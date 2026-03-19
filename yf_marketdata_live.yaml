@@ -1,0 +1,192 @@
+# Source universe for the Yahoo Finance export.
+source:
+  # Ordered list of tickers to fetch. Duplicates are removed during config load.
+  tickers:
+    - ^SPX
+    - ^VIX
+    - ^VIX1D
+    - ^VIX9D
+    - ^VXN
+    - ^MOVE
+    - AAPL
+    - ADA-USD
+    - AMZN
+    - BNB-USD
+    - BND
+    - BTC-USD
+    - DBMF
+    - DOGE-USD
+    - DRN
+    - EDC
+    - EEM
+    - EFA
+    - EFO
+    - ETH-USD
+    - FB
+    - GLD
+    - GOOG
+    - GOOGL
+    - HYG
+    - IEI
+    - IWM
+    - IYR
+    - META
+    - MSFT
+    - NAESX
+    - NVDA
+    - PDBC
+    - RSP
+    - SGOV
+    - SHY
+    - SOL-USD
+    - SPXL
+    - SPY
+    - TIP
+    - TLT
+    - TMF
+    - TNA
+    - TRREX
+    - TRX-USD
+    - TSLA
+    - TYD
+    - UGL
+    - UPRO
+    - VBMFX
+    - VCR
+    - VDC
+    - VDE
+    - VEIEX
+    - VFH
+    - VFINX
+    - VFISX
+    - VFITX
+    - VGPMX
+    - VGT
+    - VHT
+    - VIS
+    - VNQ
+    - VOX
+    - VPU
+    - VTMGX
+    - VUSTX
+    - VUSXX
+    - VWEHX
+    - XLC
+    - XLE
+    - XLF
+    - XLI
+    - XLK
+    - XLP
+    - XLRE
+    - XLU
+    - XLV
+    - XLY
+    - XRP-USD
+    - BIL
+    - TQQQ
+    - ERX
+    - TECL
+    - SQQQ
+    - DGP
+    - UPW
+    - CURE
+    - UGE
+    - FAS
+    - SOXL
+    - QQQ
+    - PSQ
+    - IEF
+    - XSD
+    - GBTC
+    - MSTR
+    - BITO
+
+# History request controls passed to yfinance.download(...).
+history:
+  # Inclusive lower bound for price history.
+  start_date: 1800-01-01
+  # Inclusive logical end date for the export. Supports tokens like today.
+  end_date: today
+  # Yahoo Finance interval. Must match one of the supported yfinance intervals.
+  interval: 1d
+  # Include pre-market and after-hours data when the interval supports it.
+  prepost: true
+
+# Search and name-resolution controls for ticker metadata.
+lookup:
+  # Resolve Ticker.Name from Yahoo search results.
+  resolve_names: true
+  # Fetch the full quote-search result set for the ticker_search dataset.
+  full_quote_results: true
+  # Maximum number of search results to keep per requested ticker.
+  max_results: 99
+
+# Fetch behavior for batching, retries, timeouts, and workspace-local cache files.
+fetch:
+  # Number of tickers to request in each batch download.
+  batch_size: 25
+  # yfinance worker count used inside each batch download.
+  threads: 4
+  # Per-request timeout in seconds for history and search calls.
+  timeout_seconds: 60
+  # Number of retries after the first failed attempt.
+  retry_attempts: 2
+  # Linear backoff multiplier in seconds between retries.
+  retry_backoff_seconds: 2.0
+  # Cache directory for parquet history batches and JSON search responses.
+  cache_dir: outputs/cache
+
+# Output controls for file layout and dataset emission.
+outputs:
+  # Single flat export folder under this workspace for all dataset files.
+  # Stacked files are written as <root_dir>/<dataset>.<format>.
+  # Per-ticker files are written as <root_dir>/<dataset>__<ticker>.<format>.
+  root_dir: outputs
+  # Single output format applied to every dataset artifact: csv, feather, or parquet.
+  format: csv
+  datasets:
+    # Original yfinance-style history, enriched with Ticker.Name.
+    history_yf:
+      # Enable or disable this dataset.
+      enabled: true
+      # Write one stacked file, one file per ticker, or both.
+      layout: stacked
+
+    # Workbook-equivalent raw OHLCV plus AdjClose.
+    history_raw:
+      # Enable or disable this dataset.
+      enabled: true
+      # Write one stacked file, one file per ticker, or both.
+      layout: stacked
+
+    # Workbook-equivalent adjusted OHLCV derived from AdjClose / Close.
+    history_adjusted:
+      # Enable or disable this dataset.
+      enabled: true
+      # Write one stacked file, one file per ticker, or both.
+      layout: stacked
+      # Drop Ticker and Ticker.Name from per-ticker exports to match the old VBA export shape.
+      drop_identity_columns_per_ticker: true
+
+    # Per-ticker min and max available dates derived from history_raw.
+    history_summary:
+      # Enable or disable this dataset.
+      enabled: true
+      # Write one stacked file, one file per ticker, or both.
+      layout: stacked
+
+    # Flattened Yahoo quote-search results that mirror the old f_TickerData intent.
+    ticker_search:
+      # Enable or disable this dataset.
+      enabled: true
+      # Write one stacked file, one file per ticker, or both.
+      layout: stacked
+
+    # Current quote, TickerType, fundamental, analyst target, and EPS-trend snapshot in one wide row per ticker.
+    current_snapshot:
+      # Enable or disable this dataset.
+      enabled: true
+      # Write one stacked file, one file per ticker, or both, all in outputs.root_dir.
+      layout: stacked
+      # Drop Ticker and Ticker.Name from per-ticker exports when per_ticker or both is used.
+      drop_identity_columns_per_ticker: true
