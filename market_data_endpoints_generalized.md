@@ -1,5 +1,7 @@
 # Market Data Endpoints — Claude Instruction Reference
 
+> Endpoint reference for [aMDT](https://github.com/dachent/mdt). Keep in sync with the repo.
+
 Fetch data from the providers below using the exact endpoints and contracts specified.
 Preserve each provider's native schema by default.
 Only normalize across providers using the cross-source schema at the bottom when explicitly asked.
