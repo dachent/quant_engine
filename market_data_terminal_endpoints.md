@@ -1,3 +1,5 @@
+Derived from https://github.com/dachent/mdt. This is a flattened/generalized instruction reference.
+
 # Market Data Endpoints — Claude Instruction Reference
 
 > Endpoint reference for [aMDT](https://github.com/dachent/mdt). Keep in sync with the repo.
@@ -20,7 +22,14 @@ When multiple sources can provide similar data:
 - Use FiscalData for Treasury fiscal/accounting datasets, not market rates.
 - Use CFTC COT for trader-position and commitment data, not as a replacement for exchange futures prices, vendor futures histories, or contract-level volume/open-interest files.
 - Use OECD for international macro/rate series when a direct national-source or FRED equivalent is unavailable or less convenient.
+- Use Central Banks (Bundesbank / BoE / RBA / BoC / BoJ) for foreign sovereign bond yield archives when FRED or OECD do not cover the required maturity or vintage.
 - Use Yahoo Finance for exchange-traded market proxies and broad current snapshots when an official exchange or issuer endpoint is not specified elsewhere in this file.
+- Use USDA AMS for U.S. agricultural and livestock cash quotes (grains, meats, cotton).
+- Use ICCO for cocoa and ICO for coffee public reference values; for monthly bulk history of either commodity, prefer World Bank Pink Sheet or IMF Primary Commodity Prices.
+- Use ICE Settlements only when no other provider covers the requested ICE-listed contract; the helper is a thin scraper.
+- Use World Bank Pink Sheet (separate from the `worldbank` WDI provider) for monthly nominal and real commodity-price history covering ~70 commodities back to 1960.
+- Use IMF Primary Commodity Prices as a cross-check on Pink Sheet when redundancy is desired.
+- Use iShares for ETF universe metadata and per-product holdings (current and as-of-date history).
 - Paid or licensed vendors should be documented outside this free/public endpoint file unless a stable endpoint contract is explicitly available and permitted.
 
 ---
@@ -75,6 +84,7 @@ https://www.federalreserve.gov/releases/h15/
 **Supported release families:**
 - `H10`: foreign exchange rates and U.S. dollar indexes.
 - `H15`: selected interest rates, including Treasury rates, federal funds, discount, bank prime, commercial paper, and related rate series.
+- Other DDP releases (e.g., `G17`, `G19`, `Z1`) follow the same URL pattern.
 
 **When to use:**
 - Native release archives or release-level metadata are required.
@@ -273,14 +283,26 @@ Use this for Commitments of Traders positioning data, trader-category analysis, 
 https://www.cftc.gov/MarketReports/CommitmentsofTraders/HistoricalCompressed/index.htm
 ```
 
-**Legacy Futures Only compressed files:**
+**Annual ZIP patterns by report family:**
 ```
-https://www.cftc.gov/files/dea/history/deacot{YYYY}.zip
-https://www.cftc.gov/files/dea/history/deacot1986_2016.zip
+https://www.cftc.gov/files/dea/history/deacot{YYYY}.zip                          ← Legacy Futures Only
+https://www.cftc.gov/files/dea/history/dea_fut_xls_{YYYY}.zip                    ← Legacy Futures-and-Options Combined
+https://www.cftc.gov/files/dea/history/fut_disagg_txt_hist_{YYYY}.zip            ← Disaggregated Futures Only
+https://www.cftc.gov/files/dea/history/com_disagg_txt_hist_{YYYY}.zip            ← Disaggregated Combined
+https://www.cftc.gov/files/dea/history/fut_fin_txt_{YYYY}.zip                    ← TFF Futures Only
+https://www.cftc.gov/files/dea/history/com_fin_txt_{YYYY}.zip                    ← TFF Combined
+https://www.cftc.gov/files/dea/history/dea_cit_txt_{YYYY}.zip                    ← Supplemental Commodity Index Trader
+```
+
+**Bulk multi-year archives (where published):**
+```
+https://www.cftc.gov/files/dea/history/deacot1986_2016.zip                       ← Legacy Futures Only
+https://www.cftc.gov/files/dea/history/fut_disagg_txt_hist_2006_2016.zip         ← Disaggregated Futures Only
+https://www.cftc.gov/files/dea/history/com_disagg_txt_hist_2006_2016.zip         ← Disaggregated Combined
+https://www.cftc.gov/files/dea/history/fin_fut_txt_2006_2016.zip                 ← TFF Futures Only
 ```
 - `{YYYY}`: four-digit year, e.g. `1986`, `2009`, `2026`
 - Resolve links from the discovery page when exact file naming differs by report family or publication year.
-- Choose the report family explicitly: Legacy, Disaggregated, Traders in Financial Futures, Futures-and-Options Combined, Supplemental Commodity Index Trader, or other CFTC-published families as required by the analysis.
 
 **Variable definitions:**
 ```
@@ -436,13 +458,225 @@ Parsed mode auto-paginates and flattens rows into `country`, `indicator`, `date`
 
 ---
 
+## Central Banks (Bundesbank / Bank of England / RBA / Bank of Canada / Bank of Japan)
+
+Single provider with five sub-sources for foreign sovereign bond yield archives. Switch with `--source {bundesbank|boe|rba|boc|boj}`.
+
+### bundesbank — Deutsche Bundesbank (SDMX-JSON, primary)
+```
+https://api.statistiken.bundesbank.de/rest/data/{dataflow}/{key}
+https://api.statistiken.bundesbank.de/rest/data/{dataflow}/{key}?format=csv
+```
+- Headline dataflow: `BBK01` (capital market yields).
+- Spot rates and par yields at 1, 2, 5, 7, 10, 30 years.
+- History: monthly back to 1972; daily back to ~1989.
+- Prefer SDMX-JSON for date-range queries; CSV is fine for full-history dumps.
+
+### boe — Bank of England (Interactive Statistical Database CSV)
+```
+https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?CSVF=TT&SeriesCodes={code}&Datefrom={DDMMMYYYY}&Dateto={DDMMMYYYY}&UsingCodes=Y
+```
+- Series codes: `IUMASTL` (long gilt), `IUMASOI` (5Y gilt), `IUMASOH` (10Y gilt), zero-coupon nominal series (`IUDSNPY`, `IUDMNPY`).
+- Date format: `DDMMMYYYY` (e.g. `01Jan2020`).
+- History: monthly back to 1963 for long gilt; daily for many series from late 1970s.
+
+### rba — Reserve Bank of Australia (Statistical Table F2)
+```
+https://www.rba.gov.au/statistics/tables/xls/f02hist.xlsx
+```
+- Multi-sheet XLSX. Coverage: 2Y, 3Y, 5Y, 10Y benchmark Commonwealth government bond yields.
+- History: daily back to 1969 for some maturities; monthly back to 1956.
+- Helper requires `openpyxl`.
+
+### boc — Bank of Canada (Valet REST)
+```
+https://www.bankofcanada.ca/valet/observations/{seriesNames}/{format}?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+```
+- `format`: `json`, `csv`, or `xml`.
+- Series codes: `V122487` (10Y benchmark), `V122486` (5Y), `V122485` (3Y), `V39055` (long-term).
+- History: daily back to 1986 via Valet; monthly back to 1950 in the separate Banking and Financial Statistics archive.
+- Cleanest of the five — prefer for any new automation that targets Canada.
+
+### boj — Bank of Japan (Time-Series Search; fragile)
+```
+https://www.stat-search.boj.or.jp/ssi/cgi-bin/famecgi2?cgi=$nme_a000_en
+```
+- Series codes (examples): `IR01'IRTSTRJGB10Y`, `IR01'IRTSTRJGB5Y`.
+- History: monthly back to 1974; partial daily coverage from the 1990s.
+- Session-bound CSV exports; no stable REST surface. Do not retry-loop the form.
+- For headline 10Y JGB history, prefer FRED `IRLTLT01JPM156N`.
+
+Preserve provider-native series codes; do not unify across central banks.
+
+---
+
+## USDA AMS (Agricultural Marketing Service)
+
+No auth required. REST API plus public bulk archive.
+
+**REST API:**
+```
+https://mymarketnews.ams.usda.gov/mymarketnews-api/v1/{report_endpoint}
+```
+
+**Bulk archive (preferred for >1 year backfill):**
+```
+https://mymarketnews.ams.usda.gov/public_data
+```
+
+**Curated representative slug map:**
+- corn = `CN_GR210`
+- wheat = `WH_GR110`
+- soybeans, soymeal, soyoil
+- live cattle = `LM_CT155`
+- lean hogs
+- cotton
+
+For any other commodity, use `--list-slugs` to enumerate the API's report directory and pass the slug via `--slug`. Resolve report slugs once and persist the mapping.
+
+**History:** 1990s+ via API. Older paper archives accessible through USDA NASS QuickStats:
+```
+https://quickstats.nass.usda.gov/api/
+```
+
+**Output:** JSON. Preserve report-slug, commodity, market, date, and price columns.
+
+---
+
+## ICCO
+
+International Cocoa Organization. Recent values are exposed on public pages; bulk historical CSV/XLS distribution moved behind a paid subscription channel (`statistics.section@icco.org`).
+
+**Public surface:**
+```
+https://www.icco.org/                                                            ← live "Cocoa Daily Prices" panel
+https://www.icco.org/statistics/                                                  ← recent monthly tables
+https://www.icco.org/icco-documentation/quarterly-bulletin-of-cocoa-statistics/   ← subscription preview
+```
+
+**Series:** ICCO Daily Price (USD/tonne) is the standard cocoa cash reference; computed as the average of London and New York front-month futures. Each homepage table also exposes London Futures, New York Futures, and the Daily Price in EUR.
+
+**Recommended fetch behavior:** parse the homepage / statistics-page HTML tables for current and near-recent daily prices. For monthly bulk history, prefer `worldbank_pinksheet` or `imf_commodities` rather than scraping ICCO HTML beyond the visible table.
+
+---
+
+## ICO
+
+International Coffee Organization. Public summary pages expose recent values; the daily-prices service and bulk historical CSV/XLS data require paid subscriptions (Daily Prices Service ~£1,200/year, World Coffee Statistics Database membership-only).
+
+**Public surface:**
+```
+https://ico.org/
+https://ico.org/resources/public-market-information/
+https://ico.org/resources/coffee-market-report-statistics-section/
+https://ico.org/what-we-do/world-coffee-statistics-database/                      ← members/subscribers only
+https://db.ico.org                                                                  ← members/subscribers only
+```
+
+**Series:** ICO Composite Indicator Price (I-CIP) is the standard coffee cash reference. Group indicators include Colombian Mild, Other Mild, Brazilian Natural, and Robusta.
+
+**Recommended fetch behavior:** parse the public ICO landing page or the monthly Coffee Market Report HTML for the most-recent monthly composite indicator print. For monthly bulk history, prefer `worldbank_pinksheet` or `imf_commodities`.
+
+---
+
+## ICE Settlements
+
+Thin, best-effort scraper for ICE marketdata report URLs under `https://www.ice.com/marketdata/reports/`. Most ICE marketdata pages render client-side, so static HTML responses often contain no usable tables. Treat as a fallback; prefer USDA AMS, Westmetall, World Bank Pink Sheet, or IMF Primary Commodity Prices when those cover the contract.
+
+**Discovery:**
+```
+https://www.ice.com/marketdata/reports/
+```
+
+**When to use:**
+- Sugar No. 11 daily reference settlements when no other source covers the contract.
+- Cotton No. 2 reference settlements when USDA AMS coverage is insufficient.
+- Any other ICE-listed product where a specific report URL is known to expose CSV / static HTML content.
+
+**Helper behavior:**
+- Raw mode saves the response bytes verbatim.
+- Parsed mode auto-detects format from the URL path or magic bytes (CSV → header + rows JSON; HTML → table-by-table extraction). XLS/XLSX is not parsed by this helper.
+- Single user-agent, no concurrency, no retries — ICE rate-limits aggressively.
+
+---
+
+## World Bank Pink Sheet
+
+Monthly nominal and real prices for ~70 commodities — energy, metals, grains, livestock, softs, fertilizers — back to 1960 for the workhorse panels. Multi-sheet XLSX. Separate provider from `worldbank` (which targets the WDI indicator JSON API).
+
+**Endpoints:**
+```
+https://thedocs.worldbank.org/en/doc/74e8be41ceb20fa0da750cda2f6b9e4e-0050012026/related/CMO-Historical-Data-Monthly.xlsx
+https://thedocs.worldbank.org/en/doc/74e8be41ceb20fa0da750cda2f6b9e4e-0050012026/related/CMO-Historical-Data-Annual.xlsx
+https://www.worldbank.org/en/research/commodity-markets                          ← landing page
+```
+
+The `74e8be41…0050012026` path component is a release identifier and rotates each month. When a published URL stops resolving, refresh from the landing page rather than hand-editing this reference.
+
+**Sheets:** `Monthly Prices` / `Monthly Indices` (and `Annual Prices` / `Annual Indices` in the annual workbook). Preserve World Bank-native column headers (e.g. `OIL_BRENT`, `iWHEAT_US_HRW`, `iCOFFEE_ARABIC`). Headers may span two physical Excel rows (commodity code + units); parsed output should preserve both.
+
+**Helper behavior:** raw mode saves XLSX bytes. Parsed mode requires `openpyxl`, auto-selects the monthly-prices panel (overridable with `--sheet`), and preserves native column order.
+
+---
+
+## IMF Primary Commodity Prices
+
+Monthly nominal prices for ~70 commodities. Single multi-sheet XLS workbook updated monthly. Largely redundant with World Bank Pink Sheet — prefer Pink Sheet when both are acceptable; use IMF as a cross-check.
+
+**Endpoint:**
+```
+https://www.imf.org/external/np/res/commod/External_Data.xls
+https://www.imf.org/en/Research/commodity-prices                                  ← landing page
+```
+
+**Coverage:** monthly back to 1992; some series longer. Headline indices include All Commodity, Energy, Non-Fuel, Food, Beverage, Agricultural Raw Materials, and Metals.
+
+**Native payload:** multi-sheet `.xls`. The `Monthly Prices` sheet (or its current renamed equivalent) is the primary panel. Each commodity is documented in its own worksheet section. Column structure preserves IMF-native commodity codes and units.
+
+**Helper behavior:** raw mode saves the workbook bytes. Parsed mode requires `xlrd` (and optionally `openpyxl`); auto-selects the monthly-prices panel, preserves native columns, and writes a JSON artifact with explicit sheet-name and selected-sheet fields.
+
+---
+
+## iShares (BlackRock ETF holdings)
+
+No auth required. iShares publishes per-ETF holdings on a public AJAX endpoint that returns the current or as-of-date constituent list. Endpoint discovery is informed by the public `talsan/ishares` reference repository (no explicit license; treated as a discovery aid only — no code is vendored).
+
+**Holdings AJAX endpoint:**
+```
+https://www.ishares.com/{product_url}/1467271812596.ajax?fileType=json&tab=all&asOfDate={YYYYMMDD}
+```
+- `fileType`: `json` (default) or `csv`.
+- `asOfDate`: `YYYYMMDD`. Earliest available across the iShares catalog is `2006-09-29`.
+- `product_url`: full slug after the domain — e.g. `us/products/239707/ishares-russell-1000-etf`. Each iShares ETF has a unique numeric product id followed by a slug.
+
+**ETF universe landing page (HTML; per-ETF product URLs are linked):**
+```
+https://www.ishares.com/us/products/etf-investments
+```
+
+**Helper modes:**
+- `--mode universe` — fetches the ETF-investments landing page and writes a JSON catalog of `{ticker, name, product_url}` entries discovered from anchor tags.
+- `--mode holdings` — fetches current holdings for the resolved `product_url`. Resolves via curated ticker map (IWV, IVV, IWM, IWB, IWF, IWD, AGG, TLT, SHY, EFA, EEM) or `--product-url`.
+- `--mode history` — same as holdings with `--asof YYYY-MM-DD` (helper converts to the YYYYMMDD format the endpoint expects).
+
+**Native ~18-field schema (preserve provider-native ordering and casing):**
+`as_of_date`, `ticker`, `name`, `sector`, `asset_class`, `market_value`, `weight`, `notional_value`, `shares`, `cusip`, `isin`, `sedol`, `price`, `location`, `exchange`, `currency`, `fx_rate`, `maturity`.
+
+**Politeness rules:**
+- Single user-agent string.
+- No concurrency; one request at a time.
+- One retry on 5xx with a fixed 5-second backoff. No infinite-retry loops.
+- No bulk-universe traversal: the universe mode walks the landing page once and returns the discovered list — it does not follow per-ETF pages.
+
+---
+
 ## Cross-Source Normalization
 
 Use only when explicitly asked to combine providers.
 
 **Long-form schema:** `source`, `dataset`, `series_id`, `symbol` (optional), `date`, `value`, `frequency`, `units`, `metadata_json`
 
-**Valid `source` values:** `fred`, `federalreserve`, `macrotrends`, `vixcentral`, `vix_utils`, `cboe`, `cftc`, `yahoo`, `westmetall`, `eia`, `multpl`, `bea`, `fiscaldata`, `treasury_rates`, `bls`, `worldbank`, `oecd`, `famafrench`
+**Valid `source` values:** `fred`, `federalreserve`, `macrotrends`, `vixcentral`, `vix_utils`, `cboe`, `cftc`, `yahoo`, `westmetall`, `eia`, `multpl`, `bea`, `fiscaldata`, `treasury_rates`, `bls`, `worldbank`, `oecd`, `famafrench`, `central_banks`, `usda_ams`, `icco`, `ico`, `ice_settlements`, `worldbank_pinksheet`, `imf_commodities`, `ishares`
 
 **Examples:**
 - `source=westmetall, dataset=chart, series_id=LME_Cu_cash`
@@ -454,3 +688,11 @@ Use only when explicitly asked to combine providers.
 - `source=famafrench, dataset=F-F_Research_Data_Factors_CSV, series_id=Mkt-RF`
 - `source=federalreserve, dataset=H10, series_id=<native Federal Reserve DDP series ID>`
 - `source=cftc, dataset=legacy_futures_only, series_id=<CFTC Contract Market Code>`
+- `source=central_banks, dataset=bundesbank/BBK01, series_id=<Bundesbank spot-rate series key>`
+- `source=usda_ams, dataset=mymarketnews_v1, series_id=<report_slug>`
+- `source=icco, dataset=daily_prices, series_id=icco_daily_price_usd`
+- `source=ico, dataset=public_market_information, series_id=composite_indicator_price`
+- `source=worldbank_pinksheet, dataset=monthly_prices, series_id=<commodity column>`
+- `source=imf_commodities, dataset=monthly_prices, series_id=<commodity row>`
+- `source=ishares, dataset=holdings, series_id=<ETF ticker>`
+- `source=ice_settlements, dataset=marketdata_report, series_id=<contract code>`
