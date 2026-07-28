@@ -84,6 +84,41 @@ def test_setup_uv_version_must_match_ci_lock() -> None:
     assert "UV_PYTHON_SELECTION_INVALID" in _codes(findings)
 
 
+def test_dependency_audit_targets_locked_python_floor() -> None:
+    path = REPOSITORY_ROOT / ".github" / "workflows" / "security.yml"
+    text = path.read_text(encoding="utf-8")
+    document = _document(text)
+    ci_lock = dict(
+        workflow_policy.load_ci_lock(REPOSITORY_ROOT / ".github" / "ci-lock.json")
+    )
+    mutated = copy.deepcopy(document)
+    steps = mutated["jobs"]["dependency-audit"]["steps"]  # type: ignore[index]
+    audit_step = next(step for step in steps if "uv audit" in str(step.get("run", "")))
+    audit_step["run"] = (
+        "uv lock --check\n"
+        "uv audit --locked --preview-features audit-command\n"
+        f"# {workflow_policy.LOCKED_AUDIT_COMMAND}"
+    )
+    findings = workflow_policy.validate_workflow_document(
+        "security.yml", mutated, text, ci_lock
+    )
+    assert "DEPENDENCY_AUDIT_COMMAND_INVALID" in _codes(findings)
+
+    mutated = copy.deepcopy(document)
+    mutated["jobs"]["dependency-audit"]["env"]["UV_PYTHON"] = "3.13"  # type: ignore[index]
+    audit_steps = mutated["jobs"]["dependency-audit"]["steps"]  # type: ignore[index]
+    setup_python = next(
+        step
+        for step in audit_steps
+        if str(step.get("uses", "")).startswith("actions/setup-python@")
+    )
+    setup_python["with"]["python-version"] = "3.13"
+    findings = workflow_policy.validate_workflow_document(
+        "security.yml", mutated, text, ci_lock
+    )
+    assert "DEPENDENCY_AUDIT_PYTHON_INVALID" in _codes(findings)
+
+
 def test_unsafe_trigger_secret_reference_and_continue_on_error_fail() -> None:
     text, document, ci_lock = _quality()
     mutated = copy.deepcopy(document)

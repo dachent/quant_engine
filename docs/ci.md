@@ -35,8 +35,9 @@ Linux x64 archive from its official GitHub release, and SHA-256 is verified
 before execution. Gitleaks
 scans locally with redacted findings and performs no credential verification,
 comment, summary, or report upload. The uv dependency audit queries OSV for the
-frozen lock graph; it sends package identities and versions, not repository
-content or credentials. An unavailable vulnerability service fails the job.
+frozen lock graph at the supported Python 3.11 floor; it sends package
+identities and versions, not repository content or credentials. An unavailable
+vulnerability service fails the job.
 
 ## Issue guard
 
@@ -82,7 +83,7 @@ uv run --frozen --no-sync ruff check .
 uv run --frozen --no-sync mypy packages/ci-controls/src tools/check_repository_boundary.py tools/issue_guard.py
 uv run --frozen --no-sync pytest -q --disable-socket tests/security tests/ci tests/governance
 uv build --all-packages --no-sources --python 3.11
-uv audit --locked --preview-features audit-command
+uv audit --locked --python-version 3.11 --preview-features audit-command
 python tools/check_repository_boundary.py --root . --policy .policy/data-boundary.toml
 ```
 

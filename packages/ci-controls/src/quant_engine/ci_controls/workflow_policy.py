@@ -24,6 +24,9 @@ ISSUE_GUARD_PERMISSIONS = {
 }
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 ACTION_REFERENCE = re.compile(r"^(?P<target>[^@]+)@(?P<sha>[0-9a-f]{40})$")
+LOCKED_AUDIT_COMMAND = (
+    "uv audit --locked --python-version 3.11 --preview-features audit-command"
+)
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -515,6 +518,39 @@ def validate_workflow_document(
                 "issue guard requires one explicit reconciler token reference",
             )
         )
+    if workflow_name == "security.yml":
+        security_jobs = document.get("jobs")
+        raw_audit_job = (
+            security_jobs.get("dependency-audit")
+            if isinstance(security_jobs, Mapping)
+            else None
+        )
+        audit_job = raw_audit_job if isinstance(raw_audit_job, Mapping) else {}
+        raw_audit_env = audit_job.get("env")
+        audit_env = raw_audit_env if isinstance(raw_audit_env, Mapping) else {}
+        if str(audit_env.get("UV_PYTHON", "")) != "3.11":
+            findings.append(
+                Finding(
+                    workflow_name,
+                    "DEPENDENCY_AUDIT_PYTHON_INVALID",
+                    "dependency audit must provision the supported Python floor",
+                )
+            )
+        audit_command_count = sum(
+            line.strip() == LOCKED_AUDIT_COMMAND
+            for job_name, _, step in _workflow_steps(document)
+            if job_name == "dependency-audit"
+            for line in str(step.get("run", "")).splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        if audit_command_count != 1:
+            findings.append(
+                Finding(
+                    workflow_name,
+                    "DEPENDENCY_AUDIT_COMMAND_INVALID",
+                    "security must audit the locked graph at the Python floor",
+                )
+            )
 
     findings.extend(_action_findings(workflow_name, document, ci_lock))
     return sorted(set(findings))
