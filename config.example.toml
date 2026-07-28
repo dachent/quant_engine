@@ -1,0 +1,40 @@
+# Credential-free example only. Copy to an ignored local configuration and
+# keep all real identifiers, provider values, and absolute workstation paths out
+# of Git. Relative roots resolve from the repository worktree.
+schema_version = 1
+environment = "offline"
+
+[runtime]
+allow_network = false
+allow_metered_access = false
+allow_external_writes = false
+
+[paths]
+source_specifications = "../xBin"
+portfolio123 = "../data_Portfolio123"
+matrixport = "../dataMatrixport"
+quantbase = "../dataQuantbase"
+schwab = "../dataSchwab"
+ibkr = "../dataIBKR"
+fidelity = "../dataFidelity"
+alpaca = "../dataAlpaca"
+portfolio = "../dataPortfolio"
+restricted_identity_crosswalk = ""
+
+[credentials]
+provider = "windows-credential-manager"
+reference_prefix = "quant_engine/"
+literal_fallback_allowed = false
+
+[web_contracts]
+persist_authenticated_capture = false
+api_fallback_enabled = false
+
+[broker]
+environment = "DRY_RUN"
+submission_enabled = false
+paper_enabled = false
+live_enabled = false
+
+[publication]
+pointer_updates_enabled = false
