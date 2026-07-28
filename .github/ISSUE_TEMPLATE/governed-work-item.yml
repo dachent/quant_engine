@@ -1,0 +1,115 @@
+name: Governed work item
+description: Create a Phase 0-8c quant_engine backlog item with explicit authority and evidence.
+title: "[AREA-000] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GitHub Issues are the sole execution tracker. Replace `AREA-000` in the title with a unique stable key such as `GOV-001`. Do not put credentials, account identifiers, captured sessions, or real financial data in this issue.
+
+  - type: input
+    id: stable_key
+    attributes:
+      label: Stable key
+      description: Unique program key; it must match the bracketed key at the start of the title.
+      placeholder: GOV-001
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: State the observable end result, not a list of activities.
+      placeholder: When this issue closes...
+    validations:
+      required: true
+
+  - type: textarea
+    id: in_scope
+    attributes:
+      label: In scope
+      description: Files, systems, behaviors, providers, periods, and users included.
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: Explicit exclusions, including deferred external or live behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: blocked_by
+    attributes:
+      label: Blocked by
+      description: Enter `None` or one GitHub issue reference and stable key per line, for example `#3 (GOV-001)`. Checkbox state is ignored; sub-issues do not imply ordering.
+      placeholder: None
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_evidence
+    attributes:
+      label: Acceptance evidence
+      description: Predeclare the checks, artifacts, reconciliations, and negative cases needed for closure.
+    validations:
+      required: true
+
+  - type: textarea
+    id: allowed_writes_effects
+    attributes:
+      label: Allowed writes and external effects
+      description: Bound repository paths and external mutations. Enter `None` for read-only work. A phase approval cannot expand this list.
+      placeholder: |
+        Repository writes:
+        External effects: None
+    validations:
+      required: true
+
+  - type: textarea
+    id: stop_reapproval
+    attributes:
+      label: Stop and reapproval triggers
+      description: Conditions that halt work or return it to a planning/approval phase.
+    validations:
+      required: true
+
+  - type: textarea
+    id: recovery
+    attributes:
+      label: Recovery procedure
+      description: State how a failed, partial, or uncertain attempt is left safe and how authority is restored.
+    validations:
+      required: true
+
+  - type: textarea
+    id: dead_ends
+    attributes:
+      label: Dead Ends
+      description: Record rejected paths, their failure mechanisms, and what material change would permit reconsideration.
+      placeholder: None at creation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: final_evidence_handoff
+    attributes:
+      label: Final evidence and handoff
+      description: Before closure, record deliverables, exact checks/results, uncertainty, recovery state, dependencies, Dead Ends, and next action.
+      placeholder: Complete before closing the issue.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: authority_acknowledgement
+    attributes:
+      label: Authority acknowledgement
+      options:
+        - label: I have not placed credentials, real account identifiers, captured sessions, or real financial data in this issue.
+          required: true
+        - label: I understand that a `PROCEED` phase approval does not authorize an unlisted external, destructive, credential, data-removal, or live-trading effect.
+          required: true
