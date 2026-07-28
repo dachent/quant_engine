@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+
+import yaml
+
+from quant_engine.ci_controls import workflow_policy
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _document(text: str) -> dict[str, object]:
+    value = yaml.load(text, Loader=yaml.BaseLoader)
+    assert isinstance(value, dict)
+    return value
+
+
+def _quality() -> tuple[str, dict[str, object], dict[str, object]]:
+    path = REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml"
+    text = path.read_text(encoding="utf-8")
+    lock = dict(
+        workflow_policy.load_ci_lock(REPOSITORY_ROOT / ".github" / "ci-lock.json")
+    )
+    return text, _document(text), lock
+
+
+def _codes(findings: list[workflow_policy.Finding]) -> set[str]:
+    return {finding.code for finding in findings}
+
+
+def test_live_workflow_surface_passes() -> None:
+    assert workflow_policy.validate_repository(REPOSITORY_ROOT) == []
+
+
+def test_floating_and_unapproved_action_references_fail() -> None:
+    text, document, ci_lock = _quality()
+    mutated = copy.deepcopy(document)
+    step = mutated["jobs"]["quality"]["steps"][0]  # type: ignore[index]
+    step["uses"] = "actions/checkout@v7"
+    findings = workflow_policy.validate_workflow_document(
+        "quality.yml", mutated, text, ci_lock
+    )
+    assert "ACTION_REF_NOT_IMMUTABLE" in _codes(findings)
+
+    step["uses"] = "unapproved/action@" + "a" * 40
+    findings = workflow_policy.validate_workflow_document(
+        "quality.yml", mutated, text, ci_lock
+    )
+    assert "ACTION_NOT_ALLOWLISTED" in _codes(findings)
+
+
+def test_broad_permissions_and_checkout_credentials_fail() -> None:
+    text, document, ci_lock = _quality()
+    mutated = copy.deepcopy(document)
+    mutated["permissions"] = {"contents": "write"}
+    checkout = mutated["jobs"]["quality"]["steps"][0]  # type: ignore[index]
+    checkout["with"]["persist-credentials"] = "true"
+    findings = workflow_policy.validate_workflow_document(
+        "quality.yml", mutated, text, ci_lock
+    )
+    assert {"WORKFLOW_PERMISSIONS_INVALID", "CHECKOUT_CREDENTIAL_PERSISTENCE"}.issubset(
+        _codes(findings)
+    )
+
+
+def test_setup_uv_version_must_match_ci_lock() -> None:
+    text, document, ci_lock = _quality()
+    mutated = copy.deepcopy(document)
+    setup_uv = mutated["jobs"]["quality"]["steps"][2]  # type: ignore[index]
+    setup_uv["with"]["version"] = "0.11.31"
+    findings = workflow_policy.validate_workflow_document(
+        "quality.yml", mutated, text, ci_lock
+    )
+    assert "UV_VERSION_LOCK_MISMATCH" in _codes(findings)
+
+    mutated = copy.deepcopy(document)
+    mutated["jobs"]["quality"]["env"]["UV_PYTHON_DOWNLOADS"] = "automatic"  # type: ignore[index]
+    findings = workflow_policy.validate_workflow_document(
+        "quality.yml", mutated, text, ci_lock
+    )
+    assert "UV_PYTHON_SELECTION_INVALID" in _codes(findings)
+
+
+def test_unsafe_trigger_secret_reference_and_continue_on_error_fail() -> None:
+    text, document, ci_lock = _quality()
+    mutated = copy.deepcopy(document)
+    mutated["on"] = {"pull_request_target": {}}
+    hostile_text = text + "\n# ${{secrets.SCHWAB_KEY}}\ncontinue-on-error: true\n"
+    findings = workflow_policy.validate_workflow_document(
+        "quality.yml", mutated, hostile_text, ci_lock
+    )
+    assert {
+        "PULL_REQUEST_TARGET_FORBIDDEN",
+        "WORKFLOW_SECRET_REFERENCE",
+        "CONTINUE_ON_ERROR_FORBIDDEN",
+    }.issubset(_codes(findings))
+
+
+def test_issue_guard_manual_dispatch_is_forbidden() -> None:
+    path = REPOSITORY_ROOT / ".github" / "workflows" / "issue-guard.yml"
+    text = path.read_text(encoding="utf-8")
+    document = _document(text)
+    mutated = copy.deepcopy(document)
+    triggers = mutated["on"]
+    assert isinstance(triggers, dict)
+    triggers["workflow_dispatch"] = {}
+    ci_lock = dict(
+        workflow_policy.load_ci_lock(REPOSITORY_ROOT / ".github" / "ci-lock.json")
+    )
+    findings = workflow_policy.validate_workflow_document(
+        "issue-guard.yml", mutated, text, ci_lock
+    )
+    assert "ISSUE_GUARD_DISPATCH_FORBIDDEN" in _codes(findings)
+
+
+def test_quality_multi_command_step_is_forbidden() -> None:
+    text, document, ci_lock = _quality()
+    mutated = copy.deepcopy(document)
+    step = mutated["jobs"]["quality"]["steps"][3]  # type: ignore[index]
+    step["run"] = "uv lock --check\nuv sync --frozen"
+    findings = workflow_policy.validate_workflow_document(
+        "quality.yml", mutated, text, ci_lock
+    )
+    assert "CROSS_PLATFORM_MULTI_COMMAND_STEP" in _codes(findings)
+
+
+def test_issue_guard_requires_unfiltered_pr_and_limited_token_environment() -> None:
+    path = REPOSITORY_ROOT / ".github" / "workflows" / "issue-guard.yml"
+    text = path.read_text(encoding="utf-8")
+    document = _document(text)
+    ci_lock = dict(
+        workflow_policy.load_ci_lock(REPOSITORY_ROOT / ".github" / "ci-lock.json")
+    )
+    mutated = copy.deepcopy(document)
+    mutated["on"]["pull_request"] = {"paths": ["tools/**"]}  # type: ignore[index]
+    reconcile_steps = mutated["jobs"]["reconcile"]["steps"]  # type: ignore[index]
+    token_step = next(step for step in reconcile_steps if "env" in step)
+    token_step["run"] = "uv run python tools/issue_guard.py reconcile"
+    findings = workflow_policy.validate_workflow_document(
+        "issue-guard.yml", mutated, text, ci_lock
+    )
+    assert {
+        "ISSUE_GUARD_PR_FILTER_FORBIDDEN",
+        "ISSUE_TOKEN_ENV_INVALID",
+    }.issubset(_codes(findings))
+
+    mutated = copy.deepcopy(document)
+    mutated["on"]["push"] = {"branches": ["feature"]}  # type: ignore[index]
+    mutated["jobs"]["reconcile"]["if"] = "always()"  # type: ignore[index]
+    findings = workflow_policy.validate_workflow_document(
+        "issue-guard.yml", mutated, text, ci_lock
+    )
+    assert {
+        "ISSUE_GUARD_PUSH_INVALID",
+        "ISSUE_GUARD_RECONCILE_GATE_INVALID",
+    }.issubset(_codes(findings))
+
+    mutated = copy.deepcopy(document)
+    reconcile_steps = mutated["jobs"]["reconcile"]["steps"]  # type: ignore[index]
+    reconcile_steps.insert(2, {"name": "Unexpected", "run": "uv sync --frozen"})
+    findings = workflow_policy.validate_workflow_document(
+        "issue-guard.yml", mutated, text, ci_lock
+    )
+    assert "ISSUE_WRITE_JOB_STEP_INVALID" in _codes(findings)
+
+
+def test_ci_lock_rejects_short_action_sha(tmp_path: Path) -> None:
+    original = json.loads(
+        (REPOSITORY_ROOT / ".github" / "ci-lock.json").read_text(encoding="utf-8")
+    )
+    original["actions"]["actions/checkout"]["sha"] = "deadbeef"
+    candidate = tmp_path / "ci-lock.json"
+    candidate.write_text(json.dumps(original), encoding="utf-8")
+    try:
+        workflow_policy.load_ci_lock(candidate)
+    except workflow_policy.WorkflowPolicyError as exc:
+        assert str(exc) == "CI_LOCK_ACTION_SHA_INVALID"
+    else:
+        raise AssertionError("short action SHA was accepted")

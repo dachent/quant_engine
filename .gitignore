@@ -98,6 +98,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .uv-cache/
+.codex-bootstrap/
 .venv/
 venv/
 

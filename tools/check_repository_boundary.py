@@ -1745,6 +1745,7 @@ def _file_findings(
         )
 
     decoded_views: tuple[str, ...] = ()
+    text_views: tuple[str, ...]
     if is_synthetic_xlsx:
         text_views = (xlsx_text,) if xlsx_text else ()
     else:
