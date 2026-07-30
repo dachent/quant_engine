@@ -12,6 +12,7 @@ dev = [
   "pytest-socket>=0.7,<0.8",
   "quant-engine-ci-controls",
   "quant-engine-core",
+  "quant-engine-portfolio-ledger",
   "ruff==0.15.22",
   "types-PyYAML>=6.0.12,<7",
 ]
@@ -21,11 +22,12 @@ package = false
 required-version = ">=0.11.28,<0.12"
 
 [tool.uv.workspace]
-members = ["packages/ci-controls", "packages/core"]
+members = ["packages/ci-controls", "packages/core", "packages/portfolio-ledger"]
 
 [tool.uv.sources]
 quant-engine-ci-controls = { workspace = true }
 quant-engine-core = { workspace = true }
+quant-engine-portfolio-ledger = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = [
@@ -49,7 +51,7 @@ select = ["E4", "E7", "E9", "F"]
 python_version = "3.11"
 strict = true
 explicit_package_bases = true
-mypy_path = ["packages/ci-controls/src", "packages/core/src"]
+mypy_path = ["packages/ci-controls/src", "packages/core/src", "packages/portfolio-ledger/src"]
 incremental = false
 pretty = true
 show_error_codes = true

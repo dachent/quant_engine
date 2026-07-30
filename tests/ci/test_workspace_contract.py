@@ -30,7 +30,13 @@ def test_virtual_root_has_only_accepted_workspace_members() -> None:
     uv = tool["uv"]
     assert isinstance(uv, dict)
     assert uv["package"] is False
-    assert uv["workspace"] == {"members": ["packages/ci-controls", "packages/core"]}
+    assert uv["workspace"] == {
+        "members": [
+            "packages/ci-controls",
+            "packages/core",
+            "packages/portfolio-ledger",
+        ]
+    }
     assert root["project"]["requires-python"] == ">=3.11,<3.14"  # type: ignore[index]
 
 
@@ -63,6 +69,23 @@ def test_core_package_is_private_namespaced_and_dependency_free() -> None:
     )
     assert not (member_root / "src" / "quant_engine" / "__init__.py").exists()
     assert (member_root / "src" / "quant_engine" / "core" / "py.typed").is_file()
+
+
+def test_portfolio_ledger_package_is_private_and_depends_only_on_core() -> None:
+    member_root = REPOSITORY_ROOT / "packages" / "portfolio-ledger"
+    member = _toml(member_root / "pyproject.toml")
+    project = member["project"]
+    assert isinstance(project, dict)
+    assert project["requires-python"] == ">=3.11,<3.14"
+    assert project["dependencies"] == ["quant-engine-core"]
+    assert project["classifiers"] == ["Private :: Do Not Upload"]
+    assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
+        "quant_engine.portfolio_ledger"
+    )
+    assert not (member_root / "src" / "quant_engine" / "__init__.py").exists()
+    assert (
+        member_root / "src" / "quant_engine" / "portfolio_ledger" / "py.typed"
+    ).is_file()
 
 
 def test_ci_lock_contains_only_full_action_shas_and_checksummed_tools() -> None:
