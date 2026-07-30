@@ -23,14 +23,14 @@ def test_supported_python_and_installed_ci_controls() -> None:
     assert distribution.metadata["Requires-Python"].replace(" ", "") == ">=3.11,<3.14"
 
 
-def test_virtual_root_has_only_the_ci_controls_workspace_member() -> None:
+def test_virtual_root_has_only_accepted_workspace_members() -> None:
     root = _toml(REPOSITORY_ROOT / "pyproject.toml")
     tool = root["tool"]
     assert isinstance(tool, dict)
     uv = tool["uv"]
     assert isinstance(uv, dict)
     assert uv["package"] is False
-    assert uv["workspace"] == {"members": ["packages/ci-controls"]}
+    assert uv["workspace"] == {"members": ["packages/ci-controls", "packages/core"]}
     assert root["project"]["requires-python"] == ">=3.11,<3.14"  # type: ignore[index]
 
 
@@ -48,6 +48,21 @@ def test_ci_controls_package_is_private_namespaced_and_non_product() -> None:
     )
     assert not (member_root / "src" / "quant_engine" / "__init__.py").exists()
     assert (member_root / "src" / "quant_engine" / "ci_controls" / "py.typed").is_file()
+
+
+def test_core_package_is_private_namespaced_and_dependency_free() -> None:
+    member_root = REPOSITORY_ROOT / "packages" / "core"
+    member = _toml(member_root / "pyproject.toml")
+    project = member["project"]
+    assert isinstance(project, dict)
+    assert project["requires-python"] == ">=3.11,<3.14"
+    assert project["dependencies"] == []
+    assert project["classifiers"] == ["Private :: Do Not Upload"]
+    assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
+        "quant_engine.core"
+    )
+    assert not (member_root / "src" / "quant_engine" / "__init__.py").exists()
+    assert (member_root / "src" / "quant_engine" / "core" / "py.typed").is_file()
 
 
 def test_ci_lock_contains_only_full_action_shas_and_checksummed_tools() -> None:

@@ -5,6 +5,7 @@ requires-python = ">=3.11, <3.14"
 [manifest]
 members = [
     "quant-engine-ci-controls",
+    "quant-engine-core",
     "quant-engine-workspace",
 ]
 
@@ -258,6 +259,11 @@ dependencies = [
 requires-dist = [{ name = "pyyaml", specifier = ">=6.0.3,<7" }]
 
 [[package]]
+name = "quant-engine-core"
+version = "0.1.0"
+source = { editable = "packages/core" }
+
+[[package]]
 name = "quant-engine-workspace"
 version = "0.0.0"
 source = { virtual = "." }
@@ -268,6 +274,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-socket" },
     { name = "quant-engine-ci-controls" },
+    { name = "quant-engine-core" },
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
@@ -280,6 +287,7 @@ dev = [
     { name = "pytest", specifier = ">=9.1,<9.2" },
     { name = "pytest-socket", specifier = ">=0.7,<0.8" },
     { name = "quant-engine-ci-controls", editable = "packages/ci-controls" },
+    { name = "quant-engine-core", editable = "packages/core" },
     { name = "ruff", specifier = "==0.15.22" },
     { name = "types-pyyaml", specifier = ">=6.0.12,<7" },
 ]

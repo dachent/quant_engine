@@ -81,3 +81,9 @@ Interfaces described in the architecture document remain target contracts until
 their governing issues provide accepted implementation evidence. Do not infer
 that an adapter, extractor, publication path, or broker action exists merely
 because it is documented.
+
+The first accepted implementation slice is
+[`quant-engine-core`](packages/core/README.md): a dependency-free,
+content-addressed source/generation manifest and fail-closed publication
+pointer. It does not implement provider acquisition, portfolio facts, or data
+migration.
