@@ -81,6 +81,29 @@ are current, scope and evidence are decision-complete, and necessary systems
 are safely reachable. Missing references, dependency cycles, or an open blocker
 make it not ready. Closing a blocked issue is invalid and must be reversed.
 
+### Backlog states
+
+Every open issue has exactly one authoritative backlog-state label:
+
+- `backlog:active` — approved current tranche. Only active issues can appear in
+  Ready views or enter Phase 8 execution.
+- `backlog:next` — legitimate outcome awaiting a named predecessor or explicit
+  prioritization. New issues default here; promotion to active requires current
+  user approval recorded in the issue.
+- `backlog:deferred` — no current consumer. The issue body must name an
+  observable activation trigger; no implementation writes are allowed until it
+  is promoted through a governed decision.
+- `backlog:folded` — not independently executable. The body identifies the
+  surviving issue that owns the outcome. A folded issue receives no independent
+  writes and closes only after that survivor is accepted.
+
+Closed issues may retain one backlog-state label or have none, but may not have
+conflicting backlog-state labels. The issue guard fails closed when an open
+issue lacks a state or any issue has multiple states. It reports Next, Deferred,
+and Folded separately from graph readiness; Ready and execution views contain
+only unblocked Active issues. State labels control disposition, while `Blocked
+by` remains the sole ordering authority.
+
 ### Dependency semantics
 
 - The issue body's `Blocked by` list is the authoritative dependency

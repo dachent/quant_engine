@@ -116,6 +116,15 @@ class DependencyReference:
     key: str
 
 
+BacklogState = Literal["active", "next", "deferred", "folded"]
+BACKLOG_LABELS: dict[str, BacklogState] = {
+    "backlog:active": "active",
+    "backlog:next": "next",
+    "backlog:deferred": "deferred",
+    "backlog:folded": "folded",
+}
+
+
 @dataclass(frozen=True)
 class IssueRecord:
     number: int
@@ -125,6 +134,8 @@ class IssueRecord:
     state: Literal["open", "closed"]
     key: str | None
     blockers: tuple[DependencyReference, ...]
+    labels: tuple[str, ...]
+    backlog_state: BacklogState | None
 
 
 @dataclass(frozen=True, order=True)
@@ -153,13 +164,23 @@ class Mutation:
         return result
 
 
-IssueStatus = Literal["GRAPH_READY", "BLOCKED", "CLOSED", "ILLEGAL_CLOSED", "INVALID"]
+IssueStatus = Literal[
+    "GRAPH_READY",
+    "BLOCKED",
+    "BACKLOG_NEXT",
+    "BACKLOG_DEFERRED",
+    "BACKLOG_FOLDED",
+    "CLOSED",
+    "ILLEGAL_CLOSED",
+    "INVALID",
+]
 
 
 @dataclass(frozen=True)
 class IssueResult:
     number: int
     key: str | None
+    backlog_state: BacklogState | None
     status: IssueStatus
     effective_open_blockers: tuple[int, ...]
 
@@ -167,6 +188,7 @@ class IssueResult:
         return {
             "number": self.number,
             "key": self.key,
+            "backlog_state": self.backlog_state,
             "status": self.status,
             "effective_open_blockers": list(self.effective_open_blockers),
         }
@@ -236,6 +258,26 @@ def _positive_integer(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
     return value
+
+
+def _normalize_labels(value: object) -> tuple[str, ...] | None:
+    """Return deterministic, case-insensitive label names from an API record."""
+
+    if not isinstance(value, list):
+        return None
+    names: set[str] = set()
+    for item in value:
+        name: object
+        if isinstance(item, str):
+            name = item
+        elif isinstance(item, Mapping):
+            name = item.get("name")
+        else:
+            return None
+        if not isinstance(name, str) or not name.strip():
+            return None
+        names.add(name.strip().casefold())
+    return tuple(sorted(names))
 
 
 def _strip_html_comments(
@@ -495,7 +537,9 @@ def _parse_issue_graph(
     raw_items: Sequence[Mapping[str, object]],
 ) -> tuple[dict[int, IssueRecord], frozenset[int], tuple[Diagnostic, ...]]:
     diagnostics: list[Diagnostic] = []
-    raw_issues: dict[int, tuple[int, str, str, Literal["open", "closed"]]] = {}
+    raw_issues: dict[
+        int, tuple[int, str, str, Literal["open", "closed"], tuple[str, ...]]
+    ] = {}
     pull_requests: set[int] = set()
     seen_numbers: set[int] = set()
 
@@ -517,10 +561,14 @@ def _parse_issue_graph(
         title = raw.get("title")
         body = raw.get("body")
         state = raw.get("state")
+        labels = _normalize_labels(raw.get("labels"))
         if not isinstance(title, str) or not (isinstance(body, str) or body is None):
             diagnostics.append(Diagnostic("ISSUE_RECORD_INVALID", issue_number=number))
             continue
         if state not in {"open", "closed"}:
+            diagnostics.append(Diagnostic("ISSUE_RECORD_INVALID", issue_number=number))
+            continue
+        if labels is None:
             diagnostics.append(Diagnostic("ISSUE_RECORD_INVALID", issue_number=number))
             continue
         normalized_state: Literal["open", "closed"] = state
@@ -529,13 +577,14 @@ def _parse_issue_graph(
             title,
             body or "",
             normalized_state,
+            labels,
         )
 
     issues: dict[int, IssueRecord] = {}
     key_owner: dict[str, int] = {}
     database_id_owner: dict[int, int] = {}
     for number in sorted(raw_issues):
-        database_id, title, body, state = raw_issues[number]
+        database_id, title, body, state, labels = raw_issues[number]
         if database_id in database_id_owner:
             diagnostics.append(
                 Diagnostic(
@@ -564,6 +613,16 @@ def _parse_issue_graph(
             key_owner[key] = number
         blockers, body_diagnostics = parse_blocked_by(body, number)
         diagnostics.extend(body_diagnostics)
+        backlog_labels = tuple(
+            BACKLOG_LABELS[label] for label in labels if label in BACKLOG_LABELS
+        )
+        if len(backlog_labels) > 1:
+            diagnostics.append(
+                Diagnostic("BACKLOG_STATE_MULTIPLE", issue_number=number)
+            )
+        elif not backlog_labels and state == "open":
+            diagnostics.append(Diagnostic("BACKLOG_STATE_MISSING", issue_number=number))
+        backlog_state = backlog_labels[0] if len(backlog_labels) == 1 else None
         issues[number] = IssueRecord(
             number=number,
             database_id=database_id,
@@ -572,6 +631,8 @@ def _parse_issue_graph(
             state=state,
             key=key,
             blockers=blockers,
+            labels=labels,
+            backlog_state=backlog_state,
         )
 
     adjacency: dict[int, tuple[int, ...]] = {}
@@ -670,6 +731,7 @@ def _snapshot_fingerprint(
                 "title": issue.title,
                 "body": issue.body,
                 "state": issue.state,
+                "labels": issue.labels,
             }
             for issue in sorted(issues.values(), key=lambda item: item.number)
         ],
@@ -826,6 +888,7 @@ def _graph_state_fingerprint(
             "title": issue.title,
             "body": issue.body,
             "state": "open" if issue.number in force_open else issue.state,
+            "labels": issue.labels,
         }
         for issue in sorted(snapshot.issues.values(), key=lambda item: item.number)
     ]
@@ -862,11 +925,25 @@ def _issue_results(
             status = "ILLEGAL_CLOSED"
         elif issue.state == "closed":
             status = "CLOSED"
+        elif issue.backlog_state == "next":
+            status = "BACKLOG_NEXT"
+        elif issue.backlog_state == "deferred":
+            status = "BACKLOG_DEFERRED"
+        elif issue.backlog_state == "folded":
+            status = "BACKLOG_FOLDED"
         elif effective_blockers:
             status = "BLOCKED"
         else:
             status = "GRAPH_READY"
-        results.append(IssueResult(number, issue.key, status, effective_blockers))
+        results.append(
+            IssueResult(
+                number,
+                issue.key,
+                issue.backlog_state,
+                status,
+                effective_blockers,
+            )
+        )
     return tuple(results)
 
 
@@ -952,6 +1029,53 @@ def _native_delta(
     return sorted(missing), sorted(stale)
 
 
+def _cycle_breaking_stale(
+    snapshot: Snapshot,
+    stale: Sequence[tuple[int, int, int]],
+    owner: str,
+    repo: str,
+) -> tuple[tuple[int, int, int], ...]:
+    """Return stale native links that must be removed before desired adds.
+
+    GitHub rejects an add when the current native graph plus the new edge would
+    form a cycle. A body-authority rewrite can legitimately reverse a whole
+    dependency chain, so add-before-remove is impossible for only those stale
+    edges that participate in cycles in the union of current and desired links.
+    """
+
+    expected_repository_url = f"https://api.github.com/repos/{owner}/{repo}".casefold()
+    adjacency: dict[int, set[int]] = {
+        number: {reference.number for reference in issue.blockers}
+        for number, issue in snapshot.issues.items()
+    }
+    local_native_edges: set[tuple[int, int, int]] = set()
+    for number, dependencies in snapshot.native.items():
+        for dependency in dependencies:
+            if (
+                dependency.repository_url.casefold() == expected_repository_url
+                and dependency.number in snapshot.issues
+            ):
+                adjacency[number].add(dependency.number)
+                local_native_edges.add(
+                    (number, dependency.number, dependency.database_id)
+                )
+
+    components = [
+        frozenset(diagnostic.related_numbers)
+        for diagnostic in _cycle_diagnostics(
+            {number: tuple(neighbors) for number, neighbors in adjacency.items()}
+        )
+    ]
+    return tuple(
+        item
+        for item in sorted(stale)
+        if item in local_native_edges
+        and any(
+            item[0] in component and item[1] in component for component in components
+        )
+    )
+
+
 def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
     """Conservatively reconcile issue state and the native dependency mirror."""
 
@@ -999,6 +1123,59 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
         mutations.append(Mutation("reopen", number))
 
     missing, stale = _native_delta(current, owner, repo)
+    cycle_breaking = _cycle_breaking_stale(current, stale, owner, repo)
+    for issue_number, blocker_number, database_id in cycle_breaking:
+        try:
+            client.remove_blocker(issue_number, database_id)
+        except Exception:
+            return _mutation_failure(
+                current,
+                mutations,
+                operation="remove-cycle",
+                issue_number=issue_number,
+                blocker_number=blocker_number,
+            )
+        mutations.append(Mutation("remove", issue_number, blocker_number, database_id))
+
+    if cycle_breaking:
+        verification = load_snapshot(client, owner, repo)
+        if verification.structural_diagnostics:
+            diagnostics = _sorted_diagnostics(
+                verification.structural_diagnostics
+                + (Diagnostic("REMOVAL_VERIFICATION_FAILED"),)
+            )
+            return GuardReport(
+                mode="reconcile",
+                ok=False,
+                fingerprint=verification.fingerprint,
+                issues=_issue_results(verification, invalid_all=True),
+                diagnostics=diagnostics,
+                mutations=tuple(mutations),
+            )
+        expected_graph = _graph_state_fingerprint(
+            current, force_open=frozenset(illegal_closed)
+        )
+        if _graph_state_fingerprint(verification) != expected_graph:
+            return GuardReport(
+                mode="reconcile",
+                ok=False,
+                fingerprint=verification.fingerprint,
+                issues=_issue_results(verification),
+                diagnostics=(Diagnostic("CONCURRENT_STATE_CHANGE"),),
+                mutations=tuple(mutations),
+            )
+        missing, stale = _native_delta(verification, owner, repo)
+        if any(item in stale for item in cycle_breaking):
+            return GuardReport(
+                mode="reconcile",
+                ok=False,
+                fingerprint=verification.fingerprint,
+                issues=_issue_results(verification),
+                diagnostics=(Diagnostic("REMOVAL_VERIFICATION_FAILED"),),
+                mutations=tuple(mutations),
+            )
+        current = verification
+
     for issue_number, blocker_number, database_id in missing:
         try:
             client.add_blocker(issue_number, database_id)
@@ -1012,9 +1189,9 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
             )
         mutations.append(Mutation("add", issue_number, blocker_number, database_id))
 
-    # Before any removal, re-read the complete graph and prove that every add
-    # is visible.  A successful HTTP response without the relationship is an
-    # uncertain outcome, so stale links must remain in place.
+    # Before ordinary stale-link removal, re-read the complete graph and prove
+    # that every add is visible. A successful HTTP response without the
+    # relationship is an uncertain outcome, so non-cycle stale links remain.
     if stale:
         verification = load_snapshot(client, owner, repo)
         if verification.structural_diagnostics:
@@ -1053,7 +1230,7 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
                 mutations=tuple(mutations),
             )
 
-    # Removals happen only after every desired relationship has been observed.
+    # Non-cycle removals happen only after every desired relationship is seen.
     for issue_number, blocker_number, database_id in stale:
         try:
             client.remove_blocker(issue_number, database_id)

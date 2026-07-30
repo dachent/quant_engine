@@ -53,13 +53,18 @@ def _issue(
     database_id: int | None = None,
     title: str | None = None,
     body: str | None = None,
+    labels: list[str] | None = None,
 ) -> dict[str, object]:
+    resolved_labels = labels
+    if resolved_labels is None:
+        resolved_labels = ["backlog:active"]
     return {
         "number": number,
         "id": database_id if database_id is not None else 10_000 + number,
         "title": title if title is not None else f"[{key}] Synthetic item",
         "body": body if body is not None else _body(blocked_by),
         "state": state,
+        "labels": [{"name": label} for label in resolved_labels],
     }
 
 
@@ -97,6 +102,7 @@ class FakeClient:
         self.change_on_second_read: tuple[int, str, object] | None = None
         self.fail_add = False
         self.ignore_add = False
+        self.ignore_remove = False
 
     def list_issues(self) -> list[dict[str, object]]:
         self.list_issue_count += 1
@@ -137,6 +143,8 @@ class FakeClient:
 
     def remove_blocker(self, issue_number: int, blocker_database_id: int) -> None:
         self.calls.append(("remove", issue_number, blocker_database_id))
+        if self.ignore_remove:
+            return
         self.native[issue_number] = [
             item
             for item in self.native.get(issue_number, [])
@@ -413,6 +421,55 @@ class ParserAndGraphTests(unittest.TestCase):
             },
         )
 
+    def test_only_active_issues_can_be_graph_ready(self) -> None:
+        issues = [
+            _issue(1, "A-001", labels=["backlog:active"]),
+            _issue(2, "A-002", labels=["backlog:next"]),
+            _issue(3, "A-003", labels=["backlog:deferred"]),
+            _issue(4, "A-004", labels=["backlog:folded"]),
+        ]
+        report = guard.audit(FakeClient(issues), OWNER, REPO)
+        self.assertTrue(report.ok)
+        self.assertEqual(
+            {item.number: item.status for item in report.issues},
+            {
+                1: "GRAPH_READY",
+                2: "BACKLOG_NEXT",
+                3: "BACKLOG_DEFERRED",
+                4: "BACKLOG_FOLDED",
+            },
+        )
+        self.assertEqual(
+            {item.number: item.backlog_state for item in report.issues},
+            {1: "active", 2: "next", 3: "deferred", 4: "folded"},
+        )
+
+    def test_open_issue_requires_exactly_one_backlog_state(self) -> None:
+        cases = {
+            "missing": ([], "BACKLOG_STATE_MISSING"),
+            "multiple": (
+                ["backlog:active", "backlog:next"],
+                "BACKLOG_STATE_MULTIPLE",
+            ),
+        }
+        for name, (labels, expected) in cases.items():
+            with self.subTest(name=name):
+                report = guard.audit(
+                    FakeClient([_issue(1, "A-001", labels=labels)]), OWNER, REPO
+                )
+                self.assertFalse(report.ok)
+                self.assertIn(expected, _diagnostic_codes(report))
+
+    def test_closed_issue_may_have_no_backlog_state(self) -> None:
+        report = guard.audit(
+            FakeClient([_issue(1, "A-001", state="closed", labels=[])]),
+            OWNER,
+            REPO,
+        )
+        self.assertTrue(report.ok)
+        self.assertEqual(report.issues[0].status, "CLOSED")
+        self.assertIsNone(report.issues[0].backlog_state)
+
 
 class ReconciliationTests(unittest.TestCase):
     def test_exact_mirror_has_no_writes(self) -> None:
@@ -472,6 +529,43 @@ class ReconciliationTests(unittest.TestCase):
             client.calls,
             [("add", 1, 9002), ("remove", 1, 9003)],
         )
+
+    def test_cycle_breaking_removal_precedes_reversed_dependency_adds(self) -> None:
+        issues = [
+            _issue(1, "A-001", "#3 (A-003)"),
+            _issue(2, "A-002", "#3 (A-003)"),
+            _issue(3, "A-003"),
+        ]
+        client = FakeClient(
+            issues,
+            {
+                2: [_native(1)],
+                3: [_native(2)],
+            },
+        )
+        report = guard.reconcile(client, OWNER, REPO)
+        self.assertTrue(report.ok)
+        self.assertEqual(
+            client.calls,
+            [
+                ("remove", 2, 10_001),
+                ("remove", 3, 10_002),
+                ("add", 1, 10_003),
+                ("add", 2, 10_003),
+            ],
+        )
+
+    def test_unobserved_cycle_breaking_removal_prevents_adds(self) -> None:
+        issues = [
+            _issue(1, "A-001", "#2 (A-002)"),
+            _issue(2, "A-002"),
+        ]
+        client = FakeClient(issues, {2: [_native(1)]})
+        client.ignore_remove = True
+        report = guard.reconcile(client, OWNER, REPO)
+        self.assertFalse(report.ok)
+        self.assertEqual(client.calls, [("remove", 2, 10_001)])
+        self.assertEqual(_diagnostic_codes(report), {"REMOVAL_VERIFICATION_FAILED"})
 
     def test_add_failure_prevents_every_removal(self) -> None:
         issues = [
@@ -569,11 +663,14 @@ class ReconciliationTests(unittest.TestCase):
         self.assertIn("BLOCKED_BY_LINE_INVALID", _diagnostic_codes(report))
         self.assertEqual(client.calls, [])
 
-    def test_concurrent_body_title_or_state_change_aborts_before_writes(self) -> None:
+    def test_concurrent_body_title_state_or_label_change_aborts_before_writes(
+        self,
+    ) -> None:
         changes: list[tuple[str, object]] = [
             ("body", _body("None.")),
             ("title", "[A-001] Changed synthetic title"),
             ("state", "closed"),
+            ("labels", [{"name": "backlog:next"}]),
         ]
         for field, value in changes:
             with self.subTest(field=field):

@@ -1,12 +1,12 @@
 name: Governed work item
 description: Create a Phase 0-8c quant_engine backlog item with explicit authority and evidence.
 title: "[AREA-000] "
-labels: []
+labels: ["backlog:next"]
 body:
   - type: markdown
     attributes:
       value: |
-        GitHub Issues are the sole execution tracker. Replace `AREA-000` in the title with a unique stable key such as `GOV-001`. Do not put credentials, account identifiers, captured sessions, or real financial data in this issue.
+        GitHub Issues are the sole execution tracker. Replace `AREA-000` in the title with a unique stable key such as `GOV-001`. New issues default to `backlog:next`; explicit approval is required to promote one to `backlog:active`. Do not put credentials, account identifiers, captured sessions, or real financial data in this issue.
 
   - type: input
     id: stable_key
