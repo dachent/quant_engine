@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
   issues:
-    types: [opened, edited, closed, reopened, deleted, transferred]
+    types: [opened, edited, labeled, unlabeled, closed, reopened, deleted, transferred]
   schedule:
     - cron: "17 * * * *"
 
