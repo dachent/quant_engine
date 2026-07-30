@@ -18,9 +18,22 @@ part of the remaining acceptance evidence. -->
 
 ## Verification evidence
 
+Exact PR head SHA: `REPLACE_WITH_40_CHARACTER_SHA`
+
 | Criterion | Check | Expected | Result | Evidence |
 |---|---|---|---|---|
 | | | | | |
+
+Free-plan merge evidence for that exact unchanged SHA:
+
+- [ ] Quality completed successfully.
+- [ ] Security completed successfully.
+- [ ] Data boundary completed successfully.
+- [ ] Issue guard completed successfully.
+- [ ] No expected workflow is missing, pending, cancelled, unexpectedly
+      skipped, or unsuccessful.
+- [ ] I understand these are project operating controls, not GitHub-enforced
+      required checks or protected-branch rules.
 
 ## Security, data, and external effects
 

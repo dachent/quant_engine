@@ -70,7 +70,14 @@ Read these before contributing:
 
 ## Foundation status
 
-The repository is in the Foundation initiative. Interfaces described in the
-architecture document are target contracts until their governing issues provide
-accepted implementation evidence. Do not infer that an adapter, extractor,
-publication path, or broker action exists merely because it is documented.
+The repository uses a private personal GitHub Free account. Its pull-request,
+exact-SHA CI, CODEOWNERS, and local push controls are procedural and
+defense-in-depth; GitHub does not server-enforce protected `main` or required
+checks for this private repository. The accepted residual risk and mandatory
+reapproval triggers are recorded in the
+[Free-plan governance decision](docs/decisions/0001-github-free-main-governance.md).
+
+Interfaces described in the architecture document remain target contracts until
+their governing issues provide accepted implementation evidence. Do not infer
+that an adapter, extractor, publication path, or broker action exists merely
+because it is documented.

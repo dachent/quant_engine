@@ -36,6 +36,20 @@ and hand off the blocker.
 
 - Make the smallest coherent, preferably reversible change within the approved
   issue scope. Do not weaken acceptance criteria to obtain a pass.
+- This repository is private on a personal GitHub Free account. GitHub does not
+  enforce protected `main`, required checks, reviews, CODEOWNERS, force-push
+  denial, or branch-deletion denial. These are project operating rules, not
+  server guarantees.
+- Never update, force-update, delete, or repoint `main` directly. Work on a
+  non-main branch and use a pull request. Before merge, record the exact PR head
+  SHA and prove that Quality, Security, Data boundary, and Issue guard all
+  completed successfully for that unchanged SHA. A template, green badge,
+  local hook, or post-push run is not a substitute for this evidence.
+- Stop before merge if any expected workflow is absent, pending, cancelled,
+  skipped unexpectedly, or unsuccessful. Any detected direct or forced update
+  to `main` freezes subsequent work until a governance incident reconciles the
+  remote history. Reopen `GOV-002` before adding a writer or write-capable app,
+  changing plan or visibility, or enabling live trading.
 - Use one writer for a shared file, repository surface, external system, Office
   application, or browser session unless both the write and external-effect
   surfaces are demonstrably independent. Name an integration owner.
