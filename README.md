@@ -87,3 +87,10 @@ The first accepted implementation slice is
 content-addressed source/generation manifest and fail-closed publication
 pointer. It does not implement provider acquisition, portfolio facts, or data
 migration.
+
+The minimal canonical fact model is
+[`quant-engine-portfolio-ledger`](packages/portfolio-ledger/README.md). It
+provides deterministic, synthetic-testable account, strategy, security,
+assignment, position, transaction, cash-flow, NAV, and reconciliation records.
+It deliberately does not implement performance policy, provider acquisition,
+or execution.
