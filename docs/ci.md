@@ -55,8 +55,8 @@ It never closes issues, edits issue bodies or checkboxes, or mutates another
 repository.
 
 Pull-request code receives no Issues token and runs only local tests with fake
-clients, and the check reports on every pull request so branch protection can
-require it without path-filter gaps. Event, scheduled, and main-push
+clients, and the check reports on every pull request so the operator can verify
+it without path-filter gaps. Event, scheduled, and main-push
 reconciliation use the default-branch implementation. Reconciliation installs
 no dependencies. Only the reconciliation job has `issues: write`; its pinned
 checkout and Python-setup actions remain inside that job's token trust boundary,
@@ -80,7 +80,7 @@ uv lock --check
 uv sync --frozen --all-groups --all-packages --python 3.11
 uv run --frozen --no-sync ruff format --check .
 uv run --frozen --no-sync ruff check .
-uv run --frozen --no-sync mypy packages/ci-controls/src tools/check_repository_boundary.py tools/issue_guard.py
+uv run --frozen --no-sync mypy packages/ci-controls/src tools/check_repository_boundary.py tools/check_push_policy.py tools/issue_guard.py
 uv run --frozen --no-sync pytest -q --disable-socket tests/security tests/ci tests/governance
 uv build --all-packages --no-sources --python 3.11
 uv audit --locked --python-version 3.11 --preview-features audit-command
@@ -93,15 +93,24 @@ product tests.
 
 ## Failure and recovery
 
-A failing job blocks acceptance; `continue-on-error` is forbidden. Keep the
-candidate on its feature branch, preserve the last accepted `main`, and retry
-only after the diagnosed input, code, lock, dependency, or environment changes.
-A merged CI defect is recovered through a governed revert or corrective pull
-request. Do not rewrite history, weaken a check, expose a matched secret, or
-use a provider credential to make CI pass.
+A failing job blocks acceptance under the project operating canon;
+`continue-on-error` is forbidden. On the current private personal GitHub Free
+plan, GitHub does not enforce that block. Pull-request results are pre-merge
+evidence only when the operator verifies all four workflows against the exact
+unchanged head SHA. A workflow triggered by a push to `main` runs after the
+mutation and is detective evidence, not prevention.
 
-Protected `main` and required-check enforcement remain GOV-002. They require a
-separate user-authorized GitHub plan change and are not claimed by CI-001.
+Keep a failed candidate on its feature branch, preserve the last accepted
+`main`, and retry only after the diagnosed input, code, lock, dependency, or
+environment changes. A merged CI defect is recovered through a governed revert
+or corrective pull request. Do not rewrite history, weaken a check, expose a
+matched secret, or use a provider credential to make CI pass.
+
+`GOV-002` records the accepted Free-plan residual risk. Actions are restricted
+to selected full-SHA-pinned dependencies, default workflow permission is read,
+and workflows cannot approve pull requests. CODEOWNERS, the PR template, issue
+reopening, and the local pre-push hook are procedural or defense-in-depth—not
+protected `main` or GitHub-required checks.
 
 ## Primary references
 

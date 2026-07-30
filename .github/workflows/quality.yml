@@ -52,7 +52,7 @@ jobs:
       - name: Check lint
         run: uv run --frozen --no-sync ruff check .
       - name: Type-check CI code
-        run: uv run --frozen --no-sync mypy packages/ci-controls/src tools/check_repository_boundary.py tools/issue_guard.py
+        run: uv run --frozen --no-sync mypy packages/ci-controls/src tools/check_repository_boundary.py tools/check_push_policy.py tools/issue_guard.py
       - name: Run bounded offline tests
         run: uv run --frozen --no-sync pytest -q --disable-socket tests/security tests/ci tests/governance
       - name: Build every workspace package
