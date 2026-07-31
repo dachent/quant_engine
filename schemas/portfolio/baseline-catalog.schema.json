@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/baseline-catalog.schema.json",
+  "title": "Private portfolio baseline catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "baseline_schema_version",
+    "policy_version",
+    "as_of_date",
+    "provenance",
+    "source_artifacts",
+    "accounts",
+    "strategies",
+    "assignments",
+    "allocations",
+    "securities",
+    "positions",
+    "transactions",
+    "flows",
+    "nav_observations",
+    "calendar_coverage",
+    "strategy_nav_coverage",
+    "costs",
+    "evidence_links",
+    "evidence_layer_metrics",
+    "strategy_live_metrics",
+    "implementation_gaps",
+    "corrections",
+    "assumptions",
+    "unmapped_records",
+    "fact_coverage",
+    "reconciliation_checks",
+    "reconciliation_exceptions",
+    "replay"
+  ],
+  "properties": {
+    "baseline_schema_version": {"const": 1},
+    "policy_version": {"const": "PORT-PERF-1"},
+    "as_of_date": {"type": "string", "format": "date"},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "catalog_sha256"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "catalog_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "source_artifacts": {"type": "array", "minItems": 17, "items": {"type": "object"}},
+    "accounts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/account"}},
+    "strategies": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "assignments": {"type": "array", "items": {"type": "object"}},
+    "allocations": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"type": "object"}},
+    "securities": {"type": "array", "items": {"type": "object"}},
+    "positions": {"type": "array", "maxItems": 0},
+    "transactions": {"type": "array", "items": {"type": "object"}},
+    "flows": {"type": "array", "items": {"type": "object"}},
+    "nav_observations": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "calendar_coverage": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/calendar_status"}},
+    "strategy_nav_coverage": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "costs": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "evidence_links": {"type": "array", "minItems": 9, "items": {"type": "object"}},
+    "evidence_layer_metrics": {"type": "array", "items": {"type": "object"}},
+    "strategy_live_metrics": {"type": "array", "items": {"type": "object"}},
+    "implementation_gaps": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "corrections": {"type": "array", "items": {"type": "object"}},
+    "assumptions": {"type": "array", "items": {"type": "object"}},
+    "unmapped_records": {"type": "array", "items": {"type": "object"}},
+    "fact_coverage": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/coverage"}},
+    "reconciliation_checks": {"type": "array", "minItems": 3, "items": {"type": "object"}},
+    "reconciliation_exceptions": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "replay": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {"status": {"const": "PASS"}}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "base_currency", "provider", "role"],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1},
+        "base_currency": {"const": "USD"},
+        "provider": {"type": "string", "minLength": 1},
+        "role": {"enum": ["INVESTMENT", "RESERVE"]}
+      }
+    },
+    "calendar_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "provider", "date", "status"],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1},
+        "provider": {"type": "string", "minLength": 1},
+        "date": {"type": ["string", "null"], "format": "date"},
+        "status": {
+          "enum": [
+            "OBSERVED",
+            "NON_BUSINESS_WEEKEND",
+            "MISSING_ON_PROVIDER_OBSERVED_DATE",
+            "UNRESOLVED_NO_CALENDAR_EVIDENCE",
+            "NO_ACCOUNT_NAV_OBSERVATIONS"
+          ]
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fact_type", "status", "known_gaps"],
+      "properties": {
+        "fact_type": {"type": "string", "minLength": 1},
+        "status": {"enum": ["COMPLETE_WITHIN_DECLARED_BOUNDARY", "PARTIAL", "FAILED"]},
+        "known_gaps": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}

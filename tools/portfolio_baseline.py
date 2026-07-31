@@ -1,0 +1,1542 @@
+"""Build and publish the first private, coverage-aware portfolio baseline.
+
+The repository owns this deterministic builder and its schemas.  The private
+specification, source records, normalized catalog, and CURRENT pointer remain
+outside Git.  Every input is an explicit, hash-bound file; this tool never
+walks a directory or calls a provider.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
+import hashlib
+import io
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import sys
+from typing import Any, Final, Mapping, Sequence
+
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationConflictError,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+    hash_file,
+    publish_generation,
+    read_current,
+    stage_generation,
+)
+from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import (
+    CashFlow,
+    MappingStatus,
+    NavObservation,
+    ObservedAmount,
+    Transaction,
+    decimal_text,
+)
+
+
+SPEC_SCHEMA_VERSION: Final = 1
+CATALOG_SCHEMA_VERSION: Final = 1
+BUILDER_VERSION: Final = "1.0.0"
+POLICY_VERSION: Final = "PORT-PERF-1"
+CURRENT_STRATEGY_COUNT: Final = 9
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_SOURCE_KEYS: Final = {
+    "alpaca-events",
+    "alpaca-flows",
+    "alpaca-nav",
+    "attribution-diagnostic",
+    "combined-control-status",
+    "component-decision-table",
+    "cost-economics",
+    "current-portfolio-summary",
+    "data-coverage-matrix",
+    "evidence-layer-metrics",
+    "hwm-status",
+    "ibkr-ledger",
+    "implementation-gap",
+    "phase2-evidence-summary",
+    "schwab-flows",
+    "schwab-nav",
+    "strategy-live-metrics",
+}
+
+_CSV_FIELDS: Final[dict[str, tuple[str, ...]]] = {
+    "alpaca-events": (
+        "date",
+        "type",
+        "symbol",
+        "qty",
+        "price",
+        "cash_after",
+        "nav_after",
+    ),
+    "alpaca-flows": ("account", "date", "bucket", "amount", "note"),
+    "alpaca-nav": ("date", "nav"),
+    "attribution-diagnostic": ("institution", "account", "date", "nav", "note"),
+    "component-decision-table": (
+        "component",
+        "current_value",
+        "systematic_weight",
+        "conceptual_family",
+        "principal_overlap",
+        "actual_or_nearest_live_cumulative_return",
+        "actual_or_nearest_live_max_drawdown",
+        "underwriting_stressed_component_max_drawdown",
+        "preliminary_verdict",
+        "required_gate",
+    ),
+    "cost-economics": (
+        "component",
+        "current_value",
+        "systematic_weight",
+        "annual_external_cost_dollars",
+        "annual_external_cost_rate_at_current_size",
+        "cost_status",
+        "minimum_sleeve_for_1pct_fixed_cost",
+        "retail_economics_flag",
+    ),
+    "data-coverage-matrix": (
+        "component",
+        "current_value",
+        "systematic_weight",
+        "account_specific_daily_series",
+        "daily_start",
+        "daily_end",
+        "return_observations",
+        "current_evidence_tier",
+        "phase2_limitation",
+    ),
+    "evidence-layer-metrics": (
+        "component",
+        "layer",
+        "provenance",
+        "start_date",
+        "end_date",
+        "observations",
+        "calendar_days",
+        "cumulative_return",
+        "descriptive_cagr",
+        "annualized_volatility",
+        "max_drawdown",
+        "ulcer_index",
+        "upi_vs_13w_treasury",
+        "worst_period_return",
+        "status",
+    ),
+    "ibkr-ledger": (
+        "date",
+        "account",
+        "starting_value",
+        "ending_value",
+        "twr",
+        "external_flow",
+        "transfer_flow",
+        "source_file",
+    ),
+    "implementation-gap": (
+        "component",
+        "provider_layer",
+        "account_layer",
+        "status",
+        "overlap_start",
+        "overlap_end",
+        "overlap_observations",
+        "provider_cumulative_return",
+        "account_cumulative_return",
+        "account_minus_provider_cumulative",
+        "daily_return_correlation",
+        "annualized_tracking_error",
+        "mean_daily_account_minus_provider",
+        "worst_daily_shortfall",
+        "note",
+    ),
+    "schwab-flows": (
+        "account",
+        "date",
+        "bucket",
+        "amount",
+        "action",
+        "description",
+        "counterparty_suffix",
+    ),
+    "schwab-nav": ("account", "date", "nav"),
+    "strategy-live-metrics": (
+        "first_date",
+        "last_date",
+        "source_return_observations",
+        "return_observations",
+        "calendar_days",
+        "cumulative_return",
+        "cagr",
+        "annualized_volatility",
+        "sharpe_period_rf",
+        "max_drawdown",
+        "ulcer_index",
+        "upi_period_rf",
+        "rf_13w_average",
+        "rf_13w_latest",
+        "worst_day",
+        "best_day",
+        "negative_day_share",
+        "downside_deviation_daily",
+        "historical_cvar_95_daily",
+        "strategy",
+        "source_reported_twr",
+        "twr_reconstruction_difference",
+        "spy_cumulative_return",
+        "spy_cagr",
+        "spy_max_drawdown",
+        "spy_ulcer_index",
+        "bil_cumulative_return",
+        "bil_cagr",
+        "bil_max_drawdown",
+        "bil_ulcer_index",
+        "cagr_minus_spy",
+    ),
+}
+
+
+class BaselineValidationError(ValueError):
+    """Private inputs or normalized facts violate the baseline contract."""
+
+
+def _text(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise BaselineValidationError(f"{field_name} must be non-empty text")
+    return value.strip()
+
+
+def _identifier(value: object, field_name: str) -> str:
+    accepted = _text(value, field_name)
+    if _IDENTIFIER.fullmatch(accepted) is None:
+        raise BaselineValidationError(f"{field_name} is not a portable identifier")
+    return accepted
+
+
+def _strict_keys(value: Mapping[str, Any], expected: set[str], name: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise BaselineValidationError(
+            f"{name} keys differ: missing={sorted(expected - actual)}, "
+            f"unexpected={sorted(actual - expected)}"
+        )
+
+
+def _object(value: object, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise BaselineValidationError(f"{field_name} must be an object")
+    return value
+
+
+def _objects(value: object, field_name: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise BaselineValidationError(f"{field_name} must be an array")
+    return [_object(item, field_name) for item in value]
+
+
+def _date(value: object, field_name: str) -> date:
+    accepted = _text(value, field_name)
+    try:
+        parsed = date.fromisoformat(accepted)
+    except ValueError as exc:
+        raise BaselineValidationError(f"{field_name} must be an ISO date") from exc
+    if parsed.isoformat() != accepted:
+        raise BaselineValidationError(f"{field_name} must use canonical ISO format")
+    return parsed
+
+
+def _decimal(
+    value: object, field_name: str, *, allow_blank: bool = False
+) -> Decimal | None:
+    if not isinstance(value, str):
+        raise BaselineValidationError(f"{field_name} must be decimal text")
+    if not value.strip() and allow_blank:
+        return None
+    try:
+        accepted = Decimal(value.strip())
+    except InvalidOperation as exc:
+        raise BaselineValidationError(f"{field_name} must be decimal text") from exc
+    if not accepted.is_finite():
+        raise BaselineValidationError(f"{field_name} must be finite")
+    return accepted
+
+
+def _portable_relative(value: object, field_name: str) -> str:
+    accepted = _text(value, field_name)
+    path = PurePosixPath(accepted)
+    if (
+        path.is_absolute()
+        or "\\" in accepted
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise BaselineValidationError(f"{field_name} must be a portable relative path")
+    return accepted
+
+
+def _load_json(path: Path, field_name: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BaselineValidationError(f"{field_name} is not readable JSON") from exc
+    return _object(decoded, field_name)
+
+
+def _read_csv(path: Path, source_key: str) -> list[dict[str, str]]:
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise BaselineValidationError(
+            f"{source_key} is not readable UTF-8 CSV"
+        ) from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    expected = _CSV_FIELDS[source_key]
+    if tuple(reader.fieldnames or ()) != expected:
+        raise BaselineValidationError(f"{source_key} header differs")
+    rows: list[dict[str, str]] = []
+    for row in reader:
+        if None in row or any(item is None for item in row.values()):
+            raise BaselineValidationError(f"{source_key} has a malformed row")
+        rows.append({str(key): value or "" for key, value in row.items()})
+    return rows
+
+
+def _record_id(prefix: str, value: Mapping[str, Any]) -> str:
+    digest = hashlib.sha256(canonical_json_bytes(value)).hexdigest()[:20]
+    return f"{prefix}-{digest}"
+
+
+def _load_spec(spec_path: Path) -> dict[str, Any]:
+    spec = _load_json(spec_path, "spec")
+    _strict_keys(
+        spec,
+        {
+            "as_of_date",
+            "policy_version",
+            "provenance",
+            "replay",
+            "roots",
+            "schema_version",
+            "sources",
+        },
+        "spec",
+    )
+    if spec["schema_version"] != SPEC_SCHEMA_VERSION:
+        raise BaselineValidationError("spec schema version is unsupported")
+    if spec["policy_version"] != POLICY_VERSION:
+        raise BaselineValidationError("spec policy version is unsupported")
+    _date(spec["as_of_date"], "spec.as_of_date")
+    return spec
+
+
+def _roots(value: object) -> dict[str, Path]:
+    roots = _object(value, "roots")
+    if not roots:
+        raise BaselineValidationError("roots must not be empty")
+    accepted: dict[str, Path] = {}
+    for root_id, path_value in roots.items():
+        identifier = _identifier(root_id, "root_id")
+        path = Path(_text(path_value, f"roots.{root_id}"))
+        if not path.is_absolute() or path.is_symlink() or not path.is_dir():
+            raise BaselineValidationError(
+                f"root {root_id} is not a real absolute directory"
+            )
+        accepted[identifier] = path
+    return accepted
+
+
+def _source_path(root: Path, relative_path: str) -> Path:
+    candidate = root.joinpath(*PurePosixPath(relative_path).parts)
+    if candidate.is_symlink() or not candidate.is_file():
+        raise BaselineValidationError("configured source is missing or linked")
+    return candidate
+
+
+def _sources(
+    value: object, roots: Mapping[str, Path], generation_as_of: date
+) -> tuple[dict[str, Path], tuple[SourceArtifact, ...], list[dict[str, Any]]]:
+    values = _object(value, "sources")
+    if set(values) != _SOURCE_KEYS:
+        raise BaselineValidationError(
+            f"source keys differ: missing={sorted(_SOURCE_KEYS - set(values))}, "
+            f"unexpected={sorted(set(values) - _SOURCE_KEYS)}"
+        )
+    paths: dict[str, Path] = {}
+    artifacts: list[SourceArtifact] = []
+    links: list[dict[str, Any]] = []
+    for source_key in sorted(values):
+        ref = _object(values[source_key], f"sources.{source_key}")
+        _strict_keys(
+            ref,
+            {
+                "as_of_date",
+                "expected_sha256",
+                "relative_path",
+                "root_id",
+                "schema_name",
+                "schema_version",
+            },
+            f"sources.{source_key}",
+        )
+        root_id = _identifier(ref["root_id"], f"sources.{source_key}.root_id")
+        if root_id not in roots:
+            raise BaselineValidationError(f"source {source_key} has unknown root")
+        relative_path = _portable_relative(
+            ref["relative_path"], f"sources.{source_key}.relative_path"
+        )
+        expected_hash = _text(
+            ref["expected_sha256"], f"sources.{source_key}.expected_sha256"
+        )
+        if _SHA256.fullmatch(expected_hash) is None:
+            raise BaselineValidationError(f"source {source_key} hash is invalid")
+        source_as_of = _date(ref["as_of_date"], f"sources.{source_key}.as_of_date")
+        if source_as_of > generation_as_of:
+            raise BaselineValidationError(
+                f"source {source_key} is newer than the baseline"
+            )
+        path = _source_path(roots[root_id], relative_path)
+        actual_hash, size = hash_file(path)
+        if actual_hash != expected_hash:
+            raise BaselineValidationError(f"source {source_key} hash differs")
+        schema_name = _text(ref["schema_name"], f"sources.{source_key}.schema_name")
+        schema_version = _text(
+            ref["schema_version"], f"sources.{source_key}.schema_version"
+        )
+        paths[source_key] = path
+        artifact_id = f"sources/{source_key}/{hashlib.sha256(relative_path.encode()).hexdigest()[:16]}"
+        artifacts.append(
+            SourceArtifact(
+                artifact_id=artifact_id,
+                sha256=actual_hash,
+                size_bytes=size,
+                as_of_date=source_as_of,
+                schema_name=schema_name,
+                schema_version=schema_version,
+            )
+        )
+        links.append(
+            {
+                "artifact_id": artifact_id,
+                "as_of_date": source_as_of.isoformat(),
+                "schema_name": schema_name,
+                "schema_version": schema_version,
+                "sha256": actual_hash,
+                "source_key": source_key,
+            }
+        )
+    return paths, tuple(artifacts), links
+
+
+def _provenance(
+    value: object,
+) -> tuple[dict[str, Any], SourceArtifact, dict[str, Any]]:
+    ref = _object(value, "provenance")
+    _strict_keys(ref, {"catalog_sha256", "generation_id", "root"}, "provenance")
+    root = Path(_text(ref["root"], "provenance.root"))
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise BaselineValidationError(
+            "provenance root is not a real absolute directory"
+        )
+    generation_id = _text(ref["generation_id"], "provenance.generation_id")
+    expected_hash = _text(ref["catalog_sha256"], "provenance.catalog_sha256")
+    if (
+        _SHA256.fullmatch(generation_id) is None
+        or _SHA256.fullmatch(expected_hash) is None
+    ):
+        raise BaselineValidationError("provenance identity is invalid")
+    try:
+        pointer = read_current(root)
+    except (OSError, ValueError) as exc:
+        raise BaselineValidationError("provenance pointer is not accepted") from exc
+    if pointer.generation_id != generation_id:
+        raise BaselineValidationError("provenance generation is not current authority")
+    path = root / "generations" / generation_id / "portfolio-provenance.json"
+    if path.is_symlink() or not path.is_file():
+        raise BaselineValidationError("provenance catalog is missing or linked")
+    actual_hash, size = hash_file(path)
+    if actual_hash != expected_hash:
+        raise BaselineValidationError("provenance catalog hash differs")
+    catalog = _load_json(path, "provenance catalog")
+    if catalog.get("catalog_schema_version") != 1:
+        raise BaselineValidationError("provenance catalog schema is unsupported")
+    artifact = SourceArtifact(
+        artifact_id="provenance/portfolio-provenance.json",
+        sha256=actual_hash,
+        size_bytes=size,
+        as_of_date=_date(catalog.get("as_of_date"), "provenance.as_of_date"),
+        schema_name="portfolio-provenance-catalog",
+        schema_version="1",
+    )
+    return (
+        catalog,
+        artifact,
+        {
+            "catalog_sha256": actual_hash,
+            "generation_id": generation_id,
+        },
+    )
+
+
+def _account_index(
+    catalog: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    accounts = _objects(catalog.get("accounts"), "provenance.accounts")
+    accepted: list[dict[str, Any]] = []
+    aliases: dict[str, str] = {}
+    for account in accounts:
+        account_id = _text(account.get("account_id"), "account.account_id")
+        role = _text(account.get("role"), "account.role")
+        account_aliases = account.get("aliases")
+        if not isinstance(account_aliases, list) or not all(
+            isinstance(item, str) and item.strip() for item in account_aliases
+        ):
+            raise BaselineValidationError("account aliases are invalid")
+        if role == "RESERVE":
+            provider = "INTERNAL"
+        else:
+            first = account_aliases[0].split(" | ", 1)[0].strip().upper()
+            provider = "IBKR" if first == "IBRK" else first
+        accepted.append(
+            {
+                "account_id": account_id,
+                "base_currency": "USD",
+                "provider": provider,
+                "role": role,
+            }
+        )
+        for alias in account_aliases:
+            key = alias.strip().casefold()
+            prior = aliases.get(key)
+            if prior is not None and prior != account_id:
+                raise BaselineValidationError("account alias is ambiguous")
+            aliases[key] = account_id
+    accepted.sort(key=lambda item: str(item["account_id"]))
+    return accepted, aliases
+
+
+def _resolve_account(aliases: Mapping[str, str], provider: str, external: str) -> str:
+    legacy = "IBRK" if provider == "IBKR" else provider.title()
+    external = external.strip()
+    candidates = []
+    if external and external.casefold() != legacy.casefold():
+        candidates.append(f"{legacy} | {external}")
+    candidates.append(legacy)
+    for candidate in candidates:
+        account_id = aliases.get(candidate.casefold())
+        if account_id is not None:
+            return account_id
+    raise BaselineValidationError(f"account mapping failed for provider {provider}")
+
+
+def _strategy_index(
+    catalog: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    strategies = _objects(catalog.get("strategies"), "provenance.strategies")
+    if len(strategies) != CURRENT_STRATEGY_COUNT:
+        raise BaselineValidationError("provenance must contain exactly 9 strategies")
+    aliases: dict[str, str] = {}
+    for strategy in strategies:
+        strategy_id = _text(strategy.get("strategy_id"), "strategy.strategy_id")
+        names = [strategy.get("name"), *list(strategy.get("aliases", []))]
+        for name in names:
+            alias = _text(name, "strategy alias").casefold()
+            prior = aliases.get(alias)
+            if prior is not None and prior != strategy_id:
+                raise BaselineValidationError("strategy alias is ambiguous")
+            aliases[alias] = strategy_id
+    return sorted(strategies, key=lambda item: str(item["strategy_id"])), aliases
+
+
+def _resolve_strategy(aliases: Mapping[str, str], observed: str) -> str:
+    strategy_id = aliases.get(observed.strip().casefold())
+    if strategy_id is None:
+        raise BaselineValidationError("current strategy mapping failed")
+    return strategy_id
+
+
+def _strategy_for_date(
+    assignments: Sequence[Mapping[str, Any]], account_id: str, event_date: date
+) -> tuple[MappingStatus, str | None]:
+    matches: list[Mapping[str, Any]] = []
+    for assignment in assignments:
+        if assignment.get("account_id") != account_id:
+            continue
+        start_value = assignment.get("effective_start")
+        end_value = assignment.get("effective_end")
+        if start_value is not None and event_date < _date(
+            start_value, "assignment.start"
+        ):
+            continue
+        if end_value is not None and event_date > _date(end_value, "assignment.end"):
+            continue
+        matches.append(assignment)
+    mapped = [item for item in matches if item.get("mapping_status") == "MAPPED"]
+    if len(mapped) == 1:
+        return MappingStatus.MAPPED, _text(mapped[0].get("strategy_id"), "strategy_id")
+    if mapped:
+        raise BaselineValidationError(
+            "multiple mapped strategies overlap for an account date"
+        )
+    return MappingStatus.UNMAPPED, None
+
+
+def _normalize_nav(
+    paths: Mapping[str, Path], aliases: Mapping[str, str]
+) -> tuple[list[dict[str, Any]], dict[str, set[date]], dict[str, str]]:
+    records: dict[tuple[str, date], dict[str, Any]] = {}
+    providers: dict[str, str] = {}
+
+    def add(
+        provider: str, external: str, day: str, value: str, source_key: str
+    ) -> None:
+        account_id = _resolve_account(aliases, provider, external)
+        observed_date = _date(day, f"{source_key}.date")
+        amount = _decimal(value, f"{source_key}.nav")
+        assert amount is not None
+        payload = NavObservation(
+            record_id="pending",
+            account_id=account_id,
+            as_of_date=observed_date,
+            nav=ObservedAmount.available(amount, "USD"),
+        ).to_dict()
+        payload["record_id"] = _record_id(
+            "nav",
+            {
+                "account_id": account_id,
+                "date": observed_date.isoformat(),
+                "value": decimal_text(amount),
+            },
+        )
+        payload["provider"] = provider
+        payload["source_key"] = source_key
+        key = (account_id, observed_date)
+        prior = records.get(key)
+        if prior is not None and prior["nav"] != payload["nav"]:
+            raise BaselineValidationError("conflicting NAV observation")
+        records[key] = payload
+        providers[account_id] = provider
+
+    for row in _read_csv(paths["schwab-nav"], "schwab-nav"):
+        add("SCHWAB", row["account"], row["date"], row["nav"], "schwab-nav")
+    for row in _read_csv(paths["ibkr-ledger"], "ibkr-ledger"):
+        add("IBKR", row["account"], row["date"], row["ending_value"], "ibkr-ledger")
+    for row in _read_csv(paths["alpaca-nav"], "alpaca-nav"):
+        add("ALPACA", "Alpaca", row["date"], row["nav"], "alpaca-nav")
+
+    provider_dates: dict[str, set[date]] = {}
+    for record in records.values():
+        provider_dates.setdefault(str(record["provider"]), set()).add(
+            _date(record["as_of_date"], "nav.as_of_date")
+        )
+    return (
+        sorted(
+            records.values(),
+            key=lambda item: (str(item["account_id"]), str(item["as_of_date"])),
+        ),
+        provider_dates,
+        providers,
+    )
+
+
+def _reconcile_nav(
+    path: Path,
+    aliases: Mapping[str, str],
+    normalized: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    raw = {
+        (
+            str(item["account_id"]),
+            _date(item["as_of_date"], "nav.as_of_date"),
+        ): _text(_object(item["nav"], "nav.amount").get("value"), "nav.value")
+        for item in normalized
+    }
+    derived: dict[tuple[str, date], str] = {}
+    for row in _read_csv(path, "attribution-diagnostic"):
+        provider = (
+            "IBKR"
+            if row["institution"].strip().upper() == "IBRK"
+            else row["institution"].strip().upper()
+        )
+        account_id = _resolve_account(aliases, provider, row["account"])
+        day = _date(row["date"], "attribution.date")
+        amount = _decimal(row["nav"], "attribution.nav")
+        assert amount is not None
+        derived[(account_id, day)] = decimal_text(amount)
+    if raw != derived:
+        raise BaselineValidationError(
+            "raw NAV sources do not reconcile to tracker derivative"
+        )
+    return {
+        "check_id": "raw-nav-to-attribution-diagnostic",
+        "observed_count": len(raw),
+        "status": "PASS",
+    }
+
+
+def _calendar_statuses(
+    accounts: Sequence[Mapping[str, Any]],
+    nav: Sequence[Mapping[str, Any]],
+    provider_dates: Mapping[str, set[date]],
+) -> list[dict[str, Any]]:
+    by_account: dict[str, set[date]] = {}
+    for record in nav:
+        by_account.setdefault(str(record["account_id"]), set()).add(
+            _date(record["as_of_date"], "nav.as_of_date")
+        )
+    statuses: list[dict[str, Any]] = []
+    for account in accounts:
+        if account["role"] == "RESERVE":
+            continue
+        account_id = str(account["account_id"])
+        provider = str(account["provider"])
+        dates = provider_dates.get(provider, set())
+        observed = by_account.get(account_id, set())
+        if not observed:
+            statuses.append(
+                {
+                    "account_id": account_id,
+                    "date": None,
+                    "provider": provider,
+                    "status": "NO_ACCOUNT_NAV_OBSERVATIONS",
+                }
+            )
+            continue
+        current = min(observed)
+        end = max(observed)
+        while current <= end:
+            if current in observed:
+                status = "OBSERVED"
+            elif current.weekday() >= 5:
+                status = "NON_BUSINESS_WEEKEND"
+            elif current in dates:
+                status = "MISSING_ON_PROVIDER_OBSERVED_DATE"
+            else:
+                status = "UNRESOLVED_NO_CALENDAR_EVIDENCE"
+            statuses.append(
+                {
+                    "account_id": account_id,
+                    "date": current.isoformat(),
+                    "provider": provider,
+                    "status": status,
+                }
+            )
+            current += timedelta(days=1)
+    return sorted(
+        statuses,
+        key=lambda item: (str(item["account_id"]), str(item["date"] or "")),
+    )
+
+
+def _normalize_flows(
+    paths: Mapping[str, Path],
+    aliases: Mapping[str, str],
+    assignments: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    flows: list[dict[str, Any]] = []
+
+    def add(
+        provider: str,
+        external: str,
+        day: str,
+        flow_type: str,
+        value: str,
+        source_key: str,
+        evidence_class: str,
+        source_ordinal: int,
+    ) -> None:
+        account_id = _resolve_account(aliases, provider, external)
+        event_date = _date(day, f"{source_key}.date")
+        amount = _decimal(value, f"{source_key}.amount")
+        assert amount is not None
+        mapping_status, strategy_id = _strategy_for_date(
+            assignments, account_id, event_date
+        )
+        identity = {
+            "account_id": account_id,
+            "amount": decimal_text(amount),
+            "date": event_date.isoformat(),
+            "flow_type": flow_type,
+            "source_ordinal": source_ordinal,
+            "source_key": source_key,
+        }
+        record = CashFlow(
+            record_id=_record_id("flow", identity),
+            account_id=account_id,
+            event_date=event_date,
+            flow_type=flow_type,
+            amount=ObservedAmount.available(amount, "USD"),
+            mapping_status=mapping_status,
+            strategy_id=strategy_id,
+        ).to_dict()
+        record.update(
+            {
+                "evidence_class": evidence_class,
+                "provider": provider,
+                "source_key": source_key,
+            }
+        )
+        flows.append(record)
+
+    for source_ordinal, row in enumerate(
+        _read_csv(paths["schwab-flows"], "schwab-flows"), start=1
+    ):
+        add(
+            "SCHWAB",
+            row["account"],
+            row["date"],
+            row["bucket"].upper(),
+            row["amount"],
+            "schwab-flows",
+            "OBSERVED",
+            source_ordinal,
+        )
+    for source_ordinal, row in enumerate(
+        _read_csv(paths["alpaca-flows"], "alpaca-flows"), start=1
+    ):
+        evidence = "INFERRED" if "infer" in row["note"].casefold() else "OBSERVED"
+        add(
+            "ALPACA",
+            row["account"],
+            row["date"],
+            row["bucket"].upper(),
+            row["amount"],
+            "alpaca-flows",
+            evidence,
+            source_ordinal,
+        )
+    for source_ordinal, row in enumerate(
+        _read_csv(paths["ibkr-ledger"], "ibkr-ledger"), start=1
+    ):
+        for field, flow_type in (
+            ("external_flow", "EXTERNAL_FLOW"),
+            ("transfer_flow", "TRANSFER_FLOW"),
+        ):
+            amount = _decimal(row[field], f"ibkr-ledger.{field}")
+            assert amount is not None
+            if amount != 0:
+                add(
+                    "IBKR",
+                    row["account"],
+                    row["date"],
+                    flow_type,
+                    row[field],
+                    "ibkr-ledger",
+                    "OBSERVED",
+                    source_ordinal,
+                )
+    identifiers = [str(item["record_id"]) for item in flows]
+    if len(identifiers) != len(set(identifiers)):
+        raise BaselineValidationError("flow identifiers are not unique")
+    return sorted(
+        flows, key=lambda item: (str(item["event_date"]), str(item["record_id"]))
+    )
+
+
+def _normalize_transactions(
+    path: Path,
+    aliases: Mapping[str, str],
+    assignments: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    account_id = _resolve_account(aliases, "ALPACA", "Alpaca")
+    transactions: list[dict[str, Any]] = []
+    securities: dict[str, dict[str, Any]] = {}
+    for row in _read_csv(path, "alpaca-events"):
+        if row["type"] not in {"buy_fill", "sell_fill"}:
+            continue
+        event_date = _date(row["date"], "alpaca-events.date")
+        quantity = _decimal(row["qty"], "alpaca-events.qty")
+        price = _decimal(row["price"], "alpaca-events.price")
+        assert quantity is not None and price is not None
+        symbol = _text(row["symbol"], "alpaca-events.symbol")
+        security_id = f"security-{hashlib.sha256(symbol.encode()).hexdigest()[:16]}"
+        securities[security_id] = {
+            "currency": "USD",
+            "security_id": security_id,
+            "symbol": symbol,
+        }
+        signed_amount = (
+            quantity
+            * price
+            * (Decimal("-1") if row["type"] == "buy_fill" else Decimal("1"))
+        )
+        mapping_status, strategy_id = _strategy_for_date(
+            assignments, account_id, event_date
+        )
+        identity = {
+            "account_id": account_id,
+            "date": event_date.isoformat(),
+            "kind": row["type"].upper(),
+            "quantity": decimal_text(quantity),
+            "security_id": security_id,
+        }
+        record = Transaction(
+            record_id=_record_id("transaction", identity),
+            account_id=account_id,
+            event_date=event_date,
+            kind=row["type"].upper(),
+            amount=ObservedAmount.available(signed_amount, "USD"),
+            mapping_status=mapping_status,
+            strategy_id=strategy_id,
+            security_id=security_id,
+        ).to_dict()
+        record.update(
+            {
+                "price": decimal_text(price),
+                "provider": "ALPACA",
+                "quantity": decimal_text(quantity),
+                "source_key": "alpaca-events",
+            }
+        )
+        transactions.append(record)
+    identifiers = [str(item["record_id"]) for item in transactions]
+    if len(identifiers) != len(set(identifiers)):
+        raise BaselineValidationError("transaction identifiers are not unique")
+    return (
+        sorted(
+            transactions,
+            key=lambda item: (str(item["event_date"]), str(item["record_id"])),
+        ),
+        sorted(securities.values(), key=lambda item: str(item["security_id"])),
+    )
+
+
+def _allocations_and_coverage(
+    paths: Mapping[str, Path], strategy_aliases: Mapping[str, str], as_of: date
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    Decimal,
+    Decimal,
+]:
+    allocations: list[dict[str, Any]] = []
+    by_strategy: dict[str, tuple[Decimal, Decimal]] = {}
+    for row in _read_csv(paths["component-decision-table"], "component-decision-table"):
+        strategy_id = _resolve_strategy(strategy_aliases, row["component"])
+        value = _decimal(row["current_value"], "allocation.current_value")
+        weight = _decimal(row["systematic_weight"], "allocation.systematic_weight")
+        assert value is not None and weight is not None
+        by_strategy[strategy_id] = (value, weight)
+        payload = {
+            "as_of_date": as_of.isoformat(),
+            "current_value": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": decimal_text(value),
+            },
+            "scope": "SYSTEMATIC",
+            "source_key": "component-decision-table",
+            "strategy_id": strategy_id,
+            "systematic_weight": decimal_text(weight),
+        }
+        allocations.append(
+            {"allocation_id": _record_id("allocation", payload), **payload}
+        )
+    if len(by_strategy) != CURRENT_STRATEGY_COUNT:
+        raise BaselineValidationError(
+            "allocation snapshot must map exactly 9 strategies"
+        )
+
+    coverage: list[dict[str, Any]] = []
+    nav_covered = Decimal("0")
+    for row in _read_csv(paths["data-coverage-matrix"], "data-coverage-matrix"):
+        strategy_id = _resolve_strategy(strategy_aliases, row["component"])
+        value = _decimal(row["current_value"], "coverage.current_value")
+        assert value is not None
+        if strategy_id not in by_strategy or by_strategy[strategy_id][0] != value:
+            raise BaselineValidationError(
+                "coverage and allocation current values differ"
+            )
+        daily = row["account_specific_daily_series"].strip().casefold()
+        if daily not in {"yes", "no"}:
+            raise BaselineValidationError("daily-series coverage must be yes or no")
+        if daily == "yes":
+            nav_covered += value
+        coverage.append(
+            {
+                "current_value_usd": decimal_text(value),
+                "daily_end": row["daily_end"].strip() or None,
+                "daily_start": row["daily_start"].strip() or None,
+                "known_gap": row["phase2_limitation"].strip() or None,
+                "return_observations": row["return_observations"].strip() or None,
+                "status": "AVAILABLE" if daily == "yes" else "UNAVAILABLE",
+                "strategy_id": strategy_id,
+            }
+        )
+
+    costs: list[dict[str, Any]] = []
+    for row in _read_csv(paths["cost-economics"], "cost-economics"):
+        strategy_id = _resolve_strategy(strategy_aliases, row["component"])
+        cost = _decimal(
+            row["annual_external_cost_dollars"], "cost.annual", allow_blank=True
+        )
+        costs.append(
+            {
+                "annual_external_cost_usd": decimal_text(cost)
+                if cost is not None
+                else None,
+                "cost_status": _text(row["cost_status"], "cost.status"),
+                "strategy_id": strategy_id,
+            }
+        )
+    systematic_total = sum((item[0] for item in by_strategy.values()), Decimal("0"))
+    return (
+        sorted(allocations, key=lambda item: str(item["strategy_id"])),
+        sorted(coverage, key=lambda item: str(item["strategy_id"])),
+        sorted(costs, key=lambda item: str(item["strategy_id"])),
+        systematic_total,
+        nav_covered,
+    )
+
+
+def _normalize_strategy_evidence(
+    paths: Mapping[str, Path], strategy_aliases: Mapping[str, str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    layer_metrics: list[dict[str, Any]] = []
+    for row in _read_csv(paths["evidence-layer-metrics"], "evidence-layer-metrics"):
+        strategy_id = _resolve_strategy(strategy_aliases, row["component"])
+        layer_metrics.append(
+            {
+                "end_date": row["end_date"].strip() or None,
+                "layer": _text(row["layer"], "evidence.layer"),
+                "metrics": {
+                    key: value or None
+                    for key, value in row.items()
+                    if key
+                    not in {
+                        "component",
+                        "layer",
+                        "provenance",
+                        "start_date",
+                        "end_date",
+                        "status",
+                    }
+                },
+                "provenance": _text(row["provenance"], "evidence.provenance"),
+                "start_date": row["start_date"].strip() or None,
+                "status": row["status"].strip() or "UNAVAILABLE_UNLABELED",
+                "strategy_id": strategy_id,
+            }
+        )
+    live_metrics: list[dict[str, Any]] = []
+    for row in _read_csv(paths["strategy-live-metrics"], "strategy-live-metrics"):
+        live_strategy_id: str | None
+        try:
+            live_strategy_id = _resolve_strategy(strategy_aliases, row["strategy"])
+        except BaselineValidationError:
+            # Aggregate/benchmark rows are preserved but cannot become Strategy identities.
+            live_strategy_id = None
+        live_metrics.append(
+            {
+                "evidence_layer": "ACCOUNT_LIVE"
+                if live_strategy_id is not None
+                else "AGGREGATE_OR_BENCHMARK",
+                "metrics": {
+                    key: value or None
+                    for key, value in row.items()
+                    if key != "strategy"
+                },
+                "observed_label": row["strategy"],
+                "strategy_id": live_strategy_id,
+            }
+        )
+    gaps: list[dict[str, Any]] = []
+    for row in _read_csv(paths["implementation-gap"], "implementation-gap"):
+        strategy_id = _resolve_strategy(strategy_aliases, row["component"])
+        gaps.append(
+            {
+                "account_layer": row["account_layer"] or None,
+                "metrics": {
+                    key: value or None
+                    for key, value in row.items()
+                    if key
+                    not in {
+                        "component",
+                        "provider_layer",
+                        "account_layer",
+                        "status",
+                        "note",
+                    }
+                },
+                "note": row["note"] or None,
+                "provider_layer": row["provider_layer"] or None,
+                "status": _text(row["status"], "implementation_gap.status"),
+                "strategy_id": strategy_id,
+            }
+        )
+    return (
+        sorted(
+            layer_metrics,
+            key=lambda item: (
+                str(item["strategy_id"]),
+                str(item["layer"]),
+                str(item["start_date"]),
+            ),
+        ),
+        sorted(
+            live_metrics,
+            key=lambda item: (
+                str(item["strategy_id"] or "~"),
+                str(item["observed_label"]),
+            ),
+        ),
+        sorted(gaps, key=lambda item: str(item["strategy_id"])),
+    )
+
+
+def _replay(
+    spec_value: object,
+    paths: Mapping[str, Path],
+    systematic_total: Decimal,
+    nav_covered: Decimal,
+) -> tuple[dict[str, Any], Decimal]:
+    spec = _object(spec_value, "replay")
+    _strict_keys(
+        spec,
+        {
+            "correlation_one_stress",
+            "full_systematic_hwm_status",
+            "nav_coverage",
+            "portfolio_action",
+            "reserve_total_usd",
+            "systematic_total_usd",
+            "total_liquid_usd",
+        },
+        "replay",
+    )
+    summary = _load_json(
+        paths["current-portfolio-summary"], "current-portfolio-summary"
+    )
+    evidence = _load_json(paths["phase2-evidence-summary"], "phase2-evidence-summary")
+    control = _load_json(paths["combined-control-status"], "combined-control-status")
+    hwm = _load_json(paths["hwm-status"], "hwm-status")
+
+    reserve = _decimal(str(summary.get("reserve_total")), "summary.reserve_total")
+    reported_systematic = _decimal(
+        str(summary.get("systematic_total")), "summary.systematic_total"
+    )
+    stress = _decimal(
+        str(evidence.get("current_correlation_one_underwriting_loss")),
+        "evidence.stress",
+    )
+    assert (
+        reserve is not None and reported_systematic is not None and stress is not None
+    )
+    stress = abs(stress)
+    if systematic_total != reported_systematic:
+        raise BaselineValidationError(
+            "allocation total does not reconcile to audit systematic total"
+        )
+    nav_ratio = nav_covered / systematic_total
+    total = systematic_total + reserve
+
+    actuals: dict[str, Decimal | str] = {
+        "correlation_one_stress": stress,
+        "full_systematic_hwm_status": _text(
+            hwm.get("full_systematic_hwm_status"), "hwm.status"
+        ),
+        "nav_coverage": nav_ratio,
+        "portfolio_action": _text(control.get("portfolio_action"), "control.action"),
+        "reserve_total_usd": reserve,
+        "systematic_total_usd": systematic_total,
+        "total_liquid_usd": total,
+    }
+    rendered: dict[str, Any] = {}
+    for key, actual in actuals.items():
+        expected_value = spec[key]
+        if isinstance(actual, Decimal):
+            contract = _object(expected_value, f"replay.{key}")
+            _strict_keys(contract, {"tolerance", "value"}, f"replay.{key}")
+            expected = _decimal(contract["value"], f"replay.{key}.value")
+            tolerance = _decimal(contract["tolerance"], f"replay.{key}.tolerance")
+            assert expected is not None and tolerance is not None
+            if tolerance < 0 or abs(actual - expected) > tolerance:
+                raise BaselineValidationError(f"frozen replay differs for {key}")
+            rendered[key] = decimal_text(actual)
+        else:
+            if actual != _text(expected_value, f"replay.{key}"):
+                raise BaselineValidationError(f"frozen replay differs for {key}")
+            rendered[key] = actual
+    rendered["status"] = "PASS"
+    return rendered, reserve
+
+
+def _fact_coverage(
+    accounts: Sequence[Mapping[str, Any]],
+    assignments: Sequence[Mapping[str, Any]],
+    transactions: Sequence[Mapping[str, Any]],
+    flows: Sequence[Mapping[str, Any]],
+    missing_strategy_nav_count: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    investment_count = sum(1 for item in accounts if item["role"] == "INVESTMENT")
+    unmapped = [
+        item for item in assignments if item.get("mapping_status") == "UNMAPPED"
+    ]
+    claims: list[dict[str, Any]] = [
+        {
+            "fact_type": "accounts",
+            "known_gaps": [],
+            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        },
+        {
+            "fact_type": "current_strategies",
+            "known_gaps": [],
+            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        },
+        {
+            "fact_type": "current_allocations",
+            "known_gaps": [],
+            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        },
+        {
+            "fact_type": "assignments",
+            "known_gaps": [f"{len(unmapped)} legacy General assignments are UNMAPPED"],
+            "status": "PARTIAL",
+        },
+        {
+            "fact_type": "nav",
+            "known_gaps": [
+                f"{missing_strategy_nav_count} current strategies lack account-specific daily series"
+            ],
+            "status": "PARTIAL",
+        },
+        {
+            "fact_type": "flows",
+            "known_gaps": [
+                "coverage is limited to accepted Schwab, IBKR, and Alpaca evidence"
+            ],
+            "status": "PARTIAL",
+        },
+        {
+            "fact_type": "transactions",
+            "known_gaps": ["coverage is limited to Alpaca fill events"],
+            "status": "PARTIAL",
+        },
+        {
+            "fact_type": "positions",
+            "known_gaps": ["no accepted position source exists for this baseline"],
+            "status": "FAILED",
+        },
+        {
+            "fact_type": "fx",
+            "known_gaps": [
+                "no accepted FX observation source exists for this baseline"
+            ],
+            "status": "FAILED",
+        },
+        {
+            "fact_type": "costs",
+            "known_gaps": [
+                "several current strategy costs remain unknown or conditional"
+            ],
+            "status": "PARTIAL",
+        },
+    ]
+    exceptions: list[dict[str, Any]] = [
+        {
+            "exception_id": "positions-unavailable",
+            "fact_type": "positions",
+            "severity": "BLOCKING_FOR_POSITION_ANALYSIS",
+            "status": "UNAVAILABLE",
+        },
+        {
+            "exception_id": "full-systematic-hwm-unavailable",
+            "fact_type": "nav",
+            "severity": "BLOCKING_FOR_AUTOMATED_HWM",
+            "status": "UNAVAILABLE",
+        },
+        {
+            "exception_id": "assignment-mapping-partial",
+            "fact_type": "assignments",
+            "record_count": len(unmapped),
+            "severity": "BLOCKING_FOR_FULL_ATTRIBUTION",
+            "status": "UNMAPPED",
+        },
+        {
+            "exception_id": "account-nav-coverage-partial",
+            "fact_type": "nav",
+            "investment_account_count": investment_count,
+            "severity": "BLOCKING_FOR_FULL_ATTRIBUTION",
+            "status": "PARTIAL",
+        },
+        {
+            "exception_id": "transaction-coverage-partial",
+            "fact_type": "transactions",
+            "record_count": len(transactions),
+            "severity": "DISCLOSED_GAP",
+            "status": "PARTIAL",
+        },
+        {
+            "exception_id": "flow-coverage-partial",
+            "fact_type": "flows",
+            "record_count": len(flows),
+            "severity": "DISCLOSED_GAP",
+            "status": "PARTIAL",
+        },
+    ]
+    return claims, exceptions
+
+
+def build_catalog(
+    spec_path: Path,
+) -> tuple[dict[str, Any], GenerationManifest, bytes]:
+    """Build and validate one deterministic baseline candidate."""
+
+    spec = _load_spec(spec_path)
+    as_of = _date(spec["as_of_date"], "spec.as_of_date")
+    roots = _roots(spec["roots"])
+    paths, source_artifacts, source_links = _sources(spec["sources"], roots, as_of)
+    provenance, provenance_artifact, provenance_ref = _provenance(spec["provenance"])
+    accounts, account_aliases = _account_index(provenance)
+    strategies, strategy_aliases = _strategy_index(provenance)
+    assignments = _objects(provenance.get("assignments"), "provenance.assignments")
+    nav, provider_dates, _ = _normalize_nav(paths, account_aliases)
+    nav_reconciliation = _reconcile_nav(
+        paths["attribution-diagnostic"], account_aliases, nav
+    )
+    calendar = _calendar_statuses(accounts, nav, provider_dates)
+    flows = _normalize_flows(paths, account_aliases, assignments)
+    transactions, securities = _normalize_transactions(
+        paths["alpaca-events"], account_aliases, assignments
+    )
+    allocations, strategy_nav_coverage, costs, systematic_total, nav_covered = (
+        _allocations_and_coverage(paths, strategy_aliases, as_of)
+    )
+    layer_metrics, live_metrics, implementation_gaps = _normalize_strategy_evidence(
+        paths, strategy_aliases
+    )
+    replay, reserve = _replay(spec["replay"], paths, systematic_total, nav_covered)
+    reserve_id = next(
+        str(item["account_id"]) for item in accounts if item["role"] == "RESERVE"
+    )
+    reserve_payload = {
+        "as_of_date": as_of.isoformat(),
+        "current_value": {
+            "currency": "USD",
+            "status": "AVAILABLE",
+            "value": decimal_text(reserve),
+        },
+        "scope": "RESERVE",
+        "source_key": "current-portfolio-summary",
+        "strategy_id": None,
+        "systematic_weight": None,
+        "account_id": reserve_id,
+    }
+    allocations.append(
+        {"allocation_id": _record_id("allocation", reserve_payload), **reserve_payload}
+    )
+    allocations.sort(
+        key=lambda item: (str(item["scope"]), str(item.get("strategy_id") or ""))
+    )
+    missing_strategy_nav_count = sum(
+        1 for item in strategy_nav_coverage if item["status"] == "UNAVAILABLE"
+    )
+    fact_coverage, exceptions = _fact_coverage(
+        accounts,
+        assignments,
+        transactions,
+        flows,
+        missing_strategy_nav_count,
+    )
+    unmapped = sorted(
+        [item for item in assignments if item.get("mapping_status") == "UNMAPPED"],
+        key=lambda item: str(item.get("assignment_id")),
+    )
+    evidence_links = [
+        {
+            "evidence_layer": route["evidence_layer"],
+            "purpose": route["purpose"],
+            "source_id": route["source_id"],
+            "strategy_id": strategy["strategy_id"],
+        }
+        for strategy in strategies
+        for route in _objects(
+            strategy.get("evidence_routes"), "strategy.evidence_routes"
+        )
+    ]
+    catalog: dict[str, Any] = {
+        "accounts": accounts,
+        "allocations": allocations,
+        "as_of_date": as_of.isoformat(),
+        "assignments": sorted(
+            assignments, key=lambda item: str(item.get("assignment_id"))
+        ),
+        "assumptions": provenance.get("assumptions", []),
+        "baseline_schema_version": CATALOG_SCHEMA_VERSION,
+        "calendar_coverage": calendar,
+        "corrections": provenance.get("corrections", []),
+        "costs": costs,
+        "evidence_layer_metrics": layer_metrics,
+        "evidence_links": sorted(
+            evidence_links,
+            key=lambda item: (
+                str(item["strategy_id"]),
+                str(item["source_id"]),
+                str(item["evidence_layer"]),
+            ),
+        ),
+        "fact_coverage": fact_coverage,
+        "flows": flows,
+        "implementation_gaps": implementation_gaps,
+        "nav_observations": nav,
+        "policy_version": POLICY_VERSION,
+        "positions": [],
+        "provenance": provenance_ref,
+        "reconciliation_checks": [
+            nav_reconciliation,
+            {
+                "check_id": "allocation-to-audit-systematic-total",
+                "status": "PASS",
+                "value_usd": decimal_text(systematic_total),
+            },
+            {
+                "check_id": "allocation-plus-reserve-to-liquid-total",
+                "status": "PASS",
+                "value_usd": replay["total_liquid_usd"],
+            },
+        ],
+        "reconciliation_exceptions": exceptions,
+        "replay": replay,
+        "securities": securities,
+        "source_artifacts": source_links,
+        "strategies": strategies,
+        "strategy_live_metrics": live_metrics,
+        "strategy_nav_coverage": strategy_nav_coverage,
+        "transactions": transactions,
+        "unmapped_records": unmapped,
+    }
+    catalog_bytes = canonical_json_bytes(catalog)
+    catalog_artifact = SourceArtifact(
+        artifact_id="normalized/portfolio-baseline.json",
+        sha256=hashlib.sha256(catalog_bytes).hexdigest(),
+        size_bytes=len(catalog_bytes),
+        as_of_date=as_of,
+        schema_name="portfolio-baseline-catalog",
+        schema_version=str(CATALOG_SCHEMA_VERSION),
+    )
+    spec_hash, spec_size = hash_file(spec_path)
+    spec_artifact = SourceArtifact(
+        artifact_id="config/portfolio-baseline-spec.json",
+        sha256=spec_hash,
+        size_bytes=spec_size,
+        as_of_date=as_of,
+        schema_name="portfolio-baseline-spec",
+        schema_version=str(SPEC_SCHEMA_VERSION),
+    )
+    observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("portfolio-baseline-builder", BUILDER_VERSION),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="exact configured baseline inputs and explicit fact-level availability dispositions",
+            fact_types=(
+                "accounts",
+                "allocations",
+                "assignments",
+                "coverage",
+                "flows",
+                "nav",
+                "reconciliation",
+                "strategies",
+                "transactions",
+            ),
+            observed_start=min(observed_dates),
+            observed_end=max(observed_dates),
+        ),
+        artifacts=(
+            *source_artifacts,
+            provenance_artifact,
+            spec_artifact,
+            catalog_artifact,
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    return catalog, manifest, catalog_bytes
+
+
+def stage_baseline(spec_path: Path, output_root: Path) -> dict[str, Any]:
+    catalog, manifest, catalog_bytes = build_catalog(spec_path)
+    manifest_path = stage_generation(output_root, manifest)
+    catalog_path = manifest_path.parent / "portfolio-baseline.json"
+    try:
+        descriptor = os.open(
+            catalog_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+    except FileExistsError:
+        if catalog_path.is_symlink() or catalog_path.read_bytes() != catalog_bytes:
+            raise GenerationConflictError(
+                "generation catalog already contains different evidence"
+            )
+    else:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(catalog_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+    return {
+        "account_count": len(catalog["accounts"]),
+        "allocation_count": len(catalog["allocations"]),
+        "catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+        "flow_count": len(catalog["flows"]),
+        "generation_id": manifest.generation_id,
+        "nav_count": len(catalog["nav_observations"]),
+        "replay_status": catalog["replay"]["status"],
+        "strategy_count": len(catalog["strategies"]),
+        "transaction_count": len(catalog["transactions"]),
+        "unmapped_count": len(catalog["unmapped_records"]),
+    }
+
+
+def publish_baseline(
+    spec_path: Path, output_root: Path, generation_id: str
+) -> dict[str, Any]:
+    evidence = stage_baseline(spec_path, output_root)
+    if evidence["generation_id"] != generation_id:
+        raise BaselineValidationError(
+            "requested generation differs from current inputs"
+        )
+    pointer = publish_generation(output_root, generation_id)
+    return {**evidence, "publication_state": pointer.state.value}
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for command in ("stage", "publish"):
+        command_parser = subparsers.add_parser(command)
+        command_parser.add_argument("--spec", type=Path, required=True)
+        command_parser.add_argument("--output-root", type=Path, required=True)
+        if command == "publish":
+            command_parser.add_argument("--generation-id", required=True)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        if args.command == "stage":
+            result = stage_baseline(args.spec, args.output_root)
+        else:
+            result = publish_baseline(args.spec, args.output_root, args.generation_id)
+    except (OSError, ValueError, GenerationConflictError) as exc:
+        print(f"portfolio-baseline: FAIL: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
