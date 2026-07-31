@@ -99,3 +99,9 @@ The first-baseline interpretation rules are ratified in
 [ADR 0002](docs/decisions/0002-portfolio-performance-policy.md). The decision
 defines coverage-aware TWR/MWR, flow, FX, composite, HWM, stress, and advisory
 readiness behavior without creating an automated risk or execution subsystem.
+
+Private tracker and current-strategy provenance is built with the
+[portfolio provenance runbook](docs/portfolio-provenance.md). Only the generic
+validator, schemas, and synthetic tests live in Git; real specifications,
+account aliases, strategy details, hashes, and catalogs remain under the local
+`dataPortfolio` boundary.

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/provenance-catalog.schema.json",
+  "title": "Private portfolio provenance catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "catalog_schema_version",
+    "policy_version",
+    "as_of_date",
+    "acquisition_date",
+    "source_artifacts",
+    "accounts",
+    "strategies",
+    "assignments",
+    "corrections",
+    "open_gaps",
+    "assumptions"
+  ],
+  "properties": {
+    "catalog_schema_version": {"const": 1},
+    "policy_version": {"const": "PORT-PERF-1"},
+    "as_of_date": {"type": "string", "format": "date"},
+    "acquisition_date": {"type": "string", "format": "date"},
+    "source_artifacts": {"type": "array", "minItems": 1},
+    "accounts": {"type": "array", "minItems": 1},
+    "strategies": {"type": "array", "minItems": 9, "maxItems": 9},
+    "assignments": {"type": "array"},
+    "corrections": {"type": "array"},
+    "open_gaps": {"type": "array"},
+    "assumptions": {"type": "array"}
+  }
+}
