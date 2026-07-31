@@ -31,7 +31,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 PANEL_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.0.0"
+BUILDER_VERSION: Final = "1.1.0"
 SOURCE_CONTRACT = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -172,6 +172,10 @@ def _panel_data(
     accounts = _objects(report.get("account_summary"), "account_summary")
     allocations = _objects(report.get("allocation_history"), "allocation_history")
     performance = _objects(report.get("twr_mwr"), "twr_mwr")
+    positions_value = report.get("positions", [])
+    positions = (
+        [] if positions_value is None else _objects(positions_value, "positions")
+    )
     coverage = _fact_rows(report)
     reconciliations = _objects(
         report.get("reconciliation_checks"), "reconciliation_checks"
@@ -271,6 +275,9 @@ def _panel_data(
     mwr_available = sum(
         str(row.get("mwr_status", "")).startswith("AVAILABLE") for row in performance
     )
+    position_count = sum(
+        str(row.get("status", "")).startswith("AVAILABLE") for row in positions
+    )
     reconciliation_passed = sum(row.get("status") == "PASS" for row in reconciliations)
     source_contract = _object(source.get("contract"), "source.contract")
     appendix = _object(source_contract.get("frozen_appendix"), "frozen_appendix")
@@ -300,7 +307,11 @@ def _panel_data(
             "Read-only local artifact; no provider, broker, order, or deployment connection exists.",
             "The candidate view is a frozen audit appendix and is not strategy, selection, or allocation authority.",
             "Full-systematic HWM is unavailable until complete reconciled daily NAV exists.",
-            "Positions and FX remain unavailable; the panel does not infer either.",
+            (
+                "Positions remain partial and FX remains unavailable; the panel does not infer either."
+                if position_count
+                else "Positions and FX remain unavailable; the panel does not infer either."
+            ),
             "MWR remains unavailable when complete external-flow coverage is absent.",
             "Provider, account-live, predecessor, shadow, and backtest evidence are not concatenated.",
             *(str(row.get("known_gap")) for row in coverage if row.get("known_gap")),
@@ -333,6 +344,7 @@ def _panel_data(
         "counts": {
             "accounts": len(accounts),
             "mwr_available": mwr_available,
+            "positions": position_count,
             "reconciliation_checks": len(reconciliations),
             "reconciliation_passed": reconciliation_passed,
             "strategies": len(strategies),
@@ -541,8 +553,8 @@ def verify_candidate(
     )
     checks.append(
         _check(
-            "Unavailable facts remain explicit",
-            data["fact_status"].get("positions") == "FAILED"
+            "Incomplete facts remain explicit",
+            data["fact_status"].get("positions") in {"PARTIAL", "FAILED"}
             and data["fact_status"].get("fx") == "FAILED",
             {
                 "fx": data["fact_status"].get("fx"),

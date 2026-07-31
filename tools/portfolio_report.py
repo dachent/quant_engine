@@ -37,7 +37,7 @@ from quant_engine.portfolio_ledger import decimal_text
 
 
 REPORT_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.0.0"
+BUILDER_VERSION: Final = "1.1.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
@@ -465,15 +465,15 @@ def _transactions_and_flows(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "account_id": record.get("account_id"),
                 "amount_usd": decimal_text(_amount(record, "amount")),
                 "date": record.get("event_date"),
-                "evidence_class": "OBSERVED",
+                "evidence_class": record.get("evidence_class") or "OBSERVED",
                 "kind": record.get("kind"),
-                "price": record.get("price"),
+                "price": record.get("price") or record.get("execution_price"),
                 "provider": record.get("provider"),
                 "quantity": record.get("quantity"),
                 "record_id": record.get("record_id"),
                 "record_type": "TRANSACTION",
                 "strategy_id": record.get("strategy_id"),
-                "symbol": security.get("symbol"),
+                "symbol": security.get("symbol") or record.get("symbol"),
             }
         )
     for record in _objects(catalog.get("flows"), "flows"):
@@ -494,6 +494,53 @@ def _transactions_and_flows(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return sorted(rows, key=lambda item: (str(item["date"]), str(item["record_id"])))
+
+
+def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = _objects(catalog.get("positions"), "positions")
+    if not rows:
+        return [
+            {
+                "account_id": None,
+                "as_of_date": catalog.get("as_of_date"),
+                "evidence_class": None,
+                "market_value_usd": None,
+                "quantity": None,
+                "security_id": None,
+                "status": "UNAVAILABLE_NO_ACCEPTED_POSITION_SOURCE",
+                "strategy_id": None,
+                "symbol": None,
+            }
+        ]
+    accepted: list[dict[str, Any]] = []
+    for item in rows:
+        amount = _object(item.get("market_value"), "position.market_value")
+        status = _text(amount.get("status"), "position.market_value.status")
+        accepted.append(
+            {
+                "account_id": item.get("account_id"),
+                "as_of_date": item.get("as_of_date"),
+                "evidence_class": item.get("evidence_class"),
+                "market_value_usd": (
+                    decimal_text(_amount(item, "market_value"))
+                    if status == "AVAILABLE"
+                    else None
+                ),
+                "quantity": item.get("quantity"),
+                "security_id": item.get("security_id"),
+                "status": (
+                    "AVAILABLE_UNMAPPED"
+                    if item.get("mapping_status") == "UNMAPPED"
+                    else "AVAILABLE_MAPPED"
+                ),
+                "strategy_id": item.get("strategy_id"),
+                "symbol": item.get("symbol"),
+            }
+        )
+    return sorted(
+        accepted,
+        key=lambda item: (str(item["account_id"]), str(item["security_id"])),
+    )
 
 
 def _flow_reconciliation(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -645,17 +692,7 @@ def build_report_data(
             },
         ],
         "portfolio_summary": _portfolio_summary(catalog),
-        "positions": [
-            {
-                "account_id": None,
-                "as_of_date": catalog.get("as_of_date"),
-                "market_value_usd": None,
-                "quantity": None,
-                "security_id": None,
-                "status": "UNAVAILABLE_NO_ACCEPTED_POSITION_SOURCE",
-                "strategy_id": None,
-            }
-        ],
+        "positions": _positions(catalog),
         "provenance": [
             {
                 "artifact": "baseline-generation",

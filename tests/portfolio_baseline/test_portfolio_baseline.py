@@ -527,6 +527,107 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
     return spec_path, spec
 
 
+def _spec_with_schwab_provider(tmp_path: Path) -> Path:
+    spec_path, spec = _spec(tmp_path)
+    provider_root = tmp_path / "dataSchwab"
+    provider_catalog = {
+        "accounts": [
+            {"account_id": "account-schwab-a"},
+            {"account_id": "account-schwab-b"},
+        ],
+        "as_of_date": "2026-07-30",
+        "catalog_schema_version": 1,
+        "coverage": {
+            "known_gaps": [
+                "one accepted account has no reported non-cash position row"
+            ],
+            "status": "PARTIAL",
+        },
+        "nav_observations": [
+            {
+                "account_id": "account-schwab-a",
+                "as_of_date": "2026-07-01",
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "10"},
+            },
+            {
+                "account_id": "account-schwab-b",
+                "as_of_date": "2026-07-01",
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "40"},
+            },
+        ],
+        "positions": [
+            {
+                "account_id": "account-schwab-a",
+                "as_of_date": "2026-07-30",
+                "average_price": "9",
+                "evidence_class": "WCH_CURRENT",
+                "mapping_status": "UNMAPPED",
+                "market_value": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "30",
+                },
+                "observed_at": "2026-07-30T20:00:00+00:00",
+                "quantity": "3",
+                "record_id": "position-synthetic-schwab",
+                "security_id": "security-schwab-synthetic",
+                "strategy_id": None,
+                "symbol": "SYNTH",
+            }
+        ],
+        "transactions": [
+            {
+                "account_id": "account-schwab-a",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-10"},
+                "event_date": "2026-07-02",
+                "evidence_class": "WCH_HISTORY",
+                "kind": "TRADE",
+                "mapping_status": "UNMAPPED",
+                "record_id": "transaction-synthetic-schwab",
+                "security_id": "security-schwab-synthetic",
+                "strategy_id": None,
+                "symbol": "SYNTH",
+            }
+        ],
+    }
+    catalog_bytes = canonical_json_bytes(provider_catalog)
+    catalog_hash = hashlib.sha256(catalog_bytes).hexdigest()
+    artifact = SourceArtifact(
+        artifact_id="normalized/schwab-generation.json",
+        sha256=catalog_hash,
+        size_bytes=len(catalog_bytes),
+        as_of_date=date(2026, 7, 30),
+        schema_name="schwab-generation-catalog",
+        schema_version="1",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 7, 30),
+        adapter=AdapterIdentity("synthetic-schwab", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic accepted Schwab slice",
+            fact_types=("nav", "positions", "transactions"),
+        ),
+        artifacts=(artifact,),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(provider_root, manifest)
+    (manifest_path.parent / "schwab-generation.json").write_bytes(catalog_bytes)
+    pointer = publish_generation(provider_root, manifest.generation_id)
+    spec["roots"]["schwab-provider"] = str(provider_root)
+    spec["schema_version"] = 2
+    spec["provider_generations"] = {
+        "schwab": {
+            "catalog_sha256": catalog_hash,
+            "generation_id": manifest.generation_id,
+            "manifest_sha256": pointer.manifest_sha256,
+            "root_id": "schwab-provider",
+        }
+    }
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    return spec_path
+
+
 def test_stage_is_deterministic_reconciled_and_coverage_aware(tmp_path: Path) -> None:
     spec_path, spec = _spec(tmp_path)
     output_root = tmp_path / "private-output"
@@ -585,6 +686,29 @@ def test_publish_requires_exact_current_candidate(tmp_path: Path) -> None:
     assert read_current(output_root).generation_id == staged["generation_id"]
 
 
+def test_accepted_schwab_generation_adds_positions_and_transactions(
+    tmp_path: Path,
+) -> None:
+    spec_path = _spec_with_schwab_provider(tmp_path)
+    catalog, manifest, _ = baseline.build_catalog(spec_path)
+    assert manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    assert len(catalog["positions"]) == 1
+    assert len(catalog["transactions"]) == 2
+    assert len(catalog["source_artifacts"]) == 19
+    position_coverage = next(
+        item for item in catalog["fact_coverage"] if item["fact_type"] == "positions"
+    )
+    assert position_coverage["status"] == "PARTIAL"
+    assert (
+        next(
+            item
+            for item in catalog["reconciliation_checks"]
+            if item["check_id"] == "schwab-provider-nav-to-portfolio-nav"
+        )["status"]
+        == "PASS_WITH_DECLARED_VARIANCE"
+    )
+
+
 def test_source_drift_nav_divergence_and_replay_difference_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -630,7 +754,8 @@ def test_spec_and_catalog_schemas_are_closed_and_preserve_yagni_boundary() -> No
         set(spec_schema["properties"]["sources"]["required"]) == baseline._SOURCE_KEYS
     )
     assert catalog_schema["additionalProperties"] is False
-    assert catalog_schema["properties"]["positions"]["maxItems"] == 0
+    assert catalog_schema["properties"]["positions"]["items"] == {"type": "object"}
+    assert spec_schema["properties"]["schema_version"] == {"enum": [1, 2]}
     assert catalog_schema["properties"]["strategies"]["minItems"] == 9
     assert catalog_schema["properties"]["strategies"]["maxItems"] == 9
 

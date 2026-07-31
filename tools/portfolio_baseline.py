@@ -45,9 +45,10 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-SPEC_SCHEMA_VERSION: Final = 1
+SPEC_SCHEMA_VERSION: Final = 2
+SUPPORTED_SPEC_SCHEMA_VERSIONS: Final = frozenset({1, 2})
 CATALOG_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.0.0"
+BUILDER_VERSION: Final = "1.1.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 CURRENT_STRATEGY_COUNT: Final = 9
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -319,25 +320,131 @@ def _record_id(prefix: str, value: Mapping[str, Any]) -> str:
 
 def _load_spec(spec_path: Path) -> dict[str, Any]:
     spec = _load_json(spec_path, "spec")
+    version = spec.get("schema_version")
+    if version not in SUPPORTED_SPEC_SCHEMA_VERSIONS:
+        raise BaselineValidationError("spec schema version is unsupported")
+    keys = {
+        "as_of_date",
+        "policy_version",
+        "provenance",
+        "replay",
+        "roots",
+        "schema_version",
+        "sources",
+    }
+    if version == SPEC_SCHEMA_VERSION:
+        keys.add("provider_generations")
     _strict_keys(
         spec,
-        {
-            "as_of_date",
-            "policy_version",
-            "provenance",
-            "replay",
-            "roots",
-            "schema_version",
-            "sources",
-        },
+        keys,
         "spec",
     )
-    if spec["schema_version"] != SPEC_SCHEMA_VERSION:
-        raise BaselineValidationError("spec schema version is unsupported")
     if spec["policy_version"] != POLICY_VERSION:
         raise BaselineValidationError("spec policy version is unsupported")
     _date(spec["as_of_date"], "spec.as_of_date")
     return spec
+
+
+def _schwab_generation(
+    value: object,
+    roots: Mapping[str, Path],
+    accounts: Sequence[Mapping[str, Any]],
+    baseline_as_of: date,
+) -> tuple[
+    dict[str, Any],
+    tuple[SourceArtifact, ...],
+    list[dict[str, Any]],
+]:
+    providers = _object(value, "provider_generations")
+    _strict_keys(providers, {"schwab"}, "provider_generations")
+    ref = _object(providers["schwab"], "provider_generations.schwab")
+    _strict_keys(
+        ref,
+        {"catalog_sha256", "generation_id", "manifest_sha256", "root_id"},
+        "provider_generations.schwab",
+    )
+    root_id = _identifier(ref["root_id"], "provider_generations.schwab.root_id")
+    if root_id not in roots:
+        raise BaselineValidationError("Schwab provider root is unknown")
+    generation_id = _text(ref["generation_id"], "Schwab generation_id")
+    catalog_sha256 = _text(ref["catalog_sha256"], "Schwab catalog_sha256")
+    manifest_sha256 = _text(ref["manifest_sha256"], "Schwab manifest_sha256")
+    if any(
+        _SHA256.fullmatch(item) is None
+        for item in (generation_id, catalog_sha256, manifest_sha256)
+    ):
+        raise BaselineValidationError("Schwab provider identity is invalid")
+    root = roots[root_id]
+    try:
+        pointer = read_current(root)
+    except (OSError, ValueError) as exc:
+        raise BaselineValidationError(
+            "Schwab provider pointer is not accepted"
+        ) from exc
+    if (
+        pointer.generation_id != generation_id
+        or pointer.manifest_sha256 != manifest_sha256
+    ):
+        raise BaselineValidationError("Schwab provider generation is not current")
+    generation_root = root / "generations" / generation_id
+    catalog_path = generation_root / "schwab-generation.json"
+    manifest_path = generation_root / "generation.json"
+    if any(
+        path.is_symlink() or not path.is_file()
+        for path in (catalog_path, manifest_path)
+    ):
+        raise BaselineValidationError("Schwab provider generation is incomplete")
+    actual_catalog_hash, catalog_size = hash_file(catalog_path)
+    actual_manifest_hash, manifest_size = hash_file(manifest_path)
+    if actual_catalog_hash != catalog_sha256 or actual_manifest_hash != manifest_sha256:
+        raise BaselineValidationError("Schwab provider generation hash differs")
+    catalog = _load_json(catalog_path, "Schwab provider catalog")
+    if catalog.get("catalog_schema_version") != 1:
+        raise BaselineValidationError("Schwab provider catalog schema is unsupported")
+    provider_as_of = _date(catalog.get("as_of_date"), "Schwab provider as_of_date")
+    if provider_as_of > baseline_as_of:
+        raise BaselineValidationError(
+            "Schwab provider generation is newer than baseline"
+        )
+    accepted_accounts = {
+        str(item["account_id"]) for item in accounts if item.get("provider") == "SCHWAB"
+    }
+    provider_accounts = {
+        _text(item.get("account_id"), "Schwab provider account_id")
+        for item in _objects(catalog.get("accounts"), "Schwab provider accounts")
+    }
+    if provider_accounts != accepted_accounts:
+        raise BaselineValidationError("Schwab provider account scope differs")
+    artifacts = (
+        SourceArtifact(
+            artifact_id="providers/schwab/generation.json",
+            sha256=actual_manifest_hash,
+            size_bytes=manifest_size,
+            as_of_date=provider_as_of,
+            schema_name="generation-manifest",
+            schema_version="1",
+        ),
+        SourceArtifact(
+            artifact_id="providers/schwab/schwab-generation.json",
+            sha256=actual_catalog_hash,
+            size_bytes=catalog_size,
+            as_of_date=provider_as_of,
+            schema_name="schwab-generation-catalog",
+            schema_version="1",
+        ),
+    )
+    links = [
+        {
+            "artifact_id": item.artifact_id,
+            "as_of_date": provider_as_of.isoformat(),
+            "schema_name": item.schema_name,
+            "schema_version": item.schema_version,
+            "sha256": item.sha256,
+            "source_key": "schwab-provider-generation",
+        }
+        for item in artifacts
+    ]
+    return catalog, artifacts, links
 
 
 def _roots(value: object) -> dict[str, Path]:
@@ -911,6 +1018,123 @@ def _normalize_transactions(
     )
 
 
+def _schwab_facts(
+    catalog: Mapping[str, Any],
+    accounts: Sequence[Mapping[str, Any]],
+    baseline_nav: Sequence[Mapping[str, Any]],
+    baseline_as_of: date,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+    list[str],
+]:
+    accepted_accounts = {
+        str(item["account_id"]) for item in accounts if item.get("provider") == "SCHWAB"
+    }
+    positions: list[dict[str, Any]] = []
+    transactions: list[dict[str, Any]] = []
+    securities: dict[str, dict[str, Any]] = {}
+    for item in _objects(catalog.get("positions"), "Schwab positions"):
+        account_id = _text(item.get("account_id"), "Schwab position account_id")
+        if account_id not in accepted_accounts:
+            raise BaselineValidationError("Schwab position account is outside scope")
+        as_of = _date(item.get("as_of_date"), "Schwab position as_of_date")
+        if as_of > baseline_as_of:
+            raise BaselineValidationError("Schwab position is newer than baseline")
+        if item.get("evidence_class") != "WCH_CURRENT":
+            raise BaselineValidationError("Schwab position evidence class differs")
+        symbol = _text(item.get("symbol"), "Schwab position symbol")
+        security_id = _text(item.get("security_id"), "Schwab position security_id")
+        securities[security_id] = {
+            "currency": "USD",
+            "security_id": security_id,
+            "symbol": symbol,
+        }
+        record = dict(item)
+        record.update({"provider": "SCHWAB", "source_key": "schwab-generation"})
+        positions.append(record)
+    for item in _objects(catalog.get("transactions"), "Schwab transactions"):
+        account_id = _text(item.get("account_id"), "Schwab transaction account_id")
+        if account_id not in accepted_accounts:
+            raise BaselineValidationError("Schwab transaction account is outside scope")
+        event_date = _date(item.get("event_date"), "Schwab transaction event_date")
+        if event_date > baseline_as_of:
+            raise BaselineValidationError("Schwab transaction is newer than baseline")
+        security_id_value = item.get("security_id")
+        symbol_value = item.get("symbol")
+        if security_id_value is not None:
+            security_id = _text(security_id_value, "Schwab transaction security_id")
+            symbol = _text(symbol_value, "Schwab transaction symbol")
+            securities[security_id] = {
+                "currency": "USD",
+                "security_id": security_id,
+                "symbol": symbol,
+            }
+        record = dict(item)
+        record.update({"provider": "SCHWAB", "source_key": "schwab-generation"})
+        transactions.append(record)
+    position_ids = [str(item.get("record_id")) for item in positions]
+    transaction_ids = [str(item.get("record_id")) for item in transactions]
+    if len(position_ids) != len(set(position_ids)) or len(transaction_ids) != len(
+        set(transaction_ids)
+    ):
+        raise BaselineValidationError(
+            "Schwab provider record identifiers are not unique"
+        )
+
+    baseline_values = {
+        (str(item["account_id"]), str(item["as_of_date"])): _text(
+            _object(item.get("nav"), "baseline NAV").get("value"),
+            "baseline NAV value",
+        )
+        for item in baseline_nav
+        if str(item.get("account_id")) in accepted_accounts
+    }
+    provider_values = {
+        (
+            _text(item.get("account_id"), "Schwab NAV account_id"),
+            _text(item.get("as_of_date"), "Schwab NAV as_of_date"),
+        ): _text(
+            _object(item.get("nav"), "Schwab NAV").get("value"),
+            "Schwab NAV value",
+        )
+        for item in _objects(catalog.get("nav_observations"), "Schwab NAV")
+    }
+    if {key[0] for key in provider_values} != accepted_accounts:
+        raise BaselineValidationError("Schwab NAV account scope differs")
+    shared = set(baseline_values) & set(provider_values)
+    reconciliation = {
+        "baseline_only_count": len(set(baseline_values) - set(provider_values)),
+        "check_id": "schwab-provider-nav-to-portfolio-nav",
+        "different_shared_count": sum(
+            baseline_values[key] != provider_values[key] for key in shared
+        ),
+        "provider_only_count": len(set(provider_values) - set(baseline_values)),
+        "shared_count": len(shared),
+        "status": "PASS_WITH_DECLARED_VARIANCE",
+    }
+    coverage = _object(catalog.get("coverage"), "Schwab coverage")
+    known_gaps = [
+        _text(item, "Schwab coverage known_gap")
+        for item in coverage.get("known_gaps", [])
+    ]
+    return (
+        sorted(
+            positions,
+            key=lambda item: (str(item["account_id"]), str(item["security_id"])),
+        ),
+        sorted(
+            transactions,
+            key=lambda item: (str(item["event_date"]), str(item["record_id"])),
+        ),
+        sorted(securities.values(), key=lambda item: str(item["security_id"])),
+        reconciliation,
+        known_gaps,
+    )
+
+
 def _allocations_and_coverage(
     paths: Mapping[str, Path], strategy_aliases: Mapping[str, str], as_of: date
 ) -> tuple[
@@ -1177,6 +1401,8 @@ def _fact_coverage(
     assignments: Sequence[Mapping[str, Any]],
     transactions: Sequence[Mapping[str, Any]],
     flows: Sequence[Mapping[str, Any]],
+    positions: Sequence[Mapping[str, Any]],
+    schwab_known_gaps: Sequence[str],
     missing_strategy_nav_count: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     investment_count = sum(1 for item in accounts if item["role"] == "INVESTMENT")
@@ -1220,13 +1446,19 @@ def _fact_coverage(
         },
         {
             "fact_type": "transactions",
-            "known_gaps": ["coverage is limited to Alpaca fill events"],
+            "known_gaps": [
+                "coverage is limited to accepted Alpaca fills and Schwab history"
+            ],
             "status": "PARTIAL",
         },
         {
             "fact_type": "positions",
-            "known_gaps": ["no accepted position source exists for this baseline"],
-            "status": "FAILED",
+            "known_gaps": (
+                list(schwab_known_gaps)
+                if positions
+                else ["no accepted position source exists for this baseline"]
+            ),
+            "status": "PARTIAL" if positions else "FAILED",
         },
         {
             "fact_type": "fx",
@@ -1245,10 +1477,15 @@ def _fact_coverage(
     ]
     exceptions: list[dict[str, Any]] = [
         {
-            "exception_id": "positions-unavailable",
+            "exception_id": (
+                "positions-partial" if positions else "positions-unavailable"
+            ),
             "fact_type": "positions",
-            "severity": "BLOCKING_FOR_POSITION_ANALYSIS",
-            "status": "UNAVAILABLE",
+            "record_count": len(positions),
+            "severity": (
+                "DISCLOSED_GAP" if positions else "BLOCKING_FOR_POSITION_ANALYSIS"
+            ),
+            "status": "PARTIAL" if positions else "UNAVAILABLE",
         },
         {
             "exception_id": "full-systematic-hwm-unavailable",
@@ -1310,6 +1547,40 @@ def build_catalog(
     transactions, securities = _normalize_transactions(
         paths["alpaca-events"], account_aliases, assignments
     )
+    positions: list[dict[str, Any]] = []
+    schwab_known_gaps: list[str] = []
+    schwab_reconciliation: dict[str, Any] | None = None
+    provider_artifacts: tuple[SourceArtifact, ...] = ()
+    provider_links: list[dict[str, Any]] = []
+    if spec["schema_version"] == SPEC_SCHEMA_VERSION:
+        schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
+            spec["provider_generations"], roots, accounts, as_of
+        )
+        (
+            positions,
+            schwab_transactions,
+            schwab_securities,
+            schwab_reconciliation,
+            schwab_known_gaps,
+        ) = _schwab_facts(schwab_catalog, accounts, nav, as_of)
+        transactions.extend(schwab_transactions)
+        transactions.sort(
+            key=lambda item: (str(item["event_date"]), str(item["record_id"]))
+        )
+        if len({str(item["record_id"]) for item in transactions}) != len(transactions):
+            raise BaselineValidationError(
+                "combined transaction identifiers are not unique"
+            )
+        by_security = {str(item["security_id"]): item for item in securities}
+        for item in schwab_securities:
+            security_id = str(item["security_id"])
+            prior = by_security.get(security_id)
+            if prior is not None and prior != item:
+                raise BaselineValidationError("security identity conflicts")
+            by_security[security_id] = item
+        securities = sorted(
+            by_security.values(), key=lambda item: str(item["security_id"])
+        )
     allocations, strategy_nav_coverage, costs, systematic_total, nav_covered = (
         _allocations_and_coverage(paths, strategy_aliases, as_of)
     )
@@ -1347,6 +1618,8 @@ def build_catalog(
         assignments,
         transactions,
         flows,
+        positions,
+        schwab_known_gaps,
         missing_strategy_nav_count,
     )
     unmapped = sorted(
@@ -1391,7 +1664,7 @@ def build_catalog(
         "implementation_gaps": implementation_gaps,
         "nav_observations": nav,
         "policy_version": POLICY_VERSION,
-        "positions": [],
+        "positions": positions,
         "provenance": provenance_ref,
         "reconciliation_checks": [
             nav_reconciliation,
@@ -1405,11 +1678,12 @@ def build_catalog(
                 "status": "PASS",
                 "value_usd": replay["total_liquid_usd"],
             },
+            *([schwab_reconciliation] if schwab_reconciliation is not None else []),
         ],
         "reconciliation_exceptions": exceptions,
         "replay": replay,
         "securities": securities,
-        "source_artifacts": source_links,
+        "source_artifacts": [*source_links, *provider_links],
         "strategies": strategies,
         "strategy_live_metrics": live_metrics,
         "strategy_nav_coverage": strategy_nav_coverage,
@@ -1432,7 +1706,7 @@ def build_catalog(
         size_bytes=spec_size,
         as_of_date=as_of,
         schema_name="portfolio-baseline-spec",
-        schema_version=str(SPEC_SCHEMA_VERSION),
+        schema_version=str(spec["schema_version"]),
     )
     observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]
     manifest = GenerationManifest.build(
@@ -1448,6 +1722,7 @@ def build_catalog(
                 "coverage",
                 "flows",
                 "nav",
+                "positions",
                 "reconciliation",
                 "strategies",
                 "transactions",
@@ -1457,6 +1732,7 @@ def build_catalog(
         ),
         artifacts=(
             *source_artifacts,
+            *provider_artifacts,
             provenance_artifact,
             spec_artifact,
             catalog_artifact,
@@ -1493,6 +1769,7 @@ def stage_baseline(spec_path: Path, output_root: Path) -> dict[str, Any]:
         "flow_count": len(catalog["flows"]),
         "generation_id": manifest.generation_id,
         "nav_count": len(catalog["nav_observations"]),
+        "position_count": len(catalog["positions"]),
         "replay_status": catalog["replay"]["status"],
         "strategy_count": len(catalog["strategies"]),
         "transaction_count": len(catalog["transactions"]),
