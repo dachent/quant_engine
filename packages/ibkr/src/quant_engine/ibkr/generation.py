@@ -40,7 +40,7 @@ from quant_engine.portfolio_ledger import (
 
 SPEC_SCHEMA_VERSION = 1
 CATALOG_SCHEMA_VERSION = 2
-ADAPTER_VERSION = "0.2.0"
+ADAPTER_VERSION = "0.2.1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SOURCE_ROLES = {
