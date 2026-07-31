@@ -118,3 +118,10 @@ workbook are built with the [portfolio report runbook](docs/portfolio-report.md)
 The workbook is a generated, read-only deliverable: calculations originate in
 tested Python and accepted private data, then native Excel recalculates and a
 machine-readable contract validates the saved copy before publication.
+
+The accepted report feeds the existing local visual shell through the
+[portfolio control-panel runbook](docs/portfolio-control-panel.md). Current
+capital, strategy, performance, gap, and coverage views derive only from the
+accepted report generation. The Candidates view is a separate, hash-identified
+frozen audit appendix; it has no refresh, selection, allocation, provider,
+broker, or execution authority.

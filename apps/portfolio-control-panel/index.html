@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>V Capital — Portfolio Control</title>
+    <meta name="description" content="Local, read-only portfolio control panel built from accepted quant_engine evidence." />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to dashboard</a>
+    <div id="app" class="app-shell" data-app-state="loading">
+      <aside class="sidebar" aria-label="Control panel navigation">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">VC</span><div><div class="brand-name">V Capital</div><div class="brand-subtitle">Portfolio control</div></div></div>
+        <nav class="nav-stack" aria-label="Dashboard sections">
+          <button class="nav-item is-active" type="button" data-nav="command" aria-current="page"><span class="nav-index">01</span><span>Command</span></button>
+          <button class="nav-item" type="button" data-nav="capital"><span class="nav-index">02</span><span>Capital</span></button>
+          <button class="nav-item" type="button" data-nav="risk"><span class="nav-index">03</span><span>Risk</span></button>
+          <button class="nav-item" type="button" data-nav="signals"><span class="nav-index">04</span><span>Signals</span></button>
+          <button class="nav-item" type="button" data-nav="candidates"><span class="nav-index">05</span><span>Candidates</span></button>
+          <button class="nav-item" type="button" data-nav="data"><span class="nav-index">06</span><span>Data health</span></button>
+        </nav>
+        <div class="sidebar-note"><div class="eyebrow">Mandate firewall</div><div class="reserve-lock"><span aria-hidden="true">◆</span> Reserve risk budget: $0</div><p>Read-only local evidence. No brokerage connection, order path, or trade authorization.</p></div>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div><div class="eyebrow">Accepted portfolio generation · local snapshot</div><h1 id="page-title">Command</h1></div>
+          <div class="topbar-meta">
+            <div class="as-of"><span>Portfolio</span><strong id="portfolio-as-of">Loading…</strong></div>
+            <div class="as-of"><span>Coverage</span><strong id="coverage-status">Loading…</strong></div>
+            <button id="snapshot-button" class="ghost-button" type="button">Snapshot info</button>
+          </div>
+        </header>
+
+        <main id="main-content" tabindex="-1">
+          <div id="loading-state" class="loading-state" role="status"><span class="loading-pulse" aria-hidden="true"></span>Loading accepted portfolio evidence…</div>
+          <div id="error-state" class="error-state" role="alert" hidden><strong>The local snapshot could not be loaded.</strong><span>Rebuild and verify it with <code>tools/portfolio_control_panel.py</code>.</span></div>
+
+          <section class="view is-active" data-view="command" aria-labelledby="command-heading">
+            <div class="status-banner status-danger"><div><div class="eyebrow">Advisory readiness</div><h2 id="command-heading">Do not expand systematic risk</h2><p id="command-reason">Coverage gates remain unresolved.</p></div><div class="status-number"><span>Execution authority</span><strong>NONE</strong></div></div>
+            <div id="command-kpis" class="kpi-grid" aria-label="Capital and evidence summary"></div>
+            <div class="grid grid-12">
+              <article class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Evidence gates</div><h3>Every unavailable fact stays unavailable</h3></div><span class="badge badge-danger">Fail closed</span></div><div id="gate-stack" class="gate-stack"></div></article>
+              <article class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Capital perimeter</div><h3>Reserve remains outside strategy risk</h3></div></div><div id="capital-ring" class="ring-layout"></div></article>
+              <article class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Current strategy evidence</div><h3>Account-live coverage by strategy</h3></div><span class="badge badge-warning">Coverage-aware</span></div><div id="strategy-coverage-bars" class="bar-list"></div></article>
+              <article class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Operator queue</div><h3>What blocks a capital decision</h3></div></div><ol id="operator-queue" class="operator-queue"></ol></article>
+              <article class="panel span-12 thesis-panel"><div class="eyebrow">Decision boundary</div><blockquote>Current evidence supports monitoring and reconciliation—not additional systematic risk or execution.</blockquote><div id="construction-points" class="thesis-points"></div></article>
+            </div>
+          </section>
+
+          <section class="view" data-view="capital" aria-labelledby="capital-heading" hidden>
+            <div class="section-intro"><div><div class="eyebrow">Capital map</div><h2 id="capital-heading">Where the money is, with identity and coverage intact</h2></div><p>Current strategy allocations and reserve are accepted baseline facts. Missing positions are not inferred.</p></div>
+            <div id="capital-kpis" class="kpi-grid"></div>
+            <div class="grid grid-12">
+              <article class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Current allocation</div><h3>Nine strategies plus reserve</h3></div><div class="segmented" aria-label="Allocation scope filter"><button type="button" class="segment is-active" data-allocation-filter="all">All</button><button type="button" class="segment" data-allocation-filter="SYSTEMATIC">Systematic</button><button type="button" class="segment" data-allocation-filter="RESERVE">Reserve</button></div></div><div class="table-wrap"><table id="allocation-table"><caption>Accepted current allocations</caption></table></div></article>
+              <article class="panel span-4"><div class="panel-heading"><div><div class="eyebrow">Provider footprint</div><h3>Accounts by provider</h3></div></div><div id="provider-bars" class="bar-list"></div><div class="callout callout-neutral">Counts describe accepted account identities, not provider completeness.</div></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Strategy register</div><h3>Economic family, cost, performance, and gaps</h3></div></div><div class="table-wrap wide"><table id="strategy-table"><caption>Current strategy evidence</caption></table></div></article>
+            </div>
+          </section>
+
+          <section class="view" data-view="risk" aria-labelledby="risk-heading" hidden>
+            <div class="section-intro"><div><div class="eyebrow">Risk evidence</div><h2 id="risk-heading">Stress is observable; full-systematic HWM is not</h2></div><p>The 15% HWM applies to systematic capital. Missing complete daily NAV blocks automated HWM.</p></div>
+            <div id="risk-kpis" class="kpi-grid"></div>
+            <div class="grid grid-12">
+              <article class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Correlation-one stress</div><h3>Accepted adverse scenario</h3></div><span class="badge">15% HWM boundary</span></div><div id="stress-bar" class="scenario-bars"></div></article>
+              <article class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">HWM governor</div><h3>Availability, not an inferred number</h3></div></div><div id="hwm-status" class="validation-cards"></div></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Performance evidence</div><h3>Account-by-strategy TWR and MWR availability</h3></div><span class="badge badge-warning">No evidence concatenation</span></div><div class="table-wrap wide"><table id="performance-table"><caption>Coverage-aware performance segments</caption></table></div></article>
+            </div>
+          </section>
+
+          <section class="view" data-view="signals" aria-labelledby="signals-heading" hidden>
+            <div class="section-intro"><div><div class="eyebrow">Advisory signals</div><h2 id="signals-heading">Implementation gaps and costs before new risk</h2></div><p>This view uses accepted current-strategy evidence. No live market feed, optimizer, or automated drift service is implied.</p></div>
+            <div id="signal-kpis" class="kpi-grid"></div>
+            <div class="grid grid-12">
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Implementation evidence</div><h3>Provider-versus-account and cost status</h3></div></div><div class="table-wrap wide"><table id="implementation-table"><caption>Strategy implementation gaps and costs</caption></table></div></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Source reconciliation</div><h3>Accepted checks and blocking exceptions</h3></div></div><div class="table-wrap"><table id="reconciliation-table"><caption>Portfolio reconciliation status</caption></table></div></article>
+            </div>
+          </section>
+
+          <section class="view" data-view="candidates" aria-labelledby="candidates-heading" hidden>
+            <div class="section-intro"><div><div class="eyebrow">Frozen audit appendix</div><h2 id="candidates-heading">Candidate research is not current strategy authority</h2></div><p id="candidate-boundary">This dated appendix is preserved for context only. It is not refreshed, ranked, or connected to capital.</p></div>
+            <div id="candidate-kpis" class="kpi-grid"></div>
+            <div class="grid grid-12"><article class="panel span-12"><div class="panel-heading candidate-tools"><div><div class="eyebrow">Frozen retail universe</div><h3>Provider and implementation screen</h3></div><div class="filter-row"><div class="segmented" aria-label="Candidate tier filter"><button type="button" class="segment is-active" data-tier-filter="all">All</button><button type="button" class="segment" data-tier-filter="Tier 1">Tier 1</button><button type="button" class="segment" data-tier-filter="Tier 2">Tier 2</button><button type="button" class="segment" data-tier-filter="Tier 3">Tier 3</button><button type="button" class="segment" data-tier-filter="Tier 4">Tier 4</button></div><label class="search-control"><span class="sr-only">Search frozen candidates</span><input id="candidate-search" type="search" placeholder="Search frozen candidate or role" /></label></div></div><div class="table-wrap wide"><table id="candidate-table"><caption>Frozen candidate/provider audit appendix</caption></table></div></article></div>
+          </section>
+
+          <section class="view" data-view="data" aria-labelledby="data-heading" hidden>
+            <div class="section-intro"><div><div class="eyebrow">Evidence operations</div><h2 id="data-heading">Coverage and lineage are part of every result</h2></div><p>Accepted generations, source hashes, gaps, and reconciliations remain visible. Missing data never becomes a silent estimate.</p></div>
+            <div id="data-kpis" class="kpi-grid"></div>
+            <div class="grid grid-12">
+              <article class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Coverage</div><h3>Fact availability and known gaps</h3></div></div><div class="table-wrap"><table id="coverage-table"><caption>Coverage and data quality</caption></table></div></article>
+              <article class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Generation authority</div><h3>Accepted local inputs</h3></div></div><div id="validation-cards" class="validation-cards"></div></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Lineage</div><h3>Source and generation hashes</h3></div></div><div class="table-wrap wide"><table id="source-table"><caption>Accepted report provenance</caption></table></div></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Known limits</div><h3>What this control panel does not prove</h3></div></div><ul id="limitations-list" class="limitations-list"></ul></article>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <noscript><div class="noscript">This local dashboard requires JavaScript to render its embedded snapshot.</div></noscript>
+    <script src="data/dashboard_data.js"></script>
+    <script src="app.js" defer></script>
+  </body>
+</html>
