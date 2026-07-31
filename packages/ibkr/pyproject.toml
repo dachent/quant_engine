@@ -1,6 +1,6 @@
 [project]
 name = "quant-engine-ibkr"
-version = "0.2.1"
+version = "0.3.0"
 description = "Read-only IBKR Flex parsing and reconciliation for quant_engine."
 requires-python = ">=3.11,<3.14"
 dependencies = ["quant-engine-core", "quant-engine-portfolio-ledger"]

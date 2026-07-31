@@ -267,7 +267,7 @@ source = { editable = "packages/core" }
 
 [[package]]
 name = "quant-engine-ibkr"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "packages/ibkr" }
 dependencies = [
     { name = "quant-engine-core" },

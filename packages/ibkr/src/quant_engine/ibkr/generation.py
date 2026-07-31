@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
@@ -30,6 +31,11 @@ from quant_engine.ibkr.flex import (
     FlexValidationError,
     parse_flex_file,
 )
+from quant_engine.ibkr.tws import (
+    TwsSnapshot,
+    load_tws_snapshot,
+    reconcile_tws_snapshot,
+)
 from quant_engine.portfolio_ledger import (
     CorporateAction,
     MappingStatus,
@@ -38,17 +44,19 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-SPEC_SCHEMA_VERSION = 1
-CATALOG_SCHEMA_VERSION = 2
-ADAPTER_VERSION = "0.2.1"
+SPEC_SCHEMA_VERSION = 2
+CATALOG_SCHEMA_VERSION = 3
+ADAPTER_VERSION = "0.3.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SOURCE_ROLES = {
     "PRIMARY_FLEX_ACTIVITY",
+    "REFRESH_FLEX_ACTIVITY",
     "SECONDARY_RECONCILIATION",
     "SCHEMA_REFERENCE",
     "RENDERED_REFERENCE",
     "BINARY_REFERENCE",
+    "TWS_CURRENT_SNAPSHOT",
 }
 _EXTERNAL_FLOW_TYPES = {"Deposits/Withdrawals"}
 
@@ -159,7 +167,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
         },
         "spec",
     )
-    if spec["schema_version"] != SPEC_SCHEMA_VERSION:
+    if spec["schema_version"] not in {1, SPEC_SCHEMA_VERSION}:
         raise IbkrGenerationError("IBKR spec schema version is unsupported")
     minimum = _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap")
     if minimum < 2:
@@ -189,11 +197,18 @@ def _source_path(root: Path, relative: str) -> Path:
 
 
 def _sources(
-    value: object, roots: Mapping[str, Path], generation_as_of: date
+    value: object,
+    roots: Mapping[str, Path],
+    generation_as_of: date,
+    spec_schema_version: int,
 ) -> tuple[list[tuple[str, str, Path]], tuple[SourceArtifact, ...]]:
     values = _objects(value, "sources")
-    if len(values) != 26:
+    if spec_schema_version == 1 and len(values) != 26:
         raise IbkrGenerationError("the accepted legacy inventory requires 26 sources")
+    if spec_schema_version == SPEC_SCHEMA_VERSION and len(values) < 28:
+        raise IbkrGenerationError(
+            "the refreshed inventory requires legacy, Flex refresh, and TWS evidence"
+        )
     resolved: list[tuple[str, str, Path]] = []
     artifacts: list[SourceArtifact] = []
     identifiers: set[str] = set()
@@ -251,6 +266,22 @@ def _sources(
         path.suffix.lower() != ".xml" for _, _, path in primary
     ):
         raise IbkrGenerationError("exactly eight primary Flex XML inputs are required")
+    refresh = [item for item in resolved if item[1] == "REFRESH_FLEX_ACTIVITY"]
+    snapshots = [item for item in resolved if item[1] == "TWS_CURRENT_SNAPSHOT"]
+    if spec_schema_version == 1:
+        if refresh or snapshots:
+            raise IbkrGenerationError(
+                "legacy spec cannot include current provider evidence"
+            )
+    elif (
+        len(refresh) != 1
+        or refresh[0][2].suffix.lower() != ".xml"
+        or len(snapshots) != 1
+        or snapshots[0][2].suffix.lower() != ".json"
+    ):
+        raise IbkrGenerationError(
+            "refreshed spec requires one Flex refresh and one TWS snapshot"
+        )
     return resolved, tuple(artifacts)
 
 
@@ -283,23 +314,77 @@ def _baseline(value: object) -> tuple[dict[str, Any], SourceArtifact]:
     )
 
 
-def _statements(sources: Sequence[tuple[str, str, Path]]) -> list[FlexDailyStatement]:
+def _statements_equal(left: FlexDailyStatement, right: FlexDailyStatement) -> bool:
+    return (
+        left.raw_account_id == right.raw_account_id
+        and left.report_date == right.report_date
+        and left.base_currency == right.base_currency
+        and left.nav == right.nav
+        and left.change_in_nav_ending_value == right.change_in_nav_ending_value
+        and Counter(left.positions) == Counter(right.positions)
+        and Counter(left.trades) == Counter(right.trades)
+        and Counter(left.cash_transactions) == Counter(right.cash_transactions)
+        and Counter(left.transfers) == Counter(right.transfers)
+        and Counter(left.corporate_actions) == Counter(right.corporate_actions)
+        and Counter(left.rates) == Counter(right.rates)
+    )
+
+
+def _statements(
+    sources: Sequence[tuple[str, str, Path]],
+) -> tuple[list[FlexDailyStatement], frozenset[str], int]:
     statements: dict[tuple[str, date], FlexDailyStatement] = {}
-    for artifact_id, role, path in sources:
-        if role != "PRIMARY_FLEX_ACTIVITY":
-            continue
-        try:
-            document = parse_flex_file(path, artifact_id=artifact_id)
-        except FlexValidationError as exc:
-            raise IbkrGenerationError(str(exc)) from exc
-        for statement in document.statements:
-            key = (statement.raw_account_id, statement.report_date)
-            if key in statements:
-                raise IbkrGenerationError("duplicate account/date FlexStatement")
-            statements[key] = statement
+    refresh_accounts: set[str] = set()
+    overlap_count = 0
+    ordered_roles = ("PRIMARY_FLEX_ACTIVITY", "REFRESH_FLEX_ACTIVITY")
+    for accepted_role in ordered_roles:
+        for artifact_id, role, path in sources:
+            if role != accepted_role:
+                continue
+            try:
+                document = parse_flex_file(path, artifact_id=artifact_id)
+            except FlexValidationError as exc:
+                raise IbkrGenerationError(str(exc)) from exc
+            for statement in document.statements:
+                key = (statement.raw_account_id, statement.report_date)
+                prior = statements.get(key)
+                if prior is not None:
+                    if accepted_role != "REFRESH_FLEX_ACTIVITY":
+                        raise IbkrGenerationError(
+                            "duplicate account/date FlexStatement"
+                        )
+                    if not _statements_equal(prior, statement):
+                        raise IbkrGenerationError(
+                            "Flex refresh conflicts with accepted overlapping history"
+                        )
+                    overlap_count += 1
+                statements[key] = statement
+                if accepted_role == "REFRESH_FLEX_ACTIVITY":
+                    refresh_accounts.add(statement.raw_account_id)
     if not statements:
         raise IbkrGenerationError("no primary Flex statements were parsed")
-    return [statements[key] for key in sorted(statements)]
+    return (
+        [statements[key] for key in sorted(statements)],
+        frozenset(refresh_accounts),
+        overlap_count,
+    )
+
+
+def _tws_source(
+    sources: Sequence[tuple[str, str, Path]],
+) -> tuple[TwsSnapshot, str] | None:
+    matches = [item for item in sources if item[1] == "TWS_CURRENT_SNAPSHOT"]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise IbkrGenerationError("exactly one TWS snapshot is allowed")
+    artifact_id, _, path = matches[0]
+    source_hash, _ = hash_file(path)
+    try:
+        snapshot = load_tws_snapshot(path, source_sha256=source_hash)
+    except FlexValidationError as exc:
+        raise IbkrGenerationError(str(exc)) from exc
+    return snapshot, artifact_id
 
 
 def _baseline_ibkr_curves(catalog: Mapping[str, Any]) -> dict[str, dict[date, Decimal]]:
@@ -400,6 +485,9 @@ def _normalize(
     baseline: Mapping[str, Any],
     crosswalk: Mapping[str, str],
     proof: Sequence[dict[str, Any]],
+    refresh_raw_account_ids: frozenset[str],
+    flex_overlap_count: int,
+    tws_source: tuple[TwsSnapshot, str] | None,
 ) -> dict[str, Any]:
     accounts_by_id = {
         _text(item.get("account_id"), "account.account_id"): item
@@ -413,6 +501,8 @@ def _normalize(
     flows: list[dict[str, Any]] = []
     corporate_actions: list[dict[str, Any]] = []
     rates: list[dict[str, Any]] = []
+    tws_account_values: list[dict[str, Any]] = []
+    tws_positions: list[dict[str, Any]] = []
     account_scope_mismatches = 0
 
     def security(conid: str | None, currency: str) -> str | None:
@@ -654,6 +744,167 @@ def _normalize(
             rates.append({"record_id": _record_id("fx", payload), **payload})
 
     observed_dates = sorted({item.report_date for item in statements})
+    flex_as_of = max(observed_dates)
+    tws_state: dict[str, Any]
+    tws_check: dict[str, Any]
+    tws_coverage: dict[str, Any]
+    tws_identity_partial = False
+    if tws_source is None:
+        tws_state = {
+            "account_summary_value_count": 0,
+            "execution_count": 0,
+            "managed_account_count": 0,
+            "mapped_account_summary_value_count": 0,
+            "mapped_position_count": 0,
+            "observed_at": None,
+            "open_order_count": 0,
+            "order_status_count": 0,
+            "order_visibility": "UNAVAILABLE",
+            "position_count": 0,
+            "status": "UNAVAILABLE",
+            "unmapped_account_summary_value_count": 0,
+            "unmapped_position_count": 0,
+        }
+        tws_check = {"check_id": "tws-current-overlap", "status": "UNAVAILABLE"}
+        tws_coverage = {
+            "fact_type": "TWS_CURRENT_STATE",
+            "known_gaps": ["No separately authorized TWS snapshot was supplied"],
+            "status": "FAILED",
+        }
+    else:
+        snapshot, snapshot_artifact_id = tws_source
+        accepted_current_accounts = (
+            refresh_raw_account_ids if refresh_raw_account_ids else frozenset(crosswalk)
+        )
+        flex_execution_ids = frozenset(
+            trade.execution_id for statement in statements for trade in statement.trades
+        )
+        reconciliation = reconcile_tws_snapshot(
+            snapshot,
+            accepted_raw_account_ids=accepted_current_accounts,
+            flex_execution_ids=flex_execution_ids,
+            flex_as_of=flex_as_of,
+        )
+        tws_identity_partial = reconciliation.account_identity_status != "PASS"
+        observed_at = snapshot.observed_at.isoformat().replace("+00:00", "Z")
+        snapshot_date = snapshot.observed_at.date()
+        unmapped_positions = 0
+        for current_position in snapshot.positions:
+            current_account_id = crosswalk.get(current_position.raw_account_id)
+            if current_account_id is None:
+                unmapped_positions += 1
+                continue
+            account = accounts_by_id[current_account_id]
+            currency = current_position.currency or _text(
+                account.get("base_currency"), "account.base_currency"
+            )
+            security_id = security(current_position.conid, currency)
+            assert security_id is not None
+            status, strategy_id = _strategy_for_date(
+                assignments, current_account_id, snapshot_date
+            )
+            current_payload: dict[str, Any] = {
+                "account_id": current_account_id,
+                "mapping_status": status,
+                "market_value": {
+                    "currency": _text(
+                        account.get("base_currency"), "account.base_currency"
+                    ),
+                    "status": "UNAVAILABLE",
+                    "value": None,
+                },
+                "observed_at": observed_at,
+                "provider_account_scope": "TWS_MANAGED_ACCOUNT",
+                "quantity": decimal_text(current_position.quantity),
+                "security_id": security_id,
+                "source_artifact_id": snapshot_artifact_id,
+                "strategy_id": strategy_id,
+            }
+            tws_positions.append(
+                {
+                    "record_id": _record_id("tws-position", current_payload),
+                    **current_payload,
+                }
+            )
+
+        managed_accounts = frozenset(snapshot.raw_account_ids)
+        unmapped_account_values = 0
+        for account_value in snapshot.account_values:
+            current_account_id = crosswalk.get(account_value.raw_account_id)
+            if current_account_id is None:
+                unmapped_account_values += 1
+                continue
+            account = accounts_by_id[current_account_id]
+            currency = (
+                _text(account.get("base_currency"), "account.base_currency")
+                if account_value.currency == "BASE"
+                else account_value.currency
+            )
+            account_value_payload: dict[str, Any] = {
+                "account_id": current_account_id,
+                "observed_at": observed_at,
+                "provider_account_scope": (
+                    "TWS_MANAGED_ACCOUNT"
+                    if account_value.raw_account_id in managed_accounts
+                    else "TWS_ACCOUNT_SUMMARY_ONLY"
+                ),
+                "source_artifact_id": snapshot_artifact_id,
+                "tag": account_value.tag,
+                "value": {
+                    "currency": currency,
+                    "status": "AVAILABLE",
+                    "value": decimal_text(account_value.value),
+                },
+            }
+            tws_account_values.append(
+                {
+                    "record_id": _record_id("tws-account-value", account_value_payload),
+                    **account_value_payload,
+                }
+            )
+
+        order_visibility = (
+            "ZERO_ROWS_OBSERVED_NOT_VISIBILITY_PROOF"
+            if snapshot.open_order_count == 0 and snapshot.order_status_count == 0
+            else "OBSERVED_API_ORDER_STATE"
+        )
+        tws_state = {
+            "account_summary_value_count": len(snapshot.account_values),
+            "execution_count": len(snapshot.executions),
+            "managed_account_count": len(snapshot.raw_account_ids),
+            "mapped_account_summary_value_count": len(tws_account_values),
+            "mapped_position_count": len(tws_positions),
+            "observed_at": observed_at,
+            "open_order_count": snapshot.open_order_count,
+            "order_status_count": snapshot.order_status_count,
+            "order_visibility": order_visibility,
+            "position_count": len(snapshot.positions),
+            "status": "CAPTURED_PARTIAL" if tws_identity_partial else "CAPTURED",
+            "unmapped_account_summary_value_count": unmapped_account_values,
+            "unmapped_position_count": unmapped_positions,
+        }
+        tws_check = {
+            "check_id": "tws-current-overlap",
+            **reconciliation.to_dict(),
+            "status": (
+                "PASS" if reconciliation.account_identity_status == "PASS" else "REVIEW"
+            ),
+        }
+        tws_gaps: list[str] = []
+        if tws_identity_partial:
+            tws_gaps.append("TWS managed-account scope differs from current Flex scope")
+        if unmapped_positions or unmapped_account_values:
+            tws_gaps.append("Some current TWS facts lack an accepted account mapping")
+        if order_visibility == "ZERO_ROWS_OBSERVED_NOT_VISIBILITY_PROOF":
+            tws_gaps.append(
+                "Zero API order rows do not prove complete order visibility"
+            )
+        tws_coverage = {
+            "fact_type": "TWS_CURRENT_STATE",
+            "known_gaps": tws_gaps,
+            "status": "PARTIAL" if tws_gaps else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        }
+
     return {
         "accounts": [
             {
@@ -664,7 +915,10 @@ def _normalize(
             }
             for account_id in sorted(set(crosswalk.values()))
         ],
-        "as_of_date": max(observed_dates).isoformat(),
+        "as_of_date": max(
+            flex_as_of,
+            tws_source[0].observed_at.date() if tws_source is not None else flex_as_of,
+        ).isoformat(),
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "corporate_actions": _dedupe(corporate_actions, "corporate action"),
         "crosswalk_proof": list(proof),
@@ -674,11 +928,7 @@ def _normalize(
                 "known_gaps": [],
                 "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
             },
-            {
-                "fact_type": "TWS_CURRENT_STATE",
-                "known_gaps": ["No separately authorized TWS snapshot was supplied"],
-                "status": "FAILED",
-            },
+            tws_coverage,
             {
                 "fact_type": "CORPORATE_ACTION_PROJECTION",
                 "known_gaps": [],
@@ -686,17 +936,24 @@ def _normalize(
             },
             {
                 "fact_type": "PROVIDER_ACCOUNT_SCOPE",
-                "known_gaps": (
-                    [
-                        "Some activity rows report an account identifier different "
-                        "from the enclosing statement; those rows are not strategy-mapped"
-                    ]
-                    if account_scope_mismatches
-                    else []
-                ),
+                "known_gaps": [
+                    *(
+                        [
+                            "Some activity rows report an account identifier different "
+                            "from the enclosing statement; those rows are not strategy-mapped"
+                        ]
+                        if account_scope_mismatches
+                        else []
+                    ),
+                    *(
+                        ["TWS managed-account scope differs from current Flex scope"]
+                        if tws_identity_partial
+                        else []
+                    ),
+                ],
                 "status": (
                     "PARTIAL"
-                    if account_scope_mismatches
+                    if account_scope_mismatches or tws_identity_partial
                     else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
                 ),
             },
@@ -718,14 +975,22 @@ def _normalize(
                 "status": "PASS",
             },
             {
+                "check_id": "flex-refresh-overlap",
+                "record_count": flex_overlap_count,
+                "status": "PASS" if refresh_raw_account_ids else "UNAVAILABLE",
+            },
+            {
                 "check_id": "activity-account-scope",
                 "exception_count": account_scope_mismatches,
                 "status": "REVIEW" if account_scope_mismatches else "PASS",
             },
-            {"check_id": "tws-current-overlap", "status": "UNAVAILABLE"},
+            tws_check,
         ],
         "securities": [securities[key] for key in sorted(securities)],
         "transactions": _dedupe(transactions, "transaction"),
+        "tws_account_values": _dedupe(tws_account_values, "TWS account value"),
+        "tws_current_positions": _dedupe(tws_positions, "TWS position"),
+        "tws_current_state": tws_state,
     }
 
 
@@ -735,17 +1000,29 @@ def build_generation(
     """Build one deterministic, partial IBKR candidate without provider access."""
 
     spec = _load_spec(spec_path)
+    spec_schema_version = _integer(spec["schema_version"], "schema_version")
     generation_as_of = _date(spec["as_of_date"], "spec.as_of_date")
     roots = _roots(spec["roots"])
-    sources, source_artifacts = _sources(spec["sources"], roots, generation_as_of)
+    sources, source_artifacts = _sources(
+        spec["sources"], roots, generation_as_of, spec_schema_version
+    )
     baseline, baseline_artifact = _baseline(spec["baseline"])
-    statements = _statements(sources)
+    statements, refresh_accounts, flex_overlap_count = _statements(sources)
+    tws_source = _tws_source(sources)
     crosswalk, proof = _crosswalk(
         statements,
         baseline,
         _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap"),
     )
-    catalog = _normalize(statements, baseline, crosswalk, proof)
+    catalog = _normalize(
+        statements,
+        baseline,
+        crosswalk,
+        proof,
+        refresh_accounts,
+        flex_overlap_count,
+        tws_source,
+    )
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
         artifact_id="normalized/ibkr-catalog.json",
@@ -762,7 +1039,7 @@ def build_generation(
         size_bytes=spec_size,
         as_of_date=generation_as_of,
         schema_name="ibkr-generation-spec",
-        schema_version=str(SPEC_SCHEMA_VERSION),
+        schema_version=str(spec_schema_version),
     )
     observed = [item.report_date for item in statements]
     account_scope_exceptions = next(
@@ -770,7 +1047,12 @@ def build_generation(
         for item in catalog["reconciliation_checks"]
         if item["check_id"] == "activity-account-scope"
     )
-    known_gaps = ["No separately authorized TWS current-state snapshot was supplied"]
+    tws_coverage = next(
+        item
+        for item in catalog["fact_coverage"]
+        if item["fact_type"] == "TWS_CURRENT_STATE"
+    )
+    known_gaps = list(tws_coverage["known_gaps"])
     if account_scope_exceptions:
         known_gaps.append(
             "Some activity rows have an ambiguous provider-reported account scope"
@@ -780,7 +1062,10 @@ def build_generation(
         adapter=AdapterIdentity("ibkr-read-builder", ADAPTER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.PARTIAL,
-            boundary="configured legacy Flex evidence plus separately authorized current TWS state",
+            boundary=(
+                "configured legacy and refreshed Flex evidence plus separately "
+                "authorized current TWS state"
+            ),
             fact_types=(
                 "accounts",
                 "cash_flows",
@@ -792,7 +1077,7 @@ def build_generation(
                 "tws_current_state",
             ),
             observed_start=min(observed),
-            observed_end=max(observed),
+            observed_end=_date(catalog["as_of_date"], "catalog.as_of_date"),
             known_gaps=tuple(known_gaps),
         ),
         artifacts=(
@@ -837,5 +1122,7 @@ def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, 
         "nav_count": len(catalog["nav_observations"]),
         "position_count": len(catalog["positions"]),
         "transaction_count": len(catalog["transactions"]),
-        "tws_status": "UNAVAILABLE",
+        "tws_account_value_count": len(catalog["tws_account_values"]),
+        "tws_position_count": len(catalog["tws_current_positions"]),
+        "tws_status": catalog["tws_current_state"]["status"],
     }

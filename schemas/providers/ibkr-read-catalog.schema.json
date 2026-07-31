@@ -18,10 +18,13 @@
     "provider_id",
     "reconciliation_checks",
     "securities",
-    "transactions"
+    "transactions",
+    "tws_account_values",
+    "tws_current_positions",
+    "tws_current_state"
   ],
   "properties": {
-    "catalog_schema_version": {"const": 2},
+    "catalog_schema_version": {"const": 3},
     "provider_id": {"const": "ibkr"},
     "as_of_date": {"type": "string", "format": "date"},
     "accounts": {"type": "array", "items": {"type": "object"}},
@@ -34,6 +37,9 @@
     "positions": {"type": "array", "items": {"type": "object"}},
     "reconciliation_checks": {"type": "array", "items": {"type": "object"}},
     "securities": {"type": "array", "items": {"type": "object"}},
-    "transactions": {"type": "array", "items": {"type": "object"}}
+    "transactions": {"type": "array", "items": {"type": "object"}},
+    "tws_account_values": {"type": "array", "items": {"type": "object"}},
+    "tws_current_positions": {"type": "array", "items": {"type": "object"}},
+    "tws_current_state": {"type": "object"}
   }
 }

@@ -236,6 +236,108 @@ def _spec(tmp_path: Path, *, cash_mismatch: bool = False) -> Path:
     return path
 
 
+def _refreshed_spec(tmp_path: Path, *, conflicting_overlap: bool = False) -> Path:
+    spec_path = _spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    source_root = Path(spec["roots"]["legacy"])
+    refresh_path = source_root / "flex-refresh.xml"
+    refresh_path.write_text(
+        _xml(
+            "SYNTH-RAW",
+            date(2026, 1, 8),
+            "999" if conflicting_overlap else "107",
+        ),
+        encoding="utf-8",
+    )
+    refresh_bytes = refresh_path.read_bytes()
+    spec["sources"].append(
+        {
+            "artifact_id": "private/flex-refresh.xml",
+            "as_of_date": "2026-01-08",
+            "expected_sha256": hashlib.sha256(refresh_bytes).hexdigest(),
+            "expected_size_bytes": len(refresh_bytes),
+            "relative_path": refresh_path.name,
+            "role": "REFRESH_FLEX_ACTIVITY",
+            "root_id": "legacy",
+            "schema_name": "activity-flex",
+            "schema_version": "3",
+        }
+    )
+    snapshot = {
+        "account_summaries": [
+            {
+                "account": "SYNTH-RAW",
+                "currency": "BASE",
+                "request_id": "1",
+                "tag": "NetLiquidation",
+                "value": "108",
+            }
+        ],
+        "captured_at_utc": "2026-01-09T20:00:00Z",
+        "connection": {"connected": True},
+        "current_day_executions": [],
+        "errors": [
+            {
+                "advanced_order_reject_json": "",
+                "error_code": 2104,
+                "message": "SYNTHETIC INFORMATIONAL STATUS",
+                "request_id": "-1",
+            }
+        ],
+        "managed_accounts": ["SYNTH-RAW"],
+        "open_orders": [],
+        "order_statuses": [],
+        "positions": [
+            {
+                "account": "SYNTH-RAW",
+                "average_cost": "10",
+                "conid": "100",
+                "currency": "USD",
+                "exchange": "SYNTH",
+                "expiry": "",
+                "local_symbol": "SYNTH",
+                "multiplier": "",
+                "primary_exchange": "SYNTH",
+                "quantity": "2",
+                "security_type": "STK",
+                "symbol": "SYNTH",
+                "trading_class": "SYNTH",
+            }
+        ],
+        "request_results": [
+            {"completed": True, "name": name}
+            for name in (
+                "account_summary",
+                "all_api_open_orders",
+                "current_day_executions",
+                "positions",
+            )
+        ],
+        "run_id": "tws-synthetic",
+        "schema_version": 1,
+    }
+    snapshot_path = source_root / "tws-snapshot.json"
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    snapshot_bytes = snapshot_path.read_bytes()
+    spec["sources"].append(
+        {
+            "artifact_id": "private/tws-snapshot.json",
+            "as_of_date": "2026-01-09",
+            "expected_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
+            "expected_size_bytes": len(snapshot_bytes),
+            "relative_path": snapshot_path.name,
+            "role": "TWS_CURRENT_SNAPSHOT",
+            "root_id": "legacy",
+            "schema_name": "ibkr-tws-read-snapshot",
+            "schema_version": "1",
+        }
+    )
+    spec["as_of_date"] = "2026-01-09"
+    spec["schema_version"] = 2
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    return spec_path
+
+
 def test_parser_rejects_missing_section_nav_mismatch_and_truncation(
     tmp_path: Path,
 ) -> None:
@@ -327,6 +429,45 @@ def test_partial_candidate_stages_but_cannot_publish(tmp_path: Path) -> None:
     assert not (output / "CURRENT.json").exists()
     with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
         publish_generation(output, str(result["generation_id"]))
+
+
+def test_refresh_and_tws_snapshot_are_reconciled_without_identifiers(
+    tmp_path: Path,
+) -> None:
+    spec_path = _refreshed_spec(tmp_path)
+    first, first_manifest, first_bytes = build_generation(spec_path)
+    second, second_manifest, second_bytes = build_generation(spec_path)
+    assert first_bytes == second_bytes
+    assert first_manifest.generation_id == second_manifest.generation_id
+    assert first["catalog_schema_version"] == 3
+    assert first["tws_current_state"]["status"] == "CAPTURED"
+    assert first["tws_current_state"]["position_count"] == 1
+    assert len(first["tws_current_positions"]) == 1
+    assert len(first["tws_account_values"]) == 1
+    refresh = next(
+        item
+        for item in first["reconciliation_checks"]
+        if item["check_id"] == "flex-refresh-overlap"
+    )
+    assert refresh == {
+        "check_id": "flex-refresh-overlap",
+        "record_count": 1,
+        "status": "PASS",
+    }
+    tws = next(
+        item
+        for item in first["reconciliation_checks"]
+        if item["check_id"] == "tws-current-overlap"
+    )
+    assert tws["account_identity_status"] == "PASS"
+    assert tws["overlap_account_count"] == 1
+    assert "SYNTH-RAW" not in first_bytes.decode("utf-8")
+
+
+def test_conflicting_flex_refresh_fails_closed(tmp_path: Path) -> None:
+    spec_path = _refreshed_spec(tmp_path, conflicting_overlap=True)
+    with pytest.raises(IbkrGenerationError, match="refresh conflicts"):
+        build_generation(spec_path)
 
 
 def test_crosswalk_ambiguity_fails_closed(tmp_path: Path) -> None:
@@ -422,10 +563,12 @@ def test_tws_boundary_reconciles_without_order_surface() -> None:
     )
     assert result.to_dict()["overlap_status"] == "SAME_DAY_EXECUTION_BOUNDARY"
     assert result.execution_overlap_count == 1
-    with pytest.raises(FlexValidationError, match="account set differs"):
-        reconcile_tws_snapshot(
-            snapshot,
-            accepted_raw_account_ids=frozenset({"OTHER"}),
-            flex_execution_ids=frozenset(),
-            flex_as_of=date(2026, 1, 8),
-        )
+    partial = reconcile_tws_snapshot(
+        snapshot,
+        accepted_raw_account_ids=frozenset({"SYNTH-RAW", "OTHER"}),
+        flex_execution_ids=frozenset(),
+        flex_as_of=date(2026, 1, 8),
+    )
+    assert partial.account_identity_status == "PARTIAL"
+    assert partial.overlap_account_count == 1
+    assert partial.flex_only_account_count == 1

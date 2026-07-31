@@ -187,8 +187,10 @@ implemented by this decision.
 
 ## Known gaps and next boundary
 
-- The observed legacy interval is finite; it proves no coverage before
-  2025-09-15 or after 2026-07-14.
+- The observed legacy interval is finite. A verified 30-calendar-day Flex
+  refresh extends four accounts through 2026-07-30; the fifth legacy account
+  remains observed only through 2026-07-14. No earlier-than-2025-09-15 claim is
+  made.
 - Five statement-level account identities appear across the XML. A further
   provider-reported identifier appears on 217 cash or corporate-action rows
   under a different enclosing statement. The offline builder retains those
@@ -197,9 +199,15 @@ implemented by this decision.
 - The two XLS artifacts remain secondary evidence until the vertical slice
   proves they add no unique facts or converts them through a separately
   governed local process.
-- The live Flex template, included accounts/fields, token scope, and
-  entitlements are unverified. No credential or provider call occurred here.
-- TWS/Gateway connectivity and actual account visibility are untested.
+- The saved `AllAccounts_Accounting_XML` template produced one complete
+  41,031,492-byte Activity Flex response: 88 daily statements for four
+  accounts from 2026-07-01 through 2026-07-30. Its 40 overlapping account-days
+  agree semantically with the legacy inputs and it adds 48 account-days.
+- One bounded read-only Gateway snapshot completed account-summary, position,
+  current-day-execution, and API-open-order reads. It observed four managed
+  accounts and 117 positions, but its current account set overlaps the Flex
+  refresh on only three accounts. That topology remains `PARTIAL`; no identity
+  is inferred.
 - The IBKR slice demonstrated 20 corporate-action consumers, so the minimal
   ledger now implements that record. A shared FX record remains deferred until
   multiple recurring consumers exist.
@@ -208,33 +216,38 @@ implemented by this decision.
 
 The private generation spec follows
 [`ibkr-generation-spec.schema.json`](../../schemas/providers/ibkr-generation-spec.schema.json).
-It hash-binds the accepted portfolio baseline and all 26 inventoried legacy
-artifacts. Absolute roots and the spec itself remain outside Git.
+Version 1 hash-binds the accepted portfolio baseline and all 26 inventoried
+legacy artifacts. Version 2 additionally requires exactly one Activity Flex
+refresh and one read-only TWS snapshot, plus their supporting capture and
+validation evidence. Absolute roots, raw provider evidence, and the private
+spec remain outside Git.
 
 ```powershell
 uv run --frozen --no-sync python tools/ibkr_generation.py build <private-spec>
 uv run --frozen --no-sync python tools/ibkr_generation.py stage <private-spec> <private-output-root>
 ```
 
-`build` performs no writes. `stage` creates a content-addressed candidate and
-never writes `CURRENT.json`. The candidate is deliberately `PARTIAL` while TWS
-current state and account-scope exceptions remain unresolved. Core publication
-therefore rejects it.
+`build` performs no writes. It fails if an overlapping refreshed statement
+differs from accepted legacy facts. `stage` creates a content-addressed
+candidate and never writes `CURRENT.json`. The catalog retains Flex history,
+mapped current TWS positions and account values, sanitized topology counts, and
+explicit unmapped counts. The candidate remains `PARTIAL` while the account
+topology and legacy row-level account-scope exceptions remain unresolved, so
+Core publication rejects it.
 Repeating the same inputs produces the same catalog bytes and generation ID.
 
 Flex retrieval has no default HTTP implementation: callers must inject both a
 credential provider and a GET transport under separately recorded authority.
 The client implements only SendRequest/GetStatement version 3, bounds error
-1019 polling, and excludes the token from results and errors. The TWS surface
-is likewise only a typed read protocol and pure reconciliation function; it
-has no socket, order, cancel, or submission method.
+1019 polling, and excludes the token from results and errors. The committed TWS
+surface parses the immutable private snapshot and performs pure reconciliation;
+it has no socket, order, cancel, or submission method.
 
 Recovery is create-only. A parser, hash, crosswalk, or reconciliation failure
 leaves the accepted portfolio baseline and every existing pointer unchanged.
 An incomplete staging directory may be removed only under the governing
 issue's separately approved recovery procedure.
 
-The remaining vertical work requires explicit issue authority for any
-credential access, provider call, `dataIBKR` creation, private real-data stage,
-pointer publication, data move, or deletion. UI, PAPER, live trading, and
-execution architecture remain deferred.
+Any later credential use, provider call, pointer publication, data move, or
+deletion still requires the governing issue's authority. UI, PAPER, live
+trading, and execution architecture remain deferred.
