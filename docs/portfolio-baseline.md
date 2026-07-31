@@ -23,6 +23,12 @@ adapter, performance engine, strategy service, or broker surface.
 - Strategy evidence layers remain distinct records. Aggregate and benchmark
   metric rows cannot become strategy identities.
 
+The accepted tracker and allocation inputs now come from their immutable,
+hash-identified source-run copy inside the private `dataPortfolio` boundary.
+The former external working roots were removed only after provenance,
+baseline, workbook, and control-panel consumers rebuilt successfully from the
+governed copy. Recovery copies are read-only and non-authoritative.
+
 The private input follows
 [`baseline-spec.schema.json`](../schemas/portfolio/baseline-spec.schema.json).
 The generated catalog follows

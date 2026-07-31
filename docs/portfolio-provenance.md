@@ -27,6 +27,20 @@ The private input follows
 The local output follows
 [`provenance-catalog.schema.json`](../schemas/portfolio/provenance-catalog.schema.json).
 
+## Accepted source authority
+
+The initial tracker and allocation evidence has completed the governed
+single-authority cutover. The configured roots now resolve only to the exact,
+hash-identified source-run copy under the private `dataPortfolio` boundary.
+The former external working roots are absent. Read-only recovery copies and
+cutover parity manifests are retained outside Git, but they are not writable
+authority and must never be configured as live inputs.
+
+The builder itself remains non-mutating. Any future source relocation must use
+the operating model's freeze, hydrate, inventory, exact-parity, consumer
+rebuild, publication, source-removal, and recovery-evidence gates before the
+configured authority may change.
+
 ## Stage
 
 Run from the repository with the frozen workspace:
