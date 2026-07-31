@@ -80,8 +80,8 @@ uv lock --check
 uv sync --frozen --all-groups --all-packages --python 3.11
 uv run --frozen --no-sync ruff format --check .
 uv run --frozen --no-sync ruff check .
-uv run --frozen --no-sync mypy packages/ci-controls/src packages/core/src packages/ibkr/src packages/portfolio-ledger/src tools/check_repository_boundary.py tools/check_push_policy.py tools/issue_guard.py tools/ibkr_generation.py tools/portfolio_provenance.py tools/portfolio_baseline.py tools/portfolio_report.py tools/portfolio_control_panel.py
-uv run --frozen --no-sync pytest -q --disable-socket tests/security tests/ci tests/core tests/ibkr tests/portfolio_ledger tests/portfolio_provenance tests/portfolio_baseline tests/portfolio_report tests/portfolio_control_panel tests/governance
+uv run --frozen --no-sync mypy packages/ci-controls/src packages/core/src packages/fidelity/src packages/ibkr/src packages/matrixport/src packages/portfolio-ledger/src packages/schwab/src packages/web-contracts/src tools/check_repository_boundary.py tools/check_push_policy.py tools/issue_guard.py tools/fidelity_generation.py tools/ibkr_generation.py tools/matrixport_generation.py tools/schwab_generation.py tools/portfolio_provenance.py tools/portfolio_baseline.py tools/portfolio_report.py tools/portfolio_control_panel.py
+uv run --frozen --no-sync pytest -q --disable-socket tests/security tests/ci tests/core tests/fidelity tests/ibkr tests/matrixport tests/portfolio_ledger tests/portfolio_provenance tests/portfolio_baseline tests/portfolio_report tests/portfolio_control_panel tests/schwab tests/web_contracts tests/governance
 uv build --all-packages --no-sources --python 3.11
 uv audit --locked --python-version 3.11 --preview-features audit-command
 python tools/check_repository_boundary.py --root . --policy .policy/data-boundary.toml
