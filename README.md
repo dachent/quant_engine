@@ -105,3 +105,10 @@ Private tracker and current-strategy provenance is built with the
 validator, schemas, and synthetic tests live in Git; real specifications,
 account aliases, strategy details, hashes, and catalogs remain under the local
 `dataPortfolio` boundary.
+
+The dated, read-only portfolio baseline is built with the
+[portfolio baseline runbook](docs/portfolio-baseline.md). It normalizes the
+accepted tracker and audit slice into accounts, current allocations, available
+NAV/flows/Alpaca fills, strategy evidence, explicit coverage, reconciliation,
+and frozen-control replay. Missing positions, FX, history, or mappings remain
+`UNAVAILABLE`, `PARTIAL`, or `UNMAPPED`; the builder does not infer them.
