@@ -14,6 +14,7 @@ dev = [
   "quant-engine-core",
   "quant-engine-ibkr",
   "quant-engine-portfolio-ledger",
+  "quant-engine-web-contract-harvester",
   "ruff==0.15.22",
   "types-PyYAML>=6.0.12,<7",
 ]
@@ -23,13 +24,14 @@ package = false
 required-version = ">=0.11.28,<0.12"
 
 [tool.uv.workspace]
-members = ["packages/ci-controls", "packages/core", "packages/ibkr", "packages/portfolio-ledger"]
+members = ["packages/ci-controls", "packages/core", "packages/ibkr", "packages/portfolio-ledger", "packages/web-contracts"]
 
 [tool.uv.sources]
 quant-engine-ci-controls = { workspace = true }
 quant-engine-core = { workspace = true }
 quant-engine-ibkr = { workspace = true }
 quant-engine-portfolio-ledger = { workspace = true }
+quant-engine-web-contract-harvester = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = [
@@ -53,7 +55,7 @@ select = ["E4", "E7", "E9", "F"]
 python_version = "3.11"
 strict = true
 explicit_package_bases = true
-mypy_path = ["packages/ci-controls/src", "packages/core/src", "packages/ibkr/src", "packages/portfolio-ledger/src"]
+mypy_path = ["packages/ci-controls/src", "packages/core/src", "packages/ibkr/src", "packages/portfolio-ledger/src", "packages/web-contracts/src"]
 incremental = false
 pretty = true
 show_error_codes = true
