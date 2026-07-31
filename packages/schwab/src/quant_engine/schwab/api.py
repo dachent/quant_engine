@@ -66,6 +66,7 @@ class CurrentSnapshot:
     positions: tuple[dict[str, object], ...]
     observed_at: datetime
     sweep_vehicle_count: int
+    transport: str
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -73,10 +74,11 @@ class CurrentSnapshot:
             "observed_at": self.observed_at.isoformat(),
             "positions": list(self.positions),
             "sweep_vehicle_count": self.sweep_vehicle_count,
+            "transport": self.transport,
         }
 
 
-CURRENT_SNAPSHOT_SCHEMA_VERSION = 1
+CURRENT_SNAPSHOT_SCHEMA_VERSION = 2
 
 
 def current_snapshot_bytes(snapshot: CurrentSnapshot) -> bytes:
@@ -136,6 +138,17 @@ def _decimal(value: object, name: str) -> Decimal | None:
         raise SchwabReadError(f"{name} is not decimal") from exc
     if not parsed.is_finite():
         raise SchwabReadError(f"{name} must be finite")
+    return parsed
+
+
+def _aware_datetime(value: object, name: str) -> datetime:
+    raw = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SchwabReadError(f"{name} is not an ISO datetime") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise SchwabReadError(f"{name} must be timezone-aware")
     return parsed
 
 
@@ -283,4 +296,142 @@ def read_current_snapshot(
         positions=tuple(positions),
         observed_at=observed_at,
         sweep_vehicle_count=sweep_vehicle_count,
+        transport="DEVELOPER_API",
+    )
+
+
+def read_web_current_snapshot(
+    document: object,
+    *,
+    crosswalk: Mapping[str, str],
+) -> CurrentSnapshot:
+    """Normalize one reviewed Schwab all-accounts web position response.
+
+    The response proves current non-cash position rows but does not prove
+    current account liquidation or cash balances. Those amounts therefore
+    remain explicitly unavailable.
+    """
+
+    if not crosswalk or len(crosswalk) != len(set(crosswalk.values())):
+        raise SchwabReadError("crosswalk must be nonempty and one-to-one")
+    payload = _object(document, "web current positions")
+    groups = _objects(payload.get("securityGroupings"), "security groupings")
+    declared_count = payload.get("positionCount")
+    if (
+        isinstance(declared_count, bool)
+        or not isinstance(declared_count, int)
+        or declared_count < 1
+    ):
+        raise SchwabReadError("web position count is invalid")
+
+    observed_accounts: set[str] = set()
+    identities: set[tuple[str, str]] = set()
+    timestamps: list[datetime] = []
+    accepted: list[tuple[str, str, Decimal, Decimal | None, Decimal | None]] = []
+    sweep_vehicle_count = 0
+    for group in groups:
+        security_type = _text(group.get("securityType"), "security type")
+        for raw in _objects(group.get("positions"), "web positions"):
+            raw_accounts = _objects(raw.get("accounts"), "web position accounts")
+            if security_type == "CashAndMoneyMarket":
+                sweep_vehicle_count += len(raw_accounts)
+                continue
+            symbol_value = (
+                raw.get("displaySymbol")
+                or raw.get("defaultSymbol")
+                or raw.get("quoteSymbol")
+            )
+            symbol = _text(symbol_value, "web position symbol")
+            for raw_account in raw_accounts:
+                external = _text(
+                    raw_account.get("accountNumberDisplayFull"),
+                    "web position account",
+                )
+                if external not in crosswalk:
+                    raise SchwabReadError(
+                        "web position account is outside the configured allowlist"
+                    )
+                internal = crosswalk[external]
+                identity = (internal, _security_id(symbol))
+                if identity in identities:
+                    raise SchwabReadError("web position identity is duplicated")
+                identities.add(identity)
+                observed_accounts.add(external)
+                timestamps.append(
+                    _aware_datetime(
+                        raw_account.get("currentTimeStamp"),
+                        "web position observed_at",
+                    )
+                )
+                quantity = _decimal(raw_account.get("quantity"), "web quantity")
+                if quantity is None:
+                    raise SchwabReadError("web quantity is missing")
+                market_value = _decimal(
+                    raw_account.get("marketValue"), "web market value"
+                )
+                average_price = _decimal(
+                    raw_account.get("costPerShare"), "web cost per share"
+                )
+                accepted.append(
+                    (internal, symbol, quantity, market_value, average_price)
+                )
+    if not accepted or not observed_accounts:
+        raise SchwabReadError("web response contains no accepted position rows")
+    observed_dates = {item.date() for item in timestamps}
+    if len(observed_dates) != 1:
+        raise SchwabReadError("web position dates differ")
+    observed_at = max(timestamps)
+
+    positions: list[dict[str, object]] = []
+    for internal, symbol, quantity, market_value, average_price in accepted:
+        security_id = _security_id(symbol)
+        record_identity = {
+            "account_id": internal,
+            "as_of_date": observed_at.date().isoformat(),
+            "security_id": security_id,
+        }
+        record = PositionSnapshot(
+            record_id=(
+                f"position-{hashlib.sha256(canonical_json_bytes(record_identity)).hexdigest()[:24]}"
+            ),
+            account_id=internal,
+            security_id=security_id,
+            as_of_date=observed_at.date(),
+            quantity=quantity,
+            market_value=(
+                ObservedAmount.available(market_value, "USD")
+                if market_value is not None
+                else ObservedAmount.unavailable("USD")
+            ),
+            mapping_status=MappingStatus.UNMAPPED,
+        ).to_dict()
+        record.update(
+            {
+                "average_price": (
+                    str(average_price) if average_price is not None else None
+                ),
+                "evidence_class": "WCH_CURRENT",
+                "observed_at": observed_at.isoformat(),
+                "symbol": symbol,
+            }
+        )
+        positions.append(record)
+
+    unavailable = ObservedAmount.unavailable("USD")
+    accounts = tuple(
+        CurrentAccount(
+            account_id=internal,
+            cash_available=unavailable,
+            liquidation_value=unavailable,
+            observed_at=observed_at,
+        )
+        for internal in sorted(crosswalk.values())
+    )
+    positions.sort(key=lambda item: (str(item["account_id"]), str(item["security_id"])))
+    return CurrentSnapshot(
+        accounts=accounts,
+        positions=tuple(positions),
+        observed_at=observed_at,
+        sweep_vehicle_count=sweep_vehicle_count,
+        transport="WEB_CONTRACT",
     )

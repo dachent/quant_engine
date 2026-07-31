@@ -11,6 +11,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.schwab import (
     SchwabGenerationError,
     build_generation,
+    publish_generation_candidate,
     stage_generation_candidate,
 )
 
@@ -375,7 +376,7 @@ def test_stage_is_immutable_and_does_not_publish(tmp_path: Path) -> None:
 def test_current_snapshot_supersedes_manual_current_reference(tmp_path: Path) -> None:
     spec = _spec_with_current(tmp_path)
     catalog, manifest, _ = build_generation(spec)
-    assert manifest.coverage.status.value == "PARTIAL"
+    assert manifest.coverage.status.value == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
     assert len(catalog["current_accounts"]) == 8
     assert len(catalog["positions"]) == 8
     assert catalog["position_quantity_unavailable_count"] == 0
@@ -395,6 +396,20 @@ def test_current_snapshot_supersedes_manual_current_reference(tmp_path: Path) ->
     )
     assert current_reference["status"] == "PASS_EXACT"
     assert "current_balances" in manifest.coverage.fact_types
+
+
+def test_complete_current_candidate_publishes_only_exact_rebuild(
+    tmp_path: Path,
+) -> None:
+    spec = _spec_with_current(tmp_path)
+    root = tmp_path / "dataSchwab"
+    staged = stage_generation_candidate(spec, root)
+    accepted = publish_generation_candidate(spec, root, str(staged["generation_id"]))
+    assert accepted["published"] is True
+    pointer = json.loads((root / "CURRENT.json").read_text(encoding="utf-8"))
+    assert pointer["generation_id"] == staged["generation_id"]
+    with pytest.raises(SchwabGenerationError, match="differs from accepted"):
+        publish_generation_candidate(spec, root, "0" * 64)
 
 
 def test_current_snapshot_hash_and_scope_fail_closed(tmp_path: Path) -> None:

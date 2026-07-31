@@ -10,6 +10,7 @@ from quant_engine.schwab import (
     SchwabReadError,
     current_snapshot_bytes,
     read_current_snapshot,
+    read_web_current_snapshot,
     write_current_snapshot,
 )
 
@@ -137,7 +138,8 @@ def test_current_snapshot_artifact_is_sanitized_and_immutable(tmp_path: Path) ->
     payload = current_snapshot_bytes(snapshot)
     document = json.loads(payload)
     assert document["provider"] == "SCHWAB"
-    assert document["schema_version"] == 1
+    assert document["schema_version"] == 2
+    assert document["transport"] == "DEVELOPER_API"
     assert "SYNTHETIC-001" not in payload.decode()
     path = tmp_path / "current-snapshot.json"
     first = write_current_snapshot(snapshot, path)
@@ -147,3 +149,85 @@ def test_current_snapshot_artifact_is_sanitized_and_immutable(tmp_path: Path) ->
     path.write_text("{}", encoding="utf-8")
     with pytest.raises(SchwabReadError, match="conflicts"):
         write_current_snapshot(snapshot, path)
+
+
+def _web_document(*, unknown_account: bool = False) -> dict[str, object]:
+    account = "SYNTHETIC-999" if unknown_account else "SYNTHETIC-001"
+    return {
+        "positionCount": 2,
+        "securityGroupings": [
+            {
+                "securityType": "Equity",
+                "positions": [
+                    {
+                        "displaySymbol": "SYNTH",
+                        "accounts": [
+                            {
+                                "accountNumberDisplayFull": account,
+                                "costPerShare": "9",
+                                "currentTimeStamp": "2026-07-31T20:00:00+00:00",
+                                "marketValue": "30",
+                                "quantity": "3",
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "securityType": "CashAndMoneyMarket",
+                "positions": [
+                    {
+                        "displaySymbol": "CASH",
+                        "accounts": [
+                            {
+                                "accountNumberDisplayFull": "SYNTHETIC-002",
+                                "currentTimeStamp": "2026-07-31T20:00:01+00:00",
+                                "marketValue": "12",
+                                "quantity": "12",
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def test_web_current_snapshot_is_internalized_and_keeps_balances_unavailable() -> None:
+    snapshot = read_web_current_snapshot(_web_document(), crosswalk=_crosswalk())
+    assert snapshot.transport == "WEB_CONTRACT"
+    assert len(snapshot.accounts) == 2
+    assert len(snapshot.positions) == 1
+    assert snapshot.sweep_vehicle_count == 1
+    assert snapshot.positions[0]["evidence_class"] == "WCH_CURRENT"
+    assert snapshot.positions[0]["quantity"] == "3"
+    assert all(
+        item.liquidation_value.to_dict()["status"] == "UNAVAILABLE"
+        for item in snapshot.accounts
+    )
+    payload = current_snapshot_bytes(snapshot).decode()
+    assert "SYNTHETIC-001" not in payload
+    assert "SYNTHETIC-002" not in payload
+
+
+def test_web_current_snapshot_unknown_account_and_naive_time_fail_closed() -> None:
+    with pytest.raises(SchwabReadError, match="outside the configured allowlist"):
+        read_web_current_snapshot(
+            _web_document(unknown_account=True), crosswalk=_crosswalk()
+        )
+    document = _web_document()
+    groups = document["securityGroupings"]
+    assert isinstance(groups, list)
+    first = groups[0]
+    assert isinstance(first, dict)
+    positions = first["positions"]
+    assert isinstance(positions, list)
+    position = positions[0]
+    assert isinstance(position, dict)
+    accounts = position["accounts"]
+    assert isinstance(accounts, list)
+    account = accounts[0]
+    assert isinstance(account, dict)
+    account["currentTimeStamp"] = "2026-07-31T20:00:00"
+    with pytest.raises(SchwabReadError, match="timezone-aware"):
+        read_web_current_snapshot(document, crosswalk=_crosswalk())

@@ -21,6 +21,7 @@ from quant_engine.core import (
     SourceArtifact,
     VerificationStatus,
     hash_file,
+    publish_generation,
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -36,7 +37,7 @@ from quant_engine.portfolio_ledger import (
 SPEC_SCHEMA_VERSION = 2
 SUPPORTED_SPEC_SCHEMA_VERSIONS = frozenset({1, 2})
 CATALOG_SCHEMA_VERSION = 1
-ADAPTER_VERSION = "0.2.0"
+ADAPTER_VERSION = "0.3.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _ROLES = {
@@ -362,6 +363,9 @@ def _current_snapshot(
     list[dict[str, object]],
     datetime,
     int,
+    str,
+    int,
+    int,
     SourceArtifact,
 ]:
     source = _object(value, "current_snapshot")
@@ -399,26 +403,39 @@ def _current_snapshot(
         raise SchwabGenerationError("current snapshot date differs from generation")
 
     document = _object(_json(path), "current snapshot")
-    _strict(
-        document,
-        {
-            "accounts",
-            "observed_at",
-            "positions",
-            "provider",
-            "schema_version",
-            "sweep_vehicle_count",
-        },
-        "current snapshot",
+    snapshot_version = _integer(
+        document.get("schema_version"), "current snapshot schema_version"
     )
-    if document["provider"] != "SCHWAB" or document["schema_version"] != 1:
+    snapshot_keys = {
+        "accounts",
+        "observed_at",
+        "positions",
+        "provider",
+        "schema_version",
+        "sweep_vehicle_count",
+    }
+    if snapshot_version == 2:
+        snapshot_keys.add("transport")
+    _strict(document, snapshot_keys, "current snapshot")
+    if document["provider"] != "SCHWAB" or snapshot_version not in {1, 2}:
         raise SchwabGenerationError("current snapshot identity is unsupported")
+    transport = (
+        "DEVELOPER_API"
+        if snapshot_version == 1
+        else _text(document["transport"], "current snapshot transport")
+    )
+    if transport not in {"DEVELOPER_API", "WEB_CONTRACT"}:
+        raise SchwabGenerationError("current snapshot transport is unsupported")
+    evidence_class = (
+        "DEVELOPER_API_CURRENT" if transport == "DEVELOPER_API" else "WCH_CURRENT"
+    )
     observed_at = _aware_datetime(document["observed_at"], "current observed_at")
     if observed_at.date() != generation_as_of:
         raise SchwabGenerationError("current observation date differs from generation")
 
     accounts: list[dict[str, object]] = []
     observed_accounts: set[str] = set()
+    current_balance_available_count = 0
     for record in _objects(document["accounts"], "current accounts"):
         _strict(
             record,
@@ -434,13 +451,14 @@ def _current_snapshot(
         ):
             raise SchwabGenerationError("current account observation time differs")
         observed_accounts.add(account_id)
+        cash_available = _amount(record["cash_available"], "cash_available")
+        liquidation_value = _amount(record["liquidation_value"], "liquidation_value")
+        current_balance_available_count += liquidation_value["status"] == "AVAILABLE"
         accounts.append(
             {
                 "account_id": account_id,
-                "cash_available": _amount(record["cash_available"], "cash_available"),
-                "liquidation_value": _amount(
-                    record["liquidation_value"], "liquidation_value"
-                ),
+                "cash_available": cash_available,
+                "liquidation_value": liquidation_value,
                 "observed_at": observed_at.isoformat(),
             }
         )
@@ -488,7 +506,7 @@ def _current_snapshot(
             raise SchwabGenerationError("current position identity is invalid")
         if (
             record["as_of_date"] != generation_as_of.isoformat()
-            or record["evidence_class"] != "DEVELOPER_API_CURRENT"
+            or record["evidence_class"] != evidence_class
             or record["mapping_status"] != "UNMAPPED"
             or record["strategy_id"] is not None
             or _aware_datetime(record["observed_at"], "position.observed_at")
@@ -506,7 +524,7 @@ def _current_snapshot(
                 "account_id": account_id,
                 "as_of_date": generation_as_of.isoformat(),
                 "average_price": _decimal_text(average_price),
-                "evidence_class": "DEVELOPER_API_CURRENT",
+                "evidence_class": evidence_class,
                 "mapping_status": "UNMAPPED",
                 "market_value": _amount(record["market_value"], "market_value"),
                 "observed_at": observed_at.isoformat(),
@@ -522,6 +540,9 @@ def _current_snapshot(
     )
     if sweep_vehicle_count < 0:
         raise SchwabGenerationError("sweep vehicle count must not be negative")
+    current_position_account_count = len(
+        {str(item["account_id"]) for item in positions}
+    )
     accounts.sort(key=lambda item: str(item["account_id"]))
     positions.sort(key=lambda item: (str(item["account_id"]), str(item["security_id"])))
     artifact = SourceArtifact(
@@ -534,7 +555,16 @@ def _current_snapshot(
             source["schema_version"], "current_snapshot.schema_version"
         ),
     )
-    return accounts, positions, observed_at, sweep_vehicle_count, artifact
+    return (
+        accounts,
+        positions,
+        observed_at,
+        sweep_vehicle_count,
+        transport,
+        current_balance_available_count,
+        current_position_account_count,
+        artifact,
+    )
 
 
 def _current_position_reconciliation(
@@ -954,12 +984,18 @@ def build_generation(
     position_as_of: object = manual_position_as_of
     current_reconciliation: list[dict[str, object]] = []
     sweep_vehicle_count: int | None = None
+    current_transport: str | None = None
+    current_balance_available_count = 0
+    current_position_account_count = 0
     if spec["schema_version"] == SPEC_SCHEMA_VERSION:
         (
             current_accounts,
             positions,
             current_observed_at,
             sweep_vehicle_count,
+            current_transport,
+            current_balance_available_count,
+            current_position_account_count,
             current_artifact,
         ) = _current_snapshot(
             spec["current_snapshot"],
@@ -987,8 +1023,22 @@ def build_generation(
     observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]
     known_gaps = (
         *(
-            ("developer API current account and position snapshot is not present",)
+            ("current account and position snapshot is not present",)
             if current_accounts is None
+            else ()
+        ),
+        *(
+            ("current account balances remain unavailable",)
+            if current_accounts is not None
+            and current_balance_available_count < len(current_accounts)
+            else ()
+        ),
+        *(
+            (
+                f"{len(crosswalk) - current_position_account_count} accepted accounts have no reported non-cash position row",
+            )
+            if current_accounts is not None
+            and current_position_account_count < len(crosswalk)
             else ()
         ),
         "historical NAV has one later manual date per brokerage account",
@@ -1043,6 +1093,9 @@ def build_generation(
         catalog.update(
             {
                 "current_accounts": current_accounts,
+                "current_balance_available_count": current_balance_available_count,
+                "current_position_account_count": current_position_account_count,
+                "current_transport": current_transport,
                 "manual_position_quantity_unavailable_count": unavailable_position_quantity,
                 "sweep_vehicle_count": sweep_vehicle_count,
             }
@@ -1060,14 +1113,27 @@ def build_generation(
         as_of_date=generation_as_of,
         adapter=AdapterIdentity("quant-engine-schwab", ADAPTER_VERSION),
         coverage=CoverageClaim(
-            status=CoverageStatus.PARTIAL,
-            boundary=(
-                "8 mapped Schwab brokerage accounts from Developer API current, WCH history, and manual reference evidence"
+            status=(
+                CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
                 if current_accounts is not None
+                else CoverageStatus.PARTIAL
+            ),
+            boundary=(
+                f"8 mapped Schwab brokerage accounts from {current_transport}, WCH history, and manual reference evidence"
+                if current_transport is not None
                 else "8 mapped Schwab brokerage accounts from reviewed WCH and manual evidence"
             ),
             fact_types=(
-                ("current_balances", "historical_nav", "positions", "transactions")
+                (
+                    (
+                        "current_balances",
+                        "historical_nav",
+                        "positions",
+                        "transactions",
+                    )
+                    if current_balance_available_count == len(current_accounts)
+                    else ("historical_nav", "positions", "transactions")
+                )
                 if current_accounts is not None
                 else ("historical_nav", "positions", "transactions")
             ),
@@ -1077,7 +1143,7 @@ def build_generation(
                 if current_accounts is not None
                 else max(observed_dates)
             ),
-            known_gaps=known_gaps,
+            known_gaps=known_gaps if current_accounts is None else (),
         ),
         artifacts=(*artifacts, normalized_artifact),
         verification=VerificationStatus.VERIFIED,
@@ -1106,4 +1172,29 @@ def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, 
         ],
         "published": False,
         "transaction_count": len(catalog["transactions"]),  # type: ignore[arg-type]
+    }
+
+
+def publish_generation_candidate(
+    spec_path: Path, output_root: Path, generation_id: str
+) -> dict[str, object]:
+    """Rebuild the exact accepted candidate and atomically publish it."""
+
+    catalog, manifest, catalog_bytes = build_generation(spec_path)
+    if manifest.generation_id != generation_id:
+        raise SchwabGenerationError(
+            "rebuilt generation differs from accepted candidate"
+        )
+    manifest_path = stage_generation(output_root, manifest)
+    catalog_path = manifest_path.parent / "schwab-generation.json"
+    if catalog_path.exists() and catalog_path.read_bytes() != catalog_bytes:
+        raise SchwabGenerationError("staged catalog conflicts with existing bytes")
+    if not catalog_path.exists():
+        catalog_path.write_bytes(catalog_bytes)
+    pointer = publish_generation(output_root, generation_id)
+    return {
+        "catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+        "coverage_status": manifest.coverage.status.value,
+        "generation_id": pointer.generation_id,
+        "published": True,
     }
