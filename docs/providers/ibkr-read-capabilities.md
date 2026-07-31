@@ -86,8 +86,10 @@ separate inventory, schema, parser, and publication projects.
    and a User-Agent. Respect one request per second and ten requests per minute
    per token.
 3. Treat the returned reference code as a short-lived retrieval handle, not a
-   generation identity. Poll `/GetStatement` with bounded backoff only for the
-   documented generation-in-progress state.
+   generation identity. Poll `/GetStatement` only for documented error `1019`,
+   starting after 20 seconds and using bounded exponential backoff capped at
+   120 seconds and nine attempts. Any other response is terminal, and polling
+   never issues a second `/SendRequest`.
 4. Persist the exact response as immutable private source evidence before
    normalization. Reject HTML error pages, malformed XML, missing expected
    sections, reversed dates, unexpected account scope, and documented

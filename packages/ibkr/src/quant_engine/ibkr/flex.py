@@ -20,6 +20,8 @@ GET_STATEMENT_URL = (
     "https://ndcdyn.interactivebrokers.com/AccountManagement/"
     "FlexWebService/GetStatement"
 )
+_POLL_INITIAL_DELAY_SECONDS = 20.0
+_POLL_MAX_DELAY_SECONDS = 120.0
 _DATE = re.compile(r"^(\d{4})-?(\d{2})-?(\d{2})")
 _REQUIRED_SECTIONS = {
     "AccountInformation",
@@ -517,7 +519,11 @@ class FlexWebServiceClient:
                 f"Flex SendRequest failed with code {error or 'UNKNOWN'}"
             )
         for attempt in range(1, max_get_attempts + 1):
-            self._wait(1.0)
+            delay = min(
+                _POLL_INITIAL_DELAY_SECONDS * (2 ** (attempt - 1)),
+                _POLL_MAX_DELAY_SECONDS,
+            )
+            self._wait(delay)
             response = self._http_get(
                 GET_STATEMENT_URL,
                 {"q": reference, "t": service_parameter, "v": "3"},

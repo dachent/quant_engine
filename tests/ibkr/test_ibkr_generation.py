@@ -377,7 +377,33 @@ def test_flex_transport_is_injected_bounded_and_token_safe() -> None:
     assert synthetic_auth_value not in str(error.value)
     assert synthetic_auth_value not in repr(client)
     assert not responses
-    assert waits == [1.0, 1.0]
+    assert waits == [20.0, 40.0]
+
+
+def test_flex_transport_polling_backoff_is_bounded() -> None:
+    responses = [
+        b"<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF</ReferenceCode></FlexStatementResponse>",
+        *[
+            b"<FlexStatementResponse><Status>Fail</Status><ErrorCode>1019</ErrorCode></FlexStatementResponse>"
+            for _ in range(9)
+        ],
+    ]
+
+    def get(url: str, params: object, headers: object) -> bytes:
+        del url, params, headers
+        return responses.pop(0)
+
+    waits: list[float] = []
+    client = FlexWebServiceClient(
+        credential_provider=lambda: "SYNTHETIC-AUTH-VALUE",
+        http_get=get,
+        wait=waits.append,
+        user_agent="quant-engine-synthetic-test",
+    )
+    with pytest.raises(FlexValidationError, match="did not complete in bounds"):
+        client.fetch_report("123", max_get_attempts=9)
+    assert waits == [20.0, 40.0, 80.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0]
+    assert not responses
 
 
 def test_tws_boundary_reconciles_without_order_surface() -> None:
