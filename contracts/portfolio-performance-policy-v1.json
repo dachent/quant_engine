@@ -1,0 +1,85 @@
+{
+  "classification": "SYNTHETIC",
+  "composite_twr_cases": [
+    {
+      "case_id": "beginning_capital_weighted",
+      "expected_return": "0.01",
+      "members": [
+        {"beginning_capital": "100", "return": "0.10"},
+        {"beginning_capital": "300", "return": "-0.02"}
+      ]
+    }
+  ],
+  "evidence_layers": [
+    "ACCOUNT_LIVE",
+    "PROVIDER_LIVE",
+    "OFFICIAL_VEHICLE",
+    "PREDECESSOR",
+    "SHADOW_OOS",
+    "BACKTEST",
+    "CONCEPTUAL_STRESS"
+  ],
+  "mwr_cases": [
+    {
+      "case_id": "one_year_xirr",
+      "cash_flows": [
+        {"date": "2025-01-01", "investor_cash_flow": "-100"},
+        {"date": "2026-01-01", "investor_cash_flow": "110"}
+      ],
+      "day_count": "ACTUAL_365",
+      "expected_return": "0.10"
+    }
+  ],
+  "policy_version": "PORT-PERF-1",
+  "risk_cases": [
+    {
+      "case_id": "complete_hwm_index",
+      "daily_returns": ["0.10", "-0.05", "-0.10"],
+      "expected_drawdown": "0.145",
+      "full_systematic_coverage": true
+    },
+    {
+      "case_id": "correlation_one_below_limit",
+      "expected_readiness": "ELIGIBLE_FOR_REVIEW",
+      "expected_stress": "0.14",
+      "hwm_available": true,
+      "strategies": [
+        {"stressed_loss": "0.10", "weight": "0.60"},
+        {"stressed_loss": "0.20", "weight": "0.40"}
+      ]
+    },
+    {
+      "case_id": "missing_full_hwm_fails_closed",
+      "expected_hwm": "UNAVAILABLE",
+      "expected_readiness": "DO_NOT_EXPAND_SYSTEMATIC_RISK",
+      "full_systematic_coverage": false
+    }
+  ],
+  "schema_version": 1,
+  "status_cases": [
+    {"case_id": "missing_nav", "expected": "UNAVAILABLE"},
+    {"case_id": "missing_fx", "expected": "UNAVAILABLE"},
+    {"case_id": "missing_strategy_mapping", "expected": "UNMAPPED"},
+    {"case_id": "non_trading_date", "expected": "NOT_A_GAP"},
+    {"case_id": "missing_trading_day", "expected": "UNAVAILABLE"}
+  ],
+  "twr_cases": [
+    {
+      "case_id": "exact_timestamp_segments",
+      "expected_return": "0.134375",
+      "flags": [],
+      "subperiods": [
+        {"beginning_value": "100", "ending_value": "110"},
+        {"beginning_value": "160", "ending_value": "165"}
+      ]
+    },
+    {
+      "beginning_value": "100",
+      "case_id": "date_only_end_of_day",
+      "ending_value": "115",
+      "expected_return": "0.05",
+      "flags": ["INFERRED_TIMING"],
+      "net_external_flow": "10"
+    }
+  ]
+}
