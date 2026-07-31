@@ -75,18 +75,19 @@ complete portfolio authority.
 dataMatrixport/
   config/                         # local hash-bound acceptance spec
   source-manifests/               # source/staging inventory proof
-  normalized-runs/20260726T041427.925Z/
-                                    # parity-proved CSV/reports/SQLite/XLSX
   source-runs/20260726T041427.925Z/
-                                    # failed, explicitly non-authoritative raw-copy staging
+                                    # full 2,006-file accepted source run
+  normalized-runs/20260726T041427.925Z/
+                                    # retained earlier normalized-copy staging
   generations/<generation-id>/
     generation.json
     catalog.json
 ```
 
 Real responses, account data, request manifests, normalized CSVs, SQLite, and
-workbooks remain outside Git. Hydrating and copying all 2,006 source-run files
-exceeded the bounded attempt after 951 files. That incomplete copy remains
-explicitly failed and non-authoritative. The useful 92-file normalized slice
-has exact source/destination hash parity; the complete raw corpus and legacy
-source remain untouched until a separately approved cutover.
+workbooks remain outside Git. The first bounded copy attempts stopped during
+OneDrive hydration and were retained as failed-attempt evidence. A resumed,
+non-deleting copy completed all 2,006 files and 16,377,712 bytes with zero
+missing, extra, or different hashes. The complete destination source run is
+the accepted local evidence copy. The legacy source remains untouched as
+recovery evidence until a separately approved source-removal cutover.
