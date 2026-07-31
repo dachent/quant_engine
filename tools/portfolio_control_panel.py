@@ -94,6 +94,18 @@ def _hash(path: Path) -> str:
     return hash_file(path)[0]
 
 
+def _template_bytes(path: Path) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise ControlPanelValidationError(f"template is missing or linked: {path.name}")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ControlPanelValidationError(
+            f"template is not readable UTF-8: {path.name}"
+        ) from exc
+    return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
 def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
     try:
         pointer = read_current(root)
@@ -264,7 +276,8 @@ def _panel_data(
     appendix = _object(source_contract.get("frozen_appendix"), "frozen_appendix")
     baseline = _object(report.get("baseline"), "baseline")
     template_hashes = {
-        name: _hash(template_root / name) for name in ("index.html", "app.js")
+        name: hashlib.sha256(_template_bytes(template_root / name)).hexdigest()
+        for name in ("index.html", "app.js")
     }
     provenance = _objects(report.get("provenance"), "provenance")
     provenance = [
@@ -360,9 +373,9 @@ def _rendered_files(
     data = _panel_data(report, report_identity, legacy, source, template_root)
     data_bytes = canonical_json_bytes(data)
     files = {
-        "index.html": (template_root / "index.html").read_bytes(),
+        "index.html": _template_bytes(template_root / "index.html"),
         "styles.css": (legacy_panel / "styles.css").read_bytes(),
-        "app.js": (template_root / "app.js").read_bytes(),
+        "app.js": _template_bytes(template_root / "app.js"),
         "data/dashboard_data.json": data_bytes,
         "data/dashboard_data.js": b"window.PORTFOLIO_DATA = " + data_bytes + b";\n",
     }

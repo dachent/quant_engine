@@ -308,6 +308,39 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     assert result["checks_passed"] == result["checks_total"]
 
 
+def test_template_line_endings_do_not_change_identity(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    lf_template = tmp_path / "template-lf"
+    crlf_template = tmp_path / "template-crlf"
+    for name in ("index.html", "app.js"):
+        normalized = (
+            (panel.DEFAULT_TEMPLATE_ROOT / name)
+            .read_text(encoding="utf-8")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+        )
+        lf_template.mkdir(parents=True, exist_ok=True)
+        crlf_template.mkdir(parents=True, exist_ok=True)
+        (lf_template / name).write_bytes(normalized.encode("utf-8"))
+        (crlf_template / name).write_bytes(
+            normalized.replace("\n", "\r\n").encode("utf-8")
+        )
+    lf = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        tmp_path / "lf-output",
+        lf_template,
+    )
+    crlf = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        tmp_path / "crlf-output",
+        crlf_template,
+    )
+    assert lf["panel_id"] == crlf["panel_id"]
+
+
 def test_source_drift_fails_closed(inputs: dict[str, Path]) -> None:
     (inputs["legacy"] / "styles.css").write_text("changed", encoding="utf-8")
     with pytest.raises(panel.ControlPanelValidationError, match="source hash differs"):
