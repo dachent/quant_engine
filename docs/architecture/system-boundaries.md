@@ -183,6 +183,13 @@ provider policy: HAR-first, with API use only for a capability explicitly marked
 unsupported by HAR or an explicit user-selected API path. A HAR failure is not
 permission to fall back.
 
+The generalized legacy tool source was retired after its curated anchors and
+behavior were accepted in this package. Its complete five-file, 148,235-byte
+original is retained read-only in the local `xBin/cutover-recovery` boundary;
+the legacy source location is absent. The pre/post-move SHA-256 parity proof
+identity is
+`acc02a53860429882bdc6c5f0cfc18b42068c8248a8e6518f7f2b067090f4f1f`.
+
 ## Portfolio domain boundary
 
 The canonical ledger owns:
