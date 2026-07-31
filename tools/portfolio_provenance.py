@@ -1,0 +1,831 @@
+#!/usr/bin/env python3
+"""Build and publish a private, hash-anchored portfolio provenance catalog.
+
+The repository contains this validator/builder, never the real specification or
+catalog. Every source file is explicit; this tool never walks a source tree.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from datetime import date
+import hashlib
+import io
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import sys
+from typing import Any, Final, Mapping, Sequence
+
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationConflictError,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+    hash_file,
+    publish_generation,
+    stage_generation,
+)
+
+
+SPEC_SCHEMA_VERSION: Final = 1
+CATALOG_SCHEMA_VERSION: Final = 1
+BUILDER_VERSION: Final = "1.0.0"
+POLICY_VERSION: Final = "PORT-PERF-1"
+CURRENT_STRATEGY_COUNT: Final = 9
+
+_IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_EVIDENCE_LAYERS = frozenset(
+    {
+        "ACCOUNT_LIVE",
+        "PROVIDER_LIVE",
+        "OFFICIAL_VEHICLE",
+        "PREDECESSOR",
+        "SHADOW_OOS",
+        "BACKTEST",
+        "CONCEPTUAL_STRESS",
+    }
+)
+_DISPOSITIONS = frozenset(
+    {
+        "AUTHORITATIVE_TRACKER_EVIDENCE",
+        "GENERATED_DERIVATIVE",
+        "HISTORICAL_REFERENCE",
+        "PRODUCING_CODE",
+        "PROVENANCE_ANCHOR",
+        "SEMANTIC_REFERENCE",
+        "STATIC_LINEAGE_MAP",
+    }
+)
+_COST_STATUSES = frozenset({"KNOWN", "PARTIAL", "UNAVAILABLE"})
+_COVERAGE_STATUSES = frozenset(
+    {"COMPLETE_WITHIN_DECLARED_BOUNDARY", "PARTIAL", "FAILED"}
+)
+_ASSUMPTION_STATUSES = frozenset({"ACCEPTED", "INFERRED", "UNRESOLVED"})
+
+_ASSIGNMENT_FIELDS = (
+    "institution",
+    "account",
+    "strategy",
+    "period_start",
+    "period_end",
+    "source",
+)
+_CORRECTION_FIELDS = (
+    "institution",
+    "account",
+    "strategy",
+    "field",
+    "old_value",
+    "new_value",
+    "evidence",
+)
+_OPEN_GAP_FIELDS = (
+    "institution",
+    "account",
+    "last_known_strategy",
+    "control_file_end_date",
+    "raw_data_last_active_date",
+    "note",
+)
+
+
+class ProvenanceValidationError(ValueError):
+    """The private specification or a referenced artifact is invalid."""
+
+
+def _strict_keys(
+    value: Mapping[str, Any], expected: set[str], object_name: str
+) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise ProvenanceValidationError(
+            f"{object_name} keys differ: missing={sorted(expected - actual)}, "
+            f"unexpected={sorted(actual - expected)}"
+        )
+
+
+def _text(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ProvenanceValidationError(f"{field_name} must be a non-empty string")
+    return value.strip()
+
+
+def _identifier(value: object, field_name: str) -> str:
+    parsed = _text(value, field_name)
+    if _IDENTIFIER.fullmatch(parsed) is None:
+        raise ProvenanceValidationError(f"{field_name} is not a portable identifier")
+    return parsed
+
+
+def _date(value: object, field_name: str) -> date:
+    parsed_text = _text(value, field_name)
+    try:
+        parsed = date.fromisoformat(parsed_text)
+    except ValueError as exc:
+        raise ProvenanceValidationError(f"{field_name} must be an ISO date") from exc
+    if parsed.isoformat() != parsed_text:
+        raise ProvenanceValidationError(f"{field_name} must use canonical ISO format")
+    return parsed
+
+
+def _object(value: object, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise ProvenanceValidationError(f"{field_name} must be an object")
+    return value
+
+
+def _objects(value: object, field_name: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ProvenanceValidationError(f"{field_name} must be an array")
+    return [_object(item, f"{field_name}[]") for item in value]
+
+
+def _strings(value: object, field_name: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ProvenanceValidationError(f"{field_name} must be an array")
+    parsed = tuple(sorted({_text(item, f"{field_name}[]") for item in value}))
+    return parsed
+
+
+def _canonical_bytes(value: Mapping[str, Any]) -> bytes:
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
+
+
+def _load_spec(path: Path) -> dict[str, Any]:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProvenanceValidationError("spec is not readable UTF-8 JSON") from exc
+    spec = _object(parsed, "spec")
+    _strict_keys(
+        spec,
+        {
+            "acquisition_date",
+            "as_of_date",
+            "assumptions",
+            "policy_version",
+            "reserve_account",
+            "roots",
+            "schema_version",
+            "source_groups",
+            "strategies",
+            "tracker_imports",
+        },
+        "spec",
+    )
+    if spec["schema_version"] != SPEC_SCHEMA_VERSION:
+        raise ProvenanceValidationError("spec schema_version is unsupported")
+    if spec["policy_version"] != POLICY_VERSION:
+        raise ProvenanceValidationError("spec policy_version is unsupported")
+    _date(spec["as_of_date"], "spec.as_of_date")
+    _date(spec["acquisition_date"], "spec.acquisition_date")
+    return spec
+
+
+def _portable_relative(value: object, field_name: str) -> str:
+    parsed = _text(value, field_name)
+    path = PurePosixPath(parsed)
+    if (
+        path.is_absolute()
+        or "\\" in parsed
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ProvenanceValidationError(
+            f"{field_name} must be a portable relative path"
+        )
+    return parsed
+
+
+def _source_path(root: Path, relative_path: str) -> Path:
+    candidate = root.joinpath(*PurePosixPath(relative_path).parts)
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved_candidate = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ProvenanceValidationError(
+            f"source is missing or unavailable: {relative_path}"
+        ) from exc
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ProvenanceValidationError(
+            f"source escapes its declared root: {relative_path}"
+        ) from exc
+    if not resolved_candidate.is_file():
+        raise ProvenanceValidationError(f"source is not a file: {relative_path}")
+    return resolved_candidate
+
+
+def _validate_roots(value: object) -> dict[str, Path]:
+    roots = _object(value, "roots")
+    if not roots:
+        raise ProvenanceValidationError("roots must not be empty")
+    accepted: dict[str, Path] = {}
+    for raw_identifier, raw_path in roots.items():
+        identifier = _identifier(raw_identifier, "roots key")
+        path = Path(_text(raw_path, f"roots.{identifier}"))
+        if not path.is_absolute():
+            raise ProvenanceValidationError(f"root {identifier} must be absolute")
+        if not path.is_dir():
+            raise ProvenanceValidationError(f"root {identifier} is not a directory")
+        accepted[identifier] = path
+    return accepted
+
+
+def _source_groups(
+    value: object, roots: Mapping[str, Path], generation_as_of: date
+) -> tuple[
+    list[dict[str, Any]], tuple[SourceArtifact, ...], dict[tuple[str, str], str]
+]:
+    groups = _objects(value, "source_groups")
+    if not groups:
+        raise ProvenanceValidationError("source_groups must not be empty")
+    group_ids: set[str] = set()
+    physical_paths: set[str] = set()
+    catalog_records: list[dict[str, Any]] = []
+    artifacts: list[SourceArtifact] = []
+    membership: dict[tuple[str, str], str] = {}
+    for group in groups:
+        _strict_keys(
+            group,
+            {
+                "as_of_date",
+                "disposition",
+                "expected_hashes",
+                "relative_paths",
+                "root_id",
+                "source_id",
+            },
+            "source_group",
+        )
+        source_id = _identifier(group["source_id"], "source_group.source_id")
+        if source_id in group_ids:
+            raise ProvenanceValidationError(f"duplicate source_id: {source_id}")
+        group_ids.add(source_id)
+        root_id = _identifier(group["root_id"], "source_group.root_id")
+        try:
+            root = roots[root_id]
+        except KeyError as exc:
+            raise ProvenanceValidationError(
+                f"source group references unknown root: {root_id}"
+            ) from exc
+        source_as_of = _date(group["as_of_date"], "source_group.as_of_date")
+        if source_as_of > generation_as_of:
+            raise ProvenanceValidationError("source as_of_date exceeds generation")
+        disposition = _text(group["disposition"], "source_group.disposition")
+        if disposition not in _DISPOSITIONS:
+            raise ProvenanceValidationError(
+                f"unknown source disposition: {disposition}"
+            )
+        relative_paths = _strings(group["relative_paths"], "relative_paths")
+        if not relative_paths:
+            raise ProvenanceValidationError(
+                f"source group {source_id} has no explicit files"
+            )
+        relative_paths = tuple(
+            _portable_relative(item, "source_group.relative_path")
+            for item in relative_paths
+        )
+        expected_hashes_raw = _object(
+            group["expected_hashes"], "source_group.expected_hashes"
+        )
+        expected_hashes: dict[str, str] = {}
+        for raw_path, raw_sha256 in expected_hashes_raw.items():
+            relative_path = _portable_relative(raw_path, "expected_hashes key")
+            sha256 = _text(raw_sha256, f"expected_hashes.{relative_path}")
+            if _SHA256.fullmatch(sha256) is None:
+                raise ProvenanceValidationError(
+                    "expected hash must be lower-case SHA-256"
+                )
+            expected_hashes[relative_path] = sha256
+        if not set(expected_hashes) <= set(relative_paths):
+            raise ProvenanceValidationError(
+                f"source group {source_id} has expected hashes for undeclared files"
+            )
+
+        files: list[dict[str, Any]] = []
+        for index, relative_path in enumerate(relative_paths, start=1):
+            source_path = _source_path(root, relative_path)
+            physical_key = os.path.normcase(str(source_path))
+            if physical_key in physical_paths:
+                raise ProvenanceValidationError(
+                    f"physical source is declared more than once: {relative_path}"
+                )
+            physical_paths.add(physical_key)
+            sha256, size_bytes = hash_file(source_path)
+            expected = expected_hashes.get(relative_path)
+            if expected is not None and expected != sha256:
+                raise ProvenanceValidationError(
+                    f"source hash differs from expected value: {source_id}/{relative_path}"
+                )
+            files.append(
+                {
+                    "relative_path": relative_path,
+                    "sha256": sha256,
+                    "size_bytes": size_bytes,
+                }
+            )
+            artifacts.append(
+                SourceArtifact(
+                    artifact_id=f"sources/{source_id}/{index:04d}",
+                    sha256=sha256,
+                    size_bytes=size_bytes,
+                    as_of_date=source_as_of,
+                    schema_name="portfolio-provenance-source",
+                    schema_version="1",
+                )
+            )
+            membership[(root_id, relative_path)] = source_id
+        catalog_records.append(
+            {
+                "as_of_date": source_as_of.isoformat(),
+                "disposition": disposition,
+                "files": files,
+                "root_id": root_id,
+                "source_id": source_id,
+            }
+        )
+    catalog_records.sort(key=lambda item: str(item["source_id"]))
+    return catalog_records, tuple(artifacts), membership
+
+
+def _validate_strategies(
+    value: object, source_ids: set[str]
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    strategies = _objects(value, "strategies")
+    if len(strategies) != CURRENT_STRATEGY_COUNT:
+        raise ProvenanceValidationError(
+            f"first baseline requires exactly {CURRENT_STRATEGY_COUNT} current strategies"
+        )
+    accepted: list[dict[str, Any]] = []
+    strategy_ids: set[str] = set()
+    alias_map: dict[str, str] = {}
+    for strategy in strategies:
+        _strict_keys(
+            strategy,
+            {
+                "aliases",
+                "cost_status",
+                "coverage_status",
+                "economic_family",
+                "evidence_routes",
+                "gaps",
+                "name",
+                "strategy_id",
+                "version_ref",
+            },
+            "strategy",
+        )
+        strategy_id = _identifier(strategy["strategy_id"], "strategy.strategy_id")
+        if strategy_id in strategy_ids:
+            raise ProvenanceValidationError(f"duplicate strategy_id: {strategy_id}")
+        strategy_ids.add(strategy_id)
+        name = _text(strategy["name"], "strategy.name")
+        aliases = _strings(strategy["aliases"], "strategy.aliases")
+        if not aliases:
+            raise ProvenanceValidationError(f"strategy {strategy_id} has no aliases")
+        for alias in (name, *aliases):
+            key = alias.casefold()
+            prior = alias_map.get(key)
+            if prior is not None and prior != strategy_id:
+                raise ProvenanceValidationError(f"strategy alias is ambiguous: {alias}")
+            alias_map[key] = strategy_id
+        cost_status = _text(strategy["cost_status"], "strategy.cost_status")
+        if cost_status not in _COST_STATUSES:
+            raise ProvenanceValidationError(f"unknown cost status: {cost_status}")
+        coverage_status = _text(strategy["coverage_status"], "strategy.coverage_status")
+        if coverage_status not in _COVERAGE_STATUSES:
+            raise ProvenanceValidationError(
+                f"unknown strategy coverage status: {coverage_status}"
+            )
+        gaps = _strings(strategy["gaps"], "strategy.gaps")
+        if coverage_status != "COMPLETE_WITHIN_DECLARED_BOUNDARY" and not gaps:
+            raise ProvenanceValidationError(
+                f"strategy {strategy_id} requires an explicit coverage gap"
+            )
+        routes: list[dict[str, str]] = []
+        for route in _objects(strategy["evidence_routes"], "evidence_routes"):
+            _strict_keys(route, {"evidence_layer", "purpose", "source_id"}, "route")
+            source_id = _identifier(route["source_id"], "route.source_id")
+            if source_id not in source_ids:
+                raise ProvenanceValidationError(
+                    f"strategy route references unknown source: {source_id}"
+                )
+            evidence_layer = _text(route["evidence_layer"], "route.evidence_layer")
+            if evidence_layer not in _EVIDENCE_LAYERS:
+                raise ProvenanceValidationError(
+                    f"unknown evidence layer: {evidence_layer}"
+                )
+            routes.append(
+                {
+                    "evidence_layer": evidence_layer,
+                    "purpose": _text(route["purpose"], "route.purpose"),
+                    "source_id": source_id,
+                }
+            )
+        if not routes:
+            raise ProvenanceValidationError(
+                f"strategy {strategy_id} has no source route"
+            )
+        version_ref = strategy["version_ref"]
+        if version_ref is not None:
+            version_ref = _text(version_ref, "strategy.version_ref")
+        accepted.append(
+            {
+                "aliases": list(aliases),
+                "cost_status": cost_status,
+                "coverage_status": coverage_status,
+                "economic_family": _text(
+                    strategy["economic_family"], "strategy.economic_family"
+                ),
+                "evidence_routes": sorted(
+                    routes,
+                    key=lambda item: (
+                        item["source_id"],
+                        item["evidence_layer"],
+                        item["purpose"],
+                    ),
+                ),
+                "gaps": list(gaps),
+                "name": name,
+                "strategy_id": strategy_id,
+                "version_ref": version_ref,
+            }
+        )
+    accepted.sort(key=lambda item: str(item["strategy_id"]))
+    return accepted, alias_map
+
+
+def _import_ref(
+    value: object,
+    field_name: str,
+    roots: Mapping[str, Path],
+    membership: Mapping[tuple[str, str], str],
+) -> tuple[Path, str]:
+    ref = _object(value, field_name)
+    _strict_keys(ref, {"relative_path", "root_id"}, field_name)
+    root_id = _identifier(ref["root_id"], f"{field_name}.root_id")
+    relative_path = _portable_relative(
+        ref["relative_path"], f"{field_name}.relative_path"
+    )
+    try:
+        root = roots[root_id]
+    except KeyError as exc:
+        raise ProvenanceValidationError(
+            f"{field_name} references unknown root: {root_id}"
+        ) from exc
+    try:
+        source_id = membership[(root_id, relative_path)]
+    except KeyError as exc:
+        raise ProvenanceValidationError(
+            f"{field_name} is not present in a source group"
+        ) from exc
+    return _source_path(root, relative_path), source_id
+
+
+def _read_csv(
+    path: Path, expected_fields: Sequence[str], object_name: str
+) -> list[dict[str, str]]:
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ProvenanceValidationError(
+            f"{object_name} is not readable UTF-8 CSV"
+        ) from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if tuple(reader.fieldnames or ()) != tuple(expected_fields):
+        raise ProvenanceValidationError(f"{object_name} header differs")
+    rows: list[dict[str, str]] = []
+    for row in reader:
+        if None in row or any(value is None for value in row.values()):
+            raise ProvenanceValidationError(f"{object_name} has a malformed row")
+        rows.append({key: value or "" for key, value in row.items() if key is not None})
+    return rows
+
+
+def _record_id(prefix: str, value: Mapping[str, Any]) -> str:
+    digest = hashlib.sha256(_canonical_bytes(value)).hexdigest()[:20]
+    return f"{prefix}-{digest}"
+
+
+def _import_tracker(
+    value: object,
+    *,
+    roots: Mapping[str, Path],
+    membership: Mapping[tuple[str, str], str],
+    strategies: Sequence[Mapping[str, Any]],
+    alias_map: Mapping[str, str],
+    reserve_value: object,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    imports = _object(value, "tracker_imports")
+    _strict_keys(
+        imports,
+        {"assignments", "corrections", "open_gaps", "unmapped_labels"},
+        "tracker_imports",
+    )
+    assignment_path, assignment_source = _import_ref(
+        imports["assignments"], "tracker_imports.assignments", roots, membership
+    )
+    correction_path, correction_source = _import_ref(
+        imports["corrections"], "tracker_imports.corrections", roots, membership
+    )
+    gap_path, gap_source = _import_ref(
+        imports["open_gaps"], "tracker_imports.open_gaps", roots, membership
+    )
+    unmapped_labels = {
+        item.casefold()
+        for item in _strings(imports["unmapped_labels"], "unmapped_labels")
+    }
+
+    reserve = _object(reserve_value, "reserve_account")
+    _strict_keys(
+        reserve, {"account_id", "aliases", "name", "source_routes"}, "reserve_account"
+    )
+    reserve_id = _identifier(reserve["account_id"], "reserve_account.account_id")
+    reserve_routes = _strings(reserve["source_routes"], "reserve_account.source_routes")
+    known_source_ids = set(membership.values())
+    if not reserve_routes or not set(reserve_routes) <= known_source_ids:
+        raise ProvenanceValidationError("reserve source routes are missing or unknown")
+
+    assignment_rows = _read_csv(assignment_path, _ASSIGNMENT_FIELDS, "assignments")
+    accounts_by_alias: dict[str, dict[str, Any]] = {}
+    assignments: list[dict[str, Any]] = []
+    strategy_ids = {str(item["strategy_id"]) for item in strategies}
+    for row in assignment_rows:
+        institution = _text(row["institution"], "assignment.institution")
+        account = row["account"].strip()
+        source_alias = institution if not account else f"{institution} | {account}"
+        account_id = (
+            f"account-{hashlib.sha256(source_alias.encode('utf-8')).hexdigest()[:16]}"
+        )
+        accounts_by_alias[source_alias] = {
+            "account_id": account_id,
+            "aliases": [source_alias],
+            "name": source_alias,
+            "role": "INVESTMENT",
+            "source_routes": [assignment_source],
+        }
+        observed_label = _text(row["strategy"], "assignment.strategy")
+        strategy_id = alias_map.get(observed_label.casefold())
+        if strategy_id is None and observed_label.casefold() not in unmapped_labels:
+            raise ProvenanceValidationError(
+                f"tracker strategy label is neither mapped nor approved unmapped: {observed_label}"
+            )
+        if strategy_id is not None and strategy_id not in strategy_ids:
+            raise ProvenanceValidationError("tracker alias maps to an unknown strategy")
+        period_start = row["period_start"].strip()
+        period_end = row["period_end"].strip()
+        if period_start:
+            _date(period_start, "assignment.period_start")
+        if period_end:
+            _date(period_end, "assignment.period_end")
+        if (
+            period_start
+            and period_end
+            and date.fromisoformat(period_end) < date.fromisoformat(period_start)
+        ):
+            raise ProvenanceValidationError("assignment interval is reversed")
+        payload: dict[str, Any] = {
+            "account_id": account_id,
+            "effective_end": period_end or None,
+            "effective_start": period_start or None,
+            "mapping_status": "MAPPED" if strategy_id is not None else "UNMAPPED",
+            "observed_label": observed_label,
+            "source_classification": _text(row["source"], "assignment.source"),
+            "source_id": assignment_source,
+            "strategy_id": strategy_id,
+        }
+        assignments.append(
+            {"assignment_id": _record_id("assignment", payload), **payload}
+        )
+
+    accounts = sorted(
+        accounts_by_alias.values(), key=lambda item: str(item["account_id"])
+    )
+    accounts.append(
+        {
+            "account_id": reserve_id,
+            "aliases": list(_strings(reserve["aliases"], "reserve_account.aliases")),
+            "name": _text(reserve["name"], "reserve_account.name"),
+            "role": "RESERVE",
+            "source_routes": list(reserve_routes),
+        }
+    )
+    accounts.sort(key=lambda item: str(item["account_id"]))
+
+    corrections: list[dict[str, Any]] = []
+    for row in _read_csv(correction_path, _CORRECTION_FIELDS, "corrections"):
+        payload = {"fields": row, "source_id": correction_source}
+        corrections.append(
+            {"correction_id": _record_id("correction", payload), **payload}
+        )
+    corrections.sort(key=lambda item: str(item["correction_id"]))
+
+    open_gaps: list[dict[str, Any]] = []
+    for row in _read_csv(gap_path, _OPEN_GAP_FIELDS, "open_gaps"):
+        payload = {"fields": row, "source_id": gap_source}
+        open_gaps.append({"gap_id": _record_id("gap", payload), **payload})
+    open_gaps.sort(key=lambda item: str(item["gap_id"]))
+    assignments.sort(key=lambda item: str(item["assignment_id"]))
+    return accounts, assignments, corrections, open_gaps
+
+
+def _validate_assumptions(value: object, source_ids: set[str]) -> list[dict[str, Any]]:
+    assumptions: list[dict[str, Any]] = []
+    identifiers: set[str] = set()
+    for assumption in _objects(value, "assumptions"):
+        _strict_keys(
+            assumption,
+            {"assumption_id", "description", "source_routes", "status"},
+            "assumption",
+        )
+        assumption_id = _identifier(
+            assumption["assumption_id"], "assumption.assumption_id"
+        )
+        if assumption_id in identifiers:
+            raise ProvenanceValidationError(f"duplicate assumption_id: {assumption_id}")
+        identifiers.add(assumption_id)
+        status = _text(assumption["status"], "assumption.status")
+        if status not in _ASSUMPTION_STATUSES:
+            raise ProvenanceValidationError(f"unknown assumption status: {status}")
+        routes = _strings(assumption["source_routes"], "assumption.source_routes")
+        if not routes or not set(routes) <= source_ids:
+            raise ProvenanceValidationError(
+                f"assumption {assumption_id} has missing or unknown source routes"
+            )
+        assumptions.append(
+            {
+                "assumption_id": assumption_id,
+                "description": _text(
+                    assumption["description"], "assumption.description"
+                ),
+                "source_routes": list(routes),
+                "status": status,
+            }
+        )
+    assumptions.sort(key=lambda item: str(item["assumption_id"]))
+    return assumptions
+
+
+def build_catalog(
+    spec_path: Path,
+) -> tuple[dict[str, Any], GenerationManifest, bytes]:
+    """Validate the private spec and return catalog, manifest, and bytes."""
+
+    spec = _load_spec(spec_path)
+    generation_as_of = _date(spec["as_of_date"], "spec.as_of_date")
+    roots = _validate_roots(spec["roots"])
+    source_records, source_artifacts, membership = _source_groups(
+        spec["source_groups"], roots, generation_as_of
+    )
+    source_ids = {str(item["source_id"]) for item in source_records}
+    strategies, alias_map = _validate_strategies(spec["strategies"], source_ids)
+    accounts, assignments, corrections, open_gaps = _import_tracker(
+        spec["tracker_imports"],
+        roots=roots,
+        membership=membership,
+        strategies=strategies,
+        alias_map=alias_map,
+        reserve_value=spec["reserve_account"],
+    )
+    assumptions = _validate_assumptions(spec["assumptions"], source_ids)
+    catalog: dict[str, Any] = {
+        "accounts": accounts,
+        "acquisition_date": _date(
+            spec["acquisition_date"], "spec.acquisition_date"
+        ).isoformat(),
+        "as_of_date": generation_as_of.isoformat(),
+        "assignments": assignments,
+        "assumptions": assumptions,
+        "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+        "corrections": corrections,
+        "open_gaps": open_gaps,
+        "policy_version": POLICY_VERSION,
+        "source_artifacts": source_records,
+        "strategies": strategies,
+    }
+    catalog_bytes = _canonical_bytes(catalog)
+    catalog_artifact = SourceArtifact(
+        artifact_id="normalized/portfolio-provenance.json",
+        sha256=hashlib.sha256(catalog_bytes).hexdigest(),
+        size_bytes=len(catalog_bytes),
+        as_of_date=generation_as_of,
+        schema_name="portfolio-provenance-catalog",
+        schema_version=str(CATALOG_SCHEMA_VERSION),
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=generation_as_of,
+        adapter=AdapterIdentity("portfolio-provenance-builder", BUILDER_VERSION),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary=(
+                "explicitly configured portfolio provenance sources, accounts, "
+                "and nine current strategies; data completeness remains in catalog gaps"
+            ),
+            fact_types=(
+                "accounts",
+                "assignments",
+                "assumptions",
+                "corrections",
+                "source artifacts",
+                "strategies",
+            ),
+            observed_start=generation_as_of,
+            observed_end=generation_as_of,
+        ),
+        artifacts=(*source_artifacts, catalog_artifact),
+        verification=VerificationStatus.VERIFIED,
+    )
+    return catalog, manifest, catalog_bytes
+
+
+def stage_catalog(spec_path: Path, output_root: Path) -> dict[str, Any]:
+    catalog, manifest, catalog_bytes = build_catalog(spec_path)
+    manifest_path = stage_generation(output_root, manifest)
+    catalog_path = manifest_path.parent / "portfolio-provenance.json"
+    try:
+        descriptor = os.open(
+            catalog_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+    except FileExistsError:
+        if catalog_path.read_bytes() != catalog_bytes:
+            raise GenerationConflictError(
+                "generation catalog already exists with different bytes"
+            )
+    else:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(catalog_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+    return {
+        "account_count": len(catalog["accounts"]),
+        "assignment_count": len(catalog["assignments"]),
+        "assumption_count": len(catalog["assumptions"]),
+        "catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+        "correction_count": len(catalog["corrections"]),
+        "generation_id": manifest.generation_id,
+        "open_gap_count": len(catalog["open_gaps"]),
+        "source_file_count": sum(
+            len(item["files"]) for item in catalog["source_artifacts"]
+        ),
+        "strategy_count": len(catalog["strategies"]),
+    }
+
+
+def publish_catalog(
+    spec_path: Path, output_root: Path, generation_id: str
+) -> dict[str, Any]:
+    evidence = stage_catalog(spec_path, output_root)
+    if evidence["generation_id"] != generation_id:
+        raise ProvenanceValidationError(
+            "requested generation differs from the current spec and source content"
+        )
+    pointer = publish_generation(output_root, generation_id)
+    return {**evidence, "publication_state": pointer.state.value}
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for command in ("stage", "publish"):
+        command_parser = subparsers.add_parser(command)
+        command_parser.add_argument("--spec", type=Path, required=True)
+        command_parser.add_argument("--output-root", type=Path, required=True)
+        if command == "publish":
+            command_parser.add_argument("--generation-id", required=True)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        if args.command == "stage":
+            result = stage_catalog(args.spec, args.output_root)
+        else:
+            result = publish_catalog(args.spec, args.output_root, args.generation_id)
+    except (OSError, ProvenanceValidationError, GenerationConflictError) as exc:
+        print(f"portfolio-provenance: FAIL: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
