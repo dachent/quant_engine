@@ -16,6 +16,9 @@ without preserving stale calculations or hard-coded operator conclusions.
   network, provider, broker, order, deployment, or live-refresh path.
 - Missing positions, FX, flows, NAV, mappings, costs, or performance remain
   `FAILED`, `PARTIAL`, `UNAVAILABLE`, or `UNMAPPED`.
+- The accepted portfolio inputs resolve to governed private source runs. The
+  original external tracker and allocation roots have completed verified
+  cutover and are not runtime dependencies.
 
 The source contract in
 `contracts/portfolio-control-panel-source-v1.json` records the audited shell,
