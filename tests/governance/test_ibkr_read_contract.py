@@ -77,7 +77,13 @@ def test_mapping_covers_existing_ledger_records_and_explicit_gaps() -> None:
     assert contract["strategy_mapping"]["authority"] == (
         "ACCEPTED_EFFECTIVE_DATED_ACCOUNT_STRATEGY_ASSIGNMENT"
     )
-    assert any("CorporateAction" in gap for gap in contract["known_gaps"])
+    corporate = next(
+        item
+        for item in contract["fact_mappings"]
+        if item["target_record"] == "CorporateAction"
+    )
+    assert "verification" in corporate
+    assert not any("CorporateAction" in gap for gap in contract["known_gaps"])
     assert any(
         "Five statement-level account identities" in gap
         for gap in contract["known_gaps"]

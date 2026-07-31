@@ -267,7 +267,7 @@ source = { editable = "packages/core" }
 
 [[package]]
 name = "quant-engine-ibkr"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/ibkr" }
 dependencies = [
     { name = "quant-engine-core" },
@@ -282,7 +282,7 @@ requires-dist = [
 
 [[package]]
 name = "quant-engine-portfolio-ledger"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/portfolio-ledger" }
 dependencies = [
     { name = "quant-engine-core" },

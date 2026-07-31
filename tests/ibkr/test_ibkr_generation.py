@@ -64,7 +64,13 @@ def _xml(
             'toCurrency="USD" rate="1" />'
             "</ConversionRates>"
         ),
-        "CorporateActions": "<CorporateActions />",
+        "CorporateActions": (
+            "<CorporateActions>"
+            f'<CorporateAction accountId="{account}" reportDate="{observed}" '
+            f'actionID="action-{observed}" type="FS" conid="100" currency="USD" '
+            'quantity="4" proceeds="0" />'
+            "</CorporateActions>"
+        ),
         "EquitySummaryByReportDateInBase": (
             f'<EquitySummaryByReportDateInBase accountId="{account}" '
             f'reportDate="{observed}" total="{nav}" />'
@@ -272,7 +278,26 @@ def test_build_is_deterministic_and_account_scope_exception_is_explicit(
     assert first_bytes == second_bytes
     assert first_manifest.generation_id == second_manifest.generation_id
     assert first_manifest.coverage.status is CoverageStatus.PARTIAL
+    assert not any(
+        "CorporateAction" in gap for gap in first_manifest.coverage.known_gaps
+    )
     assert first == second
+    corporate_coverage = next(
+        item
+        for item in first["fact_coverage"]
+        if item["fact_type"] == "CORPORATE_ACTION_PROJECTION"
+    )
+    assert corporate_coverage == {
+        "fact_type": "CORPORATE_ACTION_PROJECTION",
+        "known_gaps": [],
+        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+    }
+    assert first["corporate_actions"][0]["amount"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "0",
+    }
+    assert first["corporate_actions"][0]["mapping_status"] == "MAPPED"
     scope = next(
         item
         for item in first["fact_coverage"]

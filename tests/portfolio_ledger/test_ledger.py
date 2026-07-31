@@ -20,6 +20,7 @@ from quant_engine.portfolio_ledger import (
     AccountRole,
     AccountStrategyAssignment,
     CashFlow,
+    CorporateAction,
     LedgerSlice,
     LedgerValidationError,
     MappingStatus,
@@ -163,6 +164,19 @@ def _complete_ledger() -> LedgerSlice:
                 MappingStatus.UNMAPPED,
             ),
         ),
+        corporate_actions=(
+            CorporateAction(
+                "corporate-action-a",
+                "acct-invest",
+                AS_OF,
+                "synthetic split",
+                ObservedAmount.available(Decimal("0"), "USD"),
+                MappingStatus.MAPPED,
+                "strategy-a",
+                "security-a",
+                Decimal("12"),
+            ),
+        ),
         nav_observations=(
             NavObservation(
                 "nav-invest",
@@ -204,6 +218,7 @@ def test_build_is_idempotent_and_canonical_order_is_input_independent() -> None:
         positions=reversed(ledger.positions),
         transactions=(*ledger.transactions, *ledger.transactions),
         cash_flows=ledger.cash_flows,
+        corporate_actions=(*ledger.corporate_actions, *ledger.corporate_actions),
         nav_observations=reversed(ledger.nav_observations),
     )
 
@@ -317,6 +332,51 @@ def test_references_mapping_and_assignment_invariants_fail_closed() -> None:
                     "strategy-a",
                 ),
             ),
+        )
+
+    with pytest.raises(LedgerValidationError, match="unknown security"):
+        LedgerSlice.build(
+            as_of_date=AS_OF,
+            source_generations=(_generation(),),
+            accounts=accounts,
+            strategies=strategies,
+            securities=securities,
+            corporate_actions=(
+                CorporateAction(
+                    "bad-action",
+                    "acct-invest",
+                    AS_OF,
+                    "synthetic action",
+                    ObservedAmount.available(Decimal("0"), "USD"),
+                    MappingStatus.UNMAPPED,
+                    security_id="missing-security",
+                ),
+            ),
+        )
+
+
+def test_corporate_action_preserves_quantity_amount_and_mapping() -> None:
+    action = _complete_ledger().corporate_actions[0]
+    assert action.to_dict() == {
+        "account_id": "acct-invest",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "0"},
+        "event_date": AS_OF.isoformat(),
+        "kind": "synthetic split",
+        "mapping_status": "MAPPED",
+        "quantity": "12",
+        "record_id": "corporate-action-a",
+        "security_id": "security-a",
+        "strategy_id": "strategy-a",
+    }
+    with pytest.raises(LedgerValidationError, match="finite Decimal"):
+        CorporateAction(
+            "bad-quantity",
+            "acct-invest",
+            AS_OF,
+            "synthetic action",
+            ObservedAmount.available(Decimal("0"), "USD"),
+            MappingStatus.UNMAPPED,
+            quantity=1.0,  # type: ignore[arg-type]
         )
 
 

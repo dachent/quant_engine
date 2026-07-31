@@ -21,7 +21,7 @@
     "transactions"
   ],
   "properties": {
-    "catalog_schema_version": {"const": 1},
+    "catalog_schema_version": {"const": 2},
     "provider_id": {"const": "ibkr"},
     "as_of_date": {"type": "string", "format": "date"},
     "accounts": {"type": "array", "items": {"type": "object"}},
