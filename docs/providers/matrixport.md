@@ -77,6 +77,12 @@ dataMatrixport/
   source-manifests/               # source/staging inventory proof
   source-runs/20260726T041427.925Z/
                                     # full 2,006-file accepted source run
+  legacy-source-snapshots/20260731-final-cutover/
+                                    # full final legacy-project snapshot
+  cutover-recovery/legacy-original-20260731/
+                                    # read-only recoverable moved original
+  cutover-link-dispositions/20260731/
+                                    # quarantined external-cache junction
   normalized-runs/20260726T041427.925Z/
                                     # retained earlier normalized-copy staging
   generations/<generation-id>/
@@ -89,5 +95,17 @@ workbooks remain outside Git. The first bounded copy attempts stopped during
 OneDrive hydration and were retained as failed-attempt evidence. A resumed,
 non-deleting copy completed all 2,006 files and 16,377,712 bytes with zero
 missing, extra, or different hashes. The complete destination source run is
-the accepted local evidence copy. The legacy source remains untouched as
-recovery evidence until a separately approved source-removal cutover.
+the accepted provider-run evidence copy.
+
+The separately approved final source dissolution then absorbed the complete
+current legacy project, including later local artifacts: 5,772 files and
+92,060,538 bytes have zero missing, extra, or different SHA-256 values in the
+governed final snapshot. The pre-cutover proof SHA-256 is
+`3d31c93afc14e149579ede7ae1d77f45a2bf90a3e833d6c30aa2f43c4386fec0`.
+One archived session-bootstrap junction referenced an external cache; it was
+moved into the explicit link-disposition quarantine without copying or
+altering its target. The legacy `Playground\matrixport` path is absent. Its
+original directory was moved into the governed, read-only recovery area and
+again matches the final snapshot for all 5,772 files and 92,060,538 bytes. The
+post-move recovery proof SHA-256 is
+`2a2d53a105af03ebe06cc9090e7e14f8c353064ed371788a323ac7270d2cf07e`.
