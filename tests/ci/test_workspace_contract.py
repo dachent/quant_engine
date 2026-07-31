@@ -34,6 +34,7 @@ def test_virtual_root_has_only_accepted_workspace_members() -> None:
         "members": [
             "packages/ci-controls",
             "packages/core",
+            "packages/fidelity",
             "packages/ibkr",
             "packages/portfolio-ledger",
             "packages/schwab",
@@ -113,6 +114,35 @@ def test_ibkr_package_is_private_and_read_side_only() -> None:
     ).lower()
     for forbidden in ("submit_order", "place_order", "cancel_order"):
         assert forbidden not in public_source
+
+
+def test_fidelity_package_is_private_static_and_read_side_only() -> None:
+    member_root = REPOSITORY_ROOT / "packages" / "fidelity"
+    member = _toml(member_root / "pyproject.toml")
+    project = member["project"]
+    assert isinstance(project, dict)
+    assert project["requires-python"] == ">=3.11,<3.14"
+    assert project["dependencies"] == [
+        "quant-engine-core",
+        "quant-engine-portfolio-ledger",
+    ]
+    assert project["classifiers"] == ["Private :: Do Not Upload"]
+    assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
+        "quant_engine.fidelity"
+    )
+    assert not (member_root / "src" / "quant_engine" / "__init__.py").exists()
+    assert (member_root / "src" / "quant_engine" / "fidelity" / "py.typed").is_file()
+    public_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (member_root / "src" / "quant_engine" / "fidelity").glob("*.py")
+    ).lower()
+    for forbidden in ("submit_order", "place_order", "cancel_order", "httpx"):
+        assert forbidden not in public_source
+    quality = (REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "packages/fidelity/src" in quality
+    assert "tests/fidelity" in quality
 
 
 def test_web_contract_package_is_private_and_read_side_only() -> None:

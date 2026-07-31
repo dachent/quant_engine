@@ -6,6 +6,7 @@ requires-python = ">=3.11, <3.14"
 members = [
     "quant-engine-ci-controls",
     "quant-engine-core",
+    "quant-engine-fidelity",
     "quant-engine-ibkr",
     "quant-engine-portfolio-ledger",
     "quant-engine-schwab",
@@ -268,6 +269,21 @@ version = "0.1.0"
 source = { editable = "packages/core" }
 
 [[package]]
+name = "quant-engine-fidelity"
+version = "0.1.0"
+source = { editable = "packages/fidelity" }
+dependencies = [
+    { name = "quant-engine-core" },
+    { name = "quant-engine-portfolio-ledger" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "quant-engine-core", editable = "packages/core" },
+    { name = "quant-engine-portfolio-ledger", editable = "packages/portfolio-ledger" },
+]
+
+[[package]]
 name = "quant-engine-ibkr"
 version = "0.3.0"
 source = { editable = "packages/ibkr" }
@@ -334,6 +350,7 @@ dev = [
     { name = "pytest-socket" },
     { name = "quant-engine-ci-controls" },
     { name = "quant-engine-core" },
+    { name = "quant-engine-fidelity" },
     { name = "quant-engine-ibkr" },
     { name = "quant-engine-portfolio-ledger" },
     { name = "quant-engine-schwab" },
@@ -352,6 +369,7 @@ dev = [
     { name = "pytest-socket", specifier = ">=0.7,<0.8" },
     { name = "quant-engine-ci-controls", editable = "packages/ci-controls" },
     { name = "quant-engine-core", editable = "packages/core" },
+    { name = "quant-engine-fidelity", editable = "packages/fidelity" },
     { name = "quant-engine-ibkr", editable = "packages/ibkr" },
     { name = "quant-engine-portfolio-ledger", editable = "packages/portfolio-ledger" },
     { name = "quant-engine-schwab", editable = "packages/schwab" },
