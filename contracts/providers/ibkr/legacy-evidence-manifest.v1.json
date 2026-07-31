@@ -1,0 +1,273 @@
+{
+  "schema_version": "1.0",
+  "provider_id": "ibkr",
+  "audit_date": "2026-07-30",
+  "privacy": {
+    "filenames_committed": false,
+    "account_identifiers_committed": false,
+    "artifact_id_rule": "Audit-local stable identifier; resolve the private file by SHA-256 rather than filename or sort order.",
+    "real_evidence_location": "outside_git"
+  },
+  "concept_spec": {
+    "artifact_id": "concept-spec-v1",
+    "format": ".docx",
+    "bytes": 67132,
+    "sha256": "6c620c35a36798d772e620ee0dd8b1f605c9b3547b0bc250553693cfc6b19314",
+    "document_version": "1.0",
+    "document_date": "2026-07-26",
+    "page_count": 9,
+    "disposition": "PROVENANCE_ONLY_EXECUTION_DRAFT"
+  },
+  "legacy_summary": {
+    "artifact_count": 26,
+    "total_bytes": 252586534,
+    "extension_counts": {
+      ".csv": 14,
+      ".html": 1,
+      ".xls": 2,
+      ".xml": 8,
+      ".xsd": 1
+    },
+    "flex_activity_xml": {
+      "daily_account_statement_count": 868,
+      "distinct_internal_crosswalk_candidates": 5,
+      "distinct_report_dates": 217,
+      "coverage_start": "2025-09-15",
+      "coverage_end": "2026-07-14",
+      "observed_record_counts": {
+        "AccountInformation": 868,
+        "CashTransaction": 425,
+        "ChangeInNAV": 868,
+        "ConversionRate": 33852,
+        "CorporateAction": 20,
+        "EquitySummaryByReportDateInBase": 868,
+        "OpenPosition": 96782,
+        "StatementOfFundsLine": 12579,
+        "Trade": 3361,
+        "Transfer": 56
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "artifact_id": "legacy-001",
+      "format": ".xml",
+      "bytes": 17674666,
+      "sha256": "310dc4b16baf9e6ec73681e1141bcf51ba89a54568478214b73cd258684e85f6",
+      "coverage_start": "2025-09-15",
+      "coverage_end": "2025-12-31",
+      "daily_account_statement_count": 312,
+      "disposition": "PRIMARY_LEGACY_FLEX_ACTIVITY_INPUT"
+    },
+    {
+      "artifact_id": "legacy-002",
+      "format": ".xml",
+      "bytes": 17017209,
+      "sha256": "bd4361003f6c30a4e1c8948f7b6e96dd4cf3174c445b028e8d712ffacf99a1e8",
+      "coverage_start": "2026-01-01",
+      "coverage_end": "2026-01-30",
+      "daily_account_statement_count": 88,
+      "disposition": "PRIMARY_LEGACY_FLEX_ACTIVITY_INPUT"
+    },
+    {
+      "artifact_id": "legacy-003",
+      "format": ".xml",
+      "bytes": 33511387,
+      "sha256": "e74518339486f07bbab188387cffb5eccec50bf9e5c9de01fd32895d01e2e6ef",
+      "coverage_start": "2026-02-02",
+      "coverage_end": "2026-02-27",
+      "daily_account_statement_count": 80,
+      "disposition": "PRIMARY_LEGACY_FLEX_ACTIVITY_INPUT"
+    },
+    {
+      "artifact_id": "legacy-004",
+      "format": ".xml",
+      "bytes": 37060137,
+      "sha256": "146f6e1f10821325a02bbb9c71b26ecfcea73ffd9cff8796c2c2f44d5b1b1b79",
+      "coverage_start": "2026-03-02",
+      "coverage_end": "2026-03-31",
+      "daily_account_statement_count": 88,
+      "disposition": "PRIMARY_LEGACY_FLEX_ACTIVITY_INPUT"
+    },
+    {
+      "artifact_id": "legacy-005",
+      "format": ".xml",
+      "bytes": 38636165,
+      "sha256": "9f9427f84463e3746ec704ddc004c4a06a804650cbfd6052d655f352516cd620",
+      "coverage_start": "2026-04-01",
+      "coverage_end": "2026-04-30",
+      "daily_account_statement_count": 88,
+      "disposition": "PRIMARY_LEGACY_FLEX_ACTIVITY_INPUT"
+    },
+    {
+      "artifact_id": "legacy-006",
+      "format": ".xml",
+      "bytes": 36984850,
+      "sha256": "75ca44bc4c9d698ab3f1c946ae1356f095d04736861c597cbaf798edc58fb37f",
+      "coverage_start": "2026-05-01",
+      "coverage_end": "2026-05-29",
+      "daily_account_statement_count": 84,
+      "disposition": "PRIMARY_LEGACY_FLEX_ACTIVITY_INPUT"
+    },
+    {
+      "artifact_id": "legacy-007",
+      "format": ".xml",
+      "bytes": 44335273,
+      "sha256": "3c55ad7edaf2207f92b813b3d1683ed0845a9aac9e32fde40f9b104bcd3df172",
+      "coverage_start": "2026-06-01",
+      "coverage_end": "2026-06-30",
+      "daily_account_statement_count": 88,
+      "disposition": "PRIMARY_LEGACY_FLEX_ACTIVITY_INPUT"
+    },
+    {
+      "artifact_id": "legacy-008",
+      "format": ".xml",
+      "bytes": 17091122,
+      "sha256": "2fef58f7945a2fb90373bd5bea290c77e2ecba7fd9177b69892a45788de2e499",
+      "coverage_start": "2026-07-01",
+      "coverage_end": "2026-07-14",
+      "daily_account_statement_count": 40,
+      "disposition": "PRIMARY_LEGACY_FLEX_ACTIVITY_INPUT"
+    },
+    {
+      "artifact_id": "legacy-009",
+      "format": ".xsd",
+      "bytes": 151003,
+      "sha256": "6ad113673f4986f1b002facf73fd510e7d35feb8fa904c58386f122b3bc11052",
+      "disposition": "LEGACY_SCHEMA_VALIDATION_AID_NOT_DATA_AUTHORITY"
+    },
+    {
+      "artifact_id": "legacy-010",
+      "format": ".html",
+      "bytes": 41127,
+      "sha256": "4f660d62095360ed218a7e7ff5fa6a4c760f2cb9148c12c02a846d9a07146e80",
+      "disposition": "PRIVATE_RENDERED_CORROBORATION_NOT_PARSER_AUTHORITY"
+    },
+    {
+      "artifact_id": "legacy-011",
+      "format": ".csv",
+      "bytes": 19509,
+      "sha256": "9547a86a35879d174cadab86aaa38222f3c87f9ddebee8d90c8f3d55b660cf0c",
+      "row_count": 137,
+      "disposition": "SECONDARY_ROW_ORIENTED_STATEMENT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-012",
+      "format": ".csv",
+      "bytes": 96538,
+      "sha256": "9de5c6b5b83e5031e3315e9a1932ba173341cce7ab836d0f88958ab00f0ae962",
+      "row_count": 753,
+      "disposition": "SECONDARY_ROW_ORIENTED_STATEMENT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-013",
+      "format": ".csv",
+      "bytes": 75874,
+      "sha256": "e21b58024f71c3868f35f87aeef9ca351794d2edb0ef952d44a21373ef0adc3e",
+      "row_count": 586,
+      "disposition": "SECONDARY_ROW_ORIENTED_STATEMENT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-014",
+      "format": ".csv",
+      "bytes": 59075,
+      "sha256": "e9bb805ee82813e652ce102e670d72c20fdc49ee624f31fe21f7feef43f3ad8a",
+      "row_count": 445,
+      "disposition": "SECONDARY_ROW_ORIENTED_STATEMENT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-015",
+      "format": ".csv",
+      "bytes": 52990,
+      "sha256": "aeda34e8b8f7d760c36d7350b75fdc63daae889d7054dacba6c72ba7f4e0f944",
+      "row_count": 402,
+      "disposition": "SECONDARY_ROW_ORIENTED_STATEMENT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-016",
+      "format": ".csv",
+      "bytes": 51503,
+      "sha256": "c3df2e9d8d3c633a872ed24c4338b9177ea80f2d7f819331576b6516b58ab4ad",
+      "row_count": 383,
+      "disposition": "SECONDARY_ROW_ORIENTED_STATEMENT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-017",
+      "format": ".csv",
+      "bytes": 115429,
+      "sha256": "f1d9a69299c6757804888a8732ff93f937cf309e8a1b523da2f406fcffba939e",
+      "row_count": 855,
+      "disposition": "SECONDARY_ROW_ORIENTED_STATEMENT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-018",
+      "format": ".csv",
+      "bytes": 23529,
+      "sha256": "e06a4ee95702e174f28d8349334543218596529f4e15728cb24488214ad05da6",
+      "row_count": 179,
+      "disposition": "SECONDARY_ROW_ORIENTED_STATEMENT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-019",
+      "format": ".csv",
+      "bytes": 2354,
+      "sha256": "3fc00344962743e6840d751e5deaf69dc5e2c38098f749e194b2aaff5a6c72a1",
+      "row_count": 5,
+      "disposition": "SECONDARY_CORPORATE_ACTION_EXTRACT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-020",
+      "format": ".csv",
+      "bytes": 49003,
+      "sha256": "64b38e37415b32fdeb7e13ca6957546f07467cd10c033695ea211c442374a3b9",
+      "row_count": 188,
+      "disposition": "SECONDARY_POSITION_EXTRACT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-021",
+      "format": ".xls",
+      "bytes": 32768,
+      "sha256": "039da5c1882d8b89b65bd3150a2693370d5c747bdaf35cf78cc798151ef628b6",
+      "disposition": "PRESERVE_SECONDARY_BINARY_EVIDENCE; CONVERT_ONLY_IF_UNIQUE_FACTS_REMAIN"
+    },
+    {
+      "artifact_id": "legacy-022",
+      "format": ".xls",
+      "bytes": 22528,
+      "sha256": "cca08a9747455a5d9a25683d19fa3976b3f7ff7514dfcef28a13fddd6aefb9bb",
+      "disposition": "PRESERVE_SECONDARY_BINARY_EVIDENCE; CONVERT_ONLY_IF_UNIQUE_FACTS_REMAIN"
+    },
+    {
+      "artifact_id": "legacy-023",
+      "format": ".csv",
+      "bytes": 109838,
+      "sha256": "2dee3b89490c09884318b3592ebb6952d21b4eb49672bfdfa5629840540c75b4",
+      "row_count": 951,
+      "disposition": "SECONDARY_ROW_ORIENTED_STATEMENT_RECONCILE_TO_XML"
+    },
+    {
+      "artifact_id": "legacy-024",
+      "format": ".csv",
+      "bytes": 2835544,
+      "sha256": "3b1889585b22500071f94dc1486ac5de97914fbc0e6dca0d8bc1432eafb498e2",
+      "row_count": 62323,
+      "disposition": "DETAILED_TRADE_EXTRACT_PARSE_AND_RECONCILE"
+    },
+    {
+      "artifact_id": "legacy-025",
+      "format": ".csv",
+      "bytes": 6430504,
+      "sha256": "6382d3e9a27d9ba382a616345375347574fef64cc5a6530482821a039233bac6",
+      "row_count": 79584,
+      "disposition": "MIXED_SECTION_POSITION_EXTRACT_PARSE_AND_RECONCILE"
+    },
+    {
+      "artifact_id": "legacy-026",
+      "format": ".csv",
+      "bytes": 106609,
+      "sha256": "bb5ab0368ddcdd7422c931a680f4804ace2b63fee363f1d52c6c203458002ddd",
+      "row_count": 831,
+      "disposition": "SECONDARY_ROW_ORIENTED_STATEMENT_RECONCILE_TO_XML"
+    }
+  ]
+}
