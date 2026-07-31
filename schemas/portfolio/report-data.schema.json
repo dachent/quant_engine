@@ -40,12 +40,17 @@
     "positions": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 1,
       "items": {
         "type": "object",
         "required": ["status"],
         "properties": {
-          "status": {"const": "UNAVAILABLE_NO_ACCEPTED_POSITION_SOURCE"}
+          "status": {
+            "enum": [
+              "UNAVAILABLE_NO_ACCEPTED_POSITION_SOURCE",
+              "AVAILABLE_UNMAPPED",
+              "AVAILABLE_MAPPED"
+            ]
+          }
         }
       }
     },

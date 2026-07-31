@@ -14,7 +14,7 @@
     "replay"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"enum": [1, 2]},
     "policy_version": {"const": "PORT-PERF-1"},
     "as_of_date": {"type": "string", "format": "date"},
     "provenance": {"$ref": "#/$defs/provenance"},
@@ -66,8 +66,24 @@
         "strategy-live-metrics": {"$ref": "#/$defs/source_ref"}
       }
     },
+    "provider_generations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schwab"],
+      "properties": {"schwab": {"$ref": "#/$defs/provider_generation"}}
+    },
     "replay": {"$ref": "#/$defs/replay"}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": 2}}},
+      "then": {"required": ["provider_generations"]}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 1}}},
+      "then": {"not": {"required": ["provider_generations"]}}
+    }
+  ],
   "$defs": {
     "identifier": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -104,6 +120,22 @@
         "as_of_date": {"type": "string", "format": "date"},
         "schema_name": {"type": "string", "minLength": 1},
         "schema_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "provider_generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_id",
+        "generation_id",
+        "catalog_sha256",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "root_id": {"$ref": "#/$defs/identifier"},
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "catalog_sha256": {"$ref": "#/$defs/sha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
     "expected_decimal": {

@@ -53,7 +53,7 @@
     "assignments": {"type": "array", "items": {"type": "object"}},
     "allocations": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"type": "object"}},
     "securities": {"type": "array", "items": {"type": "object"}},
-    "positions": {"type": "array", "maxItems": 0},
+    "positions": {"type": "array", "items": {"type": "object"}},
     "transactions": {"type": "array", "items": {"type": "object"}},
     "flows": {"type": "array", "items": {"type": "object"}},
     "nav_observations": {"type": "array", "minItems": 1, "items": {"type": "object"}},

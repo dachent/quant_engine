@@ -74,7 +74,7 @@
       ["Liquid capital", currency(data.capital.total_liquid), "Accepted dated baseline"],
       ["Current strategies", String(data.counts.strategies), "Reserve is not a strategy"],
       ["Accounts", String(data.counts.accounts), "Stable internal identities"],
-      ["Positions", data.fact_status.positions, "No accepted position source", "danger"],
+      ["Positions", data.fact_status.positions, data.counts.positions ? `${integer.format(data.counts.positions)} accepted current rows` : "No accepted position source", data.counts.positions ? "warning" : "danger"],
     ]);
     renderAllocationTable();
     const providers = Object.entries(data.provider_counts).sort((a, b) => b[1] - a[1]);
