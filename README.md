@@ -94,3 +94,8 @@ provides deterministic, synthetic-testable account, strategy, security,
 assignment, position, transaction, cash-flow, NAV, and reconciliation records.
 It deliberately does not implement performance policy, provider acquisition,
 or execution.
+
+The first-baseline interpretation rules are ratified in
+[ADR 0002](docs/decisions/0002-portfolio-performance-policy.md). The decision
+defines coverage-aware TWR/MWR, flow, FX, composite, HWM, stress, and advisory
+readiness behavior without creating an automated risk or execution subsystem.
