@@ -504,11 +504,11 @@ class FlexWebServiceClient:
         query = _text(query_id, "query_id")
         if max_get_attempts < 1 or max_get_attempts > 9:
             raise FlexValidationError("max_get_attempts must be between 1 and 9")
-        token = _text(self._credential_provider(), "credential")
+        service_parameter = _text(self._credential_provider(), "credential")
         headers = {"User-Agent": self._user_agent}
         send = self._http_get(
             SEND_REQUEST_URL,
-            {"q": query, "t": token, "v": "3"},
+            {"q": query, "t": service_parameter, "v": "3"},
             headers,
         )
         status, reference, error = _service_response(send)
@@ -520,7 +520,7 @@ class FlexWebServiceClient:
             self._wait(1.0)
             response = self._http_get(
                 GET_STATEMENT_URL,
-                {"q": reference, "t": token, "v": "3"},
+                {"q": reference, "t": service_parameter, "v": "3"},
                 headers,
             )
             status, _, error = _service_response(response)

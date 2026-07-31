@@ -329,7 +329,7 @@ def test_crosswalk_ambiguity_fails_closed(tmp_path: Path) -> None:
 
 
 def test_flex_transport_is_injected_bounded_and_token_safe() -> None:
-    token = "SYNTHETIC-SECRET-TOKEN"
+    synthetic_auth_value = "SYNTHETIC-AUTH-VALUE"
     responses = [
         b"<FlexStatementResponse><Status>Success</Status><ReferenceCode>REF</ReferenceCode></FlexStatementResponse>",
         b"<FlexStatementResponse><Status>Fail</Status><ErrorCode>1019</ErrorCode></FlexStatementResponse>",
@@ -342,15 +342,15 @@ def test_flex_transport_is_injected_bounded_and_token_safe() -> None:
 
     waits: list[float] = []
     client = FlexWebServiceClient(
-        credential_provider=lambda: token,
+        credential_provider=lambda: synthetic_auth_value,
         http_get=get,
         wait=waits.append,
         user_agent="quant-engine-synthetic-test",
     )
     with pytest.raises(FlexValidationError) as error:
         client.fetch_report("123", max_get_attempts=2)
-    assert token not in str(error.value)
-    assert token not in repr(client)
+    assert synthetic_auth_value not in str(error.value)
+    assert synthetic_auth_value not in repr(client)
     assert not responses
     assert waits == [1.0, 1.0]
 
