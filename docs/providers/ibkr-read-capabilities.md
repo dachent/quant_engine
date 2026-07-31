@@ -175,8 +175,14 @@ The accepted local evidence copy is
 bytes match the legacy source by relative path, size, and SHA-256 with zero
 missing, extra, or different artifacts. The local copy proof has SHA-256
 `9181a6f520543c3d44158ca9a479e80e31a3f220339f45211a84851b1db3e9b8`.
-The original source remains untouched as recovery evidence; no destructive
-cutover is implied by acceptance of the destination copy.
+The separately approved final source dissolution reverified that copy against
+the then-current legacy source with proof identity
+`a630dcc9df020ccbff9d8d7daa8004b8afc89cb779f05937615975b3e0036e12`.
+The legacy source path is absent. Its original directory is now read-only under
+`dataIBKR/cutover-recovery/legacy-original-20260731`, where all 26 files and
+252,586,534 bytes again match the accepted source-run copy. The post-move
+recovery proof identity is
+`cd9332e58b636dd59e3aa9404348d69b56d9457588b3ef7985461fe821a97635`.
 
 The original order-execution concept specification is retained as provenance:
 
