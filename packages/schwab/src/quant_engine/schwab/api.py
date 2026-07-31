@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
+from pathlib import Path
 from typing import Any, Protocol
 
 from quant_engine.core.contracts import canonical_json_bytes
@@ -73,6 +74,39 @@ class CurrentSnapshot:
             "positions": list(self.positions),
             "sweep_vehicle_count": self.sweep_vehicle_count,
         }
+
+
+CURRENT_SNAPSHOT_SCHEMA_VERSION = 1
+
+
+def current_snapshot_bytes(snapshot: CurrentSnapshot) -> bytes:
+    """Serialize one sanitized, provider-ID-free current snapshot."""
+
+    return canonical_json_bytes(
+        {
+            **snapshot.to_dict(),
+            "provider": "SCHWAB",
+            "schema_version": CURRENT_SNAPSHOT_SCHEMA_VERSION,
+        }
+    )
+
+
+def write_current_snapshot(snapshot: CurrentSnapshot, path: Path) -> tuple[str, int]:
+    """Write an immutable sanitized snapshot and return its hash and size."""
+
+    payload = current_snapshot_bytes(snapshot)
+    if path.is_symlink() or path.parent.is_symlink() or not path.parent.is_dir():
+        raise SchwabReadError("snapshot destination must have a real parent directory")
+    if path.exists():
+        if not path.is_file() or path.read_bytes() != payload:
+            raise SchwabReadError("snapshot destination conflicts with existing bytes")
+    else:
+        try:
+            with path.open("xb") as handle:
+                handle.write(payload)
+        except OSError as exc:
+            raise SchwabReadError("snapshot write failed") from exc
+    return hashlib.sha256(payload).hexdigest(), len(payload)
 
 
 def _object(value: object, name: str) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 [project]
 name = "quant-engine-schwab"
-version = "0.1.0"
-description = "Read-only Schwab history and generation contracts for quant_engine."
+version = "0.2.0"
+description = "Read-only Schwab current-state, history, and generation contracts for quant_engine."
 requires-python = ">=3.11,<3.14"
 dependencies = ["quant-engine-core", "quant-engine-portfolio-ledger"]
 classifiers = ["Private :: Do Not Upload"]

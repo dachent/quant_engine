@@ -16,6 +16,7 @@ def _summary(spec_path: Path) -> dict[str, object]:
         "account_count": len(catalog["accounts"]),  # type: ignore[arg-type]
         "catalog_size_bytes": len(catalog_bytes),
         "coverage_status": manifest.coverage.status.value,
+        "current_account_count": len(catalog.get("current_accounts", [])),  # type: ignore[arg-type]
         "generation_id": manifest.generation_id,
         "nav_count": len(catalog["nav_observations"]),  # type: ignore[arg-type]
         "position_count": len(catalog["positions"]),  # type: ignore[arg-type]

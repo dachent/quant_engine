@@ -1,10 +1,12 @@
-"""Read-only Schwab history and generation contracts."""
+"""Read-only Schwab current-state, history, and generation contracts."""
 
 from quant_engine.schwab.api import (
     CurrentAccount,
     CurrentSnapshot,
     SchwabReadError,
+    current_snapshot_bytes,
     read_current_snapshot,
+    write_current_snapshot,
 )
 from quant_engine.schwab.generation import (
     SchwabGenerationError,
@@ -12,7 +14,7 @@ from quant_engine.schwab.generation import (
     stage_generation_candidate,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "CurrentAccount",
@@ -20,6 +22,8 @@ __all__ = [
     "SchwabGenerationError",
     "SchwabReadError",
     "build_generation",
+    "current_snapshot_bytes",
     "read_current_snapshot",
     "stage_generation_candidate",
+    "write_current_snapshot",
 ]
