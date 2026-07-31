@@ -36,6 +36,7 @@ def test_virtual_root_has_only_accepted_workspace_members() -> None:
             "packages/core",
             "packages/ibkr",
             "packages/portfolio-ledger",
+            "packages/schwab",
             "packages/web-contracts",
         ]
     }
@@ -135,6 +136,33 @@ def test_web_contract_package_is_private_and_read_side_only() -> None:
     )
     assert "packages/web-contracts/src" in quality
     assert "tests/web_contracts" in quality
+
+
+def test_schwab_package_is_private_and_read_side_only() -> None:
+    member_root = REPOSITORY_ROOT / "packages" / "schwab"
+    member = _toml(member_root / "pyproject.toml")
+    project = member["project"]
+    assert isinstance(project, dict)
+    assert project["requires-python"] == ">=3.11,<3.14"
+    assert project["dependencies"] == [
+        "quant-engine-core",
+        "quant-engine-portfolio-ledger",
+    ]
+    assert project["classifiers"] == ["Private :: Do Not Upload"]
+    assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
+        "quant_engine.schwab"
+    )
+    public_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (member_root / "src" / "quant_engine" / "schwab").glob("*.py")
+    ).lower()
+    for forbidden in ("submit_order", "place_order", "cancel_order", "raw_request"):
+        assert forbidden not in public_source
+    quality = (REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "packages/schwab/src" in quality
+    assert "tests/schwab" in quality
 
 
 def test_ci_lock_contains_only_full_action_shas_and_checksummed_tools() -> None:

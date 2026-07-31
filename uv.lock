@@ -8,6 +8,7 @@ members = [
     "quant-engine-core",
     "quant-engine-ibkr",
     "quant-engine-portfolio-ledger",
+    "quant-engine-schwab",
     "quant-engine-web-contract-harvester",
     "quant-engine-workspace",
 ]
@@ -293,6 +294,21 @@ dependencies = [
 requires-dist = [{ name = "quant-engine-core", editable = "packages/core" }]
 
 [[package]]
+name = "quant-engine-schwab"
+version = "0.1.0"
+source = { editable = "packages/schwab" }
+dependencies = [
+    { name = "quant-engine-core" },
+    { name = "quant-engine-portfolio-ledger" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "quant-engine-core", editable = "packages/core" },
+    { name = "quant-engine-portfolio-ledger", editable = "packages/portfolio-ledger" },
+]
+
+[[package]]
 name = "quant-engine-web-contract-harvester"
 version = "0.1.0"
 source = { editable = "packages/web-contracts" }
@@ -320,6 +336,7 @@ dev = [
     { name = "quant-engine-core" },
     { name = "quant-engine-ibkr" },
     { name = "quant-engine-portfolio-ledger" },
+    { name = "quant-engine-schwab" },
     { name = "quant-engine-web-contract-harvester" },
     { name = "ruff" },
     { name = "types-pyyaml" },
@@ -337,6 +354,7 @@ dev = [
     { name = "quant-engine-core", editable = "packages/core" },
     { name = "quant-engine-ibkr", editable = "packages/ibkr" },
     { name = "quant-engine-portfolio-ledger", editable = "packages/portfolio-ledger" },
+    { name = "quant-engine-schwab", editable = "packages/schwab" },
     { name = "quant-engine-web-contract-harvester", editable = "packages/web-contracts" },
     { name = "ruff", specifier = "==0.15.22" },
     { name = "types-pyyaml", specifier = ">=6.0.12,<7" },
