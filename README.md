@@ -112,3 +112,9 @@ accepted tracker and audit slice into accounts, current allocations, available
 NAV/flows/Alpaca fills, strategy evidence, explicit coverage, reconciliation,
 and frozen-control replay. Missing positions, FX, history, or mappings remain
 `UNAVAILABLE`, `PARTIAL`, or `UNMAPPED`; the builder does not infer them.
+
+The baseline's coverage-aware performance tables and independent unified
+workbook are built with the [portfolio report runbook](docs/portfolio-report.md).
+The workbook is a generated, read-only deliverable: calculations originate in
+tested Python and accepted private data, then native Excel recalculates and a
+machine-readable contract validates the saved copy before publication.
