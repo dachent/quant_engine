@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/providers/ibkr-generation-spec.schema.json",
+  "title": "IBKR read generation specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "as_of_date",
+    "baseline",
+    "minimum_crosswalk_overlap",
+    "roots",
+    "schema_version",
+    "sources"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "as_of_date": {"type": "string", "format": "date"},
+    "minimum_crosswalk_overlap": {"type": "integer", "minimum": 2},
+    "roots": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9-]{0,63}$"},
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog_sha256", "generation_id", "root"],
+      "properties": {
+        "catalog_sha256": {"$ref": "#/$defs/sha256"},
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "root": {"type": "string", "minLength": 1}
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 26,
+      "maxItems": 26,
+      "items": {"$ref": "#/$defs/source"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)(?!.*\\\\).+$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "as_of_date",
+        "expected_sha256",
+        "expected_size_bytes",
+        "relative_path",
+        "role",
+        "root_id",
+        "schema_name",
+        "schema_version"
+      ],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/portablePath"},
+        "as_of_date": {"type": "string", "format": "date"},
+        "expected_sha256": {"$ref": "#/$defs/sha256"},
+        "expected_size_bytes": {"type": "integer", "minimum": 0},
+        "relative_path": {"$ref": "#/$defs/portablePath"},
+        "role": {
+          "enum": [
+            "PRIMARY_FLEX_ACTIVITY",
+            "SECONDARY_RECONCILIATION",
+            "SCHEMA_REFERENCE",
+            "RENDERED_REFERENCE",
+            "BINARY_REFERENCE"
+          ]
+        },
+        "root_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+        "schema_name": {"type": "string", "minLength": 1},
+        "schema_version": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
