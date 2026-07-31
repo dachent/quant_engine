@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/providers/ibkr-read-catalog.schema.json",
+  "title": "Sanitized IBKR read catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "accounts",
+    "as_of_date",
+    "catalog_schema_version",
+    "corporate_actions",
+    "crosswalk_proof",
+    "fact_coverage",
+    "flows",
+    "fx_observations",
+    "nav_observations",
+    "positions",
+    "provider_id",
+    "reconciliation_checks",
+    "securities",
+    "transactions"
+  ],
+  "properties": {
+    "catalog_schema_version": {"const": 1},
+    "provider_id": {"const": "ibkr"},
+    "as_of_date": {"type": "string", "format": "date"},
+    "accounts": {"type": "array", "items": {"type": "object"}},
+    "corporate_actions": {"type": "array", "items": {"type": "object"}},
+    "crosswalk_proof": {"type": "array", "items": {"type": "object"}},
+    "fact_coverage": {"type": "array", "items": {"type": "object"}},
+    "flows": {"type": "array", "items": {"type": "object"}},
+    "fx_observations": {"type": "array", "items": {"type": "object"}},
+    "nav_observations": {"type": "array", "items": {"type": "object"}},
+    "positions": {"type": "array", "items": {"type": "object"}},
+    "reconciliation_checks": {"type": "array", "items": {"type": "object"}},
+    "securities": {"type": "array", "items": {"type": "object"}},
+    "transactions": {"type": "array", "items": {"type": "object"}}
+  }
+}

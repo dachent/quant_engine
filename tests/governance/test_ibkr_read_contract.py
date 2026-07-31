@@ -78,7 +78,13 @@ def test_mapping_covers_existing_ledger_records_and_explicit_gaps() -> None:
         "ACCEPTED_EFFECTIVE_DATED_ACCOUNT_STRATEGY_ASSIGNMENT"
     )
     assert any("CorporateAction" in gap for gap in contract["known_gaps"])
-    assert any("Five raw account identities" in gap for gap in contract["known_gaps"])
+    assert any(
+        "Five statement-level account identities" in gap
+        for gap in contract["known_gaps"]
+    )
+    assert any(
+        "217 cash or corporate-action rows" in gap for gap in contract["known_gaps"]
+    )
     assert any("No provider generation" in gap for gap in contract["known_gaps"])
 
 
@@ -141,7 +147,8 @@ def test_document_cites_official_sources_and_preserves_yagni_boundary() -> None:
         "https://www.ibkrguides.com/reportingreference/reportguide/activity%20flex%20query%20reference.htm",
     ):
         assert required in text
-    assert "does not implement an adapter" in text
+    assert "does not connect to IBKR" in text
+    assert "no socket, order, cancel, or submission method" in text
     assert "Historical bars" in text or "historical bars" in text
     assert "No provider generation or authority pointer" in MAPPING_PATH.read_text(
         encoding="utf-8"

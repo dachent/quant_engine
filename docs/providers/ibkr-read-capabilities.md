@@ -6,9 +6,11 @@ Decision date: 2026-07-30
 
 Provider ID: `ibkr` (`IBRK` is retained only in legacy provenance)
 
-This document decides what a later read-only IBKR integration may claim. It
-does not implement an adapter, connect to IBKR, configure a Flex token or
-query, publish a data generation, or authorize broker execution.
+This document decides what the read-only IBKR integration may claim. Issue
+`IBKR-RECON-001` adds an offline parser, deterministic partial-generation
+builder, injectable Flex retrieval boundary, and inert TWS snapshot protocol.
+It does not connect to IBKR, configure a Flex token or query, publish a
+generation pointer, or authorize broker execution.
 
 ## Decision
 
@@ -105,8 +107,9 @@ assuming every Flex response has the same schema.
 ## Canonical mapping
 
 The mapping intentionally uses the existing `core` and `portfolio-ledger`
-boundaries. It creates no IBKR domain package, universal observation schema,
-market-data root, or strategy-intelligence subsystem.
+boundaries. The small `quant-engine-ibkr` provider package owns only parsing,
+normalization, and read-side reconciliation; it creates no universal
+observation schema, market-data root, or strategy-intelligence subsystem.
 
 | Flex section | Canonical projection | Required rule |
 |---|---|---|
@@ -184,9 +187,11 @@ implemented by this decision.
 
 - The observed legacy interval is finite; it proves no coverage before
   2025-09-15 or after 2026-07-14.
-- Five raw account identities appear across the XML while each daily slice has
-  four. The restricted crosswalk and effective intervals must explain this
-  before publication.
+- Five statement-level account identities appear across the XML. A further
+  provider-reported identifier appears on 217 cash or corporate-action rows
+  under a different enclosing statement. The offline builder retains those
+  rows with `AMBIGUOUS_REPORTED_ACCOUNT`, prevents strategy attribution, and
+  keeps account-scope coverage partial until adjudicated.
 - The two XLS artifacts remain secondary evidence until the vertical slice
   proves they add no unique facts or converts them through a separately
   governed local process.
@@ -197,9 +202,37 @@ implemented by this decision.
   Add only the former when the IBKR vertical slice demonstrates its consumer;
   defer a shared FX contract until multiple recurring consumers exist.
 
-The next implementation issue is the existing read-only IBKR vertical slice.
-It must combine least-privilege Flex retrieval, optional TWS current-state
-capture, parsing, reconciliation, coverage, immutable generation publication,
-and immediate portfolio-report refresh. UI, PAPER, live trading, data movement,
-and execution architecture remain outside that issue unless separately
-approved.
+## Offline generation runbook
+
+The private generation spec follows
+[`ibkr-generation-spec.schema.json`](../../schemas/providers/ibkr-generation-spec.schema.json).
+It hash-binds the accepted portfolio baseline and all 26 inventoried legacy
+artifacts. Absolute roots and the spec itself remain outside Git.
+
+```powershell
+uv run --frozen --no-sync python tools/ibkr_generation.py build <private-spec>
+uv run --frozen --no-sync python tools/ibkr_generation.py stage <private-spec> <private-output-root>
+```
+
+`build` performs no writes. `stage` creates a content-addressed candidate and
+never writes `CURRENT.json`. The candidate is deliberately `PARTIAL` while TWS
+current state, account-scope exceptions, and the missing canonical corporate
+action projection remain unresolved. Core publication therefore rejects it.
+Repeating the same inputs produces the same catalog bytes and generation ID.
+
+Flex retrieval has no default HTTP implementation: callers must inject both a
+credential provider and a GET transport under separately recorded authority.
+The client implements only SendRequest/GetStatement version 3, bounds error
+1019 polling, and excludes the token from results and errors. The TWS surface
+is likewise only a typed read protocol and pure reconciliation function; it
+has no socket, order, cancel, or submission method.
+
+Recovery is create-only. A parser, hash, crosswalk, or reconciliation failure
+leaves the accepted portfolio baseline and every existing pointer unchanged.
+An incomplete staging directory may be removed only under the governing
+issue's separately approved recovery procedure.
+
+The remaining vertical work requires explicit issue authority for any
+credential access, provider call, `dataIBKR` creation, private real-data stage,
+pointer publication, data move, or deletion. UI, PAPER, live trading, and
+execution architecture remain deferred.

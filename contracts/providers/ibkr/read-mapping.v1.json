@@ -226,7 +226,10 @@
     {
       "target_record": "Transaction_or_CashFlow",
       "source_section": "CashTransaction",
-      "identity_fields": ["accountId", "transactionID"],
+      "identity_fields": ["accountId", "transactionID", "actionID"],
+      "fallback_identity_fields": [
+        "stable_hash_of_complete_source_row_when_provider_identity_is_absent"
+      ],
       "target_fields": {
         "account_id": "restricted_crosswalk(accountId)",
         "event_date": "date(dateTime_or_reportDate)",
@@ -302,7 +305,8 @@
   },
   "known_gaps": [
     "The legacy evidence begins on 2025-09-15 and ends on 2026-07-14; earlier and later history is not proven by this inventory.",
-    "Five raw account identities are observed across the legacy XML, while each daily slice contains four; the local crosswalk and account-effective intervals must explain the difference.",
+    "Five statement-level account identities are observed across the legacy XML and match the accepted NAV curves exactly through a restricted local crosswalk.",
+    "A further provider-reported account identifier occurs on 217 cash or corporate-action rows under a different enclosing statement; these facts remain account-scope exceptions and cannot receive strategy attribution until adjudicated.",
     "The two binary XLS artifacts have not been semantically compared to XML/CSV and remain secondary evidence.",
     "Current Flex query configuration, included accounts, field selection, token scope, and entitlement have not been verified.",
     "TWS/Gateway connectivity, account visibility, and execution-window behavior have not been tested locally.",
