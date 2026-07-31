@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.schwab import (
     SchwabGenerationError,
     build_generation,
@@ -254,6 +255,91 @@ def _spec(tmp_path: Path) -> Path:
     return path
 
 
+def _spec_with_current(tmp_path: Path) -> Path:
+    path = _spec(tmp_path)
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    observed_at = "2026-07-31T20:00:00+00:00"
+    accounts: list[dict[str, object]] = []
+    positions: list[dict[str, object]] = []
+    for item in spec["crosswalk"]:
+        account_id = item["internal_account_id"]
+        security_id = f"security-schwab-{hashlib.sha256(b'SYNTH').hexdigest()[:24]}"
+        identity = {
+            "account_id": account_id,
+            "as_of_date": "2026-07-31",
+            "security_id": security_id,
+        }
+        record_id = (
+            "position-"
+            + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()[:24]
+        )
+        accounts.append(
+            {
+                "account_id": account_id,
+                "cash_available": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "12",
+                },
+                "liquidation_value": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "100",
+                },
+                "observed_at": observed_at,
+            }
+        )
+        positions.append(
+            {
+                "account_id": account_id,
+                "as_of_date": "2026-07-31",
+                "average_price": "10",
+                "evidence_class": "DEVELOPER_API_CURRENT",
+                "mapping_status": "UNMAPPED",
+                "market_value": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "11",
+                },
+                "observed_at": observed_at,
+                "quantity": "1",
+                "record_id": record_id,
+                "security_id": security_id,
+                "strategy_id": None,
+                "symbol": "SYNTH",
+            }
+        )
+    snapshot = {
+        "accounts": accounts,
+        "observed_at": observed_at,
+        "positions": positions,
+        "provider": "SCHWAB",
+        "schema_version": 1,
+        "sweep_vehicle_count": 8,
+    }
+    source_root = Path(spec["roots"]["source"])
+    snapshot_path = source_root / "current-snapshot.json"
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    payload = snapshot_path.read_bytes()
+    spec.update(
+        {
+            "current_snapshot": {
+                "artifact_id": "developer/current-snapshot.json",
+                "as_of_date": "2026-07-31",
+                "expected_sha256": hashlib.sha256(payload).hexdigest(),
+                "expected_size_bytes": len(payload),
+                "relative_path": snapshot_path.relative_to(source_root).as_posix(),
+                "root_id": "source",
+                "schema_name": "schwab-developer-current-snapshot",
+                "schema_version": "1",
+            },
+            "schema_version": 2,
+        }
+    )
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    return path
+
+
 def test_build_is_deterministic_partial_and_reconciled(tmp_path: Path) -> None:
     spec = _spec(tmp_path)
     first, first_manifest, first_bytes = build_generation(spec)
@@ -284,6 +370,63 @@ def test_stage_is_immutable_and_does_not_publish(tmp_path: Path) -> None:
         root / "generations" / str(first["generation_id"]) / "schwab-generation.json"
     )
     assert catalog.is_file()
+
+
+def test_current_snapshot_supersedes_manual_current_reference(tmp_path: Path) -> None:
+    spec = _spec_with_current(tmp_path)
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status.value == "PARTIAL"
+    assert len(catalog["current_accounts"]) == 8
+    assert len(catalog["positions"]) == 8
+    assert catalog["position_quantity_unavailable_count"] == 0
+    assert catalog["sweep_vehicle_count"] == 8
+    assert all(
+        item["evidence_class"] == "DEVELOPER_API_CURRENT"
+        for item in catalog["positions"]
+    )
+    assert not any(
+        "current account and position snapshot is not present" in item
+        for item in catalog["coverage"]["known_gaps"]
+    )
+    current_reference = next(
+        item
+        for item in catalog["reconciliation"]
+        if item.get("type") == "CURRENT_POSITION_REFERENCE"
+    )
+    assert current_reference["status"] == "PASS_EXACT"
+    assert "current_balances" in manifest.coverage.fact_types
+
+
+def test_current_snapshot_hash_and_scope_fail_closed(tmp_path: Path) -> None:
+    spec = _spec_with_current(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    snapshot_path = (
+        Path(document["roots"]["source"])
+        / document["current_snapshot"]["relative_path"]
+    )
+    snapshot_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="current snapshot hash differs"):
+        build_generation(spec)
+
+    scoped = tmp_path / "scoped"
+    scoped.mkdir()
+    spec = _spec_with_current(scoped)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    snapshot_path = (
+        Path(document["roots"]["source"])
+        / document["current_snapshot"]["relative_path"]
+    )
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["accounts"].pop()
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    payload = snapshot_path.read_bytes()
+    document["current_snapshot"]["expected_sha256"] = hashlib.sha256(
+        payload
+    ).hexdigest()
+    document["current_snapshot"]["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="scope differs from crosswalk"):
+        build_generation(spec)
 
 
 def test_source_drift_and_transaction_variance_fail_closed(tmp_path: Path) -> None:

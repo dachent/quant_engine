@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 
 import pytest
 
-from quant_engine.schwab import SchwabReadError, read_current_snapshot
+from quant_engine.schwab import (
+    SchwabReadError,
+    current_snapshot_bytes,
+    read_current_snapshot,
+    write_current_snapshot,
+)
 
 
 class Response:
@@ -119,3 +126,24 @@ def test_unknown_account_http_failure_and_naive_time_fail_closed() -> None:
             crosswalk=_crosswalk(),
             observed_at=datetime(2026, 7, 31, 20),
         )
+
+
+def test_current_snapshot_artifact_is_sanitized_and_immutable(tmp_path: Path) -> None:
+    snapshot = read_current_snapshot(
+        Client(),
+        crosswalk=_crosswalk(),
+        observed_at=datetime(2026, 7, 31, 20, tzinfo=timezone.utc),
+    )
+    payload = current_snapshot_bytes(snapshot)
+    document = json.loads(payload)
+    assert document["provider"] == "SCHWAB"
+    assert document["schema_version"] == 1
+    assert "SYNTHETIC-001" not in payload.decode()
+    path = tmp_path / "current-snapshot.json"
+    first = write_current_snapshot(snapshot, path)
+    second = write_current_snapshot(snapshot, path)
+    assert first == second
+    assert path.read_bytes() == payload
+    path.write_text("{}", encoding="utf-8")
+    with pytest.raises(SchwabReadError, match="conflicts"):
+        write_current_snapshot(snapshot, path)

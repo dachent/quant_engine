@@ -1,4 +1,4 @@
-"""Deterministic stage-only Schwab history generation builder."""
+"""Deterministic stage-only Schwab history and current-state generation builder."""
 
 from __future__ import annotations
 
@@ -33,9 +33,10 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-SPEC_SCHEMA_VERSION = 1
+SPEC_SCHEMA_VERSION = 2
+SUPPORTED_SPEC_SCHEMA_VERSIONS = frozenset({1, 2})
 CATALOG_SCHEMA_VERSION = 1
-ADAPTER_VERSION = "0.1.0"
+ADAPTER_VERSION = "0.2.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _ROLES = {
@@ -163,13 +164,13 @@ def _load_spec(path: Path) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SchwabGenerationError("Schwab spec is not valid UTF-8 JSON") from exc
     spec = _object(value, "spec")
-    _strict(
-        spec,
-        {"as_of_date", "baseline", "crosswalk", "roots", "schema_version", "sources"},
-        "spec",
-    )
-    if spec["schema_version"] != SPEC_SCHEMA_VERSION:
+    version = _integer(spec.get("schema_version"), "schema_version")
+    if version not in SUPPORTED_SPEC_SCHEMA_VERSIONS:
         raise SchwabGenerationError("Schwab spec schema version is unsupported")
+    keys = {"as_of_date", "baseline", "crosswalk", "roots", "schema_version", "sources"}
+    if version == SPEC_SCHEMA_VERSION:
+        keys.add("current_snapshot")
+    _strict(spec, keys, "spec")
     return spec
 
 
@@ -316,6 +317,270 @@ def _json(path: Path) -> object:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SchwabGenerationError("source JSON is invalid") from exc
+
+
+def _aware_datetime(value: object, name: str) -> datetime:
+    raw = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise SchwabGenerationError(f"{name} must be an ISO datetime") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise SchwabGenerationError(f"{name} must be timezone-aware")
+    if parsed.isoformat() != raw:
+        raise SchwabGenerationError(f"{name} must be a canonical ISO datetime")
+    return parsed
+
+
+def _amount(value: object, name: str) -> dict[str, object]:
+    amount = _object(value, name)
+    _strict(amount, {"currency", "status", "value"}, name)
+    if amount["currency"] != "USD":
+        raise SchwabGenerationError(f"{name}.currency must be USD")
+    status = _text(amount["status"], f"{name}.status")
+    raw_value = amount["value"]
+    if status == "AVAILABLE":
+        parsed = _decimal(raw_value, f"{name}.value")
+        assert parsed is not None
+        normalized = _decimal_text(parsed)
+        if raw_value != normalized:
+            raise SchwabGenerationError(f"{name}.value must be canonical decimal text")
+        return {"currency": "USD", "status": status, "value": normalized}
+    if status == "UNAVAILABLE" and raw_value is None:
+        return {"currency": "USD", "status": status, "value": None}
+    raise SchwabGenerationError(f"{name} availability contract is invalid")
+
+
+def _current_snapshot(
+    value: object,
+    *,
+    roots: Mapping[str, Path],
+    generation_as_of: date,
+    account_ids: set[str],
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, object]],
+    datetime,
+    int,
+    SourceArtifact,
+]:
+    source = _object(value, "current_snapshot")
+    _strict(
+        source,
+        {
+            "artifact_id",
+            "as_of_date",
+            "expected_sha256",
+            "expected_size_bytes",
+            "relative_path",
+            "root_id",
+            "schema_name",
+            "schema_version",
+        },
+        "current_snapshot",
+    )
+    root_id = _text(source["root_id"], "current_snapshot.root_id")
+    if root_id not in roots:
+        raise SchwabGenerationError("current snapshot root is unknown")
+    path = _source_path(
+        roots[root_id],
+        _relative(source["relative_path"], "current_snapshot.relative_path"),
+    )
+    actual_hash, actual_size = hash_file(path)
+    expected_hash = _text(source["expected_sha256"], "current_snapshot.expected_sha256")
+    if _SHA256.fullmatch(expected_hash) is None or actual_hash != expected_hash:
+        raise SchwabGenerationError("current snapshot hash differs")
+    if actual_size != _integer(
+        source["expected_size_bytes"], "current_snapshot.expected_size_bytes"
+    ):
+        raise SchwabGenerationError("current snapshot size differs")
+    source_as_of = _date(source["as_of_date"], "current_snapshot.as_of_date")
+    if source_as_of != generation_as_of:
+        raise SchwabGenerationError("current snapshot date differs from generation")
+
+    document = _object(_json(path), "current snapshot")
+    _strict(
+        document,
+        {
+            "accounts",
+            "observed_at",
+            "positions",
+            "provider",
+            "schema_version",
+            "sweep_vehicle_count",
+        },
+        "current snapshot",
+    )
+    if document["provider"] != "SCHWAB" or document["schema_version"] != 1:
+        raise SchwabGenerationError("current snapshot identity is unsupported")
+    observed_at = _aware_datetime(document["observed_at"], "current observed_at")
+    if observed_at.date() != generation_as_of:
+        raise SchwabGenerationError("current observation date differs from generation")
+
+    accounts: list[dict[str, object]] = []
+    observed_accounts: set[str] = set()
+    for record in _objects(document["accounts"], "current accounts"):
+        _strict(
+            record,
+            {"account_id", "cash_available", "liquidation_value", "observed_at"},
+            "current accounts[]",
+        )
+        account_id = _text(record["account_id"], "current account_id")
+        if account_id not in account_ids or account_id in observed_accounts:
+            raise SchwabGenerationError("current account scope is invalid")
+        if (
+            _aware_datetime(record["observed_at"], "current account observed_at")
+            != observed_at
+        ):
+            raise SchwabGenerationError("current account observation time differs")
+        observed_accounts.add(account_id)
+        accounts.append(
+            {
+                "account_id": account_id,
+                "cash_available": _amount(record["cash_available"], "cash_available"),
+                "liquidation_value": _amount(
+                    record["liquidation_value"], "liquidation_value"
+                ),
+                "observed_at": observed_at.isoformat(),
+            }
+        )
+    if observed_accounts != account_ids:
+        raise SchwabGenerationError("current account scope differs from crosswalk")
+
+    positions: list[dict[str, object]] = []
+    identities: set[tuple[str, str]] = set()
+    for record in _objects(document["positions"], "current positions"):
+        _strict(
+            record,
+            {
+                "account_id",
+                "as_of_date",
+                "average_price",
+                "evidence_class",
+                "mapping_status",
+                "market_value",
+                "observed_at",
+                "quantity",
+                "record_id",
+                "security_id",
+                "strategy_id",
+                "symbol",
+            },
+            "current positions[]",
+        )
+        account_id = _text(record["account_id"], "position.account_id")
+        if account_id not in account_ids:
+            raise SchwabGenerationError("current position account is outside scope")
+        symbol = _text(record["symbol"], "position.symbol")
+        security_id = _text(record["security_id"], "position.security_id")
+        identity = (account_id, security_id)
+        expected_identity = {
+            "account_id": account_id,
+            "as_of_date": generation_as_of.isoformat(),
+            "security_id": _security_id(symbol),
+        }
+        if (
+            security_id != expected_identity["security_id"]
+            or _text(record["record_id"], "position.record_id")
+            != _record_id("position", expected_identity)
+            or identity in identities
+        ):
+            raise SchwabGenerationError("current position identity is invalid")
+        if (
+            record["as_of_date"] != generation_as_of.isoformat()
+            or record["evidence_class"] != "DEVELOPER_API_CURRENT"
+            or record["mapping_status"] != "UNMAPPED"
+            or record["strategy_id"] is not None
+            or _aware_datetime(record["observed_at"], "position.observed_at")
+            != observed_at
+        ):
+            raise SchwabGenerationError("current position contract differs")
+        quantity = _decimal(record["quantity"], "position.quantity")
+        assert quantity is not None
+        average_price = _decimal(
+            record["average_price"], "position.average_price", optional=True
+        )
+        identities.add(identity)
+        positions.append(
+            {
+                "account_id": account_id,
+                "as_of_date": generation_as_of.isoformat(),
+                "average_price": _decimal_text(average_price),
+                "evidence_class": "DEVELOPER_API_CURRENT",
+                "mapping_status": "UNMAPPED",
+                "market_value": _amount(record["market_value"], "market_value"),
+                "observed_at": observed_at.isoformat(),
+                "quantity": _decimal_text(quantity),
+                "record_id": _record_id("position", expected_identity),
+                "security_id": security_id,
+                "strategy_id": None,
+                "symbol": symbol,
+            }
+        )
+    sweep_vehicle_count = _integer(
+        document["sweep_vehicle_count"], "sweep_vehicle_count"
+    )
+    if sweep_vehicle_count < 0:
+        raise SchwabGenerationError("sweep vehicle count must not be negative")
+    accounts.sort(key=lambda item: str(item["account_id"]))
+    positions.sort(key=lambda item: (str(item["account_id"]), str(item["security_id"])))
+    artifact = SourceArtifact(
+        artifact_id=_relative(source["artifact_id"], "current_snapshot.artifact_id"),
+        sha256=actual_hash,
+        size_bytes=actual_size,
+        as_of_date=source_as_of,
+        schema_name=_text(source["schema_name"], "current_snapshot.schema_name"),
+        schema_version=_text(
+            source["schema_version"], "current_snapshot.schema_version"
+        ),
+    )
+    return accounts, positions, observed_at, sweep_vehicle_count, artifact
+
+
+def _current_position_reconciliation(
+    api_positions: Sequence[Mapping[str, object]],
+    manual_positions: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    api_by_identity = {
+        (str(item["account_id"]), str(item["symbol"])): item for item in api_positions
+    }
+    manual_by_identity = {
+        (str(item["account_id"]), str(item["symbol"])): item
+        for item in manual_positions
+    }
+    shared = set(api_by_identity) & set(manual_by_identity)
+    quantity_comparable = 0
+    quantity_equal = 0
+    value_comparable = 0
+    value_equal = 0
+    for identity in shared:
+        api = api_by_identity[identity]
+        manual = manual_by_identity[identity]
+        manual_quantity = manual.get("quantity")
+        if manual_quantity is not None:
+            quantity_comparable += 1
+            quantity_equal += api.get("quantity") == manual_quantity
+        api_value = _object(api.get("market_value"), "api market_value")
+        manual_value = _object(manual.get("market_value"), "manual market_value")
+        if api_value.get("status") == manual_value.get("status") == "AVAILABLE":
+            value_comparable += 1
+            value_equal += api_value.get("value") == manual_value.get("value")
+    exact = (
+        set(api_by_identity) == set(manual_by_identity)
+        and quantity_comparable == quantity_equal
+        and value_comparable == value_equal
+    )
+    return {
+        "api_only_count": len(set(api_by_identity) - set(manual_by_identity)),
+        "manual_only_count": len(set(manual_by_identity) - set(api_by_identity)),
+        "quantity_comparable_count": quantity_comparable,
+        "quantity_equal_count": quantity_equal,
+        "shared_position_count": len(shared),
+        "status": "PASS_EXACT" if exact else "PASS_OBSERVATIONAL_BOUNDARY",
+        "type": "CURRENT_POSITION_REFERENCE",
+        "value_comparable_count": value_comparable,
+        "value_equal_count": value_equal,
+    }
 
 
 def _transaction_key(record: Mapping[str, Any], *, manual: bool) -> tuple[str, ...]:
@@ -681,9 +946,34 @@ def build_generation(
         sources["WCH_TRANSACTION_JSON"], sources["MANUAL_TRANSACTION_JSON"]
     )
     nav, nav_reconciliation = _nav(sources["WCH_NAV_CSV"], sources["MANUAL_NAV_CSV"])
-    positions, position_as_of, unavailable_position_quantity = _positions(
+    manual_positions, manual_position_as_of, unavailable_position_quantity = _positions(
         sources["MANUAL_POSITION_CSV"][0][1], suffix_to_internal
     )
+    current_accounts: list[dict[str, object]] | None = None
+    positions = manual_positions
+    position_as_of: object = manual_position_as_of
+    current_reconciliation: list[dict[str, object]] = []
+    sweep_vehicle_count: int | None = None
+    if spec["schema_version"] == SPEC_SCHEMA_VERSION:
+        (
+            current_accounts,
+            positions,
+            current_observed_at,
+            sweep_vehicle_count,
+            current_artifact,
+        ) = _current_snapshot(
+            spec["current_snapshot"],
+            roots=roots,
+            generation_as_of=generation_as_of,
+            account_ids=set(crosswalk.values()),
+        )
+        position_as_of = current_observed_at.isoformat()
+        artifacts = tuple(
+            sorted((*artifacts, current_artifact), key=lambda item: item.artifact_id)
+        )
+        current_reconciliation.append(
+            _current_position_reconciliation(positions, manual_positions)
+        )
     baseline = _object(spec["baseline"], "baseline")
     expected = {
         "account_count": len(set(crosswalk.values())),
@@ -696,7 +986,11 @@ def build_generation(
             raise SchwabGenerationError(f"{key} differs from accepted baseline")
     observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]
     known_gaps = (
-        "developer API current account and position snapshot is not present",
+        *(
+            ("developer API current account and position snapshot is not present",)
+            if current_accounts is None
+            else ()
+        ),
         "historical NAV has one later manual date per brokerage account",
         "two account histories contain documented intraday restatements",
         "Investor Checking is outside the accepted brokerage boundary",
@@ -704,7 +998,7 @@ def build_generation(
             (
                 f"{unavailable_position_quantity} manual position rows have unavailable quantity",
             )
-            if unavailable_position_quantity
+            if unavailable_position_quantity and current_accounts is None
             else ()
         ),
     )
@@ -721,12 +1015,22 @@ def build_generation(
         },
         "nav_observations": nav,
         "positions": positions,
-        "position_snapshot_as_of": {
-            "local_datetime": position_as_of,
-            "time_zone": "America/New_York",
-        },
-        "position_quantity_unavailable_count": unavailable_position_quantity,
-        "reconciliation": [*transaction_reconciliation, *nav_reconciliation],
+        "position_snapshot_as_of": (
+            {"observed_at": position_as_of}
+            if current_accounts is not None
+            else {
+                "local_datetime": position_as_of,
+                "time_zone": "America/New_York",
+            }
+        ),
+        "position_quantity_unavailable_count": (
+            0 if current_accounts is not None else unavailable_position_quantity
+        ),
+        "reconciliation": [
+            *transaction_reconciliation,
+            *nav_reconciliation,
+            *current_reconciliation,
+        ],
         "source_artifacts": [item.to_dict() for item in artifacts],
         "source_provenance": {
             "developer_repository_head": "4864bc1428563b79cdeda35d55dd5f7c73b4ee3c",
@@ -735,6 +1039,14 @@ def build_generation(
         },
         "transactions": transactions,
     }
+    if current_accounts is not None:
+        catalog.update(
+            {
+                "current_accounts": current_accounts,
+                "manual_position_quantity_unavailable_count": unavailable_position_quantity,
+                "sweep_vehicle_count": sweep_vehicle_count,
+            }
+        )
     catalog_bytes = canonical_json_bytes(catalog)
     normalized_artifact = SourceArtifact(
         artifact_id="normalized/schwab-generation.json",
@@ -749,10 +1061,22 @@ def build_generation(
         adapter=AdapterIdentity("quant-engine-schwab", ADAPTER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.PARTIAL,
-            boundary="8 mapped Schwab brokerage accounts from reviewed WCH and manual evidence",
-            fact_types=("historical_nav", "positions", "transactions"),
+            boundary=(
+                "8 mapped Schwab brokerage accounts from Developer API current, WCH history, and manual reference evidence"
+                if current_accounts is not None
+                else "8 mapped Schwab brokerage accounts from reviewed WCH and manual evidence"
+            ),
+            fact_types=(
+                ("current_balances", "historical_nav", "positions", "transactions")
+                if current_accounts is not None
+                else ("historical_nav", "positions", "transactions")
+            ),
             observed_start=min(observed_dates),
-            observed_end=max(observed_dates),
+            observed_end=(
+                max((*observed_dates, generation_as_of))
+                if current_accounts is not None
+                else max(observed_dates)
+            ),
             known_gaps=known_gaps,
         ),
         artifacts=(*artifacts, normalized_artifact),
@@ -773,6 +1097,7 @@ def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, 
     return {
         "catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
         "coverage_status": manifest.coverage.status.value,
+        "current_account_count": len(catalog.get("current_accounts", [])),  # type: ignore[arg-type]
         "generation_id": manifest.generation_id,
         "nav_count": len(catalog["nav_observations"]),  # type: ignore[arg-type]
         "position_count": len(catalog["positions"]),  # type: ignore[arg-type]
