@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/report-data.schema.json",
+  "title": "Private coverage-aware portfolio report data",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "report_schema_version",
+    "as_of_date",
+    "baseline",
+    "portfolio_summary",
+    "account_summary",
+    "strategy_summary",
+    "positions",
+    "transactions_and_flows",
+    "twr_mwr",
+    "allocation_history",
+    "flow_reconciliation",
+    "reconciliation_checks",
+    "coverage_data_quality",
+    "corrections",
+    "methodology",
+    "provenance"
+  ],
+  "properties": {
+    "report_schema_version": {"const": 1},
+    "as_of_date": {"type": "string", "format": "date"},
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "catalog_sha256"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "catalog_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "portfolio_summary": {"type": "array", "minItems": 8, "items": {"type": "object"}},
+    "account_summary": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "strategy_summary": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "positions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {"const": "UNAVAILABLE_NO_ACCEPTED_POSITION_SOURCE"}
+        }
+      }
+    },
+    "transactions_and_flows": {"type": "array", "items": {"type": "object"}},
+    "twr_mwr": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/performance"}},
+    "allocation_history": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"type": "object"}},
+    "flow_reconciliation": {"type": "array", "items": {"type": "object"}},
+    "reconciliation_checks": {"type": "array", "minItems": 3, "items": {"type": "object"}},
+    "coverage_data_quality": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "corrections": {"type": "array", "items": {"type": "object"}},
+    "methodology": {"type": "array", "minItems": 7, "items": {"type": "object"}},
+    "provenance": {"type": "array", "minItems": 2, "items": {"type": "object"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "performance": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "account_id",
+        "assignment_id",
+        "strategy_id",
+        "twr",
+        "twr_status",
+        "mwr_xirr",
+        "mwr_status",
+        "flow_timing"
+      ],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1},
+        "assignment_id": {"type": "string", "minLength": 1},
+        "strategy_id": {"type": ["string", "null"]},
+        "twr": {"type": ["string", "null"]},
+        "twr_status": {
+          "enum": [
+            "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
+            "UNAVAILABLE",
+            "UNMAPPED",
+            "UNAVAILABLE_INSUFFICIENT_NAV",
+            "UNAVAILABLE_MISSING_NAV",
+            "UNAVAILABLE_FLOW_WITHOUT_SAME_DATE_NAV",
+            "UNAVAILABLE_NONPOSITIVE_PRIOR_NAV"
+          ]
+        },
+        "mwr_xirr": {"type": "null"},
+        "mwr_status": {"const": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE"},
+        "flow_timing": {"const": "DATE_ONLY_END_OF_DAY_INFERRED_TIMING"}
+      }
+    }
+  }
+}
