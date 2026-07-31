@@ -1,0 +1,205 @@
+# IBKR read capabilities and authority decision
+
+Status: accepted design candidate for `IBKR-CAP-001` (#43)
+
+Decision date: 2026-07-30
+
+Provider ID: `ibkr` (`IBRK` is retained only in legacy provenance)
+
+This document decides what a later read-only IBKR integration may claim. It
+does not implement an adapter, connect to IBKR, configure a Flex token or
+query, publish a data generation, or authorize broker execution.
+
+## Decision
+
+Use **TWS or IB Gateway for current/intraday state** and **Activity Flex for
+finalized account history**.
+
+| Fact boundary | Intraday/current authority | Finalized historical authority |
+|---|---|---|
+| Account balances and account readiness | TWS/Gateway account updates or summary | Flex Activity |
+| Positions | TWS/Gateway position/account subscriptions | Flex `OpenPosition` summary rows |
+| Open orders | TWS/Gateway | Not a historical-ledger fact |
+| Executions | TWS/Gateway events are provisional and bounded | Flex `Trade` execution rows |
+| NAV/equity | Operational TWS account values only | Flex `EquitySummaryByReportDateInBase`, reconciled to `ChangeInNAV` |
+| Cash activity and transfers | No complete claim | Flex `CashTransaction` and `Transfer` |
+| Corporate actions | No complete claim | Flex `CorporateAction` |
+| Report-date FX | No complete claim | Flex `ConversionRate` |
+
+IBKR's current TWS API documentation describes initial account/position
+snapshots followed by change updates. The official TWS FAQ explicitly states
+that historical portfolio information is not available through TWS API and
+instead comes from statements and Flex queries. `reqExecutions` is also not a
+durable ledger: IB Gateway is limited to executions since midnight, while TWS
+can expose up to seven days only when its Trade Log setting is changed.
+[TWS API documentation](https://ibkrcampus.com/campus/ibkr-api-page/twsapi-doc/),
+[official TWS FAQ](https://interactivebrokers.github.io/tws-api/third_party.html),
+[executions and commissions](https://interactivebrokers.github.io/tws-api/executions_commissions.html)
+
+TWS historical bars and ticks are instrument market data sourced from chart
+and Time & Sales facilities. They are not account NAV, account positions,
+transactions, or cash flows and may never fill an account-history gap.
+[historical market data](https://interactivebrokers.github.io/tws-api/historical_data.html)
+
+Activity Flex is the finalized-history surface. Its web service generates and
+then retrieves a preconfigured query in two steps, requires a User-Agent, uses
+service version 3, and documents pacing and incomplete-statement errors. The
+later reader must fail closed on a malformed, truncated, incomplete, or
+server-not-ready response; no partial result can become current authority.
+[Flex Web Service](https://ibkrcampus.com/campus/ibkr-api-page/flex-web-service/)
+
+## Operational authority rules
+
+The machine-readable decision is
+[`read-mapping.v1.json`](../../contracts/providers/ibkr/read-mapping.v1.json).
+For each internal account, fact type, effective interval, and finalization
+state:
+
+1. Raw account IDs and aliases resolve through the restricted local crosswalk.
+   They never enter source, fixtures, logs, issue text, or normalized output.
+2. TWS/Gateway observations are provisional. They can support operator state
+   and intraday reconciliation but cannot silently replace a finalized Flex
+   fact.
+3. Flex observations are finalized only after structural completeness,
+   declared coverage, identity resolution, and cross-section reconciliation
+   pass.
+4. An overlap retains both observations and creates a reconciliation record.
+   It does not overwrite evidence.
+5. The last accepted generation remains authoritative when a new extraction,
+   parse, mapping, or reconciliation fails.
+
+This refines, but does not broaden, the repository's existing
+[IBKR data policy](../data-policy.md#provider-specific-security-gates).
+
+## Flex retrieval contract for the later vertical slice
+
+The future read-only implementation should be one bounded vertical issue, not
+separate inventory, schema, parser, and publication projects.
+
+1. The operator creates a least-privilege Activity Flex query in Client Portal
+   and stores only its query ID and token reference in the approved credential
+   store. A token value is never written to Git, configuration, logs, or issue
+   text.
+2. Call `/SendRequest` with token reference resolution, query ID, version 3,
+   and a User-Agent. Respect one request per second and ten requests per minute
+   per token.
+3. Treat the returned reference code as a short-lived retrieval handle, not a
+   generation identity. Poll `/GetStatement` with bounded backoff only for the
+   documented generation-in-progress state.
+4. Persist the exact response as immutable private source evidence before
+   normalization. Reject HTML error pages, malformed XML, missing expected
+   sections, reversed dates, unexpected account scope, and documented
+   incomplete/settlement/P&L-not-ready responses.
+5. Normalize, reconcile, declare coverage, and publish through the existing
+   generation envelope. Repeating the same frozen inputs and mapper version
+   must produce identical normalized hashes.
+
+Flex templates are customizable at the field and section level, and saved
+queries are available for the four previous calendar years plus the current
+year. The implementation must therefore record the exact selected sections,
+fields, account scope, date rule, output format, and query identity rather than
+assuming every Flex response has the same schema.
+[Activity Flex reference](https://www.ibkrguides.com/reportingreference/reportguide/activity%20flex%20query%20reference.htm),
+[Flex query availability](https://www.ibkrguides.com/orgportal/performanceandstatements/flex.htm)
+
+## Canonical mapping
+
+The mapping intentionally uses the existing `core` and `portfolio-ledger`
+boundaries. It creates no IBKR domain package, universal observation schema,
+market-data root, or strategy-intelligence subsystem.
+
+| Flex section | Canonical projection | Required rule |
+|---|---|---|
+| `AccountInformation` | `Account` lookup | Resolve locally; provider name, alias, and raw ID are evidence, not canonical IDs. |
+| `EquitySummaryByReportDateInBase` | `NavObservation` | Use `total` in account base currency; reconcile with same-date `ChangeInNAV.endingValue`. |
+| `OpenPosition` | `Security` and `PositionSnapshot` | Use `conid` identity and `SUMMARY` rows only; convert `positionValue` with the observed report-date rate and preserve raw components. |
+| `Trade` | `Transaction` plus execution evidence | Use execution-level rows and `ibExecID`; retain proceeds, taxes, commissions, corrections, and order references. |
+| `CashTransaction` | `Transaction` or `CashFlow` | Deposits, withdrawals, and external transfers are flows; dividends, interest, fees, and taxes remain investment results. Unknown types stay `UNMAPPED`. |
+| `Transfer` | `CashFlow` and reconciliation evidence | Pair internal portfolio transfers; never invent a cash value for an unvalued position transfer. |
+| `CorporateAction` | Future `CorporateAction` record | Preserve now; the minimal ledger does not yet implement the declared target. |
+| `ConversionRate` | Provider source FX evidence | Use only for the exact report date/currency pair; no silent interpolation. A shared FX record waits for a second real consumer. |
+
+Official field meanings used by this mapping are documented in the reporting
+guide for [Change in NAV](https://www.ibkrguides.com/reportingreference/reportguide/changeinnav_fq.htm),
+[Open Positions](https://www.ibkrguides.com/reportingreference/reportguide/open%20positionsfq.htm),
+[Trades](https://www.ibkrguides.com/reportingreference/reportguide/tradesfq.htm),
+[Cash Transactions](https://www.ibkrguides.com/reportingreference/reportguide/cash%20transactionsfq.htm),
+and [Currency Conversion Rate](https://www.ibkrguides.com/reportingreference/reportguide/currency%20conversion%20ratefq.htm).
+
+### Mapping examples
+
+- A finalized `EquitySummaryByReportDateInBase` row for one raw account and
+  report date becomes one `NavObservation` after crosswalk resolution. If its
+  total differs from `ChangeInNAV.endingValue`, publication blocks.
+- An `OpenPosition` row with `levelOfDetail=SUMMARY` becomes one
+  account/security/date snapshot. Lot rows remain source evidence and are not
+  summed again.
+- A `Trade` row with an execution identifier becomes one transaction. A
+  corrected or cancelled row appends lineage; it never mutates the original
+  source fact.
+- A cash transaction classified as dividend becomes investment-result
+  transaction evidence, not an external flow. An unrecognized description or
+  code remains `UNMAPPED` and blocks a complete coverage claim.
+- Provider `model` and account labels do not create strategies. Only an
+  accepted effective-dated `AccountStrategyAssignment` may attach a strategy;
+  otherwise the fact remains `UNMAPPED`.
+
+## Legacy evidence inventory
+
+The sanitized manifest is
+[`legacy-evidence-manifest.v1.json`](../../contracts/providers/ibkr/legacy-evidence-manifest.v1.json).
+It records a SHA-256 and disposition for every named legacy artifact while
+excluding filenames, account identifiers, security identifiers, transactions,
+positions, and absolute paths from Git.
+
+Read-only inspection found:
+
+- 26 artifacts totaling 252,586,534 bytes: eight XML, fourteen CSV, two XLS,
+  one XSD, and one HTML artifact;
+- eight full `FlexQueryResponse` XML inputs with 868 daily-account statements,
+  five crosswalk candidates, and 217 distinct report dates from 2025-09-15
+  through 2026-07-14;
+- 868 NAV rows, 96,782 position rows, 3,361 trade rows, 425 cash transactions,
+  56 transfers, 20 corporate actions, and 33,852 conversion-rate rows; and
+- secondary CSV, HTML, XSD, and binary XLS representations that must be
+  reconciled or explicitly proven redundant before a later migration can call
+  every artifact disposed.
+
+The original order-execution concept specification is retained as provenance:
+
+```text
+artifact: concept-spec-v1
+version/date: 1.0 / 2026-07-26
+pages: 9
+sha256: 6c620c35a36798d772e620ee0dd8b1f605c9b3547b0bc250553693cfc6b19314
+```
+
+Its immutable manifests, one-writer rule, unknown-submission reconciliation,
+append-only event ledger, and fail-closed invariants remain useful for the
+deferred execution backlog. Its proposed services, database, APIs, risk
+engine, UI, and live rollout are not requirements for the read side and are not
+implemented by this decision.
+
+## Known gaps and next boundary
+
+- The observed legacy interval is finite; it proves no coverage before
+  2025-09-15 or after 2026-07-14.
+- Five raw account identities appear across the XML while each daily slice has
+  four. The restricted crosswalk and effective intervals must explain this
+  before publication.
+- The two XLS artifacts remain secondary evidence until the vertical slice
+  proves they add no unique facts or converts them through a separately
+  governed local process.
+- The live Flex template, included accounts/fields, token scope, and
+  entitlements are unverified. No credential or provider call occurred here.
+- TWS/Gateway connectivity and actual account visibility are untested.
+- The minimal ledger lacks a `CorporateAction` record and standalone FX record.
+  Add only the former when the IBKR vertical slice demonstrates its consumer;
+  defer a shared FX contract until multiple recurring consumers exist.
+
+The next implementation issue is the existing read-only IBKR vertical slice.
+It must combine least-privilege Flex retrieval, optional TWS current-state
+capture, parsing, reconciliation, coverage, immutable generation publication,
+and immediate portfolio-report refresh. UI, PAPER, live trading, data movement,
+and execution architecture remain outside that issue unless separately
+approved.
