@@ -5,6 +5,7 @@ from quant_engine.portfolio_ledger.models import (
     AccountRole,
     AccountStrategyAssignment,
     CashFlow,
+    CorporateAction,
     LedgerSlice,
     LedgerValidationError,
     MappingStatus,
@@ -25,7 +26,7 @@ from quant_engine.portfolio_ledger.reconciliation import (
     reconcile_position_values,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Account",
@@ -33,6 +34,7 @@ __all__ = [
     "AccountRole",
     "AccountStrategyAssignment",
     "CashFlow",
+    "CorporateAction",
     "LedgerSlice",
     "LedgerValidationError",
     "MappingStatus",

@@ -30,12 +30,17 @@ from quant_engine.ibkr.flex import (
     FlexValidationError,
     parse_flex_file,
 )
-from quant_engine.portfolio_ledger import decimal_text
+from quant_engine.portfolio_ledger import (
+    CorporateAction,
+    MappingStatus,
+    ObservedAmount,
+    decimal_text,
+)
 
 
 SPEC_SCHEMA_VERSION = 1
-CATALOG_SCHEMA_VERSION = 1
-ADAPTER_VERSION = "0.1.0"
+CATALOG_SCHEMA_VERSION = 2
+ADAPTER_VERSION = "0.2.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SOURCE_ROLES = {
@@ -591,19 +596,18 @@ def _normalize(
                 }
             )
         for action in statement.corporate_actions:
+            status, strategy_id = _strategy_for_date(
+                assignments, account_id, action.event_date
+            )
             if not action.reported_account_matches_statement:
+                status, strategy_id = "UNMAPPED", None
                 account_scope_mismatches += 1
-            payload = {
-                "account_id": account_id,
-                "action_type": action.action_type,
-                "amount": decimal_text(action.amount)
+            action_amount = (
+                ObservedAmount.available(action.amount, action.currency)
                 if action.amount is not None
-                else None,
-                "currency": action.currency,
-                "event_date": action.event_date.isoformat(),
-                "quantity": decimal_text(action.quantity)
-                if action.quantity is not None
-                else None,
+                else ObservedAmount.unavailable(action.currency)
+            )
+            provider_evidence = {
                 "provider_account_scope": (
                     "STATEMENT_ACCOUNT"
                     if action.reported_account_matches_statement
@@ -612,12 +616,33 @@ def _normalize(
                 "provider_activity_id_sha256": hashlib.sha256(
                     action.identity.encode()
                 ).hexdigest(),
-                "security_id": security(action.conid, action.currency),
                 "source_artifact_id": statement.artifact_id,
             }
-            corporate_actions.append(
-                {"record_id": _record_id("corporate-action", payload), **payload}
+            identity_payload = {
+                "account_id": account_id,
+                "amount": action_amount.to_dict(),
+                "event_date": action.event_date.isoformat(),
+                "kind": action.action_type,
+                "mapping_status": status,
+                "quantity": decimal_text(action.quantity)
+                if action.quantity is not None
+                else None,
+                "security_id": security(action.conid, action.currency),
+                "strategy_id": strategy_id,
+                **provider_evidence,
+            }
+            record = CorporateAction(
+                record_id=_record_id("corporate-action", identity_payload),
+                account_id=account_id,
+                event_date=action.event_date,
+                kind=action.action_type,
+                amount=action_amount,
+                mapping_status=MappingStatus(status),
+                strategy_id=strategy_id,
+                security_id=security(action.conid, action.currency),
+                quantity=action.quantity,
             )
+            corporate_actions.append({**record.to_dict(), **provider_evidence})
         for rate in statement.rates:
             payload = {
                 "as_of_date": rate.report_date.isoformat(),
@@ -656,10 +681,8 @@ def _normalize(
             },
             {
                 "fact_type": "CORPORATE_ACTION_PROJECTION",
-                "known_gaps": [
-                    "Minimal ledger CorporateAction record is not implemented"
-                ],
-                "status": "PARTIAL",
+                "known_gaps": [],
+                "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
             },
             {
                 "fact_type": "PROVIDER_ACCOUNT_SCOPE",
@@ -742,6 +765,16 @@ def build_generation(
         schema_version=str(SPEC_SCHEMA_VERSION),
     )
     observed = [item.report_date for item in statements]
+    account_scope_exceptions = next(
+        item["exception_count"]
+        for item in catalog["reconciliation_checks"]
+        if item["check_id"] == "activity-account-scope"
+    )
+    known_gaps = ["No separately authorized TWS current-state snapshot was supplied"]
+    if account_scope_exceptions:
+        known_gaps.append(
+            "Some activity rows have an ambiguous provider-reported account scope"
+        )
     manifest = GenerationManifest.build(
         as_of_date=generation_as_of,
         adapter=AdapterIdentity("ibkr-read-builder", ADAPTER_VERSION),
@@ -760,10 +793,7 @@ def build_generation(
             ),
             observed_start=min(observed),
             observed_end=max(observed),
-            known_gaps=(
-                "No separately authorized TWS current-state snapshot was supplied",
-                "The minimal ledger has no CorporateAction record",
-            ),
+            known_gaps=tuple(known_gaps),
         ),
         artifacts=(
             *source_artifacts,

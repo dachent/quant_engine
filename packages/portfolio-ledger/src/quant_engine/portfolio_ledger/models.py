@@ -328,6 +328,53 @@ class CashFlow:
 
 
 @dataclass(frozen=True)
+class CorporateAction:
+    """A source-observed security event without provider-specific semantics."""
+
+    record_id: str
+    account_id: str
+    event_date: date
+    kind: str
+    amount: ObservedAmount
+    mapping_status: MappingStatus
+    strategy_id: str | None = None
+    security_id: str | None = None
+    quantity: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("record_id", "account_id", "kind"):
+            object.__setattr__(
+                self, field_name, _text(getattr(self, field_name), field_name)
+            )
+        if self.security_id is not None:
+            object.__setattr__(
+                self, "security_id", _text(self.security_id, "security_id")
+            )
+        if self.quantity is not None:
+            _decimal(self.quantity, "corporate_action.quantity")
+        object.__setattr__(
+            self,
+            "strategy_id",
+            _validate_strategy_mapping(self.mapping_status, self.strategy_id),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "account_id": self.account_id,
+            "amount": self.amount.to_dict(),
+            "event_date": self.event_date.isoformat(),
+            "kind": self.kind,
+            "mapping_status": self.mapping_status.value,
+            "quantity": (
+                decimal_text(self.quantity) if self.quantity is not None else None
+            ),
+            "record_id": self.record_id,
+            "security_id": self.security_id,
+            "strategy_id": self.strategy_id,
+        }
+
+
+@dataclass(frozen=True)
 class NavObservation:
     record_id: str
     account_id: str
@@ -432,6 +479,7 @@ class LedgerSlice:
     positions: tuple[PositionSnapshot, ...]
     transactions: tuple[Transaction, ...]
     cash_flows: tuple[CashFlow, ...]
+    corporate_actions: tuple[CorporateAction, ...]
     nav_observations: tuple[NavObservation, ...]
 
     @classmethod
@@ -447,6 +495,7 @@ class LedgerSlice:
         positions: Iterable[PositionSnapshot] = (),
         transactions: Iterable[Transaction] = (),
         cash_flows: Iterable[CashFlow] = (),
+        corporate_actions: Iterable[CorporateAction] = (),
         nav_observations: Iterable[NavObservation] = (),
     ) -> LedgerSlice:
         generations = _deduplicate(
@@ -478,6 +527,11 @@ class LedgerSlice:
         )
         accepted_flows = _deduplicate(
             cash_flows, key=lambda item: item.record_id, object_name="cash flow"
+        )
+        accepted_actions = _deduplicate(
+            corporate_actions,
+            key=lambda item: item.record_id,
+            object_name="corporate action",
         )
         accepted_nav = _deduplicate(
             nav_observations, key=lambda item: item.record_id, object_name="NAV"
@@ -562,6 +616,21 @@ class LedgerSlice:
             if flow.event_date > as_of_date:
                 raise LedgerValidationError("cash flow is later than ledger as_of_date")
 
+        for action in accepted_actions:
+            account = require_account(action.account_id)
+            validate_mapping(account, action.mapping_status, action.strategy_id)
+            if (
+                action.security_id is not None
+                and action.security_id not in security_ids
+            ):
+                raise LedgerValidationError(
+                    f"corporate action references unknown security: {action.security_id}"
+                )
+            if action.event_date > as_of_date:
+                raise LedgerValidationError(
+                    "corporate action is later than ledger as_of_date"
+                )
+
         for nav in accepted_nav:
             account = require_account(nav.account_id)
             if nav.nav.currency != account.base_currency:
@@ -588,6 +657,7 @@ class LedgerSlice:
             positions=accepted_positions,
             transactions=accepted_transactions,
             cash_flows=accepted_flows,
+            corporate_actions=accepted_actions,
             nav_observations=accepted_nav,
         )
 
@@ -597,6 +667,7 @@ class LedgerSlice:
             "as_of_date": self.as_of_date.isoformat(),
             "assignments": [item.to_dict() for item in self.assignments],
             "cash_flows": [item.to_dict() for item in self.cash_flows],
+            "corporate_actions": [item.to_dict() for item in self.corporate_actions],
             "nav_observations": [item.to_dict() for item in self.nav_observations],
             "positions": [item.to_dict() for item in self.positions],
             "securities": [item.to_dict() for item in self.securities],

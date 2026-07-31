@@ -119,7 +119,7 @@ observation schema, market-data root, or strategy-intelligence subsystem.
 | `Trade` | `Transaction` plus execution evidence | Use execution-level rows and `ibExecID`; retain proceeds, taxes, commissions, corrections, and order references. |
 | `CashTransaction` | `Transaction` or `CashFlow` | Deposits, withdrawals, and external transfers are flows; dividends, interest, fees, and taxes remain investment results. Unknown types stay `UNMAPPED`. |
 | `Transfer` | `CashFlow` and reconciliation evidence | Pair internal portfolio transfers; never invent a cash value for an unvalued position transfer. |
-| `CorporateAction` | Future `CorporateAction` record | Preserve now; the minimal ledger does not yet implement the declared target. |
+| `CorporateAction` | `CorporateAction` | Preserve quantity and amount independently; strategy attribution requires the accepted assignment and untrusted account scope remains `UNMAPPED`. |
 | `ConversionRate` | Provider source FX evidence | Use only for the exact report date/currency pair; no silent interpolation. A shared FX record waits for a second real consumer. |
 
 Official field meanings used by this mapping are documented in the reporting
@@ -198,9 +198,9 @@ implemented by this decision.
 - The live Flex template, included accounts/fields, token scope, and
   entitlements are unverified. No credential or provider call occurred here.
 - TWS/Gateway connectivity and actual account visibility are untested.
-- The minimal ledger lacks a `CorporateAction` record and standalone FX record.
-  Add only the former when the IBKR vertical slice demonstrates its consumer;
-  defer a shared FX contract until multiple recurring consumers exist.
+- The IBKR slice demonstrated 20 corporate-action consumers, so the minimal
+  ledger now implements that record. A shared FX record remains deferred until
+  multiple recurring consumers exist.
 
 ## Offline generation runbook
 
@@ -216,8 +216,8 @@ uv run --frozen --no-sync python tools/ibkr_generation.py stage <private-spec> <
 
 `build` performs no writes. `stage` creates a content-addressed candidate and
 never writes `CURRENT.json`. The candidate is deliberately `PARTIAL` while TWS
-current state, account-scope exceptions, and the missing canonical corporate
-action projection remain unresolved. Core publication therefore rejects it.
+current state and account-scope exceptions remain unresolved. Core publication
+therefore rejects it.
 Repeating the same inputs produces the same catalog bytes and generation ID.
 
 Flex retrieval has no default HTTP implementation: callers must inject both a
