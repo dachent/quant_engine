@@ -170,6 +170,14 @@ Read-only inspection found:
   reconciled or explicitly proven redundant before a later migration can call
   every artifact disposed.
 
+The accepted local evidence copy is
+`dataIBKR/source-runs/legacy-20260731/files`. All 26 files and 252,586,534
+bytes match the legacy source by relative path, size, and SHA-256 with zero
+missing, extra, or different artifacts. The local copy proof has SHA-256
+`9181a6f520543c3d44158ca9a479e80e31a3f220339f45211a84851b1db3e9b8`.
+The original source remains untouched as recovery evidence; no destructive
+cutover is implied by acceptance of the destination copy.
+
 The original order-execution concept specification is retained as provenance:
 
 ```text
@@ -235,6 +243,16 @@ explicit unmapped counts. The candidate remains `PARTIAL` while the account
 topology and legacy row-level account-scope exceptions remain unresolved, so
 Core publication rejects it.
 Repeating the same inputs produces the same catalog bytes and generation ID.
+
+The accepted destination-root replay produced immutable partial generation
+`a99c37f016bf6f60673db4ca3d8a2b44e1dc5223db9eb626688bb5d6656e7f68`
+and catalog SHA-256
+`fc43fa630d6d7ceac7e7497a00e485adbc6c3ffa5d25e9cb341828f9391f87d0`.
+It contains 916 NAV observations, 22,011 finalized Flex positions, 4,139
+transactions, 94 flows, 20 corporate actions, 8,931 FX observations, 117
+mapped current Gateway positions, and 24 current account values. This is an
+accepted evidence generation, not current portfolio authority: coverage is
+`PARTIAL` and `CURRENT.json` is absent.
 
 Flex retrieval has no default HTTP implementation: callers must inject both a
 credential provider and a GET transport under separately recorded authority.
