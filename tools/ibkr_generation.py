@@ -20,7 +20,9 @@ def _summary(spec_path: Path) -> dict[str, object]:
         "nav_count": len(catalog["nav_observations"]),
         "position_count": len(catalog["positions"]),
         "transaction_count": len(catalog["transactions"]),
-        "tws_status": "UNAVAILABLE",
+        "tws_account_value_count": len(catalog["tws_account_values"]),
+        "tws_position_count": len(catalog["tws_current_positions"]),
+        "tws_status": catalog["tws_current_state"]["status"],
     }
 
 
