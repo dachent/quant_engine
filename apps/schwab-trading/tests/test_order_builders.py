@@ -1,4 +1,9 @@
-from order_builders import build_order_spec, normalize_duration, normalize_session, normalize_tax_lot_method
+from order_builders import (
+    build_order_spec,
+    normalize_duration,
+    normalize_session,
+    normalize_tax_lot_method,
+)
 from schemas import Duration, ExecutionProfile, OrderTemplate, Session, TaxLotMethod
 
 
@@ -11,7 +16,7 @@ def test_normalizers_match_workbook_rules() -> None:
 def test_build_buy_limit_bracket_payload() -> None:
     payload = build_order_spec(
         order_template=OrderTemplate.BUY_LIMIT_BRACKET,
-        account_number="12345678",
+        account_number=("SYNTHETIC_ACCOUNT"),
         symbol="SPY",
         quantity=10,
         chosen_limit_price=500.25,
@@ -28,7 +33,7 @@ def test_build_buy_limit_bracket_payload() -> None:
 def test_build_sell_market_payload() -> None:
     payload = build_order_spec(
         order_template=OrderTemplate.SELL_MARKET,
-        account_number="12345678",
+        account_number=("SYNTHETIC_ACCOUNT"),
         symbol="SPY",
         quantity=-10,
         chosen_limit_price=None,
@@ -39,4 +44,3 @@ def test_build_sell_market_payload() -> None:
 
     assert payload["orderType"] == "MARKET"
     assert payload["orderLegCollection"][0]["instruction"] == "SELL"
-

@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from openpyxl import Workbook
 
+from execution_guard import require_submission_authority
 from imports import create_import_template, parse_import_workbook
 from logging_setup import setup_runner_logging
 from order_builders import build_order_spec, template_requires_limit, template_side
@@ -21,8 +22,17 @@ from schemas import (
     Side,
     SortPreset,
 )
-from schwab_client import DEFAULT_CALLBACK_TIMEOUT_SECONDS, SchwabClient, SchwabClientError
-from storage import db_connection, ensure_runtime_dirs, get_app_paths, init_db, save_setting
+from schwab_client import (
+    DEFAULT_CALLBACK_TIMEOUT_SECONDS,
+    SchwabClient,
+)
+from storage import (
+    db_connection,
+    ensure_runtime_dirs,
+    get_app_paths,
+    init_db,
+    save_setting,
+)
 
 
 logger = setup_runner_logging()
@@ -43,7 +53,9 @@ def _side_for_quantity(quantity: float) -> Side:
     return Side.BUY if quantity > 0 else Side.SELL
 
 
-def _reference_notional(row: PreviewRow, quantity: float, unit_price: float | None) -> float | None:
+def _reference_notional(
+    row: PreviewRow, quantity: float, unit_price: float | None
+) -> float | None:
     if unit_price is None:
         return None
     return abs(quantity) * unit_price
@@ -69,7 +81,7 @@ def _build_preview_rows(
         quote = (quote_map or {}).get(import_row.symbol)
         preview = PreviewRow(
             row_number=import_row.row_number,
-            account_number=import_row.account_number,
+            account_number=(import_row.account_number),
             symbol=import_row.symbol,
             quantity=import_row.quantity,
             side=side,
@@ -132,7 +144,7 @@ def _build_preview_rows(
             try:
                 preview.order_payload = build_order_spec(
                     order_template=profile.order_template,
-                    account_number=import_row.account_number,
+                    account_number=(import_row.account_number),
                     symbol=import_row.symbol,
                     quantity=import_row.quantity,
                     chosen_limit_price=preview.chosen_limit_price,
@@ -147,7 +159,11 @@ def _build_preview_rows(
             preview.local_status = "INVALID"
         elif not import_row.enabled:
             preview.local_status = "DISABLED"
-        elif not strict_market_data and limit_required and preview.chosen_limit_price is None:
+        elif (
+            not strict_market_data
+            and limit_required
+            and preview.chosen_limit_price is None
+        ):
             preview.local_status = "NEEDS_QUOTES"
             preview.local_status_detail = "Refresh quotes to compute limit pricing."
         else:
@@ -157,8 +173,12 @@ def _build_preview_rows(
     return _apply_execution_order(preview_rows, profile.sort_preset)
 
 
-def _apply_execution_order(preview_rows: list[PreviewRow], sort_preset: SortPreset) -> list[PreviewRow]:
-    ready_rows = [row for row in preview_rows if row.enabled and not row.validation_errors]
+def _apply_execution_order(
+    preview_rows: list[PreviewRow], sort_preset: SortPreset
+) -> list[PreviewRow]:
+    ready_rows = [
+        row for row in preview_rows if row.enabled and not row.validation_errors
+    ]
     other_rows = [row for row in preview_rows if row not in ready_rows]
 
     def notional(row: PreviewRow) -> float:
@@ -169,11 +189,23 @@ def _apply_execution_order(preview_rows: list[PreviewRow], sort_preset: SortPres
     elif sort_preset == SortPreset.ABS_NOTIONAL_DESC:
         ordered = sorted(ready_rows, key=notional, reverse=True)
     elif sort_preset == SortPreset.SELLS_DESC_THEN_BUYS_DESC:
-        sells = sorted((row for row in ready_rows if row.side == Side.SELL), key=notional, reverse=True)
-        buys = sorted((row for row in ready_rows if row.side == Side.BUY), key=notional, reverse=True)
+        sells = sorted(
+            (row for row in ready_rows if row.side == Side.SELL),
+            key=notional,
+            reverse=True,
+        )
+        buys = sorted(
+            (row for row in ready_rows if row.side == Side.BUY),
+            key=notional,
+            reverse=True,
+        )
         ordered = [*sells, *buys]
     else:
-        sells = sorted((row for row in ready_rows if row.side == Side.SELL), key=notional, reverse=True)
+        sells = sorted(
+            (row for row in ready_rows if row.side == Side.SELL),
+            key=notional,
+            reverse=True,
+        )
         buys = sorted((row for row in ready_rows if row.side == Side.BUY), key=notional)
         ordered = [*sells, *buys]
 
@@ -181,7 +213,14 @@ def _apply_execution_order(preview_rows: list[PreviewRow], sort_preset: SortPres
         row.execution_sequence = index
     for row in other_rows:
         row.execution_sequence = None
-    return sorted(preview_rows, key=lambda row: (row.execution_sequence is None, row.execution_sequence or row.row_number, row.row_number))
+    return sorted(
+        preview_rows,
+        key=lambda row: (
+            row.execution_sequence is None,
+            row.execution_sequence or row.row_number,
+            row.row_number,
+        ),
+    )
 
 
 def _persist_account_snapshots(snapshots: list[AccountSnapshot]) -> None:
@@ -344,7 +383,9 @@ def task_validate_import(args: dict[str, Any]) -> dict[str, Any]:
     profile = _load_profile(args)
     import_path = Path(args["import_path"]).resolve()
     rows, errors = parse_import_workbook(import_path)
-    preview_rows = _build_preview_rows(rows, profile, quote_map=None, task_name="validate_import")
+    preview_rows = _build_preview_rows(
+        rows, profile, quote_map=None, task_name="validate_import"
+    )
     return {
         "import_path": str(import_path),
         "errors": [error.model_dump(mode="json") for error in errors],
@@ -364,7 +405,9 @@ def task_refresh_quotes(args: dict[str, Any]) -> dict[str, Any]:
         }
     client = SchwabClient()
     quote_map = client.get_quotes([row.symbol for row in rows])
-    preview_rows = _build_preview_rows(rows, profile, quote_map=quote_map, task_name="refresh_quotes")
+    preview_rows = _build_preview_rows(
+        rows, profile, quote_map=quote_map, task_name="refresh_quotes"
+    )
     return {
         "import_path": str(import_path),
         "errors": [],
@@ -373,6 +416,7 @@ def task_refresh_quotes(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def task_place_orders(args: dict[str, Any]) -> dict[str, Any]:
+    require_submission_authority("place_orders")
     profile = _load_profile(args)
     import_path = Path(args["import_path"]).resolve()
     rows, errors = parse_import_workbook(import_path)
@@ -385,20 +429,32 @@ def task_place_orders(args: dict[str, Any]) -> dict[str, Any]:
 
     client = SchwabClient()
     quote_map = client.get_quotes([row.symbol for row in rows])
-    preview_rows = _build_preview_rows(rows, profile, quote_map=quote_map, task_name="place_orders")
+    preview_rows = _build_preview_rows(
+        rows, profile, quote_map=quote_map, task_name="place_orders"
+    )
     run_id = args.get("request_id") or f"run-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     init_db()
     with db_connection() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO order_runs(run_id, created_at, import_path, execution_profile_json, summary_json) VALUES(?, ?, ?, ?, ?)",
-            (run_id, now_iso(), str(import_path), json.dumps(profile.model_dump(mode="json")), None),
+            (
+                run_id,
+                now_iso(),
+                str(import_path),
+                json.dumps(profile.model_dump(mode="json")),
+                None,
+            ),
         )
 
     hash_map = client.get_account_hash_map()
     submitted = 0
     rejected = 0
     for preview in preview_rows:
-        if not preview.enabled or preview.validation_errors or preview.order_payload is None:
+        if (
+            not preview.enabled
+            or preview.validation_errors
+            or preview.order_payload is None
+        ):
             continue
         account_hash = hash_map.get(preview.account_number)
         if not account_hash:
@@ -426,7 +482,9 @@ def task_place_orders(args: dict[str, Any]) -> dict[str, Any]:
         preview.order_id = _extract_order_id(location)
         if 200 <= response.status_code < 300:
             preview.local_status = "SUBMITTED"
-            preview.local_status_detail = f"OrderId: {preview.order_id}" if preview.order_id else ""
+            preview.local_status_detail = (
+                f"OrderId: {preview.order_id}" if preview.order_id else ""
+            )
             submitted += 1
         else:
             preview.local_status = "REJECTED"
@@ -495,7 +553,9 @@ def task_export_snapshot(args: dict[str, Any]) -> dict[str, Any]:
         positions = task_refresh_portfolio({})["positions"]
     if not orders:
         profile = _load_profile(args)
-        orders = task_refresh_orders({"execution_profile": profile.model_dump(mode="json")})["orders"]
+        orders = task_refresh_orders(
+            {"execution_profile": profile.model_dump(mode="json")}
+        )["orders"]
 
     workbook = Workbook()
     sheet_accounts = workbook.active
@@ -503,8 +563,22 @@ def task_export_snapshot(args: dict[str, Any]) -> dict[str, Any]:
     sheet_portfolio = workbook.create_sheet("Portfolio")
     sheet_orders = workbook.create_sheet("Order Status")
 
-    account_headers = ["ACCOUNT NAME", "ACCOUNT NUMBER", "ACCOUNT HASH", "CASH AVAILABLE", "LIQUIDATION VALUE"]
-    portfolio_headers = ["ACCOUNT NAME", "ACCOUNT NUMBER", "SYMBOL", "AVG PRICE", "QTY", "VALUE", "DAY P/L"]
+    account_headers = [
+        "ACCOUNT NAME",
+        "ACCOUNT NUMBER",
+        "ACCOUNT HASH",
+        "CASH AVAILABLE",
+        "LIQUIDATION VALUE",
+    ]
+    portfolio_headers = [
+        "ACCOUNT NAME",
+        "ACCOUNT NUMBER",
+        "SYMBOL",
+        "AVG PRICE",
+        "QTY",
+        "VALUE",
+        "DAY P/L",
+    ]
     order_headers = [
         "ACCOUNT NAME",
         "ACCOUNT NUMBER",
@@ -521,13 +595,23 @@ def task_export_snapshot(args: dict[str, Any]) -> dict[str, Any]:
     ]
 
     sheet_accounts.append(account_headers)
-    for row in sorted(accounts, key=lambda item: (item["account_name"], item["account_number"])):
+    for row in sorted(
+        accounts, key=lambda item: (item["account_name"], item["account_number"])
+    ):
         sheet_accounts.append(
-            [row["account_name"], row["account_number"], row["account_hash"], row["cash_available"], row["liquidation_value"]]
+            [
+                row["account_name"],
+                row["account_number"],
+                row["account_hash"],
+                row["cash_available"],
+                row["liquidation_value"],
+            ]
         )
 
     sheet_portfolio.append(portfolio_headers)
-    for row in sorted(positions, key=lambda item: (item["account_name"], item["symbol"])):
+    for row in sorted(
+        positions, key=lambda item: (item["account_name"], item["symbol"])
+    ):
         sheet_portfolio.append(
             [
                 row["account_name"],
@@ -541,7 +625,9 @@ def task_export_snapshot(args: dict[str, Any]) -> dict[str, Any]:
         )
 
     sheet_orders.append(order_headers)
-    for row in sorted(orders, key=lambda item: item.get("entered_time") or "", reverse=True):
+    for row in sorted(
+        orders, key=lambda item: item.get("entered_time") or "", reverse=True
+    ):
         sheet_orders.append(
             [
                 row["account_name"],
@@ -559,9 +645,14 @@ def task_export_snapshot(args: dict[str, Any]) -> dict[str, Any]:
             ]
         )
 
-    output_dir = Path(export_dir_raw).expanduser() if export_dir_raw else paths.exports_dir
+    output_dir = (
+        Path(export_dir_raw).expanduser() if export_dir_raw else paths.exports_dir
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir.resolve() / f"SchwabData_{datetime.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
+    output_path = (
+        output_dir.resolve()
+        / f"SchwabData_{datetime.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
+    )
     workbook.save(output_path)
     return {
         "export_path": str(output_path),

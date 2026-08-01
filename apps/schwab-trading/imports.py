@@ -9,7 +9,13 @@ from schemas import ImportOrderRow, ImportValidationError
 
 
 REQUIRED_HEADERS = ("account_number", "symbol", "quantity")
-OPTIONAL_HEADERS = ("enabled", "limit_price_override", "take_profit_price", "stop_price", "note")
+OPTIONAL_HEADERS = (
+    "enabled",
+    "limit_price_override",
+    "take_profit_price",
+    "stop_price",
+    "note",
+)
 ALL_HEADERS = REQUIRED_HEADERS + OPTIONAL_HEADERS
 
 
@@ -28,18 +34,27 @@ def _normalize_bool(value: Any) -> bool:
     raise ValueError(f"Unsupported enabled value: {value!r}")
 
 
-def parse_import_workbook(path: str | Path) -> tuple[list[ImportOrderRow], list[ImportValidationError]]:
+def parse_import_workbook(
+    path: str | Path,
+) -> tuple[list[ImportOrderRow], list[ImportValidationError]]:
     workbook_path = Path(path)
     errors: list[ImportValidationError] = []
     rows: list[ImportOrderRow] = []
 
     if not workbook_path.exists():
-        return [], [ImportValidationError(field_name="file", message=f"Import file not found: {workbook_path}")]
+        return [], [
+            ImportValidationError(
+                field_name="file", message=f"Import file not found: {workbook_path}"
+            )
+        ]
 
     workbook = load_workbook(workbook_path, read_only=True, data_only=True)
     sheet = workbook.worksheets[0]
 
-    headers = [_normalize_header(cell.value) for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
+    headers = [
+        _normalize_header(cell.value)
+        for cell in next(sheet.iter_rows(min_row=1, max_row=1))
+    ]
     header_map = {header: index for index, header in enumerate(headers) if header}
 
     for required in REQUIRED_HEADERS:
@@ -54,7 +69,9 @@ def parse_import_workbook(path: str | Path) -> tuple[list[ImportOrderRow], list[
     if errors:
         return [], errors
 
-    for row_number, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+    for row_number, row in enumerate(
+        sheet.iter_rows(min_row=2, values_only=True), start=2
+    ):
         if all(value in (None, "") for value in row):
             continue
 
@@ -68,7 +85,7 @@ def parse_import_workbook(path: str | Path) -> tuple[list[ImportOrderRow], list[
         try:
             payload["enabled"] = _normalize_bool(payload.get("enabled", True))
             parsed = ImportOrderRow.model_validate(payload)
-            if not parsed.account_number:
+            if not (parsed.account_number):
                 raise ValueError("account_number is blank")
             if not parsed.symbol:
                 raise ValueError("symbol is blank")
@@ -102,4 +119,3 @@ def create_import_template(path: str | Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(target)
     return target
-

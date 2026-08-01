@@ -1,12 +1,39 @@
-# Schwab Trading Engine
+# Schwab Trading Engine for `quant_engine`
 
-Local Python port of the Excel/VBA Schwab workflow.
+Windows operator application absorbed from the original Excel/VBA Schwab
+workflow. The existing Tkinter UI and request/result runner remain available,
+but order submission and cancellation are unconditionally disabled in this
+release.
+
+Source history and the project-specific delta are recorded in
+[`PROVENANCE.md`](PROVENANCE.md).
 
 ## Run
 
 ```powershell
-& ".\.venv\Scripts\python.exe" ".\ui.py"
+$env:QUANT_ENGINE_SCHWAB_HOME = "C:\path\to\_quant_engine\dataSchwab\runtime"
+uv run --frozen --project apps/schwab-trading python apps/schwab-trading/ui.py
 ```
+
+If `QUANT_ENGINE_SCHWAB_HOME` is omitted in this monorepo, the app resolves the
+sibling `dataSchwab\runtime` folder. Runtime jobs, results, logs, imports,
+exports, SQLite state, and DPAPI credentials never belong in the worktree.
+
+## Callable task runner
+
+The UI and command invocation use the same task registry:
+
+```powershell
+uv run --frozen --project apps/schwab-trading python apps/schwab-trading/runner.py `
+  --task refresh_portfolio `
+  --request-file C:\path\to\request.json `
+  --result-file C:\path\to\result.json
+```
+
+Read-side tasks still require an authorized local Schwab session. The retained
+`place_orders` task returns a structured `SubmissionDisabledError` before
+client construction, quotes, SQLite mutation, or broker access. The UI control
+is visibly disabled. There is no configuration or environment bypass.
 
 ## Auth Diagnostics
 
@@ -62,11 +89,14 @@ The callback URL must exactly match the Schwab developer app entry, including wh
 
 - `Validate` is structural validation only; it may mark rows as `NEEDS_QUOTES` when quote-derived limit pricing is required.
 - `Refresh Quotes` computes preview pricing and execution order.
-- `Place Orders` submits in the computed execution sequence.
+- `Place Orders (disabled)` is retained only to show the legacy workflow
+  boundary; it cannot submit.
 - `Refresh Orders` is the broker-source-of-truth status view and backfills rejection details plus tax-lot data when needed.
 
 ## Tests
 
 ```powershell
-& "C:\ProgramData\.pyenv\pyenv-win\versions\3.13.3\python.exe" -m pytest .\tests
+uv run --frozen --project apps/schwab-trading pytest -q `
+  --disable-socket --allow-hosts=127.0.0.1,localhost `
+  apps/schwab-trading/tests
 ```

@@ -254,7 +254,9 @@ class TaskRequest(BaseModel):
 
     request_id: str = Field(default_factory=lambda: str(uuid4()))
     task_name: str
-    created_at: str = Field(default_factory=lambda: datetime.now().astimezone().isoformat())
+    created_at: str = Field(
+        default_factory=lambda: datetime.now().astimezone().isoformat()
+    )
     args: dict[str, Any] = Field(default_factory=dict)
     meta: dict[str, Any] = Field(default_factory=dict)
 

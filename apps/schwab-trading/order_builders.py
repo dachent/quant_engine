@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from schemas import Duration, ExecutionProfile, OrderTemplate, Session, Side, TaxLotMethod
+from schemas import (
+    Duration,
+    ExecutionProfile,
+    OrderTemplate,
+    Session,
+    Side,
+    TaxLotMethod,
+)
 
 
 def normalize_duration(raw: str | Duration | None) -> Duration:
@@ -85,7 +92,11 @@ def normalize_tax_lot_method(raw: str | TaxLotMethod | None) -> TaxLotMethod:
 
 
 def template_side(order_template: OrderTemplate) -> Side:
-    return Side.SELL if order_template in {OrderTemplate.SELL_LIMIT, OrderTemplate.SELL_MARKET} else Side.BUY
+    return (
+        Side.SELL
+        if order_template in {OrderTemplate.SELL_LIMIT, OrderTemplate.SELL_MARKET}
+        else Side.BUY
+    )
 
 
 def template_requires_limit(order_template: OrderTemplate) -> bool:
@@ -136,7 +147,9 @@ def _base_order(
     return payload
 
 
-def _normalize_profile(profile: ExecutionProfile, is_market: bool, uses_stop: bool) -> tuple[Duration, Session, TaxLotMethod]:
+def _normalize_profile(
+    profile: ExecutionProfile, is_market: bool, uses_stop: bool
+) -> tuple[Duration, Session, TaxLotMethod]:
     duration = normalize_duration(profile.duration)
     session = normalize_session(profile.session)
     tax_lot_method = normalize_tax_lot_method(profile.tax_lot_method)
@@ -187,18 +200,36 @@ def build_order_spec(
         OrderTemplate.BUY_MARKET_BRACKET,
         OrderTemplate.BUY_LIMIT_BRACKET,
     }
-    duration, session, tax_lot_method = _normalize_profile(profile, is_market=is_market, uses_stop=uses_stop)
+    duration, session, tax_lot_method = _normalize_profile(
+        profile, is_market=is_market, uses_stop=uses_stop
+    )
 
     if template_requires_limit(order_template) and chosen_limit_price is None:
-        raise ValueError("Selected order template requires a computed or manual limit price")
+        raise ValueError(
+            "Selected order template requires a computed or manual limit price"
+        )
 
-    if order_template in {OrderTemplate.BUY_MARKET_TAKE_PROFIT, OrderTemplate.BUY_LIMIT_TAKE_PROFIT} and take_profit_price is None:
-        raise ValueError("take_profit_price is required for the selected order template")
-    if order_template in {OrderTemplate.BUY_MARKET_STOP, OrderTemplate.BUY_LIMIT_STOP} and stop_price is None:
+    if (
+        order_template
+        in {OrderTemplate.BUY_MARKET_TAKE_PROFIT, OrderTemplate.BUY_LIMIT_TAKE_PROFIT}
+        and take_profit_price is None
+    ):
+        raise ValueError(
+            "take_profit_price is required for the selected order template"
+        )
+    if (
+        order_template in {OrderTemplate.BUY_MARKET_STOP, OrderTemplate.BUY_LIMIT_STOP}
+        and stop_price is None
+    ):
         raise ValueError("stop_price is required for the selected order template")
-    if order_template in {OrderTemplate.BUY_MARKET_BRACKET, OrderTemplate.BUY_LIMIT_BRACKET}:
+    if order_template in {
+        OrderTemplate.BUY_MARKET_BRACKET,
+        OrderTemplate.BUY_LIMIT_BRACKET,
+    }:
         if take_profit_price is None or stop_price is None:
-            raise ValueError("Both take_profit_price and stop_price are required for bracket orders")
+            raise ValueError(
+                "Both take_profit_price and stop_price are required for bracket orders"
+            )
 
     if order_template == OrderTemplate.BUY_LIMIT:
         return _base_order(
@@ -250,11 +281,16 @@ def build_order_spec(
             instruction="SELL",
         )
 
-    root_type = "MARKET" if order_template in {
-        OrderTemplate.BUY_MARKET_TAKE_PROFIT,
-        OrderTemplate.BUY_MARKET_STOP,
-        OrderTemplate.BUY_MARKET_BRACKET,
-    } else "LIMIT"
+    root_type = (
+        "MARKET"
+        if order_template
+        in {
+            OrderTemplate.BUY_MARKET_TAKE_PROFIT,
+            OrderTemplate.BUY_MARKET_STOP,
+            OrderTemplate.BUY_MARKET_BRACKET,
+        }
+        else "LIMIT"
+    )
 
     root = _base_order(
         strategy_type="TRIGGER",
@@ -291,7 +327,10 @@ def build_order_spec(
         stop_price=stop_price,
     )
 
-    if order_template in {OrderTemplate.BUY_MARKET_TAKE_PROFIT, OrderTemplate.BUY_LIMIT_TAKE_PROFIT}:
+    if order_template in {
+        OrderTemplate.BUY_MARKET_TAKE_PROFIT,
+        OrderTemplate.BUY_LIMIT_TAKE_PROFIT,
+    }:
         root["childOrderStrategies"] = [
             {
                 "orderStrategyType": "OCO",
@@ -311,4 +350,3 @@ def build_order_spec(
         }
     ]
     return root
-

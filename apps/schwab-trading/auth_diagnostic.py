@@ -5,15 +5,35 @@ import sys
 from typing import Sequence
 
 from logging_setup import setup_runner_logging
-from schwab_client import DEFAULT_CALLBACK_TIMEOUT_SECONDS, SchwabClient, SchwabClientError
+from schwab_client import (
+    DEFAULT_CALLBACK_TIMEOUT_SECONDS,
+    SchwabClient,
+    SchwabClientError,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run an isolated Schwab login diagnostic.")
-    parser.add_argument("mode", choices=("manual", "auto"), help="Which login path to exercise.")
-    parser.add_argument("--app-key", dest="app_key", help="Schwab app key. Omit to use stored credentials.")
-    parser.add_argument("--app-secret", dest="app_secret", help="Schwab app secret. Omit to use stored credentials.")
-    parser.add_argument("--callback-url", dest="callback_url", help="Schwab callback URL. Omit to use stored credentials.")
+    parser = argparse.ArgumentParser(
+        description="Run an isolated Schwab login diagnostic."
+    )
+    parser.add_argument(
+        "mode", choices=("manual", "auto"), help="Which login path to exercise."
+    )
+    parser.add_argument(
+        "--app-key",
+        dest="app_key",
+        help="Schwab app key. Omit to use stored credentials.",
+    )
+    parser.add_argument(
+        "--app-secret",
+        dest="app_secret",
+        help="Schwab app secret. Omit to use stored credentials.",
+    )
+    parser.add_argument(
+        "--callback-url",
+        dest="callback_url",
+        help="Schwab callback URL. Omit to use stored credentials.",
+    )
     parser.add_argument(
         "--timeout",
         type=float,
@@ -32,10 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _configure_client(args: argparse.Namespace, parser: argparse.ArgumentParser) -> SchwabClient:
+def _configure_client(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> SchwabClient:
     provided = [bool(args.app_key), bool(args.app_secret), bool(args.callback_url)]
     if any(provided) and not all(provided):
-        parser.error("Provide --app-key, --app-secret, and --callback-url together, or omit all three to use stored credentials.")
+        parser.error(
+            "Provide --app-key, --app-secret, and --callback-url together, or omit all three to use stored credentials."
+        )
 
     client = SchwabClient()
     if all(provided):
@@ -45,7 +69,9 @@ def _configure_client(args: argparse.Namespace, parser: argparse.ArgumentParser)
     return client
 
 
-def _print_summary(mode: str, client: SchwabClient, linked_accounts: list[dict[str, object]]) -> None:
+def _print_summary(
+    mode: str, client: SchwabClient, linked_accounts: list[dict[str, object]]
+) -> None:
     login_status = client.login_status()
     print()
     print("Auth diagnostic complete")
@@ -63,7 +89,13 @@ def _run_manual(client: SchwabClient) -> int:
     print(login["authorization_url"])
     print()
     print("Redacted diagnostics:")
-    for key in ("callback_url", "callback_port", "callback_path", "authorize_redirect_uri", "authorize_url"):
+    for key in (
+        "callback_url",
+        "callback_port",
+        "callback_path",
+        "authorize_redirect_uri",
+        "authorize_url",
+    ):
         print(f"{key}: {diagnostics[key]}")
     print()
     received_url = input("Redirect URL> ").strip()
@@ -85,7 +117,7 @@ def _run_auto(client: SchwabClient, timeout: float, browser: str | None) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    setup_runner_logging()
+    setup_runner_logging(activate=True)
     parser = build_parser()
     args = parser.parse_args(argv)
 

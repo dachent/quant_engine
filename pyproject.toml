@@ -27,7 +27,7 @@ package = false
 required-version = ">=0.11.28,<0.12"
 
 [tool.uv.workspace]
-members = ["packages/ci-controls", "packages/core", "packages/fidelity", "packages/ibkr", "packages/matrixport", "packages/portfolio-ledger", "packages/schwab", "packages/web-contracts"]
+members = ["apps/schwab-trading", "packages/ci-controls", "packages/core", "packages/fidelity", "packages/ibkr", "packages/matrixport", "packages/portfolio-ledger", "packages/schwab", "packages/web-contracts"]
 
 [tool.uv.sources]
 quant-engine-ci-controls = { workspace = true }

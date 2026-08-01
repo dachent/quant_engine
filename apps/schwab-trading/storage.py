@@ -17,8 +17,15 @@ class DATA_BLOB(ctypes.Structure):
     _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_byte))]
 
 
-kernel32 = ctypes.windll.kernel32
-crypt32 = ctypes.windll.crypt32
+if os.name == "nt":
+    kernel32 = ctypes.windll.kernel32
+    crypt32 = ctypes.windll.crypt32
+else:
+    kernel32 = None
+    crypt32 = None
+
+
+RUNTIME_ROOT_ENV = "QUANT_ENGINE_SCHWAB_HOME"
 
 
 def _blob_from_bytes(data: bytes) -> DATA_BLOB:
@@ -36,9 +43,19 @@ def _bytes_from_blob(blob: DATA_BLOB) -> bytes:
 
 
 def dpapi_encrypt(plaintext: bytes) -> bytes:
+    if kernel32 is None or crypt32 is None:
+        raise RuntimeError("Schwab credential storage requires Windows DPAPI")
     in_blob = _blob_from_bytes(plaintext)
     out_blob = DATA_BLOB()
-    if not crypt32.CryptProtectData(ctypes.byref(in_blob), "schwab_tool", None, None, None, 0, ctypes.byref(out_blob)):
+    if not crypt32.CryptProtectData(
+        ctypes.byref(in_blob),
+        "schwab_tool",
+        None,
+        None,
+        None,
+        0,
+        ctypes.byref(out_blob),
+    ):
         raise ctypes.WinError()
     try:
         return _bytes_from_blob(out_blob)
@@ -48,9 +65,13 @@ def dpapi_encrypt(plaintext: bytes) -> bytes:
 
 
 def dpapi_decrypt(ciphertext: bytes) -> bytes:
+    if kernel32 is None or crypt32 is None:
+        raise RuntimeError("Schwab credential storage requires Windows DPAPI")
     in_blob = _blob_from_bytes(ciphertext)
     out_blob = DATA_BLOB()
-    if not crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+    if not crypt32.CryptUnprotectData(
+        ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)
+    ):
         raise ctypes.WinError()
     try:
         return _bytes_from_blob(out_blob)
@@ -72,8 +93,18 @@ class AppPaths:
     credentials_path: Path
 
 
+def _default_runtime_root() -> Path:
+    configured = os.environ.get(RUNTIME_ROOT_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    repository_root = Path(__file__).resolve().parents[2]
+    if (repository_root / "pyproject.toml").is_file():
+        return (repository_root.parent / "dataSchwab" / "runtime").resolve()
+    raise RuntimeError(f"Set {RUNTIME_ROOT_ENV} to a governed local runtime directory")
+
+
 def get_app_paths(root: Path | None = None) -> AppPaths:
-    base = root or Path(__file__).resolve().parent
+    base = root.resolve() if root is not None else _default_runtime_root()
     return AppPaths(
         root=base,
         jobs_dir=base / "jobs",
@@ -133,7 +164,9 @@ class CredentialStore:
     def save(self, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         encrypted = dpapi_encrypt(encoded)
-        atomic_write_text(self.credentials_path, base64.b64encode(encrypted).decode("ascii"))
+        atomic_write_text(
+            self.credentials_path, base64.b64encode(encrypted).decode("ascii")
+        )
 
     def merge(self, **updates: Any) -> dict[str, Any]:
         payload = self.load()
@@ -273,15 +306,21 @@ _URL_FIELDS = {
 }
 _TEXT_REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
-        re.compile(r"(?i)([?&](?:code|access_token|refresh_token|id_token|token)=)([^&#\s]+)"),
+        re.compile(
+            r"(?i)([?&](?:code|access_token|refresh_token|id_token|token)=)([^&#\s]+)"
+        ),
         r"\1[REDACTED]",
     ),
     (
-        re.compile(r"(?i)(\"(?:app_secret|access_token|refresh_token|id_token|client_secret)\"\s*:\s*\")([^\"]+)(\")"),
+        re.compile(
+            r"(?i)(\"(?:app_secret|access_token|refresh_token|id_token|client_secret)\"\s*:\s*\")([^\"]+)(\")"
+        ),
         r"\1[REDACTED]\3",
     ),
     (
-        re.compile(r"(?i)('(?:app_secret|access_token|refresh_token|id_token|client_secret)'\s*:\s*')([^']+)(')"),
+        re.compile(
+            r"(?i)('(?:app_secret|access_token|refresh_token|id_token|client_secret)'\s*:\s*')([^']+)(')"
+        ),
         r"\1[REDACTED]\3",
     ),
 )
@@ -311,7 +350,10 @@ def redact_sensitive_data(value: Any, key: str | None = None) -> Any:
     if lowered_key in _SENSITIVE_FIELDS:
         return _REDACTED
     if isinstance(value, dict):
-        return {child_key: redact_sensitive_data(child_value, child_key) for child_key, child_value in value.items()}
+        return {
+            child_key: redact_sensitive_data(child_value, child_key)
+            for child_key, child_value in value.items()
+        }
     if isinstance(value, list):
         return [redact_sensitive_data(item, key) for item in value]
     if isinstance(value, tuple):
@@ -328,7 +370,9 @@ def append_audit_record(record: dict[str, Any], audit_path: Path | None = None) 
     path = audit_path or runtime.logs_dir / "audit.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(redact_sensitive_data(record), ensure_ascii=False) + "\n")
+        handle.write(
+            json.dumps(redact_sensitive_data(record), ensure_ascii=False) + "\n"
+        )
 
 
 def sanitize_runtime_artifacts(paths: AppPaths | None = None) -> None:
@@ -353,5 +397,9 @@ def sanitize_runtime_artifacts(paths: AppPaths | None = None) -> None:
         except json.JSONDecodeError:
             sanitized_lines.append(_redact_text(raw_line))
         else:
-            sanitized_lines.append(json.dumps(redact_sensitive_data(payload), ensure_ascii=False))
-    atomic_write_text(audit_path, "\n".join(sanitized_lines) + ("\n" if sanitized_lines else ""))
+            sanitized_lines.append(
+                json.dumps(redact_sensitive_data(payload), ensure_ascii=False)
+            )
+    atomic_write_text(
+        audit_path, "\n".join(sanitized_lines) + ("\n" if sanitized_lines else "")
+    )

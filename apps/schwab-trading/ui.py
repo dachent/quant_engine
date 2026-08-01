@@ -10,9 +10,15 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
+from execution_guard import SUBMISSION_DISABLED_MESSAGE
 from imports import create_import_template
 from logging_setup import setup_ui_logging
-from schwab_client import DEFAULT_CALLBACK_URL, LOGIN_TASK_TIMEOUT_SECONDS, SchwabClient, SchwabClientError
+from schwab_client import (
+    DEFAULT_CALLBACK_URL,
+    LOGIN_TASK_TIMEOUT_SECONDS,
+    SchwabClient,
+    SchwabClientError,
+)
 from schemas import (
     Duration,
     ExecutionProfile,
@@ -23,7 +29,14 @@ from schemas import (
     TaxLotMethod,
     TaskRequest,
 )
-from storage import CredentialStore, ensure_runtime_dirs, get_app_paths, load_settings, sanitize_runtime_artifacts, save_setting
+from storage import (
+    CredentialStore,
+    ensure_runtime_dirs,
+    get_app_paths,
+    load_settings,
+    sanitize_runtime_artifacts,
+    save_setting,
+)
 
 
 logger = setup_ui_logging()
@@ -97,14 +110,24 @@ class SchwabToolApp:
         settings = load_settings()
         credentials = self.store.load()
         saved_profile = settings.get("execution_profile", {})
-        profile = ExecutionProfile.model_validate(saved_profile) if saved_profile else ExecutionProfile()
+        profile = (
+            ExecutionProfile.model_validate(saved_profile)
+            if saved_profile
+            else ExecutionProfile()
+        )
 
         self.import_path_var = tk.StringVar(value=settings.get("import_path", ""))
-        self.export_dir_var = tk.StringVar(value=settings.get("export_dir", str(self.paths.exports_dir)))
+        self.export_dir_var = tk.StringVar(
+            value=settings.get("export_dir", str(self.paths.exports_dir))
+        )
         self.app_key_var = tk.StringVar(value=credentials.get("app_key", ""))
         self.app_secret_var = tk.StringVar(value=credentials.get("app_secret", ""))
-        self.callback_url_var = tk.StringVar(value=credentials.get("callback_url", DEFAULT_CALLBACK_URL))
-        self.login_status_var = tk.StringVar(value="Token present" if credentials.get("token") else "Not logged in")
+        self.callback_url_var = tk.StringVar(
+            value=credentials.get("callback_url", DEFAULT_CALLBACK_URL)
+        )
+        self.login_status_var = tk.StringVar(
+            value="Token present" if credentials.get("token") else "Not logged in"
+        )
 
         self.order_template_var = tk.StringVar(value=profile.order_template.value)
         self.duration_var = tk.StringVar(value=profile.duration.value)
@@ -113,15 +136,25 @@ class SchwabToolApp:
         self.sort_preset_var = tk.StringVar(value=profile.sort_preset.value)
         self.preview_only_var = tk.BooleanVar(value=profile.preview_only)
         self.pricing_method_var = tk.StringVar(value=profile.limit_pricing_method.value)
-        self.legacy_d_min_var = tk.StringVar(value=str(profile.pricing_params.legacy_d_min))
+        self.legacy_d_min_var = tk.StringVar(
+            value=str(profile.pricing_params.legacy_d_min)
+        )
         self.legacy_k_var = tk.StringVar(value=str(profile.pricing_params.legacy_k))
-        self.delta_cap_bps_var = tk.StringVar(value=str(profile.pricing_params.delta_cap_bps))
-        self.tick_cap_var = tk.StringVar(value="" if profile.pricing_params.tick_cap is None else str(profile.pricing_params.tick_cap))
+        self.delta_cap_bps_var = tk.StringVar(
+            value=str(profile.pricing_params.delta_cap_bps)
+        )
+        self.tick_cap_var = tk.StringVar(
+            value=""
+            if profile.pricing_params.tick_cap is None
+            else str(profile.pricing_params.tick_cap)
+        )
         self.lookback_days_var = tk.StringVar(value=str(profile.orders_lookback_days))
 
         self.current_job_var = tk.StringVar(value="Idle")
         self.last_action_var = tk.StringVar(value="Ready")
-        self.counts_var = tk.StringVar(value="Loaded 0 | Valid 0 | Submitted 0 | Rejected 0 | Canceled 0")
+        self.counts_var = tk.StringVar(
+            value="Loaded 0 | Valid 0 | Submitted 0 | Rejected 0 | Canceled 0"
+        )
         self.refresh_var = tk.StringVar(value="No refresh yet")
 
     def _build_layout(self) -> None:
@@ -154,20 +187,23 @@ class SchwabToolApp:
         frame.columnconfigure(10, weight=1)
 
         buttons = [
-            ("Login / Refresh Auth", self._login),
-            ("Refresh Accounts", self._refresh_accounts),
-            ("Refresh Portfolio", self._refresh_portfolio),
-            ("Refresh Orders", self._refresh_orders),
-            ("Open Import Template", self._open_template),
-            ("Import", self._choose_import_file),
-            ("Validate", self._validate_import),
-            ("Refresh Quotes", self._refresh_quotes),
-            ("Place Orders", self._place_orders),
-            ("Export", self._export_snapshot),
+            ("Login / Refresh Auth", self._login, False),
+            ("Refresh Accounts", self._refresh_accounts, False),
+            ("Refresh Portfolio", self._refresh_portfolio, False),
+            ("Refresh Orders", self._refresh_orders, False),
+            ("Open Import Template", self._open_template, False),
+            ("Import", self._choose_import_file, False),
+            ("Validate", self._validate_import, False),
+            ("Refresh Quotes", self._refresh_quotes, False),
+            ("Place Orders (disabled)", self._place_orders, True),
+            ("Export", self._export_snapshot, False),
         ]
-        for column, (label, command) in enumerate(buttons):
+        for column, (label, command, disabled) in enumerate(buttons):
             padx = (0, 4) if column == 0 else 4
-            ttk.Button(frame, text=label, command=command).grid(row=0, column=column, padx=padx)
+            button = ttk.Button(frame, text=label, command=command)
+            if disabled:
+                button.state(["disabled"])
+            button.grid(row=0, column=column, padx=padx)
 
     def _build_left_rail(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -176,58 +212,118 @@ class SchwabToolApp:
         auth_frame.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         auth_frame.columnconfigure(1, weight=1)
         ttk.Label(auth_frame, text="App Key").grid(row=0, column=0, sticky="w")
-        ttk.Entry(auth_frame, textvariable=self.app_key_var, width=34).grid(row=0, column=1, sticky="ew")
+        ttk.Entry(auth_frame, textvariable=self.app_key_var, width=34).grid(
+            row=0, column=1, sticky="ew"
+        )
         ttk.Label(auth_frame, text="App Secret").grid(row=1, column=0, sticky="w")
-        ttk.Entry(auth_frame, textvariable=self.app_secret_var, show="*", width=34).grid(row=1, column=1, sticky="ew")
+        ttk.Entry(
+            auth_frame, textvariable=self.app_secret_var, show="*", width=34
+        ).grid(row=1, column=1, sticky="ew")
         ttk.Label(auth_frame, text="Callback URI").grid(row=2, column=0, sticky="w")
-        ttk.Entry(auth_frame, textvariable=self.callback_url_var, width=34).grid(row=2, column=1, sticky="ew")
+        ttk.Entry(auth_frame, textvariable=self.callback_url_var, width=34).grid(
+            row=2, column=1, sticky="ew"
+        )
         ttk.Label(auth_frame, text="Login Status").grid(row=3, column=0, sticky="w")
-        ttk.Label(auth_frame, textvariable=self.login_status_var, width=30).grid(row=3, column=1, sticky="w")
+        ttk.Label(auth_frame, textvariable=self.login_status_var, width=30).grid(
+            row=3, column=1, sticky="w"
+        )
 
         files = ttk.LabelFrame(parent, text="Files", padding=10)
         files.grid(row=1, column=0, sticky="ew", pady=(0, 12))
         files.columnconfigure(1, weight=1)
         ttk.Label(files, text="Import File").grid(row=0, column=0, sticky="w")
-        ttk.Entry(files, textvariable=self.import_path_var, width=34).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-        ttk.Button(files, text="Browse...", command=self._choose_import_file).grid(row=0, column=2, sticky="ew")
-        ttk.Label(files, text="Export Folder").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(files, textvariable=self.export_dir_var, width=34).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(8, 0))
-        ttk.Button(files, text="Browse...", command=self._choose_export_dir).grid(row=1, column=2, sticky="ew", pady=(8, 0))
+        ttk.Entry(files, textvariable=self.import_path_var, width=34).grid(
+            row=0, column=1, sticky="ew", padx=(0, 8)
+        )
+        ttk.Button(files, text="Browse...", command=self._choose_import_file).grid(
+            row=0, column=2, sticky="ew"
+        )
+        ttk.Label(files, text="Export Folder").grid(
+            row=1, column=0, sticky="w", pady=(8, 0)
+        )
+        ttk.Entry(files, textvariable=self.export_dir_var, width=34).grid(
+            row=1, column=1, sticky="ew", padx=(0, 8), pady=(8, 0)
+        )
+        ttk.Button(files, text="Browse...", command=self._choose_export_dir).grid(
+            row=1, column=2, sticky="ew", pady=(8, 0)
+        )
 
         execution = ttk.LabelFrame(parent, text="Execution", padding=10)
         execution.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         execution.columnconfigure(1, weight=1)
         ttk.Label(execution, text="Order Template").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(execution, textvariable=self.order_template_var, values=[item.value for item in OrderTemplate], state="readonly").grid(row=0, column=1, sticky="ew")
+        ttk.Combobox(
+            execution,
+            textvariable=self.order_template_var,
+            values=[item.value for item in OrderTemplate],
+            state="readonly",
+        ).grid(row=0, column=1, sticky="ew")
         ttk.Label(execution, text="Duration").grid(row=1, column=0, sticky="w")
-        ttk.Combobox(execution, textvariable=self.duration_var, values=[item.value for item in Duration], state="readonly").grid(row=1, column=1, sticky="ew")
+        ttk.Combobox(
+            execution,
+            textvariable=self.duration_var,
+            values=[item.value for item in Duration],
+            state="readonly",
+        ).grid(row=1, column=1, sticky="ew")
         ttk.Label(execution, text="Session").grid(row=2, column=0, sticky="w")
-        ttk.Combobox(execution, textvariable=self.session_var, values=[item.value for item in Session], state="readonly").grid(row=2, column=1, sticky="ew")
+        ttk.Combobox(
+            execution,
+            textvariable=self.session_var,
+            values=[item.value for item in Session],
+            state="readonly",
+        ).grid(row=2, column=1, sticky="ew")
         ttk.Label(execution, text="Tax Lot").grid(row=3, column=0, sticky="w")
-        ttk.Combobox(execution, textvariable=self.tax_lot_var, values=[item.value for item in TaxLotMethod], state="readonly").grid(row=3, column=1, sticky="ew")
+        ttk.Combobox(
+            execution,
+            textvariable=self.tax_lot_var,
+            values=[item.value for item in TaxLotMethod],
+            state="readonly",
+        ).grid(row=3, column=1, sticky="ew")
         ttk.Label(execution, text="Sort Preset").grid(row=4, column=0, sticky="w")
-        ttk.Combobox(execution, textvariable=self.sort_preset_var, values=[item.value for item in SortPreset], state="readonly").grid(row=4, column=1, sticky="ew")
-        ttk.Checkbutton(execution, text="Preview only", variable=self.preview_only_var).grid(row=5, column=0, columnspan=2, sticky="w")
+        ttk.Combobox(
+            execution,
+            textvariable=self.sort_preset_var,
+            values=[item.value for item in SortPreset],
+            state="readonly",
+        ).grid(row=4, column=1, sticky="ew")
+        ttk.Checkbutton(
+            execution, text="Preview only", variable=self.preview_only_var
+        ).grid(row=5, column=0, columnspan=2, sticky="w")
 
         pricing = ttk.LabelFrame(parent, text="Limit Pricing", padding=10)
         pricing.grid(row=3, column=0, sticky="ew", pady=(0, 12))
         pricing.columnconfigure(1, weight=1)
         ttk.Label(pricing, text="Method").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(pricing, textvariable=self.pricing_method_var, values=[item.value for item in LimitPricingMethod], state="readonly").grid(row=0, column=1, sticky="ew")
+        ttk.Combobox(
+            pricing,
+            textvariable=self.pricing_method_var,
+            values=[item.value for item in LimitPricingMethod],
+            state="readonly",
+        ).grid(row=0, column=1, sticky="ew")
         ttk.Label(pricing, text="Legacy d_min").grid(row=1, column=0, sticky="w")
-        ttk.Entry(pricing, textvariable=self.legacy_d_min_var).grid(row=1, column=1, sticky="ew")
+        ttk.Entry(pricing, textvariable=self.legacy_d_min_var).grid(
+            row=1, column=1, sticky="ew"
+        )
         ttk.Label(pricing, text="Legacy k").grid(row=2, column=0, sticky="w")
-        ttk.Entry(pricing, textvariable=self.legacy_k_var).grid(row=2, column=1, sticky="ew")
+        ttk.Entry(pricing, textvariable=self.legacy_k_var).grid(
+            row=2, column=1, sticky="ew"
+        )
         ttk.Label(pricing, text="Cap (bps)").grid(row=3, column=0, sticky="w")
-        ttk.Entry(pricing, textvariable=self.delta_cap_bps_var).grid(row=3, column=1, sticky="ew")
+        ttk.Entry(pricing, textvariable=self.delta_cap_bps_var).grid(
+            row=3, column=1, sticky="ew"
+        )
         ttk.Label(pricing, text="Tick Cap").grid(row=4, column=0, sticky="w")
-        ttk.Entry(pricing, textvariable=self.tick_cap_var).grid(row=4, column=1, sticky="ew")
+        ttk.Entry(pricing, textvariable=self.tick_cap_var).grid(
+            row=4, column=1, sticky="ew"
+        )
 
         refresh = ttk.LabelFrame(parent, text="Status Refresh", padding=10)
         refresh.grid(row=4, column=0, sticky="ew")
         refresh.columnconfigure(1, weight=1)
         ttk.Label(refresh, text="Lookback Days").grid(row=0, column=0, sticky="w")
-        ttk.Entry(refresh, textvariable=self.lookback_days_var).grid(row=0, column=1, sticky="ew")
+        ttk.Entry(refresh, textvariable=self.lookback_days_var).grid(
+            row=0, column=1, sticky="ew"
+        )
 
     def _build_tabs(self, parent: ttk.Frame) -> None:
         self.notebook = ttk.Notebook(parent)
@@ -242,7 +338,9 @@ class SchwabToolApp:
         logs_frame.columnconfigure(0, weight=1)
         logs_frame.rowconfigure(0, weight=1)
         self.logs_text = tk.Text(logs_frame, wrap="none")
-        self.log_yscroll = ttk.Scrollbar(logs_frame, orient="vertical", command=self.logs_text.yview)
+        self.log_yscroll = ttk.Scrollbar(
+            logs_frame, orient="vertical", command=self.logs_text.yview
+        )
         self.logs_text.grid(row=0, column=0, sticky="nsew")
         self.log_yscroll.grid(row=0, column=1, sticky="ns")
         self.logs_text.configure(yscrollcommand=self.log_yscroll.set)
@@ -257,10 +355,18 @@ class SchwabToolApp:
         frame = ttk.Frame(self.root, padding=12)
         frame.grid(row=2, column=0, sticky="ew")
         frame.columnconfigure(4, weight=1)
-        ttk.Label(frame, textvariable=self.current_job_var).grid(row=0, column=0, sticky="w", padx=(0, 16))
-        ttk.Label(frame, textvariable=self.last_action_var).grid(row=0, column=1, sticky="w", padx=(0, 16))
-        ttk.Label(frame, textvariable=self.counts_var).grid(row=0, column=2, sticky="w", padx=(0, 16))
-        ttk.Label(frame, textvariable=self.refresh_var).grid(row=0, column=3, sticky="w", padx=(0, 16))
+        ttk.Label(frame, textvariable=self.current_job_var).grid(
+            row=0, column=0, sticky="w", padx=(0, 16)
+        )
+        ttk.Label(frame, textvariable=self.last_action_var).grid(
+            row=0, column=1, sticky="w", padx=(0, 16)
+        )
+        ttk.Label(frame, textvariable=self.counts_var).grid(
+            row=0, column=2, sticky="w", padx=(0, 16)
+        )
+        ttk.Label(frame, textvariable=self.refresh_var).grid(
+            row=0, column=3, sticky="w", padx=(0, 16)
+        )
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
         self.progress.grid(row=0, column=4, sticky="ew")
 
@@ -283,15 +389,21 @@ class SchwabToolApp:
             "orders_lookback_days": int(self.lookback_days_var.get() or "7"),
         }
 
-    def _queue_task(self, task_name: str, args: dict[str, Any], *, timeout_seconds: int = 900) -> bool:
+    def _queue_task(
+        self, task_name: str, args: dict[str, Any], *, timeout_seconds: int = 900
+    ) -> bool:
         if self.busy:
             messagebox.showwarning("Busy", "A task is already running.")
             return False
 
-        request = TaskRequest(task_name=task_name, args=args, meta={"ui_version": "1.0"})
+        request = TaskRequest(
+            task_name=task_name, args=args, meta={"ui_version": "1.0"}
+        )
         request_path = self.paths.jobs_dir / f"{request.request_id}.json"
         result_path = self.paths.results_dir / f"{request.request_id}.json"
-        request_path.write_text(json.dumps(request.model_dump(mode="json"), indent=2), encoding="utf-8")
+        request_path.write_text(
+            json.dumps(request.model_dump(mode="json"), indent=2), encoding="utf-8"
+        )
         self._persist_ui_settings()
 
         self.busy = True
@@ -301,7 +413,9 @@ class SchwabToolApp:
         if task_name == "login" and bool(args.get("force_login")):
             self.last_action_var.set("Opening browser for Schwab login")
             self.refresh_var.set(f"Waiting for redirect on {callback_url}")
-            self.login_status_var.set(f"Approve the local certificate warning on {callback_url} if your browser shows it")
+            self.login_status_var.set(
+                f"Approve the local certificate warning on {callback_url} if your browser shows it"
+            )
         elif task_name == "login":
             self.last_action_var.set("Refreshing saved Schwab session")
             self.refresh_var.set("Checking saved token and linked accounts")
@@ -313,7 +427,16 @@ class SchwabToolApp:
         logger.info("Starting task %s request_id=%s", task_name, request.request_id)
 
         def worker() -> None:
-            command = [str(self.python_exe), str(self.runner_path), "--task", task_name, "--request-file", str(request_path), "--result-file", str(result_path)]
+            command = [
+                str(self.python_exe),
+                str(self.runner_path),
+                "--task",
+                task_name,
+                "--request-file",
+                str(request_path),
+                "--result-file",
+                str(result_path),
+            ]
             try:
                 process = subprocess.run(
                     command,
@@ -322,11 +445,29 @@ class SchwabToolApp:
                     text=True,
                     timeout=timeout_seconds,
                 )
-                result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {
-                    "status": "error",
-                    "error": {"message": process.stderr or "Runner did not write a result file."},
-                }
-                self.queue.put(("result", {"task_name": task_name, "request_id": request.request_id, "payload": result, "stdout": process.stdout, "stderr": process.stderr}))
+                result = (
+                    json.loads(result_path.read_text(encoding="utf-8"))
+                    if result_path.exists()
+                    else {
+                        "status": "error",
+                        "error": {
+                            "message": process.stderr
+                            or "Runner did not write a result file."
+                        },
+                    }
+                )
+                self.queue.put(
+                    (
+                        "result",
+                        {
+                            "task_name": task_name,
+                            "request_id": request.request_id,
+                            "payload": result,
+                            "stdout": process.stdout,
+                            "stderr": process.stderr,
+                        },
+                    )
+                )
             except subprocess.TimeoutExpired:
                 timeout_message = "Runner timed out."
                 if task_name == "login":
@@ -335,9 +476,33 @@ class SchwabToolApp:
                         "Confirm the Schwab developer app callback URL exactly matches this value, including whether it omits a trailing slash, "
                         "and approve the local certificate warning if your browser shows it."
                     )
-                self.queue.put(("result", {"task_name": task_name, "request_id": request.request_id, "payload": {"status": "timeout", "error": {"message": timeout_message}}}))
+                self.queue.put(
+                    (
+                        "result",
+                        {
+                            "task_name": task_name,
+                            "request_id": request.request_id,
+                            "payload": {
+                                "status": "timeout",
+                                "error": {"message": timeout_message},
+                            },
+                        },
+                    )
+                )
             except Exception as exc:  # noqa: BLE001
-                self.queue.put(("result", {"task_name": task_name, "request_id": request.request_id, "payload": {"status": "error", "error": {"message": str(exc)}}}))
+                self.queue.put(
+                    (
+                        "result",
+                        {
+                            "task_name": task_name,
+                            "request_id": request.request_id,
+                            "payload": {
+                                "status": "error",
+                                "error": {"message": str(exc)},
+                            },
+                        },
+                    )
+                )
 
         threading.Thread(target=worker, daemon=True).start()
         return True
@@ -384,7 +549,12 @@ class SchwabToolApp:
             self._render_orders_preview(self.current_preview_rows)
         elif task_name == "refresh_accounts":
             self.accounts_table.set_rows(
-                ["account_name", "account_number", "cash_available", "liquidation_value"],
+                [
+                    "account_name",
+                    "account_number",
+                    "cash_available",
+                    "liquidation_value",
+                ],
                 output.get("accounts", []),
             )
         elif task_name == "refresh_orders":
@@ -410,11 +580,21 @@ class SchwabToolApp:
             self._merge_broker_statuses(orders)
         elif task_name == "refresh_portfolio":
             self.portfolio_table.set_rows(
-                ["account_name", "account_number", "symbol", "average_price", "quantity", "value", "day_pl"],
+                [
+                    "account_name",
+                    "account_number",
+                    "symbol",
+                    "average_price",
+                    "quantity",
+                    "value",
+                    "day_pl",
+                ],
                 output.get("positions", []),
             )
         elif task_name == "export_snapshot":
-            messagebox.showinfo("Export complete", output.get("export_path", "Export written."))
+            messagebox.showinfo(
+                "Export complete", output.get("export_path", "Export written.")
+            )
 
     def _render_orders_preview(self, rows: list[dict[str, Any]]) -> None:
         columns = [
@@ -435,7 +615,11 @@ class SchwabToolApp:
             "validation_errors",
         ]
         self.orders_table.set_rows(columns, rows)
-        valid_count = sum(1 for row in rows if not row.get("validation_errors") and row.get("enabled", True))
+        valid_count = sum(
+            1
+            for row in rows
+            if not row.get("validation_errors") and row.get("enabled", True)
+        )
         invalid_count = sum(1 for row in rows if row.get("validation_errors"))
         submitted = sum(1 for row in rows if row.get("local_status") == "SUBMITTED")
         rejected = sum(1 for row in rows if row.get("local_status") == "REJECTED")
@@ -446,7 +630,9 @@ class SchwabToolApp:
     def _merge_broker_statuses(self, orders: list[dict[str, Any]]) -> None:
         if not self.current_preview_rows:
             return
-        orders_by_id = {row.get("order_id"): row for row in orders if row.get("order_id")}
+        orders_by_id = {
+            row.get("order_id"): row for row in orders if row.get("order_id")
+        }
         for row in self.current_preview_rows:
             order_id = row.get("order_id")
             if order_id and order_id in orders_by_id:
@@ -461,7 +647,11 @@ class SchwabToolApp:
         runner_log = self.paths.logs_dir / "runner.log"
         audit_log = self.paths.logs_dir / "audit.jsonl"
         chunks: list[str] = []
-        for label, path in (("UI", ui_log), ("RUNNER", runner_log), ("AUDIT", audit_log)):
+        for label, path in (
+            ("UI", ui_log),
+            ("RUNNER", runner_log),
+            ("AUDIT", audit_log),
+        ):
             if path.exists():
                 lines = path.read_text(encoding="utf-8").splitlines()[-120:]
                 chunks.append(f"===== {label} =====")
@@ -471,7 +661,11 @@ class SchwabToolApp:
 
     def _choose_import_file(self) -> None:
         current_import_path = self.import_path_var.get().strip()
-        initial_dir = Path(current_import_path).expanduser().parent if current_import_path else self.paths.imports_dir
+        initial_dir = (
+            Path(current_import_path).expanduser().parent
+            if current_import_path
+            else self.paths.imports_dir
+        )
         if not initial_dir.exists():
             initial_dir = self.paths.imports_dir
         selected = filedialog.askopenfilename(
@@ -484,7 +678,11 @@ class SchwabToolApp:
 
     def _choose_export_dir(self) -> None:
         current_export_dir = self.export_dir_var.get().strip()
-        initial_dir = Path(current_export_dir).expanduser() if current_export_dir else self.paths.exports_dir
+        initial_dir = (
+            Path(current_export_dir).expanduser()
+            if current_export_dir
+            else self.paths.exports_dir
+        )
         if not initial_dir.exists():
             initial_dir = self.paths.exports_dir
         selected = filedialog.askdirectory(
@@ -524,11 +722,13 @@ class SchwabToolApp:
             return
 
         app_key = self.app_key_var.get().strip()
-        app_secret = self.app_secret_var.get().strip()
+        client_credential = self.app_secret_var.get().strip()
         callback_url = self.callback_url_var.get().strip()
 
-        if not app_key or not app_secret:
-            messagebox.showwarning("Auth", "App key and app secret are required before login.")
+        if not app_key or not client_credential:
+            messagebox.showwarning(
+                "Auth", "App key and app secret are required before login."
+            )
             return
         if callback_url.endswith("/"):
             messagebox.showerror(
@@ -548,14 +748,14 @@ class SchwabToolApp:
             current_credentials.get(field, "") != value
             for field, value in (
                 ("app_key", app_key),
-                ("app_secret", app_secret),
+                ("app_secret", client_credential),
                 ("callback_url", callback_url),
             )
         )
         updated_credentials = {
             **current_credentials,
             "app_key": app_key,
-            "app_secret": app_secret,
+            "app_secret": (client_credential),
             "callback_url": callback_url,
         }
         if credentials_changed:
@@ -588,19 +788,12 @@ class SchwabToolApp:
         )
 
     def _place_orders(self) -> None:
-        if not self.import_path_var.get().strip():
-            messagebox.showwarning("Import file", "Choose an import workbook first.")
-            return
-        self._queue_task(
-            "place_orders",
-            {
-                "import_path": self.import_path_var.get().strip(),
-                "execution_profile": self._execution_profile_payload(),
-            },
-        )
+        messagebox.showerror("Submission disabled", SUBMISSION_DISABLED_MESSAGE)
 
     def _refresh_orders(self) -> None:
-        self._queue_task("refresh_orders", {"execution_profile": self._execution_profile_payload()})
+        self._queue_task(
+            "refresh_orders", {"execution_profile": self._execution_profile_payload()}
+        )
 
     def _refresh_portfolio(self) -> None:
         self._queue_task("refresh_portfolio", {})
@@ -616,8 +809,11 @@ class SchwabToolApp:
 
 
 def main() -> None:
+    setup_ui_logging(activate=True)
     root = tk.Tk()
-    template_path = ensure_runtime_dirs(get_app_paths()).imports_dir / "order_template.xlsx"
+    template_path = (
+        ensure_runtime_dirs(get_app_paths()).imports_dir / "order_template.xlsx"
+    )
     if not template_path.exists():
         create_import_template(template_path)
     app = SchwabToolApp(root)

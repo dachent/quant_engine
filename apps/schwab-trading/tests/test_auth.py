@@ -72,7 +72,9 @@ def test_validate_callback_url_accepts_explicit_loopback_urls() -> None:
 
 
 def test_authorization_diagnostics_use_exact_callback_value() -> None:
-    diagnostics = SchwabClient._authorization_diagnostics("KEY1234", "https://127.0.0.1:9443")
+    diagnostics = SchwabClient._authorization_diagnostics(
+        "KEY1234", "https://127.0.0.1:9443"
+    )
     parsed = urlparse(diagnostics["authorize_url"])
     query = parse_qs(parsed.query)
 
@@ -91,8 +93,12 @@ def test_auth_error_mapping_is_actionable() -> None:
         client = SchwabClient(root=temp_root)
         client._last_preflight_succeeded = True
 
-        timeout_message = client._auth_error_message(auth.RedirectTimeoutError("timed out"), DEFAULT_CALLBACK_URL)
-        bind_message = client._auth_error_message(auth.RedirectServerExitedError("server exited"), DEFAULT_CALLBACK_URL)
+        timeout_message = client._auth_error_message(
+            auth.RedirectTimeoutError("timed out"), DEFAULT_CALLBACK_URL
+        )
+        bind_message = client._auth_error_message(
+            auth.RedirectServerExitedError("server exited"), DEFAULT_CALLBACK_URL
+        )
 
         assert DEFAULT_CALLBACK_URL in timeout_message
         assert "listener is reachable" in timeout_message.lower()
@@ -101,7 +107,9 @@ def test_auth_error_mapping_is_actionable() -> None:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_begin_manual_login_returns_authorization_url_and_redacted_diagnostics() -> None:
+def test_begin_manual_login_returns_authorization_url_and_redacted_diagnostics() -> (
+    None
+):
     temp_root = _temp_dir()
     callback_url = f"https://127.0.0.1:{_free_port()}"
     try:
@@ -109,9 +117,13 @@ def test_begin_manual_login_returns_authorization_url_and_redacted_diagnostics()
         client.save_credentials("KEY1234", "SECRET5678", callback_url)
 
         login = client.begin_manual_login()
-        authorize_query = parse_qs(urlparse(login["diagnostics"]["authorize_url"]).query)
+        authorize_query = parse_qs(
+            urlparse(login["diagnostics"]["authorize_url"]).query
+        )
 
-        assert login["authorization_url"].startswith("https://api.schwabapi.com/v1/oauth/authorize?")
+        assert login["authorization_url"].startswith(
+            "https://api.schwabapi.com/v1/oauth/authorize?"
+        )
         assert login["diagnostics"]["authorize_redirect_uri"] == callback_url
         assert login["diagnostics"]["callback_url"] == callback_url
         assert authorize_query["state"] == ["[REDACTED]"]
@@ -120,10 +132,12 @@ def test_begin_manual_login_returns_authorization_url_and_redacted_diagnostics()
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_complete_manual_login_persists_token_and_verifies_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_complete_manual_login_persists_token_and_verifies_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     temp_root = _temp_dir()
     callback_url = f"https://127.0.0.1:{_free_port()}"
-    verified_accounts = [{"accountNumber": "1234"}]
+    verified_accounts = [{"accountNumber": ("SYNTHETIC_ACCOUNT")}]
     captured: dict[str, object] = {}
     try:
         client = SchwabClient(root=temp_root)
@@ -143,28 +157,41 @@ def test_complete_manual_login_persists_token_and_verifies_accounts(monkeypatch:
             captured["app_secret"] = app_secret
             captured["received_url"] = received_url
             captured["enforce_enums"] = enforce_enums
-            token_write_func({"creation_timestamp": 123, "token": {"access_token": "token-value"}})
+            token_write_func(
+                {
+                    "creation_timestamp": 123,
+                    "token": {"access_token": ("synthetic-value")},
+                }
+            )
             return object()
 
-        monkeypatch.setattr(auth, "client_from_received_url", fake_client_from_received_url)
+        monkeypatch.setattr(
+            auth, "client_from_received_url", fake_client_from_received_url
+        )
         monkeypatch.setattr(client, "get_account_numbers", lambda: verified_accounts)
 
-        linked = client.complete_manual_login(f"{callback_url}?code=abc123&state=oauth-state")
+        linked = client.complete_manual_login(
+            f"{callback_url}?code=abc123&state=oauth-state"
+        )
         stored = client.load_credentials()
 
         assert linked == verified_accounts
         assert client.last_verified_accounts() == verified_accounts
-        assert stored["token"]["token"]["access_token"] == "token-value"
+        assert stored["token"]["token"]["access_token"] == "synthetic-value"
         assert captured["api_key"] == "KEY1234"
         assert captured["app_secret"] == "SECRET5678"
-        assert captured["received_url"] == f"{callback_url}?code=abc123&state=oauth-state"
+        assert (
+            captured["received_url"] == f"{callback_url}?code=abc123&state=oauth-state"
+        )
         assert captured["enforce_enums"] is False
         assert client._pending_auth_context is None
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_connect_reuses_existing_token_and_skips_browser_login(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connect_reuses_existing_token_and_skips_browser_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     temp_root = _temp_dir()
     callback_url = f"https://127.0.0.1:{_free_port()}"
     try:
@@ -172,9 +199,12 @@ def test_connect_reuses_existing_token_and_skips_browser_login(monkeypatch: pyte
         client.store.save(
             {
                 "app_key": "KEY1234",
-                "app_secret": "SECRET5678",
+                "app_secret": ("SECRET5678"),
                 "callback_url": callback_url,
-                "token": {"creation_timestamp": 123, "token": {"access_token": "token-value"}},
+                "token": {
+                    "creation_timestamp": 123,
+                    "token": {"access_token": ("synthetic-value")},
+                },
             }
         )
         session = object()
@@ -187,23 +217,33 @@ def test_connect_reuses_existing_token_and_skips_browser_login(monkeypatch: pyte
 
         def fake_verify() -> list[dict[str, str]]:
             calls["verified"] = True
-            client._last_verified_accounts = [{"accountNumber": "1234"}]
+            client._last_verified_accounts = [{"accountNumber": ("SYNTHETIC_ACCOUNT")}]
             return client._last_verified_accounts
 
-        monkeypatch.setattr(client, "_connect_from_existing_token", fake_existing_token_connect)
-        monkeypatch.setattr(client, "_connect_via_browser_callback", lambda *args, **kwargs: pytest.fail("browser callback flow should not run"))
+        monkeypatch.setattr(
+            client, "_connect_from_existing_token", fake_existing_token_connect
+        )
+        monkeypatch.setattr(
+            client,
+            "_connect_via_browser_callback",
+            lambda *args, **kwargs: pytest.fail("browser callback flow should not run"),
+        )
         monkeypatch.setattr(client, "_verify_login_session", fake_verify)
 
         returned = client.connect(force_login=False, interactive=False)
 
         assert returned is session
         assert calls == {"existing": True, "verified": True}
-        assert client.last_verified_accounts() == [{"accountNumber": "1234"}]
+        assert client.last_verified_accounts() == [
+            {"accountNumber": ("SYNTHETIC_ACCOUNT")}
+        ]
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_connect_uses_browser_callback_flow_for_forced_login(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connect_uses_browser_callback_flow_for_forced_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     temp_root = _temp_dir()
     callback_url = f"https://127.0.0.1:{_free_port()}"
     calls: dict[str, object] = {}
@@ -211,19 +251,31 @@ def test_connect_uses_browser_callback_flow_for_forced_login(monkeypatch: pytest
         client = SchwabClient(root=temp_root)
         client.save_credentials("KEY1234", "SECRET5678", callback_url)
 
-        def fake_browser_callback(_creds, interactive: bool, callback_timeout: float, requested_browser: str | None = None):
+        def fake_browser_callback(
+            _creds,
+            interactive: bool,
+            callback_timeout: float,
+            requested_browser: str | None = None,
+        ):
             calls["browser_callback"] = {
                 "interactive": interactive,
                 "callback_timeout": callback_timeout,
                 "requested_browser": requested_browser,
             }
             client.client = object()
-            client._last_verified_accounts = [{"accountNumber": "1234"}]
+            client._last_verified_accounts = [{"accountNumber": ("SYNTHETIC_ACCOUNT")}]
             return client.client
 
-        monkeypatch.setattr(client, "_connect_via_browser_callback", fake_browser_callback)
+        monkeypatch.setattr(
+            client, "_connect_via_browser_callback", fake_browser_callback
+        )
 
-        returned = client.connect(force_login=True, interactive=False, callback_timeout=12.5, requested_browser="chrome")
+        returned = client.connect(
+            force_login=True,
+            interactive=False,
+            callback_timeout=12.5,
+            requested_browser="chrome",
+        )
 
         assert returned is client.client
         assert calls["browser_callback"] == {
@@ -231,7 +283,9 @@ def test_connect_uses_browser_callback_flow_for_forced_login(monkeypatch: pytest
             "callback_timeout": 12.5,
             "requested_browser": "chrome",
         }
-        assert client.last_verified_accounts() == [{"accountNumber": "1234"}]
+        assert client.last_verified_accounts() == [
+            {"accountNumber": ("SYNTHETIC_ACCOUNT")}
+        ]
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
@@ -270,17 +324,21 @@ def test_connect_via_browser_callback_routes_received_url_through_shared_complet
             calls["requested_browser"] = requested_browser
             return lambda url: opened.append(url) or True
 
-        def fake_consume(_creds, received_url: str, *, auth_context=None) -> list[dict[str, str]]:
+        def fake_consume(
+            _creds, received_url: str, *, auth_context=None
+        ) -> list[dict[str, str]]:
             calls["received_url"] = received_url
             calls["auth_context"] = auth_context
             client.client = object()
-            client._last_verified_accounts = [{"accountNumber": "1234"}]
+            client._last_verified_accounts = [{"accountNumber": ("SYNTHETIC_ACCOUNT")}]
             return client._last_verified_accounts
 
         monkeypatch.setattr(client, "_callback_listener_server", fake_listener)
         monkeypatch.setattr(client, "_wait_for_callback_request", fake_wait)
         monkeypatch.setattr(client, "_consume_received_url", fake_consume)
-        monkeypatch.setattr(SchwabClient, "_browser_opener", staticmethod(fake_browser_opener))
+        monkeypatch.setattr(
+            SchwabClient, "_browser_opener", staticmethod(fake_browser_opener)
+        )
 
         returned = client._connect_via_browser_callback(
             creds,
@@ -319,14 +377,18 @@ def test_wait_for_callback_request_ignores_favicon() -> None:
         )
         callback_queue.put(expected)
 
-        received = client._wait_for_callback_request(callback_queue, timeout_seconds=1.0)
+        received = client._wait_for_callback_request(
+            callback_queue, timeout_seconds=1.0
+        )
 
         assert received == expected
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_connect_reports_timeout_after_preflight_success(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connect_reports_timeout_after_preflight_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     temp_root = _temp_dir()
     callback_url = f"https://127.0.0.1:{_free_port()}"
     try:
@@ -338,7 +400,9 @@ def test_connect_reports_timeout_after_preflight_success(monkeypatch: pytest.Mon
             assert url == callback_url
             yield object()
 
-        callback_requests = [CallbackRequest(url=callback_url, request_path="/", matched_callback=True)]
+        callback_requests = [
+            CallbackRequest(url=callback_url, request_path="/", matched_callback=True)
+        ]
 
         def fake_wait(_queue, _timeout_seconds: float) -> CallbackRequest:
             if callback_requests:
@@ -347,7 +411,11 @@ def test_connect_reports_timeout_after_preflight_success(monkeypatch: pytest.Mon
 
         monkeypatch.setattr(client, "_callback_listener_server", fake_listener)
         monkeypatch.setattr(client, "_wait_for_callback_request", fake_wait)
-        monkeypatch.setattr(SchwabClient, "_browser_opener", staticmethod(lambda requested_browser=None: (lambda url: True)))
+        monkeypatch.setattr(
+            SchwabClient,
+            "_browser_opener",
+            staticmethod(lambda requested_browser=None: lambda url: True),
+        )
 
         with pytest.raises(SchwabClientError) as exc_info:
             client.connect(force_login=True, interactive=False, callback_timeout=5.0)
@@ -357,7 +425,9 @@ def test_connect_reports_timeout_after_preflight_success(monkeypatch: pytest.Mon
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_connect_reports_unexpected_callback_path(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connect_reports_unexpected_callback_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     temp_root = _temp_dir()
     callback_url = f"https://127.0.0.1:{_free_port()}"
     try:
@@ -371,7 +441,11 @@ def test_connect_reports_unexpected_callback_path(monkeypatch: pytest.MonkeyPatc
 
         callback_requests = [
             CallbackRequest(url=callback_url, request_path="/", matched_callback=True),
-            CallbackRequest(url=f"https://127.0.0.1:{urlparse(callback_url).port}/wrong-path?code=abc123", request_path="/wrong-path", matched_callback=False),
+            CallbackRequest(
+                url=f"https://127.0.0.1:{urlparse(callback_url).port}/wrong-path?code=abc123",
+                request_path="/wrong-path",
+                matched_callback=False,
+            ),
         ]
 
         def fake_wait(_queue, _timeout_seconds: float) -> CallbackRequest:
@@ -379,7 +453,11 @@ def test_connect_reports_unexpected_callback_path(monkeypatch: pytest.MonkeyPatc
 
         monkeypatch.setattr(client, "_callback_listener_server", fake_listener)
         monkeypatch.setattr(client, "_wait_for_callback_request", fake_wait)
-        monkeypatch.setattr(SchwabClient, "_browser_opener", staticmethod(lambda requested_browser=None: (lambda url: True)))
+        monkeypatch.setattr(
+            SchwabClient,
+            "_browser_opener",
+            staticmethod(lambda requested_browser=None: lambda url: True),
+        )
 
         with pytest.raises(SchwabClientError) as exc_info:
             client.connect(force_login=True, interactive=False, callback_timeout=5.0)
@@ -390,17 +468,28 @@ def test_connect_reports_unexpected_callback_path(monkeypatch: pytest.MonkeyPatc
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_task_login_uses_non_interactive_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_task_login_uses_non_interactive_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: dict[str, object] = {}
 
     class StubClient:
-        def save_credentials(self, app_key: str, app_secret: str, callback_url: str) -> None:
+        def save_credentials(
+            self, app_key: str, app_secret: str, callback_url: str
+        ) -> None:
             calls["saved"] = (app_key, app_secret, callback_url)
 
         def load_credentials(self) -> dict[str, str]:
             return {"app_key": "KEY1234"}
 
-        def connect(self, *, force_login: bool, interactive: bool, callback_timeout: float, requested_browser: str | None = None):
+        def connect(
+            self,
+            *,
+            force_login: bool,
+            interactive: bool,
+            callback_timeout: float,
+            requested_browser: str | None = None,
+        ):
             calls["connect"] = {
                 "force_login": force_login,
                 "interactive": interactive,
@@ -410,17 +499,17 @@ def test_task_login_uses_non_interactive_connect(monkeypatch: pytest.MonkeyPatch
             return object()
 
         def last_verified_accounts(self) -> list[dict[str, str]]:
-            return [{"accountNumber": "1234"}]
+            return [{"accountNumber": ("SYNTHETIC_ACCOUNT")}]
 
         def login_status(self) -> dict[str, bool]:
-            return {"has_token": True}
+            return {"has_token": (True)}
 
     monkeypatch.setattr(tasks, "SchwabClient", StubClient)
 
     result = tasks.task_login(
         {
             "app_key": "KEY1234",
-            "app_secret": "SECRET5678",
+            "app_secret": ("SECRET5678"),
             "callback_url": DEFAULT_CALLBACK_URL,
             "force_login": True,
             "requested_browser": "chrome",
@@ -441,13 +530,15 @@ def test_redact_sensitive_data_masks_auth_material() -> None:
     record = {
         "request": {
             "args": {
-                "app_secret": "very-secret",
+                "app_secret": ("synthetic-secret"),
                 "callback_url": "https://127.0.0.1:8182/?code=abc123",
             }
         },
         "result": {
-            "output": {"token": {"access_token": "token-value"}},
-            "error": {"traceback": "received_url=https://127.0.0.1:8182/?code=abc123&access_token=xyz"},
+            "output": {"token": {"access_token": ("synthetic-value")}},
+            "error": {
+                "traceback": "received_url=https://127.0.0.1:8182/?code=abc123&access_token=xyz"
+            },
         },
     }
 
@@ -455,7 +546,10 @@ def test_redact_sensitive_data_masks_auth_material() -> None:
 
     assert sanitized["request"]["args"]["app_secret"] == "[REDACTED]"
     assert sanitized["result"]["output"]["token"] == "[REDACTED]"
-    assert sanitized["request"]["args"]["callback_url"] == "https://127.0.0.1:8182/?[REDACTED]"
+    assert (
+        sanitized["request"]["args"]["callback_url"]
+        == "https://127.0.0.1:8182/?[REDACTED]"
+    )
     assert "abc123" not in sanitized["result"]["error"]["traceback"]
     assert "xyz" not in sanitized["result"]["error"]["traceback"]
 
@@ -470,7 +564,9 @@ def test_ui_login_persists_credentials_but_writes_minimal_job_payload(
     monkeypatch.setattr(ui, "save_setting", lambda key, value: None)
     monkeypatch.setattr(ui.messagebox, "showwarning", lambda *args, **kwargs: None)
     monkeypatch.setattr(ui.messagebox, "showerror", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ui.tk.Misc, "after", lambda self, delay, callback=None, *args: None)
+    monkeypatch.setattr(
+        ui.tk.Misc, "after", lambda self, delay, callback=None, *args: None
+    )
 
     class FakeThread:
         def __init__(self, target, daemon: bool) -> None:
@@ -496,7 +592,10 @@ def test_ui_login_persists_credentials_but_writes_minimal_job_payload(
 
         request_payload = json.loads(request_files[0].read_text(encoding="utf-8"))
         assert request_payload["task_name"] == "login"
-        assert request_payload["args"] == {"use_stored_credentials": True, "force_login": True}
+        assert request_payload["args"] == {
+            "use_stored_credentials": True,
+            "force_login": True,
+        }
         assert "SECRET5678" not in request_files[0].read_text(encoding="utf-8")
         assert app.last_action_var.get() == "Opening browser for Schwab login"
         assert app.refresh_var.get() == "Waiting for redirect on https://127.0.0.1:9443"
@@ -541,19 +640,27 @@ def test_ui_builds_workflow_action_bar_and_files_block(
     monkeypatch.setattr(ui, "get_app_paths", lambda: paths)
     monkeypatch.setattr(ui, "load_settings", lambda: settings)
     monkeypatch.setattr(ui, "sanitize_runtime_artifacts", lambda _paths=None: None)
-    monkeypatch.setattr(ui.tk.Misc, "after", lambda self, delay, callback=None, *args: None)
+    monkeypatch.setattr(
+        ui.tk.Misc, "after", lambda self, delay, callback=None, *args: None
+    )
 
     root = _create_tk_root()
     try:
         app = ui.SchwabToolApp(root)
-        notebook_tabs = [app.notebook.tab(tab_id, option="text") for tab_id in app.notebook.tabs()]
+        notebook_tabs = [
+            app.notebook.tab(tab_id, option="text") for tab_id in app.notebook.tabs()
+        ]
         action_bar = root.winfo_children()[0]
         action_buttons = [
-            (int(child.grid_info()["column"]), child.cget("text"))
+            (
+                int(child.grid_info()["column"]),
+                child.cget("text"),
+                child.instate(["disabled"]),
+            )
             for child in action_bar.winfo_children()
             if child.winfo_class() == "TButton"
         ]
-        action_labels = [label for _, label in sorted(action_buttons)]
+        action_labels = [label for _, label, _ in sorted(action_buttons)]
 
         body = root.winfo_children()[1]
         left_rail = body.winfo_children()[0]
@@ -573,9 +680,19 @@ def test_ui_builds_workflow_action_bar_and_files_block(
             "Import",
             "Validate",
             "Refresh Quotes",
-            "Place Orders",
+            "Place Orders (disabled)",
             "Export",
         ]
+        assert next(
+            disabled
+            for _, label, disabled in action_buttons
+            if label == "Place Orders (disabled)"
+        )
+        assert not any(
+            disabled
+            for _, label, disabled in action_buttons
+            if label != "Place Orders (disabled)"
+        )
         assert root.title() == "Schwab Trading Engine"
         assert notebook_tabs == [
             "Accounts",
@@ -584,7 +701,13 @@ def test_ui_builds_workflow_action_bar_and_files_block(
             "Orders Preview",
             "Logs",
         ]
-        assert section_labels == ["Auth", "Files", "Execution", "Limit Pricing", "Status Refresh"]
+        assert section_labels == [
+            "Auth",
+            "Files",
+            "Execution",
+            "Limit Pricing",
+            "Status Refresh",
+        ]
         assert app.import_path_var.get() == settings["import_path"]
         assert app.export_dir_var.get() == settings["export_dir"]
     finally:
@@ -602,9 +725,13 @@ def test_ui_queue_task_persists_import_and_export_settings(
     monkeypatch.setattr(ui, "get_app_paths", lambda: paths)
     monkeypatch.setattr(ui, "load_settings", lambda: {})
     monkeypatch.setattr(ui, "sanitize_runtime_artifacts", lambda _paths=None: None)
-    monkeypatch.setattr(ui, "save_setting", lambda key, value: saved_settings.append((key, value)))
+    monkeypatch.setattr(
+        ui, "save_setting", lambda key, value: saved_settings.append((key, value))
+    )
     monkeypatch.setattr(ui.messagebox, "showwarning", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ui.tk.Misc, "after", lambda self, delay, callback=None, *args: None)
+    monkeypatch.setattr(
+        ui.tk.Misc, "after", lambda self, delay, callback=None, *args: None
+    )
 
     class FakeThread:
         def __init__(self, target, daemon: bool) -> None:
@@ -626,7 +753,10 @@ def test_ui_queue_task_persists_import_and_export_settings(
 
         assert queued is True
         assert ("import_path", str(paths.imports_dir / "orders.xlsx")) in saved_settings
-        assert ("export_dir", str(paths.exports_dir / "manual-exports")) in saved_settings
+        assert (
+            "export_dir",
+            str(paths.exports_dir / "manual-exports"),
+        ) in saved_settings
     finally:
         root.destroy()
         shutil.rmtree(temp_root, ignore_errors=True)
@@ -643,8 +773,14 @@ def test_ui_login_rejects_trailing_slash_callback(
     monkeypatch.setattr(ui, "load_settings", lambda: {})
     monkeypatch.setattr(ui, "save_setting", lambda key, value: None)
     monkeypatch.setattr(ui.messagebox, "showwarning", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ui.messagebox, "showerror", lambda *args, **kwargs: errors.append((args, kwargs)))
-    monkeypatch.setattr(ui.tk.Misc, "after", lambda self, delay, callback=None, *args: None)
+    monkeypatch.setattr(
+        ui.messagebox,
+        "showerror",
+        lambda *args, **kwargs: errors.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        ui.tk.Misc, "after", lambda self, delay, callback=None, *args: None
+    )
 
     root = _create_tk_root()
     try:
@@ -677,13 +813,19 @@ def test_callback_preflight_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
         opened: list[str] = []
         monkeypatch.setattr(client, "_callback_preflight_server", fake_server)
-        monkeypatch.setattr(client, "_wait_for_received_url", lambda queue, timeout_seconds, callback_url=None: callback_url)
+        monkeypatch.setattr(
+            client,
+            "_wait_for_received_url",
+            lambda queue, timeout_seconds, callback_url=None: callback_url,
+        )
 
         def open_browser(url: str) -> bool:
             opened.append(url)
             return True
 
-        client._run_callback_preflight(callback_url, timeout_seconds=3.0, open_browser=open_browser)
+        client._run_callback_preflight(
+            callback_url, timeout_seconds=3.0, open_browser=open_browser
+        )
         assert opened == [callback_url]
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
@@ -708,14 +850,18 @@ def test_callback_preflight_failure(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(client, "_wait_for_received_url", fake_wait)
 
         with pytest.raises(SchwabClientError) as exc_info:
-            client._run_callback_preflight(callback_url, timeout_seconds=1.0, open_browser=lambda url: True)
+            client._run_callback_preflight(
+                callback_url, timeout_seconds=1.0, open_browser=lambda url: True
+            )
 
         assert "local callback preflight failed" in str(exc_info.value).lower()
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_callback_preflight_reports_browser_open_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_callback_preflight_reports_browser_open_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     temp_root = _temp_dir()
     try:
         client = SchwabClient(root=temp_root)
@@ -730,7 +876,9 @@ def test_callback_preflight_reports_browser_open_failure(monkeypatch: pytest.Mon
         monkeypatch.setattr(client, "_callback_preflight_server", fake_server)
 
         with pytest.raises(SchwabClientError) as exc_info:
-            client._run_callback_preflight(callback_url, timeout_seconds=1.0, open_browser=lambda url: False)
+            client._run_callback_preflight(
+                callback_url, timeout_seconds=1.0, open_browser=lambda url: False
+            )
 
         assert "unable to open the default browser" in str(exc_info.value).lower()
     finally:
@@ -745,9 +893,13 @@ def test_complete_manual_login_requires_pending_auth_context() -> None:
         client.save_credentials("KEY1234", "SECRET5678", callback_url)
 
         with pytest.raises(SchwabClientError) as exc_info:
-            client.complete_manual_login(f"{callback_url}?code=abc123&state=oauth-state")
+            client.complete_manual_login(
+                f"{callback_url}?code=abc123&state=oauth-state"
+            )
 
-        assert "authorization context was missing or reset" in str(exc_info.value).lower()
+        assert (
+            "authorization context was missing or reset" in str(exc_info.value).lower()
+        )
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
@@ -765,10 +917,14 @@ def test_complete_manual_login_reports_token_exchange_failure_after_callback_rec
         def fake_client_from_received_url(*args, **kwargs):
             raise ValueError("invalid_grant")
 
-        monkeypatch.setattr(auth, "client_from_received_url", fake_client_from_received_url)
+        monkeypatch.setattr(
+            auth, "client_from_received_url", fake_client_from_received_url
+        )
 
         with pytest.raises(SchwabClientError) as exc_info:
-            client.complete_manual_login(f"{callback_url}?code=abc123&state=oauth-state")
+            client.complete_manual_login(
+                f"{callback_url}?code=abc123&state=oauth-state"
+            )
 
         message = str(exc_info.value).lower()
         assert "reached the local callback url" in message
@@ -808,7 +964,9 @@ def test_get_account_wraps_single_field_string(monkeypatch: pytest.MonkeyPatch) 
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_get_positions_snapshot_requests_positions_field(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_positions_snapshot_requests_positions_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     temp_root = _temp_dir()
     callback_url = f"https://127.0.0.1:{_free_port()}"
     captured_fields: list[object] = []
@@ -816,8 +974,12 @@ def test_get_positions_snapshot_requests_positions_field(monkeypatch: pytest.Mon
         client = SchwabClient(root=temp_root)
         client.save_credentials("KEY1234", "SECRET5678", callback_url)
 
-        monkeypatch.setattr(client, "get_account_hash_map", lambda: {"12345678": "hash-123"})
-        monkeypatch.setattr(client, "get_account_nickname_map", lambda: {"12345678": "Main"})
+        monkeypatch.setattr(
+            client, "get_account_hash_map", lambda: {"12345678": "hash-123"}
+        )
+        monkeypatch.setattr(
+            client, "get_account_nickname_map", lambda: {"12345678": "Main"}
+        )
 
         def fake_get_account(account_hash: str, fields=None):
             captured_fields.append(fields)
@@ -849,7 +1011,9 @@ def test_get_positions_snapshot_requests_positions_field(monkeypatch: pytest.Mon
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_task_export_snapshot_writes_to_requested_export_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_task_export_snapshot_writes_to_requested_export_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     temp_root = _temp_dir()
     paths = _temp_paths(temp_root)
     target_dir = temp_root / "custom-exports"
@@ -858,7 +1022,7 @@ def test_task_export_snapshot_writes_to_requested_export_dir(monkeypatch: pytest
         "account_snapshots": [
             {
                 "account_name": "Main",
-                "account_number": "12345678",
+                "account_number": ("SYNTHETIC_ACCOUNT"),
                 "account_hash": "hash-123",
                 "cash_available": 1000.0,
                 "liquidation_value": 1500.0,
@@ -867,7 +1031,7 @@ def test_task_export_snapshot_writes_to_requested_export_dir(monkeypatch: pytest
         "position_snapshots": [
             {
                 "account_name": "Main",
-                "account_number": "12345678",
+                "account_number": ("SYNTHETIC_ACCOUNT"),
                 "symbol": "AAPL",
                 "average_price": 100.0,
                 "quantity": 3,
@@ -878,7 +1042,7 @@ def test_task_export_snapshot_writes_to_requested_export_dir(monkeypatch: pytest
         "broker_orders": [
             {
                 "account_name": "Main",
-                "account_number": "12345678",
+                "account_number": ("SYNTHETIC_ACCOUNT"),
                 "order_id": "OID-1",
                 "status": "FILLED",
                 "quantity": 3,
@@ -894,7 +1058,9 @@ def test_task_export_snapshot_writes_to_requested_export_dir(monkeypatch: pytest
     }
 
     monkeypatch.setattr(tasks, "get_app_paths", lambda: paths)
-    monkeypatch.setattr(tasks, "_load_snapshot_rows", lambda table_name: snapshot_rows[table_name])
+    monkeypatch.setattr(
+        tasks, "_load_snapshot_rows", lambda table_name: snapshot_rows[table_name]
+    )
 
     try:
         result = tasks.task_export_snapshot({"export_dir": str(target_dir)})
@@ -907,7 +1073,9 @@ def test_task_export_snapshot_writes_to_requested_export_dir(monkeypatch: pytest
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_task_export_snapshot_falls_back_to_runtime_exports_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_task_export_snapshot_falls_back_to_runtime_exports_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     temp_root = _temp_dir()
     paths = _temp_paths(temp_root)
 
@@ -915,7 +1083,7 @@ def test_task_export_snapshot_falls_back_to_runtime_exports_dir(monkeypatch: pyt
         "account_snapshots": [
             {
                 "account_name": "Main",
-                "account_number": "12345678",
+                "account_number": ("SYNTHETIC_ACCOUNT"),
                 "account_hash": "hash-123",
                 "cash_available": 1000.0,
                 "liquidation_value": 1500.0,
@@ -926,7 +1094,9 @@ def test_task_export_snapshot_falls_back_to_runtime_exports_dir(monkeypatch: pyt
     }
 
     monkeypatch.setattr(tasks, "get_app_paths", lambda: paths)
-    monkeypatch.setattr(tasks, "_load_snapshot_rows", lambda table_name: snapshot_rows[table_name])
+    monkeypatch.setattr(
+        tasks, "_load_snapshot_rows", lambda table_name: snapshot_rows[table_name]
+    )
     monkeypatch.setattr(tasks, "task_refresh_portfolio", lambda args: {"positions": []})
     monkeypatch.setattr(tasks, "task_refresh_orders", lambda args: {"orders": []})
 
@@ -940,11 +1110,15 @@ def test_task_export_snapshot_falls_back_to_runtime_exports_dir(monkeypatch: pyt
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_auth_diagnostic_manual_mode(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_auth_diagnostic_manual_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     calls: dict[str, object] = {}
 
     class StubClient:
-        def save_credentials(self, app_key: str, app_secret: str, callback_url: str) -> None:
+        def save_credentials(
+            self, app_key: str, app_secret: str, callback_url: str
+        ) -> None:
             calls["saved"] = (app_key, app_secret, callback_url)
 
         def clear_token(self) -> None:
@@ -964,13 +1138,15 @@ def test_auth_diagnostic_manual_mode(monkeypatch: pytest.MonkeyPatch, capsys: py
 
         def complete_manual_login(self, received_url: str) -> list[dict[str, str]]:
             calls["received_url"] = received_url
-            return [{"accountNumber": "1234"}]
+            return [{"accountNumber": ("SYNTHETIC_ACCOUNT")}]
 
         def login_status(self) -> dict[str, object]:
-            return {"callback_url": DEFAULT_CALLBACK_URL, "has_token": True}
+            return {"callback_url": DEFAULT_CALLBACK_URL, "has_token": (True)}
 
     monkeypatch.setattr(auth_diagnostic, "SchwabClient", StubClient)
-    monkeypatch.setattr("builtins.input", lambda prompt="": f"{DEFAULT_CALLBACK_URL}?code=abc123")
+    monkeypatch.setattr(
+        "builtins.input", lambda prompt="": f"{DEFAULT_CALLBACK_URL}?code=abc123"
+    )
 
     exit_code = auth_diagnostic.main(
         [
@@ -1018,14 +1194,16 @@ def test_auth_diagnostic_auto_mode_passes_browser_override(
             return object()
 
         def last_verified_accounts(self) -> list[dict[str, str]]:
-            return [{"accountNumber": "1234"}]
+            return [{"accountNumber": ("SYNTHETIC_ACCOUNT")}]
 
         def login_status(self) -> dict[str, object]:
-            return {"callback_url": DEFAULT_CALLBACK_URL, "has_token": True}
+            return {"callback_url": DEFAULT_CALLBACK_URL, "has_token": (True)}
 
     monkeypatch.setattr(auth_diagnostic, "SchwabClient", StubClient)
 
-    exit_code = auth_diagnostic.main(["auto", "--timeout", "42", "--browser", "firefox"])
+    exit_code = auth_diagnostic.main(
+        ["auto", "--timeout", "42", "--browser", "firefox"]
+    )
 
     output = capsys.readouterr().out
     assert exit_code == 0

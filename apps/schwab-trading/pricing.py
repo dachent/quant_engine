@@ -20,7 +20,9 @@ def _round_sell_to_tick(price: float, tick: float) -> float:
     return math.floor(price / tick) * tick
 
 
-def compute_nbbo_metrics(bid: float | None, ask: float | None) -> dict[str, float | None]:
+def compute_nbbo_metrics(
+    bid: float | None, ask: float | None
+) -> dict[str, float | None]:
     if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
         return {
             "nbbo_spread": None,
@@ -49,7 +51,13 @@ def legacy_workbook_nbbo(
     midpoint = metrics["midpoint"]
     spread_percent = metrics["spread_percent"]
     if midpoint is None or spread_percent is None:
-        return {**metrics, "delta": None, "buy_limit": None, "sell_limit": None, "chosen_limit_price": None}
+        return {
+            **metrics,
+            "delta": None,
+            "buy_limit": None,
+            "sell_limit": None,
+            "chosen_limit_price": None,
+        }
 
     delta = max(params.legacy_d_min, params.legacy_k * spread_percent / 2)
     buy_limit = midpoint * (1 + delta)
@@ -74,7 +82,13 @@ def baseline_nbbo(
     midpoint = metrics["midpoint"]
     spread_percent = metrics["spread_percent"]
     if midpoint is None or spread_percent is None:
-        return {**metrics, "delta": None, "buy_limit": None, "sell_limit": None, "chosen_limit_price": None}
+        return {
+            **metrics,
+            "delta": None,
+            "buy_limit": None,
+            "sell_limit": None,
+            "chosen_limit_price": None,
+        }
 
     tick = _tick_size(midpoint)
     spread_bps = spread_percent * 10_000
@@ -143,7 +157,9 @@ def price_preview(
         errors.append("limit_price_override must be positive")
 
     if profile.limit_pricing_method == LimitPricingMethod.LEGACY_WORKBOOK_NBBO:
-        details = legacy_workbook_nbbo(side, bid_price, ask_price, profile.pricing_params)
+        details = legacy_workbook_nbbo(
+            side, bid_price, ask_price, profile.pricing_params
+        )
     elif profile.limit_pricing_method == LimitPricingMethod.BASELINE_NBBO:
         details = baseline_nbbo(side, bid_price, ask_price, profile.pricing_params)
     else:
@@ -155,13 +171,22 @@ def price_preview(
             "chosen_limit_price": None,
         }
 
-    chosen_limit = limit_price_override if limit_price_override is not None else details["chosen_limit_price"]
-    if profile.limit_pricing_method == LimitPricingMethod.MANUAL_OVERRIDE and chosen_limit is None and limit_required:
+    chosen_limit = (
+        limit_price_override
+        if limit_price_override is not None
+        else details["chosen_limit_price"]
+    )
+    if (
+        profile.limit_pricing_method == LimitPricingMethod.MANUAL_OVERRIDE
+        and chosen_limit is None
+        and limit_required
+    ):
         errors.append("limit_price_override is required for manual_override pricing")
 
     if (
         strict_market_data
-        and profile.limit_pricing_method in {LimitPricingMethod.LEGACY_WORKBOOK_NBBO, LimitPricingMethod.BASELINE_NBBO}
+        and profile.limit_pricing_method
+        in {LimitPricingMethod.LEGACY_WORKBOOK_NBBO, LimitPricingMethod.BASELINE_NBBO}
         and limit_required
         and chosen_limit is None
     ):

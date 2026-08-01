@@ -3,7 +3,9 @@ from schemas import ExecutionProfile, LimitPricingMethod, Side
 
 
 def test_legacy_workbook_nbbo_matches_formula() -> None:
-    result = legacy_workbook_nbbo(Side.BUY, 95.28, 96.43, ExecutionProfile().pricing_params)
+    result = legacy_workbook_nbbo(
+        Side.BUY, 95.28, 96.43, ExecutionProfile().pricing_params
+    )
 
     assert round(result["midpoint"], 6) == round((95.28 + 96.43) / 2, 6)
     assert round(result["nbbo_spread"], 6) == round(96.43 - 95.28, 6)
@@ -32,4 +34,3 @@ def test_manual_override_requires_override_for_limit_orders() -> None:
 
     assert result["chosen_limit_price"] is None
     assert errors
-

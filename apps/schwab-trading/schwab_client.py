@@ -16,9 +16,15 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 from schwab import auth
 
+from execution_guard import require_submission_authority
 from order_builders import normalize_tax_lot_method
 from schemas import AccountSnapshot, BrokerOrder, PositionSnapshot, QuoteData
-from storage import CredentialStore, ensure_runtime_dirs, get_app_paths, redact_sensitive_data
+from storage import (
+    CredentialStore,
+    ensure_runtime_dirs,
+    get_app_paths,
+    redact_sensitive_data,
+)
 
 
 BASE_URL = "https://api.schwabapi.com"
@@ -63,18 +69,20 @@ class SchwabClient:
     def load_credentials(self) -> dict[str, Any]:
         return self.store.load()
 
-    def save_credentials(self, app_key: str, app_secret: str, callback_url: str) -> dict[str, Any]:
+    def save_credentials(
+        self, app_key: str, app_secret: str, callback_url: str
+    ) -> dict[str, Any]:
         callback_url = callback_url.strip()
         self._validate_callback_url(callback_url)
         current = self.store.load()
-        token = current.get("token")
+        stored_authorization = current.get("token")
         payload = {
             "app_key": app_key.strip(),
-            "app_secret": app_secret.strip(),
+            "app_secret": (app_secret.strip()),
             "callback_url": callback_url,
         }
-        if token:
-            payload["token"] = token
+        if stored_authorization:
+            payload["token"] = stored_authorization
         self.store.save(payload)
         return payload
 
@@ -89,9 +97,13 @@ class SchwabClient:
         app_secret = str(payload.get("app_secret", "")).strip()
         callback_url = str(payload.get("callback_url", "")).strip()
         if not app_key or not app_secret or not callback_url:
-            raise SchwabClientError("App key, app secret, and callback URL must be configured first.")
+            raise SchwabClientError(
+                "App key, app secret, and callback URL must be configured first."
+            )
         self._validate_callback_url(callback_url)
-        return Credentials(app_key=app_key, app_secret=app_secret, callback_url=callback_url)
+        return Credentials(
+            app_key=app_key, app_secret=(app_secret), callback_url=callback_url
+        )
 
     @staticmethod
     def _validate_callback_url(callback_url: str) -> None:
@@ -102,11 +114,15 @@ class SchwabClient:
         if parsed.hostname != "127.0.0.1":
             raise SchwabClientError("Callback URL must use host 127.0.0.1.")
         if parsed.port is None:
-            raise SchwabClientError("Callback URL must include an explicit loopback port, for example https://127.0.0.1:8182.")
+            raise SchwabClientError(
+                "Callback URL must include an explicit loopback port, for example https://127.0.0.1:8182."
+            )
         if parsed.path and not parsed.path.startswith("/"):
             raise SchwabClientError("Callback URL path must start with '/'.")
         if parsed.query or parsed.fragment:
-            raise SchwabClientError("Callback URL cannot contain query parameters or fragments.")
+            raise SchwabClientError(
+                "Callback URL cannot contain query parameters or fragments."
+            )
 
     @staticmethod
     def _normalize_callback_path(path: str) -> str:
@@ -127,7 +143,9 @@ class SchwabClient:
     def _callback_components(cls, callback_url: str) -> tuple[int, str, str]:
         parsed = urlparse(callback_url)
         if parsed.port is None:
-            raise SchwabClientError("Callback URL must include an explicit loopback port.")
+            raise SchwabClientError(
+                "Callback URL must include an explicit loopback port."
+            )
         return (
             parsed.port,
             cls._normalize_callback_path(parsed.path),
@@ -135,7 +153,9 @@ class SchwabClient:
         )
 
     @classmethod
-    def _validate_received_callback_url(cls, callback_url: str, received_url: str) -> None:
+    def _validate_received_callback_url(
+        cls, callback_url: str, received_url: str
+    ) -> None:
         expected = urlparse(callback_url)
         received = urlparse(received_url)
         expected_path = cls._normalize_callback_path(expected.path)
@@ -143,7 +163,11 @@ class SchwabClient:
         received_host = received.hostname or "<unknown>"
         received_port = received.port or "<unknown>"
 
-        if received.scheme != expected.scheme or received.hostname != expected.hostname or received.port != expected.port:
+        if (
+            received.scheme != expected.scheme
+            or received.hostname != expected.hostname
+            or received.port != expected.port
+        ):
             raise SchwabClientError(
                 f"Received redirect URL targeted {received.scheme}://{received_host}:{received_port} instead of {callback_url}. "
                 "Confirm the Schwab developer app callback URL exactly matches the configured loopback URL."
@@ -169,9 +193,13 @@ class SchwabClient:
             except queue.Empty:
                 startup_error = None
             if startup_error is not None:
-                raise auth.RedirectServerExitedError("Local callback listener exited before it started.") from startup_error
+                raise auth.RedirectServerExitedError(
+                    "Local callback listener exited before it started."
+                ) from startup_error
             if not server_thread.is_alive():
-                raise auth.RedirectServerExitedError("Local callback listener exited before it started.")
+                raise auth.RedirectServerExitedError(
+                    "Local callback listener exited before it started."
+                )
             try:
                 response = httpx.get(status_url, verify=False, timeout=1.0)
             except httpx.HTTPError:
@@ -180,7 +208,9 @@ class SchwabClient:
             if response.status_code == 200:
                 return
             time.sleep(0.1)
-        raise auth.RedirectServerExitedError("Local callback listener did not start in time.")
+        raise auth.RedirectServerExitedError(
+            "Local callback listener did not start in time."
+        )
 
     @contextmanager
     def _callback_listener_server(self, callback_url: str) -> Any:
@@ -228,7 +258,9 @@ class SchwabClient:
                         status=404,
                     )
 
-                server = make_server("127.0.0.1", callback_port, app, ssl_context="adhoc", threaded=True)
+                server = make_server(
+                    "127.0.0.1", callback_port, app, ssl_context="adhoc", threaded=True
+                )
                 server_holder["server"] = server
                 server.serve_forever()
             except BaseException as exc:  # noqa: BLE001
@@ -261,7 +293,9 @@ class SchwabClient:
     def _callback_preflight_server(self, callback_url: str) -> Any:
         return self._callback_listener_server(callback_url)
 
-    def _wait_for_callback_request(self, callback_queue: queue.Queue[CallbackRequest], timeout_seconds: float) -> CallbackRequest:
+    def _wait_for_callback_request(
+        self, callback_queue: queue.Queue[CallbackRequest], timeout_seconds: float
+    ) -> CallbackRequest:
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
             remaining = max(0.1, deadline - time.time())
@@ -283,9 +317,15 @@ class SchwabClient:
         *,
         callback_url: str,
     ) -> str:
-        callback_request = self._wait_for_callback_request(callback_queue, timeout_seconds)
+        callback_request = self._wait_for_callback_request(
+            callback_queue, timeout_seconds
+        )
         if not callback_request.matched_callback:
-            raise SchwabClientError(self._callback_path_mismatch_message(callback_url, callback_request.request_path))
+            raise SchwabClientError(
+                self._callback_path_mismatch_message(
+                    callback_url, callback_request.request_path
+                )
+            )
         return callback_request.url
 
     def _connect_from_existing_token(self, creds: Credentials):
@@ -303,7 +343,9 @@ class SchwabClient:
         return auth.get_auth_context(creds.app_key, creds.callback_url)
 
     @staticmethod
-    def _authorization_diagnostics(app_key: str, callback_url: str, auth_context: Any | None = None) -> dict[str, Any]:
+    def _authorization_diagnostics(
+        app_key: str, callback_url: str, auth_context: Any | None = None
+    ) -> dict[str, Any]:
         parsed_callback = urlparse(callback_url)
         auth_context = auth_context or auth.get_auth_context(app_key, callback_url)
         parsed_authorize = urlparse(auth_context.authorization_url)
@@ -313,7 +355,9 @@ class SchwabClient:
         redacted_query["client_id"] = [f"...{app_key[-4:]}"]
         if "state" in redacted_query:
             redacted_query["state"] = ["[REDACTED]"]
-        authorize_url = parsed_authorize._replace(query=urlencode(redacted_query, doseq=True)).geturl()
+        authorize_url = parsed_authorize._replace(
+            query=urlencode(redacted_query, doseq=True)
+        ).geturl()
         return {
             "callback_url": callback_url,
             "callback_scheme": parsed_callback.scheme,
@@ -344,7 +388,9 @@ class SchwabClient:
             raise SchwabClientError(failure_message)
 
     @classmethod
-    def _callback_path_mismatch_message(cls, callback_url: str, request_path: str) -> str:
+    def _callback_path_mismatch_message(
+        cls, callback_url: str, request_path: str
+    ) -> str:
         expected_path = cls._normalize_callback_path(urlparse(callback_url).path)
         return (
             f"The browser reached the local callback listener, but requested path {request_path} instead of {expected_path}. "
@@ -372,7 +418,9 @@ class SchwabClient:
                 "Unable to open the default browser for the local callback preflight.",
             )
             try:
-                self._wait_for_received_url(callback_queue, timeout_seconds, callback_url=callback_url)
+                self._wait_for_received_url(
+                    callback_queue, timeout_seconds, callback_url=callback_url
+                )
             except auth.RedirectTimeoutError as exc:
                 raise SchwabClientError(
                     f"Local callback preflight failed for {callback_url}. "
@@ -384,7 +432,9 @@ class SchwabClient:
 
     def _prepare_login_attempt(self, creds: Credentials) -> tuple[Any, dict[str, Any]]:
         auth_context = self._build_auth_context(creds)
-        diagnostics = self._authorization_diagnostics(creds.app_key, creds.callback_url, auth_context=auth_context)
+        diagnostics = self._authorization_diagnostics(
+            creds.app_key, creds.callback_url, auth_context=auth_context
+        )
         self._pending_auth_context = auth_context
         return auth_context, diagnostics
 
@@ -402,16 +452,22 @@ class SchwabClient:
 
         active_auth_context = auth_context or self._pending_auth_context
         if active_auth_context is None:
-            query = parse_qs(urlparse(authorization_response).query, keep_blank_values=True)
+            query = parse_qs(
+                urlparse(authorization_response).query, keep_blank_values=True
+            )
             if query.get("code") or query.get("state"):
                 raise SchwabClientError(
                     "The browser reached the callback URL, but the saved authorization context was missing or reset before token exchange. "
                     "Start login again to generate a fresh authorization URL."
                 )
-            raise SchwabClientError("Login has not been started. Start login before completing the redirect URL.")
+            raise SchwabClientError(
+                "Login has not been started. Start login before completing the redirect URL."
+            )
 
         try:
-            self._connect_from_received_url(creds, active_auth_context, authorization_response)
+            self._connect_from_received_url(
+                creds, active_auth_context, authorization_response
+            )
             linked_accounts = self._verify_login_session()
         except SchwabClientError:
             raise
@@ -433,7 +489,9 @@ class SchwabClient:
         callback_timeout: float,
         requested_browser: str | None = None,
     ):
-        callback_port, callback_path, display_path = self._callback_components(creds.callback_url)
+        callback_port, callback_path, display_path = self._callback_components(
+            creds.callback_url
+        )
         auth_context, diagnostics = self._prepare_login_attempt(creds)
         opener = self._browser_opener(requested_browser)
 
@@ -450,7 +508,9 @@ class SchwabClient:
                 "Unable to open the default browser for the local callback preflight.",
             )
             try:
-                preflight_request = self._wait_for_callback_request(callback_queue, CALLBACK_PREFLIGHT_TIMEOUT_SECONDS)
+                preflight_request = self._wait_for_callback_request(
+                    callback_queue, CALLBACK_PREFLIGHT_TIMEOUT_SECONDS
+                )
             except auth.RedirectTimeoutError as exc:
                 raise SchwabClientError(
                     f"Local callback preflight failed for {creds.callback_url}. "
@@ -459,9 +519,15 @@ class SchwabClient:
                     f"Open {creds.callback_url} directly, accept the browser security warning, and confirm the callback page loads."
                 ) from exc
             if not preflight_request.matched_callback:
-                raise SchwabClientError(self._callback_path_mismatch_message(creds.callback_url, preflight_request.request_path))
+                raise SchwabClientError(
+                    self._callback_path_mismatch_message(
+                        creds.callback_url, preflight_request.request_path
+                    )
+                )
             self._last_preflight_succeeded = True
-            logger.info("Local callback preflight succeeded callback_url=%s", creds.callback_url)
+            logger.info(
+                "Local callback preflight succeeded callback_url=%s", creds.callback_url
+            )
 
             logger.info(
                 "Starting browser-assisted Schwab login callback_url=%s scheme=%s host=%s port=%s path=%s interactive=%s",
@@ -472,7 +538,10 @@ class SchwabClient:
                 display_path,
                 interactive,
             )
-            logger.info("Schwab authorize preview authorize_url=%s", diagnostics["authorize_url"])
+            logger.info(
+                "Schwab authorize preview authorize_url=%s",
+                diagnostics["authorize_url"],
+            )
             logger.info(
                 "Authorize redirect_uri matches callback=%s",
                 diagnostics["authorize_redirect_uri"] == creds.callback_url,
@@ -482,19 +551,32 @@ class SchwabClient:
                 opener,
                 "Unable to open the default browser for the Schwab authorization URL.",
             )
-            callback_request = self._wait_for_callback_request(callback_queue, callback_timeout)
+            callback_request = self._wait_for_callback_request(
+                callback_queue, callback_timeout
+            )
 
-        if callback_request.request_path != callback_path or not callback_request.matched_callback:
-            raise SchwabClientError(self._callback_path_mismatch_message(creds.callback_url, callback_request.request_path))
+        if (
+            callback_request.request_path != callback_path
+            or not callback_request.matched_callback
+        ):
+            raise SchwabClientError(
+                self._callback_path_mismatch_message(
+                    creds.callback_url, callback_request.request_path
+                )
+            )
 
         logger.info(
             "Received browser callback request callback_url=%s",
             redact_sensitive_data(callback_request.url, "received_url"),
         )
-        self._consume_received_url(creds, callback_request.url, auth_context=auth_context)
+        self._consume_received_url(
+            creds, callback_request.url, auth_context=auth_context
+        )
         return self.client
 
-    def _connect_from_received_url(self, creds: Credentials, auth_context: Any, received_url: str):
+    def _connect_from_received_url(
+        self, creds: Credentials, auth_context: Any, received_url: str
+    ):
         self.client = auth.client_from_received_url(
             creds.app_key,
             creds.app_secret,
@@ -508,10 +590,14 @@ class SchwabClient:
     def _verify_login_session(self) -> list[dict[str, Any]]:
         linked_accounts = self.get_account_numbers()
         self._last_verified_accounts = list(linked_accounts)
-        logger.info("Verified Schwab login linked_account_count=%s", len(linked_accounts))
+        logger.info(
+            "Verified Schwab login linked_account_count=%s", len(linked_accounts)
+        )
         return linked_accounts
 
-    def _auth_error_message(self, exc: Exception, callback_url: str, *, received_url: str | None = None) -> str:
+    def _auth_error_message(
+        self, exc: Exception, callback_url: str, *, received_url: str | None = None
+    ) -> str:
         if isinstance(exc, auth.RedirectTimeoutError):
             if self._last_preflight_succeeded:
                 return (
@@ -532,12 +618,24 @@ class SchwabClient:
             )
         message = str(exc)
         lowered = message.lower()
-        if isinstance(exc, ValueError) and ("callback url" in lowered or "hostname" in lowered):
+        if isinstance(exc, ValueError) and (
+            "callback url" in lowered or "hostname" in lowered
+        ):
             return (
                 f"Invalid callback URL for Python loopback auth: {callback_url}. "
                 "It must use https, host 127.0.0.1, and an explicit port."
             )
-        if any(token in lowered for token in ("redirect_uri", "redirect uri", "invalid_client", "invalid_grant", "unauthorized", "mismatch")):
+        if any(
+            token in lowered
+            for token in (
+                "redirect_uri",
+                "redirect uri",
+                "invalid_client",
+                "invalid_grant",
+                "unauthorized",
+                "mismatch",
+            )
+        ):
             if received_url:
                 return (
                     "Schwab reached the local callback URL, but rejected the OAuth code exchange. "
@@ -553,14 +651,16 @@ class SchwabClient:
 
     def _token_read(self) -> dict[str, Any]:
         payload = self.store.load()
-        token = payload.get("token")
-        if not token:
+        stored_authorization = payload.get("token")
+        if not stored_authorization:
             raise FileNotFoundError("No stored Schwab token was found.")
-        return token
+        return stored_authorization
 
-    def _token_write(self, token: dict[str, Any], *args: Any, **kwargs: Any) -> None:
+    def _token_write(
+        self, token_payload: dict[str, Any], *args: Any, **kwargs: Any
+    ) -> None:
         payload = self.store.load()
-        payload["token"] = token
+        payload["token"] = token_payload
         self.store.save(payload)
 
     def begin_manual_login(self) -> dict[str, Any]:
@@ -576,7 +676,9 @@ class SchwabClient:
             diagnostics["callback_port"],
             diagnostics["callback_path"],
         )
-        logger.info("Schwab authorize preview authorize_url=%s", diagnostics["authorize_url"])
+        logger.info(
+            "Schwab authorize preview authorize_url=%s", diagnostics["authorize_url"]
+        )
         return {
             "authorization_url": auth_context.authorization_url,
             "diagnostics": diagnostics,
@@ -598,13 +700,13 @@ class SchwabClient:
     ):
         creds = self._load_credentials()
         payload = self.store.load()
-        has_token = "token" in payload and not force_login
+        authorization_available = "token" in payload and not force_login
         self._last_preflight_succeeded = None
         self._last_verified_accounts = []
         self._pending_auth_context = None
 
         try:
-            if has_token:
+            if authorization_available:
                 self.client = self._connect_from_existing_token(creds)
                 self._verify_login_session()
             else:
@@ -617,7 +719,9 @@ class SchwabClient:
         except SchwabClientError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise SchwabClientError(self._auth_error_message(exc, creds.callback_url)) from exc
+            raise SchwabClientError(
+                self._auth_error_message(exc, creds.callback_url)
+            ) from exc
 
         return self.client
 
@@ -632,7 +736,9 @@ class SchwabClient:
             response.raise_for_status()
         except Exception as exc:  # noqa: BLE001
             body = response.text
-            raise SchwabClientError(f"{message}: HTTP {response.status_code} {response.reason_phrase}: {body}") from exc
+            raise SchwabClientError(
+                f"{message}: HTTP {response.status_code} {response.reason_phrase}: {body}"
+            ) from exc
         return response.json()
 
     def raw_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
@@ -643,13 +749,22 @@ class SchwabClient:
 
     def login_status(self) -> dict[str, Any]:
         payload = self.store.load()
-        token = payload.get("token")
+        stored_authorization = payload.get("token")
         token_age_seconds = None
-        if isinstance(token, dict) and "creation_timestamp" in token:
-            token_age_seconds = int(datetime.now().timestamp()) - int(token["creation_timestamp"])
+        if (
+            isinstance(stored_authorization, dict)
+            and "creation_timestamp" in stored_authorization
+        ):
+            token_age_seconds = int(datetime.now().timestamp()) - int(
+                stored_authorization["creation_timestamp"]
+            )
         return {
-            "configured": bool(payload.get("app_key") and payload.get("app_secret") and payload.get("callback_url")),
-            "has_token": token is not None,
+            "configured": bool(
+                payload.get("app_key")
+                and payload.get("app_secret")
+                and payload.get("callback_url")
+            ),
+            "has_token": (stored_authorization is not None),
             "callback_url": payload.get("callback_url"),
             "token_age_seconds": token_age_seconds,
         }
@@ -660,7 +775,9 @@ class SchwabClient:
         return list(payload)
 
     def get_account_hash_map(self) -> dict[str, str]:
-        return {row["accountNumber"]: row["hashValue"] for row in self.get_account_numbers()}
+        return {
+            row["accountNumber"]: row["hashValue"] for row in self.get_account_numbers()
+        }
 
     def get_user_preferences(self) -> dict[str, Any]:
         response = self.ensure_client().get_user_preferences()
@@ -669,19 +786,28 @@ class SchwabClient:
     def get_account_nickname_map(self) -> dict[str, str]:
         prefs = self.get_user_preferences()
         accounts = prefs.get("accounts", [])
-        return {entry.get("accountNumber", ""): entry.get("nickName", "") for entry in accounts}
+        return {
+            entry.get("accountNumber", ""): entry.get("nickName", "")
+            for entry in accounts
+        }
 
     @staticmethod
-    def _normalize_account_fields(fields: str | Iterable[str] | None) -> list[str] | None:
+    def _normalize_account_fields(
+        fields: str | Iterable[str] | None,
+    ) -> list[str] | None:
         if fields is None:
             return None
         if isinstance(fields, str):
             return [fields]
         return list(fields)
 
-    def get_account(self, account_hash: str, fields: str | Iterable[str] | None = None) -> dict[str, Any]:
+    def get_account(
+        self, account_hash: str, fields: str | Iterable[str] | None = None
+    ) -> dict[str, Any]:
         normalized_fields = self._normalize_account_fields(fields)
-        response = self.ensure_client().get_account(account_hash, fields=normalized_fields)
+        response = self.ensure_client().get_account(
+            account_hash, fields=normalized_fields
+        )
         return self._response_json(response, f"Unable to load account {account_hash}")
 
     def get_accounts_snapshot(self) -> list[AccountSnapshot]:
@@ -699,7 +825,7 @@ class SchwabClient:
             snapshots.append(
                 AccountSnapshot(
                     account_name=nicknames.get(account_number) or account_number,
-                    account_number=account_number,
+                    account_number=(account_number),
                     account_hash=account_hash,
                     cash_available=cash_available,
                     liquidation_value=balances.get("liquidationValue"),
@@ -729,7 +855,7 @@ class SchwabClient:
                 positions.append(
                     PositionSnapshot(
                         account_name=nicknames.get(account_number) or account_number,
-                        account_number=account_number,
+                        account_number=(account_number),
                         account_hash=account_hash,
                         symbol=symbol,
                         average_price=average_price,
@@ -742,7 +868,9 @@ class SchwabClient:
         return positions
 
     def get_quotes(self, symbols: list[str]) -> dict[str, QuoteData]:
-        unique_symbols = sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()})
+        unique_symbols = sorted(
+            {symbol.strip().upper() for symbol in symbols if symbol.strip()}
+        )
         if not unique_symbols:
             return {}
         response = self.ensure_client().get_quotes(unique_symbols)
@@ -756,7 +884,9 @@ class SchwabClient:
                 high_price=quote.get("highPrice"),
                 low_price=quote.get("lowPrice"),
                 close_price=quote.get("closePrice"),
-                last_price=quote.get("lastPrice") or quote.get("mark") or quote.get("askPrice"),
+                last_price=quote.get("lastPrice")
+                or quote.get("mark")
+                or quote.get("askPrice"),
                 mark_price=quote.get("mark"),
                 bid_price=quote.get("bidPrice"),
                 ask_price=quote.get("askPrice"),
@@ -764,14 +894,20 @@ class SchwabClient:
             )
         return quotes
 
-    def preview_order(self, account_hash: str, order_spec: dict[str, Any]) -> httpx.Response:
+    def preview_order(
+        self, account_hash: str, order_spec: dict[str, Any]
+    ) -> httpx.Response:
         response = self.ensure_client().preview_order(account_hash, order_spec)
         return response
 
-    def place_order(self, account_hash: str, order_spec: dict[str, Any]) -> httpx.Response:
+    def place_order(
+        self, account_hash: str, order_spec: dict[str, Any]
+    ) -> httpx.Response:
+        require_submission_authority("place_order")
         return self.ensure_client().place_order(account_hash, order_spec)
 
     def cancel_order(self, account_hash: str, order_id: str) -> httpx.Response:
+        require_submission_authority("cancel_order")
         return self.ensure_client().cancel_order(order_id, account_hash)
 
     def get_order(self, account_hash: str, order_id: str) -> dict[str, Any]:
@@ -790,7 +926,9 @@ class SchwabClient:
                 to_entered_datetime=now,
                 max_results=1000,
             )
-            orders = self._response_json(response, f"Unable to load orders for account {account_number}")
+            orders = self._response_json(
+                response, f"Unable to load orders for account {account_number}"
+            )
             if isinstance(orders, dict):
                 iterable = orders.get("orders", [])
             else:
@@ -801,17 +939,29 @@ class SchwabClient:
                 if not order_id:
                     continue
                 status_details = order.get("statusDescription") or ""
-                cost_basis_method = order.get("taxLotMethod") or order.get("tax_lot_method")
+                cost_basis_method = order.get("taxLotMethod") or order.get(
+                    "tax_lot_method"
+                )
                 if not status_details or not cost_basis_method:
                     details = self.get_order(account_hash, order_id)
                     if not status_details:
-                        status_details = details.get("statusDescription") or details.get("message") or ""
+                        status_details = (
+                            details.get("statusDescription")
+                            or details.get("message")
+                            or ""
+                        )
                         if not status_details:
                             status_details = json.dumps(details)[:500]
                     if not cost_basis_method:
-                        cost_basis_method = details.get("taxLotMethod") or details.get("tax_lot_method")
-                        if not cost_basis_method and isinstance(details.get("order"), dict):
-                            cost_basis_method = details["order"].get("taxLotMethod") or details["order"].get("tax_lot_method")
+                        cost_basis_method = details.get("taxLotMethod") or details.get(
+                            "tax_lot_method"
+                        )
+                        if not cost_basis_method and isinstance(
+                            details.get("order"), dict
+                        ):
+                            cost_basis_method = details["order"].get(
+                                "taxLotMethod"
+                            ) or details["order"].get("tax_lot_method")
                 legs = order.get("orderLegCollection", [])
                 symbol = None
                 instruction = ""
@@ -826,7 +976,7 @@ class SchwabClient:
                 snapshots.append(
                     BrokerOrder(
                         account_name=nicknames.get(account_number) or account_number,
-                        account_number=account_number,
+                        account_number=(account_number),
                         account_hash=account_hash,
                         order_id=order_id,
                         quantity=quantity,
@@ -837,8 +987,11 @@ class SchwabClient:
                         session=order.get("session"),
                         status=order.get("status"),
                         status_details=status_details,
-                        cost_basis_method=str(normalize_tax_lot_method(cost_basis_method or "")),
-                        cancelable=str(order.get("status", "")).upper() in {"WORKING", "QUEUED", "ACCEPTED"},
+                        cost_basis_method=str(
+                            normalize_tax_lot_method(cost_basis_method or "")
+                        ),
+                        cancelable=str(order.get("status", "")).upper()
+                        in {"WORKING", "QUEUED", "ACCEPTED"},
                         raw=order,
                     )
                 )
