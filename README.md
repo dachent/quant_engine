@@ -139,3 +139,9 @@ static, coverage-aware baseline. It uses exact-date alignment, time-ordered
 validation, immutable generations, and explicit gross/net cost gates; it does
 not claim MPI/DSA equivalence. See the
 [factor and alpha runbook](docs/analytics/factor-alpha-decomposition.md).
+
+Coverage-aware portfolio dependence is built separately from factor
+decomposition. Measured Pearson/Spearman cells, conceptual priors, posterior and
+stress matrices, implementation coincidence, and correlation-one loss remain
+distinct. See the
+[correlation and dependence runbook](docs/analytics/correlation-dependence.md).
