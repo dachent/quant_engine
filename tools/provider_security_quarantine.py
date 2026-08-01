@@ -13,6 +13,7 @@ from typing import Any, Final, Mapping, Sequence
 
 PLAN_SCHEMA_VERSION: Final = 1
 _SUPPORTED_ROOT_LABELS: Final = {
+    "alpaca": frozenset({"legacy-data"}),
     "portfolio123": frozenset({"har-workspace", "legacy-data"}),
     "quantbase": frozenset({"legacy-workspace"}),
 }
@@ -127,6 +128,10 @@ def _category(provider_id: str, label: str, relative: Path) -> str | None:
         ):
             return "DERIVED_AUTHENTICATED_SUMMARY_RISK"
         return None
+    if provider_id == "alpaca" and label == "legacy-data":
+        if relative.suffix.lower() == ".md":
+            return "PLAINTEXT_REPORT_RISK"
+        return None
     raise QuarantineError(f"unsupported provider/source label: {provider_id}/{label}")
 
 
@@ -204,7 +209,7 @@ def plan_provider(
                 }
             )
     if not entries:
-        raise QuarantineError("no Portfolio123 security-risk artifacts were found")
+        raise QuarantineError("no provider security-risk artifacts were found")
     entries.sort(
         key=lambda item: (
             str(item["source_label"]),
@@ -247,6 +252,14 @@ def plan_quantbase(legacy_root: Path, quarantine_root: Path) -> dict[str, object
     return plan_provider(
         "quantbase",
         {"legacy-workspace": legacy_root},
+        quarantine_root,
+    )
+
+
+def plan_alpaca(legacy_root: Path, quarantine_root: Path) -> dict[str, object]:
+    return plan_provider(
+        "alpaca",
+        {"legacy-data": legacy_root},
         quarantine_root,
     )
 
@@ -540,6 +553,9 @@ def _parser() -> argparse.ArgumentParser:
     quantbase = subparsers.add_parser("plan-quantbase")
     quantbase.add_argument("--legacy-root", type=Path, required=True)
     quantbase.add_argument("--quarantine-root", type=Path, required=True)
+    alpaca = subparsers.add_parser("plan-alpaca")
+    alpaca.add_argument("--legacy-root", type=Path, required=True)
+    alpaca.add_argument("--quarantine-root", type=Path, required=True)
     for command in ("apply", "verify", "scan", "restore"):
         child = subparsers.add_parser(command)
         child.add_argument("--plan", type=Path, required=True)
@@ -553,6 +569,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = plan_p123(args.har_root, args.legacy_root, args.quarantine_root)
         elif args.command == "plan-quantbase":
             result = plan_quantbase(args.legacy_root, args.quarantine_root)
+        elif args.command == "plan-alpaca":
+            result = plan_alpaca(args.legacy_root, args.quarantine_root)
         elif args.command == "apply":
             result = apply_plan(args.plan)
         elif args.command == "verify":

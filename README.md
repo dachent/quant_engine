@@ -129,6 +129,10 @@ The accepted [Quantbase provider contract and generation runbook](docs/providers
 defines the HAR-only routes, the 55-file dated baseline, deterministic replay,
 and the verified single-authority cutover into `dataQuantbase`.
 
+Legacy Alpaca plaintext reports use the bounded, reversible
+[Alpaca security quarantine](docs/alpaca-security-quarantine.md) before any
+code or data integration.
+
 The baseline's coverage-aware performance tables and independent unified
 workbook are built with the [portfolio report runbook](docs/portfolio-report.md).
 The workbook is a generated, read-only deliverable: calculations originate in
