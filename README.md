@@ -120,6 +120,12 @@ Legacy Portfolio123 authenticated artifacts are handled only through the
 Quarantine is reversible and does not substitute for provider-side credential
 rotation or authorize a Portfolio123 data/API call.
 
+The repository-authoritative [Portfolio123 capability](docs/providers/portfolio123.md)
+combines deterministic browser capture plans, a deny-by-default WCH route contract,
+HAR-first transport decisions, metered API authorization evidence, and one
+formula/ranking-system skill. Authentication or extraction failure never causes
+automatic API fallback, and provider mutations require separate exact approval.
+
 Quantbase authenticated captures and account evidence use the same move/hash
 engine through a [narrow Quantbase profile](docs/quantbase-security-quarantine.md).
 The normalized CSV baseline remains outside that security quarantine and is
