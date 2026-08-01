@@ -258,6 +258,15 @@ section[data-view="dependence"] th,
   font-size: 11px;
 }
 
+section[data-view="capital"] th {
+  font-size: 11px;
+}
+
+section[data-view="capital"] .callout-neutral {
+  background: #182632;
+  color: var(--text-soft);
+}
+
 #factor-detail .badge-positive {
   border-color: #367a65;
   background: #173d33;

@@ -17,9 +17,13 @@ adapter, performance engine, strategy service, or broker surface.
 - Provider-specific account aliases are used only in memory to resolve stable
   internal IDs. They and absolute workstation paths are absent from normalized
   output and command summaries.
-- Positions and FX are explicitly unavailable. Transaction coverage is limited
-  to accepted Alpaca fills. Flow and NAV coverage are limited to the accepted
-  Schwab, IBKR, and Alpaca evidence.
+- Current Schwab positions are accepted from the pinned provider generation.
+  Each position is attributed only when exactly one effective account-strategy
+  assignment exists at its as-of date; absent mappings remain `UNMAPPED` and
+  overlaps fail closed. Current balances, non-Schwab positions, and FX remain
+  explicitly unavailable or partial. Transaction coverage is limited to
+  accepted Alpaca fills and Schwab history. Flow and NAV coverage is limited to
+  the accepted Schwab, IBKR, and Alpaca evidence.
 - Strategy evidence layers remain distinct records. Aggregate and benchmark
   metric rows cannot become strategy identities.
 
@@ -49,10 +53,12 @@ The command:
 1. verifies the current provenance pointer and every expected source hash;
 2. resolves raw records to internal account and strategy identities;
 3. reconciles raw broker NAV to the tracker attribution diagnostic;
-4. reconciles nine systematic allocations plus reserve to the audit totals;
-5. distinguishes observed dates, non-business weekends, missing observations
+4. attributes current positions through the same effective-dated assignment
+   rule used for ledger facts and reconciles mapped counts and market value;
+5. reconciles nine systematic allocations plus reserve to the audit totals;
+6. distinguishes observed dates, non-business weekends, missing observations
    on provider-observed dates, and dates lacking calendar evidence;
-6. stages an immutable catalog only after the configured total, coverage,
+7. stages an immutable catalog only after the configured total, coverage,
    stress, HWM-status, and advisory-action replay passes.
 
 The output is create-only:

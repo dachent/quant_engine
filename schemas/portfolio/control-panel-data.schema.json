@@ -21,13 +21,14 @@
     "meta",
     "panel_schema_version",
     "performance",
+    "positions",
     "provenance",
     "provider_counts",
     "reconciliation_checks",
     "strategies"
   ],
   "properties": {
-    "panel_schema_version": { "const": 2 },
+    "panel_schema_version": { "const": 3 },
     "meta": {
       "type": "object",
       "additionalProperties": false,
@@ -123,6 +124,7 @@
     "gates": { "$ref": "#/$defs/rows" },
     "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "performance": { "$ref": "#/$defs/rows" },
+    "positions": { "$ref": "#/$defs/rows" },
     "provenance": { "$ref": "#/$defs/rows" },
     "provider_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
     "reconciliation_checks": { "$ref": "#/$defs/rows" },

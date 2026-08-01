@@ -74,6 +74,9 @@ const systematicRows = Number(await page.locator("#allocation-table").getAttribu
 await page.locator('[data-allocation-filter="all"]').click();
 const allAllocationRows = Number(await page.locator("#allocation-table").getAttribute("data-visible-rows"));
 checks.push(check("Allocation filters preserve 9 plus reserve", reserveRows === 1 && systematicRows === 9 && allAllocationRows === 10, { all: allAllocationRows, reserve: reserveRows, systematic: systematicRows }));
+const positionRows = Number(await page.locator("#position-table").getAttribute("data-visible-rows"));
+const positionText = await page.locator("#position-table").textContent();
+checks.push(check("Current positions retain mapped strategy attribution", positionRows === 29 && !positionText?.includes("AVAILABLE UNMAPPED") && !positionText?.includes("No accepted strategy"), { mapped_rows: positionRows, unmapped_visible: Boolean(positionText?.includes("UNMAPPED")) }));
 
 await page.locator('[data-nav="candidates"]').click();
 await page.locator('[data-tier-filter="Tier 1"]').click();
