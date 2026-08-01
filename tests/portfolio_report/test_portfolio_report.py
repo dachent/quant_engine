@@ -431,6 +431,39 @@ def test_missing_strategy_evidence_is_unavailable_not_inferred(tmp_path: Path) -
     assert strategy["nav_status"] == "UNAVAILABLE"
 
 
+def test_transaction_without_amount_remains_explicitly_unavailable(
+    tmp_path: Path,
+) -> None:
+    catalog = _baseline_catalog()
+    catalog["transactions"].append(
+        {
+            "account_id": "account-a",
+            "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+            "event_date": "2026-01-03",
+            "evidence_class": "WCH_HISTORICAL",
+            "kind": "Stock Split",
+            "mapping_status": "UNMAPPED",
+            "provider": "SYNTHETIC",
+            "quantity": "2",
+            "record_id": "transaction-no-amount",
+            "security_id": "security-1",
+            "source_key": "synthetic-transaction",
+            "strategy_id": None,
+        }
+    )
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(baseline_root)
+
+    row = next(
+        item
+        for item in report["transactions_and_flows"]
+        if item["record_id"] == "transaction-no-amount"
+    )
+    assert row["amount_status"] == "UNAVAILABLE"
+    assert row["amount_usd"] is None
+
+
 def test_high_precision_performance_is_numeric_only_in_excel_presentation() -> None:
     exact = "0.001932516064483270690775302874751"
 

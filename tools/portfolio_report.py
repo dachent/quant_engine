@@ -460,10 +460,17 @@ def _transactions_and_flows(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for record in _objects(catalog.get("transactions"), "transactions"):
         security = securities.get(str(record.get("security_id")), {})
+        amount = _object(record.get("amount"), "transaction.amount")
+        amount_status = _text(amount.get("status"), "transaction.amount.status")
         rows.append(
             {
                 "account_id": record.get("account_id"),
-                "amount_usd": decimal_text(_amount(record, "amount")),
+                "amount_status": amount_status,
+                "amount_usd": (
+                    decimal_text(_amount(record, "amount"))
+                    if amount_status == "AVAILABLE"
+                    else None
+                ),
                 "date": record.get("event_date"),
                 "evidence_class": record.get("evidence_class") or "OBSERVED",
                 "kind": record.get("kind"),
@@ -477,10 +484,17 @@ def _transactions_and_flows(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
             }
         )
     for record in _objects(catalog.get("flows"), "flows"):
+        amount = _object(record.get("amount"), "flow.amount")
+        amount_status = _text(amount.get("status"), "flow.amount.status")
         rows.append(
             {
                 "account_id": record.get("account_id"),
-                "amount_usd": decimal_text(_amount(record, "amount")),
+                "amount_status": amount_status,
+                "amount_usd": (
+                    decimal_text(_amount(record, "amount"))
+                    if amount_status == "AVAILABLE"
+                    else None
+                ),
                 "date": record.get("event_date"),
                 "evidence_class": record.get("evidence_class"),
                 "kind": record.get("flow_type"),
