@@ -115,6 +115,11 @@ positions inherit a strategy only from one exact effective-dated account
 assignment. Missing provider facts, FX, history, or mappings remain
 `UNAVAILABLE`, `PARTIAL`, or `UNMAPPED`; the builder does not infer them.
 
+Legacy Portfolio123 authenticated artifacts are handled only through the
+[checksummed security-quarantine control](docs/p123-security-quarantine.md).
+Quarantine is reversible and does not substitute for provider-side credential
+rotation or authorize a Portfolio123 data/API call.
+
 The baseline's coverage-aware performance tables and independent unified
 workbook are built with the [portfolio report runbook](docs/portfolio-report.md).
 The workbook is a generated, read-only deliverable: calculations originate in
