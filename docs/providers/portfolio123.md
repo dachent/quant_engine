@@ -60,6 +60,35 @@ legacy-artifact inspection and live/billed API validation.
 Issue #19 owns deterministic local data publication, database roll-forward,
 coverage, reconciliation, and the verified single-authority cutover.
 
+## Local data generation and cutover
+
+Issue `#19 (P123-DATA-001)` is implemented by
+`tools/portfolio123_generation.py`. The private plan inventories and hashes both
+approved source roots. It preserves the original 19 Parquet tables byte for
+byte, then adds one Parquet table for each classified HAR-derived CSV family.
+Every normalized row records its source artifact, source row, entity, and
+transport. Recent-trade summaries are not mislabeled as current holdings.
+
+Raw JSON, HTML, screenshots, email, workbooks, and other legacy material are
+copied into a content-addressed immutable source-run object store and hash-bound
+as `PROVENANCE_ONLY`. A canonical source index retains every original relative
+path while avoiding Windows path-length failures. The generator never parses
+authenticated raw artifacts under issue #19.
+
+```text
+python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as-of-date YYYY-MM-DD
+python tools/portfolio123_generation.py stage PLAN_JSON
+python tools/portfolio123_generation.py publish PLAN_JSON GENERATION_ID
+python tools/portfolio123_generation.py verify PLAN_JSON GENERATION_ID
+python tools/portfolio123_generation.py cutover PLAN_JSON GENERATION_ID
+```
+
+`stage` cannot change `CURRENT.json`. `publish` rebuilds the candidate from the
+verified source-run authority before atomically advancing the pointer.
+`cutover` verifies the published generation again, removes only the exact
+hash-bound source files, removes the now-empty legacy roots, and records the
+recovery authority. Any inventory or byte difference fails closed.
+
 ## Generated installations
 
 The repository skill is checksum-locked by

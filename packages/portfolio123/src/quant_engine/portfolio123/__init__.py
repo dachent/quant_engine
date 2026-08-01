@@ -21,8 +21,16 @@ from quant_engine.portfolio123.routing import (
     record_api_result,
     route_capability,
 )
+from quant_engine.portfolio123.generation import (
+    Portfolio123GenerationError,
+    create_cutover_plan,
+    cutover_sources,
+    publish_candidate,
+    stage_candidate,
+    verify_published,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "API_COST_DOCUMENTATION_URL",
@@ -33,13 +41,19 @@ __all__ = [
     "CapabilityPolicy",
     "CaptureTarget",
     "Portfolio123RoutingError",
+    "Portfolio123GenerationError",
     "RouteDecision",
     "RouteReason",
     "Transport",
     "account_capture_targets",
     "capability_policy",
+    "create_cutover_plan",
+    "cutover_sources",
     "managed_strategy_capture_targets",
     "record_api_result",
+    "publish_candidate",
     "route_capability",
+    "stage_candidate",
     "shared_strategy_capture_targets",
+    "verify_published",
 ]
