@@ -1,0 +1,395 @@
+from __future__ import annotations
+
+import csv
+from datetime import date, timedelta
+import hashlib
+import importlib.util
+import json
+import math
+from pathlib import Path
+import sys
+from typing import Any, cast
+
+import pytest
+
+from quant_engine.core import read_current
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_decomposition.py"
+SPEC = importlib.util.spec_from_file_location("portfolio_decomposition", MODULE_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError("unable to load portfolio decomposition builder")
+decomposition = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = decomposition
+SPEC.loader.exec_module(decomposition)
+
+
+def _days(count: int, start: date = date(2025, 1, 2)) -> list[date]:
+    accepted: list[date] = []
+    current = start
+    while len(accepted) < count:
+        if current.weekday() < 5:
+            accepted.append(current)
+        current += timedelta(days=1)
+    return accepted
+
+
+def _hash(path: Path) -> tuple[str, int]:
+    content = path.read_bytes()
+    return hashlib.sha256(content).hexdigest(), len(content)
+
+
+def _write_sources(
+    root: Path,
+    *,
+    count: int = 140,
+    formula: str = "unconstrained",
+    identical_factors: bool = False,
+    target_only_dates: tuple[date, ...] = (),
+    mixed_layer: bool = False,
+    complete_costs: bool = False,
+) -> tuple[Path, list[date]]:
+    root.mkdir(parents=True)
+    days = _days(count)
+    target_path = root / "targets.csv"
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(decomposition.TARGET_HEADERS)
+        for index, day in enumerate([*days, *target_only_dates]):
+            f1 = 0.008 * math.sin(index / 5.0) + 0.002 * math.cos(index / 11.0)
+            f2 = f1 if identical_factors else 0.006 * math.cos(index / 7.0)
+            if formula == "simplex":
+                excess = 0.0002 + 0.7 * f1 + 0.3 * f2
+            elif formula == "single":
+                excess = 0.0001 + 0.8 * f1
+            else:
+                excess = 0.0001 + 0.6 * f1 - 0.2 * f2
+            layer = "BACKTEST" if mixed_layer and index == count - 1 else "ACCOUNT_LIVE"
+            writer.writerow(
+                [
+                    "synthetic-strategy",
+                    day.isoformat(),
+                    format(excess + 0.00005, ".17g"),
+                    layer,
+                    "NET",
+                    "TOTAL",
+                    "0.00001" if complete_costs else "",
+                ]
+            )
+    factor_path = root / "factors.csv"
+    with factor_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["date", "RF", "F1", "F2"])
+        for index, day in enumerate(days):
+            f1 = 0.008 * math.sin(index / 5.0) + 0.002 * math.cos(index / 11.0)
+            f2 = f1 if identical_factors else 0.006 * math.cos(index / 7.0)
+            writer.writerow(
+                [day.isoformat(), "0.00005", format(f1, ".17g"), format(f2, ".17g")]
+            )
+    return target_path, days
+
+
+def _model(
+    days: list[date],
+    *,
+    model_id: str = "model-two-factor",
+    factors: list[str] | None = None,
+    constraint: str = "UNCONSTRAINED",
+    cost_coverage: str = "INCOMPLETE",
+    minimum_train: int = 40,
+    minimum_test: int = 20,
+) -> dict[str, object]:
+    return {
+        "constraint": constraint,
+        "cost_coverage": cost_coverage,
+        "cv_folds": 3,
+        "factor_ids": factors or ["factor-one", "factor-two"],
+        "minimum_test_observations": minimum_test,
+        "minimum_train_observations": minimum_train,
+        "model_id": model_id,
+        "parsimony_tolerance": "0.000001",
+        "periods_per_year": 252,
+        "ridge_candidates": ["0", "0.000001", "0.0001"],
+        "series_id": "synthetic-strategy",
+        "test_start": days[90].isoformat(),
+        "train_end": days[89].isoformat(),
+    }
+
+
+def _spec(
+    root: Path,
+    target_path: Path,
+    days: list[date],
+    *,
+    models: list[dict[str, object]] | None = None,
+    maximum_staleness_days: int = 7,
+) -> Path:
+    factor_path = root / "factors.csv"
+    target_hash, target_size = _hash(target_path)
+    factor_hash, factor_size = _hash(factor_path)
+    value = {
+        "as_of_date": max(days).isoformat(),
+        "factor_source": {
+            "artifact_id": "frozen/factors.csv",
+            "date_column": "date",
+            "expected_sha256": factor_hash,
+            "expected_size_bytes": factor_size,
+            "factors": [
+                {
+                    "column": "F1",
+                    "factor_id": "factor-one",
+                    "return_type": "EXCESS",
+                },
+                {
+                    "column": "F2",
+                    "factor_id": "factor-two",
+                    "return_type": "EXCESS",
+                },
+            ],
+            "relative_path": "factors.csv",
+            "risk_free_column": "RF",
+            "schema_name": "synthetic-factor-returns",
+            "schema_version": "1",
+        },
+        "maximum_factor_staleness_days": maximum_staleness_days,
+        "models": models or [_model(days)],
+        "schema_version": 1,
+        "target_source": {
+            "artifact_id": "frozen/targets.csv",
+            "expected_sha256": target_hash,
+            "expected_size_bytes": target_size,
+            "relative_path": "targets.csv",
+            "schema_name": "synthetic-target-returns",
+            "schema_version": "1",
+        },
+    }
+    spec_path = root / "spec.json"
+    spec_path.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return spec_path
+
+
+def _available(result: dict[str, object]) -> dict[str, Any]:
+    models = cast(list[dict[str, Any]], result["model_results"])
+    selected = [item for item in models if item["selected_for_series"]]
+    assert len(selected) == 1
+    assert selected[0]["status"] == "AVAILABLE"
+    return selected[0]
+
+
+def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    target_path, days = _write_sources(source)
+    spec_path = _spec(source, target_path, days)
+
+    first, manifest, first_bytes = decomposition.build_decomposition(spec_path, source)
+    second, second_manifest, second_bytes = decomposition.build_decomposition(
+        spec_path, source
+    )
+
+    assert first_bytes == second_bytes
+    assert manifest.generation_id == second_manifest.generation_id
+    model = _available(first)
+    exposures = {
+        item["factor_id"]: float(item["exposure"]) for item in model["exposures"]
+    }
+    assert exposures == pytest.approx({"factor-one": 0.6, "factor-two": -0.2}, abs=1e-9)
+    assert float(model["alpha"]["periodic_intercept"]) == pytest.approx(
+        0.0001, abs=1e-10
+    )
+    assert model["alpha"]["net_status"] == "AVAILABLE_OBSERVED_BASIS"
+    assert model["alpha"]["gross_status"] == "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
+    assert float(
+        model["diagnostics"]["holdout"]["predicted_r_squared"]
+    ) == pytest.approx(1.0, abs=1e-9)
+    assert model["method_label"] == "MPI_INFORMED_NON_EQUIVALENT"
+    for row in model["contributions"]:
+        reconstructed = (
+            float(row["alpha_contribution"])
+            + sum(float(value) for value in row["factor_contributions"].values())
+            + float(row["residual"])
+        )
+        assert reconstructed == pytest.approx(
+            float(row["actual_excess_return"]), abs=5e-11
+        )
+
+
+def test_simplex_and_parsimony_selection_recover_known_truth(tmp_path: Path) -> None:
+    source = tmp_path / "simplex"
+    target_path, days = _write_sources(source, formula="simplex")
+    models = [
+        _model(days, model_id="one-factor", factors=["factor-one"]),
+        _model(
+            days,
+            model_id="simplex-two-factor",
+            constraint="LONG_ONLY_SUM_TO_ONE",
+        ),
+    ]
+    spec_path = _spec(source, target_path, days, models=models)
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+    model = next(
+        item
+        for item in cast(list[dict[str, Any]], result["model_results"])
+        if item["model_id"] == "simplex-two-factor"
+    )
+    exposures = [float(item["exposure"]) for item in model["exposures"]]
+    assert exposures == pytest.approx([0.7, 0.3], abs=1e-8)
+    assert sum(exposures) == pytest.approx(1.0, abs=1e-12)
+    assert model["alpha"]["confidence_status"] == "UNAVAILABLE_METHOD_NOT_CLASSICAL_OLS"
+
+    single_source = tmp_path / "parsimonious"
+    single_target, single_days = _write_sources(single_source, formula="single")
+    single_models = [
+        _model(single_days, model_id="one-factor", factors=["factor-one"]),
+        _model(single_days, model_id="two-factor"),
+    ]
+    single_spec = _spec(single_source, single_target, single_days, models=single_models)
+    single_result, _manifest, _content = decomposition.build_decomposition(
+        single_spec, single_source
+    )
+    selection = cast(list[dict[str, Any]], single_result["model_selections"])[0]
+    assert selection["model_id"] == "one-factor"
+    assert selection["factor_count"] == 1
+
+
+def test_holdout_is_not_used_to_fit_or_select_ridge(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    target_path, days = _write_sources(source)
+    spec_path = _spec(source, target_path, days)
+    original, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+    original_model = _available(original)
+
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    test_start = days[90].isoformat()
+    for row in rows[1:]:
+        if row[1] >= test_start:
+            row[2] = format(-float(row[2]), ".17g")
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    changed_spec = _spec(source, target_path, days)
+    changed, _manifest, _content = decomposition.build_decomposition(
+        changed_spec, source
+    )
+    changed_model = _available(changed)
+
+    assert changed_model["selected_ridge"] == original_model["selected_ridge"]
+    assert [item["exposure"] for item in changed_model["exposures"]] == [
+        item["exposure"] for item in original_model["exposures"]
+    ]
+    assert float(changed_model["diagnostics"]["holdout"]["predicted_r_squared"]) < 0
+
+
+def test_coverage_separates_missing_weekday_and_weekend_and_short_history(
+    tmp_path: Path,
+) -> None:
+    missing_weekday = date(2025, 7, 21)
+    missing_weekend = date(2025, 7, 19)
+    source = tmp_path / "source"
+    target_path, days = _write_sources(
+        source, target_only_dates=(missing_weekday, missing_weekend)
+    )
+    models = [
+        _model(days, model_id="available"),
+        _model(days, model_id="short", minimum_train=200),
+    ]
+    spec_path = _spec(
+        source,
+        target_path,
+        [*days, missing_weekday, missing_weekend],
+        models=models,
+    )
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+    by_id = {
+        item["model_id"]: item
+        for item in cast(list[dict[str, Any]], result["model_results"])
+    }
+    assert by_id["available"]["coverage"]["factor_missing_weekdays"] == 1
+    assert by_id["available"]["coverage"]["factor_missing_weekends"] == 1
+    assert by_id["short"]["status"] == "UNAVAILABLE_INSUFFICIENT_TRAIN_HISTORY"
+
+
+def test_singular_stale_cost_and_evidence_fail_closed(tmp_path: Path) -> None:
+    singular_root = tmp_path / "singular"
+    singular_target, days = _write_sources(singular_root, identical_factors=True)
+    singular_spec = _spec(singular_root, singular_target, days)
+    singular_result, _manifest, _content = decomposition.build_decomposition(
+        singular_spec, singular_root
+    )
+    singular_model = _available(singular_result)
+    assert singular_model["diagnostics"]["rank_status"] == "SINGULAR_PSEUDOINVERSE"
+    assert (
+        singular_model["alpha"]["confidence_status"]
+        == "UNAVAILABLE_METHOD_NOT_CLASSICAL_OLS"
+    )
+
+    stale_root = tmp_path / "stale"
+    stale_target, stale_days = _write_sources(
+        stale_root,
+        target_only_dates=(date(2026, 2, 2),),
+    )
+    stale_spec = _spec(
+        stale_root,
+        stale_target,
+        [*stale_days, date(2026, 2, 2)],
+        maximum_staleness_days=1,
+    )
+    stale_result, _manifest, _content = decomposition.build_decomposition(
+        stale_spec, stale_root
+    )
+    assert cast(list[dict[str, Any]], stale_result["model_results"])[0]["status"] == (
+        "UNAVAILABLE_STALE_FACTORS"
+    )
+
+    costs_root = tmp_path / "costs"
+    costs_target, cost_days = _write_sources(costs_root)
+    costs_spec = _spec(
+        costs_root,
+        costs_target,
+        cost_days,
+        models=[_model(cost_days, cost_coverage="COMPLETE")],
+    )
+    with pytest.raises(decomposition.DecompositionError, match="COMPLETE costs"):
+        decomposition.build_decomposition(costs_spec, costs_root)
+
+    mixed_root = tmp_path / "mixed"
+    mixed_target, mixed_days = _write_sources(mixed_root, mixed_layer=True)
+    mixed_spec = _spec(mixed_root, mixed_target, mixed_days)
+    with pytest.raises(decomposition.DecompositionError, match="cannot mix"):
+        decomposition.build_decomposition(mixed_spec, mixed_root)
+
+
+def test_missing_risk_free_and_candidate_drift_are_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    target_path, days = _write_sources(source)
+    factor_path = source / "factors.csv"
+    rows = list(csv.reader(factor_path.read_text(encoding="utf-8").splitlines()))
+    rows[5][1] = ""
+    with factor_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source, target_path, days)
+    with pytest.raises(decomposition.DecompositionError, match="risk free"):
+        decomposition.build_decomposition(spec_path, source)
+
+    clean_root = tmp_path / "clean"
+    clean_target, clean_days = _write_sources(clean_root, complete_costs=True)
+    clean_spec = _spec(
+        clean_root,
+        clean_target,
+        clean_days,
+        models=[_model(clean_days, cost_coverage="COMPLETE")],
+    )
+    output = tmp_path / "analytics"
+    staged = decomposition.stage_candidate(clean_spec, clean_root, output)
+    published = decomposition.publish(clean_spec, clean_root, output)
+    pointer = read_current(output)
+    assert published["publication_state"] == "PUBLISHED"
+    assert pointer.generation_id == staged["generation_id"]
+
+    candidate = Path(cast(str, staged["candidate"])) / "decomposition.json"
+    candidate.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(decomposition.DecompositionError, match="exact build"):
+        decomposition.stage_candidate(clean_spec, clean_root, output)

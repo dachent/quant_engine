@@ -133,3 +133,9 @@ history. The useful Yahoo workbook-lineage behavior and the flattened endpoint
 gist are absorbed as provenance into that single capability rather than kept as
 duplicate products. Generated market data remains outside Git and every Yahoo
 artifact receives hash-bound request and coverage evidence.
+
+The first factor-composition and alpha-decomposition capability is a clean-room,
+static, coverage-aware baseline. It uses exact-date alignment, time-ordered
+validation, immutable generations, and explicit gross/net cost gates; it does
+not claim MPI/DSA equivalence. See the
+[factor and alpha runbook](docs/analytics/factor-alpha-decomposition.md).

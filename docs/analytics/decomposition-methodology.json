@@ -1,0 +1,277 @@
+{
+  "acquired_at_utc": "2026-08-01T04:44:21.909Z",
+  "implementation_boundary": {
+    "allowed": [
+      "static excess-return regression with an explicit intercept",
+      "unconstrained ridge regression",
+      "long-only sum-to-one returns-based style analysis",
+      "time-ordered cross-validation and holdout testing",
+      "transparent factor contribution and residual reconciliation"
+    ],
+    "label": "MPI_INFORMED_NON_EQUIVALENT",
+    "not_implemented": [
+      "dynamic factor exposures",
+      "flexible-least-squares or Kalman smoothing",
+      "MPI Factor Search heuristics",
+      "proprietary breakpoint, clustering, calibration, or stress defaults"
+    ],
+    "reason": "The public materials do not disclose every production choice and the legal/IP gate for potentially claim-overlapping dynamic behavior is not cleared."
+  },
+  "legal_ip_gate": {
+    "checked_at_utc": "2026-08-01T04:44:21.909Z",
+    "displayed_expiration_date": "2026-10-18",
+    "displayed_status": "Active",
+    "disposition": "NOT_CLEARED_DYNAMIC_IMPLEMENTATION_EXCLUDED",
+    "publication": "US7617142B2",
+    "source": "https://patents.google.com/patent/US7617142B2/en",
+    "source_caveat": "Google Patents states that its legal status is an assumption, is not a legal conclusion, and has not been independently analyzed by Google."
+  },
+  "methodology_version": "ANL-DECOMP-STATIC-1",
+  "reading_list_artifact": {
+    "artifact_id": "xBin/mpi_methodology_reading_list.md",
+    "sha256": "a467290f2398ced4d19189a580314679699ef347308157c40627152ce7f00e00",
+    "size_bytes": 5386
+  },
+  "source_count": 16,
+  "sources": [
+    {
+      "bytes": 149900,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "Static returns-based style analysis estimates average factor exposures from a return history.",
+        "Static exposures can conceal changes in investment style and produce misleading averages.",
+        "Dynamic analysis is presented as a response to time-varying exposures."
+      ],
+      "independent_use": "Motivates the static baseline, its limitations, and explicit non-equivalence label.",
+      "order": 1,
+      "sha256": "41dd3122c5ba0ff220255268c4b0a6edd086575102cd72f54d2000c950ea6308",
+      "title": "Seeing Through Walls: Bringing Greater Transparency to Hedge and Mutual Fund Analysis",
+      "unknowns": ["Production defaults and proprietary dynamic-estimation behavior are not disclosed."],
+      "url": "https://www.markovprocesses.com/download/mpi_SeeingThroughWalls2005Q2.pdf"
+    },
+    {
+      "bytes": 235760,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "A dynamic factor model expresses an asset return as the contemporaneous factor-return vector times time-varying exposures plus residual error.",
+        "Flexible least squares balances observation residual error against a penalty on changes in adjacent exposure vectors.",
+        "The smoothing parameter is evaluated with leave-one-out cross-validation and Predicted R-squared.",
+        "Forward filtering and backward smoothing are described for the time-varying state."
+      ],
+      "equations": [
+        "y_t = x_t^T beta_t + e_t",
+        "beta_t = V_t beta_(t-1) + xi_t",
+        "min sum_t (y_t - x_t^T beta_t)^2 + lambda * sum_t ||beta_t - beta_(t-1)||^2"
+      ],
+      "independent_use": "Documents the dynamic research target but does not authorize or define the shipped implementation.",
+      "order": 2,
+      "sha256": "71de77554f230a95a9b7d2fcbebd684f71cd94cd494593a3171d5a1a25b40a78",
+      "title": "Dynamic Analysis of Hedge Funds",
+      "unknowns": [
+        "All production constraints, initialization rules, numerical tolerances, and lambda search grids are not disclosed.",
+        "Exact current-product equivalence cannot be established from the paper."
+      ],
+      "url": "https://www.markovprocesses.com/download/dsa_iasted_markov_etal.pdf"
+    },
+    {
+      "bytes": 334986,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "Candidate factors are grouped hierarchically to reduce redundancy.",
+        "Guided factor search compares incremental models and balances parsimony against predictive performance."
+      ],
+      "independent_use": "Requires explicit candidate factor sets and parsimonious time-ordered model selection; proprietary search is excluded.",
+      "order": 3,
+      "sha256": "a418b853396afc1f15d22dfe7f866f83387b887885d86fd0986406dc14c4d4f8",
+      "title": "Factor Search Feature Factsheet",
+      "unknowns": ["Clustering distance, branch-pruning thresholds, search order, and tie-breaking defaults are not fully disclosed."],
+      "url": "https://www.markovprocesses.com/download/FactorSearch_Factsheet.pdf"
+    },
+    {
+      "bytes": 399809,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "A broad economically motivated factor universe is organized into a cluster tree.",
+        "Branches are searched and pruned, DSA models are estimated, and candidate models are compared using Predicted R-squared."
+      ],
+      "independent_use": "Supports explicit economic factor families, parsimony, and holdout evidence rather than an opaque universal search.",
+      "order": 4,
+      "sha256": "a380df78686c394ea19ac2526ddfe63f1d2968c84ea9603cd27a08e3f9545fd0",
+      "title": "Bridgewater Pure Alpha Case Study",
+      "unknowns": ["The exact factor universe, transformations, pruning heuristics, and production calibrations are not reproducible from the case study."],
+      "url": "https://www.markovprocesses.com/download/BridgewaterPureAlpha_CaseStudy_MPI.pdf"
+    },
+    {
+      "bytes": 166552,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "Dynamic exposure estimates are intended to reveal leverage, breakpoints, and changing strategy behavior.",
+        "Short histories and cross-validated credibility are highlighted as intended use cases."
+      ],
+      "independent_use": "Defines diagnostic goals and the need for coverage fields; it is not an algorithm specification.",
+      "order": 5,
+      "sha256": "59bd783fb4301c407c799a52a19ed5f68a497aed14a67e447c51239f0a0c8587",
+      "title": "MPI for Alternative Investment and Hedge Fund Analysis",
+      "unknowns": ["Marketing descriptions do not establish implementation defaults or statistical guarantees."],
+      "url": "https://www.markovprocesses.com/download/mpi_HedgeFundFactSheet.pdf"
+    },
+    {
+      "bytes": 841802,
+      "content_type": "text/html; charset=UTF-8",
+      "disclosed": [
+        "The current workflow estimates changing exposures, cross-validates factors and parameters, attributes returns, and derives risk and stress diagnostics from public return data."
+      ],
+      "independent_use": "Defines product-level output categories; only transparent static attribution ships in this version.",
+      "order": 6,
+      "sha256": "7229192ddb921df7eae4783ceca331350e40c93abe28a098937202c5b0258183",
+      "title": "MPI Transparency Lab",
+      "unknowns": ["The public page does not disclose the complete current production pipeline."],
+      "url": "https://www.markovprocesses.com/product/mpi-transparency-lab/"
+    },
+    {
+      "bytes": 77349,
+      "content_type": "text/html; charset=UTF-8",
+      "disclosed": [
+        "The index workflow sequences factor selection, cross-validation, dynamic estimation, out-of-sample testing, and tracker construction."
+      ],
+      "independent_use": "Requires strict separation of estimation, holdout validation, and later portfolio use.",
+      "order": 7,
+      "sha256": "89cdf364a4939e6fa4e63af2adb8de0ddb6c4999d03300952106b172fd6bb157",
+      "title": "MPI Hedge Fund Indices",
+      "unknowns": ["Tracker construction and rebalance rules are outside this analytics issue and are not reproduced."],
+      "url": "https://www.markovprocesses.com/product/mpi-hedge-fund-indices/"
+    },
+    {
+      "bytes": 83012,
+      "content_type": "text/html; charset=UTF-8",
+      "disclosed": [
+        "Stress analysis can combine historical scenarios, hypothetical factor shocks, reverse tests, and exposure propagation."
+      ],
+      "independent_use": "Reserves stress propagation for a later accepted consumer; this issue emits exposures and contributions only.",
+      "order": 8,
+      "sha256": "9ce5d2eca856f509a2ae30f8b216a181e88307212f6d87627735062f4a3cfea0",
+      "title": "Portfolio Stress Testing",
+      "unknowns": ["Scenario libraries, shock calibration, and portfolio aggregation defaults are not fully disclosed."],
+      "url": "https://www.markovprocesses.com/blog/portfolio-stress-testing/"
+    },
+    {
+      "bytes": 124310,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "A global-macro factor map is evaluated at long and short horizons and interpreted only after Predicted R-squared validation."
+      ],
+      "independent_use": "Requires horizon and factor-set identity to travel with results.",
+      "order": 9,
+      "sha256": "fbdd24233eec6d4cfbbfd8926c17cb9e3e126f293ebd675e02275aa45f2907c5",
+      "title": "Uncovering the Dynamics of Carmignac Patrimoine",
+      "unknowns": ["Horizon defaults and full factor definitions are not generalized from the example."],
+      "url": "https://www.markovprocesses.com/download/CarmignacPatrimoine_ResearchCaseStudy_MPI.pdf"
+    },
+    {
+      "bytes": 191518,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "Complex absolute-return strategies may require directional, relative-value, currency, volatility, market, and risk-premia proxies."
+      ],
+      "independent_use": "Supports economically classified, user-approved factors rather than provider-label inference.",
+      "order": 10,
+      "sha256": "5788eac69a29972accdf3dc2b3e683054801666267e3f018222191fc3372efd4",
+      "title": "Standard Life GARS Fund: MPI's Factor X-ray",
+      "unknowns": ["The example does not establish a universal factor taxonomy or selection rule."],
+      "url": "https://www.markovprocesses.com/download/Standard_Life_GARS.pdf"
+    },
+    {
+      "bytes": 93574,
+      "content_type": "text/html; charset=UTF-8",
+      "disclosed": [
+        "Returns-based estimates can provide more frequent, comparable effective allocations than delayed holdings snapshots."
+      ],
+      "independent_use": "Factor composition is labeled inferred from returns and never represented as observed holdings.",
+      "order": 11,
+      "sha256": "9a6387a7d20a2fe5e898c5096a8ed3c8ec0663603892e57df28ea44f964d486b",
+      "title": "Target-Date Fund Research Series, Part I",
+      "unknowns": ["Returns-based exposure estimates cannot identify individual holdings or eliminate proxy error."],
+      "url": "https://www.markovprocesses.com/blog/target-date-fund-research-series-part-i-advantages-quant-approach-glide-path-analysis/"
+    },
+    {
+      "bytes": 301013,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "A worked attribution separates benchmark-relative factor effects, timing, and residual security-selection effects after model validation."
+      ],
+      "independent_use": "This version reports factor contribution and residual alpha but makes no security-selection or timing claim.",
+      "order": 12,
+      "sha256": "12d5287a859fd210cb040deb9d428e05316ad3d22040f02442e5ae39998a38e2",
+      "title": "Performance Attribution Report: Intrepid Small Cap",
+      "unknowns": ["Security selection cannot be identified from return-only data without additional evidence."],
+      "url": "https://www.markovprocesses.com/download/MPI_Research_IntrepidSmallCap.pdf"
+    },
+    {
+      "bytes": 67891,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "Changes in inferred exposures and predictive validity can be monitored as potential strategy-deviation diagnostics."
+      ],
+      "independent_use": "Supports diagnostics and explicit uncertainty, not automated alerts in the first release.",
+      "order": 13,
+      "sha256": "1dbaa88c19ad9e5f8ee99b29d4a1a6517993138a294c5edeedb85524fb565502",
+      "title": "How Proper Analysis of Returns Can Be a Crystal Ball",
+      "unknowns": ["A retrospective case study does not establish prospective detection power."],
+      "url": "https://www.markovprocesses.com/download/mpi_ItsInTheNumbers2006Q2.pdf"
+    },
+    {
+      "bytes": 89243,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "Factor identification, out-of-sample replication, long-short exposure inference, and monitoring are demonstrated for a quantitative fund."
+      ],
+      "independent_use": "Allows negative exposures only in explicitly unconstrained models and requires holdout diagnostics.",
+      "order": 14,
+      "sha256": "5badbe2837ab0b6d9a995451442d9e156140b15c35ddf52f1c61d30a0b149c93",
+      "title": "The Law of Large Numbers: An Analysis of the Renaissance Fund",
+      "unknowns": ["Inferred leverage and long-short exposures remain proxy-dependent estimates."],
+      "url": "https://www.markovprocesses.com/download/mpi_TheLawOfLargeNumbers2007Q3.pdf"
+    },
+    {
+      "bytes": 135288,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "Option-strategy proxies, residual behavior, and poor leave-one-out predictive validity can be used as forensic warning evidence."
+      ],
+      "independent_use": "Requires poor predictive fit and unusual residuals to remain visible rather than tuned away.",
+      "order": 15,
+      "sha256": "e1149a2de35a500dc45ddce2fb92a8c3313954654491e1bb7facecf6cf371aa0",
+      "title": "Madoff Fraud Analysis",
+      "unknowns": ["A return decomposition is not proof of fraud or of a particular hidden strategy."],
+      "url": "https://www.markovprocesses.com/download/mpi_Madoff_Fraud_Analysis_2008Q4.pdf"
+    },
+    {
+      "bytes": 86728,
+      "content_type": "application/pdf",
+      "disclosed": [
+        "Implausible fit, zero predictive validity, and inconsistent return behavior are presented as forensic warning signs."
+      ],
+      "independent_use": "Negative predictive R-squared is retained as decision-grade evidence rather than floored at zero.",
+      "order": 16,
+      "sha256": "adf941683c0bf784a493aab5be8c37ac76ffeb26cace8866a534d7e05a7e6c2b",
+      "title": "Why Would One Invest in an Outlier? An Analysis of the Bayou Fund",
+      "unknowns": ["Forensic flags are diagnostics and do not establish misconduct."],
+      "url": "https://www.markovprocesses.com/download/mpi_WhyWouldOneInvestInAnOutlier_BayouFund.pdf"
+    }
+  ],
+  "static_equations": {
+    "adjusted_r_squared": "1 - (1 - R2) * (n - 1) / (n - p - 1)",
+    "excess_return_model": "y_t - rf_t = alpha + sum_j beta_j * f_j,t + epsilon_t",
+    "holdout_predicted_r_squared": "1 - SSE_holdout / sum_t (y_t - mean(y_train))^2",
+    "ridge_objective": "min ||y - alpha - X beta||^2 + lambda ||beta||^2",
+    "style_constraint": "beta_j >= 0 and sum_j beta_j = 1"
+  },
+  "unknown_production_details": [
+    "Current proprietary factor-search universe and hierarchy",
+    "Search and branch-pruning heuristics",
+    "Dynamic smoothing parameter grids and defaults",
+    "State initialization, constraints, tolerances, and breakpoint rules",
+    "Current product stress libraries and calibration",
+    "Any undisclosed production implementation changes after the cited publications"
+  ]
+}
