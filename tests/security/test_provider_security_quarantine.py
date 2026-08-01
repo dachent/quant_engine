@@ -141,3 +141,28 @@ def test_quantbase_profile_selects_only_authenticated_and_account_artifacts(
     quarantine.verify_plan(plan_path)
     assert (source / "RUNBOOK_QUANTBASE.md").is_file()
     assert (csv / "history.csv").is_file()
+
+
+def test_alpaca_profile_quarantines_plaintext_reports_only(tmp_path: Path) -> None:
+    source = tmp_path / "alpaca"
+    (source / "export").mkdir(parents=True)
+    (source / "code").mkdir()
+    (source / "REPORT.md").write_bytes(b"plain report")
+    (source / "export" / "README.md").write_bytes(b"API Key: synthetic")
+    (source / "export" / "account.csv").write_bytes(b"private data")
+    (source / "code" / "adapter.py").write_bytes(b"source code")
+
+    result = quarantine.plan_alpaca(source, tmp_path / "quarantine")
+    assert result["artifact_count"] == 2
+    plan_path = Path(str(result["plan_path"]))
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["provider_id"] == "alpaca"
+    assert {row["relative_path"] for row in plan["entries"]} == {
+        "REPORT.md",
+        "export/README.md",
+    }
+    quarantine.apply_plan(plan_path)
+    quarantine.verify_plan(plan_path)
+    assert (source / "export" / "account.csv").is_file()
+    assert (source / "code" / "adapter.py").is_file()
+    assert not (source / "REPORT.md").exists()
