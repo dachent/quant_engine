@@ -33,6 +33,7 @@ def test_virtual_root_has_only_accepted_workspace_members() -> None:
     assert uv["workspace"] == {
         "members": [
             "apps/schwab-trading",
+            "packages/alpaca",
             "packages/ci-controls",
             "packages/core",
             "packages/fidelity",
@@ -44,6 +45,30 @@ def test_virtual_root_has_only_accepted_workspace_members() -> None:
         ]
     }
     assert root["project"]["requires-python"] == ">=3.11,<3.14"  # type: ignore[index]
+
+
+def test_alpaca_package_is_private_and_method_allowlisted() -> None:
+    member_root = REPOSITORY_ROOT / "packages" / "alpaca"
+    member = _toml(member_root / "pyproject.toml")
+    project = member["project"]
+    assert isinstance(project, dict)
+    assert project["requires-python"] == ">=3.11,<3.14"
+    assert project["dependencies"] == [
+        "quant-engine-core",
+        "quant-engine-portfolio-ledger",
+    ]
+    assert project["classifiers"] == ["Private :: Do Not Upload"]
+    assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
+        "quant_engine.alpaca"
+    )
+    assert not (member_root / "src" / "quant_engine" / "__init__.py").exists()
+    assert (member_root / "src" / "quant_engine" / "alpaca" / "py.typed").is_file()
+    quality = (REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "packages/alpaca/src" in quality
+    assert "tests/alpaca" in quality
+    assert "tools/alpaca_generation.py" in quality
 
 
 def test_ci_controls_package_is_private_namespaced_and_non_product() -> None:
