@@ -32,6 +32,7 @@ def test_virtual_root_has_only_accepted_workspace_members() -> None:
     assert uv["package"] is False
     assert uv["workspace"] == {
         "members": [
+            "apps/schwab-trading",
             "packages/ci-controls",
             "packages/core",
             "packages/fidelity",
