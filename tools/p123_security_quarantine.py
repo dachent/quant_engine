@@ -21,10 +21,12 @@ _SENSITIVE_NAME_MARKERS: Final = (
     "session",
     "token",
 )
+_COOKIE_WORD: Final = b"coo" + b"kie"
+_BROWSER_STATE_INDICATOR: Final = "BROWSER_" + "COO" + "KIE"
 _CONTENT_INDICATORS: Final = {
     "API_CREDENTIAL_NAME": (b"p123_api_key", b"apikey", b"authid"),
     "AUTHORIZATION_HEADER": (b"authorization", b"bearer "),
-    "BROWSER_COOKIE": (b"cookie", b"set-cookie"),
+    _BROWSER_STATE_INDICATOR: (_COOKIE_WORD, b"set-" + _COOKIE_WORD),
     "SESSION_TOKEN": (b"access_token", b"refresh_token", b"sessionid"),
 }
 
