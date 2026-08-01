@@ -120,6 +120,11 @@ Legacy Portfolio123 authenticated artifacts are handled only through the
 Quarantine is reversible and does not substitute for provider-side credential
 rotation or authorize a Portfolio123 data/API call.
 
+Quantbase authenticated captures and account evidence use the same move/hash
+engine through a [narrow Quantbase profile](docs/quantbase-security-quarantine.md).
+The normalized CSV baseline remains outside that security quarantine and is
+not published until the separate integration issue passes.
+
 The baseline's coverage-aware performance tables and independent unified
 workbook are built with the [portfolio report runbook](docs/portfolio-report.md).
 The workbook is a generated, read-only deliverable: calculations originate in
