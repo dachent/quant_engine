@@ -14,6 +14,10 @@ from quant_engine.web_contracts.extract import (
     extract_har,
 )
 from quant_engine.web_contracts.provenance import SOURCE_ANCHORS
+from quant_engine.web_contracts.quantbase import (
+    QUANTBASE_CONTRACT,
+    extract_quantbase_har,
+)
 from quant_engine.web_contracts.schwab import SCHWAB_CONTRACT
 
 __version__ = "0.1.0"
@@ -22,6 +26,7 @@ __all__ = [
     "EndpointContract",
     "ExtractedResponse",
     "ProviderContract",
+    "QUANTBASE_CONTRACT",
     "REDACTION",
     "SCHWAB_CONTRACT",
     "SOURCE_ANCHORS",
@@ -30,4 +35,5 @@ __all__ = [
     "WebContractError",
     "canonical_extraction",
     "extract_har",
+    "extract_quantbase_har",
 ]

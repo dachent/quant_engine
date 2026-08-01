@@ -125,6 +125,10 @@ engine through a [narrow Quantbase profile](docs/quantbase-security-quarantine.m
 The normalized CSV baseline remains outside that security quarantine and is
 not published until the separate integration issue passes.
 
+The accepted [Quantbase provider contract and generation runbook](docs/providers/quantbase.md)
+defines the HAR-only routes, the 55-file dated baseline, deterministic replay,
+and the verified single-authority cutover into `dataQuantbase`.
+
 The baseline's coverage-aware performance tables and independent unified
 workbook are built with the [portfolio report runbook](docs/portfolio-report.md).
 The workbook is a generated, read-only deliverable: calculations originate in
