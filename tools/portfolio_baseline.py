@@ -48,7 +48,7 @@ from quant_engine.portfolio_ledger import (
 SPEC_SCHEMA_VERSION: Final = 2
 SUPPORTED_SPEC_SCHEMA_VERSIONS: Final = frozenset({1, 2})
 CATALOG_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.1.0"
+BUILDER_VERSION: Final = "1.2.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 CURRENT_STRATEGY_COUNT: Final = 9
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1021,12 +1021,14 @@ def _normalize_transactions(
 def _schwab_facts(
     catalog: Mapping[str, Any],
     accounts: Sequence[Mapping[str, Any]],
+    assignments: Sequence[Mapping[str, Any]],
     baseline_nav: Sequence[Mapping[str, Any]],
     baseline_as_of: date,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
     list[dict[str, Any]],
+    dict[str, Any],
     dict[str, Any],
     list[str],
 ]:
@@ -1053,7 +1055,15 @@ def _schwab_facts(
             "symbol": symbol,
         }
         record = dict(item)
-        record.update({"provider": "SCHWAB", "source_key": "schwab-generation"})
+        mapping_status, strategy_id = _strategy_for_date(assignments, account_id, as_of)
+        record.update(
+            {
+                "mapping_status": mapping_status.value,
+                "provider": "SCHWAB",
+                "source_key": "schwab-generation",
+                "strategy_id": strategy_id,
+            }
+        )
         positions.append(record)
     for item in _objects(catalog.get("transactions"), "Schwab transactions"):
         account_id = _text(item.get("account_id"), "Schwab transaction account_id")
@@ -1115,6 +1125,32 @@ def _schwab_facts(
         "shared_count": len(shared),
         "status": "PASS_WITH_DECLARED_VARIANCE",
     }
+    mapped_position_count = sum(
+        item.get("mapping_status") == MappingStatus.MAPPED.value for item in positions
+    )
+    position_market_value = sum(
+        (
+            _decimal(
+                _object(item.get("market_value"), "position.market_value").get("value"),
+                "position.market_value.value",
+            )
+            or Decimal("0")
+            for item in positions
+        ),
+        Decimal("0"),
+    )
+    position_reconciliation = {
+        "check_id": "current-position-strategy-attribution",
+        "mapped_count": mapped_position_count,
+        "market_value_usd": decimal_text(position_market_value),
+        "position_count": len(positions),
+        "status": (
+            "PASS"
+            if mapped_position_count == len(positions)
+            else "PASS_WITH_EXPLICIT_UNMAPPED"
+        ),
+        "unmapped_count": len(positions) - mapped_position_count,
+    }
     coverage = _object(catalog.get("coverage"), "Schwab coverage")
     known_gaps = [
         _text(item, "Schwab coverage known_gap")
@@ -1131,6 +1167,7 @@ def _schwab_facts(
         ),
         sorted(securities.values(), key=lambda item: str(item["security_id"])),
         reconciliation,
+        position_reconciliation,
         known_gaps,
     )
 
@@ -1550,6 +1587,7 @@ def build_catalog(
     positions: list[dict[str, Any]] = []
     schwab_known_gaps: list[str] = []
     schwab_reconciliation: dict[str, Any] | None = None
+    position_reconciliation: dict[str, Any] | None = None
     provider_artifacts: tuple[SourceArtifact, ...] = ()
     provider_links: list[dict[str, Any]] = []
     if spec["schema_version"] == SPEC_SCHEMA_VERSION:
@@ -1561,8 +1599,9 @@ def build_catalog(
             schwab_transactions,
             schwab_securities,
             schwab_reconciliation,
+            position_reconciliation,
             schwab_known_gaps,
-        ) = _schwab_facts(schwab_catalog, accounts, nav, as_of)
+        ) = _schwab_facts(schwab_catalog, accounts, assignments, nav, as_of)
         transactions.extend(schwab_transactions)
         transactions.sort(
             key=lambda item: (str(item["event_date"]), str(item["record_id"]))
@@ -1679,6 +1718,7 @@ def build_catalog(
                 "value_usd": replay["total_liquid_usd"],
             },
             *([schwab_reconciliation] if schwab_reconciliation is not None else []),
+            *([position_reconciliation] if position_reconciliation is not None else []),
         ],
         "reconciliation_exceptions": exceptions,
         "replay": replay,

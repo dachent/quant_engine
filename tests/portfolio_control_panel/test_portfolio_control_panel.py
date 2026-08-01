@@ -161,6 +161,19 @@ def _report() -> dict[str, object]:
             },
             {"metric": "Advisory readiness", "value": "DO_NOT_EXPAND_SYSTEMATIC_RISK"},
         ],
+        "positions": [
+            {
+                "account_id": "account-00",
+                "as_of_date": "2026-07-30",
+                "evidence_class": "WCH_CURRENT",
+                "market_value_usd": "30",
+                "quantity": "3",
+                "security_id": "security-synthetic",
+                "status": "AVAILABLE_MAPPED",
+                "strategy_id": "strategy-0",
+                "symbol": "SYNTH",
+            }
+        ],
         "provenance": [
             {
                 "artifact": "synthetic-baseline",
@@ -649,7 +662,21 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             encoding="utf-8"
         )
     )
-    assert data["panel_schema_version"] == 2
+    assert data["panel_schema_version"] == 3
+    assert data["positions"] == [
+        {
+            "account_id": "account-00",
+            "as_of_date": "2026-07-30",
+            "evidence_class": "WCH_CURRENT",
+            "market_value_usd": "30",
+            "quantity": "3",
+            "security_id": "security-synthetic",
+            "status": "AVAILABLE_MAPPED",
+            "strategy_id": "strategy-0",
+            "strategy_name": STRATEGY_NAMES[0],
+            "symbol": "SYNTH",
+        }
+    ]
     assert data["factor_analysis"]["available_count"] == 5
     assert data["factor_analysis"]["unavailable_count"] == 4
     assert data["dependence_analysis"]["available_pair_count"] == 10

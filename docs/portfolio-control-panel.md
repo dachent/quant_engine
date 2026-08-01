@@ -6,9 +6,11 @@ without preserving stale calculations or hard-coded operator conclusions.
 
 ## Authority boundary
 
-- Current accounts, allocations, strategies, performance, costs, gaps,
-  coverage, reconciliation, HWM availability, stress, and readiness come only
-  from the current accepted `dataPortfolio/reporting` generation.
+- Current accounts, allocations, strategies, positions, performance, costs,
+  gaps, coverage, reconciliation, HWM availability, stress, and readiness come
+  only from the current accepted `dataPortfolio/reporting` generation. A
+  position displays a strategy only when the baseline found one exact
+  effective-dated account assignment.
 - Factor composition, net/gross alpha status, holdout fit, coverage, and
   contribution reconciliation come only from the accepted
   `dataPortfolio/analytics/decomposition` generation. The static method is
@@ -23,7 +25,7 @@ without preserving stale calculations or hard-coded operator conclusions.
   candidate, authorize diligence, or allocate capital.
 - The application uses embedded local data and relative assets. It contains no
   network, provider, broker, order, deployment, or live-refresh path.
-- Missing positions, FX, flows, NAV, mappings, costs, or performance remain
+- Missing or unmapped positions, FX, flows, NAV, mappings, costs, or performance remain
   `FAILED`, `PARTIAL`, `UNAVAILABLE`, or `UNMAPPED`.
 - The accepted portfolio inputs resolve to governed private source runs. The
   original external tracker and allocation roots have completed verified
@@ -95,13 +97,14 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py qa `
   --candidate-dir <candidate-directory> --qa-dir $qa
 ```
 
-Acceptance requires desktop Command, Risk, Factor & alpha, Dependence,
+Acceptance requires desktop Command, Capital, Risk, Factor & alpha, Dependence,
 Candidates, Data health, mobile Command, and direct-file captures; no console
-or request failures; clean Command, Factor & alpha, Dependence, and mobile
+or request failures; clean Command, Capital, Factor & alpha, Dependence, and mobile
 visual lint; PDF export; eight-view navigation; factor selection; matrix
-selection and cell drill-down; allocation filters; candidate filter/search; a
-responsive provenance control; and absence of execution controls. Screenshots
-must also be inspected visually before publication.
+selection and cell drill-down; allocation filters; current-position
+attribution; candidate filter/search; a responsive provenance control; and
+absence of execution controls. Screenshots must also be inspected visually
+before publication.
 
 ## Publish and recover
 

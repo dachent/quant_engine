@@ -108,9 +108,11 @@ account aliases, strategy details, hashes, and catalogs remain under the local
 
 The dated, read-only portfolio baseline is built with the
 [portfolio baseline runbook](docs/portfolio-baseline.md). It normalizes the
-accepted tracker and audit slice into accounts, current allocations, available
-NAV/flows/Alpaca fills, strategy evidence, explicit coverage, reconciliation,
-and frozen-control replay. Missing positions, FX, history, or mappings remain
+accepted tracker, audit, and pinned provider slices into accounts, current
+allocations, available NAV/flows/transactions/positions, strategy evidence,
+explicit coverage, reconciliation, and frozen-control replay. Current
+positions inherit a strategy only from one exact effective-dated account
+assignment. Missing provider facts, FX, history, or mappings remain
 `UNAVAILABLE`, `PARTIAL`, or `UNMAPPED`; the builder does not infer them.
 
 The baseline's coverage-aware performance tables and independent unified

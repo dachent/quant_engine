@@ -83,6 +83,10 @@
     $("#provider-bars").innerHTML = providers.map(([provider, count]) => `<div><div class="bar-label"><span>${safe(provider)}</span><strong>${integer.format(count)}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${count / maxCount * 100}%"></div></div></div>`).join("");
     const rows = data.strategies.map((row) => `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)}</span></td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td>${statusText(row.nav_status)}</td><td>${safe(row.cost_status)}</td><td>${statusText(row.implementation_gap_status)}</td></tr>`);
     $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV"], ["Cost"], ["Implementation gap"]], rows);
+    const positionRows = data.positions.map((row) => `<tr><td><span class="cell-primary">${safe(row.strategy_name || "UNMAPPED")}</span><span class="cell-secondary">${safe(row.strategy_id || "No accepted strategy")}</span></td><td><span class="cell-primary">${safe(row.symbol || "—")}</span><span class="cell-secondary">${safe(row.security_id || "—")}</span></td><td><code>${safe(row.account_id || "—")}</code></td><td class="numeric">${safe(row.quantity ?? "—")}</td><td class="numeric">${currency(row.market_value_usd)}</td><td>${formatDate(row.as_of_date)}</td><td>${statusText(row.status)}</td></tr>`);
+    const positionTable = $("#position-table");
+    positionTable.dataset.visibleRows = String(data.positions.length);
+    positionTable.innerHTML = tableMarkup([["Strategy / identity"], ["Security"], ["Account"], ["Quantity", "numeric"], ["Market value", "numeric"], ["As of"], ["Status"]], positionRows.length ? positionRows : [emptyRow(7)]);
   }
 
   function renderRisk() {
@@ -316,7 +320,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 2) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 3) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
       renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderCandidates(); renderData(); bindEvents();

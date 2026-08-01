@@ -54,12 +54,13 @@
           </section>
 
           <section class="view" data-view="capital" aria-labelledby="capital-heading" hidden>
-            <div class="section-intro"><div><div class="eyebrow">Capital map</div><h2 id="capital-heading">Where the money is, with identity and coverage intact</h2></div><p>Current strategy allocations and reserve are accepted baseline facts. Missing positions are not inferred.</p></div>
+            <div class="section-intro"><div><div class="eyebrow">Capital map</div><h2 id="capital-heading">Where the money is, with identity and coverage intact</h2></div><p>Current positions inherit strategy identity only from one effective account assignment. Missing or ambiguous mappings are never inferred.</p></div>
             <div id="capital-kpis" class="kpi-grid"></div>
             <div class="grid grid-12">
               <article class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Current allocation</div><h3>Nine strategies plus reserve</h3></div><div class="segmented" aria-label="Allocation scope filter"><button type="button" class="segment is-active" data-allocation-filter="all">All</button><button type="button" class="segment" data-allocation-filter="SYSTEMATIC">Systematic</button><button type="button" class="segment" data-allocation-filter="RESERVE">Reserve</button></div></div><div class="table-wrap"><table id="allocation-table"><caption>Accepted current allocations</caption></table></div></article>
               <article class="panel span-4"><div class="panel-heading"><div><div class="eyebrow">Provider footprint</div><h3>Accounts by provider</h3></div></div><div id="provider-bars" class="bar-list"></div><div class="callout callout-neutral">Counts describe accepted account identities, not provider completeness.</div></article>
               <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Strategy register</div><h3>Economic family, cost, performance, and gaps</h3></div></div><div class="table-wrap wide"><table id="strategy-table"><caption>Current strategy evidence</caption></table></div></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Current holdings</div><h3>Positions attributed by effective account assignment</h3></div><span class="badge">No holding-based inference</span></div><div class="table-wrap wide"><table id="position-table"><caption>Accepted current positions and strategy attribution</caption></table></div></article>
             </div>
           </section>
 

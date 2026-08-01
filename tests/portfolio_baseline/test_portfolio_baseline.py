@@ -693,6 +693,9 @@ def test_accepted_schwab_generation_adds_positions_and_transactions(
     catalog, manifest, _ = baseline.build_catalog(spec_path)
     assert manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
     assert len(catalog["positions"]) == 1
+    assert catalog["positions"][0]["mapping_status"] == "MAPPED"
+    assert catalog["positions"][0]["strategy_id"] == "strategy-1"
+    assert catalog["positions"][0]["market_value"]["value"] == "30"
     assert len(catalog["transactions"]) == 2
     assert len(catalog["source_artifacts"]) == 19
     position_coverage = next(
@@ -707,6 +710,65 @@ def test_accepted_schwab_generation_adds_positions_and_transactions(
         )["status"]
         == "PASS_WITH_DECLARED_VARIANCE"
     )
+    assert next(
+        item
+        for item in catalog["reconciliation_checks"]
+        if item["check_id"] == "current-position-strategy-attribution"
+    ) == {
+        "check_id": "current-position-strategy-attribution",
+        "mapped_count": 1,
+        "market_value_usd": "30",
+        "position_count": 1,
+        "status": "PASS",
+        "unmapped_count": 0,
+    }
+
+
+def test_strategy_for_date_is_effective_dated_and_fails_on_overlap() -> None:
+    assignments = [
+        {
+            "account_id": "account-a",
+            "effective_end": "2026-01-31",
+            "effective_start": None,
+            "mapping_status": "MAPPED",
+            "strategy_id": "strategy-old",
+        },
+        {
+            "account_id": "account-a",
+            "effective_end": None,
+            "effective_start": "2026-02-01",
+            "mapping_status": "MAPPED",
+            "strategy_id": "strategy-current",
+        },
+    ]
+
+    assert baseline._strategy_for_date(assignments, "account-a", date(2026, 1, 31)) == (
+        baseline.MappingStatus.MAPPED,
+        "strategy-old",
+    )
+    assert baseline._strategy_for_date(assignments, "account-a", date(2026, 2, 1)) == (
+        baseline.MappingStatus.MAPPED,
+        "strategy-current",
+    )
+    assert baseline._strategy_for_date(
+        assignments, "account-missing", date(2026, 2, 1)
+    ) == (baseline.MappingStatus.UNMAPPED, None)
+
+    overlapping = [
+        *assignments,
+        {
+            "account_id": "account-a",
+            "effective_end": None,
+            "effective_start": "2026-02-01",
+            "mapping_status": "MAPPED",
+            "strategy_id": "strategy-overlap",
+        },
+    ]
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="multiple mapped strategies overlap",
+    ):
+        baseline._strategy_for_date(overlapping, "account-a", date(2026, 2, 1))
 
 
 def test_source_drift_nav_divergence_and_replay_difference_fail_closed(

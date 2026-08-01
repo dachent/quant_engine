@@ -31,6 +31,7 @@ const launchOptions = {
 };
 const captures = [
   { name: "desktop-command", view: "command", viewport: { width: 1440, height: 900 }, lint: true, pdf: true },
+  { name: "desktop-capital", view: "capital", viewport: { width: 1440, height: 900 }, lint: true },
   { name: "desktop-risk", view: "risk", viewport: { width: 1440, height: 900 } },
   { name: "desktop-attribution", view: "attribution", viewport: { width: 1440, height: 900 }, lint: true },
   { name: "desktop-dependence", view: "dependence", viewport: { width: 1440, height: 900 }, lint: true },

@@ -31,8 +31,8 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-PANEL_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.2.0"
+PANEL_SCHEMA_VERSION: Final = 3
+BUILDER_VERSION: Final = "1.3.0"
 SOURCE_CONTRACT = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -61,6 +61,7 @@ VIEWS: Final = (
 )
 CAPTURES: Final = (
     "desktop-command",
+    "desktop-capital",
     "desktop-risk",
     "desktop-attribution",
     "desktop-dependence",
@@ -71,6 +72,7 @@ CAPTURES: Final = (
 )
 LINT_CAPTURES: Final = (
     "desktop-command",
+    "desktop-capital",
     "desktop-attribution",
     "desktop-dependence",
     "mobile-command",
@@ -602,6 +604,17 @@ def _panel_data(
         }
         for row in performance
     ]
+    normalized_positions = [
+        {
+            **row,
+            "strategy_name": (
+                None
+                if row.get("strategy_id") is None
+                else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
+            ),
+        }
+        for row in positions
+    ]
 
     fact_by_item = {
         str(row.get("item")): row
@@ -785,6 +798,7 @@ def _panel_data(
         },
         "panel_schema_version": PANEL_SCHEMA_VERSION,
         "performance": normalized_performance,
+        "positions": normalized_positions,
         "provenance": provenance,
         "provider_counts": dict(sorted(provider_counts.items())),
         "reconciliation_checks": reconciliations,
@@ -1002,6 +1016,47 @@ def verify_candidate(
             and len(data["allocations"]) == 10
             and data["counts"]["accounts"] == 19,
             data["counts"],
+        )
+    )
+    report, _, _ = _current_report(report_root)
+    report_position_rows = _objects(report.get("positions", []), "report.positions")
+    strategy_names = {
+        _text(row.get("strategy_id"), "strategy.strategy_id"): _text(
+            row.get("strategy_name"), "strategy.strategy_name"
+        )
+        for row in _objects(report.get("strategy_summary"), "strategy_summary")
+    }
+    expected_position_rows = [
+        {
+            **row,
+            "strategy_name": (
+                None
+                if row.get("strategy_id") is None
+                else strategy_names.get(str(row.get("strategy_id")), "UNMAPPED")
+            ),
+        }
+        for row in report_position_rows
+    ]
+    position_rows = _objects(data.get("positions"), "positions")
+    checks.append(
+        _check(
+            "Current positions preserve report attribution",
+            position_rows == expected_position_rows
+            and data["counts"]["positions"] == len(report_position_rows)
+            and all(
+                row.get("status") != "AVAILABLE_MAPPED"
+                or (
+                    isinstance(row.get("strategy_id"), str) and bool(row["strategy_id"])
+                )
+                for row in position_rows
+            ),
+            {
+                "mapped": sum(
+                    row.get("status") == "AVAILABLE_MAPPED" for row in position_rows
+                ),
+                "rows": len(position_rows),
+                "source_rows": len(report_position_rows),
+            },
         )
     )
     checks.append(
