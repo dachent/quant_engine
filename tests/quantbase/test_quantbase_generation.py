@@ -116,6 +116,29 @@ def test_stage_publish_verify_and_single_authority_cutover(tmp_path: Path) -> No
     assert rebuilt["reconciliation"]["record_count"] == len(FILES)  # type: ignore[index]
 
 
+def test_cutover_retry_accepts_only_verified_remaining_subset(tmp_path: Path) -> None:
+    plan, source, _ = _plan(tmp_path)
+    staged = generation.stage_candidate(plan)
+    generation.publish_candidate(plan, str(staged["generation_id"]))
+
+    (source / "RUNBOOK_QUANTBASE.md").unlink()
+    (source / "csv" / "account_activity.csv").unlink()
+    result = generation.cutover_source(plan, str(staged["generation_id"]))
+    assert result["state"] == "SINGLE_AUTHORITY_CUTOVER_COMPLETE"
+    assert not source.exists()
+
+
+def test_cutover_retry_rejects_unplanned_remaining_file(tmp_path: Path) -> None:
+    plan, source, _ = _plan(tmp_path)
+    staged = generation.stage_candidate(plan)
+    generation.publish_candidate(plan, str(staged["generation_id"]))
+    (source / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+
+    with pytest.raises(generation.QuantbaseGenerationError, match="undeclared files"):
+        generation.cutover_source(plan, str(staged["generation_id"]))
+    assert source.exists()
+
+
 def test_source_drift_and_unknown_dataset_fail_closed(tmp_path: Path) -> None:
     plan, source, data = _plan(tmp_path)
     (source / "csv" / "account_activity.csv").write_text("changed", encoding="utf-8")
