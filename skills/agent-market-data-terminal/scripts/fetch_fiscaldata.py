@@ -15,10 +15,18 @@ USER_AGENT = "Codex agent-market-data-terminal/1.0"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch no-auth Treasury FiscalData JSON endpoints.")
-    parser.add_argument("--endpoint", required=True, help="FiscalData endpoint path such as /accounting/od/avg_interest_rates.")
+    parser = argparse.ArgumentParser(
+        description="Fetch no-auth Treasury FiscalData JSON endpoints."
+    )
+    parser.add_argument(
+        "--endpoint",
+        required=True,
+        help="FiscalData endpoint path such as /accounting/od/avg_interest_rates.",
+    )
     parser.add_argument("--fields", help="Comma-separated FiscalData fields.")
-    parser.add_argument("--filter", dest="filter_value", help="FiscalData filter expression.")
+    parser.add_argument(
+        "--filter", dest="filter_value", help="FiscalData filter expression."
+    )
     parser.add_argument("--sort", help="FiscalData sort expression.")
     parser.add_argument("--page-size", type=int, help="Optional page[size] value.")
     parser.add_argument("--page-number", type=int, help="Optional page[number] value.")
@@ -81,7 +89,9 @@ def main() -> int:
             "meta": payload.get("meta"),
             "links": payload.get("links"),
         }
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         row_count = len(artifact["data"]) if isinstance(artifact["data"], list) else 0
         print(f"Saved parsed FiscalData artifact to {output_path}")
         print(f"rows={row_count}")

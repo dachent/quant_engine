@@ -14,7 +14,9 @@ USER_AGENT = "Codex agent-market-data-terminal/1.0"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch the IMF Primary Commodity Prices workbook.")
+    parser = argparse.ArgumentParser(
+        description="Fetch the IMF Primary Commodity Prices workbook."
+    )
     parser.add_argument(
         "--url",
         default=HEADLINE_URL,
@@ -39,8 +41,14 @@ def select_sheet_name(sheet_names: list[str], override: str | None) -> str:
     if override:
         if override in sheet_names:
             return override
-        raise RuntimeError(f"--sheet {override!r} not found in workbook. Sheets: {sheet_names}")
-    candidates = [name for name in sheet_names if "month" in name.lower() and "price" in name.lower()]
+        raise RuntimeError(
+            f"--sheet {override!r} not found in workbook. Sheets: {sheet_names}"
+        )
+    candidates = [
+        name
+        for name in sheet_names
+        if "month" in name.lower() and "price" in name.lower()
+    ]
     if candidates:
         return candidates[0]
     candidates = [name for name in sheet_names if "month" in name.lower()]
@@ -49,11 +57,15 @@ def select_sheet_name(sheet_names: list[str], override: str | None) -> str:
     return sheet_names[0]
 
 
-def parse_workbook(payload: bytes, source_url: str, override_sheet: str | None) -> dict[str, object]:
+def parse_workbook(
+    payload: bytes, source_url: str, override_sheet: str | None
+) -> dict[str, object]:
     try:
         import xlrd  # type: ignore
     except ImportError as exc:
-        raise RuntimeError("Parsed IMF Commodities mode requires xlrd. Install with `pip install xlrd`.") from exc
+        raise RuntimeError(
+            "Parsed IMF Commodities mode requires xlrd. Install with `pip install xlrd`."
+        ) from exc
 
     book = xlrd.open_workbook(file_contents=payload)
     sheet_names = book.sheet_names()
@@ -89,7 +101,10 @@ def parse_workbook(payload: bytes, source_url: str, override_sheet: str | None) 
             header_row_index = index
             break
 
-    header = [str(cell) if cell is not None else f"column_{idx + 1}" for idx, cell in enumerate(rows[header_row_index])]
+    header = [
+        str(cell) if cell is not None else f"column_{idx + 1}"
+        for idx, cell in enumerate(rows[header_row_index])
+    ]
     data_rows: list[dict[str, object]] = []
     for row in rows[header_row_index + 1 :]:
         if not row or all(cell in (None, "") for cell in row):
@@ -126,7 +141,9 @@ def main() -> int:
             return 0
 
         artifact = parse_workbook(payload, args.url, args.sheet)
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed IMF Commodities artifact to {output_path}")
         print(f"sheet={artifact['selected_sheet']} rows={artifact['row_count']}")
         return 0

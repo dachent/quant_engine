@@ -17,13 +17,23 @@ VALID_AGGREGATIONS = {"avg", "sum", "eop"}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download a FRED series using the clean CSV endpoint.")
-    parser.add_argument("--series-id", required=True, help="FRED series id, for example GS10 or VIXCLS.")
+    parser = argparse.ArgumentParser(
+        description="Download a FRED series using the clean CSV endpoint."
+    )
+    parser.add_argument(
+        "--series-id", required=True, help="FRED series id, for example GS10 or VIXCLS."
+    )
     parser.add_argument("--start", required=True, help="Start date in YYYY-MM-DD.")
     parser.add_argument("--end", required=True, help="End date in YYYY-MM-DD.")
     parser.add_argument("--transformation", choices=sorted(VALID_TRANSFORMATIONS))
-    parser.add_argument("--fq", choices=sorted(VALID_FREQUENCIES), help="Frequency override.")
-    parser.add_argument("--fam", choices=sorted(VALID_AGGREGATIONS), help="Aggregation method when fq is set.")
+    parser.add_argument(
+        "--fq", choices=sorted(VALID_FREQUENCIES), help="Frequency override."
+    )
+    parser.add_argument(
+        "--fam",
+        choices=sorted(VALID_AGGREGATIONS),
+        help="Aggregation method when fq is set.",
+    )
     parser.add_argument("--vintage-date", help="Optional vintage date in YYYY-MM-DD.")
     parser.add_argument("--output", required=True, help="Output CSV path.")
     return parser.parse_args()
@@ -58,11 +68,15 @@ def build_url(args: argparse.Namespace) -> str:
 
 
 def fetch_csv(url: str) -> bytes:
-    request = Request(url, headers={"User-Agent": "Codex agent-market-data-terminal/1.0"})
+    request = Request(
+        url, headers={"User-Agent": "Codex agent-market-data-terminal/1.0"}
+    )
     with urlopen(request, timeout=60) as response:
         payload = response.read()
     if payload.lstrip().startswith(b"<"):
-        raise RuntimeError("FRED returned HTML instead of CSV. Check the series id and parameters.")
+        raise RuntimeError(
+            "FRED returned HTML instead of CSV. Check the series id and parameters."
+        )
     return payload
 
 

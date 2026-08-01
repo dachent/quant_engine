@@ -1,4 +1,8 @@
-Derived from https://github.com/dachent/mdt. This is a flattened/generalized instruction reference.
+> **Generated provenance snapshot.** Derived from
+> <https://github.com/dachent/mdt> and absorbed from gist
+> `dachent/a80848d89966daa6730cd553be691b1a` at
+> `28315ce9711360989e56452d62c72e43ed36b247`. The provider-specific files in
+> this skill are authoritative. Do not maintain this flattened mirror by hand.
 
 # Market Data Endpoints — Claude Instruction Reference
 

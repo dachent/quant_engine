@@ -35,14 +35,32 @@ TAG_PATTERN = re.compile(r"<[^>]+>")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch USDA AMS Market News reports or the bulk-data catalog.")
+    parser = argparse.ArgumentParser(
+        description="Fetch USDA AMS Market News reports or the bulk-data catalog."
+    )
     parser.add_argument("--slug", help="AMS report slug, e.g. CN_GR210 (corn).")
-    parser.add_argument("--commodity", choices=sorted(CURATED_SLUGS.keys()), help="Curated commodity name; resolves to a known slug.")
-    parser.add_argument("--bulk", action="store_true", help="Fetch the /public_data directory listing.")
-    parser.add_argument("--list-slugs", action="store_true", help="Print the curated commodity-to-slug mapping and exit.")
+    parser.add_argument(
+        "--commodity",
+        choices=sorted(CURATED_SLUGS.keys()),
+        help="Curated commodity name; resolves to a known slug.",
+    )
+    parser.add_argument(
+        "--bulk", action="store_true", help="Fetch the /public_data directory listing."
+    )
+    parser.add_argument(
+        "--list-slugs",
+        action="store_true",
+        help="Print the curated commodity-to-slug mapping and exit.",
+    )
     parser.add_argument("--url", help="Optional explicit override URL.")
-    parser.add_argument("--format", choices=["raw", "parsed"], help="Required unless --list-slugs is set.")
-    parser.add_argument("--output", help="Output path. Required unless --list-slugs is set.")
+    parser.add_argument(
+        "--format",
+        choices=["raw", "parsed"],
+        help="Required unless --list-slugs is set.",
+    )
+    parser.add_argument(
+        "--output", help="Output path. Required unless --list-slugs is set."
+    )
     return parser.parse_args()
 
 
@@ -80,7 +98,9 @@ def build_url(args: argparse.Namespace) -> str:
 def parse_directory_listing(text: str, source_url: str) -> dict[str, object]:
     entries: list[dict[str, str]] = []
     for match in LINK_PATTERN.finditer(text):
-        href = match.group("double") or match.group("single") or match.group("bare") or ""
+        href = (
+            match.group("double") or match.group("single") or match.group("bare") or ""
+        )
         label = clean_text(match.group("label") or "")
         if not href or href.startswith("#"):
             continue
@@ -95,7 +115,9 @@ def parse_directory_listing(text: str, source_url: str) -> dict[str, object]:
     }
 
 
-def parse_rest_payload(text: str, source_url: str, slug: str | None) -> dict[str, object]:
+def parse_rest_payload(
+    text: str, source_url: str, slug: str | None
+) -> dict[str, object]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -113,11 +135,18 @@ def main() -> int:
     args = parse_args()
 
     if args.list_slugs:
-        print(json.dumps({"provider": "usda_ams", "curated_slugs": CURATED_SLUGS}, indent=2))
+        print(
+            json.dumps(
+                {"provider": "usda_ams", "curated_slugs": CURATED_SLUGS}, indent=2
+            )
+        )
         return 0
 
     if not args.format or not args.output:
-        print("Error: --format and --output are required unless --list-slugs is set.", file=sys.stderr)
+        print(
+            "Error: --format and --output are required unless --list-slugs is set.",
+            file=sys.stderr,
+        )
         return 1
 
     output_path = Path(args.output).expanduser().resolve()
@@ -138,14 +167,23 @@ def main() -> int:
         else:
             artifact = parse_rest_payload(text, source_url, resolve_slug(args))
 
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed USDA AMS artifact to {output_path}")
         if "entry_count" in artifact:
             print(f"entries={artifact['entry_count']}")
         else:
             print(f"slug={artifact.get('slug')}")
         return 0
-    except (HTTPError, URLError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+    except (
+        HTTPError,
+        URLError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

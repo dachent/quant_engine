@@ -15,7 +15,9 @@ from urllib.request import Request, urlopen
 
 HOMEPAGE_URL = "https://ico.org/"
 PUBLIC_MARKET_INFO_URL = "https://ico.org/resources/public-market-information/"
-COFFEE_MARKET_REPORT_URL = "https://ico.org/resources/coffee-market-report-statistics-section/"
+COFFEE_MARKET_REPORT_URL = (
+    "https://ico.org/resources/coffee-market-report-statistics-section/"
+)
 USER_AGENT = "Codex agent-market-data-terminal/1.0"
 TAG_PATTERN = re.compile(r"<[^>]+>")
 ROW_PATTERN = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -24,7 +26,9 @@ TABLE_PATTERN = re.compile(r"<table\b[^>]*>(.*?)</table>", re.IGNORECASE | re.DO
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch ICO coffee composite indicator price data from public pages.")
+    parser = argparse.ArgumentParser(
+        description="Fetch ICO coffee composite indicator price data from public pages."
+    )
     parser.add_argument(
         "--url",
         default=PUBLIC_MARKET_INFO_URL,
@@ -83,11 +87,13 @@ def parse_html_tables(text: str, source_url: str) -> dict[str, object]:
                 row_obj[key] = parsed if parsed is not None else value
             if row_obj:
                 data_rows.append(row_obj)
-        tables.append({
-            "header": header,
-            "rows": data_rows,
-            "row_count": len(data_rows),
-        })
+        tables.append(
+            {
+                "header": header,
+                "rows": data_rows,
+                "row_count": len(data_rows),
+            }
+        )
 
     return {
         "provider": "ico",
@@ -153,9 +159,13 @@ def main() -> int:
 
         fmt = detect_format(args.url, payload)
         if fmt == "csv":
-            artifact = parse_csv_payload(payload.decode("utf-8-sig", errors="replace"), args.url)
+            artifact = parse_csv_payload(
+                payload.decode("utf-8-sig", errors="replace"), args.url
+            )
         elif fmt == "html":
-            artifact = parse_html_tables(payload.decode("utf-8", errors="replace"), args.url)
+            artifact = parse_html_tables(
+                payload.decode("utf-8", errors="replace"), args.url
+            )
         elif fmt == "xls":
             raise RuntimeError(
                 "ICO XLS parsing is out of scope here. Save the file with --format raw and parse separately, "
@@ -164,14 +174,23 @@ def main() -> int:
         else:
             raise RuntimeError(f"Unrecognized ICO payload format for {args.url}.")
 
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed ICO artifact to {output_path}")
         if "tables" in artifact:
             print(f"tables={artifact.get('table_count', 0)}")
         else:
             print(f"rows={artifact.get('row_count', 0)}")
         return 0
-    except (HTTPError, URLError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+    except (
+        HTTPError,
+        URLError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

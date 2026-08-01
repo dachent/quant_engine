@@ -25,11 +25,24 @@ SUPPORTED_FILE_FORMATS = {"xlsx", "xls", "csv", "zip"}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch no-auth BEA public files by direct URL, release page, or Data.json catalog.")
-    parser.add_argument("--mode", required=True, choices=["direct", "release-page", "catalog"])
-    parser.add_argument("--url", help="Direct BEA file URL or release-page URL, depending on mode.")
-    parser.add_argument("--catalog-format", choices=["xlsx", "csv", "zip"], help="Optional file-format filter for catalog mode.")
-    parser.add_argument("--match", help="Optional case-insensitive substring filter for release-page or catalog discovery.")
+    parser = argparse.ArgumentParser(
+        description="Fetch no-auth BEA public files by direct URL, release page, or Data.json catalog."
+    )
+    parser.add_argument(
+        "--mode", required=True, choices=["direct", "release-page", "catalog"]
+    )
+    parser.add_argument(
+        "--url", help="Direct BEA file URL or release-page URL, depending on mode."
+    )
+    parser.add_argument(
+        "--catalog-format",
+        choices=["xlsx", "csv", "zip"],
+        help="Optional file-format filter for catalog mode.",
+    )
+    parser.add_argument(
+        "--match",
+        help="Optional case-insensitive substring filter for release-page or catalog discovery.",
+    )
     parser.add_argument("--format", required=True, choices=["raw", "parsed"])
     parser.add_argument("--output", required=True, help="Output path.")
     return parser.parse_args()
@@ -111,7 +124,9 @@ def looks_like_header(row: list[object]) -> bool:
 
 
 def rows_to_table(rows: list[list[object]]) -> dict[str, object]:
-    non_empty = [trim_row(row) for row in rows if any(cell not in ("", None) for cell in row)]
+    non_empty = [
+        trim_row(row) for row in rows if any(cell not in ("", None) for cell in row)
+    ]
     if not non_empty:
         return {"row_count": 0, "rows": []}
 
@@ -121,7 +136,12 @@ def rows_to_table(rows: list[list[object]]) -> dict[str, object]:
         data_rows = []
         for row in non_empty[1:]:
             row_values = list(row) + [None] * max(0, len(columns) - len(row))
-            data_rows.append({column: row_values[index] if index < len(row_values) else None for index, column in enumerate(columns)})
+            data_rows.append(
+                {
+                    column: row_values[index] if index < len(row_values) else None
+                    for index, column in enumerate(columns)
+                }
+            )
         return {"columns": columns, "row_count": len(data_rows), "rows": data_rows}
 
     return {"row_count": len(non_empty), "rows": non_empty}
@@ -135,7 +155,9 @@ def parse_csv_bytes(raw_bytes: bytes) -> dict[str, object]:
         normalized_row = []
         for cell in row:
             parsed = parse_scalar(cell)
-            normalized_row.append(parsed if isinstance(parsed, (int, float)) else cell.strip())
+            normalized_row.append(
+                parsed if isinstance(parsed, (int, float)) else cell.strip()
+            )
         rows.append(normalized_row)
     normalized_rows: list[list[object]] = []
     for row in rows:
@@ -149,7 +171,9 @@ def import_openpyxl():
     try:
         import openpyxl  # type: ignore
     except ImportError as exc:
-        raise RuntimeError("Parsed BEA XLSX support requires the optional 'openpyxl' package.") from exc
+        raise RuntimeError(
+            "Parsed BEA XLSX support requires the optional 'openpyxl' package."
+        ) from exc
     return openpyxl
 
 
@@ -163,7 +187,9 @@ def parse_workbook_rows(row_iterable) -> list[list[object]]:
 
 def parse_xlsx_bytes(raw_bytes: bytes) -> dict[str, object]:
     openpyxl = import_openpyxl()
-    workbook = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True, read_only=True)
+    workbook = openpyxl.load_workbook(
+        io.BytesIO(raw_bytes), data_only=True, read_only=True
+    )
     sheets = []
     for sheet_name in workbook.sheetnames:
         worksheet = workbook[sheet_name]
@@ -179,8 +205,12 @@ def parse_xlsx_bytes(raw_bytes: bytes) -> dict[str, object]:
             "title": properties.title,
             "subject": properties.subject,
             "creator": properties.creator,
-            "created": properties.created.isoformat() if getattr(properties, "created", None) else None,
-            "modified": properties.modified.isoformat() if getattr(properties, "modified", None) else None,
+            "created": properties.created.isoformat()
+            if getattr(properties, "created", None)
+            else None,
+            "modified": properties.modified.isoformat()
+            if getattr(properties, "modified", None)
+            else None,
         },
         "sheets": sheets,
     }
@@ -197,13 +227,17 @@ def import_xlrd_optional():
 def parse_xls_bytes(raw_bytes: bytes) -> dict[str, object]:
     xlrd = import_xlrd_optional()
     if xlrd is None:
-        raise RuntimeError("Parsed BEA XLS support requires the optional 'xlrd' package.")
+        raise RuntimeError(
+            "Parsed BEA XLS support requires the optional 'xlrd' package."
+        )
     workbook = xlrd.open_workbook(file_contents=raw_bytes)
     sheets = []
     for sheet in workbook.sheets():
         rows = []
         for row_index in range(sheet.nrows):
-            rows.append([normalize_cell(value) for value in sheet.row_values(row_index)])
+            rows.append(
+                [normalize_cell(value) for value in sheet.row_values(row_index)]
+            )
         sheet_artifact = {"name": sheet.name}
         sheet_artifact.update(rows_to_table(rows))
         sheets.append(sheet_artifact)
@@ -273,7 +307,12 @@ class LinkCollector(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag != "a" or self.current_href is None:
             return
-        self.links.append({"href": self.current_href, "text": clean_text("".join(self.current_text_parts))})
+        self.links.append(
+            {
+                "href": self.current_href,
+                "text": clean_text("".join(self.current_text_parts)),
+            }
+        )
         self.current_href = None
         self.current_text_parts = []
 
@@ -283,7 +322,9 @@ def extract_title(html_text: str) -> str | None:
     return clean_text(match.group(1)) if match else None
 
 
-def discover_release_page(url: str, match_text: str | None) -> tuple[str, dict[str, object]]:
+def discover_release_page(
+    url: str, match_text: str | None
+) -> tuple[str, dict[str, object]]:
     html_text = fetch_text(url)
     parser = LinkCollector()
     parser.feed(html_text)
@@ -305,7 +346,9 @@ def discover_release_page(url: str, match_text: str | None) -> tuple[str, dict[s
         candidates.append({"url": href, "label": link["text"], "format": file_format})
 
     if not candidates:
-        raise RuntimeError("No downloadable BEA file links matched on the release page.")
+        raise RuntimeError(
+            "No downloadable BEA file links matched on the release page."
+        )
 
     return candidates[0]["url"], {
         "release_page_url": url,
@@ -327,7 +370,9 @@ def candidate_matches(candidate: dict[str, object], match_text: str | None) -> b
     return match_text.lower() in " ".join(haystack_parts).lower()
 
 
-def discover_catalog(catalog_format: str | None, match_text: str | None) -> tuple[str, dict[str, object]]:
+def discover_catalog(
+    catalog_format: str | None, match_text: str | None
+) -> tuple[str, dict[str, object]]:
     catalog_payload = json.loads(fetch_bytes(DATA_JSON_URL).decode("utf-8"))
     datasets = catalog_payload.get("dataset", [])
     if not isinstance(datasets, list):
@@ -344,7 +389,11 @@ def discover_catalog(catalog_format: str | None, match_text: str | None) -> tupl
             if not isinstance(distribution, dict):
                 continue
             url = distribution.get("downloadURL")
-            if not url and isinstance(distribution.get("accessURL"), str) and file_format_for_path(str(distribution.get("accessURL"))):
+            if (
+                not url
+                and isinstance(distribution.get("accessURL"), str)
+                and file_format_for_path(str(distribution.get("accessURL")))
+            ):
                 url = distribution.get("accessURL")
             if not isinstance(url, str):
                 continue
@@ -366,12 +415,19 @@ def discover_catalog(catalog_format: str | None, match_text: str | None) -> tupl
             candidates.append(candidate)
 
     if not candidates:
-        raise RuntimeError("No downloadable BEA catalog distributions matched the requested filters.")
+        raise RuntimeError(
+            "No downloadable BEA catalog distributions matched the requested filters."
+        )
 
-    return str(candidates[0]["url"]), {"catalog_url": DATA_JSON_URL, "candidates": candidates}
+    return str(candidates[0]["url"]), {
+        "catalog_url": DATA_JSON_URL,
+        "candidates": candidates,
+    }
 
 
-def fetch_first_available_candidate(candidates: object, fallback_url: str) -> tuple[str, bytes, dict[str, str], int]:
+def fetch_first_available_candidate(
+    candidates: object, fallback_url: str
+) -> tuple[str, bytes, dict[str, str], int]:
     if not isinstance(candidates, list) or not candidates:
         raw_bytes, headers = fetch_response(fallback_url)
         return fallback_url, raw_bytes, headers, 0
@@ -391,8 +447,12 @@ def fetch_first_available_candidate(candidates: object, fallback_url: str) -> tu
             continue
 
     if last_error is not None:
-        raise RuntimeError(f"No reachable BEA download candidates matched the requested filters. Last error: {last_error}") from last_error
-    raise RuntimeError("No reachable BEA download candidates matched the requested filters.")
+        raise RuntimeError(
+            f"No reachable BEA download candidates matched the requested filters. Last error: {last_error}"
+        ) from last_error
+    raise RuntimeError(
+        "No reachable BEA download candidates matched the requested filters."
+    )
 
 
 def main() -> int:
@@ -409,12 +469,20 @@ def main() -> int:
         elif args.mode == "release-page":
             source_url, discovery = discover_release_page(str(args.url), args.match)
             context.update(discovery)
-            source_url, raw_bytes, headers, candidate_index = fetch_first_available_candidate(context.get("candidates", []), source_url)
+            source_url, raw_bytes, headers, candidate_index = (
+                fetch_first_available_candidate(
+                    context.get("candidates", []), source_url
+                )
+            )
             context["selected_candidate_index"] = candidate_index
         else:
             source_url, discovery = discover_catalog(args.catalog_format, args.match)
             context.update(discovery)
-            source_url, raw_bytes, headers, candidate_index = fetch_first_available_candidate(context.get("candidates", []), source_url)
+            source_url, raw_bytes, headers, candidate_index = (
+                fetch_first_available_candidate(
+                    context.get("candidates", []), source_url
+                )
+            )
             context["selected_candidate_index"] = candidate_index
 
         if args.format == "raw":
@@ -434,10 +502,20 @@ def main() -> int:
             "parsed": parsed,
         }
         artifact.update(context)
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed BEA artifact to {output_path}")
         return 0
-    except (HTTPError, URLError, OSError, RuntimeError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+    except (
+        HTTPError,
+        URLError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        zipfile.BadZipFile,
+        json.JSONDecodeError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

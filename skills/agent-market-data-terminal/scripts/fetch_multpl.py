@@ -21,10 +21,19 @@ CELL_PATTERN = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTAL
 TAG_PATTERN = re.compile(r"<[^>]+>")
 TITLE_PATTERN = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 H1_PATTERN = re.compile(r"<h1[^>]*>(.*?)</h1>", re.IGNORECASE | re.DOTALL)
-CURRENT_PATTERN = re.compile(r'<div id="current">(.*?)</div>\s*</div>|<div id="current">(.*?)</div>', re.IGNORECASE | re.DOTALL)
-CURRENT_TITLE_PATTERN = re.compile(r'<span class="currentTitle">(.*?)</span>', re.IGNORECASE | re.DOTALL)
-TIMESTAMP_PATTERN = re.compile(r'<div id="timestamp">(.*?)</div>', re.IGNORECASE | re.DOTALL)
-CHANGE_PATTERN = re.compile(r'<span class="([^"]+)">(.*?)</span>', re.IGNORECASE | re.DOTALL)
+CURRENT_PATTERN = re.compile(
+    r'<div id="current">(.*?)</div>\s*</div>|<div id="current">(.*?)</div>',
+    re.IGNORECASE | re.DOTALL,
+)
+CURRENT_TITLE_PATTERN = re.compile(
+    r'<span class="currentTitle">(.*?)</span>', re.IGNORECASE | re.DOTALL
+)
+TIMESTAMP_PATTERN = re.compile(
+    r'<div id="timestamp">(.*?)</div>', re.IGNORECASE | re.DOTALL
+)
+CHANGE_PATTERN = re.compile(
+    r'<span class="([^"]+)">(.*?)</span>', re.IGNORECASE | re.DOTALL
+)
 ESTIMATE_PATTERN = re.compile(r'<abbr[^>]*title="Estimate"[^>]*>', re.IGNORECASE)
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 EPOCH = date(1970, 1, 1)
@@ -35,16 +44,22 @@ SCALE_TYPE_MAP = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch raw or parsed Multpl chart, table, or Atom views.")
+    parser = argparse.ArgumentParser(
+        description="Fetch raw or parsed Multpl chart, table, or Atom views."
+    )
     parser.add_argument("--page-url", required=True, help="Base Multpl chart page URL.")
-    parser.add_argument("--view", required=True, choices=["chart", "table-year", "table-month", "atom"])
+    parser.add_argument(
+        "--view", required=True, choices=["chart", "table-year", "table-month", "atom"]
+    )
     parser.add_argument("--format", required=True, choices=["raw", "parsed"])
     parser.add_argument("--output", required=True, help="Output path.")
     return parser.parse_args()
 
 
 def fetch_bytes(url: str) -> bytes:
-    request = Request(url, headers={"User-Agent": "Codex agent-market-data-terminal/1.0"})
+    request = Request(
+        url, headers={"User-Agent": "Codex agent-market-data-terminal/1.0"}
+    )
     with urlopen(request, timeout=60) as response:
         return response.read()
 
@@ -139,9 +154,18 @@ def parse_current_block(current_html: str | None) -> dict[str, object] | None:
         change = parse_number(change_cleaned)
 
     value_html = current_html
-    value_html = re.sub(r"<b[^>]*>.*?</b>", " ", value_html, flags=re.IGNORECASE | re.DOTALL)
-    value_html = re.sub(r"<span[^>]*>.*?</span>", " ", value_html, flags=re.IGNORECASE | re.DOTALL)
-    value_html = re.sub(r'<div id="timestamp">.*?</div>', " ", value_html, flags=re.IGNORECASE | re.DOTALL)
+    value_html = re.sub(
+        r"<b[^>]*>.*?</b>", " ", value_html, flags=re.IGNORECASE | re.DOTALL
+    )
+    value_html = re.sub(
+        r"<span[^>]*>.*?</span>", " ", value_html, flags=re.IGNORECASE | re.DOTALL
+    )
+    value_html = re.sub(
+        r'<div id="timestamp">.*?</div>',
+        " ",
+        value_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     value = parse_number(value_html)
 
     return {
@@ -209,7 +233,9 @@ def to_iso_date(days_since_epoch: int | float) -> str:
     return (EPOCH + timedelta(days=int(days_since_epoch))).isoformat()
 
 
-def build_chart_series(series_name: str, x_values: list[object], y_values: object) -> list[dict[str, object]]:
+def build_chart_series(
+    series_name: str, x_values: list[object], y_values: object
+) -> list[dict[str, object]]:
     if not isinstance(x_values, list):
         raise RuntimeError("Multpl `pi` x-values were not a list.")
 
@@ -242,12 +268,20 @@ def parse_chart_page(source_url: str, html_text: str) -> dict[str, object]:
     current = parse_current_block(extract_current_html(html_text))
     pi = load_js_array(extract_pi_literal(html_text))
     if len(pi) < 7:
-        raise RuntimeError("Multpl `pi` payload did not include the expected seven elements.")
+        raise RuntimeError(
+            "Multpl `pi` payload did not include the expected seven elements."
+        )
 
-    x_values, y_values, y_axis_min, y_axis_max, suffix, scale_type_code, annotations = pi[:7]
+    x_values, y_values, y_axis_min, y_axis_max, suffix, scale_type_code, annotations = (
+        pi[:7]
+    )
     series = build_chart_series(title, x_values, y_values)
     parsed_scale_code = parse_number(scale_type_code)
-    scale_type_value = int(parsed_scale_code) if isinstance(parsed_scale_code, int) else parsed_scale_code
+    scale_type_value = (
+        int(parsed_scale_code)
+        if isinstance(parsed_scale_code, int)
+        else parsed_scale_code
+    )
     scale_name = SCALE_TYPE_MAP.get(scale_type_value, "unknown")
 
     return {
@@ -271,7 +305,9 @@ def parse_table_date(value: str) -> str:
 
 
 def parse_table_page(source_url: str, html_text: str, view: str) -> dict[str, object]:
-    table_match = re.search(r'<table id="datatable".*?</table>', html_text, re.IGNORECASE | re.DOTALL)
+    table_match = re.search(
+        r'<table id="datatable".*?</table>', html_text, re.IGNORECASE | re.DOTALL
+    )
     if not table_match:
         raise RuntimeError("Could not find the Multpl data table.")
 
@@ -287,7 +323,13 @@ def parse_table_page(source_url: str, html_text: str, view: str) -> dict[str, ob
         value = parse_number(cells[1])
         if value is None:
             continue
-        rows.append({"date": parse_table_date(date_text), "value": value, "is_estimate": is_estimate})
+        rows.append(
+            {
+                "date": parse_table_date(date_text),
+                "value": value,
+                "is_estimate": is_estimate,
+            }
+        )
 
     return {
         "provider": "multpl",
@@ -303,8 +345,16 @@ def parse_atom(source_url: str, xml_text: str) -> dict[str, object]:
     title = root.findtext("atom:title", default="Multpl", namespaces=ATOM_NS)
     updated_at = root.findtext("atom:updated", default=None, namespaces=ATOM_NS)
     entry = root.find("atom:entry", ATOM_NS)
-    entry_updated = entry.findtext("atom:updated", default=None, namespaces=ATOM_NS) if entry is not None else None
-    entry_content = entry.findtext("atom:content", default="", namespaces=ATOM_NS) if entry is not None else ""
+    entry_updated = (
+        entry.findtext("atom:updated", default=None, namespaces=ATOM_NS)
+        if entry is not None
+        else None
+    )
+    entry_content = (
+        entry.findtext("atom:content", default="", namespaces=ATOM_NS)
+        if entry is not None
+        else ""
+    )
     current = parse_current_block(html.unescape(entry_content))
 
     return {
@@ -342,14 +392,24 @@ def main() -> int:
         else:
             parsed_output = parse_atom(source_url, text)
 
-        output_path.write_text(json.dumps(parsed_output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(parsed_output, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         print(f"Saved parsed Multpl artifact to {output_path}")
         if "rows" in parsed_output:
             print(f"rows={len(parsed_output['rows'])}")
         elif "series" in parsed_output:
             print(f"series={len(parsed_output['series'])}")
         return 0
-    except (ET.ParseError, HTTPError, URLError, RuntimeError, ValueError, SyntaxError) as exc:
+    except (
+        ET.ParseError,
+        HTTPError,
+        URLError,
+        RuntimeError,
+        ValueError,
+        SyntaxError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

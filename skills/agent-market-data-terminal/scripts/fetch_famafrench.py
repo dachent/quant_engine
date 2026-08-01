@@ -20,10 +20,16 @@ MISSING_SENTINELS = {"-99.99", "-999", "-999.0", "-999.00"}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch structured Kenneth French Data Library CSV zip feeds.")
+    parser = argparse.ArgumentParser(
+        description="Fetch structured Kenneth French Data Library CSV zip feeds."
+    )
     source_group = parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument("--feed-id", help="CSV zip feed stem such as F-F_Research_Data_Factors_CSV.")
-    source_group.add_argument("--url", help="Direct Kenneth French _CSV.zip URL, including archive URLs.")
+    source_group.add_argument(
+        "--feed-id", help="CSV zip feed stem such as F-F_Research_Data_Factors_CSV."
+    )
+    source_group.add_argument(
+        "--url", help="Direct Kenneth French _CSV.zip URL, including archive URLs."
+    )
     parser.add_argument("--format", required=True, choices=["raw", "parsed"])
     parser.add_argument("--output", required=True, help="Output path.")
     return parser.parse_args()
@@ -38,7 +44,9 @@ def normalize_feed_id(feed_id: str) -> str:
     if value.lower().endswith(".zip"):
         value = value[:-4]
     if value.upper().endswith("_TXT"):
-        raise ValueError("TXT feeds are not supported. Use the CSV zip stem ending in _CSV.")
+        raise ValueError(
+            "TXT feeds are not supported. Use the CSV zip stem ending in _CSV."
+        )
     if not value.upper().endswith("_CSV"):
         raise ValueError("--feed-id must be the exact CSV zip stem ending in _CSV.")
     return value
@@ -47,20 +55,37 @@ def normalize_feed_id(feed_id: str) -> str:
 def validate_direct_url(url: str) -> str:
     parsed = urlparse(url.strip())
     if parsed.scheme != "https" or parsed.netloc.lower() != "mba.tuck.dartmouth.edu":
-        raise ValueError("Fama/French URLs must use https://mba.tuck.dartmouth.edu/ direct zip paths.")
+        raise ValueError(
+            "Fama/French URLs must use https://mba.tuck.dartmouth.edu/ direct zip paths."
+        )
 
     path = parsed.path or ""
     lower_path = path.lower()
     if lower_path.endswith("_txt.zip"):
-        raise ValueError("TXT feeds are not supported. Provide a direct _CSV.zip URL instead.")
+        raise ValueError(
+            "TXT feeds are not supported. Provide a direct _CSV.zip URL instead."
+        )
     if lower_path.endswith(".html") or lower_path.endswith("/"):
-        raise ValueError("HTML pages are not supported. Provide a direct _CSV.zip URL instead.")
+        raise ValueError(
+            "HTML pages are not supported. Provide a direct _CSV.zip URL instead."
+        )
     if not lower_path.endswith("_csv.zip"):
-        raise ValueError("Fama/French access is restricted to direct structured _CSV.zip URLs.")
+        raise ValueError(
+            "Fama/French access is restricted to direct structured _CSV.zip URLs."
+        )
     if "/pages/faculty/ken.french/" not in path:
         raise ValueError("URL must point to a Kenneth French Data Library zip feed.")
     encoded_path = quote(path, safe="/%._-()")
-    return urlunparse((parsed.scheme, parsed.netloc, encoded_path, parsed.params, parsed.query, parsed.fragment))
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            encoded_path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
 
 
 def build_source_url(args: argparse.Namespace) -> tuple[str, str]:
@@ -169,12 +194,20 @@ def looks_like_title_block(block: list[str], block_text: str) -> bool:
     return True
 
 
-def parse_table_block(block: list[str], *, pending_title: str | None, feed_id: str, section_index: int) -> dict[str, object]:
-    header_index = next((index for index, line in enumerate(block) if is_header_line(line)), None)
+def parse_table_block(
+    block: list[str], *, pending_title: str | None, feed_id: str, section_index: int
+) -> dict[str, object]:
+    header_index = next(
+        (index for index, line in enumerate(block) if is_header_line(line)), None
+    )
     if header_index is None:
-        raise RuntimeError("Expected a table header inside a Fama/French section block.")
+        raise RuntimeError(
+            "Expected a table header inside a Fama/French section block."
+        )
 
-    title_lines = [clean_text(line) for line in block[:header_index] if clean_text(line)]
+    title_lines = [
+        clean_text(line) for line in block[:header_index] if clean_text(line)
+    ]
     title = " ".join(title_lines) if title_lines else pending_title
 
     header_cells = split_csv_line(block[header_index])
@@ -187,8 +220,8 @@ def parse_table_block(block: list[str], *, pending_title: str | None, feed_id: s
         cells = split_csv_line(line)
         if not cells:
             continue
-        period_token = clean_text(cells[0])
-        if not period_token:
+        period_label = clean_text(cells[0])
+        if not period_label:
             continue
         if len(cells) > len(columns):
             for column_index in range(len(columns), len(cells)):
@@ -197,7 +230,7 @@ def parse_table_block(block: list[str], *, pending_title: str | None, feed_id: s
         for index, column in enumerate(columns):
             cell_value = cells[index] if index < len(cells) else ""
             if index == 0:
-                row[column] = period_token
+                row[column] = period_label
             else:
                 row[column] = parse_value(cell_value)
         rows.append(row)
@@ -206,13 +239,16 @@ def parse_table_block(block: list[str], *, pending_title: str | None, feed_id: s
         raise RuntimeError("A Fama/French section did not contain any data rows.")
 
     return {
-        "title": title or infer_title(str(rows[0].get("period")), feed_id, section_index),
+        "title": title
+        or infer_title(str(rows[0].get("period")), feed_id, section_index),
         "columns": columns,
         "rows": rows,
     }
 
 
-def parse_csv_member(text: str, feed_id: str) -> tuple[list[str], list[dict[str, object]]]:
+def parse_csv_member(
+    text: str, feed_id: str
+) -> tuple[list[str], list[dict[str, object]]]:
     blocks = split_blocks(text)
     preamble: list[str] = []
     sections: list[dict[str, object]] = []
@@ -221,21 +257,34 @@ def parse_csv_member(text: str, feed_id: str) -> tuple[list[str], list[dict[str,
     for index, block in enumerate(blocks):
         has_header = any(is_header_line(line) for line in block)
         if not has_header:
-            block_text = " ".join(clean_text(line) for line in block if clean_text(line))
+            block_text = " ".join(
+                clean_text(line) for line in block if clean_text(line)
+            )
             if not block_text:
                 continue
-            next_has_header = index + 1 < len(blocks) and any(is_header_line(line) for line in blocks[index + 1])
+            next_has_header = index + 1 < len(blocks) and any(
+                is_header_line(line) for line in blocks[index + 1]
+            )
             if next_has_header and looks_like_title_block(block, block_text):
                 pending_title = block_text
             elif not sections:
                 preamble.append(block_text)
             continue
 
-        sections.append(parse_table_block(block, pending_title=pending_title, feed_id=feed_id, section_index=len(sections) + 1))
+        sections.append(
+            parse_table_block(
+                block,
+                pending_title=pending_title,
+                feed_id=feed_id,
+                section_index=len(sections) + 1,
+            )
+        )
         pending_title = None
 
     if not sections:
-        raise RuntimeError("Could not find any structured table sections inside the Fama/French CSV feed.")
+        raise RuntimeError(
+            "Could not find any structured table sections inside the Fama/French CSV feed."
+        )
 
     return preamble, sections
 
@@ -243,9 +292,13 @@ def parse_csv_member(text: str, feed_id: str) -> tuple[list[str], list[dict[str,
 def load_zip_payload(raw_bytes: bytes) -> tuple[list[str], str, str]:
     with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
         zip_members = archive.namelist()
-        csv_members = [member for member in zip_members if member.lower().endswith(".csv")]
+        csv_members = [
+            member for member in zip_members if member.lower().endswith(".csv")
+        ]
         if not csv_members:
-            raise RuntimeError("The Fama/French zip payload did not contain a CSV member.")
+            raise RuntimeError(
+                "The Fama/French zip payload did not contain a CSV member."
+            )
         csv_member = csv_members[0]
         text = archive.read(csv_member).decode("utf-8-sig", errors="replace")
     return zip_members, csv_member, text
@@ -277,11 +330,20 @@ def main() -> int:
             "preamble": preamble,
             "sections": sections,
         }
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed Fama/French artifact to {output_path}")
         print(f"sections={len(sections)}")
         return 0
-    except (HTTPError, URLError, OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
+    except (
+        HTTPError,
+        URLError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        zipfile.BadZipFile,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

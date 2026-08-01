@@ -10,7 +10,7 @@ import re
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
@@ -20,17 +20,36 @@ ARCHIVE_LINK_PATTERN = re.compile(
     r"<a[^>]+href=[\"'](?P<href>https://cdn\.cboe\.com/resources/futures/archive/volume-and-price/[^\"']+\.csv)[\"'][^>]*>(?P<label>.*?)</a>",
     re.IGNORECASE | re.DOTALL,
 )
-ARCHIVE_FILE_PATTERN = re.compile(r"CFE_(?P<month_code>[FGHJKMNQUVXZ])(?P<year>\d{2})_(?P<product>[A-Z0-9]+)\.csv$", re.IGNORECASE)
+ARCHIVE_FILE_PATTERN = re.compile(
+    r"CFE_(?P<month_code>[FGHJKMNQUVXZ])(?P<year>\d{2})_(?P<product>[A-Z0-9]+)\.csv$",
+    re.IGNORECASE,
+)
 TAG_PATTERN = re.compile(r"<[^>]+>")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch direct CBOE CSV datasets or discover futures archive files.")
-    parser.add_argument("--mode", choices=["direct", "futures-archive"], default="direct")
-    parser.add_argument("--url", help="Direct CBOE CSV endpoint URL. Required in direct mode.")
-    parser.add_argument("--year", type=int, help="Optional four-digit year filter for futures archive mode.")
-    parser.add_argument("--product", help="Optional product code filter for futures archive mode, such as VX.")
-    parser.add_argument("--match", help="Optional case-insensitive substring filter for archive labels or URLs.")
+    parser = argparse.ArgumentParser(
+        description="Fetch direct CBOE CSV datasets or discover futures archive files."
+    )
+    parser.add_argument(
+        "--mode", choices=["direct", "futures-archive"], default="direct"
+    )
+    parser.add_argument(
+        "--url", help="Direct CBOE CSV endpoint URL. Required in direct mode."
+    )
+    parser.add_argument(
+        "--year",
+        type=int,
+        help="Optional four-digit year filter for futures archive mode.",
+    )
+    parser.add_argument(
+        "--product",
+        help="Optional product code filter for futures archive mode, such as VX.",
+    )
+    parser.add_argument(
+        "--match",
+        help="Optional case-insensitive substring filter for archive labels or URLs.",
+    )
     parser.add_argument("--format", required=True, choices=["raw", "parsed"])
     parser.add_argument("--output", required=True, help="Output path.")
     return parser.parse_args()
@@ -41,7 +60,9 @@ def validate_args(args: argparse.Namespace) -> None:
         if not args.url:
             raise ValueError("--url is required in direct mode.")
         if args.year is not None or args.product or args.match:
-            raise ValueError("--year, --product, and --match are only valid in futures-archive mode.")
+            raise ValueError(
+                "--year, --product, and --match are only valid in futures-archive mode."
+            )
         return
 
     if args.url:
@@ -141,7 +162,11 @@ def filter_archive_links(
 
     if product:
         product_upper = product.upper()
-        filtered = [item for item in filtered if str(item.get("product", "")).upper() == product_upper]
+        filtered = [
+            item
+            for item in filtered
+            if str(item.get("product", "")).upper() == product_upper
+        ]
 
     if match_text:
         needle = match_text.lower()
@@ -158,10 +183,15 @@ def filter_archive_links(
 
 def choose_archive_link(args: argparse.Namespace) -> tuple[str, dict[str, object]]:
     links = discover_archive_links()
-    matches = filter_archive_links(links, year=args.year, product=args.product, match_text=args.match)
+    matches = filter_archive_links(
+        links, year=args.year, product=args.product, match_text=args.match
+    )
     if not matches:
         raise ValueError("No CBOE futures archive files matched the requested filters.")
-    return str(matches[0]["url"]), {"archive_page_url": ARCHIVE_PAGE_URL, "matches": matches}
+    return str(matches[0]["url"]), {
+        "archive_page_url": ARCHIVE_PAGE_URL,
+        "matches": matches,
+    }
 
 
 def main() -> int:
@@ -191,7 +221,9 @@ def main() -> int:
             parsed["archive_page_url"] = archive_context["archive_page_url"]
             parsed["archive_matches"] = archive_context["matches"]
 
-        output_path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(parsed, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed CBOE artifact to {output_path}")
         print(f"rows={len(parsed['rows'])}")
         return 0

@@ -18,7 +18,9 @@ DOWNLOAD_BASE = "https://www.federalreserve.gov/datadownload/Output.aspx"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch Federal Reserve DDP releases (SDMX-XML ZIP).")
+    parser = argparse.ArgumentParser(
+        description="Fetch Federal Reserve DDP releases (SDMX-XML ZIP)."
+    )
     parser.add_argument(
         "--release",
         default="H15",
@@ -51,7 +53,9 @@ def parse_sdmx_xml(xml_bytes: bytes, member_name: str) -> list[dict[str, object]
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError as exc:
-        raise RuntimeError(f"Failed to parse SDMX XML member {member_name!r}: {exc}") from exc
+        raise RuntimeError(
+            f"Failed to parse SDMX XML member {member_name!r}: {exc}"
+        ) from exc
 
     rows: list[dict[str, object]] = []
 
@@ -116,11 +120,20 @@ def main() -> int:
             return 0
 
         artifact = parse_archive(payload, source_url, args.release)
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed Federal Reserve artifact to {output_path}")
         print(f"release={artifact['release']} rows={artifact['row_count']}")
         return 0
-    except (HTTPError, URLError, OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
+    except (
+        HTTPError,
+        URLError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        zipfile.BadZipFile,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

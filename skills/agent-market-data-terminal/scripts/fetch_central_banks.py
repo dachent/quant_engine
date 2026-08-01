@@ -18,25 +18,54 @@ from urllib.request import Request, urlopen
 USER_AGENT = "Codex agent-market-data-terminal/1.0"
 
 BUNDESBANK_SDMX_BASE = "https://api.statistiken.bundesbank.de/rest/data"
-BOE_IADB_BASE = "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp"
+BOE_IADB_BASE = (
+    "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp"
+)
 RBA_F2_URL = "https://www.rba.gov.au/statistics/tables/xls/f02hist.xlsx"
 BOC_VALET_BASE = "https://www.bankofcanada.ca/valet/observations"
-BOJ_SEARCH_URL = "https://www.stat-search.boj.or.jp/ssi/cgi-bin/famecgi2?cgi=$nme_a000_en"
+BOJ_SEARCH_URL = (
+    "https://www.stat-search.boj.or.jp/ssi/cgi-bin/famecgi2?cgi=$nme_a000_en"
+)
 
 TAG_PATTERN = re.compile(r"<[^>]+>")
 ROW_PATTERN = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
 CELL_PATTERN = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
 TABLE_PATTERN = re.compile(r"<table\b[^>]*>(.*?)</table>", re.IGNORECASE | re.DOTALL)
-MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+MONTH_ABBR = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch foreign central-bank historical bond yield archives.")
-    parser.add_argument("--source", required=True, choices=["bundesbank", "boe", "rba", "boc", "boj"])
-    parser.add_argument("--series", help="Series code or comma-separated codes (BoE, BoC, BoJ).")
-    parser.add_argument("--key", help="Bundesbank series key (used as `{key}` in the SDMX URL).")
-    parser.add_argument("--dataflow", default="BBK01", help="Bundesbank dataflow id. Defaults to BBK01.")
-    parser.add_argument("--bundesbank-format", choices=["sdmx-json", "csv"], default="sdmx-json")
+    parser = argparse.ArgumentParser(
+        description="Fetch foreign central-bank historical bond yield archives."
+    )
+    parser.add_argument(
+        "--source", required=True, choices=["bundesbank", "boe", "rba", "boc", "boj"]
+    )
+    parser.add_argument(
+        "--series", help="Series code or comma-separated codes (BoE, BoC, BoJ)."
+    )
+    parser.add_argument(
+        "--key", help="Bundesbank series key (used as `{key}` in the SDMX URL)."
+    )
+    parser.add_argument(
+        "--dataflow", default="BBK01", help="Bundesbank dataflow id. Defaults to BBK01."
+    )
+    parser.add_argument(
+        "--bundesbank-format", choices=["sdmx-json", "csv"], default="sdmx-json"
+    )
     parser.add_argument("--start", help="Start date in YYYY-MM-DD.")
     parser.add_argument("--end", help="End date in YYYY-MM-DD.")
     parser.add_argument("--sheet", help="RBA: override sheet name.")
@@ -97,7 +126,11 @@ def build_boe_url(args: argparse.Namespace) -> str:
         return args.url
     if not args.series:
         raise ValueError("--series is required for source=boe.")
-    params: list[tuple[str, str]] = [("CSVF", "TT"), ("SeriesCodes", args.series), ("UsingCodes", "Y")]
+    params: list[tuple[str, str]] = [
+        ("CSVF", "TT"),
+        ("SeriesCodes", args.series),
+        ("UsingCodes", "Y"),
+    ]
     if args.start:
         params.append(("Datefrom", iso_to_boe_date(args.start)))
     if args.end:
@@ -154,10 +187,14 @@ def parse_bundesbank_sdmx(text: str) -> dict[str, object]:
     dimensions = structure.get("dimensions", {}) if isinstance(structure, dict) else {}
     obs_dims = dimensions.get("observation", []) if isinstance(dimensions, dict) else []
     series_dims = dimensions.get("series", []) if isinstance(dimensions, dict) else []
-    series_map = data_sets[0].get("series", {}) if isinstance(data_sets[0], dict) else {}
+    series_map = (
+        data_sets[0].get("series", {}) if isinstance(data_sets[0], dict) else {}
+    )
 
     rows: list[dict[str, object]] = []
-    for series_key, series_payload in series_map.items() if isinstance(series_map, dict) else []:
+    for series_key, series_payload in (
+        series_map.items() if isinstance(series_map, dict) else []
+    ):
         if not isinstance(series_payload, dict):
             continue
         series_indexes = series_key.split(":")
@@ -170,7 +207,11 @@ def parse_bundesbank_sdmx(text: str) -> dict[str, object]:
             except ValueError:
                 continue
             values = dim.get("values", [])
-            if isinstance(values, list) and 0 <= position < len(values) and isinstance(values[position], dict):
+            if (
+                isinstance(values, list)
+                and 0 <= position < len(values)
+                and isinstance(values[position], dict)
+            ):
                 base[str(dim.get("id"))] = values[position].get("id")
 
         observations = series_payload.get("observations", {})
@@ -187,7 +228,11 @@ def parse_bundesbank_sdmx(text: str) -> dict[str, object]:
                 except ValueError:
                     continue
                 values = dim.get("values", [])
-                if isinstance(values, list) and 0 <= position < len(values) and isinstance(values[position], dict):
+                if (
+                    isinstance(values, list)
+                    and 0 <= position < len(values)
+                    and isinstance(values[position], dict)
+                ):
                     row[str(dim.get("id"))] = values[position].get("id")
             if isinstance(obs_payload, list) and obs_payload:
                 row["value"] = obs_payload[0]
@@ -220,7 +265,9 @@ def parse_html_tables(text: str) -> list[dict[str, object]]:
                 record[key] = parsed if parsed is not None else value
             if record:
                 data_rows.append(record)
-        tables.append({"header": header, "rows": data_rows, "row_count": len(data_rows)})
+        tables.append(
+            {"header": header, "rows": data_rows, "row_count": len(data_rows)}
+        )
     return tables
 
 
@@ -228,12 +275,18 @@ def parse_rba_xlsx(payload: bytes, override_sheet: str | None) -> dict[str, obje
     try:
         from openpyxl import load_workbook  # type: ignore
     except ImportError as exc:
-        raise RuntimeError("RBA parsing requires openpyxl. Install with `pip install openpyxl`.") from exc
+        raise RuntimeError(
+            "RBA parsing requires openpyxl. Install with `pip install openpyxl`."
+        ) from exc
     workbook = load_workbook(filename=BytesIO(payload), data_only=True, read_only=True)
     sheet_names = list(workbook.sheetnames)
     selected = override_sheet
     if selected is None:
-        candidates = [name for name in sheet_names if "yield" in name.lower() or "f02" in name.lower()]
+        candidates = [
+            name
+            for name in sheet_names
+            if "yield" in name.lower() or "f02" in name.lower()
+        ]
         selected = candidates[0] if candidates else sheet_names[0]
     if selected not in sheet_names:
         raise RuntimeError(f"--sheet {selected!r} not found. Sheets: {sheet_names}")
@@ -251,7 +304,12 @@ def parse_rba_xlsx(payload: bytes, override_sheet: str | None) -> dict[str, obje
             header_index = index
             break
     if header_index is None:
-        return {"sheet_names": sheet_names, "selected_sheet": selected, "rows": [], "row_count": 0}
+        return {
+            "sheet_names": sheet_names,
+            "selected_sheet": selected,
+            "rows": [],
+            "row_count": 0,
+        }
 
     header = [
         str(cell) if cell is not None else f"column_{idx + 1}"
@@ -306,12 +364,22 @@ def main() -> int:
             text = payload.decode("utf-8", errors="replace")
             if args.bundesbank_format == "csv":
                 header, rows = parse_csv_text(text)
-                body: dict[str, object] = {"format": "csv", "header": header, "rows": rows, "row_count": len(rows)}
+                body: dict[str, object] = {
+                    "format": "csv",
+                    "header": header,
+                    "rows": rows,
+                    "row_count": len(rows),
+                }
             else:
                 body = {"format": "sdmx-json", **parse_bundesbank_sdmx(text)}
         elif args.source == "boe":
             header, rows = parse_csv_text(payload.decode("utf-8-sig", errors="replace"))
-            body = {"format": "csv", "header": header, "rows": rows, "row_count": len(rows)}
+            body = {
+                "format": "csv",
+                "header": header,
+                "rows": rows,
+                "row_count": len(rows),
+            }
         elif args.source == "rba":
             body = {"format": "xlsx", **parse_rba_xlsx(payload, args.sheet)}
         elif args.source == "boc":
@@ -320,7 +388,12 @@ def main() -> int:
                 body = {"format": "json", "payload": json.loads(text)}
             except json.JSONDecodeError:
                 header, rows = parse_csv_text(text)
-                body = {"format": "csv", "header": header, "rows": rows, "row_count": len(rows)}
+                body = {
+                    "format": "csv",
+                    "header": header,
+                    "rows": rows,
+                    "row_count": len(rows),
+                }
         elif args.source == "boj":
             text = payload.decode("utf-8", errors="replace")
             tables = parse_html_tables(text)
@@ -339,11 +412,21 @@ def main() -> int:
             "source_url": source_url,
             **body,
         }
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
         print(f"Saved parsed central_banks artifact to {output_path}")
         print(f"sub_source={args.source}")
         return 0
-    except (HTTPError, URLError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+    except (
+        HTTPError,
+        URLError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

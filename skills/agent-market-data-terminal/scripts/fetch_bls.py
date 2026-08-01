@@ -6,7 +6,6 @@ import json
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -15,9 +14,19 @@ USER_AGENT = "Codex agent-market-data-terminal/1.0"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch public BLS v1 time series data without registration.")
-    parser.add_argument("--series-id", dest="series_ids", action="append", required=True, help="BLS series ID. Repeat for multiple series.")
-    parser.add_argument("--start-year", help="Optional start year for bounded requests.")
+    parser = argparse.ArgumentParser(
+        description="Fetch public BLS v1 time series data without registration."
+    )
+    parser.add_argument(
+        "--series-id",
+        dest="series_ids",
+        action="append",
+        required=True,
+        help="BLS series ID. Repeat for multiple series.",
+    )
+    parser.add_argument(
+        "--start-year", help="Optional start year for bounded requests."
+    )
     parser.add_argument("--end-year", help="Optional end year for bounded requests.")
     parser.add_argument("--format", required=True, choices=["raw", "parsed"])
     parser.add_argument("--output", required=True, help="Output path.")
@@ -42,7 +51,9 @@ def request_bytes(method: str, url: str, *, body: bytes | None = None) -> bytes:
         return response.read()
 
 
-def build_request(series_ids: list[str], start_year: str | None, end_year: str | None) -> tuple[str, str, bytes | None]:
+def build_request(
+    series_ids: list[str], start_year: str | None, end_year: str | None
+) -> tuple[str, str, bytes | None]:
     if len(series_ids) == 1 and start_year is None and end_year is None:
         return "GET", f"{BASE_URL}/{series_ids[0]}", None
 
@@ -54,20 +65,26 @@ def build_request(series_ids: list[str], start_year: str | None, end_year: str |
     return "POST", f"{BASE_URL}/", json.dumps(payload).encode("utf-8")
 
 
-def normalize_footnotes(items: list[dict[str, object]] | None) -> list[dict[str, object]]:
+def normalize_footnotes(
+    items: list[dict[str, object]] | None,
+) -> list[dict[str, object]]:
     if not items:
         return []
     cleaned: list[dict[str, object]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        normalized = {key: value for key, value in item.items() if value not in ("", None)}
+        normalized = {
+            key: value for key, value in item.items() if value not in ("", None)
+        }
         if normalized:
             cleaned.append(normalized)
     return cleaned
 
 
-def parse_payload(payload: dict[str, object], method: str, request_url: str) -> dict[str, object]:
+def parse_payload(
+    payload: dict[str, object], method: str, request_url: str
+) -> dict[str, object]:
     results = payload.get("Results", {})
     series_items = results.get("series", []) if isinstance(results, dict) else []
     parsed_series: list[dict[str, object]] = []
@@ -128,7 +145,9 @@ def main() -> int:
 
         payload = json.loads(raw_bytes.decode("utf-8"))
         artifact = parse_payload(payload, method, request_url)
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed BLS artifact to {output_path}")
         print(f"series={len(artifact['series'])}")
         return 0

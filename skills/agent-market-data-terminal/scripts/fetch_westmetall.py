@@ -40,18 +40,27 @@ MONTH_NAMES = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch Westmetall chart XML or HTML market-data views.")
+    parser = argparse.ArgumentParser(
+        description="Fetch Westmetall chart XML or HTML market-data views."
+    )
     parser.add_argument("--field", help="Westmetall field id, for example LME_Cu_cash.")
     parser.add_argument("--view", required=True, choices=["chart", "table", "averages"])
     parser.add_argument("--format", required=True, choices=["raw", "parsed"])
     parser.add_argument("--output", required=True, help="Output path.")
-    parser.add_argument("--lang", default="en", help="Westmetall language, defaults to en.")
-    parser.add_argument("--page-url", help="Existing Westmetall page URL. The script can resolve field from it.")
+    parser.add_argument(
+        "--lang", default="en", help="Westmetall language, defaults to en."
+    )
+    parser.add_argument(
+        "--page-url",
+        help="Existing Westmetall page URL. The script can resolve field from it.",
+    )
     return parser.parse_args()
 
 
 def fetch_bytes(url: str) -> bytes:
-    request = Request(url, headers={"User-Agent": "Codex agent-market-data-terminal/1.0"})
+    request = Request(
+        url, headers={"User-Agent": "Codex agent-market-data-terminal/1.0"}
+    )
     with urlopen(request, timeout=60) as response:
         return response.read()
 
@@ -128,7 +137,9 @@ def parse_chart_xml(xml_text: str, field: str, source_url: str) -> dict[str, obj
                 continue
             rows.append({"date": x_value.replace("/", "-"), "value": parsed_value})
 
-        series.append({"name": name, "type": "lineSeries", "metadata": metadata, "rows": rows})
+        series.append(
+            {"name": name, "type": "lineSeries", "metadata": metadata, "rows": rows}
+        )
 
     return {
         "provider": "westmetall",
@@ -144,7 +155,9 @@ def parse_westmetall_date(value: str) -> str:
     return datetime.strptime(value, "%d. %B %Y").date().isoformat()
 
 
-def parse_table_view(html_text: str, field: str, view: str, source_url: str) -> dict[str, object]:
+def parse_table_view(
+    html_text: str, field: str, view: str, source_url: str
+) -> dict[str, object]:
     matches = list(YEAR_SECTION_PATTERN.finditer(html_text))
     if not matches:
         raise RuntimeError("Could not find Westmetall year sections in the HTML view.")
@@ -168,16 +181,27 @@ def parse_table_view(html_text: str, field: str, view: str, source_url: str) -> 
                         series_map.setdefault(column_name, [])
                 continue
 
-            if cells == header or cells[0].lower() in {"date", "month"} or len(cells) < len(header):
+            if (
+                cells == header
+                or cells[0].lower() in {"date", "month"}
+                or len(cells) < len(header)
+            ):
                 continue
 
             if view == "table":
-                base_row = {"date": parse_westmetall_date(cells[0]), "year": section_year}
+                base_row = {
+                    "date": parse_westmetall_date(cells[0]),
+                    "year": section_year,
+                }
             else:
                 month_number = MONTH_NAMES.get(cells[0])
                 if month_number is None:
                     continue
-                base_row = {"date": f"{section_year}-{month_number:02d}-01", "year": section_year, "month": cells[0]}
+                base_row = {
+                    "date": f"{section_year}-{month_number:02d}-01",
+                    "year": section_year,
+                    "month": cells[0],
+                }
 
             for index, column_name in enumerate(header[1:], start=1):
                 if not column_name or index >= len(cells):
@@ -218,7 +242,11 @@ def main() -> int:
     try:
         field = resolve_field(args.field, args.page_url)
         lang = infer_language(args.page_url, args.lang)
-        source_url = build_chart_api_url(field, lang) if args.view == "chart" else build_html_url(field, args.view, lang)
+        source_url = (
+            build_chart_api_url(field, lang)
+            if args.view == "chart"
+            else build_html_url(field, args.view, lang)
+        )
         output_path = Path(args.output).expanduser().resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -241,7 +269,10 @@ def main() -> int:
             text = payload.decode("utf-8", errors="replace")
             parsed_output = parse_table_view(text, field, args.view, source_url)
 
-        output_path.write_text(json.dumps(parsed_output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(parsed_output, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         print(f"Saved parsed Westmetall artifact to {output_path}")
         print(f"series={len(parsed_output.get('series', []))}")
         return 0

@@ -35,9 +35,15 @@ PAGE_ID_PATTERNS = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch Macrotrends economic-data JSON for a page and chart frequency.")
-    parser.add_argument("--page-url", required=True, help="Macrotrends dataset page URL.")
-    parser.add_argument("--chart-frequency", required=True, choices=sorted(CHART_FREQUENCIES))
+    parser = argparse.ArgumentParser(
+        description="Fetch Macrotrends economic-data JSON for a page and chart frequency."
+    )
+    parser.add_argument(
+        "--page-url", required=True, help="Macrotrends dataset page URL."
+    )
+    parser.add_argument(
+        "--chart-frequency", required=True, choices=sorted(CHART_FREQUENCIES)
+    )
     parser.add_argument("--output", required=True, help="Output JSON path.")
     return parser.parse_args()
 
@@ -62,14 +68,22 @@ def extract_page_id(page_url: str, html: str) -> str:
     if path_match:
         return path_match.group("page_id")
 
-    raise RuntimeError("Could not extract Macrotrends page_id from the page HTML or URL.")
+    raise RuntimeError(
+        "Could not extract Macrotrends page_id from the page HTML or URL."
+    )
 
 
-def fetch_payload(page_url: str, page_id: str, chart_frequency: str) -> dict[str, object]:
+def fetch_payload(
+    page_url: str, page_id: str, chart_frequency: str
+) -> dict[str, object]:
     endpoint = f"https://www.macrotrends.net/economic-data/{page_id}/{chart_frequency}"
     raw = fetch_text(endpoint, referer=page_url)
     payload = json.loads(raw)
-    if not isinstance(payload, dict) or "data" not in payload or "metadata" not in payload:
+    if (
+        not isinstance(payload, dict)
+        or "data" not in payload
+        or "metadata" not in payload
+    ):
         raise RuntimeError("Macrotrends endpoint returned an unexpected payload.")
 
     return {
@@ -94,7 +108,9 @@ def main() -> int:
 
     output_path = Path(args.output).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     print(f"Saved {len(payload.get('data', []))} rows to {output_path}")
     print(f"page_id={page_id} chart_frequency={args.chart_frequency}")
     return 0

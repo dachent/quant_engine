@@ -21,7 +21,9 @@ USER_AGENT = "Codex agent-market-data-terminal/1.0"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch the World Bank Pink Sheet (CMO) commodity-price workbook.")
+    parser = argparse.ArgumentParser(
+        description="Fetch the World Bank Pink Sheet (CMO) commodity-price workbook."
+    )
     parser.add_argument(
         "--frequency",
         choices=["monthly", "annual"],
@@ -52,13 +54,21 @@ def fetch_bytes(url: str) -> bytes:
         return response.read()
 
 
-def select_sheet_name(sheet_names: list[str], override: str | None, frequency: str) -> str:
+def select_sheet_name(
+    sheet_names: list[str], override: str | None, frequency: str
+) -> str:
     if override:
         if override in sheet_names:
             return override
-        raise RuntimeError(f"--sheet {override!r} not found in workbook. Sheets: {sheet_names}")
+        raise RuntimeError(
+            f"--sheet {override!r} not found in workbook. Sheets: {sheet_names}"
+        )
     keyword = "monthly" if frequency == "monthly" else "annual"
-    primary = [name for name in sheet_names if keyword in name.lower() and "price" in name.lower()]
+    primary = [
+        name
+        for name in sheet_names
+        if keyword in name.lower() and "price" in name.lower()
+    ]
     if primary:
         return primary[0]
     fallback = [name for name in sheet_names if keyword in name.lower()]
@@ -67,7 +77,9 @@ def select_sheet_name(sheet_names: list[str], override: str | None, frequency: s
     return sheet_names[0]
 
 
-def parse_workbook(payload: bytes, source_url: str, frequency: str, override_sheet: str | None) -> dict[str, object]:
+def parse_workbook(
+    payload: bytes, source_url: str, frequency: str, override_sheet: str | None
+) -> dict[str, object]:
     try:
         from openpyxl import load_workbook  # type: ignore
         from io import BytesIO
@@ -104,9 +116,13 @@ def parse_workbook(payload: bytes, source_url: str, frequency: str, override_she
     secondary_header: list[str] | None = None
     if secondary_index is not None:
         secondary_row = rows[secondary_index]
-        secondary_header = [str(cell) if cell is not None else "" for cell in secondary_row]
+        secondary_header = [
+            str(cell) if cell is not None else "" for cell in secondary_row
+        ]
         is_data_row = any(
-            isinstance(cell, (int, float)) for cell in secondary_row if cell not in (None, "")
+            isinstance(cell, (int, float))
+            for cell in secondary_row
+            if cell not in (None, "")
         )
         if is_data_row:
             secondary_header = None
@@ -151,7 +167,10 @@ def main() -> int:
             return 0
 
         artifact = parse_workbook(payload, source_url, args.frequency, args.sheet)
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
         print(f"Saved parsed Pink Sheet artifact to {output_path}")
         print(f"sheet={artifact['selected_sheet']} rows={artifact['row_count']}")
         return 0

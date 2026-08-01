@@ -123,11 +123,13 @@ def parse_html_tables(text: str, source_url: str) -> dict[str, object]:
                 record[key] = parsed if parsed is not None else value
             if record:
                 data_rows.append(record)
-        tables.append({
-            "header": header,
-            "rows": data_rows,
-            "row_count": len(data_rows),
-        })
+        tables.append(
+            {
+                "header": header,
+                "rows": data_rows,
+                "row_count": len(data_rows),
+            }
+        )
 
     return {
         "provider": "ice_settlements",
@@ -153,9 +155,13 @@ def main() -> int:
 
         fmt = detect_format(args.url, payload)
         if fmt == "csv":
-            artifact = parse_csv_payload(payload.decode("utf-8-sig", errors="replace"), args.url)
+            artifact = parse_csv_payload(
+                payload.decode("utf-8-sig", errors="replace"), args.url
+            )
         elif fmt == "html":
-            artifact = parse_html_tables(payload.decode("utf-8", errors="replace"), args.url)
+            artifact = parse_html_tables(
+                payload.decode("utf-8", errors="replace"), args.url
+            )
         elif fmt == "xls":
             raise RuntimeError(
                 "ICE XLS parsing is out of scope here. Save with --format raw and parse separately."
@@ -163,14 +169,23 @@ def main() -> int:
         else:
             raise RuntimeError(f"Unrecognized ICE payload format for {args.url}.")
 
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed ICE artifact to {output_path}")
         if "tables" in artifact:
             print(f"tables={artifact.get('table_count', 0)}")
         else:
             print(f"rows={artifact.get('row_count', 0)}")
         return 0
-    except (HTTPError, URLError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+    except (
+        HTTPError,
+        URLError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

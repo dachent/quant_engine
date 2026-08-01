@@ -25,12 +25,16 @@ DATASETS = {
     "daily_treasury_real_yield_curve",
     "daily_treasury_real_long_term",
 }
-CSV_LINK_PATTERN = re.compile(r'href="(?P<href>[^"]*daily-treasury-rates\.csv[^"]*?_format=csv)"', re.IGNORECASE)
+CSV_LINK_PATTERN = re.compile(
+    r'href="(?P<href>[^"]*daily-treasury-rates\.csv[^"]*?_format=csv)"', re.IGNORECASE
+)
 XML_LINK_PATTERN = re.compile(r'href="(?P<href>[^"]*/pages/xml\?[^"]*)"', re.IGNORECASE)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch Treasury daily rates XML or CSV feeds.")
+    parser = argparse.ArgumentParser(
+        description="Fetch Treasury daily rates XML or CSV feeds."
+    )
     parser.add_argument("--dataset", required=True, choices=sorted(DATASETS))
     scope = parser.add_mutually_exclusive_group(required=True)
     scope.add_argument("--year", help="Year scope such as 2024.")
@@ -72,7 +76,9 @@ def resolve_data_url(args: argparse.Namespace, text_view_url: str) -> str:
     pattern = XML_LINK_PATTERN if args.view == "xml" else CSV_LINK_PATTERN
     match = pattern.search(html_text)
     if not match:
-        raise RuntimeError(f"Could not find the Treasury {args.view.upper()} link on the TextView page.")
+        raise RuntimeError(
+            f"Could not find the Treasury {args.view.upper()} link on the TextView page."
+        )
     return urljoin(text_view_url, html.unescape(match.group("href")))
 
 
@@ -100,7 +106,9 @@ def local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def parse_xml_payload(raw_bytes: bytes) -> tuple[list[str], list[dict[str, object]], str | None]:
+def parse_xml_payload(
+    raw_bytes: bytes,
+) -> tuple[list[str], list[dict[str, object]], str | None]:
     root = ET.fromstring(raw_bytes)
     title = None
     title_node = root.find("{http://www.w3.org/2005/Atom}title")
@@ -111,7 +119,9 @@ def parse_xml_payload(raw_bytes: bytes) -> tuple[list[str], list[dict[str, objec
     columns: list[str] = []
 
     for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
-        properties = entry.find(".//{http://schemas.microsoft.com/ado/2007/08/dataservices/metadata}properties")
+        properties = entry.find(
+            ".//{http://schemas.microsoft.com/ado/2007/08/dataservices/metadata}properties"
+        )
         if properties is None:
             continue
         row: dict[str, object] = {}
@@ -165,11 +175,20 @@ def main() -> int:
         if feed_title:
             artifact["feed_title"] = feed_title
 
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed Treasury rates artifact to {output_path}")
         print(f"rows={len(rows)}")
         return 0
-    except (ET.ParseError, HTTPError, URLError, OSError, RuntimeError, ValueError) as exc:
+    except (
+        ET.ParseError,
+        HTTPError,
+        URLError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

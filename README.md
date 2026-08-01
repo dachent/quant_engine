@@ -125,3 +125,11 @@ capital, strategy, performance, gap, and coverage views derive only from the
 accepted report generation. The Candidates view is a separate, hash-identified
 frozen audit appendix; it has no refresh, selection, allocation, provider,
 broker, or execution authority.
+
+Public, no-auth market and macro acquisition is routed through the
+[Agent Market Data Terminal](docs/providers/market-data-terminal.md). Its
+provider-native skill and helper scripts preserve the full `dachent/mdt`
+history. The useful Yahoo workbook-lineage behavior and the flattened endpoint
+gist are absorbed as provenance into that single capability rather than kept as
+duplicate products. Generated market data remains outside Git and every Yahoo
+artifact receives hash-bound request and coverage evidence.

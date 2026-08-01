@@ -15,7 +15,20 @@ from urllib.request import Request, urlopen
 
 BASE_URL = "http://vixcentral.com"
 PLACEHOLDER_RESPONSES = {"hello", "hello historical"}
-MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+MONTH_NAMES = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+]
 IMPORTANT_LIVE_INDEXES = {
     "time_data": 1,
     "last": 2,
@@ -42,10 +55,19 @@ USER_AGENT = "Codex agent-market-data-terminal/1.0"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch VIXCentral live or historical data.")
-    parser.add_argument("--mode", required=True, choices=["live", "historical"], help="Fetch live term structure or a historical curve.")
+    parser = argparse.ArgumentParser(
+        description="Fetch VIXCentral live or historical data."
+    )
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["live", "historical"],
+        help="Fetch live term structure or a historical curve.",
+    )
     parser.add_argument("--date", help="Historical date in YYYY-MM-DD.")
-    parser.add_argument("--days", type=int, help="Bulk historical days for /historical/?days=N.")
+    parser.add_argument(
+        "--days", type=int, help="Bulk historical days for /historical/?days=N."
+    )
     parser.add_argument("--output", required=True, help="Output JSON path.")
     return parser.parse_args()
 
@@ -53,7 +75,9 @@ def parse_args() -> argparse.Namespace:
 def validate_args(args: argparse.Namespace) -> None:
     if args.mode == "historical":
         if args.date and args.days:
-            raise ValueError("Use either --date or --days for historical mode, not both.")
+            raise ValueError(
+                "Use either --date or --days for historical mode, not both."
+            )
         if not args.date and not args.days:
             raise ValueError("Historical mode requires --date or --days.")
         if args.date:
@@ -91,11 +115,15 @@ def parse_json_text(raw_text: str) -> Any | None:
         return None
 
 
-def is_placeholder_or_invalid(raw_text: str, parsed: Any | None, *, accept_html: bool) -> bool:
+def is_placeholder_or_invalid(
+    raw_text: str, parsed: Any | None, *, accept_html: bool
+) -> bool:
     stripped = raw_text.strip().strip('"').strip().lower()
     if stripped in PLACEHOLDER_RESPONSES:
         return True
-    if raw_text.lstrip().startswith("<!DOCTYPE") or raw_text.lstrip().startswith("<html"):
+    if raw_text.lstrip().startswith("<!DOCTYPE") or raw_text.lstrip().startswith(
+        "<html"
+    ):
         return not accept_html
     if parsed is None:
         return not accept_html
@@ -138,17 +166,23 @@ def import_requests_module():
     try:
         return importlib.import_module("requests")
     except ImportError as exc:
-        raise RuntimeError("VIXCentral session fallback requires the 'requests' package.") from exc
+        raise RuntimeError(
+            "VIXCentral session fallback requires the 'requests' package."
+        ) from exc
 
 
 def fetch_with_requests_session(endpoint: str) -> str:
     requests = import_requests_module()
     session = requests.Session()
 
-    home_response = session.get(f"{BASE_URL}/", headers={"User-Agent": USER_AGENT}, timeout=60)
+    home_response = session.get(
+        f"{BASE_URL}/", headers={"User-Agent": USER_AGENT}, timeout=60
+    )
     home_response.raise_for_status()
 
-    response = session.get(endpoint, headers={"User-Agent": USER_AGENT, **XHR_HEADERS}, timeout=60)
+    response = session.get(
+        endpoint, headers={"User-Agent": USER_AGENT, **XHR_HEADERS}, timeout=60
+    )
     response.raise_for_status()
     return response.text
 
@@ -158,7 +192,9 @@ def fetch_with_curl_cffi(endpoint: str) -> str:
         curl_requests = importlib.import_module("curl_cffi.requests")
         curl_module = importlib.import_module("curl_cffi")
     except ImportError as exc:
-        raise RuntimeError("Optional VIXCentral TLS impersonation fallback requires the 'curl_cffi' package.") from exc
+        raise RuntimeError(
+            "Optional VIXCentral TLS impersonation fallback requires the 'curl_cffi' package."
+        ) from exc
 
     http_version = getattr(curl_module, "CurlHttpVersion").V1_1
     session = curl_requests.Session()
@@ -171,7 +207,9 @@ def fetch_with_curl_cffi(endpoint: str) -> str:
         timeout=60,
     )
     if getattr(home_response, "status_code", 200) >= 400:
-        raise RuntimeError(f"curl_cffi homepage priming failed with status {home_response.status_code}")
+        raise RuntimeError(
+            f"curl_cffi homepage priming failed with status {home_response.status_code}"
+        )
 
     response = session.get(
         endpoint,
@@ -181,7 +219,9 @@ def fetch_with_curl_cffi(endpoint: str) -> str:
         timeout=60,
     )
     if getattr(response, "status_code", 200) >= 400:
-        raise RuntimeError(f"curl_cffi endpoint fetch failed with status {response.status_code}")
+        raise RuntimeError(
+            f"curl_cffi endpoint fetch failed with status {response.status_code}"
+        )
     return response.text
 
 
@@ -203,10 +243,18 @@ def fetch_payload(args: argparse.Namespace, endpoint: str) -> tuple[Any, str, st
     if not is_placeholder_or_invalid(raw_text, parsed, accept_html=accept_html):
         return parsed if parsed is not None else raw_text, raw_text, "curl_cffi"
 
-    raise RuntimeError("VIXCentral returned placeholder or non-JSON content after direct, session-primed, and curl_cffi retries.")
+    raise RuntimeError(
+        "VIXCentral returned placeholder or non-JSON content after direct, session-primed, and curl_cffi retries."
+    )
 
 
-def build_output(args: argparse.Namespace, endpoint: str, raw_text: str, payload: Any, fetch_strategy: str) -> dict[str, Any]:
+def build_output(
+    args: argparse.Namespace,
+    endpoint: str,
+    raw_text: str,
+    payload: Any,
+    fetch_strategy: str,
+) -> dict[str, Any]:
     used_fallback = fetch_strategy != "direct"
     output: dict[str, Any] = {
         "source": "vixcentral",
@@ -247,7 +295,9 @@ def main() -> int:
 
     output_path = Path(args.output).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(
+        json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     print(f"Saved VIXCentral artifact to {output_path}")
     if artifact.get("fetch_strategy") != "direct":
         print(f"Fallback strategy used: {artifact['fetch_strategy']}")

@@ -64,7 +64,9 @@ Use this skill when a task needs lightweight, no-auth raw downloads, parsed tabl
   Use this provider for historical VIX futures/cash term structure when the user wants CBOE-backed research data instead of VIXCentral's live site routes.
 - Yahoo Finance
   Open `references/yahoo.md`, then use `scripts/fetch_yfinance.py`.
-  Keep Yahoo requests direct through `yfinance` and limit the helper surface to `history` and `current_snapshot`.
+  Keep Yahoo requests direct through `yfinance`; the helper also preserves the
+  absorbed workbook-lineage adjusted/raw/summary/search datasets without a
+  separate YAML runtime.
 - Federal Reserve DDP
   Open `references/federalreserve.md`, then use `scripts/fetch_federalreserve.py`.
   Use this for H.10 (FX) and H.15 (rates) — prefer the all-release SDMX-XML ZIP for full history; the current-release HTML page is for the latest weekly print only.
@@ -116,6 +118,8 @@ python .\scripts\fetch_cboe.py --url "https://cdn.cboe.com/api/global/us_indices
 python .\scripts\fetch_cboe.py --mode futures-archive --product VX --year 2013 --format parsed --output .\outputs\cboe_vx_archive_2013.json
 python .\scripts\fetch_vix_utils.py --dataset spot-wide --format parsed --output .\outputs\vix_utils_spot_wide.json
 python .\scripts\fetch_yfinance.py --dataset history --ticker SPY --ticker TLT --start 2020-01-01 --end today --interval 1d --format parsed --output .\outputs\yfinance_history.json
+python .\scripts\fetch_yfinance.py --dataset history_adjusted --ticker SPY --ticker TLT --start 2020-01-01 --end today --interval 1d --format parsed --output .\outputs\yfinance_adjusted.json
+python .\scripts\fetch_yfinance.py --dataset ticker_search --ticker SPY --search-count 5 --format parsed --output .\outputs\yfinance_search.json
 python .\scripts\fetch_yfinance.py --dataset current_snapshot --ticker ^VIX --ticker SPY --format parsed --output .\outputs\yfinance_snapshot.json
 python .\scripts\fetch_federalreserve.py --release H15 --format parsed --output .\outputs\fed_h15.json
 python .\scripts\fetch_cftc.py --family legacy_futures_only --year 2024 --format parsed --output .\outputs\cftc_legacy_2024.json

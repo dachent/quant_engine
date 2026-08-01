@@ -21,11 +21,16 @@ DATASETS = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch VIX futures/cash datasets through dougransom/vix_utils.")
+    parser = argparse.ArgumentParser(
+        description="Fetch VIX futures/cash datasets through dougransom/vix_utils."
+    )
     parser.add_argument("--dataset", required=True, choices=sorted(DATASETS))
     parser.add_argument("--format", required=True, choices=["raw", "parsed"])
     parser.add_argument("--output", required=True, help="Output path.")
-    parser.add_argument("--cache-dir", help="Optional workspace-local cache directory for vix_utils downloads.")
+    parser.add_argument(
+        "--cache-dir",
+        help="Optional workspace-local cache directory for vix_utils downloads.",
+    )
     return parser.parse_args()
 
 
@@ -37,7 +42,9 @@ def import_optional(module_name: str, package_hint: str):
 
 
 def configure_cache_dir(cache_dir: Path) -> None:
-    location_module = import_optional("vix_utils.location", "The optional 'vix_utils' package")
+    location_module = import_optional(
+        "vix_utils.location", "The optional 'vix_utils' package"
+    )
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     override = getattr(location_module, "override_data_dir", None)
@@ -53,7 +60,7 @@ def configure_cache_dir(cache_dir: Path) -> None:
 def load_dataset(dataset: str, cache_dir: Path):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
-        pandas = import_optional("pandas", "The optional 'pandas' dependency")
+        import_optional("pandas", "The optional 'pandas' dependency")
         vix_utils = import_optional("vix_utils", "The optional 'vix_utils' package")
         configure_cache_dir(cache_dir)
         logging.getLogger().setLevel(logging.ERROR)
@@ -65,14 +72,22 @@ def load_dataset(dataset: str, cache_dir: Path):
             return vix_utils.get_vix_index_histories()
 
         if dataset == "futures-wide":
-            return vix_utils.pivot_futures_on_monthly_tenor(vix_utils.load_vix_term_structure())
+            return vix_utils.pivot_futures_on_monthly_tenor(
+                vix_utils.load_vix_term_structure()
+            )
 
         if dataset == "spot-wide":
-            return vix_utils.pivot_spot_term_structure_on_symbol(vix_utils.get_vix_index_histories())
+            return vix_utils.pivot_spot_term_structure_on_symbol(
+                vix_utils.get_vix_index_histories()
+            )
 
         if dataset == "futures-m1m2":
-            continuous = import_optional("vix_utils.continuous_maturity", "The optional 'vix_utils' package")
-            monthly_wide = vix_utils.pivot_futures_on_monthly_tenor(vix_utils.load_vix_term_structure())
+            continuous = import_optional(
+                "vix_utils.continuous_maturity", "The optional 'vix_utils' package"
+            )
+            monthly_wide = vix_utils.pivot_futures_on_monthly_tenor(
+                vix_utils.load_vix_term_structure()
+            )
             return continuous.continuous_maturity_one_month(monthly_wide)
 
     raise ValueError(f"Unsupported dataset: {dataset}")
@@ -106,9 +121,13 @@ def dataframe_to_rows(frame) -> tuple[list[str], list[dict[str, Any]]]:
         normalized = normalized.reset_index()
 
     if hasattr(normalized.columns, "to_flat_index"):
-        normalized.columns = [flatten_column_name(column) for column in normalized.columns.to_flat_index()]
+        normalized.columns = [
+            flatten_column_name(column) for column in normalized.columns.to_flat_index()
+        ]
     else:
-        normalized.columns = [flatten_column_name(column) for column in normalized.columns]
+        normalized.columns = [
+            flatten_column_name(column) for column in normalized.columns
+        ]
 
     rows = []
     for record in normalized.to_dict(orient="records"):
@@ -125,7 +144,11 @@ def write_raw_frame(frame, output_path: Path) -> None:
 def main() -> int:
     args = parse_args()
     output_path = Path(args.output).expanduser().resolve()
-    cache_dir = Path(args.cache_dir).expanduser().resolve() if args.cache_dir else (Path.cwd() / "tmp" / "vix_utils-cache").resolve()
+    cache_dir = (
+        Path(args.cache_dir).expanduser().resolve()
+        if args.cache_dir
+        else (Path.cwd() / "tmp" / "vix_utils-cache").resolve()
+    )
 
     try:
         frame = load_dataset(args.dataset, cache_dir)
@@ -145,7 +168,9 @@ def main() -> int:
             "columns": columns,
             "rows": rows,
         }
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed vix_utils artifact to {output_path}")
         print(f"dataset={args.dataset} rows={len(rows)} cache_dir={cache_dir}")
         return 0

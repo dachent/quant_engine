@@ -42,12 +42,26 @@ TICKER_NEAR_LINK = re.compile(r"\b([A-Z]{2,6})\b")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch iShares ETF universe or holdings (current / historical).")
-    parser.add_argument("--mode", required=True, choices=["universe", "holdings", "history"])
-    parser.add_argument("--ticker", help="iShares ETF ticker; resolves via curated map.")
-    parser.add_argument("--product-url", help="Explicit product URL slug, e.g. us/products/239707/ishares-russell-1000-etf.")
+    parser = argparse.ArgumentParser(
+        description="Fetch iShares ETF universe or holdings (current / historical)."
+    )
+    parser.add_argument(
+        "--mode", required=True, choices=["universe", "holdings", "history"]
+    )
+    parser.add_argument(
+        "--ticker", help="iShares ETF ticker; resolves via curated map."
+    )
+    parser.add_argument(
+        "--product-url",
+        help="Explicit product URL slug, e.g. us/products/239707/ishares-russell-1000-etf.",
+    )
     parser.add_argument("--asof", help="As-of date in YYYY-MM-DD (history mode).")
-    parser.add_argument("--file-type", choices=["json", "csv"], default="json", help="iShares fileType parameter.")
+    parser.add_argument(
+        "--file-type",
+        choices=["json", "csv"],
+        default="json",
+        help="iShares fileType parameter.",
+    )
     parser.add_argument("--format", required=True, choices=["raw", "parsed"])
     parser.add_argument("--output", required=True, help="Output path.")
     return parser.parse_args()
@@ -87,7 +101,9 @@ def resolve_product_url(args: argparse.Namespace) -> str:
     if args.product_url:
         slug = args.product_url.strip().lstrip("/")
         if slug.startswith("http"):
-            raise ValueError("--product-url must be a slug like us/products/239707/...; do not include the host.")
+            raise ValueError(
+                "--product-url must be a slug like us/products/239707/...; do not include the host."
+            )
         return slug
     if args.ticker:
         ticker = args.ticker.strip().upper()
@@ -110,7 +126,9 @@ def normalize_asof(value: str | None) -> str | None:
     return parsed.strftime("%Y%m%d")
 
 
-def build_holdings_url(product_slug: str, file_type: str, asof_yyyymmdd: str | None) -> str:
+def build_holdings_url(
+    product_slug: str, file_type: str, asof_yyyymmdd: str | None
+) -> str:
     params = [("fileType", file_type), ("tab", "all")]
     if asof_yyyymmdd:
         params.append(("asOfDate", asof_yyyymmdd))
@@ -125,8 +143,14 @@ def parse_universe(text: str, source_url: str) -> dict[str, object]:
         label = clean_text(match.group("label") or "")
         if not href:
             continue
-        absolute = href if href.startswith("http") else urljoin(ROOT + "/", href.lstrip("/"))
-        slug = absolute.split("ishares.com/", 1)[-1] if "ishares.com/" in absolute else absolute
+        absolute = (
+            href if href.startswith("http") else urljoin(ROOT + "/", href.lstrip("/"))
+        )
+        slug = (
+            absolute.split("ishares.com/", 1)[-1]
+            if "ishares.com/" in absolute
+            else absolute
+        )
         if slug in seen:
             continue
         seen.add(slug)
@@ -142,12 +166,20 @@ def parse_universe(text: str, source_url: str) -> dict[str, object]:
     }
 
 
-def parse_holdings(payload: bytes, source_url: str, product_slug: str, asof_yyyymmdd: str | None, file_type: str) -> dict[str, object]:
+def parse_holdings(
+    payload: bytes,
+    source_url: str,
+    product_slug: str,
+    asof_yyyymmdd: str | None,
+    file_type: str,
+) -> dict[str, object]:
     if file_type == "json":
         try:
             data = json.loads(payload.decode("utf-8-sig", errors="replace"))
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"iShares JSON payload could not be parsed: {exc}") from exc
+            raise RuntimeError(
+                f"iShares JSON payload could not be parsed: {exc}"
+            ) from exc
         return {
             "provider": "ishares",
             "source_url": source_url,
@@ -182,8 +214,13 @@ def main() -> int:
                 print(f"Saved raw iShares universe HTML to {output_path}")
                 print(f"URL: {LANDING_PAGE_URL}")
                 return 0
-            artifact = parse_universe(payload.decode("utf-8", errors="replace"), LANDING_PAGE_URL)
-            output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            artifact = parse_universe(
+                payload.decode("utf-8", errors="replace"), LANDING_PAGE_URL
+            )
+            output_path.write_text(
+                json.dumps(artifact, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
             print(f"Saved parsed iShares universe to {output_path}")
             print(f"entries={artifact['entry_count']}")
             return 0
@@ -201,12 +238,25 @@ def main() -> int:
             print(f"URL: {source_url}")
             return 0
 
-        artifact = parse_holdings(payload, source_url, product_slug, asof_yyyymmdd, args.file_type)
-        output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        artifact = parse_holdings(
+            payload, source_url, product_slug, asof_yyyymmdd, args.file_type
+        )
+        output_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Saved parsed iShares artifact to {output_path}")
-        print(f"product={product_slug} asof={asof_yyyymmdd or 'current'} file_type={args.file_type}")
+        print(
+            f"product={product_slug} asof={asof_yyyymmdd or 'current'} file_type={args.file_type}"
+        )
         return 0
-    except (HTTPError, URLError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+    except (
+        HTTPError,
+        URLError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

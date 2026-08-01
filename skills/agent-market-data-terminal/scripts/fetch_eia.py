@@ -32,7 +32,9 @@ SUMMARY_SECTION_PATTERN = re.compile(
     r"<!--Start of Inner Data Table -->(.*?)<!--End of Inner Data Table -->",
     re.IGNORECASE | re.DOTALL,
 )
-HISTORY_FILE_PATTERN = re.compile(r"(?P<series>.+?)(?P<freq>[DWMA])\.(?:htm|xls)$", re.IGNORECASE)
+HISTORY_FILE_PATTERN = re.compile(
+    r"(?P<series>.+?)(?P<freq>[DWMA])\.(?:htm|xls)$", re.IGNORECASE
+)
 MISSING_MARKERS = {"", "-", "--", "NA", "W"}
 FREQUENCY_NAME_TO_CODE = {
     "daily": "D",
@@ -43,7 +45,9 @@ FREQUENCY_NAME_TO_CODE = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fetch raw or parsed EIA DNAV summary/history pages.")
+    parser = argparse.ArgumentParser(
+        description="Fetch raw or parsed EIA DNAV summary/history pages."
+    )
     parser.add_argument(
         "--page-url",
         required=True,
@@ -51,7 +55,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--format", required=True, choices=["raw", "parsed"])
     parser.add_argument("--output", required=True, help="Output path.")
-    parser.add_argument("--prefer", choices=["xls", "html"], default="xls", help="Raw-mode preference, defaults to xls.")
+    parser.add_argument(
+        "--prefer",
+        choices=["xls", "html"],
+        default="xls",
+        help="Raw-mode preference, defaults to xls.",
+    )
     parser.add_argument(
         "--source",
         choices=["auto", "xls", "html"],
@@ -62,7 +71,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def fetch_bytes(url: str) -> bytes:
-    request = Request(url, headers={"User-Agent": "Codex agent-market-data-terminal/1.0"})
+    request = Request(
+        url, headers={"User-Agent": "Codex agent-market-data-terminal/1.0"}
+    )
     with urlopen(request, timeout=60) as response:
         return response.read()
 
@@ -155,7 +166,9 @@ def extract_download_url(html_text: str, source_url: str) -> str | None:
 
 def extract_release_dates(html_text: str) -> tuple[str | None, str | None]:
     release_match = re.search(r"Release Date:\s*([^<]+)", html_text, re.IGNORECASE)
-    next_release_match = re.search(r"Next Release Date:\s*([^<]+)", html_text, re.IGNORECASE)
+    next_release_match = re.search(
+        r"Next Release Date:\s*([^<]+)", html_text, re.IGNORECASE
+    )
     return (
         parse_release_date(release_match.group(1)) if release_match else None,
         parse_release_date(next_release_match.group(1)) if next_release_match else None,
@@ -183,13 +196,22 @@ class TopLevelTableParser(HTMLParser):
             if self.target_table_depth is None:
                 self.target_table_depth = self.table_depth
 
-        if tag == "tr" and self.table_depth == self.target_table_depth and not self.in_row:
+        if (
+            tag == "tr"
+            and self.table_depth == self.target_table_depth
+            and not self.in_row
+        ):
             self.in_row = True
             self.current_row_class = attr_map.get("class", "")
             self.current_row = []
             return
 
-        if tag in {"td", "th"} and self.in_row and self.table_depth == self.target_table_depth and not self.capture_cell:
+        if (
+            tag in {"td", "th"}
+            and self.in_row
+            and self.table_depth == self.target_table_depth
+            and not self.capture_cell
+        ):
             self.capture_cell = True
             self.current_cell_parts = [self.get_starttag_text()]
             self.current_cell_attrs = attr_map
@@ -203,7 +225,12 @@ class TopLevelTableParser(HTMLParser):
         if self.capture_cell:
             self.current_cell_parts.append(f"</{tag}>")
 
-        if tag == self.current_cell_tag and self.capture_cell and self.in_row and self.table_depth == self.target_table_depth:
+        if (
+            tag == self.current_cell_tag
+            and self.capture_cell
+            and self.in_row
+            and self.table_depth == self.target_table_depth
+        ):
             cell_html = "".join(self.current_cell_parts)
             self.current_row.append(
                 {
@@ -220,7 +247,9 @@ class TopLevelTableParser(HTMLParser):
             return
 
         if tag == "tr" and self.in_row and self.table_depth == self.target_table_depth:
-            self.rows.append({"class": self.current_row_class, "cells": self.current_row})
+            self.rows.append(
+                {"class": self.current_row_class, "cells": self.current_row}
+            )
             self.in_row = False
             self.current_row_class = ""
             self.current_row = []
@@ -239,7 +268,9 @@ def page_type_for(page_url: str) -> str:
     return "history" if "/hist/" in path else "summary"
 
 
-def parse_summary_page(page_url: str, html_text: str, download_url: str | None) -> dict[str, object]:
+def parse_summary_page(
+    page_url: str, html_text: str, download_url: str | None
+) -> dict[str, object]:
     section_match = SUMMARY_SECTION_PATTERN.search(html_text)
     summary_section = section_match.group(1) if section_match else html_text
     parser = TopLevelTableParser()
@@ -263,7 +294,11 @@ def parse_summary_page(page_url: str, html_text: str, download_url: str | None) 
 
         cell_class = str(first_cell.get("attrs", {}).get("class", ""))
         if label == "Product by Area":
-            header_dates = [parse_short_date(str(cell.get("text", ""))) for cell in cells[1:-1] if str(cell.get("text", "")).strip()]
+            header_dates = [
+                parse_short_date(str(cell.get("text", "")))
+                for cell in cells[1:-1]
+                if str(cell.get("text", "")).strip()
+            ]
             continue
 
         if cell_class == "DataStub2":
@@ -277,13 +312,20 @@ def parse_summary_page(page_url: str, html_text: str, download_url: str | None) 
             history_range = str(cells[-1].get("text", "")) if cells else None
             values = []
             for header_date, value_cell in zip(header_dates, cells[1:-1]):
-                values.append({"date": header_date, "value": parse_number(str(value_cell.get("text", "")))})
+                values.append(
+                    {
+                        "date": header_date,
+                        "value": parse_number(str(value_cell.get("text", ""))),
+                    }
+                )
             rows.append(
                 {
                     "category": current_category,
                     "label": label,
                     "values": values,
-                    "history_url": urljoin(page_url, html.unescape(history_href)) if history_href else None,
+                    "history_url": urljoin(page_url, html.unescape(history_href))
+                    if history_href
+                    else None,
                     "history_range": history_range or None,
                 }
             )
@@ -301,7 +343,9 @@ def parse_summary_page(page_url: str, html_text: str, download_url: str | None) 
     }
 
 
-def infer_history_details(page_url: str, download_url: str | None = None) -> tuple[str | None, str]:
+def infer_history_details(
+    page_url: str, download_url: str | None = None
+) -> tuple[str | None, str]:
     parsed_url = urlparse(page_url)
     query = parse_qs(parsed_url.query)
     series_id = query.get("s", [None])[0]
@@ -319,12 +363,16 @@ def infer_history_details(page_url: str, download_url: str | None = None) -> tup
                 frequency = match.group("freq").upper()
 
     if not frequency:
-        raise RuntimeError("Could not determine EIA history frequency from the URL or linked XLS.")
+        raise RuntimeError(
+            "Could not determine EIA history frequency from the URL or linked XLS."
+        )
     return series_id.upper() if series_id else None, frequency.upper()
 
 
 def parse_daily_week_label(value: str) -> date | None:
-    match = re.match(r"^(\d{4})\s+([A-Za-z]{3})-\s*(\d{1,2})\s+to\s+[A-Za-z]{3}-\s*\d{1,2}$", value)
+    match = re.match(
+        r"^(\d{4})\s+([A-Za-z]{3})-\s*(\d{1,2})\s+to\s+[A-Za-z]{3}-\s*\d{1,2}$", value
+    )
     if not match:
         return None
     year_value, month_name, day_value = match.groups()
@@ -341,7 +389,12 @@ def parse_daily_history_rows(row_cells: list[str]) -> list[dict[str, object]]:
         parsed_value = parse_number(cell)
         if parsed_value is None:
             continue
-        rows.append({"date": (week_start + timedelta(days=index)).isoformat(), "value": parsed_value})
+        rows.append(
+            {
+                "date": (week_start + timedelta(days=index)).isoformat(),
+                "value": parsed_value,
+            }
+        )
     return rows
 
 
@@ -359,7 +412,12 @@ def parse_weekly_history_rows(row_cells: list[str]) -> list[dict[str, object]]:
         if parsed_value is None or not end_date_text:
             continue
         month_value, day_value = [int(part) for part in end_date_text.split("/")]
-        rows.append({"date": date(year_value, month_value, day_value).isoformat(), "value": parsed_value})
+        rows.append(
+            {
+                "date": date(year_value, month_value, day_value).isoformat(),
+                "value": parsed_value,
+            }
+        )
     return rows
 
 
@@ -372,7 +430,9 @@ def parse_monthly_history_rows(row_cells: list[str]) -> list[dict[str, object]]:
         parsed_value = parse_number(cell)
         if parsed_value is None:
             continue
-        rows.append({"date": f"{year_value}-{month_number:02d}-01", "value": parsed_value})
+        rows.append(
+            {"date": f"{year_value}-{month_number:02d}-01", "value": parsed_value}
+        )
     return rows
 
 
@@ -390,13 +450,23 @@ def parse_annual_history_rows(row_cells: list[str]) -> list[dict[str, object]]:
     return rows
 
 
-def parse_history_page_html(page_url: str, html_text: str, download_url: str | None) -> dict[str, object]:
+def parse_history_page_html(
+    page_url: str, html_text: str, download_url: str | None
+) -> dict[str, object]:
     series_id, frequency = infer_history_details(page_url, download_url)
     release_date, next_release_date = extract_release_dates(html_text)
     rows: list[dict[str, object]] = []
-    table_match = re.search(r"<table[^>]*class=['\"]FloatTitle['\"][^>]*>.*?</table>", html_text, re.IGNORECASE | re.DOTALL)
+    table_match = re.search(
+        r"<table[^>]*class=['\"]FloatTitle['\"][^>]*>.*?</table>",
+        html_text,
+        re.IGNORECASE | re.DOTALL,
+    )
     if not table_match:
-        table_match = re.search(r"<table\s+SUMMARY=(?:['\"].*?['\"]|[^>]+)>.*?</table>", html_text, re.IGNORECASE | re.DOTALL)
+        table_match = re.search(
+            r"<table\s+SUMMARY=(?:['\"].*?['\"]|[^>]+)>.*?</table>",
+            html_text,
+            re.IGNORECASE | re.DOTALL,
+        )
     if not table_match:
         raise RuntimeError("Could not find the EIA history data table.")
 
@@ -437,7 +507,9 @@ def import_xlrd():
     try:
         import xlrd  # type: ignore
     except ImportError as exc:
-        raise RuntimeError("EIA XLS parsing requires the optional 'xlrd' package.") from exc
+        raise RuntimeError(
+            "EIA XLS parsing requires the optional 'xlrd' package."
+        ) from exc
     return xlrd
 
 
@@ -479,7 +551,9 @@ def extract_workbook_metadata(contents_sheet) -> dict[str, str | None]:
 
 def xls_date_to_iso(xlrd_module, workbook, value: object, frequency: str) -> str:
     if isinstance(value, (int, float)):
-        parsed_date = xlrd_module.xldate.xldate_as_datetime(float(value), workbook.datemode).date()
+        parsed_date = xlrd_module.xldate.xldate_as_datetime(
+            float(value), workbook.datemode
+        ).date()
     else:
         text_value = clean_scalar(value)
         if not text_value:
@@ -491,7 +565,9 @@ def xls_date_to_iso(xlrd_module, workbook, value: object, frequency: str) -> str
         elif frequency == "A":
             year_match = re.match(r"^\d{4}$", text_value)
             if not year_match:
-                raise RuntimeError(f"Unexpected annual EIA XLS date value: {text_value}")
+                raise RuntimeError(
+                    f"Unexpected annual EIA XLS date value: {text_value}"
+                )
             return f"{text_value}-01-01"
         else:
             raise RuntimeError(f"Unsupported EIA history frequency: {frequency}")
@@ -503,14 +579,20 @@ def xls_date_to_iso(xlrd_module, workbook, value: object, frequency: str) -> str
     return parsed_date.isoformat()
 
 
-def extract_history_rows_from_workbook(workbook, xlrd_module, frequency: str) -> tuple[str | None, str, list[dict[str, object]]]:
+def extract_history_rows_from_workbook(
+    workbook, xlrd_module, frequency: str
+) -> tuple[str | None, str, list[dict[str, object]]]:
     try:
         data_sheet = workbook.sheet_by_name("Data 1")
     except Exception as exc:
-        raise RuntimeError("EIA XLS workbook did not include the expected 'Data 1' worksheet.") from exc
+        raise RuntimeError(
+            "EIA XLS workbook did not include the expected 'Data 1' worksheet."
+        ) from exc
 
     if data_sheet.nrows < 4 or data_sheet.ncols < 2:
-        raise RuntimeError("EIA XLS workbook did not contain the expected 'Data 1' layout.")
+        raise RuntimeError(
+            "EIA XLS workbook did not contain the expected 'Data 1' layout."
+        )
 
     sourcekey = clean_scalar(data_sheet.cell_value(1, 1)) or None
     value_label = clean_scalar(data_sheet.cell_value(2, 1)) or "EIA Series"
@@ -524,48 +606,74 @@ def extract_history_rows_from_workbook(workbook, xlrd_module, frequency: str) ->
         parsed_value = parse_numeric_cell(value_cell)
         if parsed_value is None:
             continue
-        rows.append({"date": xls_date_to_iso(xlrd_module, workbook, date_cell, frequency), "value": parsed_value})
+        rows.append(
+            {
+                "date": xls_date_to_iso(xlrd_module, workbook, date_cell, frequency),
+                "value": parsed_value,
+            }
+        )
 
     return sourcekey, value_label, rows
 
 
-def parse_history_page_xls(page_url: str, download_url: str, html_text: str) -> dict[str, object]:
+def parse_history_page_xls(
+    page_url: str, download_url: str, html_text: str
+) -> dict[str, object]:
     release_date, next_release_date = extract_release_dates(html_text)
-    inferred_series_id, inferred_frequency = infer_history_details(page_url, download_url)
+    inferred_series_id, inferred_frequency = infer_history_details(
+        page_url, download_url
+    )
     xlrd_module = import_xlrd()
     workbook = xlrd_module.open_workbook(file_contents=fetch_bytes(download_url))
 
     try:
         contents_sheet = workbook.sheet_by_name("Contents")
     except Exception as exc:
-        raise RuntimeError("EIA XLS workbook did not include the expected 'Contents' worksheet.") from exc
+        raise RuntimeError(
+            "EIA XLS workbook did not include the expected 'Contents' worksheet."
+        ) from exc
 
     workbook_metadata = extract_workbook_metadata(contents_sheet)
-    frequency = normalize_frequency_code(workbook_metadata.get("frequency")) or inferred_frequency
-    sourcekey, value_label, rows = extract_history_rows_from_workbook(workbook, xlrd_module, frequency)
+    frequency = (
+        normalize_frequency_code(workbook_metadata.get("frequency"))
+        or inferred_frequency
+    )
+    sourcekey, value_label, rows = extract_history_rows_from_workbook(
+        workbook, xlrd_module, frequency
+    )
 
     return {
         "provider": "eia",
         "page_type": "history",
         "source_url": page_url,
         "download_url": download_url,
-        "title": value_label or workbook_metadata.get("title") or extract_title(html_text),
+        "title": value_label
+        or workbook_metadata.get("title")
+        or extract_title(html_text),
         "series_id": sourcekey or inferred_series_id,
         "frequency": frequency,
-        "release_date": parse_release_date(workbook_metadata.get("release_date")) or release_date,
-        "next_release_date": parse_release_date(workbook_metadata.get("next_release_date")) or next_release_date,
+        "release_date": parse_release_date(workbook_metadata.get("release_date"))
+        or release_date,
+        "next_release_date": parse_release_date(
+            workbook_metadata.get("next_release_date")
+        )
+        or next_release_date,
         "parsed_from": "xls",
         "rows": rows,
     }
 
 
-def parse_history_page(page_url: str, html_text: str, download_url: str | None, source: str) -> dict[str, object]:
+def parse_history_page(
+    page_url: str, html_text: str, download_url: str | None, source: str
+) -> dict[str, object]:
     if source == "html":
         return parse_history_page_html(page_url, html_text, download_url)
 
     if not download_url:
         if source == "xls":
-            raise RuntimeError("EIA history page does not expose a linked XLS download.")
+            raise RuntimeError(
+                "EIA history page does not expose a linked XLS download."
+            )
         return parse_history_page_html(page_url, html_text, download_url)
 
     try:
@@ -578,7 +686,9 @@ def parse_history_page(page_url: str, html_text: str, download_url: str | None, 
         return parsed_output
 
 
-def save_raw_output(source_url: str, preferred_url: str | None, prefer: str, output_path: Path) -> str:
+def save_raw_output(
+    source_url: str, preferred_url: str | None, prefer: str, output_path: Path
+) -> str:
     if prefer == "xls" and preferred_url:
         output_path.write_bytes(fetch_bytes(preferred_url))
         return preferred_url
@@ -593,7 +703,11 @@ def main() -> int:
         page_kind = page_type_for(source_url)
         html_text = fetch_text(source_url)
         effective_url = source_url
-        redirect_url = extract_meta_refresh_url(html_text, source_url) if page_kind == "history" else None
+        redirect_url = (
+            extract_meta_refresh_url(html_text, source_url)
+            if page_kind == "history"
+            else None
+        )
         if redirect_url:
             effective_url = redirect_url
             html_text = fetch_text(effective_url)
@@ -602,19 +716,28 @@ def main() -> int:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         if args.format == "raw":
-            saved_url = save_raw_output(effective_url, download_url, args.prefer, output_path)
+            saved_url = save_raw_output(
+                effective_url, download_url, args.prefer, output_path
+            )
             print(f"Saved raw EIA payload to {output_path}")
             print(f"URL: {saved_url}")
             return 0
 
         if page_kind == "summary":
             if args.source == "xls":
-                raise ValueError("Parsed summary pages support HTML output only. Use --format raw for the linked XLS.")
+                raise ValueError(
+                    "Parsed summary pages support HTML output only. Use --format raw for the linked XLS."
+                )
             parsed_output = parse_summary_page(source_url, html_text, download_url)
         else:
-            parsed_output = parse_history_page(source_url, html_text, download_url, args.source)
+            parsed_output = parse_history_page(
+                source_url, html_text, download_url, args.source
+            )
 
-        output_path.write_text(json.dumps(parsed_output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(parsed_output, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         print(f"Saved parsed EIA artifact to {output_path}")
         print(f"page_type={page_kind} rows={len(parsed_output.get('rows', []))}")
         return 0
