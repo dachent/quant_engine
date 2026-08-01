@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+import pytest
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+MODULE_PATH = REPOSITORY_ROOT / "tools" / "p123_security_quarantine.py"
+SPEC = importlib.util.spec_from_file_location("p123_security_quarantine", MODULE_PATH)
+if SPEC is None or SPEC.loader is None:  # pragma: no cover - import machinery guard
+    raise RuntimeError("unable to load Portfolio123 quarantine tool")
+quarantine = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = quarantine
+SPEC.loader.exec_module(quarantine)
+
+
+def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
+    har = tmp_path / "har"
+    legacy = tmp_path / "legacy"
+    target = tmp_path / "quarantine"
+    (har / "json").mkdir(parents=True)
+    (legacy / "p123_export" / "__pycache__").mkdir(parents=True)
+    (har / "json" / "strategy.har").write_bytes(b"authenticated har")
+    (har / "json" / "p123_cookies.json").write_bytes(b"cookie material")
+    (har / "p123_config.json").write_bytes(b"configuration")
+    (har / "normalized.csv").write_bytes(b"not quarantined")
+    (legacy / "config.yaml").write_bytes(b"configuration")
+    (legacy / "p123_export" / "credentials.py").write_bytes(b"legacy code")
+    (legacy / "p123_export" / "__pycache__" / "credentials.pyc").write_bytes(
+        b"compiled legacy code"
+    )
+    (legacy / "portfolio.parquet").write_bytes(b"not quarantined")
+    return har, legacy, target
+
+
+def test_plan_apply_verify_and_restore_are_bounded(tmp_path: Path) -> None:
+    har, legacy, target = _inputs(tmp_path)
+    first = quarantine.plan_p123(har, legacy, target)
+    second = quarantine.plan_p123(har, legacy, target)
+    assert first == second
+    assert first["artifact_count"] == 6
+    plan_path = Path(str(first["plan_path"]))
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert all("authenticated har" not in json.dumps(row) for row in plan["entries"])
+
+    applied = quarantine.apply_plan(plan_path)
+    assert applied["state"] == "QUARANTINED"
+    verified = quarantine.verify_plan(plan_path)
+    assert verified["artifact_count"] == 6
+    scanned = quarantine.scan_plan(plan_path)
+    assert scanned["state"] == "SCANNED_WITHOUT_VALUE_DISCLOSURE"
+    assert scanned["files_with_indicators"] >= 1
+    scan = json.loads(
+        (plan_path.parent / "sensitivity-scan.json").read_text(encoding="utf-8")
+    )
+    assert all("cookie material" not in json.dumps(row) for row in scan["findings"])
+    assert (har / "normalized.csv").read_bytes() == b"not quarantined"
+    assert (legacy / "portfolio.parquet").read_bytes() == b"not quarantined"
+    assert not (har / "json" / "strategy.har").exists()
+
+    restored = quarantine.restore_plan(plan_path)
+    assert restored["restored_count"] == 6
+    assert (har / "json" / "strategy.har").read_bytes() == b"authenticated har"
+    assert (legacy / "p123_export" / "credentials.py").read_bytes() == b"legacy code"
+
+
+def test_apply_fails_closed_on_source_drift(tmp_path: Path) -> None:
+    har, legacy, target = _inputs(tmp_path)
+    result = quarantine.plan_p123(har, legacy, target)
+    plan_path = Path(str(result["plan_path"]))
+    (har / "json" / "strategy.har").write_bytes(b"changed")
+
+    with pytest.raises(quarantine.QuarantineError, match="source differs"):
+        quarantine.apply_plan(plan_path)
+
+    assert (har / "json" / "strategy.har").read_bytes() == b"changed"
+    assert not (plan_path.parent / "objects").exists()
+
+
+def test_plan_rejects_quarantine_inside_source(tmp_path: Path) -> None:
+    har, legacy, _ = _inputs(tmp_path)
+    with pytest.raises(quarantine.QuarantineError, match="must be disjoint"):
+        quarantine.plan_p123(har, legacy, har / "quarantine")
+
+
+def test_failed_apply_keeps_journal_and_retry_uses_new_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    har, legacy, target = _inputs(tmp_path)
+    result = quarantine.plan_p123(har, legacy, target)
+    plan_path = Path(str(result["plan_path"]))
+
+    def fail_replace(source: str, destination: str) -> None:
+        raise OSError(f"synthetic move failure: {source} -> {destination}")
+
+    with monkeypatch.context() as context:
+        context.setattr(quarantine.os, "replace", fail_replace)
+        with pytest.raises(OSError, match="synthetic move failure"):
+            quarantine.apply_plan(plan_path)
+
+    assert (plan_path.parent / "apply-journal.jsonl").is_file()
+    applied = quarantine.apply_plan(plan_path)
+    assert applied["state"] == "QUARANTINED"
+    assert (plan_path.parent / "apply-journal-02.jsonl").is_file()
