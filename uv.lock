@@ -19,6 +19,7 @@ members = [
     "quant-engine-ibkr",
     "quant-engine-matrixport",
     "quant-engine-portfolio-ledger",
+    "quant-engine-portfolio123",
     "quant-engine-schwab",
     "quant-engine-schwab-trading-app",
     "quant-engine-web-contract-harvester",
@@ -1135,6 +1136,21 @@ dependencies = [
 requires-dist = [{ name = "quant-engine-core", editable = "packages/core" }]
 
 [[package]]
+name = "quant-engine-portfolio123"
+version = "0.1.0"
+source = { editable = "packages/portfolio123" }
+dependencies = [
+    { name = "quant-engine-core" },
+    { name = "quant-engine-web-contract-harvester" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "quant-engine-core", editable = "packages/core" },
+    { name = "quant-engine-web-contract-harvester", editable = "packages/web-contracts" },
+]
+
+[[package]]
 name = "quant-engine-schwab"
 version = "0.3.0"
 source = { editable = "packages/schwab" }
@@ -1207,6 +1223,7 @@ dev = [
     { name = "quant-engine-ibkr" },
     { name = "quant-engine-matrixport" },
     { name = "quant-engine-portfolio-ledger" },
+    { name = "quant-engine-portfolio123" },
     { name = "quant-engine-schwab" },
     { name = "quant-engine-web-contract-harvester" },
     { name = "ruff" },
@@ -1235,6 +1252,7 @@ dev = [
     { name = "quant-engine-ibkr", editable = "packages/ibkr" },
     { name = "quant-engine-matrixport", editable = "packages/matrixport" },
     { name = "quant-engine-portfolio-ledger", editable = "packages/portfolio-ledger" },
+    { name = "quant-engine-portfolio123", editable = "packages/portfolio123" },
     { name = "quant-engine-schwab", editable = "packages/schwab" },
     { name = "quant-engine-web-contract-harvester", editable = "packages/web-contracts" },
     { name = "ruff", specifier = "==0.15.22" },

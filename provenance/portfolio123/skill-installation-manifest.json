@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "skill": "portfolio123",
+  "governing_issue": 18,
+  "files": [
+    {
+      "path": "SKILL.md",
+      "sha256": "c986b22d0d5aec13de68f2fae463a4704b108db9f7bde5b79f54ca96dad8a356"
+    },
+    {
+      "path": "agents/openai.yaml",
+      "sha256": "5e684052f9e6fb0a754b28207ddf7f6a978b854054912b5a420f433f60260c62"
+    },
+    {
+      "path": "references/advanced-functions.md",
+      "sha256": "d99148dccb9461a6d87ed60445b42d7c00272c5b086a6a76117928f3831adc82"
+    },
+    {
+      "path": "references/api.md",
+      "sha256": "91166dff9058e36d8b8abb037c8fc2b4b8a2500cdf787bc040af9e03f7ce31f3"
+    },
+    {
+      "path": "references/benchmark-functions.md",
+      "sha256": "66fa225e92f4c54f8f745e6c0be9ceb9705eae3a10929f251c6243c6b008a735"
+    },
+    {
+      "path": "references/estimates.md",
+      "sha256": "735806d5f9bc2227a44f0be5473c0f564cf8d4c77c332b5f0a71483e5a582833"
+    },
+    {
+      "path": "references/financials.md",
+      "sha256": "b5ba887442f44288e0d5f0135699827d19700972fd144729d9106266253c54de"
+    },
+    {
+      "path": "references/fundamentals.md",
+      "sha256": "319a9af39442d3f3bba1aa9c60ecf0893272f3d3f47e4dbe9e477856221e6c21"
+    },
+    {
+      "path": "references/industry-sector.md",
+      "sha256": "f595715f07ebdbdfb92488f9111a86962a186608ce2dc6a065932bda8354b154"
+    },
+    {
+      "path": "references/misc.md",
+      "sha256": "ca77e8ff6ed329bb06a585dd099a060b716f2edc01e2ed8b22217286f2b0f742"
+    },
+    {
+      "path": "references/ranking-system-xml.md",
+      "sha256": "30a731e47b26341b432a86bb1bfacf3f512d17b8552143b707c96b63b1c0f91d"
+    },
+    {
+      "path": "references/ratios-statistics.md",
+      "sha256": "6ac257f649e79dd24145bf32460d59cbeefa6b5799d00d2ce013656373a1304d"
+    },
+    {
+      "path": "references/strategy.md",
+      "sha256": "36a7b1dd59ab5197e750089598f3e5dbb0a481087be041dac6fdcde421051637"
+    },
+    {
+      "path": "references/taxonomy.md",
+      "sha256": "7dfbf7c693a7aad332868b9d5680462127e688194cd2d5bd61039406d8cd9e82"
+    },
+    {
+      "path": "references/technical.md",
+      "sha256": "5965252596488eb3e72db52a79d2b3ff3fee8a74fcd83e642e6c09ea8ce87ea4"
+    },
+    {
+      "path": "references/universe-filters.md",
+      "sha256": "543f0d2fded776f3ebd7b30301fc83f217d6828ee4023672ae2728520e8ae426"
+    },
+    {
+      "path": "references/universe-operations.md",
+      "sha256": "9b76d709ac32b9c0394015c3b9091de27985f142c3e11ec30f0c780604304cdc"
+    },
+    {
+      "path": "references/web-contracts.md",
+      "sha256": "12950d43e4a7712e4f848eeccc38e087111a607c91cfd6dd5561943a7df600cb"
+    }
+  ]
+}

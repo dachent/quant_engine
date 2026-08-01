@@ -40,6 +40,7 @@ def test_virtual_root_has_only_accepted_workspace_members() -> None:
             "packages/ibkr",
             "packages/matrixport",
             "packages/portfolio-ledger",
+            "packages/portfolio123",
             "packages/schwab",
             "packages/web-contracts",
         ]
@@ -117,6 +118,31 @@ def test_portfolio_ledger_package_is_private_and_depends_only_on_core() -> None:
     assert (
         member_root / "src" / "quant_engine" / "portfolio_ledger" / "py.typed"
     ).is_file()
+
+
+def test_portfolio123_package_is_private_and_har_first() -> None:
+    member_root = REPOSITORY_ROOT / "packages" / "portfolio123"
+    member = _toml(member_root / "pyproject.toml")
+    project = member["project"]
+    assert isinstance(project, dict)
+    assert project["requires-python"] == ">=3.11,<3.14"
+    assert project["dependencies"] == [
+        "quant-engine-core",
+        "quant-engine-web-contract-harvester",
+    ]
+    assert project["classifiers"] == ["Private :: Do Not Upload"]
+    assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
+        "quant_engine.portfolio123"
+    )
+    assert not (member_root / "src" / "quant_engine" / "__init__.py").exists()
+    assert (
+        member_root / "src" / "quant_engine" / "portfolio123" / "py.typed"
+    ).is_file()
+    quality = (REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "packages/portfolio123/src" in quality
+    assert "tests/portfolio123" in quality
 
 
 def test_ibkr_package_is_private_and_read_side_only() -> None:
