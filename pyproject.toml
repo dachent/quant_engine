@@ -3,7 +3,7 @@ name = "quant-engine-workspace"
 version = "0.0.0"
 description = "Private governed workspace for quant_engine."
 requires-python = ">=3.11,<3.14"
-dependencies = ["numpy>=2.0,<3", "xlsxwriter>=3.2,<4"]
+dependencies = ["numpy>=2.0,<2.5", "xlsxwriter>=3.2,<4"]
 
 [project.optional-dependencies]
 market-data = [
