@@ -1,9 +1,13 @@
 [project]
 name = "quant-engine-portfolio123"
-version = "0.1.0"
+version = "0.2.0"
 description = "HAR-first Portfolio123 capability routing for quant_engine."
 requires-python = ">=3.11,<3.14"
-dependencies = ["quant-engine-core", "quant-engine-web-contract-harvester"]
+dependencies = [
+  "pyarrow==21.0.0",
+  "quant-engine-core",
+  "quant-engine-web-contract-harvester",
+]
 classifiers = ["Private :: Do Not Upload"]
 
 [build-system]

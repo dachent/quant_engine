@@ -127,6 +127,7 @@ def test_portfolio123_package_is_private_and_har_first() -> None:
     assert isinstance(project, dict)
     assert project["requires-python"] == ">=3.11,<3.14"
     assert project["dependencies"] == [
+        "pyarrow==21.0.0",
         "quant-engine-core",
         "quant-engine-web-contract-harvester",
     ]
