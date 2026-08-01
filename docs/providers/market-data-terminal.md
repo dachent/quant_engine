@@ -29,7 +29,7 @@ exchange-calendar completeness proof.
 | Source | Accepted revision | History | Disposition |
 |---|---:|---:|---|
 | `dachent/mdt` | `f7eedb35dff9317bbac6aaa53d8df3607da03c4a` | 16 commits | Imported without squashing; current skill is authoritative. |
-| `dachent/yf_marketdata` | `a009e963d50b8bd6140ee44e0944088302b2bfaa` | 5 commits | Imported without squashing; adjusted/raw/summary/search behavior and tests were curated into the single Yahoo helper; duplicate runtime removed from the live tree. |
+| `dachent/yf_marketdata` | source `a009e963d50b8bd6140ee44e0944088302b2bfaa`; sanitized `29ac0f3da93a6fee42a1dc4a675ca734b356acc5` | 5 commits | Imported without squashing after removing `.vendor` from every revision; adjusted/raw/summary/search behavior and tests were curated into the single Yahoo helper; duplicate runtime removed from the live tree. |
 | gist `a80848d89966daa6730cd553be691b1a` | `28315ce9711360989e56452d62c72e43ed36b247` | 7 commits | Imported without squashing; retained as a generated provenance snapshot, not an independent authority. |
 
 The three upstream sources did not declare license files at the accepted
@@ -39,10 +39,27 @@ it does not grant third-party redistribution rights. Provider terms and
 attribution remain provider-specific responsibilities.
 
 The machine-readable mapping is
-`docs/providers/market-data-terminal-source-manifest.json`. All three accepted
-source commits remain ancestors of the integration branch; the temporary
-import directories were removed only after their differentiated behavior or
-documentation was incorporated.
+`docs/providers/market-data-terminal-source-manifest.json`. The accepted MDT
+and gist source commits and the accepted sanitized Yahoo head remain ancestors
+of the integration branch. The temporary import directories were removed only
+after their differentiated behavior or documentation was incorporated.
+
+The Yahoo source history required a security-preserving rewrite. Upstream
+commit `1d50e5b970a610f13535bcd7724b5cee6d6faa5a` committed 4,249 dependency
+files under `.vendor`; Gitleaks identified seven generic-key test vectors in
+vendored protobuf and NumPy tests. No finding was allowlisted. The rewritten
+history preserves author, timestamp, message, topology, and the five-commit
+sequence while removing `.vendor` from every revision. The accepted upstream
+head and sanitized head have the identical tree
+`d549d6cca6f696d490bfb583735fd85830842fe4`.
+
+| Source commit | Sanitized commit |
+|---|---|
+| `a8b36b57085e5c46fc4475caed2db195e482fef0` | `421718638cecd52e8bfd91ba66bf372be981cdbf` |
+| `1d50e5b970a610f13535bcd7724b5cee6d6faa5a` | `5dae074e3d4d48f153b73b5b72d75a340210f7e2` |
+| `ebddf34e3a4a766eb166ead37d229c150e0654d3` | `18025ce933361ef85aeaae8c982a78da0ce05725` |
+| `3de63ae11059d4ef737cfa33c0dc6a18900ff2ae` | `d81e72184686ea0f80ebbf3bb3bac5210c1f3bd5` |
+| `a009e963d50b8bd6140ee44e0944088302b2bfaa` | `29ac0f3da93a6fee42a1dc4a675ca734b356acc5` |
 
 ## Runtime
 

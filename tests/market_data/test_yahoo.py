@@ -184,6 +184,20 @@ def test_all_absorbed_source_histories_are_ancestors_and_manifested() -> None:
             cwd=REPOSITORY_ROOT,
             check=True,
         )
+        if "sanitized_head_tree" in source:
+            tree = subprocess.check_output(
+                ["git", "rev-parse", f"{commit}^{{tree}}"],
+                cwd=REPOSITORY_ROOT,
+                text=True,
+            ).strip()
+            assert tree == source["source_head_tree"]
+            assert tree == source["sanitized_head_tree"]
+            history_paths = subprocess.check_output(
+                ["git", "log", "--format=", "--name-only", commit],
+                cwd=REPOSITORY_ROOT,
+                text=True,
+            ).splitlines()
+            assert not any(path.startswith(".vendor/") for path in history_paths)
         assert (REPOSITORY_ROOT / source["retained_path"]).exists()
 
 
