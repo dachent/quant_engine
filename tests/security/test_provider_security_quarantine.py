@@ -9,8 +9,10 @@ import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = REPOSITORY_ROOT / "tools" / "p123_security_quarantine.py"
-SPEC = importlib.util.spec_from_file_location("p123_security_quarantine", MODULE_PATH)
+MODULE_PATH = REPOSITORY_ROOT / "tools" / "provider_security_quarantine.py"
+SPEC = importlib.util.spec_from_file_location(
+    "provider_security_quarantine", MODULE_PATH
+)
 if SPEC is None or SPEC.loader is None:  # pragma: no cover - import machinery guard
     raise RuntimeError("unable to load Portfolio123 quarantine tool")
 quarantine = importlib.util.module_from_spec(SPEC)
@@ -106,3 +108,36 @@ def test_failed_apply_keeps_journal_and_retry_uses_new_attempt(
     applied = quarantine.apply_plan(plan_path)
     assert applied["state"] == "QUARANTINED"
     assert (plan_path.parent / "apply-journal-02.jsonl").is_file()
+
+
+def test_quantbase_profile_selects_only_authenticated_and_account_artifacts(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "quantbase"
+    source.mkdir()
+    (source / "capture.har").write_bytes(b"sessionid material")
+    (source / "quantbase_cookies.json").write_bytes(b"browser state")
+    (source / "account_activity_api_response.json").write_bytes(b"account data")
+    (source / "account_activity_screenshot.png").write_bytes(b"image evidence")
+    (source / "quantbase_api_summary_20260731.json").write_bytes(b"summary")
+    (source / "RUNBOOK_QUANTBASE.md").write_bytes(b"keep source code")
+    csv = source / "csv"
+    csv.mkdir()
+    (csv / "history.csv").write_bytes(b"keep normalized data")
+
+    result = quarantine.plan_quantbase(source, tmp_path / "quarantine")
+    assert result["artifact_count"] == 5
+    plan_path = Path(str(result["plan_path"]))
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["provider_id"] == "quantbase"
+    assert {row["relative_path"] for row in plan["entries"]} == {
+        "account_activity_api_response.json",
+        "account_activity_screenshot.png",
+        "capture.har",
+        "quantbase_api_summary_20260731.json",
+        "quantbase_cookies.json",
+    }
+    quarantine.apply_plan(plan_path)
+    quarantine.verify_plan(plan_path)
+    assert (source / "RUNBOOK_QUANTBASE.md").is_file()
+    assert (csv / "history.csv").is_file()
