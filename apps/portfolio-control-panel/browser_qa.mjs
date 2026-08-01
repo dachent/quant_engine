@@ -32,6 +32,8 @@ const launchOptions = {
 const captures = [
   { name: "desktop-command", view: "command", viewport: { width: 1440, height: 900 }, lint: true, pdf: true },
   { name: "desktop-risk", view: "risk", viewport: { width: 1440, height: 900 } },
+  { name: "desktop-attribution", view: "attribution", viewport: { width: 1440, height: 900 }, lint: true },
+  { name: "desktop-dependence", view: "dependence", viewport: { width: 1440, height: 900 }, lint: true },
   { name: "desktop-candidates", view: "candidates", viewport: { width: 1440, height: 900 } },
   { name: "desktop-data", view: "data", viewport: { width: 1440, height: 900 } },
   { name: "mobile-command", view: "command", viewport: { width: 390, height: 844 }, lint: true },
@@ -85,11 +87,13 @@ async function visualLint(page) {
     const findings = [];
     for (const element of Array.from(document.querySelectorAll("body *"))) {
       if (!isVisible(element)) continue;
+      if (element.matches("caption, .sr-only")) continue;
       const text = (element.innerText || "").trim().replace(/\s+/g, " ");
       const selector = selectorFor(element);
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
-      if (text && (element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1)) {
+      const intentionalScroll = element.matches("#app, .workspace, main, .view, .grid, .table-wrap, .matrix-shell");
+      if (text && !intentionalScroll && (element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1)) {
         findings.push({ rule: "text_overflow", severity: "major", selector, message: "Element text appears clipped or scrollable.", sample: text.slice(0, 120), bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
       }
       const fontSize = Number.parseFloat(style.fontSize);

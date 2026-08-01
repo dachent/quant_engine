@@ -7,6 +7,7 @@ from collections import Counter
 from datetime import date
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -30,8 +31,8 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-PANEL_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.1.0"
+PANEL_SCHEMA_VERSION: Final = 2
+BUILDER_VERSION: Final = "1.2.0"
 SOURCE_CONTRACT = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -43,18 +44,36 @@ DEFAULT_TEMPLATE_ROOT = (
 PANEL_FILES: Final = (
     "index.html",
     "styles.css",
+    "analytics.css",
     "app.js",
     "data/dashboard_data.json",
     "data/dashboard_data.js",
 )
-VIEWS: Final = ("command", "capital", "risk", "signals", "candidates", "data")
+VIEWS: Final = (
+    "command",
+    "capital",
+    "risk",
+    "signals",
+    "attribution",
+    "dependence",
+    "candidates",
+    "data",
+)
 CAPTURES: Final = (
     "desktop-command",
     "desktop-risk",
+    "desktop-attribution",
+    "desktop-dependence",
     "desktop-candidates",
     "desktop-data",
     "mobile-command",
     "direct-file",
+)
+LINT_CAPTURES: Final = (
+    "desktop-command",
+    "desktop-attribution",
+    "desktop-dependence",
+    "mobile-command",
 )
 
 
@@ -118,6 +137,38 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
     return report, {"generation_id": pointer.generation_id, "sha256": _hash(path)}, path
 
 
+def _current_analytics(
+    root: Path,
+    *,
+    filename: str,
+    field_name: str,
+    expected_schema_version: int,
+) -> tuple[dict[str, Any], dict[str, str], Path]:
+    try:
+        pointer = read_current(root)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ControlPanelValidationError(
+            f"{field_name} pointer is not accepted"
+        ) from exc
+    path = root / "generations" / pointer.generation_id / filename
+    value = _load_json(path, field_name)
+    if value.get("analytics_schema_version") != expected_schema_version:
+        raise ControlPanelValidationError(f"{field_name} schema is unsupported")
+    return value, {"generation_id": pointer.generation_id, "sha256": _hash(path)}, path
+
+
+def _analytics_roots(
+    report_root: Path,
+    decomposition_root: Path | None,
+    correlation_root: Path | None,
+) -> tuple[Path, Path]:
+    analytics = report_root.parent / "analytics"
+    return (
+        decomposition_root or analytics / "decomposition",
+        correlation_root or analytics / "correlation",
+    )
+
+
 def _source_inputs(legacy_panel: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     contract = _load_json(SOURCE_CONTRACT, "control-panel source contract")
     if contract.get("contract_version") != 1:
@@ -160,9 +211,336 @@ def _fact_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
     return _objects(report.get("coverage_data_quality"), "coverage_data_quality")
 
 
+def _finite_float(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ControlPanelValidationError(f"{field_name} must be numeric")
+    try:
+        accepted = float(value)
+    except ValueError as exc:
+        raise ControlPanelValidationError(f"{field_name} must be numeric") from exc
+    if not math.isfinite(accepted):
+        raise ControlPanelValidationError(f"{field_name} must be finite")
+    return accepted
+
+
+def _number_text(value: float) -> str:
+    if abs(value) < 5e-16:
+        value = 0.0
+    return format(value, ".12g")
+
+
+def _factor_analysis(
+    decomposition: Mapping[str, Any],
+    identity: Mapping[str, str],
+    strategy_names: set[str],
+) -> dict[str, Any]:
+    method_label = _text(decomposition.get("method_label"), "factor.method_label")
+    methodology_version = _text(
+        decomposition.get("methodology_version"), "factor.methodology_version"
+    )
+    selections = _objects(decomposition.get("model_selections"), "model_selections")
+    if {
+        _text(row.get("series_id"), "selection.series_id") for row in selections
+    } != strategy_names:
+        raise ControlPanelValidationError(
+            "factor selections differ from the current strategy boundary"
+        )
+    models = _objects(decomposition.get("model_results"), "model_results")
+    model_index = {
+        (
+            _text(row.get("series_id"), "model.series_id"),
+            _text(row.get("model_id"), "model.model_id"),
+        ): row
+        for row in models
+    }
+    attempts: dict[str, list[dict[str, Any]]] = {}
+    for row in models:
+        attempts.setdefault(_text(row.get("series_id"), "model.series_id"), []).append(
+            row
+        )
+
+    rows: list[dict[str, Any]] = []
+    available_count = 0
+    for selection in sorted(selections, key=lambda row: str(row.get("series_id"))):
+        series_id = _text(selection.get("series_id"), "selection.series_id")
+        selected_model = selection.get("model_id")
+        if selected_model is None:
+            series_attempts = attempts.get(series_id, [])
+            reasons = sorted(
+                {_text(item.get("status"), "model.status") for item in series_attempts}
+            )
+            best_coverage: dict[str, Any] | None = None
+            if series_attempts:
+                best = max(
+                    series_attempts,
+                    key=lambda item: int(
+                        _object(item.get("coverage"), "model.coverage").get(
+                            "aligned_observations", 0
+                        )
+                    ),
+                )
+                best_coverage = _object(best.get("coverage"), "model.coverage")
+            rows.append(
+                {
+                    "alpha": None,
+                    "contribution_summary": None,
+                    "cost_coverage": "INCOMPLETE",
+                    "coverage": best_coverage,
+                    "diagnostics": None,
+                    "evidence_layer": None,
+                    "exposures": [],
+                    "model_id": None,
+                    "selection_status": _text(
+                        selection.get("status"), "selection.status"
+                    ),
+                    "series_id": series_id,
+                    "status": "UNAVAILABLE",
+                    "unavailable_reasons": reasons or ["UNAVAILABLE_NO_MODEL_EVIDENCE"],
+                }
+            )
+            continue
+
+        model_id = _text(selected_model, "selection.model_id")
+        model = model_index.get((series_id, model_id))
+        if model is None or model.get("status") != "AVAILABLE":
+            raise ControlPanelValidationError(
+                f"selected factor model is not available: {series_id}"
+            )
+        contributions = _objects(model.get("contributions"), "model.contributions")
+        if not contributions:
+            raise ControlPanelValidationError(
+                "selected factor model has no contributions"
+            )
+        factor_ids = tuple(
+            _text(item, "model.factor_ids[]") for item in model.get("factor_ids", [])
+        )
+        if not factor_ids:
+            raise ControlPanelValidationError("selected factor model has no factors")
+        maximum_error = 0.0
+        test_rows: list[dict[str, Any]] = []
+        for contribution in contributions:
+            factor_values = _object(
+                contribution.get("factor_contributions"),
+                "contribution.factor_contributions",
+            )
+            if set(factor_values) != set(factor_ids):
+                raise ControlPanelValidationError(
+                    "factor contribution columns differ from selected factors"
+                )
+            factor_total = sum(
+                _finite_float(value, f"contribution.{factor_id}")
+                for factor_id, value in factor_values.items()
+            )
+            alpha_value = _finite_float(
+                contribution.get("alpha_contribution"),
+                "contribution.alpha_contribution",
+            )
+            fitted = _finite_float(
+                contribution.get("fitted_excess_return"),
+                "contribution.fitted_excess_return",
+            )
+            actual = _finite_float(
+                contribution.get("actual_excess_return"),
+                "contribution.actual_excess_return",
+            )
+            residual = _finite_float(
+                contribution.get("residual"), "contribution.residual"
+            )
+            maximum_error = max(
+                maximum_error,
+                abs(fitted - alpha_value - factor_total),
+                abs(actual - fitted - residual),
+            )
+            if contribution.get("partition") == "TEST":
+                test_rows.append(contribution)
+        if maximum_error > 1e-9 or not test_rows:
+            raise ControlPanelValidationError(
+                "factor contributions do not reconcile or lack holdout evidence"
+            )
+
+        def mean(field: str) -> str:
+            return _number_text(
+                sum(
+                    _finite_float(row.get(field), f"contribution.{field}")
+                    for row in test_rows
+                )
+                / len(test_rows)
+            )
+
+        factor_means = {
+            factor_id: _number_text(
+                sum(
+                    _finite_float(
+                        _object(
+                            row.get("factor_contributions"),
+                            "contribution.factor_contributions",
+                        ).get(factor_id),
+                        f"contribution.{factor_id}",
+                    )
+                    for row in test_rows
+                )
+                / len(test_rows)
+            )
+            for factor_id in factor_ids
+        }
+        rows.append(
+            {
+                "alpha": _object(model.get("alpha"), "model.alpha"),
+                "contribution_summary": {
+                    "alpha_mean": mean("alpha_contribution"),
+                    "factor_means": factor_means,
+                    "fitted_mean": mean("fitted_excess_return"),
+                    "maximum_reconciliation_error": _number_text(maximum_error),
+                    "observations": len(test_rows),
+                    "realized_mean": mean("actual_excess_return"),
+                    "residual_mean": mean("residual"),
+                },
+                "cost_coverage": _text(
+                    model.get("cost_coverage"), "model.cost_coverage"
+                ),
+                "coverage": _object(model.get("coverage"), "model.coverage"),
+                "diagnostics": _object(model.get("diagnostics"), "model.diagnostics"),
+                "evidence_layer": _text(
+                    model.get("evidence_layer"), "model.evidence_layer"
+                ),
+                "exposures": _objects(model.get("exposures"), "model.exposures"),
+                "model_id": model_id,
+                "selection_status": _text(selection.get("status"), "selection.status"),
+                "series_id": series_id,
+                "status": "AVAILABLE",
+                "unavailable_reasons": [],
+            }
+        )
+        available_count += 1
+    return {
+        "analytics_hash": _text(
+            decomposition.get("analytics_hash"), "factor.analytics_hash"
+        ),
+        "as_of_date": _text(decomposition.get("as_of_date"), "factor.as_of_date"),
+        "available_count": available_count,
+        "generation_id": identity["generation_id"],
+        "method_label": method_label,
+        "methodology_manifest_sha256": _text(
+            decomposition.get("methodology_manifest_sha256"),
+            "factor.methodology_manifest_sha256",
+        ),
+        "methodology_version": methodology_version,
+        "series": rows,
+        "source_sha256": identity["sha256"],
+        "sources": _object(decomposition.get("sources"), "factor.sources"),
+        "unavailable_count": len(rows) - available_count,
+    }
+
+
+def _dependence_analysis(
+    correlation: Mapping[str, Any],
+    identity: Mapping[str, str],
+    strategy_names: set[str],
+) -> dict[str, Any]:
+    dependence = _object(correlation.get("dependence"), "dependence")
+    raw_series = dependence.get("series_ids")
+    if not isinstance(raw_series, list):
+        raise ControlPanelValidationError("dependence.series_ids must be an array")
+    series_ids = [_text(item, "dependence.series_ids[]") for item in raw_series]
+    if len(series_ids) != len(strategy_names) or set(series_ids) != strategy_names:
+        raise ControlPanelValidationError(
+            "correlation series differ from the current strategy boundary"
+        )
+    matrices = _object(dependence.get("matrices"), "dependence.matrices")
+    required_matrices = {
+        "conceptual_prior",
+        "decision_no_missing_diversification_credit",
+        "observed_pearson",
+        "observed_spearman",
+        "posterior",
+        "stress",
+    }
+    if set(matrices) != required_matrices:
+        raise ControlPanelValidationError("dependence matrix set differs")
+    for name, matrix_value in matrices.items():
+        matrix = _object(matrix_value, f"matrices.{name}")
+        values = matrix.get("values")
+        if not isinstance(values, list) or len(values) != len(series_ids):
+            raise ControlPanelValidationError(f"matrix {name} row count differs")
+        if any(
+            not isinstance(row, list) or len(row) != len(series_ids) for row in values
+        ):
+            raise ControlPanelValidationError(f"matrix {name} column count differs")
+
+    observed = _objects(dependence.get("observed_cells"), "observed_cells")
+    blends = _objects(dependence.get("blend_cells"), "blend_cells")
+    implementation = _objects(
+        dependence.get("implementation_cells"), "implementation_cells"
+    )
+    expected_cells = len(series_ids) * (len(series_ids) - 1) // 2
+    if not all(
+        len(items) == expected_cells for items in (observed, blends, implementation)
+    ):
+        raise ControlPanelValidationError("dependence cell coverage differs")
+
+    def keyed(
+        items: list[dict[str, Any]], name: str
+    ) -> dict[frozenset[str], dict[str, Any]]:
+        result: dict[frozenset[str], dict[str, Any]] = {}
+        for item in items:
+            key = frozenset(
+                (
+                    _text(item.get("left"), f"{name}.left"),
+                    _text(item.get("right"), f"{name}.right"),
+                )
+            )
+            if len(key) != 2 or key in result:
+                raise ControlPanelValidationError(f"{name} pair coverage is invalid")
+            result[key] = item
+        return result
+
+    observed_index = keyed(observed, "observed")
+    blend_index = keyed(blends, "blend")
+    implementation_index = keyed(implementation, "implementation")
+    if not (set(observed_index) == set(blend_index) == set(implementation_index)):
+        raise ControlPanelValidationError("dependence pair sets differ")
+    cells = [
+        {
+            "blend": blend_index[key],
+            "implementation": implementation_index[key],
+            "left": item["left"],
+            "observed": item,
+            "right": item["right"],
+        }
+        for key, item in observed_index.items()
+    ]
+    cells.sort(
+        key=lambda item: (
+            series_ids.index(item["left"]),
+            series_ids.index(item["right"]),
+        )
+    )
+    correlation_one = _object(dependence.get("correlation_one"), "correlation_one")
+    return {
+        "analytics_hash": _text(
+            correlation.get("analytics_hash"), "correlation.analytics_hash"
+        ),
+        "as_of_date": _text(correlation.get("as_of_date"), "correlation.as_of_date"),
+        "available_pair_count": sum(
+            item.get("status") == "AVAILABLE" for item in observed
+        ),
+        "cells": cells,
+        "correlation_one": correlation_one,
+        "generation_id": identity["generation_id"],
+        "matrices": matrices,
+        "pair_count": expected_cells,
+        "series_ids": series_ids,
+        "source_sha256": identity["sha256"],
+    }
+
+
 def _panel_data(
     report: Mapping[str, Any],
     report_identity: Mapping[str, str],
+    decomposition: Mapping[str, Any],
+    decomposition_identity: Mapping[str, str],
+    correlation: Mapping[str, Any],
+    correlation_identity: Mapping[str, str],
     legacy: Mapping[str, Any],
     source: Mapping[str, Any],
     template_root: Path,
@@ -193,6 +571,13 @@ def _panel_data(
         )
         for row in strategies
     }
+    current_strategy_names = set(strategy_names.values())
+    factor_analysis = _factor_analysis(
+        decomposition, decomposition_identity, current_strategy_names
+    )
+    dependence_analysis = _dependence_analysis(
+        correlation, correlation_identity, current_strategy_names
+    )
     normalized_allocations = []
     for row in allocations:
         strategy_id = row.get("strategy_id")
@@ -284,7 +669,7 @@ def _panel_data(
     baseline = _object(report.get("baseline"), "baseline")
     template_hashes = {
         name: hashlib.sha256(_template_bytes(template_root / name)).hexdigest()
-        for name in ("index.html", "app.js")
+        for name in ("index.html", "analytics.css", "app.js")
     }
     provenance = _objects(report.get("provenance"), "provenance")
     provenance = [
@@ -301,7 +686,31 @@ def _panel_data(
             "schema": "strategy-allocation-audit/frozen",
             "sha256": appendix.get("data_sha256"),
         },
+        {
+            "artifact": "portfolio-factor-decomposition-generation",
+            "as_of_date": factor_analysis["as_of_date"],
+            "schema": "portfolio-factor-decomposition/1",
+            "sha256": decomposition_identity["sha256"],
+        },
+        {
+            "artifact": "portfolio-correlation-generation",
+            "as_of_date": dependence_analysis["as_of_date"],
+            "schema": "portfolio-correlation/1",
+            "sha256": correlation_identity["sha256"],
+        },
     ]
+    report_stress = _finite_float(
+        _summary_value(summary, "Correlation-one stress"),
+        "portfolio_summary.Correlation-one stress",
+    )
+    analytics_stress = _finite_float(
+        _object(dependence_analysis["correlation_one"], "correlation_one").get("loss"),
+        "correlation_one.loss",
+    )
+    if abs(report_stress - analytics_stress) > 1e-10:
+        raise ControlPanelValidationError(
+            "correlation-one stress differs from the accepted portfolio report"
+        )
     limitations = sorted(
         {
             "Read-only local artifact; no provider, broker, order, or deployment connection exists.",
@@ -352,6 +761,8 @@ def _panel_data(
             "twr_rows": len(performance),
         },
         "coverage": coverage,
+        "dependence_analysis": dependence_analysis,
+        "factor_analysis": factor_analysis,
         "fact_status": {
             item: row.get("status") for item, row in sorted(fact_by_item.items())
         },
@@ -363,6 +774,10 @@ def _panel_data(
             ),
             "panel_mode": "LOCAL_DIRECT_FILE_READ_ONLY",
             "portfolio_as_of": _text(report.get("as_of_date"), "report.as_of_date"),
+            "correlation_generation_id": correlation_identity["generation_id"],
+            "correlation_sha256": correlation_identity["sha256"],
+            "decomposition_generation_id": decomposition_identity["generation_id"],
+            "decomposition_sha256": decomposition_identity["sha256"],
             "report_generation_id": report_identity["generation_id"],
             "report_sha256": report_identity["sha256"],
             "source_shell_hashes": source.get("observed_hashes"),
@@ -378,21 +793,60 @@ def _panel_data(
 
 
 def _rendered_files(
-    report_root: Path, legacy_panel: Path, template_root: Path
-) -> tuple[dict[str, bytes], dict[str, Any], Path, Path]:
+    report_root: Path,
+    legacy_panel: Path,
+    template_root: Path,
+    decomposition_root: Path | None = None,
+    correlation_root: Path | None = None,
+) -> tuple[dict[str, bytes], dict[str, Any], tuple[Path, Path, Path, Path]]:
     report, report_identity, report_path = _current_report(report_root)
+    resolved_decomposition, resolved_correlation = _analytics_roots(
+        report_root, decomposition_root, correlation_root
+    )
+    decomposition, decomposition_identity, decomposition_path = _current_analytics(
+        resolved_decomposition,
+        filename="decomposition.json",
+        field_name="portfolio factor decomposition",
+        expected_schema_version=1,
+    )
+    correlation, correlation_identity, correlation_path = _current_analytics(
+        resolved_correlation,
+        filename="correlation.json",
+        field_name="portfolio correlation",
+        expected_schema_version=1,
+    )
     legacy, source = _source_inputs(legacy_panel)
-    data = _panel_data(report, report_identity, legacy, source, template_root)
+    data = _panel_data(
+        report,
+        report_identity,
+        decomposition,
+        decomposition_identity,
+        correlation,
+        correlation_identity,
+        legacy,
+        source,
+        template_root,
+    )
     data_bytes = canonical_json_bytes(data)
     files = {
         "index.html": _template_bytes(template_root / "index.html"),
         "styles.css": (legacy_panel / "styles.css").read_bytes(),
+        "analytics.css": _template_bytes(template_root / "analytics.css"),
         "app.js": _template_bytes(template_root / "app.js"),
         "data/dashboard_data.json": data_bytes,
         "data/dashboard_data.js": b"window.PORTFOLIO_DATA = " + data_bytes + b";\n",
     }
     legacy_data = legacy_panel / "data" / "dashboard_data.json"
-    return files, data, report_path, legacy_data
+    return (
+        files,
+        data,
+        (
+            report_path,
+            decomposition_path,
+            correlation_path,
+            legacy_data,
+        ),
+    )
 
 
 def _panel_id(files: Mapping[str, bytes]) -> str:
@@ -425,8 +879,16 @@ def build_candidate(
     legacy_panel: Path,
     output_root: Path,
     template_root: Path = DEFAULT_TEMPLATE_ROOT,
+    decomposition_root: Path | None = None,
+    correlation_root: Path | None = None,
 ) -> dict[str, Any]:
-    files, data, _, _ = _rendered_files(report_root, legacy_panel, template_root)
+    files, data, _ = _rendered_files(
+        report_root,
+        legacy_panel,
+        template_root,
+        decomposition_root,
+        correlation_root,
+    )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
     for relative, content in files.items():
@@ -440,6 +902,8 @@ def build_candidate(
         "panel_id": panel_id,
         "panel_schema_version": PANEL_SCHEMA_VERSION,
         "portfolio_as_of": data["meta"]["portfolio_as_of"],
+        "correlation_generation_id": data["meta"]["correlation_generation_id"],
+        "decomposition_generation_id": data["meta"]["decomposition_generation_id"],
         "report_generation_id": data["meta"]["report_generation_id"],
         "state": "STAGED",
     }
@@ -447,6 +911,8 @@ def build_candidate(
     return {
         "candidate_dir": str(candidate),
         "candidate_rows": len(data["candidate_appendix"]["providers"]),
+        "correlation_pair_count": data["dependence_analysis"]["pair_count"],
+        "factor_model_count": data["factor_analysis"]["available_count"],
         "panel_id": panel_id,
         "strategy_count": data["counts"]["strategies"],
         "twr_available_count": data["counts"]["twr_available"],
@@ -466,8 +932,16 @@ def verify_candidate(
     legacy_panel: Path,
     candidate_dir: Path,
     template_root: Path = DEFAULT_TEMPLATE_ROOT,
+    decomposition_root: Path | None = None,
+    correlation_root: Path | None = None,
 ) -> dict[str, Any]:
-    expected, data, _, _ = _rendered_files(report_root, legacy_panel, template_root)
+    expected, data, _ = _rendered_files(
+        report_root,
+        legacy_panel,
+        template_root,
+        decomposition_root,
+        correlation_root,
+    )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
     checks.append(
@@ -485,7 +959,7 @@ def verify_candidate(
     javascript = expected["app.js"].decode("utf-8")
     checks.append(
         _check(
-            "All six operator views are present",
+            "All eight operator views are present",
             all(f'data-view="{view}"' in html for view in VIEWS),
             list(VIEWS),
         )
@@ -562,6 +1036,43 @@ def verify_candidate(
             },
         )
     )
+    factor_rows = _objects(data["factor_analysis"].get("series"), "factor.series")
+    checks.append(
+        _check(
+            "Accepted factor and alpha evidence is exact",
+            data["factor_analysis"]["available_count"] == 5
+            and data["factor_analysis"]["unavailable_count"] == 4
+            and all(
+                row.get("contribution_summary") is None
+                or _finite_float(
+                    _object(
+                        row.get("contribution_summary"), "contribution_summary"
+                    ).get("maximum_reconciliation_error"),
+                    "maximum_reconciliation_error",
+                )
+                <= 1e-9
+                for row in factor_rows
+            ),
+            {
+                "available": data["factor_analysis"]["available_count"],
+                "generation": data["meta"]["decomposition_generation_id"],
+                "unavailable": data["factor_analysis"]["unavailable_count"],
+            },
+        )
+    )
+    checks.append(
+        _check(
+            "Accepted dependence evidence is exact",
+            data["dependence_analysis"]["pair_count"] == 36
+            and data["dependence_analysis"]["available_pair_count"] == 10
+            and len(data["dependence_analysis"]["matrices"]) == 6,
+            {
+                "available_pairs": data["dependence_analysis"]["available_pair_count"],
+                "generation": data["meta"]["correlation_generation_id"],
+                "pairs": data["dependence_analysis"]["pair_count"],
+            },
+        )
+    )
     result = {
         "all_passed": all(row["status"] == "PASS" for row in checks),
         "checks": checks,
@@ -632,7 +1143,7 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
         ]
     )
     lint_counts: dict[str, int] = {}
-    for name in ("desktop-command", "mobile-command"):
+    for name in LINT_CAPTURES:
         lint = _load_json(qa_dir / name / "visual-lint.json", f"{name} visual lint")
         count = lint.get("finding_count")
         if not isinstance(count, int):
@@ -640,7 +1151,7 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
         lint_counts[name] = count
     checks.append(
         _check(
-            "Desktop and mobile visual lint are clean",
+            "Required desktop and mobile visual lint is clean",
             all(value == 0 for value in lint_counts.values()),
             lint_counts,
         )
@@ -717,14 +1228,26 @@ def publish_panel(
     qa_dir: Path,
     output_root: Path,
     template_root: Path = DEFAULT_TEMPLATE_ROOT,
+    decomposition_root: Path | None = None,
+    correlation_root: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
-        report_root, legacy_panel, candidate_dir, template_root
+        report_root,
+        legacy_panel,
+        candidate_dir,
+        template_root,
+        decomposition_root,
+        correlation_root,
     )
     qa = validate_qa(candidate_dir, qa_dir)
-    _, data, report_path, legacy_data = _rendered_files(
-        report_root, legacy_panel, template_root
+    _, data, input_paths = _rendered_files(
+        report_root,
+        legacy_panel,
+        template_root,
+        decomposition_root,
+        correlation_root,
     )
+    report_path, decomposition_path, correlation_path, legacy_data = input_paths
     as_of = date.fromisoformat(_text(data["meta"]["portfolio_as_of"], "as_of"))
     artifacts: list[SourceArtifact] = [
         SourceArtifact.from_path(
@@ -740,6 +1263,20 @@ def publish_panel(
             as_of_date=date.fromisoformat(data["candidate_appendix"]["as_of_date"]),
             schema_name="strategy-allocation-audit-candidates",
             schema_version="frozen-2026-07-17",
+        ),
+        SourceArtifact.from_path(
+            decomposition_path,
+            artifact_id="input/portfolio-factor-decomposition.json",
+            as_of_date=date.fromisoformat(data["factor_analysis"]["as_of_date"]),
+            schema_name="portfolio-factor-decomposition",
+            schema_version="1",
+        ),
+        SourceArtifact.from_path(
+            correlation_path,
+            artifact_id="input/portfolio-correlation.json",
+            as_of_date=date.fromisoformat(data["dependence_analysis"]["as_of_date"]),
+            schema_name="portfolio-correlation",
+            schema_version="1",
         ),
     ]
     for relative in (*PANEL_FILES, "candidate.json"):
@@ -769,8 +1306,14 @@ def publish_panel(
         adapter=AdapterIdentity("portfolio-control-panel-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="accepted portfolio report rendered read-only with explicit gaps and a separate frozen candidate appendix",
-            fact_types=("portfolio control panel", "browser QA", "frozen appendix"),
+            boundary="accepted portfolio, factor/alpha, and dependence generations rendered read-only with explicit gaps and a separate frozen candidate appendix",
+            fact_types=(
+                "portfolio control panel",
+                "factor and alpha attribution",
+                "correlation and dependence",
+                "browser QA",
+                "frozen appendix",
+            ),
             observed_start=as_of,
             observed_end=as_of,
         ),
@@ -786,6 +1329,8 @@ def publish_panel(
     pointer = publish_generation(output_root, manifest.generation_id)
     return {
         "browser_checks": qa["checks_total"],
+        "correlation_generation_id": data["meta"]["correlation_generation_id"],
+        "decomposition_generation_id": data["meta"]["decomposition_generation_id"],
         "generation_id": manifest.generation_id,
         "panel_id": verification["panel_id"],
         "publication_state": pointer.state.value,
@@ -803,6 +1348,8 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument(
             "--template-root", type=Path, default=DEFAULT_TEMPLATE_ROOT
         )
+        command.add_argument("--decomposition-root", type=Path)
+        command.add_argument("--correlation-root", type=Path)
         command.add_argument("--output-root", type=Path, required=name != "verify")
         if name != "build":
             command.add_argument("--candidate-dir", type=Path, required=True)
@@ -823,6 +1370,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.legacy_panel,
                 args.output_root,
                 args.template_root,
+                args.decomposition_root,
+                args.correlation_root,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -830,6 +1379,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.legacy_panel,
                 args.candidate_dir,
                 args.template_root,
+                args.decomposition_root,
+                args.correlation_root,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -841,6 +1392,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.qa_dir,
                 args.output_root,
                 args.template_root,
+                args.decomposition_root,
+                args.correlation_root,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)

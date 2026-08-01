@@ -10,6 +10,7 @@
   const number = (value) => value == null || value === "" || Number.isNaN(Number(value)) ? null : Number(value);
   const currency = (value) => number(value) == null ? "—" : money.format(Number(value));
   const pct = (value, digits = 1) => number(value) == null ? "—" : `${(Number(value) * 100).toFixed(digits)}%`;
+  const decimal = (value, digits = 3) => number(value) == null ? "—" : Number(value).toFixed(digits);
   const formatDate = (value) => {
     if (!value) return "—";
     const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00Z`);
@@ -114,6 +115,138 @@
     $("#reconciliation-table").innerHTML = tableMarkup([["Check / exception"], ["Status"], ["Evidence / gap"]], reconciliationRows);
   }
 
+  let selectedFactorSeries = null;
+  function renderFactorDetail() {
+    const analysis = data.factor_analysis;
+    const row = analysis.series.find((item) => item.series_id === selectedFactorSeries) || analysis.series[0];
+    if (!row) return;
+    selectedFactorSeries = row.series_id;
+    $$("[data-factor-strategy]").forEach((button) => button.classList.toggle("is-active", button.dataset.factorStrategy === selectedFactorSeries));
+    if (row.status !== "AVAILABLE") {
+      const aligned = row.coverage?.aligned_observations ?? 0;
+      $("#factor-detail").innerHTML = `<div class="callout callout-danger"><strong>${safe(row.series_id)} — UNAVAILABLE</strong><br>${safe(row.unavailable_reasons.join(" · "))}. Accepted aligned observations: ${integer.format(aligned)}. No exposure or alpha is inferred.</div>`;
+      return;
+    }
+    const alpha = row.alpha;
+    const holdout = row.diagnostics.holdout;
+    const summary = row.contribution_summary;
+    const maximumExposure = Math.max(...row.exposures.map((item) => Math.abs(Number(item.exposure))), 1);
+    const exposures = row.exposures.map((item) => {
+      const exposure = Number(item.exposure);
+      const width = Math.min(48, Math.abs(exposure) / maximumExposure * 48);
+      const left = exposure < 0 ? 50 - width : 50;
+      const uncertainty = item.standard_error == null ? "Coefficient SE unavailable for fitted method" : `SE ${decimal(item.standard_error)}`;
+      return `<div class="exposure-row"><div class="exposure-name"><strong>${safe(item.factor_id)}</strong><span>${safe(uncertainty)}</span></div><div class="exposure-track" aria-label="${safe(item.factor_id)} exposure ${decimal(item.exposure)}"><span class="exposure-fill ${exposure < 0 ? "is-negative" : ""}" style="left:${left}%;width:${width}%"></span></div><div class="exposure-value">${decimal(item.exposure)}×</div></div>`;
+    }).join("");
+    const contributionRows = [
+      ...Object.entries(summary.factor_means).map(([factor, value]) => `<tr><td>${safe(factor)}</td><td>Factor contribution</td><td class="numeric">${pct(value, 3)}</td></tr>`),
+      `<tr><td>Alpha</td><td>Periodic intercept contribution</td><td class="numeric">${pct(summary.alpha_mean, 3)}</td></tr>`,
+      `<tr><td>Fitted</td><td>Factor plus alpha</td><td class="numeric">${pct(summary.fitted_mean, 3)}</td></tr>`,
+      `<tr><td>Residual</td><td>Realized minus fitted</td><td class="numeric">${pct(summary.residual_mean, 3)}</td></tr>`,
+      `<tr><td>Realized</td><td>Observed excess return</td><td class="numeric">${pct(summary.realized_mean, 3)}</td></tr>`,
+    ];
+    $("#factor-detail").innerHTML = `<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Net alpha</div><div class="metric-value">${pct(alpha.net_annualized)}</div><div class="metric-note">${safe(alpha.net_status)} · observed basis</div></div><div class="metric-block"><div class="metric-label">Gross alpha</div><div class="metric-value">${pct(alpha.gross_annualized)}</div><div class="metric-note">${safe(alpha.gross_status)}</div></div><div class="metric-block"><div class="metric-label">Holdout predicted R²</div><div class="metric-value">${pct(holdout.predicted_r_squared)}</div><div class="metric-note">${integer.format(holdout.observation_count)} out-of-sample observations</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(holdout.tracking_error_annualized)}</div><div class="metric-note">Annualized holdout residual volatility</div></div><div class="metric-block"><div class="metric-label">Exact-date coverage</div><div class="metric-value">${integer.format(row.coverage.aligned_observations)}</div><div class="metric-note">${formatDate(row.coverage.observed_start)}–${formatDate(row.coverage.observed_end)}</div></div><div class="metric-block"><div class="metric-label">Reconciliation error</div><div class="metric-value">${safe(summary.maximum_reconciliation_error)}</div><div class="metric-note">Maximum absolute return identity error</div></div></div><div class="grid grid-12" style="margin-top:16px"><div class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Selected exposures</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(row.evidence_layer)}</span></div><div class="exposure-list">${exposures}</div></div><div class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge">n=${integer.format(summary.observations)}</span></div><div class="table-wrap"><table><caption>Holdout factor contribution reconciliation</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], contributionRows)}</table></div></div></div>`;
+  }
+
+  function renderAttribution() {
+    const analysis = data.factor_analysis;
+    const firstAvailable = analysis.series.find((row) => row.status === "AVAILABLE");
+    selectedFactorSeries ||= firstAvailable?.series_id || analysis.series[0]?.series_id;
+    renderKpis("#factor-kpis", [
+      ["Validated models", `${analysis.available_count}/${analysis.series.length}`, "Parsimony-selected holdout models", "positive"],
+      ["Unavailable", String(analysis.unavailable_count), "No inferred exposures or alpha", "danger"],
+      ["Methodology", analysis.methodology_version, analysis.method_label, "warning"],
+      ["Analytics as of", formatDate(analysis.as_of_date), `Generation ${analysis.generation_id.slice(0, 12)}…`],
+    ]);
+    $("#factor-method-badge").textContent = analysis.method_label.replaceAll("_", " ");
+    const rows = analysis.series.map((row) => {
+      const holdout = row.diagnostics?.holdout;
+      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO VALIDATED MODEL")}</span></td><td>${statusText(row.status)}</td><td>${safe(row.exposures.map((item) => item.factor_id).join(" · ") || "—")}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")}</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.unavailable_reasons.join(" · "))}</td></tr>`;
+    });
+    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Status"], ["Factors"], ["Observed interval"], ["Aligned", "numeric"], ["Holdout R²", "numeric"], ["Net alpha", "numeric"], ["Gross / unavailable state"]], rows);
+    $("#factor-strategy-selector").innerHTML = analysis.series.map((row) => `<button type="button" class="strategy-chip ${row.status === "AVAILABLE" ? "" : "is-unavailable"}" data-factor-strategy="${safe(row.series_id)}">${safe(row.series_id)}</button>`).join("");
+    $$("[data-factor-strategy]").forEach((button) => button.addEventListener("click", () => { selectedFactorSeries = button.dataset.factorStrategy; renderFactorDetail(); }));
+    renderFactorDetail();
+  }
+
+  const matrixLabels = {
+    observed_pearson: ["Observed Pearson correlation", "Measured · compatible exact-date evidence only"],
+    observed_spearman: ["Observed rank dependence", "Measured · robust Spearman rank check"],
+    posterior: ["Posterior correlation", "Conceptual prior plus capped observed weight · PSD projected"],
+    stress: ["Stress correlation", "Stress assumption · PSD projected"],
+    conceptual_prior: ["Conceptual prior", "Assumption · not measured data"],
+    decision_no_missing_diversification_credit: ["No-credit decision view", "Missing observed pairs set to 1.0 · not a covariance input"],
+  };
+  let selectedMatrix = "observed_pearson";
+  let selectedPair = null;
+  const shortSeries = (value) => String(value).replace(" Portfolio", "").replace(" Strategy", "").replace(" Factor [P123]", " P123").replace("GrizzlyBears VTMA", "Grizzly").replace("Robuxio Crypto (High Sharpe High Vol)", "Robuxio").replace("[Composer] - The Holy Grail (Buy Copy)", "Composer").replace("Growth at Market Pivot Points [EchoTrade]", "EchoTrade");
+  const pairKey = (left, right) => [left, right].sort().join("\u0000");
+
+  function renderCorrelationDetail(left, right) {
+    const detail = $("#correlation-detail");
+    if (left === right) {
+      $("#correlation-detail-title").textContent = shortSeries(left);
+      detail.innerHTML = `<div class="callout callout-neutral">Diagonal values are 1.0 by definition. Select a non-diagonal cell to inspect pair evidence.</div>`;
+      return;
+    }
+    const cell = data.dependence_analysis.cells.find((item) => pairKey(item.left, item.right) === pairKey(left, right));
+    if (!cell) return;
+    const observed = cell.observed;
+    const coverage = observed.coverage;
+    const blend = cell.blend;
+    const implementation = cell.implementation;
+    $("#correlation-detail-title").textContent = `${shortSeries(left)} × ${shortSeries(right)}`;
+    detail.innerHTML = `<div class="validation-card"><div><strong>Observed status</strong><span>${safe(coverage.evidence_layer || "No compatible measured layer")}</span></div><div class="validation-score">${safe(observed.status)}</div></div><div class="evidence-grid"><dl class="detail-list"><div><dt>Pearson</dt><dd>${decimal(observed.pearson)}</dd></div><div><dt>Spearman</dt><dd>${decimal(observed.spearman)}</dd></div><div><dt>Downside</dt><dd>${decimal(observed.downside.correlation)}</dd></div><div><dt>Latest rolling</dt><dd>${decimal(observed.rolling_pearson.latest)}</dd></div><div><dt>Common observations</dt><dd>${integer.format(coverage.common_observations)}</dd></div><div><dt>Exact-date interval</dt><dd>${safe(coverage.observed_start || "—")}–${safe(coverage.observed_end || "—")}</dd></div></dl><dl class="detail-list"><div><dt>Missing left / right</dt><dd>${integer.format(coverage.missing_from_left)} / ${integer.format(coverage.missing_from_right)}</dd></div><div><dt>Conceptual prior</dt><dd>${decimal(blend.conceptual_prior)}</dd></div><div><dt>Observed weight</dt><dd>${pct(blend.observed_weight)}</dd></div><div><dt>Posterior pre-PSD</dt><dd>${decimal(blend.posterior_pre_psd)}</dd></div><div><dt>Stress pre-PSD</dt><dd>${decimal(blend.stress_pre_psd)}</dd></div><div><dt>Implementation mapping</dt><dd>${safe(implementation.status)}</dd></div></dl></div><div class="callout ${observed.status === "AVAILABLE" ? "callout-neutral" : "callout-danger"}">${safe(blend.decision_status)}. ${safe(blend.conceptual_prior_note)}</div>`;
+  }
+
+  function renderCorrelationMatrix() {
+    const dependence = data.dependence_analysis;
+    const matrix = dependence.matrices[selectedMatrix];
+    const series = dependence.series_ids;
+    const label = matrixLabels[selectedMatrix];
+    $("#matrix-title").textContent = label[0];
+    const header = `<thead><tr><th scope="col">Strategy</th>${series.map((name) => `<th scope="col" title="${safe(name)}"><span class="matrix-abbr">${safe(shortSeries(name))}</span></th>`).join("")}</tr></thead>`;
+    const rows = series.map((left, rowIndex) => `<tr><th scope="row" title="${safe(left)}"><span class="matrix-abbr">${safe(shortSeries(left))}</span></th>${series.map((right, columnIndex) => {
+      const raw = matrix.values[rowIndex][columnIndex];
+      const numeric = number(raw);
+      const diagonal = rowIndex === columnIndex;
+      const unavailable = numeric == null;
+      const intensity = numeric == null ? 0 : .12 + Math.min(1, Math.abs(numeric)) * .34;
+      const target = numeric < 0 ? [130, 174, 242] : [92, 200, 192];
+      const base = [16, 26, 36];
+      const color = base.map((channel, index) => Math.round(channel + (target[index] - channel) * intensity));
+      const selected = selectedPair === pairKey(left, right);
+      return `<td><button type="button" class="matrix-cell-button ${numeric < 0 ? "is-negative" : ""} ${unavailable ? "is-unavailable" : ""} ${diagonal ? "is-diagonal" : ""} ${selected ? "is-selected" : ""}" style="--cell-color:rgb(${color.join(",")})" data-correlation-left="${safe(left)}" data-correlation-right="${safe(right)}" ${diagonal ? "disabled" : ""} aria-label="${safe(left)} and ${safe(right)}: ${unavailable ? "unavailable" : Number(numeric).toFixed(3)}">${unavailable ? "—" : Number(numeric).toFixed(2)}</button></td>`;
+    }).join("")}</tr>`).join("");
+    $("#correlation-matrix").innerHTML = `<table class="matrix-table"><caption>${safe(label[0])}: ${safe(label[1])}</caption>${header}<tbody>${rows}</tbody></table><div class="callout callout-neutral">${safe(matrix.classification)} · ${safe(label[1])}</div>`;
+    $$('[data-correlation-left]').forEach((button) => button.addEventListener("click", () => {
+      const left = button.dataset.correlationLeft;
+      const right = button.dataset.correlationRight;
+      selectedPair = pairKey(left, right);
+      renderCorrelationMatrix();
+      renderCorrelationDetail(left, right);
+    }));
+  }
+
+  function renderDependence() {
+    const dependence = data.dependence_analysis;
+    const corrOne = dependence.correlation_one;
+    const unavailable = dependence.pair_count - dependence.available_pair_count;
+    renderKpis("#dependence-kpis", [
+      ["Measured pairs", `${dependence.available_pair_count}/${dependence.pair_count}`, "Exact-date same-layer observations", "positive"],
+      ["Unavailable pairs", String(unavailable), "No inferred diversification credit", "danger"],
+      ["Correlation-one loss", pct(corrOne.loss), "Separate conservative portfolio bound", "danger"],
+      ["Analytics as of", formatDate(dependence.as_of_date), `Generation ${dependence.generation_id.slice(0, 12)}…`],
+    ]);
+    selectedPair ||= pairKey(dependence.cells.find((item) => item.observed.status === "AVAILABLE")?.left || dependence.series_ids[0], dependence.cells.find((item) => item.observed.status === "AVAILABLE")?.right || dependence.series_ids[1]);
+    renderCorrelationMatrix();
+    const selected = dependence.cells.find((item) => pairKey(item.left, item.right) === selectedPair) || dependence.cells[0];
+    renderCorrelationDetail(selected.left, selected.right);
+    $("#correlation-one-summary").innerHTML = `<div class="metric-block"><div class="metric-label">Loss</div><div class="metric-value">${pct(corrOne.loss)}</div><div class="metric-note">Weighted component adverse losses</div></div><div class="metric-block"><div class="metric-label">Expected</div><div class="metric-value">${pct(corrOne.expected_loss)}</div><div class="metric-note">Accepted baseline reference</div></div><div class="metric-block"><div class="metric-label">Reconciliation</div><div class="metric-value">${safe(corrOne.reconciliation_difference)}</div><div class="metric-note">${safe(corrOne.status)}</div></div>`;
+    const componentRows = corrOne.components.map((row) => `<tr><td>${safe(row.series_id)}</td><td class="numeric">${pct(row.allocation_weight)}</td><td class="numeric">${pct(row.adverse_loss_fraction)}</td><td class="numeric">${pct(row.loss_contribution)}</td></tr>`);
+    $("#correlation-one-table").innerHTML = tableMarkup([["Strategy"], ["Weight", "numeric"], ["Adverse loss", "numeric"], ["Contribution", "numeric"]], componentRows.length ? componentRows : [emptyRow(4, "No component detail in this accepted fixture")]);
+  }
+
   let tierFilter = "all";
   let candidateSearch = "";
   function renderCandidateTable() {
@@ -146,7 +279,7 @@
     ]);
     const coverageRows = data.coverage.map((row) => `<tr><td><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></td><td>${statusText(row.status)}</td><td>${safe(row.value ?? "—")}</td><td>${safe(row.known_gap || "—")}</td></tr>`);
     $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status"], ["Value"], ["Known gap"]], coverageRows);
-    $("#validation-cards").innerHTML = `<div class="validation-card"><div><strong>Portfolio report</strong><span>Current accepted generation</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Frozen candidate appendix</strong><span>${safe(data.candidate_appendix.as_of_date)} · hash locked</span></div><div class="validation-score">FROZEN</div></div><div class="callout callout-neutral">The report and appendix have separate authority. Candidate rows never enter current strategy totals.</div>`;
+    $("#validation-cards").innerHTML = `<div class="validation-card"><div><strong>Portfolio report</strong><span>${safe(data.meta.report_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Factor / alpha</strong><span>${safe(data.meta.decomposition_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Dependence</strong><span>${safe(data.meta.correlation_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Frozen candidate appendix</strong><span>${safe(data.candidate_appendix.as_of_date)} · hash locked</span></div><div class="validation-score">FROZEN</div></div><div class="callout callout-neutral">Portfolio, analytics, and appendix generations retain separate authority. Candidate rows never enter current strategy totals.</div>`;
     const sourceRows = data.provenance.map((row) => `<tr><td><span class="cell-primary">${safe(row.artifact)}</span><span class="cell-secondary">${safe(row.schema)}</span></td><td>${formatDate(row.as_of_date)}</td><td><code>${safe(row.sha256.slice(0, 16))}…</code></td></tr>`);
     $("#source-table").innerHTML = tableMarkup([["Artifact / schema"], ["As of"], ["SHA-256"]], sourceRows);
     $("#limitations-list").innerHTML = data.limitations.map((item) => `<li>${safe(item)}</li>`).join("");
@@ -175,17 +308,18 @@
     $$('[data-nav]').forEach((button) => button.addEventListener("click", () => setView(button.dataset.nav)));
     $$('[data-allocation-filter]').forEach((button) => button.addEventListener("click", () => { allocationFilter = button.dataset.allocationFilter; $$('[data-allocation-filter]').forEach((item) => item.classList.toggle("is-active", item === button)); renderAllocationTable(); }));
     $$('[data-tier-filter]').forEach((button) => button.addEventListener("click", () => { tierFilter = button.dataset.tierFilter; $$('[data-tier-filter]').forEach((item) => item.classList.toggle("is-active", item === button)); renderCandidateTable(); }));
+    $$('[data-matrix]').forEach((button) => button.addEventListener("click", () => { selectedMatrix = button.dataset.matrix; $$('[data-matrix]').forEach((item) => item.classList.toggle("is-active", item === button)); renderCorrelationMatrix(); }));
     $("#candidate-search").addEventListener("input", (event) => { candidateSearch = event.target.value.trim(); renderCandidateTable(); });
-    $("#snapshot-button").addEventListener("click", () => showToast(`Report ${data.meta.report_generation_id.slice(0, 12)}… · portfolio as of ${data.meta.portfolio_as_of} · read-only local artifact.`));
+    $("#snapshot-button").addEventListener("click", () => showToast(`Report ${data.meta.report_generation_id.slice(0, 12)}… · factors ${data.meta.decomposition_generation_id.slice(0, 12)}… · dependence ${data.meta.correlation_generation_id.slice(0, 12)}… · read-only local artifact.`));
     window.addEventListener("hashchange", () => setView(location.hash.slice(1) || "command", false));
   }
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 1) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 2) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
-      renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderCandidates(); renderData(); bindEvents();
+      renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderCandidates(); renderData(); bindEvents();
       $("#loading-state").hidden = true;
       $("#app").dataset.appState = "ready";
       const requested = location.hash.slice(1);

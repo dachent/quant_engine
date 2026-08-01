@@ -13,6 +13,8 @@
     "capital",
     "counts",
     "coverage",
+    "dependence_analysis",
+    "factor_analysis",
     "fact_status",
     "gates",
     "limitations",
@@ -25,13 +27,17 @@
     "strategies"
   ],
   "properties": {
-    "panel_schema_version": { "const": 1 },
+    "panel_schema_version": { "const": 2 },
     "meta": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["baseline_generation_id", "panel_mode", "portfolio_as_of", "report_generation_id", "report_sha256", "source_shell_hashes", "template_hashes"],
+      "required": ["baseline_generation_id", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_sha256", "panel_mode", "portfolio_as_of", "report_generation_id", "report_sha256", "source_shell_hashes", "template_hashes"],
       "properties": {
         "baseline_generation_id": { "$ref": "#/$defs/hash" },
+        "correlation_generation_id": { "$ref": "#/$defs/hash" },
+        "correlation_sha256": { "$ref": "#/$defs/hash" },
+        "decomposition_generation_id": { "$ref": "#/$defs/hash" },
+        "decomposition_sha256": { "$ref": "#/$defs/hash" },
         "panel_mode": { "const": "LOCAL_DIRECT_FILE_READ_ONLY" },
         "portfolio_as_of": { "type": "string", "format": "date" },
         "report_generation_id": { "$ref": "#/$defs/hash" },
@@ -80,6 +86,39 @@
     "blocking_items": { "$ref": "#/$defs/rows" },
     "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
     "coverage": { "$ref": "#/$defs/rows" },
+    "dependence_analysis": {
+      "type": "object",
+      "required": ["analytics_hash", "as_of_date", "available_pair_count", "cells", "correlation_one", "generation_id", "matrices", "pair_count", "series_ids", "source_sha256"],
+      "properties": {
+        "analytics_hash": { "$ref": "#/$defs/hash" },
+        "as_of_date": { "type": "string", "format": "date" },
+        "available_pair_count": { "type": "integer", "minimum": 0 },
+        "cells": { "type": "array", "minItems": 36, "maxItems": 36, "items": { "type": "object" } },
+        "correlation_one": { "type": "object" },
+        "generation_id": { "$ref": "#/$defs/hash" },
+        "matrices": { "type": "object", "minProperties": 6, "maxProperties": 6 },
+        "pair_count": { "const": 36 },
+        "series_ids": { "type": "array", "minItems": 9, "maxItems": 9, "items": { "type": "string" }, "uniqueItems": true },
+        "source_sha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "factor_analysis": {
+      "type": "object",
+      "required": ["analytics_hash", "as_of_date", "available_count", "generation_id", "method_label", "methodology_manifest_sha256", "methodology_version", "series", "source_sha256", "sources", "unavailable_count"],
+      "properties": {
+        "analytics_hash": { "$ref": "#/$defs/hash" },
+        "as_of_date": { "type": "string", "format": "date" },
+        "available_count": { "type": "integer", "minimum": 0 },
+        "generation_id": { "$ref": "#/$defs/hash" },
+        "method_label": { "const": "MPI_INFORMED_NON_EQUIVALENT" },
+        "methodology_manifest_sha256": { "$ref": "#/$defs/hash" },
+        "methodology_version": { "type": "string" },
+        "series": { "type": "array", "minItems": 9, "maxItems": 9, "items": { "type": "object" } },
+        "source_sha256": { "$ref": "#/$defs/hash" },
+        "sources": { "type": "object" },
+        "unavailable_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "fact_status": { "type": "object", "additionalProperties": { "type": "string" } },
     "gates": { "$ref": "#/$defs/rows" },
     "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },

@@ -42,14 +42,29 @@ await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
 const checks = [];
-const views = ["command", "capital", "risk", "signals", "candidates", "data"];
+const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "candidates", "data"];
 const visited = [];
 for (const view of views) {
   await page.locator(`[data-nav="${view}"]`).click();
   const active = await page.locator(`[data-view="${view}"]`).evaluate((node) => !node.hidden && node.classList.contains("is-active"));
   if (active) visited.push(view);
 }
-checks.push(check("All six navigation views activate", visited.length === views.length, visited));
+checks.push(check("All eight navigation views activate", visited.length === views.length, visited));
+
+await page.locator('[data-nav="attribution"]').click();
+const factorRows = await page.locator("#factor-model-table tbody tr").count();
+const factorChips = await page.locator("[data-factor-strategy]").count();
+await page.locator("[data-factor-strategy]").last().click();
+const unavailableFactorDetail = await page.locator("#factor-detail").textContent();
+checks.push(check("Factor and alpha coverage is interactive", factorRows === 9 && factorChips === 9 && unavailableFactorDetail?.includes("UNAVAILABLE"), { factor_chips: factorChips, factor_rows: factorRows, unavailable_visible: unavailableFactorDetail?.includes("UNAVAILABLE") }));
+
+await page.locator('[data-nav="dependence"]').click();
+const matrixCells = await page.locator("[data-correlation-left]").count();
+await page.locator('[data-matrix="stress"]').click();
+const matrixTitle = await page.locator("#matrix-title").textContent();
+await page.locator('[data-correlation-left]:not([disabled])').first().click();
+const pairDetail = await page.locator("#correlation-detail").textContent();
+checks.push(check("Dependence matrices and cell evidence are interactive", matrixCells === 81 && matrixTitle?.includes("Stress") && pairDetail?.includes("Observed status"), { cell_buttons: matrixCells, matrix_title: matrixTitle, pair_detail: Boolean(pairDetail?.includes("Observed status")) }));
 
 await page.locator('[data-nav="capital"]').click();
 await page.locator('[data-allocation-filter="RESERVE"]').click();
