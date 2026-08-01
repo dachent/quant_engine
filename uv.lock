@@ -12,6 +12,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "quant-engine-alpaca",
     "quant-engine-ci-controls",
     "quant-engine-core",
     "quant-engine-fidelity",
@@ -1039,6 +1040,21 @@ wheels = [
 ]
 
 [[package]]
+name = "quant-engine-alpaca"
+version = "0.1.0"
+source = { editable = "packages/alpaca" }
+dependencies = [
+    { name = "quant-engine-core" },
+    { name = "quant-engine-portfolio-ledger" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "quant-engine-core", editable = "packages/core" },
+    { name = "quant-engine-portfolio-ledger", editable = "packages/portfolio-ledger" },
+]
+
+[[package]]
 name = "quant-engine-ci-controls"
 version = "0.1.0"
 source = { editable = "packages/ci-controls" }
@@ -1184,6 +1200,7 @@ dev = [
     { name = "pandas" },
     { name = "pytest" },
     { name = "pytest-socket" },
+    { name = "quant-engine-alpaca" },
     { name = "quant-engine-ci-controls" },
     { name = "quant-engine-core" },
     { name = "quant-engine-fidelity" },
@@ -1211,6 +1228,7 @@ dev = [
     { name = "pandas", specifier = ">=2.2,<4" },
     { name = "pytest", specifier = ">=9.1,<9.2" },
     { name = "pytest-socket", specifier = ">=0.7,<0.8" },
+    { name = "quant-engine-alpaca", editable = "packages/alpaca" },
     { name = "quant-engine-ci-controls", editable = "packages/ci-controls" },
     { name = "quant-engine-core", editable = "packages/core" },
     { name = "quant-engine-fidelity", editable = "packages/fidelity" },

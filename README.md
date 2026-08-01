@@ -133,6 +133,10 @@ Legacy Alpaca plaintext reports use the bounded, reversible
 [Alpaca security quarantine](docs/alpaca-security-quarantine.md) before any
 code or data integration.
 
+The accepted replacement surface is the [read-only Alpaca integration](docs/alpaca-integration.md),
+with hash-bound legacy-code disposition recorded in
+[Alpaca prototype provenance](provenance/alpaca/legacy-prototypes.md).
+
 The baseline's coverage-aware performance tables and independent unified
 workbook are built with the [portfolio report runbook](docs/portfolio-report.md).
 The workbook is a generated, read-only deliverable: calculations originate in

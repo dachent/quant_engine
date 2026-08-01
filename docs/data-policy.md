@@ -228,10 +228,10 @@ generation or report unchanged.
   are `SECRET_AUTH`, must be invalidated or quarantined under its security
   issue, and cannot be committed even if redacted. Expired or ambiguous
   sessions fail closed.
-- **Alpaca:** suspected plaintext keys and reports remain quarantined. The
-  affected key is revoked or rotated only through its approved security issue,
-  followed by lineage scanning before any content import. The maintained
-  adapter is semantically read-only; execution is a separate future initiative.
+- **Alpaca:** plaintext reports are quarantined. The accepted evidence contains
+  a key identifier but no authenticating key pair; no provider mutation was
+  performed. The maintained adapter is method-allowlisted and semantically
+  read-only; execution is a separate future initiative.
 - **IBKR:** Flex uses a least-privilege query and token reference in the
   approved credential store. Flex is finalized historical authority; TWS is
   current/intraday authority. Historical market bars are not account history,
