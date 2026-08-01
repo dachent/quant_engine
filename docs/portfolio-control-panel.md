@@ -9,6 +9,15 @@ without preserving stale calculations or hard-coded operator conclusions.
 - Current accounts, allocations, strategies, performance, costs, gaps,
   coverage, reconciliation, HWM availability, stress, and readiness come only
   from the current accepted `dataPortfolio/reporting` generation.
+- Factor composition, net/gross alpha status, holdout fit, coverage, and
+  contribution reconciliation come only from the accepted
+  `dataPortfolio/analytics/decomposition` generation. The static method is
+  labeled `MPI_INFORMED_NON_EQUIVALENT`; it is not proprietary MPI output or
+  Dynamic Style Analysis.
+- Observed Pearson/Spearman cells, conceptual priors, posterior/stress
+  matrices, the decision-only no-credit view, and correlation-one loss come
+  only from the accepted `dataPortfolio/analytics/correlation` generation and
+  remain separately labeled.
 - The Candidates view is the hash-locked 2026-07-17 audit appendix. Its 33 rows
   are not `Strategy` identities and cannot update current totals, rank a new
   candidate, authorize diligence, or allocate capital.
@@ -25,7 +34,8 @@ The source contract in
 appendix hashes, as-of date, and prior 18/18 validation anchor. The copied CSS
 must match that contract byte for byte. Repository HTML and JavaScript replace
 the dated renderer with the accepted control-panel data contract in
-`schemas/portfolio/control-panel-data.schema.json`.
+`schemas/portfolio/control-panel-data.schema.json`. `analytics.css` extends the
+locked legacy stylesheet without modifying it or adding a framework.
 
 ## Build and verify
 
@@ -41,6 +51,13 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
   --report-root $report --legacy-panel $legacy --output-root $output
 ```
 
+The command resolves the accepted analytics roots as siblings of `reporting`:
+`dataPortfolio\analytics\decomposition` and
+`dataPortfolio\analytics\correlation`. `--decomposition-root` and
+`--correlation-root` may override those paths for isolated tests. The panel is
+not built if either pointer, schema, nine-strategy boundary, 36-pair boundary,
+factor contribution identity, or correlation-one reconciliation differs.
+
 The command prints the content-addressed candidate directory. Rebuilds from
 unchanged inputs produce the same panel ID. Verify that exact candidate before
 browser work:
@@ -51,9 +68,11 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
   --candidate-dir <candidate-directory>
 ```
 
-The verifier proves the six views, local-only assets, lack of network or trade
-code, accepted capital/risk replay, nine-strategy boundary, 19 account
-identities, explicit unavailable facts, and frozen-appendix isolation.
+The verifier proves all eight views, local-only assets, lack of network or
+trade code, accepted capital/risk replay, nine-strategy boundary, 19 account
+identities, five validated/four unavailable factor results, 10 measured/26
+unavailable dependence pairs, explicit unavailable facts, and frozen-appendix
+isolation.
 
 ## Browser and interaction QA
 
@@ -76,9 +95,11 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py qa `
   --candidate-dir <candidate-directory> --qa-dir $qa
 ```
 
-Acceptance requires desktop, mobile, Risk, Candidates, Data health, and direct
-file captures; no console or request failures; clean desktop/mobile visual
-lint; PDF export; navigation; allocation filters; candidate filter/search; a
+Acceptance requires desktop Command, Risk, Factor & alpha, Dependence,
+Candidates, Data health, mobile Command, and direct-file captures; no console
+or request failures; clean Command, Factor & alpha, Dependence, and mobile
+visual lint; PDF export; eight-view navigation; factor selection; matrix
+selection and cell drill-down; allocation filters; candidate filter/search; a
 responsive provenance control; and absence of execution controls. Screenshots
 must also be inspected visually before publication.
 
@@ -93,7 +114,8 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --candidate-dir <candidate-directory> --qa-dir $qa --output-root $output
 ```
 
-Publication stages an immutable generation, copies the panel and QA evidence,
+Publication hash-binds the accepted portfolio, decomposition, and correlation
+artifacts, stages an immutable generation, copies the panel and QA evidence,
 and advances `dataPortfolio/control-panel/CURRENT.json` only after all checks
 pass. A failed build or QA run remains a non-authoritative candidate; a failed
 publication leaves the prior pointer unchanged. The strategy-allocation audit
