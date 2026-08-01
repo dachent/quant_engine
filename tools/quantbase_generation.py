@@ -13,6 +13,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 from typing import Any, Final
 
 from quant_engine.core import (
@@ -747,6 +748,45 @@ def verify_published(plan_path: Path, generation_id: str) -> dict[str, object]:
     }
 
 
+def _verify_remaining_legacy_source(root: Path, plan: Mapping[str, Any]) -> None:
+    """Verify a full or partially removed source during a bounded retry."""
+
+    if root.is_symlink() or not root.is_dir():
+        raise QuantbaseGenerationError("legacy source is missing or linked")
+    allowed_directories = {".hermes", ".hermes/plans", "csv"}
+    actual_directories = {
+        path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_dir()
+    }
+    if not actual_directories <= allowed_directories:
+        raise QuantbaseGenerationError("legacy source contains undeclared directories")
+    expected = {
+        _text(item["relative_path"], "relative_path"): item
+        for item in _expected_entries(plan)
+    }
+    actual_files = {
+        path.relative_to(root).as_posix(): path
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    if not set(actual_files) <= set(expected):
+        raise QuantbaseGenerationError("legacy source contains undeclared files")
+    for relative, path in actual_files.items():
+        item = expected[relative]
+        if path.is_symlink():
+            raise QuantbaseGenerationError("remaining legacy input is linked")
+        digest, size = hash_file(path)
+        if digest != item["sha256"] or size != item["bytes"]:
+            raise QuantbaseGenerationError(
+                f"remaining legacy input differs: {relative}"
+            )
+
+
+def _remove_empty_directory(path: Path) -> None:
+    if os.name == "nt":
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+    path.rmdir()
+
+
 def cutover_source(plan_path: Path, generation_id: str) -> dict[str, object]:
     """Remove only the exact accepted legacy source after publication proof."""
 
@@ -757,10 +797,14 @@ def cutover_source(plan_path: Path, generation_id: str) -> dict[str, object]:
         result_path = plan_path.parent / "cutover-result.json"
         return _object(json.loads(result_path.read_text(encoding="utf-8")), "result")
     source = _absolute_directory(str(source), "source_root", existing=True)
-    _verify_tree(source, plan, legacy=True)
+    _verify_remaining_legacy_source(source, plan)
     for item in _expected_entries(plan):
-        _entry_path(source, _text(item["relative_path"], "relative_path")).unlink()
-    (source / "csv").rmdir()
+        path = _entry_path(source, _text(item["relative_path"], "relative_path"))
+        if path.exists():
+            path.unlink()
+    csv_root = source / "csv"
+    if csv_root.exists():
+        _remove_empty_directory(csv_root)
     hermes = source / ".hermes"
     if hermes.exists():
         for directory in sorted(
@@ -768,9 +812,9 @@ def cutover_source(plan_path: Path, generation_id: str) -> dict[str, object]:
             key=lambda path: len(path.parts),
             reverse=True,
         ):
-            directory.rmdir()
-        hermes.rmdir()
-    source.rmdir()
+            _remove_empty_directory(directory)
+        _remove_empty_directory(hermes)
+    _remove_empty_directory(source)
     result = {
         "generation_id": generation_id,
         "original_source_removed": True,
