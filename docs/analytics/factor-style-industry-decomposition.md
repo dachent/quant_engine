@@ -112,3 +112,14 @@ Real market and portfolio data remain local and untracked. Each accepted run
 records raw and normalized hashes, source revision/as-of dates, coverage, and
 the exact catalog version. Provider revisions create new generations; they do
 not overwrite prior evidence.
+
+`tools/portfolio_public_decomposition_sources.py` converts accepted Kenneth
+French parser outputs into three deterministic files: US factors, Europe
+factors, and US 49-industry value-weighted returns. It verifies every feed
+identity and URL, hashes every input and output, converts provider percentages
+to decimal returns, joins factor and momentum histories only on exact dates,
+joins US industries to the US risk-free series on exact dates, and preserves
+missing industry returns as empty observations. Its column order is directly
+compatible with the decomposition engine: date, risk-free return, then factor
+or industry returns. It never fills, interpolates, or treats missing values as
+zero.
