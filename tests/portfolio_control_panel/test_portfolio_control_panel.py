@@ -808,6 +808,68 @@ def test_template_line_endings_do_not_change_identity(
     assert lf["panel_id"] == crlf["panel_id"]
 
 
+def test_provider_evidence_overlay_preserves_separate_account_and_provider_dates(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    evidence = tmp_path / "strategy-evidence.json"
+    _write_json(
+        evidence,
+        {
+            "as_of_date": "2026-07-31",
+            "schema_version": 1,
+            "strategies": [
+                {
+                    "account": {
+                        "observed_start": "2026-01-22",
+                        "observed_end": "2026-07-14",
+                        "return_observations": 124,
+                    },
+                    "current_snapshot": {"observed_date": "2026-07-27"},
+                    "evidence_layer": "PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE",
+                    "generation_id": "e" * 64,
+                    "generation_as_of_date": "2026-07-31",
+                    "overlap": {
+                        "account_minus_provider_cumulative": "-0.1642",
+                        "annualized_tracking_error": "0.1177",
+                        "daily_return_correlation": "0.8267",
+                        "status": "TESTED_EXACT_DATE_PATHS",
+                    },
+                    "provider": {
+                        "observed_start": "2025-05-12",
+                        "observed_end": "2026-07-24",
+                        "return_observations": 315,
+                    },
+                    "provider_id": "portfolio123",
+                    "sources": {},
+                    "strategy_id": "strategy-0",
+                    "strategy_name": STRATEGY_NAMES[0],
+                }
+            ],
+        },
+    )
+
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        strategy_evidence_path=evidence,
+    )
+    data = json.loads(
+        (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    attached = data["strategies"][0]["provider_evidence"]
+    assert attached["account"]["observed_end"] == "2026-07-14"
+    assert attached["provider"]["observed_end"] == "2026-07-24"
+    assert data["meta"]["strategy_evidence_as_of"] == "2026-07-31"
+    assert any(
+        row["artifact"] == "current-strategy-provider-evidence"
+        for row in data["provenance"]
+    )
+
+
 def test_source_drift_fails_closed(inputs: dict[str, Path]) -> None:
     (inputs["legacy"] / "styles.css").write_text("changed", encoding="utf-8")
     with pytest.raises(panel.ControlPanelValidationError, match="source hash differs"):
@@ -859,7 +921,7 @@ def test_browser_qa_rejects_console_error(
         panel.validate_qa(candidate, qa)
 
 
-def test_material_hwm_perimeter_excludes_composer_and_accepts_robuxio() -> None:
+def test_material_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> None:
     strategies = [
         {
             "strategy_id": "composer-holy-grail",
@@ -894,7 +956,20 @@ def test_material_hwm_perimeter_excludes_composer_and_accepts_robuxio() -> None:
                     "target_current_drawdown": "0.162",
                     "target_max_drawdown": "0.196",
                 },
-            }
+            },
+            {
+                "series_id": "Volatis Strategy",
+                "status": "AVAILABLE",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "coverage": {
+                    "target_observed_start": "2024-10-16",
+                    "target_observed_end": "2026-07-29",
+                    "target_observations": 650,
+                    "target_cumulative_return": "0.63",
+                    "target_current_drawdown": "0.199",
+                    "target_max_drawdown": "0.320",
+                },
+            },
         ]
     }
     policy = {"excluded_strategy_ids": ["composer-holy-grail"]}
@@ -906,14 +981,16 @@ def test_material_hwm_perimeter_excludes_composer_and_accepts_robuxio() -> None:
     assert by_id["robuxio-crypto"]["nav_status"] == "AVAILABLE"
     assert by_id["robuxio-crypto"]["hwm_source"] == "ACCOUNT_LIVE_PROVIDER_OVERLAY"
     assert by_id["robuxio-crypto"]["nav_return_observations"] == 331
+    assert by_id["volatis-strategy"]["nav_status"] == "AVAILABLE"
+    assert by_id["volatis-strategy"]["nav_return_observations"] == 650
     assert summary == {
-        "covered_value_usd": "80",
+        "covered_value_usd": "100",
         "excluded_value_usd": "1",
         "excluded_strategies": ["[Composer] - The Holy Grail (Buy Copy)"],
         "material_value_usd": "100",
-        "nav_coverage": "0.8",
-        "status": "NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV",
-        "uncovered_strategies": ["Volatis Strategy"],
+        "nav_coverage": "1",
+        "status": "AVAILABLE_MATERIAL_PERIMETER",
+        "uncovered_strategies": [],
     }
 
 
@@ -961,6 +1038,9 @@ def test_provider_account_nav_overlay_promotes_twr_evidence() -> None:
     assert accepted_strategies[0]["account_live_cumulative_return"] == "0.42"
     assert accepted_strategies[0]["account_live_max_drawdown"] == "-0.196"
     assert accepted_strategies[0]["available_twr_segments"] == 1
+    assert accepted_strategies[0]["implementation_gap_status"] == (
+        "NOT_APPLICABLE_PROVIDER_CUSTODIED_ACCOUNT"
+    )
     assert accepted_performance[0]["nav_observations"] == 331
     assert accepted_performance[0]["twr"] == "0.42"
     assert accepted_performance[0]["twr_status"] == (

@@ -33,7 +33,7 @@
     "meta": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["baseline_generation_id", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_sha256", "hwm_policy_sha256", "panel_mode", "portfolio_as_of", "report_generation_id", "report_sha256", "source_shell_hashes", "template_hashes"],
+      "required": ["baseline_generation_id", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_sha256", "hwm_policy_sha256", "panel_mode", "portfolio_as_of", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "template_hashes"],
       "properties": {
         "baseline_generation_id": { "$ref": "#/$defs/hash" },
         "correlation_generation_id": { "$ref": "#/$defs/hash" },
@@ -46,6 +46,8 @@
         "report_generation_id": { "$ref": "#/$defs/hash" },
         "report_sha256": { "$ref": "#/$defs/hash" },
         "source_shell_hashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/hash" } },
+        "strategy_evidence_as_of": { "type": ["string", "null"], "format": "date" },
+        "strategy_evidence_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "template_hashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/hash" } }
       }
     },

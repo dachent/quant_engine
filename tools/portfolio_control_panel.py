@@ -33,7 +33,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 PANEL_SCHEMA_VERSION: Final = 4
-BUILDER_VERSION: Final = "1.4.0"
+BUILDER_VERSION: Final = "1.5.0"
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
     "either_strategy_underwater",
@@ -107,6 +107,97 @@ def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ControlPanelValidationError(f"{field_name} is not readable JSON") from exc
     return _object(decoded, field_name)
+
+
+def _strategy_evidence(
+    path: Path | None,
+    strategy_ids: set[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
+    """Load an optional provider/account evidence overlay without joining paths."""
+
+    if path is None:
+        return {}, None
+    evidence = _load_json(path, "strategy evidence")
+    if evidence.get("schema_version") != 1:
+        raise ControlPanelValidationError("strategy evidence schema is unsupported")
+    as_of_date = _text(evidence.get("as_of_date"), "strategy evidence as_of_date")
+    try:
+        date.fromisoformat(as_of_date)
+    except ValueError as exc:
+        raise ControlPanelValidationError(
+            "strategy evidence as_of_date is invalid"
+        ) from exc
+    rows = _objects(evidence.get("strategies"), "strategy evidence strategies")
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        strategy_id = _text(row.get("strategy_id"), "strategy evidence strategy_id")
+        if strategy_id in by_id:
+            raise ControlPanelValidationError(
+                "strategy evidence identity is duplicated"
+            )
+        if strategy_id not in strategy_ids:
+            raise ControlPanelValidationError(
+                f"strategy evidence is outside the current boundary: {strategy_id}"
+            )
+        provider_id = _text(row.get("provider_id"), "strategy evidence provider_id")
+        generation_id = _text(
+            row.get("generation_id"), "strategy evidence generation_id"
+        )
+        if re.fullmatch(r"[0-9a-f]{64}", generation_id) is None:
+            raise ControlPanelValidationError(
+                f"strategy evidence generation identity is invalid: {strategy_id}"
+            )
+        generation_as_of_date = _text(
+            row.get("generation_as_of_date"),
+            "strategy evidence generation_as_of_date",
+        )
+        try:
+            date.fromisoformat(generation_as_of_date)
+        except ValueError as exc:
+            raise ControlPanelValidationError(
+                f"strategy evidence generation date is invalid: {strategy_id}"
+            ) from exc
+        evidence_layer = _text(
+            row.get("evidence_layer"), "strategy evidence evidence_layer"
+        )
+        account = _object(row.get("account"), "strategy evidence account")
+        for field in ("observed_start", "observed_end", "return_observations"):
+            if account.get(field) is None:
+                raise ControlPanelValidationError(
+                    f"strategy evidence account lacks {field}: {strategy_id}"
+                )
+        try:
+            observed_start = date.fromisoformat(str(account["observed_start"]))
+            observed_end = date.fromisoformat(str(account["observed_end"]))
+        except ValueError as exc:
+            raise ControlPanelValidationError(
+                f"strategy evidence account date is invalid: {strategy_id}"
+            ) from exc
+        if observed_end < observed_start:
+            raise ControlPanelValidationError(
+                f"strategy evidence account interval is reversed: {strategy_id}"
+            )
+        if (
+            not isinstance(account["return_observations"], int)
+            or account["return_observations"] <= 0
+        ):
+            raise ControlPanelValidationError(
+                f"strategy evidence return observations are invalid: {strategy_id}"
+            )
+        by_id[strategy_id] = {
+            **row,
+            "evidence_layer": evidence_layer,
+            "generation_id": generation_id,
+            "generation_as_of_date": generation_as_of_date,
+            "provider_id": provider_id,
+        }
+    sha256, size_bytes = hash_file(path)
+    return by_id, {
+        "as_of_date": as_of_date,
+        "path": path,
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+    }
 
 
 def _hash(path: Path) -> str:
@@ -403,6 +494,9 @@ def _provider_account_nav_performance(
                 ),
                 "account_live_status": "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV",
                 "available_twr_segments": 1,
+                "implementation_gap_status": (
+                    "NOT_APPLICABLE_PROVIDER_CUSTODIED_ACCOUNT"
+                ),
             }
         )
     return accepted_strategies, accepted_performance
@@ -766,6 +860,7 @@ def _panel_data(
     legacy: Mapping[str, Any],
     source: Mapping[str, Any],
     template_root: Path,
+    strategy_evidence_path: Path | None = None,
 ) -> dict[str, Any]:
     summary = _summary(report)
     strategies = _objects(report.get("strategy_summary"), "strategy_summary")
@@ -793,6 +888,9 @@ def _panel_data(
         )
         for row in strategies
     }
+    evidence_by_strategy, evidence_identity = _strategy_evidence(
+        strategy_evidence_path, set(strategy_names)
+    )
     current_strategy_names = set(strategy_names.values())
     factor_analysis = _factor_analysis(
         decomposition, decomposition_identity, current_strategy_names
@@ -806,6 +904,22 @@ def _panel_data(
     )
     strategies, performance = _provider_account_nav_performance(
         strategies, performance, factor_analysis
+    )
+    strategies = [
+        {
+            **row,
+            **(
+                {"provider_evidence": evidence_by_strategy[str(row["strategy_id"])]}
+                if str(row["strategy_id"]) in evidence_by_strategy
+                else {}
+            ),
+        }
+        for row in strategies
+    ]
+    provider_nav_names = sorted(
+        _text(row.get("strategy_name"), "provider NAV strategy_name")
+        for row in strategies
+        if row.get("hwm_source") == "ACCOUNT_LIVE_PROVIDER_OVERLAY"
     )
     coverage = [dict(row) for row in coverage]
     for row in coverage:
@@ -977,6 +1091,18 @@ def _panel_data(
             "schema": "portfolio-hwm-policy/2",
             "sha256": hwm_policy_hash,
         },
+        *(
+            [
+                {
+                    "artifact": "current-strategy-provider-evidence",
+                    "as_of_date": evidence_identity["as_of_date"],
+                    "schema": "current-strategy-provider-evidence/1",
+                    "sha256": evidence_identity["sha256"],
+                }
+            ]
+            if evidence_identity is not None
+            else []
+        ),
     ]
     report_stress = _finite_float(
         _summary_value(summary, "Correlation-one stress"),
@@ -1019,11 +1145,16 @@ def _panel_data(
             "nav_coverage": hwm_summary["nav_coverage"],
             "readiness": _summary_value(summary, "Advisory readiness"),
             "reason": (
-                "Material HWM coverage now includes the accepted Matrixport "
-                "Robuxio account-live series; Composer is reported but excluded "
-                "de minimis. Remaining HWM gap: "
-                + ", ".join(hwm_summary["uncovered_strategies"])
-                + "."
+                "Accepted provider-custodied account NAV now covers "
+                + (", ".join(provider_nav_names) or "no additional sleeves")
+                + "; Composer is reported but excluded de minimis. "
+                + (
+                    "Remaining HWM gap: "
+                    + ", ".join(hwm_summary["uncovered_strategies"])
+                    + "."
+                    if hwm_summary["uncovered_strategies"]
+                    else "Every material systematic sleeve has accepted daily NAV."
+                )
             ),
         },
         "allocations": normalized_allocations,
@@ -1069,6 +1200,14 @@ def _panel_data(
             "decomposition_generation_id": decomposition_identity["generation_id"],
             "decomposition_sha256": decomposition_identity["sha256"],
             "hwm_policy_sha256": hwm_policy_hash,
+            "strategy_evidence_as_of": (
+                evidence_identity["as_of_date"]
+                if evidence_identity is not None
+                else None
+            ),
+            "strategy_evidence_sha256": (
+                evidence_identity["sha256"] if evidence_identity is not None else None
+            ),
             "report_generation_id": report_identity["generation_id"],
             "report_sha256": report_identity["sha256"],
             "source_shell_hashes": source.get("observed_hashes"),
@@ -1091,7 +1230,12 @@ def _rendered_files(
     template_root: Path,
     decomposition_root: Path | None = None,
     correlation_root: Path | None = None,
-) -> tuple[dict[str, bytes], dict[str, Any], tuple[Path, Path, Path, Path]]:
+    strategy_evidence_path: Path | None = None,
+) -> tuple[
+    dict[str, bytes],
+    dict[str, Any],
+    tuple[Path, Path, Path, Path, Path | None],
+]:
     report, report_identity, report_path = _current_report(report_root)
     resolved_decomposition, resolved_correlation = _analytics_roots(
         report_root, decomposition_root, correlation_root
@@ -1119,6 +1263,7 @@ def _rendered_files(
         legacy,
         source,
         template_root,
+        strategy_evidence_path,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -1138,6 +1283,7 @@ def _rendered_files(
             decomposition_path,
             correlation_path,
             legacy_data,
+            strategy_evidence_path,
         ),
     )
 
@@ -1174,6 +1320,7 @@ def build_candidate(
     template_root: Path = DEFAULT_TEMPLATE_ROOT,
     decomposition_root: Path | None = None,
     correlation_root: Path | None = None,
+    strategy_evidence_path: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -1181,6 +1328,7 @@ def build_candidate(
         template_root,
         decomposition_root,
         correlation_root,
+        strategy_evidence_path,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -1227,6 +1375,7 @@ def verify_candidate(
     template_root: Path = DEFAULT_TEMPLATE_ROOT,
     decomposition_root: Path | None = None,
     correlation_root: Path | None = None,
+    strategy_evidence_path: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -1234,6 +1383,7 @@ def verify_candidate(
         template_root,
         decomposition_root,
         correlation_root,
+        strategy_evidence_path,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -1347,6 +1497,43 @@ def verify_candidate(
             data["advisory"],
         )
     )
+    if strategy_evidence_path is not None:
+        strategy_rows = {
+            _text(row.get("strategy_id"), "strategy strategy_id"): row
+            for row in _objects(data.get("strategies"), "strategies")
+        }
+        volatis = strategy_rows.get("volatis-strategy", {})
+        p123 = strategy_rows.get("p123-ai-factor", {})
+        volatis_evidence = _object(
+            volatis.get("provider_evidence"), "Volatis provider evidence"
+        )
+        p123_evidence = _object(
+            p123.get("provider_evidence"), "Portfolio123 provider evidence"
+        )
+        p123_account = _object(p123_evidence.get("account"), "P123 account evidence")
+        p123_provider = _object(p123_evidence.get("provider"), "P123 provider evidence")
+        checks.append(
+            _check(
+                "Provider evidence remains explicit and separate",
+                volatis.get("nav_status") == "AVAILABLE"
+                and volatis.get("hwm_source") == "ACCOUNT_LIVE_PROVIDER_OVERLAY"
+                and volatis_evidence.get("provider_id") == "quantbase"
+                and p123_evidence.get("provider_id") == "portfolio123"
+                and p123_account.get("observed_end")
+                != p123_provider.get("observed_end")
+                and isinstance(p123_evidence.get("overlap"), dict)
+                and isinstance(p123_evidence.get("current_snapshot"), dict),
+                {
+                    "p123_account_end": p123_account.get("observed_end"),
+                    "p123_generation_as_of": p123_evidence.get("generation_as_of_date"),
+                    "p123_provider_end": p123_provider.get("observed_end"),
+                    "volatis_account_end": _object(
+                        volatis_evidence.get("account"),
+                        "Volatis account evidence",
+                    ).get("observed_end"),
+                },
+            )
+        )
     checks.append(
         _check(
             "Frozen candidates remain isolated",
@@ -1399,7 +1586,14 @@ def verify_candidate(
         _check(
             "Accepted dependence evidence is exact",
             data["dependence_analysis"]["pair_count"] == 36
-            and data["dependence_analysis"]["available_pair_count"] == 10
+            and data["dependence_analysis"]["available_pair_count"]
+            == sum(
+                _object(cell.get("observed"), "dependence observed cell").get("status")
+                == "AVAILABLE"
+                for cell in _objects(
+                    data["dependence_analysis"].get("cells"), "dependence cells"
+                )
+            )
             and len(data["dependence_analysis"]["matrices"]) == 6
             and len(data["dependence_analysis"]["horizon_matrices"]) == 8
             and len(data["dependence_analysis"]["drawdown_matrices"]) == 2,
@@ -1600,6 +1794,7 @@ def publish_panel(
     template_root: Path = DEFAULT_TEMPLATE_ROOT,
     decomposition_root: Path | None = None,
     correlation_root: Path | None = None,
+    strategy_evidence_path: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         report_root,
@@ -1608,6 +1803,7 @@ def publish_panel(
         template_root,
         decomposition_root,
         correlation_root,
+        strategy_evidence_path,
     )
     qa = validate_qa(candidate_dir, qa_dir)
     _, data, input_paths = _rendered_files(
@@ -1616,8 +1812,15 @@ def publish_panel(
         template_root,
         decomposition_root,
         correlation_root,
+        strategy_evidence_path,
     )
-    report_path, decomposition_path, correlation_path, legacy_data = input_paths
+    (
+        report_path,
+        decomposition_path,
+        correlation_path,
+        legacy_data,
+        strategy_evidence_source,
+    ) = input_paths
     as_of = date.fromisoformat(_text(data["meta"]["portfolio_as_of"], "as_of"))
     artifacts: list[SourceArtifact] = [
         SourceArtifact.from_path(
@@ -1656,6 +1859,18 @@ def publish_panel(
             schema_version="2",
         ),
     ]
+    if strategy_evidence_source is not None:
+        artifacts.append(
+            SourceArtifact.from_path(
+                strategy_evidence_source,
+                artifact_id="input/current-strategy-provider-evidence.json",
+                as_of_date=date.fromisoformat(
+                    _text(data["meta"]["strategy_evidence_as_of"], "evidence as_of")
+                ),
+                schema_name="current-strategy-provider-evidence",
+                schema_version="1",
+            )
+        )
     for relative in (*PANEL_FILES, "candidate.json"):
         artifacts.append(
             SourceArtifact.from_path(
@@ -1731,6 +1946,7 @@ def _parser() -> argparse.ArgumentParser:
         )
         command.add_argument("--decomposition-root", type=Path)
         command.add_argument("--correlation-root", type=Path)
+        command.add_argument("--strategy-evidence", type=Path)
         command.add_argument("--output-root", type=Path, required=name != "verify")
         if name != "build":
             command.add_argument("--candidate-dir", type=Path, required=True)
@@ -1753,6 +1969,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.template_root,
                 args.decomposition_root,
                 args.correlation_root,
+                args.strategy_evidence,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -1762,6 +1979,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.template_root,
                 args.decomposition_root,
                 args.correlation_root,
+                args.strategy_evidence,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -1775,6 +1993,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.template_root,
                 args.decomposition_root,
                 args.correlation_root,
+                args.strategy_evidence,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)

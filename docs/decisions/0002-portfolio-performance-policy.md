@@ -212,10 +212,12 @@ machine-readable policy is `contracts/portfolio-hwm-policy-v2.json` (`PORT-HWM-2
 3. Hash-verified provider-custodied account NAV is acceptable HWM evidence when
    it is tied to exactly one positive live holding and normalized without
    interpolation or evidence-layer substitution.
-4. Robuxio meets that rule through the accepted Matrixport generation. Its
-   account-live NAV path contributes to material HWM coverage. Full-material
-   HWM remains unavailable while any other included strategy lacks accepted
-   daily evidence through its declared boundary.
+4. Robuxio meets that rule through the accepted Matrixport generation. Volatis
+   meets it through the accepted Quantbase generation after non-rebalance cash
+   additions reconcile to observed cost-basis increases. Their account-live
+   paths contribute to material HWM coverage. Full-material HWM remains
+   unavailable while any other included strategy lacks accepted daily evidence
+   through its declared boundary.
 
 This amendment changes HWM coverage only. It does not change reported capital,
 the 15% systematic drawdown limit, the distinction between sleeve and composite

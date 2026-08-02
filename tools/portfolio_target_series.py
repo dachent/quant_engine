@@ -1,10 +1,11 @@
 """Normalize provider-custodied strategy NAV into governed target returns.
 
-The initial vertical slice accepts an immutable Matrixport generation. It
-verifies both the product NAV and the matching live holding against that
-generation's manifest, calculates after-fee NAV returns, and merges them with
-an existing canonical target file. No provider call or credential access is
-performed.
+The first vertical slice accepts an immutable Matrixport generation. The
+roll-forward path also accepts published Quantbase and Portfolio123
+generations. It adds the Quantbase-custodied Volatis account path, preserves
+the separate Portfolio123 provider-model and IBKR account-live paths, and
+emits explicit overlap reconciliation. No provider call or credential access
+is performed.
 """
 
 from __future__ import annotations
@@ -12,12 +13,14 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
 import json
+import math
 from pathlib import Path
+import statistics
 from typing import Any, Final, Mapping, Sequence
 
 from quant_engine.core.contracts import canonical_json_bytes
@@ -34,6 +37,13 @@ TARGET_FIELDS: Final = (
 )
 MATRIXPORT_NAV_FIELDS: Final = frozenset({"nav", "product_id", "timestamp_utc"})
 MATRIXPORT_HOLDING_FIELDS: Final = frozenset({"product_id", "shares"})
+QUANTBASE_HISTORY_FIELDS: Final = frozenset(
+    {"time", "value", "cost_basis", "profit_loss"}
+)
+QUANTBASE_ACTIVITY_FIELDS: Final = frozenset(
+    {"activity_type", "amount", "fund", "is_rebalance", "time", "type"}
+)
+CORRELATION_FIELDS: Final = ("series_id", "date", "return", "evidence_layer")
 
 
 class TargetSeriesError(ValueError):
@@ -132,6 +142,16 @@ def _positive_decimal(value: object, name: str) -> Decimal:
     return accepted
 
 
+def _decimal(value: object, name: str) -> Decimal:
+    try:
+        accepted = Decimal(str(value).replace(",", ""))
+    except (InvalidOperation, ValueError) as exc:
+        raise TargetSeriesError(f"{name} must be decimal") from exc
+    if not accepted.is_finite():
+        raise TargetSeriesError(f"{name} must be finite")
+    return accepted
+
+
 def _utc_day(value: str) -> date:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -218,6 +238,242 @@ def _target_bytes(rows: Sequence[Mapping[str, str]]) -> bytes:
     return buffer.getvalue().encode("utf-8")
 
 
+def _target_rows(content: bytes) -> list[dict[str, str]]:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TargetSeriesError("target content is not UTF-8") from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if tuple(reader.fieldnames or ()) != TARGET_FIELDS:
+        raise TargetSeriesError("target content header differs")
+    rows = [{field: str(row[field]) for field in TARGET_FIELDS} for row in reader]
+    if not rows:
+        raise TargetSeriesError("target content is empty")
+    return rows
+
+
+def _path_statistics(rows: Sequence[Mapping[str, str]]) -> dict[str, object]:
+    if not rows:
+        raise TargetSeriesError("return path is empty")
+    wealth = Decimal(1)
+    peak = Decimal(1)
+    maximum_drawdown = Decimal(0)
+    for row in rows:
+        value = _decimal(row["return"], "return")
+        if value <= -1:
+            raise TargetSeriesError("return must exceed negative one")
+        wealth *= Decimal(1) + value
+        peak = max(peak, wealth)
+        maximum_drawdown = max(maximum_drawdown, Decimal(1) - wealth / peak)
+    return {
+        "cumulative_return": format((wealth - Decimal(1)).normalize(), "f"),
+        "current_drawdown": format((Decimal(1) - wealth / peak).normalize(), "f"),
+        "maximum_drawdown": format(maximum_drawdown.normalize(), "f"),
+        "observed_end": rows[-1]["date"],
+        "observed_start": rows[0]["date"],
+        "return_observations": len(rows),
+    }
+
+
+def _quantbase_returns(
+    history_path: Path,
+    activity_path: Path,
+    fund_id: str,
+    series_id: str,
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    history: list[tuple[date, Decimal, Decimal]] = []
+    seen_days: set[date] = set()
+    for row in _csv_rows(
+        history_path, QUANTBASE_HISTORY_FIELDS, "Quantbase account price history"
+    ):
+        try:
+            day = datetime.strptime(row["time"], "%m/%d/%Y").date()
+        except ValueError as exc:
+            raise TargetSeriesError("Quantbase account date is invalid") from exc
+        if day in seen_days:
+            raise TargetSeriesError("Quantbase account history has duplicate dates")
+        seen_days.add(day)
+        value = _decimal(row["value"], "Quantbase account value")
+        cost_basis = _decimal(row["cost_basis"], "Quantbase cost basis")
+        if value < 0 or cost_basis < 0:
+            raise TargetSeriesError(
+                "Quantbase value and cost basis must be nonnegative"
+            )
+        history.append((day, value, cost_basis))
+    history.sort(key=lambda item: item[0])
+    if len(history) < 2:
+        raise TargetSeriesError("Quantbase account history is insufficient")
+
+    contributions: list[tuple[datetime, Decimal]] = []
+    for row in _csv_rows(
+        activity_path, QUANTBASE_ACTIVITY_FIELDS, "Quantbase account activity"
+    ):
+        if (
+            row["activity_type"] != "filled_txn"
+            or row["fund"] != fund_id
+            or row["is_rebalance"].lower() != "false"
+        ):
+            continue
+        amount = _decimal(row["amount"], "Quantbase fund activity amount")
+        if amount <= 0 or row["type"].upper() != "BUY":
+            continue
+        try:
+            observed = datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise TargetSeriesError("Quantbase activity timestamp is invalid") from exc
+        if observed.tzinfo is None or observed.utcoffset() is None:
+            raise TargetSeriesError("Quantbase activity timestamp lacks an offset")
+        contributions.append((observed, amount))
+    contributions.sort(key=lambda item: item[0])
+    if not contributions:
+        raise TargetSeriesError("Quantbase fund has no identified capital additions")
+
+    pending: list[tuple[datetime, Decimal]] = []
+    contribution_index = 0
+    previous_cost_basis = Decimal(0)
+    booked_flows: dict[date, Decimal] = {}
+    flow_matches: list[dict[str, object]] = []
+    tolerance = Decimal("0.02")
+    for day, _value, cost_basis in history:
+        while (
+            contribution_index < len(contributions)
+            and contributions[contribution_index][0].date() <= day
+        ):
+            pending.append(contributions[contribution_index])
+            contribution_index += 1
+        delta = cost_basis - previous_cost_basis
+        if delta > tolerance and pending:
+            running = Decimal(0)
+            matched_count = 0
+            for index, (_timestamp, amount) in enumerate(pending):
+                running += amount
+                if abs(running - delta) <= tolerance:
+                    matched_count = index + 1
+                    break
+                if running > delta + tolerance:
+                    break
+            if matched_count:
+                booked_flows[day] = running
+                flow_matches.append(
+                    {
+                        "booked_date": day.isoformat(),
+                        "cost_basis_increase": format(delta.normalize(), "f"),
+                        "flow_amount": format(running.normalize(), "f"),
+                        "source_activity_count": matched_count,
+                    }
+                )
+                pending = pending[matched_count:]
+        previous_cost_basis = cost_basis
+    if contribution_index != len(contributions) or pending:
+        raise TargetSeriesError("Quantbase capital additions do not reconcile")
+
+    result: list[dict[str, str]] = []
+    previous_value: Decimal | None = None
+    first_value_date: date | None = None
+    for day, value, _cost_basis in history:
+        if value <= 0:
+            continue
+        if first_value_date is None:
+            first_value_date = day
+        if previous_value is None:
+            previous_value = value
+            continue
+        flow = booked_flows.get(day, Decimal(0))
+        period_return = (value - flow) / previous_value - Decimal(1)
+        if period_return <= -1:
+            raise TargetSeriesError("Quantbase flow-adjusted return is invalid")
+        result.append(
+            {
+                "series_id": series_id,
+                "date": day.isoformat(),
+                "return": format(period_return.normalize(), "f"),
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return_basis": "NET",
+                "return_type": "TOTAL",
+                "cost": "",
+            }
+        )
+        previous_value = value
+    statistics_value = _path_statistics(result)
+    statistics_value.update(
+        {
+            "flow_convention": "DATE_ONLY_END_OF_DAY_BOOKING",
+            "flow_events": len(flow_matches),
+            "fund_id": fund_id,
+            "nav_observations": len(result) + 1,
+            "source_first_positive_value_date": (
+                first_value_date.isoformat() if first_value_date else None
+            ),
+        }
+    )
+    return result, {"coverage": statistics_value, "flow_matches": flow_matches}
+
+
+def build_quantbase_targets(
+    base_targets: Path,
+    manifest_path: Path,
+    history_path: Path,
+    activity_path: Path,
+    fund_id: str,
+    series_id: str,
+) -> tuple[bytes, bytes]:
+    manifest = _load_json(manifest_path, "Quantbase generation manifest")
+    if manifest.get("verification") != "VERIFIED":
+        raise TargetSeriesError("Quantbase generation is not verified")
+    generation_id = str(manifest.get("generation_id", ""))
+    if len(generation_id) != 64:
+        raise TargetSeriesError("Quantbase generation identity is invalid")
+    try:
+        generation_as_of_date = date.fromisoformat(str(manifest.get("as_of_date", "")))
+    except ValueError as exc:
+        raise TargetSeriesError("Quantbase generation as-of date is invalid") from exc
+    artifacts = _manifest_artifacts(manifest.get("artifacts"))
+    history_artifact = _verify_artifact(
+        history_path,
+        artifacts,
+        "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+    )
+    activity_artifact = _verify_artifact(
+        activity_path, artifacts, "source/csv/account_activity.csv"
+    )
+    base = _base_rows(base_targets, series_id)
+    provider_rows, evidence = _quantbase_returns(
+        history_path, activity_path, fund_id, series_id
+    )
+    combined = sorted(
+        [*base, *provider_rows], key=lambda row: (row["series_id"], row["date"])
+    )
+    target_content = _target_bytes(combined)
+    base_hash, base_size = _sha256(base_targets)
+    proof: dict[str, object] = {
+        "builder": "portfolio-target-series/quantbase-account-1",
+        "generation_id": generation_id,
+        "generation_as_of_date": generation_as_of_date.isoformat(),
+        "provider_id": "quantbase",
+        "series_id": series_id,
+        "strategy_id": "volatis-strategy",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "return_basis": "NET",
+        **evidence,
+        "sources": {
+            "base_targets": {"sha256": base_hash, "size_bytes": base_size},
+            "account_history": {
+                "artifact_id": history_artifact.artifact_id,
+                "sha256": history_artifact.sha256,
+                "size_bytes": history_artifact.size_bytes,
+            },
+            "account_activity": {
+                "artifact_id": activity_artifact.artifact_id,
+                "sha256": activity_artifact.sha256,
+                "size_bytes": activity_artifact.size_bytes,
+            },
+        },
+        "target_sha256": hashlib.sha256(target_content).hexdigest(),
+        "target_size_bytes": len(target_content),
+    }
+    return target_content, canonical_json_bytes(proof)
+
+
 def build_matrixport_targets(
     base_targets: Path,
     manifest_path: Path,
@@ -269,6 +525,306 @@ def build_matrixport_targets(
         "target_size_bytes": len(target_content),
     }
     return target_content, canonical_json_bytes(proof)
+
+
+def _parquet_rows(
+    path: Path, columns: Sequence[str], name: str
+) -> list[dict[str, object]]:
+    if path.is_symlink() or not path.is_file():
+        raise TargetSeriesError(f"{name} must be a regular file")
+    try:
+        import pyarrow.parquet as pq  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise TargetSeriesError("Portfolio123 Parquet support is unavailable") from exc
+    try:
+        table = pq.read_table(path, columns=list(columns))
+    except Exception as exc:
+        raise TargetSeriesError(f"{name} is not readable Parquet") from exc
+    return [dict(row) for row in table.to_pylist()]
+
+
+def _portfolio123_returns(equity_path: Path, entity_id: str) -> list[dict[str, str]]:
+    selected: dict[date, tuple[Decimal, Decimal]] = {}
+    for row in _parquet_rows(
+        equity_path,
+        ("_entity_id", "Date", "Total Equity", "Cash Added"),
+        "Portfolio123 equity curve",
+    ):
+        if str(row.get("_entity_id") or "") != entity_id:
+            continue
+        raw_date = str(row.get("Date") or "")
+        try:
+            day = date.fromisoformat(raw_date)
+        except ValueError as exc:
+            raise TargetSeriesError("Portfolio123 equity date is invalid") from exc
+        equity = _decimal(row.get("Total Equity") or "", "Portfolio123 equity")
+        cash_added = _decimal(row.get("Cash Added") or "0", "Portfolio123 cash added")
+        if equity <= 0:
+            raise TargetSeriesError("Portfolio123 equity must be positive")
+        observation = (equity, cash_added)
+        if day in selected and selected[day] != observation:
+            raise TargetSeriesError("Portfolio123 equity has conflicting dates")
+        selected[day] = observation
+    ordered = sorted(selected.items())
+    if len(ordered) < 2:
+        raise TargetSeriesError("Portfolio123 entity lacks an equity history")
+    result: list[dict[str, str]] = []
+    previous = ordered[0][1][0]
+    for day, (equity, cash_added) in ordered[1:]:
+        period_return = (equity - cash_added) / previous - Decimal(1)
+        if period_return <= -1:
+            raise TargetSeriesError("Portfolio123 flow-adjusted return is invalid")
+        result.append(
+            {
+                "series_id": entity_id,
+                "date": day.isoformat(),
+                "return": format(period_return.normalize(), "f"),
+                "evidence_layer": "PROVIDER_LIVE",
+                "return_basis": "OBSERVED",
+                "return_type": "TOTAL",
+                "cost": "",
+            }
+        )
+        previous = equity
+    return result
+
+
+def _cumulative(rows: Sequence[Mapping[str, str]]) -> Decimal:
+    wealth = Decimal(1)
+    for row in rows:
+        wealth *= Decimal(1) + _decimal(row["return"], "return")
+    return wealth - Decimal(1)
+
+
+def _overlap_reconciliation(
+    account_rows: Sequence[Mapping[str, str]],
+    provider_rows: Sequence[Mapping[str, str]],
+) -> dict[str, object]:
+    account = {
+        row["date"]: _decimal(row["return"], "account return") for row in account_rows
+    }
+    provider = {
+        row["date"]: _decimal(row["return"], "provider return") for row in provider_rows
+    }
+    common = sorted(set(account) & set(provider))
+    if len(common) < 2:
+        raise TargetSeriesError("Portfolio123 paths lack a usable exact-date overlap")
+    account_values = [float(account[day]) for day in common]
+    provider_values = [float(provider[day]) for day in common]
+    if (
+        statistics.pstdev(account_values) <= 1e-15
+        or statistics.pstdev(provider_values) <= 1e-15
+    ):
+        correlation: float | None = None
+    else:
+        correlation = statistics.correlation(account_values, provider_values)
+    differences = [left - right for left, right in zip(account_values, provider_values)]
+    tracking_error = statistics.pstdev(differences) * math.sqrt(252)
+    account_overlap = [
+        {"return": format(account[day].normalize(), "f")} for day in common
+    ]
+    provider_overlap = [
+        {"return": format(provider[day].normalize(), "f")} for day in common
+    ]
+    account_cumulative = _cumulative(account_overlap)
+    provider_cumulative = _cumulative(provider_overlap)
+    return {
+        "account_cumulative_return": format(account_cumulative.normalize(), "f"),
+        "account_minus_provider_cumulative": format(
+            (account_cumulative - provider_cumulative).normalize(), "f"
+        ),
+        "annualized_tracking_error": format(tracking_error, ".12g"),
+        "daily_return_correlation": (
+            None if correlation is None else format(correlation, ".12g")
+        ),
+        "observations": len(common),
+        "observed_end": common[-1],
+        "observed_start": common[0],
+        "provider_cumulative_return": format(provider_cumulative.normalize(), "f"),
+        "status": "TESTED_EXACT_DATE_PATHS",
+    }
+
+
+def _portfolio123_snapshot(
+    metadata_path: Path, account_entity_id: str
+) -> dict[str, object]:
+    matches = []
+    for row in _parquet_rows(
+        metadata_path,
+        ("id", "lastFix", "netWorth", "netWorthPrevWithCashAdded", "isLive"),
+        "Portfolio123 account metadata",
+    ):
+        if str(row.get("id") or "") == account_entity_id and row.get(
+            "netWorth"
+        ) not in (None, ""):
+            matches.append(row)
+    if len(matches) != 1:
+        raise TargetSeriesError("Portfolio123 account snapshot is not unique")
+    row = matches[0]
+    try:
+        milliseconds = int(str(row.get("lastFix") or ""))
+    except ValueError as exc:
+        raise TargetSeriesError(
+            "Portfolio123 account snapshot time is invalid"
+        ) from exc
+    observed = datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc)
+    return {
+        "account_entity_id": account_entity_id,
+        "is_live": str(row.get("isLive") or "").lower() == "true",
+        "net_worth": format(
+            _decimal(
+                row.get("netWorth") or "", "Portfolio123 account net worth"
+            ).normalize(),
+            "f",
+        ),
+        "net_worth_previous_with_cash_added": format(
+            _decimal(
+                row.get("netWorthPrevWithCashAdded") or "",
+                "Portfolio123 previous net worth",
+            ).normalize(),
+            "f",
+        ),
+        "observed_at_utc": observed.isoformat().replace("+00:00", "Z"),
+        "observed_date": observed.date().isoformat(),
+    }
+
+
+def build_portfolio123_evidence(
+    target_content: bytes,
+    manifest_path: Path,
+    equity_path: Path,
+    metadata_path: Path,
+    provider_entity_id: str,
+    account_entity_id: str,
+    strategy_id: str,
+    account_series_id: str,
+) -> bytes:
+    manifest = _load_json(manifest_path, "Portfolio123 generation manifest")
+    if manifest.get("verification") != "VERIFIED":
+        raise TargetSeriesError("Portfolio123 generation is not verified")
+    generation_id = str(manifest.get("generation_id", ""))
+    if len(generation_id) != 64:
+        raise TargetSeriesError("Portfolio123 generation identity is invalid")
+    try:
+        generation_as_of_date = date.fromisoformat(str(manifest.get("as_of_date", "")))
+    except ValueError as exc:
+        raise TargetSeriesError(
+            "Portfolio123 generation as-of date is invalid"
+        ) from exc
+    artifacts = _manifest_artifacts(manifest.get("artifacts"))
+    equity_artifact = _verify_artifact(
+        equity_path, artifacts, "tables/har_equity_curve.parquet"
+    )
+    metadata_artifact = _verify_artifact(
+        metadata_path, artifacts, "tables/har_account_metadata.parquet"
+    )
+    account_rows = [
+        row
+        for row in _target_rows(target_content)
+        if row["series_id"] == account_series_id
+    ]
+    if len(account_rows) < 2 or {row["evidence_layer"] for row in account_rows} != {
+        "ACCOUNT_LIVE"
+    }:
+        raise TargetSeriesError("Portfolio123 account target is unavailable")
+    provider_rows = _portfolio123_returns(equity_path, provider_entity_id)
+    provider_statistics = _path_statistics(provider_rows)
+    account_statistics = _path_statistics(account_rows)
+    evidence = {
+        "account": account_statistics,
+        "current_snapshot": _portfolio123_snapshot(metadata_path, account_entity_id),
+        "evidence_layer": "PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE",
+        "generation_id": generation_id,
+        "generation_as_of_date": generation_as_of_date.isoformat(),
+        "overlap": _overlap_reconciliation(account_rows, provider_rows),
+        "provider": {
+            **provider_statistics,
+            "entity_id": provider_entity_id,
+        },
+        "provider_id": "portfolio123",
+        "sources": {
+            "equity_curve": {
+                "artifact_id": equity_artifact.artifact_id,
+                "sha256": equity_artifact.sha256,
+                "size_bytes": equity_artifact.size_bytes,
+            },
+            "account_metadata": {
+                "artifact_id": metadata_artifact.artifact_id,
+                "sha256": metadata_artifact.sha256,
+                "size_bytes": metadata_artifact.size_bytes,
+            },
+        },
+        "strategy_id": strategy_id,
+        "strategy_name": account_series_id,
+    }
+    return canonical_json_bytes(evidence)
+
+
+def build_strategy_evidence(
+    quantbase_proof_content: bytes, portfolio123_evidence_content: bytes
+) -> bytes:
+    quantbase = json.loads(quantbase_proof_content)
+    portfolio123 = json.loads(portfolio123_evidence_content)
+    quantbase_strategy = {
+        "account": quantbase["coverage"],
+        "evidence_layer": quantbase["evidence_layer"],
+        "generation_id": quantbase["generation_id"],
+        "generation_as_of_date": quantbase["generation_as_of_date"],
+        "provider_id": quantbase["provider_id"],
+        "sources": quantbase["sources"],
+        "strategy_id": quantbase["strategy_id"],
+        "strategy_name": quantbase["series_id"],
+    }
+    as_of_dates = [
+        str(quantbase_strategy["generation_as_of_date"]),
+        str(portfolio123["generation_as_of_date"]),
+    ]
+    result = {
+        "as_of_date": max(as_of_dates),
+        "schema_version": 1,
+        "strategies": [quantbase_strategy, portfolio123],
+    }
+    return canonical_json_bytes(result)
+
+
+def _correlation_bytes(target_content: bytes) -> bytes:
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=CORRELATION_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    for row in _target_rows(target_content):
+        writer.writerow({field: row[field] for field in CORRELATION_FIELDS})
+    return buffer.getvalue().encode("utf-8")
+
+
+def build_correlation_inputs(
+    base_spec_path: Path,
+    base_returns_path: Path,
+    target_content: bytes,
+    as_of_date: str,
+) -> tuple[bytes, bytes]:
+    spec = _load_json(base_spec_path, "base correlation spec")
+    source = spec.get("return_source")
+    if not isinstance(source, dict):
+        raise TargetSeriesError("correlation return source is invalid")
+    base_hash, base_size = _sha256(base_returns_path)
+    if (
+        source.get("expected_sha256") != base_hash
+        or source.get("expected_size_bytes") != base_size
+    ):
+        raise TargetSeriesError("base correlation return identity differs")
+    content = _correlation_bytes(target_content)
+    spec["as_of_date"] = max(str(spec.get("as_of_date", "")), as_of_date)
+    source.update(
+        {
+            "artifact_id": "provider-rollforward/account-live-strategy-returns.csv",
+            "expected_sha256": hashlib.sha256(content).hexdigest(),
+            "expected_size_bytes": len(content),
+            "relative_path": "returns.csv",
+            "schema_name": "portfolio-account-live-strategy-returns",
+            "schema_version": "2",
+        }
+    )
+    return canonical_json_bytes(spec), content
 
 
 def build_decomposition_inputs(
@@ -342,6 +898,99 @@ def build_decomposition_inputs(
     return canonical_json_bytes(spec), factor_path.read_bytes(), manifest_content
 
 
+def build_provider_rollforward_inputs(
+    base_spec_path: Path,
+    factor_path: Path,
+    base_targets_path: Path,
+    target_content: bytes,
+    quantbase_proof_content: bytes,
+    strategy_evidence_content: bytes,
+    quantbase_manifest_path: Path,
+    portfolio123_manifest_path: Path,
+) -> tuple[bytes, bytes, bytes, bytes]:
+    """Rebind decomposition inputs to the two-provider roll-forward."""
+
+    spec = _load_json(base_spec_path, "base decomposition spec")
+    target_source = spec.get("target_source")
+    factor_source = spec.get("factor_source")
+    if not isinstance(target_source, dict) or not isinstance(factor_source, dict):
+        raise TargetSeriesError("decomposition spec source contracts are invalid")
+    base_hash, base_size = _sha256(base_targets_path)
+    if (
+        target_source.get("expected_sha256") != base_hash
+        or target_source.get("expected_size_bytes") != base_size
+    ):
+        raise TargetSeriesError("base decomposition target identity differs")
+    factor_hash, factor_size = _sha256(factor_path)
+    if (
+        factor_source.get("expected_sha256") != factor_hash
+        or factor_source.get("expected_size_bytes") != factor_size
+    ):
+        raise TargetSeriesError("base decomposition factor identity differs")
+    evidence = json.loads(strategy_evidence_content)
+    if not isinstance(evidence, dict) or evidence.get("schema_version") != 1:
+        raise TargetSeriesError("strategy evidence is invalid")
+    try:
+        original_as_of = date.fromisoformat(str(spec.get("as_of_date", "")))
+        evidence_as_of = date.fromisoformat(str(evidence.get("as_of_date", "")))
+    except ValueError as exc:
+        raise TargetSeriesError("provider roll-forward as-of date is invalid") from exc
+    spec["as_of_date"] = max(original_as_of, evidence_as_of).isoformat()
+    target_source.update(
+        {
+            "artifact_id": "provider-rollforward/account-live-strategy-returns.csv",
+            "expected_sha256": hashlib.sha256(target_content).hexdigest(),
+            "expected_size_bytes": len(target_content),
+            "relative_path": "targets.csv",
+            "schema_name": "portfolio-account-live-strategy-returns",
+            "schema_version": "3",
+        }
+    )
+    provenance = spec.get("provenance_sources", [])
+    if not isinstance(provenance, list):
+        raise TargetSeriesError("decomposition provenance sources are invalid")
+    additions = []
+    for artifact_id, content, schema_name in (
+        (
+            "provider-rollforward/quantbase-source-proof.json",
+            quantbase_proof_content,
+            "portfolio-target-source-proof",
+        ),
+        (
+            "provider-rollforward/strategy-evidence.json",
+            strategy_evidence_content,
+            "portfolio-strategy-provider-evidence",
+        ),
+        (
+            "provider-rollforward/quantbase-generation.json",
+            quantbase_manifest_path.read_bytes(),
+            "generation-manifest",
+        ),
+        (
+            "provider-rollforward/portfolio123-generation.json",
+            portfolio123_manifest_path.read_bytes(),
+            "generation-manifest",
+        ),
+    ):
+        additions.append(
+            {
+                "artifact_id": artifact_id,
+                "expected_sha256": hashlib.sha256(content).hexdigest(),
+                "expected_size_bytes": len(content),
+                "relative_path": artifact_id.rsplit("/", 1)[1],
+                "schema_name": schema_name,
+                "schema_version": "1",
+            }
+        )
+    spec["provenance_sources"] = [*provenance, *additions]
+    return (
+        canonical_json_bytes(spec),
+        factor_path.read_bytes(),
+        quantbase_manifest_path.read_bytes(),
+        portfolio123_manifest_path.read_bytes(),
+    )
+
+
 def _write_exact(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -355,56 +1004,177 @@ def _write_exact(path: Path, content: bytes) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-targets", type=Path, required=True)
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--nav", type=Path, required=True)
-    parser.add_argument("--holdings", type=Path, required=True)
-    parser.add_argument("--product-id", required=True)
-    parser.add_argument("--series-id", required=True)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--nav", type=Path)
+    parser.add_argument("--holdings", type=Path)
+    parser.add_argument("--product-id")
+    parser.add_argument("--series-id")
     parser.add_argument("--base-decomposition-spec", type=Path)
     parser.add_argument("--factors", type=Path)
+    parser.add_argument("--base-correlation-spec", type=Path)
+    parser.add_argument("--base-correlation-returns", type=Path)
+    parser.add_argument("--quantbase-manifest", type=Path)
+    parser.add_argument("--quantbase-history", type=Path)
+    parser.add_argument("--quantbase-activity", type=Path)
+    parser.add_argument("--quantbase-fund-id")
+    parser.add_argument("--quantbase-series-id")
+    parser.add_argument("--portfolio123-manifest", type=Path)
+    parser.add_argument("--portfolio123-equity", type=Path)
+    parser.add_argument("--portfolio123-metadata", type=Path)
+    parser.add_argument("--portfolio123-provider-entity-id")
+    parser.add_argument("--portfolio123-account-entity-id")
+    parser.add_argument("--portfolio123-strategy-id")
+    parser.add_argument("--portfolio123-account-series-id")
     parser.add_argument("--output-root", type=Path, required=True)
     return parser
+
+
+def _required(args: argparse.Namespace, names: Sequence[str], mode: str) -> None:
+    missing = [name for name in names if getattr(args, name) is None]
+    if missing:
+        rendered = ", ".join("--" + name.replace("_", "-") for name in missing)
+        raise TargetSeriesError(f"{mode} requires {rendered}")
 
 
 def main() -> int:
     args = _parser().parse_args()
     try:
-        targets, proof = build_matrixport_targets(
-            args.base_targets,
-            args.manifest,
-            args.nav,
-            args.holdings,
-            args.product_id,
-            args.series_id,
-        )
-        _write_exact(args.output_root / "targets.csv", targets)
-        _write_exact(args.output_root / "source-proof.json", proof)
-        if (args.base_decomposition_spec is None) != (args.factors is None):
-            raise TargetSeriesError(
-                "base decomposition spec and factors must be supplied together"
+        if args.quantbase_manifest is not None:
+            _required(
+                args,
+                (
+                    "base_decomposition_spec",
+                    "factors",
+                    "base_correlation_spec",
+                    "base_correlation_returns",
+                    "quantbase_history",
+                    "quantbase_activity",
+                    "quantbase_fund_id",
+                    "quantbase_series_id",
+                    "portfolio123_manifest",
+                    "portfolio123_equity",
+                    "portfolio123_metadata",
+                    "portfolio123_provider_entity_id",
+                    "portfolio123_account_entity_id",
+                    "portfolio123_strategy_id",
+                    "portfolio123_account_series_id",
+                ),
+                "provider roll-forward",
             )
-        if args.base_decomposition_spec is not None and args.factors is not None:
-            spec, factors, upstream_manifest = build_decomposition_inputs(
-                args.base_decomposition_spec,
-                args.factors,
+            targets, quantbase_proof = build_quantbase_targets(
+                args.base_targets,
+                args.quantbase_manifest,
+                args.quantbase_history,
+                args.quantbase_activity,
+                args.quantbase_fund_id,
+                args.quantbase_series_id,
+            )
+            p123_evidence = build_portfolio123_evidence(
+                targets,
+                args.portfolio123_manifest,
+                args.portfolio123_equity,
+                args.portfolio123_metadata,
+                args.portfolio123_provider_entity_id,
+                args.portfolio123_account_entity_id,
+                args.portfolio123_strategy_id,
+                args.portfolio123_account_series_id,
+            )
+            strategy_evidence = build_strategy_evidence(quantbase_proof, p123_evidence)
+            spec, factors, quantbase_manifest, p123_manifest = (
+                build_provider_rollforward_inputs(
+                    args.base_decomposition_spec,
+                    args.factors,
+                    args.base_targets,
+                    targets,
+                    quantbase_proof,
+                    strategy_evidence,
+                    args.quantbase_manifest,
+                    args.portfolio123_manifest,
+                )
+            )
+            decomposition_root = args.output_root / "decomposition"
+            _write_exact(decomposition_root / "targets.csv", targets)
+            _write_exact(
+                decomposition_root / "quantbase-source-proof.json",
+                quantbase_proof,
+            )
+            _write_exact(
+                decomposition_root / "strategy-evidence.json", strategy_evidence
+            )
+            _write_exact(decomposition_root / "spec.json", spec)
+            _write_exact(decomposition_root / "factors.csv", factors)
+            _write_exact(
+                decomposition_root / "quantbase-generation.json", quantbase_manifest
+            )
+            _write_exact(
+                decomposition_root / "portfolio123-generation.json", p123_manifest
+            )
+            base_spec = _load_json(
+                args.base_decomposition_spec, "base decomposition spec"
+            )
+            for source in base_spec.get("provenance_sources", []):
+                if not isinstance(source, dict):
+                    raise TargetSeriesError("base provenance source is invalid")
+                relative = str(source.get("relative_path", ""))
+                if not relative:
+                    raise TargetSeriesError("base provenance source path is invalid")
+                _write_exact(
+                    decomposition_root / relative,
+                    (args.base_decomposition_spec.parent / relative).read_bytes(),
+                )
+            evidence_value = json.loads(strategy_evidence)
+            correlation_spec, correlation_returns = build_correlation_inputs(
+                args.base_correlation_spec,
+                args.base_correlation_returns,
+                targets,
+                str(evidence_value["as_of_date"]),
+            )
+            correlation_root = args.output_root / "correlation"
+            _write_exact(correlation_root / "spec.json", correlation_spec)
+            _write_exact(correlation_root / "returns.csv", correlation_returns)
+            _write_exact(args.output_root / "strategy-evidence.json", strategy_evidence)
+        else:
+            _required(
+                args,
+                ("manifest", "nav", "holdings", "product_id", "series_id"),
+                "Matrixport normalization",
+            )
+            targets, proof = build_matrixport_targets(
                 args.base_targets,
                 args.manifest,
-                targets,
-                proof,
+                args.nav,
+                args.holdings,
+                args.product_id,
+                args.series_id,
             )
-            _write_exact(args.output_root / "spec.json", spec)
-            _write_exact(args.output_root / "factors.csv", factors)
-            _write_exact(
-                args.output_root / "matrixport-generation.json", upstream_manifest
-            )
+            _write_exact(args.output_root / "targets.csv", targets)
+            _write_exact(args.output_root / "source-proof.json", proof)
+            if (args.base_decomposition_spec is None) != (args.factors is None):
+                raise TargetSeriesError(
+                    "base decomposition spec and factors must be supplied together"
+                )
+            if args.base_decomposition_spec is not None and args.factors is not None:
+                spec, factors, upstream_manifest = build_decomposition_inputs(
+                    args.base_decomposition_spec,
+                    args.factors,
+                    args.base_targets,
+                    args.manifest,
+                    targets,
+                    proof,
+                )
+                _write_exact(args.output_root / "spec.json", spec)
+                _write_exact(args.output_root / "factors.csv", factors)
+                _write_exact(
+                    args.output_root / "matrixport-generation.json",
+                    upstream_manifest,
+                )
     except (OSError, TargetSeriesError) as exc:
         print(f"ERROR: {exc}", file=__import__("sys").stderr)
         return 2
     print(
         json.dumps(
             {
-                "proof": str(args.output_root / "source-proof.json"),
-                "targets": str(args.output_root / "targets.csv"),
+                "output_root": str(args.output_root),
             },
             sort_keys=True,
             separators=(",", ":"),
