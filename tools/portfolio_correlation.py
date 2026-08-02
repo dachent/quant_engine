@@ -638,7 +638,9 @@ def _conditioned_correlation(
     minimum_observations: int,
     definition: str,
 ) -> dict[str, object]:
-    conditioned_dates = [day for day, accepted in zip(dates, mask, strict=True) if accepted]
+    conditioned_dates = [
+        day for day, accepted in zip(dates, mask, strict=True) if accepted
+    ]
     conditioned_left = left[mask]
     conditioned_right = right[mask]
     correlation = (
@@ -650,8 +652,12 @@ def _conditioned_correlation(
         "conditioning_rule": definition,
         "correlation": _number(correlation),
         "observations": len(conditioned_dates),
-        "observed_end": conditioned_dates[-1].isoformat() if conditioned_dates else None,
-        "observed_start": conditioned_dates[0].isoformat() if conditioned_dates else None,
+        "observed_end": conditioned_dates[-1].isoformat()
+        if conditioned_dates
+        else None,
+        "observed_start": conditioned_dates[0].isoformat()
+        if conditioned_dates
+        else None,
         "status": (
             "AVAILABLE"
             if correlation is not None
@@ -805,7 +811,9 @@ def _observed_cell(
     expected_joint = len(dates) * spec.tail_quantile**2
     left_underwater = _underwater_dates(left_rows)
     right_underwater = _underwater_dates(right_rows)
-    left_drawdown = np.asarray([day in left_underwater for day in dates], dtype=np.bool_)
+    left_drawdown = np.asarray(
+        [day in left_underwater for day in dates], dtype=np.bool_
+    )
     right_drawdown = np.asarray(
         [day in right_underwater for day in dates], dtype=np.bool_
     )

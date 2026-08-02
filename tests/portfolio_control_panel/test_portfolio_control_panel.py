@@ -805,9 +805,10 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
     launcher_text = launcher.read_text(encoding="utf-8")
     assert f"generations/{pointer.generation_id}/index.html" in launcher_text
     assert published["stable_launcher"] == str(launcher)
-    assert published["launcher_sha256"] == hashlib.sha256(
-        launcher.read_bytes()
-    ).hexdigest()
+    assert (
+        published["launcher_sha256"]
+        == hashlib.sha256(launcher.read_bytes()).hexdigest()
+    )
 
 
 def test_browser_qa_rejects_console_error(

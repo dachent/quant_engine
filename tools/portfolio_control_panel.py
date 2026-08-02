@@ -1318,15 +1318,13 @@ def _publish_current_launcher(output_root: Path, generation_id: str) -> str:
         '<meta name="robots" content="noindex,nofollow" />'
         '<meta http-equiv="refresh" content="0; url=' + target + '" />'
         "<title>V Capital — Current Portfolio Control</title></head>"
-        '<body><main><h1>Opening the current accepted portfolio snapshot</h1>'
-        '<p>This stable local launcher currently resolves to immutable generation '
+        "<body><main><h1>Opening the current accepted portfolio snapshot</h1>"
+        "<p>This stable local launcher currently resolves to immutable generation "
         + generation_id
         + '.</p><p><a href="'
         + target
         + '">Open the accepted snapshot</a></p></main>'
-        '<script>location.replace("./'
-        + target
-        + '");</script></body></html>\n'
+        '<script>location.replace("./' + target + '");</script></body></html>\n'
     ).encode("utf-8")
     output_root.mkdir(parents=True, exist_ok=True)
     temporary = output_root / f".index-{generation_id}.tmp"

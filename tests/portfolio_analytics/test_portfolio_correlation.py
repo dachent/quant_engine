@@ -211,12 +211,14 @@ def test_observed_dependence_coverage_and_no_credit_are_explicit(
     assert identical["horizons"]["126"]["status"] == (
         "UNAVAILABLE_INSUFFICIENT_HISTORY"
     )
-    assert identical["drawdown_regimes"]["either_strategy_underwater"][
-        "conditioning_rule"
-    ] == "EITHER_WEALTH_INDEX_BELOW_PRIOR_RUNNING_HWM"
-    assert identical["drawdown_regimes"]["either_strategy_underwater"][
-        "status"
-    ] == "AVAILABLE"
+    assert (
+        identical["drawdown_regimes"]["either_strategy_underwater"]["conditioning_rule"]
+        == "EITHER_WEALTH_INDEX_BELOW_PRIOR_RUNNING_HWM"
+    )
+    assert (
+        identical["drawdown_regimes"]["either_strategy_underwater"]["status"]
+        == "AVAILABLE"
+    )
     assert identical["joint_tail"]["multiple_vs_independence"] is not None
 
     five_day = _dependence(result)["horizon_matrices"]["5"]
