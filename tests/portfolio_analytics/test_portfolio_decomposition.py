@@ -117,6 +117,79 @@ def _model(
     }
 
 
+def _dynamic_model(days: list[date]) -> dict[str, object]:
+    model = _model(
+        days,
+        model_id="dynamic-fls",
+        minimum_train=60,
+        minimum_test=20,
+    )
+    model.update(
+        {
+            "estimator": "DYNAMIC_FLS",
+            "ridge_candidates": ["0.0000000001"],
+            "smoothness_candidates": [
+                "0.00000001",
+                "0.0000001",
+                "0.000001",
+                "0.00001",
+                "0.0001",
+                "0.001",
+            ],
+            "test_start": days[105].isoformat(),
+            "train_end": days[104].isoformat(),
+        }
+    )
+    return model
+
+
+def _write_dynamic_sources(
+    root: Path,
+) -> tuple[Path, list[date], list[tuple[float, float]]]:
+    root.mkdir(parents=True)
+    days = _days(150)
+    truth: list[tuple[float, float]] = []
+    target_path = root / "targets.csv"
+    factor_path = root / "factors.csv"
+    with (
+        target_path.open("w", encoding="utf-8", newline="") as target_handle,
+        factor_path.open("w", encoding="utf-8", newline="") as factor_handle,
+    ):
+        target_writer = csv.writer(target_handle)
+        factor_writer = csv.writer(factor_handle)
+        target_writer.writerow(decomposition.TARGET_HEADERS)
+        factor_writer.writerow(["date", "RF", "F1", "F2"])
+        for index, day in enumerate(days):
+            f1 = 0.012 * math.sin(index / 3.7) + 0.004 * math.cos(index / 13.0)
+            f2 = 0.010 * math.cos(index / 5.1) - 0.003 * math.sin(index / 17.0)
+            beta_one = 0.15 + 0.70 * index / (len(days) - 1)
+            beta_two = -0.35 + 0.30 * math.sin(index / 28.0)
+            alpha = 0.00015
+            risk_free = 0.00005
+            excess = alpha + beta_one * f1 + beta_two * f2
+            truth.append((beta_one, beta_two))
+            target_writer.writerow(
+                [
+                    "synthetic-strategy",
+                    day.isoformat(),
+                    format(excess + risk_free, ".17g"),
+                    "ACCOUNT_LIVE",
+                    "NET",
+                    "TOTAL",
+                    "",
+                ]
+            )
+            factor_writer.writerow(
+                [
+                    day.isoformat(),
+                    format(risk_free, ".17g"),
+                    format(f1, ".17g"),
+                    format(f2, ".17g"),
+                ]
+            )
+    return target_path, days, truth
+
+
 def _spec(
     root: Path,
     target_path: Path,
@@ -202,10 +275,20 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
     )
     assert model["alpha"]["net_status"] == "AVAILABLE_OBSERVED_BASIS"
     assert model["alpha"]["gross_status"] == "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
+    assert decomposition._annualize_coefficient_standard_error(
+        0.0004, 252
+    ) == pytest.approx(0.1008)
     assert float(
         model["diagnostics"]["holdout"]["predicted_r_squared"]
     ) == pytest.approx(1.0, abs=1e-9)
     assert model["method_label"] == "MPI_INFORMED_NON_EQUIVALENT"
+    assert model["coverage"]["target_observed_start"] == days[0].isoformat()
+    assert model["coverage"]["target_cumulative_return"] is not None
+    assert model["coverage"]["target_observed_end"] == days[-1].isoformat()
+    assert 0 <= float(model["coverage"]["target_current_drawdown"]) < 1
+    assert float(model["coverage"]["target_max_drawdown"]) >= float(
+        model["coverage"]["target_current_drawdown"]
+    )
     for row in model["contributions"]:
         reconstructed = (
             float(row["alpha_contribution"])
@@ -256,10 +339,14 @@ def test_simplex_and_parsimony_selection_recover_known_truth(tmp_path: Path) -> 
     assert selection["factor_count"] == 1
 
 
-def test_holdout_is_not_used_to_fit_or_select_ridge(tmp_path: Path) -> None:
+def test_holdout_is_not_used_to_fit_or_select_model_or_ridge(tmp_path: Path) -> None:
     source = tmp_path / "source"
     target_path, days = _write_sources(source)
-    spec_path = _spec(source, target_path, days)
+    models = [
+        _model(days, model_id="one-factor", factors=["factor-one"]),
+        _model(days, model_id="two-factor"),
+    ]
+    spec_path = _spec(source, target_path, days, models=models)
     original, _manifest, _content = decomposition.build_decomposition(spec_path, source)
     original_model = _available(original)
 
@@ -270,12 +357,13 @@ def test_holdout_is_not_used_to_fit_or_select_ridge(tmp_path: Path) -> None:
             row[2] = format(-float(row[2]), ".17g")
     with target_path.open("w", encoding="utf-8", newline="") as handle:
         csv.writer(handle).writerows(rows)
-    changed_spec = _spec(source, target_path, days)
+    changed_spec = _spec(source, target_path, days, models=models)
     changed, _manifest, _content = decomposition.build_decomposition(
         changed_spec, source
     )
     changed_model = _available(changed)
 
+    assert changed_model["model_id"] == original_model["model_id"]
     assert changed_model["selected_ridge"] == original_model["selected_ridge"]
     assert [item["exposure"] for item in changed_model["exposures"]] == [
         item["exposure"] for item in original_model["exposures"]
@@ -393,3 +481,109 @@ def test_missing_risk_free_and_candidate_drift_are_rejected(tmp_path: Path) -> N
     candidate.write_text("{}\n", encoding="utf-8")
     with pytest.raises(decomposition.DecompositionError, match="exact build"):
         decomposition.stage_candidate(clean_spec, clean_root, output)
+
+
+def test_dynamic_fls_recovers_time_varying_path_and_walks_forward(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "dynamic"
+    target_path, days, truth = _write_dynamic_sources(source)
+    spec_path = _spec(
+        source,
+        target_path,
+        days,
+        models=[_dynamic_model(days)],
+    )
+
+    first, first_manifest, first_bytes = decomposition.build_decomposition(
+        spec_path, source
+    )
+    second, second_manifest, second_bytes = decomposition.build_decomposition(
+        spec_path, source
+    )
+    assert first_bytes == second_bytes
+    assert first_manifest.generation_id == second_manifest.generation_id
+    model = _available(first)
+    assert model["estimator"] == "DYNAMIC_FLS"
+    assert model["method_label"] == "MPI_INFORMED_NON_EQUIVALENT"
+    dynamic = model["diagnostics"]["dynamic"]
+    assert dynamic["validation"] == "EXACT_LEAVE_ONE_OUT_TRAIN_ONLY"
+    assert dynamic["state_transition"] == "IDENTITY_RANDOM_WALK"
+    assert float(dynamic["selected_smoothness"]) in {
+        0.00000001,
+        0.0000001,
+        0.000001,
+        0.00001,
+        0.0001,
+        0.001,
+    }
+    path = dynamic["exposure_path"]
+    recovered = [
+        (
+            float(row["exposures"]["factor-one"]),
+            float(row["exposures"]["factor-two"]),
+        )
+        for row in path[:105]
+    ]
+    mean_absolute_error = sum(
+        abs(actual[0] - expected[0]) + abs(actual[1] - expected[1])
+        for actual, expected in zip(recovered, truth[:105], strict=True)
+    ) / (2 * len(recovered))
+    assert mean_absolute_error < 0.16
+    assert float(model["diagnostics"]["holdout"]["predicted_r_squared"]) > 0.5
+    comparison = dynamic["holdout_comparison"]
+    assert comparison["selection_effect"] == (
+        "DIAGNOSTIC_ONLY_HOLDOUT_NOT_USED_FOR_SELECTION"
+    )
+    assert float(comparison["dynamic_minus_static_predicted_r_squared"]) > 0
+    assert model["diagnostics"]["holdout"]["prediction_mode"] == (
+        "CAUSAL_WALK_FORWARD_PRIOR_STATE"
+    )
+    for row in model["contributions"]:
+        reconstructed = (
+            float(row["alpha_contribution"])
+            + sum(float(value) for value in row["factor_contributions"].values())
+            + float(row["residual"])
+        )
+        assert reconstructed == pytest.approx(
+            float(row["actual_excess_return"]), abs=5e-11
+        )
+
+
+def test_dynamic_selection_and_training_path_do_not_consume_holdout(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "dynamic"
+    target_path, days, _truth = _write_dynamic_sources(source)
+    model_definition = _dynamic_model(days)
+    spec_path = _spec(
+        source,
+        target_path,
+        days,
+        models=[model_definition],
+    )
+    original, _manifest, _bytes = decomposition.build_decomposition(spec_path, source)
+    original_model = _available(original)
+
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    changed_index = 0
+    for row in rows[1:]:
+        if row[1] >= cast(str, model_definition["test_start"]):
+            row[2] = format(0.05 if changed_index % 2 == 0 else -0.05, ".17g")
+            changed_index += 1
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    changed_spec = _spec(
+        source,
+        target_path,
+        days,
+        models=[model_definition],
+    )
+    changed, _manifest, _bytes = decomposition.build_decomposition(changed_spec, source)
+    changed_model = _available(changed)
+
+    assert changed_model["selected_smoothness"] == original_model["selected_smoothness"]
+    original_train = original_model["diagnostics"]["dynamic"]["exposure_path"][:105]
+    changed_train = changed_model["diagnostics"]["dynamic"]["exposure_path"][:105]
+    assert changed_train == original_train
+    assert float(changed_model["diagnostics"]["holdout"]["predicted_r_squared"]) < 0

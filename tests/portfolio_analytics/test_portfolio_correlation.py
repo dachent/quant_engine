@@ -205,7 +205,26 @@ def test_observed_dependence_coverage_and_no_credit_are_explicit(
     assert gapped["coverage"]["missing_from_right"] == 60
     assert gapped["rolling_pearson"]["status"] == "AVAILABLE"
     assert identical["downside"]["status"] == "AVAILABLE"
+    assert identical["coverage"]["frequency"] == "WEEKDAY_OBSERVED_EXACT_DATE"
+    assert identical["horizons"]["5"]["status"] == "AVAILABLE"
+    assert identical["horizons"]["5"]["observations"] == 5
+    assert identical["horizons"]["126"]["status"] == (
+        "UNAVAILABLE_INSUFFICIENT_HISTORY"
+    )
+    assert (
+        identical["drawdown_regimes"]["either_strategy_underwater"]["conditioning_rule"]
+        == "EITHER_WEALTH_INDEX_BELOW_PRIOR_RUNNING_HWM"
+    )
+    assert (
+        identical["drawdown_regimes"]["either_strategy_underwater"]["status"]
+        == "AVAILABLE"
+    )
     assert identical["joint_tail"]["multiple_vs_independence"] is not None
+
+    five_day = _dependence(result)["horizon_matrices"]["5"]
+    base_index = SERIES.index("base")
+    identical_index = SERIES.index("identical")
+    assert float(five_day["values"][base_index][identical_index]) == pytest.approx(1)
 
     blend = next(
         item

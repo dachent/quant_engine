@@ -1,8 +1,8 @@
 # Factor composition and alpha decomposition
 
-`tools/portfolio_decomposition.py` implements the repository's first
-returns-decomposition contract. It is a clean-room, static, read-only baseline,
-not an MPI/DSA clone. Every result carries the label
+`tools/portfolio_decomposition.py` implements the repository's reproducible
+static and dynamic returns-decomposition contract. It is a clean-room,
+read-only implementation, not an MPI/DSA clone. Every result carries the label
 `MPI_INFORMED_NON_EQUIVALENT` and the hash of
 `docs/analytics/decomposition-methodology.json`.
 
@@ -15,26 +15,73 @@ excess returns using the supplied risk-free series, and fits either:
 - an unconstrained regression with an unpenalized intercept and optional ridge
   penalty; or
 - a long-only, sum-to-one returns-based style model with an unpenalized
-  intercept and optional ridge penalty.
+  intercept and optional ridge penalty; or
+- an unconstrained clean-room flexible-least-squares model with a static
+  training intercept, identity/random-walk factor states, a disclosed state
+  ridge, and a disclosed candidate grid for adjacent-state smoothness.
+
+The dynamic objective is:
+
+```text
+min sum_t w_t (y_t - alpha - x_t' beta_t)^2
+    + lambda sum_t ||beta_t - beta_(t-1)||^2
+    + ridge sum_t ||beta_t||^2
+```
+
+It is solved deterministically as a block-tridiagonal system. The implementation
+uses no MPI code, factor-search heuristic, calibration, breakpoint rule, or
+undisclosed default.
+
+Published-method anchors:
+
+- [Dynamic Analysis of Hedge Funds](https://www.markovprocesses.com/download/dsa_iasted_markov_etal.pdf)
+  supplies the time-varying observation/state model, FLS smoothness objective,
+  leave-one-out procedure, and Predicted R-squared selection criterion.
+- [Factor Search factsheet](https://www.markovprocesses.com/download/FactorSearch_Factsheet.pdf)
+  explicitly describes its clustering step as proprietary; this implementation
+  therefore accepts explicit factor sets and does not recreate that search.
+- [Bridgewater Pure Alpha case study](https://www.markovprocesses.com/download/BridgewaterPureAlpha_CaseStudy_MPI.pdf)
+  motivates broad economic factor families, parsimony, and predictive
+  validation without supplying production search defaults.
 
 Ridge candidates are compared using expanding, time-ordered validation blocks.
 The final model is fitted only through `train_end` and evaluated from
 `test_start`; holdout Predicted R-squared uses the training mean as its naive
 forecast, so the holdout mean is not leaked. Competing factor sets for the same
-series are selected by holdout Predicted R-squared, with fewer factors winning
-within the declared parsimony tolerance.
+series are selected only by expanding training-window cross-validation, with
+fewer factors winning within the declared parsimony tolerance. The displayed
+holdout is therefore not consumed by ridge or factor-set selection.
 
 The output includes factor exposures, arithmetic periodic contributions,
 intercept/alpha, residuals, tracking error, in-sample R-squared and adjusted
 R-squared, holdout Predicted R-squared, sensitivity across ridge candidates,
 coverage counts, exact evidence layer, and confidence availability. Daily
 factor contributions plus intercept and residual reconcile to the observed
-excess return. Negative Predicted R-squared remains negative.
+excess return. Negative Predicted R-squared remains negative. Dynamic models
+also emit the full dated exposure path, exposure-change diagnostics, exact
+smoothness sensitivity, training-only leave-one-out predictions, and causal
+walk-forward holdout forecasts.
+
+For `DYNAMIC_FLS`, every candidate smoothness value is evaluated by literally
+omitting each training observation in turn, refitting the connected state path,
+and calculating Predicted R-squared from those omitted-observation forecasts.
+The largest smoothness value within the declared tolerance of the best score is
+selected, favoring the smoother path without using holdout data. Holdout
+forecasts use only the prior filtered state. A holdout observation can update a
+later filtered state but cannot change the factor set, smoothing parameter,
+ridge, intercept, or training path.
+
+Every dynamic result is compared with a static unconstrained benchmark using
+the same factors, training boundary, state ridge, and holdout. The comparison
+is diagnostic only and never selects or retunes the dynamic model. A dynamic
+path that does not improve holdout Predicted R-squared is reported explicitly
+as `DOES_NOT_OUTPERFORM_STATIC_SAME_FACTORS_HOLDOUT`.
 
 Gross and net alpha are not silently interchanged. The observed return basis is
 always available when the model is available. Conversion to the other basis is
 reported only when every aligned observation has an accepted cost value.
-Classical coefficient standard errors are reported only for a full-rank,
+Annualized coefficient standard errors receive the same linear annualization
+transform as the reported periodic coefficient. Classical coefficient standard errors are reported only for a full-rank,
 unconstrained, unregularized fit; otherwise confidence is explicitly
 `UNAVAILABLE_METHOD_NOT_CLASSICAL_OLS`.
 
@@ -59,6 +106,39 @@ Supported evidence layers are `ACCOUNT_LIVE`, `PROVIDER_LIVE`,
 `CONCEPTUAL_STRESS`. One series may have only one layer. The current portfolio
 consumer may select `ACCOUNT_LIVE` results; other layers remain separate
 evidence.
+
+Existing specifications without `estimator` remain `STATIC_RBSA`. A dynamic
+model adds:
+
+```json
+{
+  "estimator": "DYNAMIC_FLS",
+  "constraint": "UNCONSTRAINED",
+  "ridge_candidates": ["0.0000000001"],
+  "smoothness_candidates": ["0.00000001", "0.0000001", "0.000001", "0.00001"]
+}
+```
+
+Dynamic models intentionally require one disclosed ridge value and do not
+support inferred long-only, leverage, breakpoint, or transition constraints.
+
+## Provider-custodied account NAV normalization
+
+`tools/portfolio_target_series.py` provides the first governed account-live
+provider overlay. It reads an already accepted Matrixport generation; it makes
+no provider or credential call. Before emitting Robuxio returns it verifies the
+generation manifest plus the exact hashes and sizes of `csv/nav_daily.csv` and
+`csv/holdings.csv`, requires exactly one matching positive live holding, and
+converts consecutive after-fee NAV observations into `ACCOUNT_LIVE`, `NET`,
+`TOTAL` returns using `Decimal` arithmetic.
+
+The current frozen source contains 332 Robuxio NAV observations and therefore
+331 returns. Its cumulative return and drawdown path remain target-series
+facts, independent of whether a factor model explains them. The normalized
+target, source proof, and upstream generation
+manifest are hash-bound inputs to the decomposition generation. Private product
+identifiers and holdings remain outside Git. Missing dates, NAV, FX, and returns
+are not forward-filled or interpolated.
 
 ## Build, verify, publish, and recover
 
@@ -86,10 +166,10 @@ publish a new generation; accepted generations are never overwritten.
 ## Deliberate boundary
 
 The supplied methodology catalog records all 16 reading-list sources, fetched
-artifact hashes, disclosed ideas, independent choices, and unknown production
-details. Google Patents currently displays US7617142B2 as active with an
-expiration date of 2026-10-18 while warning that its status is not a legal
-conclusion. No ownership/legal disposition clearing potentially
-claim-overlapping behavior is recorded. Dynamic exposures,
-flexible-least-squares/Kalman smoothing, proprietary factor search, and MPI
-production defaults therefore remain unimplemented.
+artifact hashes, disclosed equations, independent choices, and unknown
+production details. The dynamic implementation is limited to the openly
+described FLS objective, identity-state model, leave-one-out parameter
+selection, and Predicted R-squared. Proprietary factor search, clustering,
+branch pruning, market-driven transitions, dynamic constraints, breakpoint
+relaxation, stress libraries, and production defaults remain unimplemented.
+The output must never be described as MPI software or exact DSA replication.

@@ -222,7 +222,7 @@ def _decomposition() -> dict[str, object]:
                 "model_id": model_id,
                 "series_id": series_id,
                 "status": (
-                    "SELECTED_PARSIMONIOUS_HOLDOUT_MODEL"
+                    "SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL"
                     if model_id
                     else "UNAVAILABLE_NO_VALIDATED_MODEL"
                 ),
@@ -241,6 +241,58 @@ def _decomposition() -> dict[str, object]:
             "train_observations": 78 if model_id else 0,
         }
         if model_id:
+            estimator = "DYNAMIC_FLS" if index == 0 else "STATIC_RBSA"
+            diagnostics: dict[str, object] = {
+                "holdout": {
+                    "adjusted_r_squared": "0.39",
+                    "observation_count": 2,
+                    "predicted_r_squared": "0.4",
+                    "r_squared": "0.4",
+                    "rmse": "0.01",
+                    "tracking_error_annualized": "0.15",
+                },
+                "rank": 2,
+                "rank_status": "FULL_RANK",
+                "train": {
+                    "adjusted_r_squared": "0.38",
+                    "observation_count": 78,
+                    "r_squared": "0.39",
+                    "rmse": "0.011",
+                    "tracking_error_annualized": "0.16",
+                },
+            }
+            if estimator == "DYNAMIC_FLS":
+                diagnostics["dynamic"] = {
+                    "exposure_path": [
+                        {
+                            "date": "2026-07-29",
+                            "estimation_state": "TRAIN_SMOOTHED",
+                            "exposure_change_l2": None,
+                            "exposures": {"SPY_XS": "0.7"},
+                        },
+                        {
+                            "date": "2026-07-30",
+                            "estimation_state": "HOLDOUT_FILTERED_CAUSAL",
+                            "exposure_change_l2": "0.1",
+                            "exposures": {"SPY_XS": "0.8"},
+                        },
+                    ],
+                    "holdout_comparison": {
+                        "dynamic_predicted_r_squared": "0.4",
+                        "dynamic_minus_static_predicted_r_squared": "0.1",
+                        "selection_effect": "DIAGNOSTIC_ONLY_HOLDOUT_NOT_USED_FOR_SELECTION",
+                        "static_predicted_r_squared": "0.3",
+                        "status": "OUTPERFORMS_STATIC_SAME_FACTORS_HOLDOUT",
+                    },
+                    "largest_exposure_changes": [
+                        {"date": "2026-07-30", "exposure_change_l2": "0.1"}
+                    ],
+                    "selected_smoothness": "0.0001",
+                    "selection_predicted_r_squared": "0.45",
+                    "selection_rule": "MAX_TRAIN_LOO_PREDICTED_R2_THEN_SMOOTHEST_WITHIN_TOLERANCE",
+                    "state_transition": "IDENTITY_RANDOM_WALK",
+                    "validation": "EXACT_LEAVE_ONE_OUT_TRAIN_ONLY",
+                }
             models.append(
                 {
                     "alpha": {
@@ -274,25 +326,8 @@ def _decomposition() -> dict[str, object]:
                     ],
                     "cost_coverage": "INCOMPLETE",
                     "coverage": coverage,
-                    "diagnostics": {
-                        "holdout": {
-                            "adjusted_r_squared": "0.39",
-                            "observation_count": 2,
-                            "predicted_r_squared": "0.4",
-                            "r_squared": "0.4",
-                            "rmse": "0.01",
-                            "tracking_error_annualized": "0.15",
-                        },
-                        "rank": 2,
-                        "rank_status": "FULL_RANK",
-                        "train": {
-                            "adjusted_r_squared": "0.38",
-                            "observation_count": 78,
-                            "r_squared": "0.39",
-                            "rmse": "0.011",
-                            "tracking_error_annualized": "0.16",
-                        },
-                    },
+                    "diagnostics": diagnostics,
+                    "estimator": estimator,
                     "evidence_layer": "ACCOUNT_LIVE",
                     "exposures": [
                         {
@@ -314,6 +349,7 @@ def _decomposition() -> dict[str, object]:
                 {
                     "cost_coverage": "INCOMPLETE",
                     "coverage": coverage,
+                    "estimator": "STATIC_RBSA",
                     "model_id": f"attempt-{index}",
                     "series_id": series_id,
                     "status": "UNAVAILABLE_UNKNOWN_TARGET_SERIES",
@@ -326,7 +362,7 @@ def _decomposition() -> dict[str, object]:
         "builder_version": "synthetic",
         "method_label": "MPI_INFORMED_NON_EQUIVALENT",
         "methodology_manifest_sha256": "e" * 64,
-        "methodology_version": "ANL-DECOMP-STATIC-1",
+        "methodology_version": "ANL-DECOMP-CLEANROOM-2",
         "model_results": models,
         "model_selections": selections,
         "sources": {
@@ -381,6 +417,41 @@ def _correlation() -> dict[str, object]:
                         "correlation": "0.4" if available else None,
                         "observations": 30 if available else 0,
                         "status": "AVAILABLE" if available else "UNAVAILABLE",
+                    },
+                    "drawdown_regimes": {
+                        "both_strategies_underwater": {
+                            "conditioning_rule": "BOTH_WEALTH_INDICES_BELOW_PRIOR_RUNNING_HWM",
+                            "correlation": "0.35" if available else None,
+                            "observations": 25 if available else 0,
+                            "observed_end": "2026-07-30" if available else None,
+                            "observed_start": "2026-02-02" if available else None,
+                            "status": "AVAILABLE" if available else "UNAVAILABLE",
+                        },
+                        "either_strategy_underwater": {
+                            "conditioning_rule": "EITHER_WEALTH_INDEX_BELOW_PRIOR_RUNNING_HWM",
+                            "correlation": "0.4" if available else None,
+                            "observations": 40 if available else 0,
+                            "observed_end": "2026-07-30" if available else None,
+                            "observed_start": "2026-01-15" if available else None,
+                            "status": "AVAILABLE" if available else "UNAVAILABLE",
+                        },
+                    },
+                    "horizons": {
+                        str(horizon): {
+                            "correlation": (
+                                "0.5" if available and horizon <= 63 else None
+                            ),
+                            "observations": min(80, horizon) if available else 0,
+                            "observed_end": "2026-07-30" if available else None,
+                            "observed_start": "2026-01-02" if available else None,
+                            "status": (
+                                "AVAILABLE"
+                                if available and horizon <= 63
+                                else "UNAVAILABLE_INSUFFICIENT_HISTORY"
+                            ),
+                            "window_observations": horizon,
+                        }
+                        for horizon in (5, 21, 22, 63, 126, 130, 252, 260)
                     },
                     "joint_tail": {
                         "joint_days": 4 if available else 0,
@@ -451,6 +522,26 @@ def _correlation() -> dict[str, object]:
                 "status": "AVAILABLE_RECONCILED_SEPARATE_CONSERVATIVE_BOUND",
             },
             "implementation_cells": implementation,
+            "drawdown_matrices": {
+                "both_strategies_underwater": {
+                    "classification": "MEASURED_CONDITIONED_ON_PAIR_WEALTH_DRAWDOWN_STATE",
+                    "conditioning_rule": "BOTH_WEALTH_INDICES_BELOW_PRIOR_RUNNING_HWM",
+                    "values": matrix("0.35"),
+                },
+                "either_strategy_underwater": {
+                    "classification": "MEASURED_CONDITIONED_ON_PAIR_WEALTH_DRAWDOWN_STATE",
+                    "conditioning_rule": "EITHER_WEALTH_INDEX_BELOW_PRIOR_RUNNING_HWM",
+                    "values": matrix("0.4"),
+                },
+            },
+            "horizon_matrices": {
+                str(horizon): {
+                    "classification": "MEASURED_WEEKDAY_OBSERVATION_WINDOW",
+                    "values": matrix("0.5" if horizon <= 63 else None),
+                    "window_observations": horizon,
+                }
+                for horizon in (5, 21, 22, 63, 126, 130, 252, 260)
+            },
             "matrices": {
                 "conceptual_prior": {
                     "classification": "CONCEPTUAL_NOT_MEASURED",
@@ -662,7 +753,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             encoding="utf-8"
         )
     )
-    assert data["panel_schema_version"] == 3
+    assert data["panel_schema_version"] == 4
     assert data["positions"] == [
         {
             "account_id": "account-00",
@@ -678,6 +769,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         }
     ]
     assert data["factor_analysis"]["available_count"] == 5
+    assert data["factor_analysis"]["dynamic_available_count"] == 1
     assert data["factor_analysis"]["unavailable_count"] == 4
     assert data["dependence_analysis"]["available_pair_count"] == 10
     assert data["dependence_analysis"]["pair_count"] == 36
@@ -745,6 +837,15 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
     generation = inputs["output"] / "generations" / pointer.generation_id
     assert (generation / "index.html").is_file()
     assert (generation / "qa" / "qa-validation.json").is_file()
+    launcher = inputs["output"] / "index.html"
+    assert launcher.is_file()
+    launcher_text = launcher.read_text(encoding="utf-8")
+    assert f"generations/{pointer.generation_id}/index.html" in launcher_text
+    assert published["stable_launcher"] == str(launcher)
+    assert (
+        published["launcher_sha256"]
+        == hashlib.sha256(launcher.read_bytes()).hexdigest()
+    )
 
 
 def test_browser_qa_rejects_console_error(
@@ -756,3 +857,112 @@ def test_browser_qa_rejects_console_error(
     _write_json(qa / "desktop-risk" / "console-events.json", [{"text": "boom"}])
     with pytest.raises(panel.ControlPanelValidationError, match="browser QA failed"):
         panel.validate_qa(candidate, qa)
+
+
+def test_material_hwm_perimeter_excludes_composer_and_accepts_robuxio() -> None:
+    strategies = [
+        {
+            "strategy_id": "composer-holy-grail",
+            "strategy_name": "[Composer] - The Holy Grail (Buy Copy)",
+            "current_value_usd": "1",
+            "nav_status": "UNAVAILABLE",
+        },
+        {
+            "strategy_id": "robuxio-crypto",
+            "strategy_name": "Robuxio Crypto (High Sharpe High Vol)",
+            "current_value_usd": "80",
+            "nav_status": "UNAVAILABLE",
+        },
+        {
+            "strategy_id": "volatis-strategy",
+            "strategy_name": "Volatis Strategy",
+            "current_value_usd": "20",
+            "nav_status": "UNAVAILABLE",
+        },
+    ]
+    factors = {
+        "series": [
+            {
+                "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+                "status": "AVAILABLE",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "coverage": {
+                    "target_observed_start": "2025-08-14",
+                    "target_observed_end": "2026-07-26",
+                    "target_observations": 331,
+                    "target_cumulative_return": "0.42",
+                    "target_current_drawdown": "0.162",
+                    "target_max_drawdown": "0.196",
+                },
+            }
+        ]
+    }
+    policy = {"excluded_strategy_ids": ["composer-holy-grail"]}
+
+    rows, summary = panel._material_hwm_coverage(strategies, factors, policy)
+
+    by_id = {row["strategy_id"]: row for row in rows}
+    assert by_id["composer-holy-grail"]["nav_status"] == "EXCLUDED_DE_MINIMIS"
+    assert by_id["robuxio-crypto"]["nav_status"] == "AVAILABLE"
+    assert by_id["robuxio-crypto"]["hwm_source"] == "ACCOUNT_LIVE_PROVIDER_OVERLAY"
+    assert by_id["robuxio-crypto"]["nav_return_observations"] == 331
+    assert summary == {
+        "covered_value_usd": "80",
+        "excluded_value_usd": "1",
+        "excluded_strategies": ["[Composer] - The Holy Grail (Buy Copy)"],
+        "material_value_usd": "100",
+        "nav_coverage": "0.8",
+        "status": "NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV",
+        "uncovered_strategies": ["Volatis Strategy"],
+    }
+
+
+def test_provider_account_nav_overlay_promotes_twr_evidence() -> None:
+    strategies = [
+        {
+            "strategy_id": "robuxio-crypto",
+            "strategy_name": "Robuxio Crypto (High Sharpe High Vol)",
+            "hwm_source": "ACCOUNT_LIVE_PROVIDER_OVERLAY",
+        }
+    ]
+    performance = [
+        {
+            "account_id": "account-1",
+            "strategy_id": "robuxio-crypto",
+            "nav_observations": 0,
+            "twr": None,
+            "twr_status": "UNAVAILABLE_INSUFFICIENT_NAV",
+        }
+    ]
+    factors = {
+        "series": [
+            {
+                "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+                "status": "AVAILABLE",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "coverage": {
+                    "target_cumulative_return": "0.42",
+                    "target_max_drawdown": "0.196",
+                    "target_observations": 331,
+                    "target_observed_start": "2025-08-26",
+                    "target_observed_end": "2026-07-26",
+                },
+            }
+        ]
+    }
+
+    accepted_strategies, accepted_performance = panel._provider_account_nav_performance(
+        strategies, performance, factors
+    )
+
+    assert accepted_strategies[0]["account_live_status"] == (
+        "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV"
+    )
+    assert accepted_strategies[0]["account_live_cumulative_return"] == "0.42"
+    assert accepted_strategies[0]["account_live_max_drawdown"] == "-0.196"
+    assert accepted_strategies[0]["available_twr_segments"] == 1
+    assert accepted_performance[0]["nav_observations"] == 331
+    assert accepted_performance[0]["twr"] == "0.42"
+    assert accepted_performance[0]["twr_status"] == (
+        "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV"
+    )

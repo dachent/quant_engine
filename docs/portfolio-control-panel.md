@@ -7,16 +7,27 @@ without preserving stale calculations or hard-coded operator conclusions.
 ## Authority boundary
 
 - Current accounts, allocations, strategies, positions, performance, costs,
-  gaps, coverage, reconciliation, HWM availability, stress, and readiness come
-  only from the current accepted `dataPortfolio/reporting` generation. A
+  gaps, coverage, reconciliation, stress, and readiness come from the current
+  accepted `dataPortfolio/reporting` generation. Material HWM coverage may also
+  consume a hash-verified `ACCOUNT_LIVE` provider overlay under `PORT-HWM-2`. A
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
-- Factor composition, net/gross alpha status, holdout fit, coverage, and
-  contribution reconciliation come only from the accepted
-  `dataPortfolio/analytics/decomposition` generation. The static method is
-  labeled `MPI_INFORMED_NON_EQUIVALENT`; it is not proprietary MPI output or
-  Dynamic Style Analysis.
-- Observed Pearson/Spearman cells, conceptual priors, posterior/stress
+- Factor composition, net/gross alpha status, holdout fit, coverage,
+  contribution reconciliation, and any dated dynamic exposure path come only
+  from the accepted `dataPortfolio/analytics/decomposition` generation. Static
+  RBSA and clean-room dynamic FLS results are both labeled
+  `MPI_INFORMED_NON_EQUIVALENT`; neither is proprietary MPI output nor a claim
+  to undisclosed MPI production behavior.
+- The material HWM perimeter is explicit: Composer remains visible in capital
+  reporting but is excluded de minimis; Robuxio uses the accepted Matrixport
+  account-NAV history; every other current systematic strategy remains
+  included. An uncovered included sleeve is named rather than hidden behind a
+  generic coverage complaint.
+- The same Robuxio unit-NAV path supplies its account-live sleeve TWR,
+  cumulative return, and maximum drawdown. It does not manufacture MWR, account
+  cash flows, or a full-portfolio composite.
+- Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
+  matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come
   only from the accepted `dataPortfolio/analytics/correlation` generation and
   remain separately labeled.
@@ -71,10 +82,11 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
 ```
 
 The verifier proves all eight views, local-only assets, lack of network or
-trade code, accepted capital/risk replay, nine-strategy boundary, 19 account
-identities, five validated/four unavailable factor results, 10 measured/26
-unavailable dependence pairs, explicit unavailable facts, and frozen-appendix
-isolation.
+trade code, accepted capital/risk replay, the exact nine-strategy boundary, 19
+account identities, the available and unavailable factor counts bound to the
+analytics generation, dynamic
+estimator disclosures when present, 10 measured/26 unavailable dependence
+pairs, explicit unavailable facts, and frozen-appendix isolation.
 
 ## Browser and interaction QA
 
@@ -97,12 +109,15 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py qa `
   --candidate-dir <candidate-directory> --qa-dir $qa
 ```
 
-Acceptance requires desktop Command, Capital, Risk, Factor & alpha, Dependence,
-Candidates, Data health, mobile Command, and direct-file captures; no console
-or request failures; clean Command, Capital, Factor & alpha, Dependence, and mobile
-visual lint; PDF export; eight-view navigation; factor selection; matrix
-selection and cell drill-down; allocation filters; current-position
-attribution; candidate filter/search; a responsive provenance control; and
+Acceptance requires all eight views at 1440×900, 1024×768, and 390×844 plus a
+direct-file capture; no console or request failures; clean visual lint across
+all 24 viewport/view combinations; PDF export; eight-view navigation; factor
+selection; dynamic exposure-path and same-factor static-benchmark evidence
+when a dynamic model is selected; full-overlap, requested-horizon, and
+drawdown-regime matrix selection with cell drill-down; allocation filters;
+current-position
+attribution separated from historical General intervals; candidate
+filter/search; a responsive provenance control; and
 absence of execution controls. Screenshots must also be inspected visually
 before publication.
 

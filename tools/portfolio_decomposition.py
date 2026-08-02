@@ -1,4 +1,4 @@
-"""Build and publish deterministic static factor and alpha decompositions."""
+"""Build and publish deterministic static and dynamic return decompositions."""
 
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 ANALYTICS_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.0.0"
-METHODOLOGY_VERSION: Final = "ANL-DECOMP-STATIC-1"
+BUILDER_VERSION: Final = "1.5.0"
+METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-2"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
 METHODOLOGY_PATH: Final = (
     Path(__file__).resolve().parents[1]
@@ -64,6 +64,7 @@ RETURN_BASES: Final = {"GROSS", "NET"}
 RETURN_TYPES: Final = {"EXCESS", "TOTAL"}
 CONSTRAINTS: Final = {"UNCONSTRAINED", "LONG_ONLY_SUM_TO_ONE"}
 COST_COVERAGE: Final = {"COMPLETE", "INCOMPLETE"}
+ESTIMATORS: Final = {"STATIC_RBSA", "DYNAMIC_FLS"}
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -121,6 +122,8 @@ class ModelDefinition:
     cv_folds: int
     periods_per_year: int
     parsimony_tolerance: float
+    estimator: str
+    smoothness_candidates: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,7 @@ class Specification:
     risk_free_column: str
     factors: tuple[FactorDefinition, ...]
     models: tuple[ModelDefinition, ...]
+    provenance_sources: tuple[SourceDefinition, ...]
 
 
 @dataclass(frozen=True)
@@ -140,6 +144,16 @@ class Fit:
     intercept: float
     exposures: FloatArray
     rank: int
+    rank_status: str
+
+
+@dataclass(frozen=True)
+class DynamicFit:
+    """One clean-room FLS solution for a disclosed smoothness value."""
+
+    intercept: float
+    exposures: FloatArray
+    fitted: FloatArray
     rank_status: str
 
 
@@ -259,23 +273,32 @@ def _factor_definition(value: Mapping[str, Any], index: int) -> FactorDefinition
 
 def _model_definition(value: Mapping[str, Any], index: int) -> ModelDefinition:
     name = f"models[{index}]"
+    base_keys = {
+        "constraint",
+        "cost_coverage",
+        "cv_folds",
+        "factor_ids",
+        "minimum_test_observations",
+        "minimum_train_observations",
+        "model_id",
+        "parsimony_tolerance",
+        "periods_per_year",
+        "ridge_candidates",
+        "series_id",
+        "test_start",
+        "train_end",
+    }
+    estimator = _text(value.get("estimator", "STATIC_RBSA"), f"{name}.estimator")
+    if estimator not in ESTIMATORS:
+        raise DecompositionError(f"{name}.estimator is unsupported")
+    expected_keys = set(base_keys)
+    if "estimator" in value:
+        expected_keys.add("estimator")
+    if estimator == "DYNAMIC_FLS":
+        expected_keys.add("smoothness_candidates")
     _strict_keys(
         value,
-        {
-            "constraint",
-            "cost_coverage",
-            "cv_folds",
-            "factor_ids",
-            "minimum_test_observations",
-            "minimum_train_observations",
-            "model_id",
-            "parsimony_tolerance",
-            "periods_per_year",
-            "ridge_candidates",
-            "series_id",
-            "test_start",
-            "train_end",
-        },
+        expected_keys,
         name,
     )
     constraint = _text(value["constraint"], f"{name}.constraint")
@@ -303,6 +326,33 @@ def _model_definition(value: Mapping[str, Any], index: int) -> ModelDefinition:
     )
     if not ridge:
         raise DecompositionError(f"{name}.ridge_candidates must be non-empty")
+    smoothness: tuple[float, ...] = ()
+    if estimator == "DYNAMIC_FLS":
+        if constraint != "UNCONSTRAINED":
+            raise DecompositionError(
+                f"{name}.DYNAMIC_FLS currently requires UNCONSTRAINED"
+            )
+        if len(ridge) != 1:
+            raise DecompositionError(
+                f"{name}.DYNAMIC_FLS requires one disclosed state ridge value"
+            )
+        raw_smoothness = value["smoothness_candidates"]
+        if not isinstance(raw_smoothness, list):
+            raise DecompositionError(f"{name}.smoothness_candidates must be an array")
+        smoothness = tuple(
+            sorted(
+                {
+                    _finite(
+                        item,
+                        f"{name}.smoothness_candidates[]",
+                        minimum=1e-12,
+                    )
+                    for item in raw_smoothness
+                }
+            )
+        )
+        if not smoothness:
+            raise DecompositionError(f"{name}.smoothness_candidates must be non-empty")
     train_end = _day(value["train_end"], f"{name}.train_end")
     test_start = _day(value["test_start"], f"{name}.test_start")
     if test_start <= train_end:
@@ -335,6 +385,8 @@ def _model_definition(value: Mapping[str, Any], index: int) -> ModelDefinition:
             f"{name}.parsimony_tolerance",
             minimum=0.0,
         ),
+        estimator=estimator,
+        smoothness_candidates=smoothness,
     )
 
 
@@ -344,18 +396,17 @@ def _load_spec(path: Path) -> Specification:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DecompositionError("specification is not readable UTF-8 JSON") from exc
     root = _object(decoded, "specification")
-    _strict_keys(
-        root,
-        {
-            "as_of_date",
-            "factor_source",
-            "maximum_factor_staleness_days",
-            "models",
-            "schema_version",
-            "target_source",
-        },
-        "specification",
-    )
+    root_keys = {
+        "as_of_date",
+        "factor_source",
+        "maximum_factor_staleness_days",
+        "models",
+        "schema_version",
+        "target_source",
+    }
+    if "provenance_sources" in root:
+        root_keys.add("provenance_sources")
+    _strict_keys(root, root_keys, "specification")
     if root["schema_version"] != 1:
         raise DecompositionError("specification schema_version is unsupported")
     factor_source_object = _object(root["factor_source"], "factor_source")
@@ -425,6 +476,12 @@ def _load_spec(path: Path) -> Specification:
         ),
         factors=factors,
         models=models,
+        provenance_sources=tuple(
+            _source_definition(item, f"provenance_sources[{index}]")
+            for index, item in enumerate(
+                _objects(root.get("provenance_sources", []), "provenance_sources")
+            )
+        ),
     )
 
 
@@ -619,6 +676,179 @@ def _predict(fit: Fit, matrix: FloatArray) -> FloatArray:
     return (fit.intercept + matrix @ fit.exposures).astype(np.float64)
 
 
+def _linear_solve(matrix: FloatArray, right: FloatArray) -> tuple[FloatArray, bool]:
+    """Solve a small deterministic system and disclose pseudoinverse fallback."""
+
+    try:
+        solved = np.linalg.solve(matrix, right)
+        return cast(FloatArray, solved.astype(np.float64)), False
+    except np.linalg.LinAlgError:
+        solved = np.linalg.pinv(matrix) @ right
+        return cast(FloatArray, solved.astype(np.float64)), True
+
+
+def _block_tridiagonal_solve(
+    diagonal: Sequence[FloatArray],
+    off_diagonal: Sequence[FloatArray],
+    right: FloatArray,
+) -> tuple[FloatArray, str]:
+    """Solve a symmetric block-tridiagonal system using a block Thomas pass."""
+
+    count = len(diagonal)
+    if count == 0 or right.ndim != 3 or right.shape[0] != count:
+        raise DecompositionError("dynamic system dimensions are invalid")
+    if len(off_diagonal) != count - 1:
+        raise DecompositionError("dynamic off-diagonal dimensions are invalid")
+    transformed_right: list[FloatArray] = []
+    transformed_upper: list[FloatArray] = []
+    used_pseudoinverse = False
+    for index in range(count):
+        effective = diagonal[index].copy()
+        rhs = right[index].copy()
+        if index:
+            lower = off_diagonal[index - 1].T
+            effective -= lower @ transformed_upper[index - 1]
+            rhs -= lower @ transformed_right[index - 1]
+        solved_rhs, fallback = _linear_solve(effective, rhs)
+        used_pseudoinverse = used_pseudoinverse or fallback
+        transformed_right.append(solved_rhs)
+        if index < count - 1:
+            solved_upper, fallback = _linear_solve(effective, off_diagonal[index])
+            used_pseudoinverse = used_pseudoinverse or fallback
+            transformed_upper.append(solved_upper)
+    solution = np.empty_like(right, dtype=np.float64)
+    solution[-1] = transformed_right[-1]
+    for index in range(count - 2, -1, -1):
+        solution[index] = (
+            transformed_right[index] - transformed_upper[index] @ solution[index + 1]
+        )
+    status = (
+        "BLOCK_TRIDIAGONAL_PSEUDOINVERSE"
+        if used_pseudoinverse
+        else "BLOCK_TRIDIAGONAL_FULL_RANK"
+    )
+    return solution, status
+
+
+def _dynamic_fit(
+    matrix: FloatArray,
+    target: FloatArray,
+    *,
+    smoothness: float,
+    ridge: float,
+    weights: FloatArray | None = None,
+    fixed_intercept: float | None = None,
+) -> DynamicFit:
+    """Minimize residual error plus adjacent-state FLS smoothness.
+
+    The independent implementation uses identity state transitions and an
+    isotropic disclosed ridge. It does not reproduce undisclosed MPI defaults,
+    constraints, breakpoint relaxation, or factor-search heuristics.
+    """
+
+    if matrix.ndim != 2 or target.ndim != 1 or len(matrix) != len(target):
+        raise DecompositionError("dynamic fit arrays are incompatible")
+    observation_count, factor_count = matrix.shape
+    if observation_count < 2 or factor_count < 1:
+        raise DecompositionError("dynamic fit requires two rows and one factor")
+    accepted_weights = (
+        np.ones(observation_count, dtype=np.float64)
+        if weights is None
+        else weights.astype(np.float64)
+    )
+    if accepted_weights.shape != (observation_count,) or np.any(
+        (accepted_weights != 0.0) & (accepted_weights != 1.0)
+    ):
+        raise DecompositionError("dynamic observation weights must be zero or one")
+    if float(np.sum(accepted_weights)) < 2.0:
+        raise DecompositionError("dynamic fit has insufficient included observations")
+
+    identity = np.eye(factor_count, dtype=np.float64)
+    diagonal: list[FloatArray] = []
+    off_diagonal = [
+        (-smoothness * identity).copy() for _ in range(observation_count - 1)
+    ]
+    data_right = np.empty((observation_count, factor_count), dtype=np.float64)
+    intercept_right = np.empty((observation_count, factor_count), dtype=np.float64)
+    for index in range(observation_count):
+        factor_row = matrix[index]
+        weight = float(accepted_weights[index])
+        neighbor_penalty = smoothness * (
+            1.0 if index in {0, observation_count - 1} else 2.0
+        )
+        diagonal.append(
+            cast(
+                FloatArray,
+                (
+                    weight * np.outer(factor_row, factor_row)
+                    + (ridge + neighbor_penalty) * identity
+                ).astype(np.float64),
+            )
+        )
+        data_right[index] = weight * factor_row * target[index]
+        intercept_right[index] = weight * factor_row
+
+    if fixed_intercept is None:
+        combined_right = np.stack((data_right, intercept_right), axis=2)
+        solved, rank_status = _block_tridiagonal_solve(
+            diagonal, off_diagonal, combined_right
+        )
+        data_solution = solved[:, :, 0]
+        intercept_solution = solved[:, :, 1]
+        weighted_factors = accepted_weights[:, None] * matrix
+        denominator = float(np.sum(accepted_weights)) - float(
+            np.sum(weighted_factors * intercept_solution)
+        )
+        if abs(denominator) <= 1e-12:
+            raise DecompositionError("dynamic intercept is not identifiable")
+        intercept = (
+            float(np.sum(accepted_weights * target))
+            - float(np.sum(weighted_factors * data_solution))
+        ) / denominator
+        exposures = data_solution - intercept_solution * intercept
+    else:
+        adjusted_right = data_right - intercept_right * fixed_intercept
+        solved, rank_status = _block_tridiagonal_solve(
+            diagonal, off_diagonal, adjusted_right[:, :, None]
+        )
+        intercept = fixed_intercept
+        exposures = solved[:, :, 0]
+    fitted = intercept + np.sum(matrix * exposures, axis=1)
+    return DynamicFit(
+        intercept=float(intercept),
+        exposures=cast(FloatArray, exposures.astype(np.float64)),
+        fitted=cast(FloatArray, fitted.astype(np.float64)),
+        rank_status=rank_status,
+    )
+
+
+def _dynamic_loo_score(
+    matrix: FloatArray,
+    target: FloatArray,
+    *,
+    smoothness: float,
+    ridge: float,
+) -> tuple[float | None, FloatArray]:
+    """Compute the paper's leave-one-out Predicted R-squared directly."""
+
+    predictions = np.empty(len(target), dtype=np.float64)
+    for omitted in range(len(target)):
+        weights = np.ones(len(target), dtype=np.float64)
+        weights[omitted] = 0.0
+        fit = _dynamic_fit(
+            matrix,
+            target,
+            smoothness=smoothness,
+            ridge=ridge,
+            weights=weights,
+        )
+        predictions[omitted] = fit.intercept + matrix[omitted] @ fit.exposures[omitted]
+    return (
+        _r_squared(target, predictions, float(np.mean(target))),
+        cast(FloatArray, predictions),
+    )
+
+
 def _r_squared(
     actual: FloatArray, predicted: FloatArray, baseline: float
 ) -> float | None:
@@ -711,6 +941,349 @@ def _metrics(
     }
 
 
+def _annualize_coefficient_standard_error(
+    periodic_standard_error: float | None, periods_per_year: int
+) -> float | None:
+    """Apply the same linear transform used for an annualized coefficient."""
+    if periodic_standard_error is None:
+        return None
+    return periodic_standard_error * periods_per_year
+
+
+def _dynamic_model_result(
+    model: ModelDefinition,
+    target_rows: Sequence[TargetRow],
+    aligned: Sequence[tuple[TargetRow, FactorRow, tuple[float, ...]]],
+    train: Sequence[tuple[TargetRow, FactorRow, tuple[float, ...]]],
+    test: Sequence[tuple[TargetRow, FactorRow, tuple[float, ...]]],
+    aligned_matrix: FloatArray,
+    aligned_target: FloatArray,
+    train_matrix: FloatArray,
+    train_target: FloatArray,
+    test_matrix: FloatArray,
+    test_target: FloatArray,
+    coverage: Mapping[str, object],
+) -> dict[str, object]:
+    ridge = model.ridge_candidates[0]
+    sensitivity: list[dict[str, object]] = []
+    scored: list[tuple[float, float]] = []
+    for smoothness in model.smoothness_candidates:
+        predicted_r_squared, _predictions = _dynamic_loo_score(
+            train_matrix,
+            train_target,
+            smoothness=smoothness,
+            ridge=ridge,
+        )
+        fit = _dynamic_fit(
+            train_matrix,
+            train_target,
+            smoothness=smoothness,
+            ridge=ridge,
+        )
+        differences = np.diff(fit.exposures, axis=0)
+        roughness = float(np.sum(differences**2))
+        turnover = float(np.sum(np.abs(differences)))
+        if predicted_r_squared is not None:
+            scored.append((predicted_r_squared, smoothness))
+        sensitivity.append(
+            {
+                "leave_one_out_observations": len(train_target),
+                "predicted_r_squared": _number(predicted_r_squared),
+                "roughness_l2_squared": _number(roughness),
+                "smoothness": _number(smoothness),
+                "turnover_l1": _number(turnover),
+            }
+        )
+    if not scored:
+        return _unavailable_result(
+            model,
+            target_rows,
+            "UNAVAILABLE_DYNAMIC_CROSS_VALIDATION",
+            coverage,
+        )
+    best_score = max(item[0] for item in scored)
+    eligible = [
+        item for item in scored if best_score - item[0] <= model.parsimony_tolerance
+    ]
+    selected_score, selected_smoothness = max(eligible, key=lambda item: item[1])
+    train_fit = _dynamic_fit(
+        train_matrix,
+        train_target,
+        smoothness=selected_smoothness,
+        ridge=ridge,
+    )
+
+    history_matrix = train_matrix.copy()
+    history_target = train_target.copy()
+    test_predictions: list[float] = []
+    filtered_exposures: dict[date, FloatArray] = {}
+    holdout_forecasts: list[dict[str, object]] = []
+    for index, observation in enumerate(test):
+        prior_fit = _dynamic_fit(
+            history_matrix,
+            history_target,
+            smoothness=selected_smoothness,
+            ridge=ridge,
+            fixed_intercept=train_fit.intercept,
+        )
+        forecast_exposure = prior_fit.exposures[-1].copy()
+        prediction = float(train_fit.intercept + test_matrix[index] @ forecast_exposure)
+        test_predictions.append(prediction)
+        history_matrix = np.vstack((history_matrix, test_matrix[index]))
+        history_target = np.append(history_target, test_target[index])
+        posterior_fit = _dynamic_fit(
+            history_matrix,
+            history_target,
+            smoothness=selected_smoothness,
+            ridge=ridge,
+            fixed_intercept=train_fit.intercept,
+        )
+        filtered_exposure = posterior_fit.exposures[-1].copy()
+        day = observation[0].day
+        filtered_exposures[day] = filtered_exposure
+        holdout_forecasts.append(
+            {
+                "actual_excess_return": _number(test_target[index]),
+                "date": day.isoformat(),
+                "forecast_exposures": {
+                    factor_id: _number(forecast_exposure[column])
+                    for column, factor_id in enumerate(model.factor_ids)
+                },
+                "predicted_excess_return": _number(prediction),
+            }
+        )
+    test_predicted = np.asarray(test_predictions, dtype=np.float64)
+    holdout_r_squared = _r_squared(
+        test_target, test_predicted, float(np.mean(train_target))
+    )
+    static_benchmark_fit = _fit(
+        train_matrix,
+        train_target,
+        constraint="UNCONSTRAINED",
+        ridge=ridge,
+    )
+    static_benchmark_predictions = _predict(static_benchmark_fit, test_matrix)
+    static_benchmark_r_squared = _r_squared(
+        test_target,
+        static_benchmark_predictions,
+        float(np.mean(train_target)),
+    )
+    holdout_delta_vs_static = (
+        None
+        if holdout_r_squared is None or static_benchmark_r_squared is None
+        else holdout_r_squared - static_benchmark_r_squared
+    )
+    benchmark_status = (
+        "UNAVAILABLE_STATIC_BENCHMARK"
+        if holdout_delta_vs_static is None
+        else "OUTPERFORMS_STATIC_SAME_FACTORS_HOLDOUT"
+        if holdout_delta_vs_static > 0.0
+        else "DOES_NOT_OUTPERFORM_STATIC_SAME_FACTORS_HOLDOUT"
+    )
+
+    train_exposures = {
+        observation[0].day: train_fit.exposures[index].copy()
+        for index, observation in enumerate(train)
+    }
+    last_train_exposure = train_fit.exposures[-1].copy()
+    exposure_path: list[dict[str, object]] = []
+    contributions: list[dict[str, object]] = []
+    previous_exposure: FloatArray | None = None
+    change_rows: list[tuple[float, str]] = []
+    for index, observation in enumerate(aligned):
+        target_row = observation[0]
+        if target_row.day in train_exposures:
+            exposure = train_exposures[target_row.day]
+            estimation_state = "TRAIN_SMOOTHED"
+            partition = "TRAIN"
+        elif target_row.day in filtered_exposures:
+            exposure = filtered_exposures[target_row.day]
+            estimation_state = "HOLDOUT_FILTERED_CAUSAL"
+            partition = "TEST"
+        else:
+            exposure = last_train_exposure
+            estimation_state = "EMBARGO_FORECAST_NO_UPDATE"
+            partition = "GAP"
+        fitted = float(train_fit.intercept + aligned_matrix[index] @ exposure)
+        factor_contributions = {
+            factor_id: _number(exposure[column] * aligned_matrix[index, column])
+            for column, factor_id in enumerate(model.factor_ids)
+        }
+        residual = float(aligned_target[index] - fitted)
+        reconstructed = (
+            train_fit.intercept
+            + sum(float(cast(str, value)) for value in factor_contributions.values())
+            + residual
+        )
+        if not math.isclose(
+            reconstructed,
+            float(aligned_target[index]),
+            rel_tol=0.0,
+            abs_tol=5e-11,
+        ):
+            raise DecompositionError("dynamic factor contributions do not reconcile")
+        change_norm = (
+            None
+            if previous_exposure is None
+            else float(np.linalg.norm(exposure - previous_exposure))
+        )
+        if change_norm is not None:
+            change_rows.append((change_norm, target_row.day.isoformat()))
+        exposure_path.append(
+            {
+                "date": target_row.day.isoformat(),
+                "estimation_state": estimation_state,
+                "exposure_change_l2": _number(change_norm),
+                "exposures": {
+                    factor_id: _number(exposure[column])
+                    for column, factor_id in enumerate(model.factor_ids)
+                },
+            }
+        )
+        contributions.append(
+            {
+                "actual_excess_return": _number(aligned_target[index]),
+                "alpha_contribution": _number(train_fit.intercept),
+                "date": target_row.day.isoformat(),
+                "factor_contributions": factor_contributions,
+                "factor_exposures": {
+                    factor_id: _number(exposure[column])
+                    for column, factor_id in enumerate(model.factor_ids)
+                },
+                "fitted_excess_return": _number(fitted),
+                "partition": partition,
+                "residual": _number(residual),
+            }
+        )
+        previous_exposure = exposure
+
+    latest_exposure = previous_exposure
+    if latest_exposure is None:
+        raise DecompositionError("dynamic exposure path is empty")
+    evaluation_means = np.mean(test_matrix, axis=0)
+    exposures = [
+        {
+            "confidence_status": "UNAVAILABLE_DYNAMIC_PATH_INFERENCE",
+            "exposure": _number(latest_exposure[index]),
+            "factor_id": factor_id,
+            "holdout_mean_period_contribution": _number(
+                latest_exposure[index] * evaluation_means[index]
+            ),
+            "standard_error": None,
+        }
+        for index, factor_id in enumerate(model.factor_ids)
+    ]
+
+    periodic_cost = (
+        None
+        if model.cost_coverage != "COMPLETE"
+        else float(np.mean([cast(float, item[0].cost) for item in train]))
+    )
+    observed_basis = target_rows[0].return_basis
+    gross_alpha = None
+    net_alpha = None
+    gross_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
+    net_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
+    annualized_observed = train_fit.intercept * model.periods_per_year
+    if observed_basis == "GROSS":
+        gross_alpha = annualized_observed
+        gross_status = "AVAILABLE_OBSERVED_BASIS"
+        if periodic_cost is not None:
+            net_alpha = (train_fit.intercept - periodic_cost) * model.periods_per_year
+            net_status = "AVAILABLE_COMPLETE_COST_CONVERSION"
+    else:
+        net_alpha = annualized_observed
+        net_status = "AVAILABLE_OBSERVED_BASIS"
+        if periodic_cost is not None:
+            gross_alpha = (train_fit.intercept + periodic_cost) * model.periods_per_year
+            gross_status = "AVAILABLE_COMPLETE_COST_CONVERSION"
+
+    largest_changes = [
+        {"date": day, "exposure_change_l2": _number(value)}
+        for value, day in sorted(change_rows, key=lambda item: (-item[0], item[1]))[:5]
+    ]
+    return {
+        "alpha": {
+            "annualized_standard_error": None,
+            "confidence_status": "UNAVAILABLE_DYNAMIC_PATH_INFERENCE",
+            "gross_annualized": _number(gross_alpha),
+            "gross_status": gross_status,
+            "net_annualized": _number(net_alpha),
+            "net_status": net_status,
+            "periodic_intercept": _number(train_fit.intercept),
+        },
+        "constraint": model.constraint,
+        "contributions": contributions,
+        "cost_coverage": model.cost_coverage,
+        "coverage": dict(coverage),
+        "diagnostics": {
+            "dynamic": {
+                "exposure_path": exposure_path,
+                "holdout_forecasts": holdout_forecasts,
+                "holdout_comparison": {
+                    "dynamic_predicted_r_squared": _number(holdout_r_squared),
+                    "dynamic_minus_static_predicted_r_squared": _number(
+                        holdout_delta_vs_static
+                    ),
+                    "selection_effect": "DIAGNOSTIC_ONLY_HOLDOUT_NOT_USED_FOR_SELECTION",
+                    "static_predicted_r_squared": _number(static_benchmark_r_squared),
+                    "status": benchmark_status,
+                },
+                "largest_exposure_changes": largest_changes,
+                "rank_status": train_fit.rank_status,
+                "selected_smoothness": _number(selected_smoothness),
+                "selection_predicted_r_squared": _number(selected_score),
+                "selection_rule": (
+                    "MAX_TRAIN_LOO_PREDICTED_R2_THEN_SMOOTHEST_WITHIN_TOLERANCE"
+                ),
+                "state_transition": "IDENTITY_RANDOM_WALK",
+                "validation": "EXACT_LEAVE_ONE_OUT_TRAIN_ONLY",
+            },
+            "holdout": {
+                **_metrics(
+                    test_target,
+                    test_predicted,
+                    baseline=float(np.mean(train_target)),
+                    factor_count=len(model.factor_ids),
+                    periods_per_year=model.periods_per_year,
+                ),
+                "predicted_r_squared": _number(holdout_r_squared),
+                "prediction_mode": "CAUSAL_WALK_FORWARD_PRIOR_STATE",
+            },
+            "rank": None,
+            "rank_status": train_fit.rank_status,
+            "train": _metrics(
+                train_target,
+                train_fit.fitted,
+                baseline=float(np.mean(train_target)),
+                factor_count=len(model.factor_ids),
+                periods_per_year=model.periods_per_year,
+            ),
+        },
+        "estimator": model.estimator,
+        "evidence_layer": target_rows[0].evidence_layer,
+        "exposures": exposures,
+        "factor_ids": list(model.factor_ids),
+        "method_label": METHOD_LABEL,
+        "model_id": model.model_id,
+        "parsimony_tolerance": _number(model.parsimony_tolerance),
+        "ridge_sensitivity": [
+            {
+                "cv_observations": len(train_target),
+                "cv_predicted_r_squared": _number(selected_score),
+                "holdout_predicted_r_squared": _number(holdout_r_squared),
+                "ridge": _number(ridge),
+            }
+        ],
+        "selected_for_series": False,
+        "selected_ridge": _number(ridge),
+        "selected_smoothness": _number(selected_smoothness),
+        "series_id": model.series_id,
+        "smoothness_sensitivity": sensitivity,
+        "status": "AVAILABLE",
+    }
+
+
 def _unavailable_result(
     model: ModelDefinition,
     rows: Sequence[TargetRow] | None,
@@ -731,6 +1304,7 @@ def _unavailable_result(
         "cost_coverage": model.cost_coverage,
         "coverage": dict(coverage),
         "diagnostics": {},
+        "estimator": model.estimator,
         "evidence_layer": first.evidence_layer if first else None,
         "exposures": [],
         "factor_ids": list(model.factor_ids),
@@ -760,6 +1334,13 @@ def _model_result(
         "observed_end": None,
         "observed_start": None,
         "target_observations": len(target_rows or ()),
+        "target_cumulative_return": None,
+        "target_current_drawdown": None,
+        "target_max_drawdown": None,
+        "target_observed_end": target_rows[-1].day.isoformat() if target_rows else None,
+        "target_observed_start": target_rows[0].day.isoformat()
+        if target_rows
+        else None,
         "test_observations": 0,
         "train_observations": 0,
     }
@@ -789,6 +1370,19 @@ def _model_result(
 
     train = [item for item in aligned if item[0].day <= model.train_end]
     test = [item for item in aligned if item[0].day >= model.test_start]
+    current_drawdown: float | None = None
+    maximum_drawdown: float | None = None
+    cumulative_return: float | None = None
+    if all(row.return_type == "TOTAL" for row in target_rows):
+        wealth = 1.0
+        peak = 1.0
+        maximum_drawdown = 0.0
+        for row in target_rows:
+            wealth *= 1.0 + row.value
+            peak = max(peak, wealth)
+            maximum_drawdown = max(maximum_drawdown, 1.0 - wealth / peak)
+        current_drawdown = 1.0 - wealth / peak
+        cumulative_return = wealth - 1.0
     coverage = {
         "aligned_observations": len(aligned),
         "alignment_ratio": _number(len(aligned) / len(target_rows)),
@@ -798,6 +1392,11 @@ def _model_result(
         "observed_end": aligned[-1][0].day.isoformat() if aligned else None,
         "observed_start": aligned[0][0].day.isoformat() if aligned else None,
         "target_observations": len(target_rows),
+        "target_cumulative_return": _number(cumulative_return),
+        "target_current_drawdown": _number(current_drawdown),
+        "target_max_drawdown": _number(maximum_drawdown),
+        "target_observed_end": target_rows[-1].day.isoformat(),
+        "target_observed_start": target_rows[0].day.isoformat(),
         "test_observations": len(test),
         "train_observations": len(train),
     }
@@ -852,6 +1451,22 @@ def _model_result(
 
     train_matrix, train_target = arrays(train)
     test_matrix, test_target = arrays(test)
+    aligned_matrix, aligned_target = arrays(aligned)
+    if model.estimator == "DYNAMIC_FLS":
+        return _dynamic_model_result(
+            model,
+            target_rows,
+            aligned,
+            train,
+            test,
+            aligned_matrix,
+            aligned_target,
+            train_matrix,
+            train_target,
+            test_matrix,
+            test_target,
+            coverage,
+        )
     sensitivity: list[dict[str, object]] = []
     scored: list[tuple[float, float]] = []
     for ridge in model.ridge_candidates:
@@ -896,7 +1511,6 @@ def _model_result(
         train_matrix, train_target, fit, selected_ridge, model.constraint
     )
 
-    aligned_matrix, aligned_target = arrays(aligned)
     aligned_predicted = _predict(fit, aligned_matrix)
     contributions: list[dict[str, object]] = []
     for index, (target_row, _factor_row, _values) in enumerate(aligned):
@@ -975,10 +1589,9 @@ def _model_result(
             gross_alpha = (fit.intercept + periodic_cost) * model.periods_per_year
             gross_status = "AVAILABLE_COMPLETE_COST_CONVERSION"
 
-    alpha_standard_error = (
-        None
-        if standard_errors is None
-        else float(standard_errors[0]) * math.sqrt(model.periods_per_year)
+    alpha_standard_error = _annualize_coefficient_standard_error(
+        None if standard_errors is None else float(standard_errors[0]),
+        model.periods_per_year,
     )
     return {
         "alpha": {
@@ -1015,6 +1628,7 @@ def _model_result(
                 periods_per_year=model.periods_per_year,
             ),
         },
+        "estimator": model.estimator,
         "evidence_layer": target_rows[0].evidence_layer,
         "exposures": exposures,
         "factor_ids": list(model.factor_ids),
@@ -1039,11 +1653,18 @@ def _select_models(
         for result in results:
             if result["series_id"] != series_id or result["status"] != "AVAILABLE":
                 continue
-            diagnostics = cast(dict[str, Any], result["diagnostics"])
-            holdout = cast(dict[str, Any], diagnostics["holdout"])
-            score = holdout["predicted_r_squared"]
-            if score is not None:
-                available.append((result, float(score)))
+            selected_ridge = result["selected_ridge"]
+            sensitivity = cast(list[dict[str, Any]], result["ridge_sensitivity"])
+            selected_cv = next(
+                (
+                    item["cv_predicted_r_squared"]
+                    for item in sensitivity
+                    if item["ridge"] == selected_ridge
+                ),
+                None,
+            )
+            if selected_cv is not None:
+                available.append((result, float(selected_cv)))
         if not available:
             selections.append(
                 {
@@ -1060,7 +1681,7 @@ def _select_models(
             if best_score - item[1]
             <= definitions[cast(str, item[0]["model_id"])].parsimony_tolerance
         ]
-        selected, score = min(
+        selected, selection_score = min(
             eligible,
             key=lambda item: (
                 len(cast(list[object], item[0]["factor_ids"])),
@@ -1068,13 +1689,16 @@ def _select_models(
             ),
         )
         selected["selected_for_series"] = True
+        diagnostics = cast(dict[str, Any], selected["diagnostics"])
+        holdout = cast(dict[str, Any], diagnostics["holdout"])
         selections.append(
             {
                 "factor_count": len(cast(list[object], selected["factor_ids"])),
-                "holdout_predicted_r_squared": _number(score),
+                "holdout_predicted_r_squared": holdout["predicted_r_squared"],
                 "model_id": selected["model_id"],
+                "selection_cv_predicted_r_squared": _number(selection_score),
                 "series_id": series_id,
-                "status": "SELECTED_PARSIMONIOUS_HOLDOUT_MODEL",
+                "status": "SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL",
             }
         )
     return selections
@@ -1086,6 +1710,10 @@ def build_decomposition(
     spec = _load_spec(spec_path)
     target_path = _verify_source(source_root, spec.target_source)
     factor_path = _verify_source(source_root, spec.factor_source)
+    provenance_paths = tuple(
+        (definition, _verify_source(source_root, definition))
+        for definition in spec.provenance_sources
+    )
     targets = _read_targets(target_path, spec.as_of_date)
     factors, _headers = _read_factors(factor_path, spec)
     definitions = {item.factor_id: item for item in spec.factors}
@@ -1112,6 +1740,14 @@ def build_decomposition(
             "sha256": spec.target_source.expected_sha256,
             "size_bytes": spec.target_source.expected_size_bytes,
         },
+        "provenance": [
+            {
+                "artifact_id": definition.artifact_id,
+                "sha256": definition.expected_sha256,
+                "size_bytes": definition.expected_size_bytes,
+            }
+            for definition, _path in provenance_paths
+        ],
     }
     payload: dict[str, object] = {
         "analytics_schema_version": ANALYTICS_SCHEMA_VERSION,
@@ -1151,6 +1787,17 @@ def build_decomposition(
             as_of_date=spec.as_of_date,
             schema_name=spec.factor_source.schema_name,
             schema_version=spec.factor_source.schema_version,
+        ),
+        *(
+            SourceArtifact(
+                artifact_id=definition.artifact_id,
+                sha256=definition.expected_sha256,
+                size_bytes=definition.expected_size_bytes,
+                as_of_date=spec.as_of_date,
+                schema_name=definition.schema_name,
+                schema_version=definition.schema_version,
+            )
+            for definition, _path in provenance_paths
         ),
         SourceArtifact(
             artifact_id="methodology/decomposition-methodology.json",

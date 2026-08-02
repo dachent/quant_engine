@@ -33,7 +33,8 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 ANALYTICS_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.0.0"
+BUILDER_VERSION: Final = "1.1.0"
+TRADING_OBSERVATION_HORIZONS: Final = (5, 21, 22, 63, 126, 130, 252, 260)
 RETURN_HEADERS: Final = ("series_id", "date", "return", "evidence_layer")
 EVIDENCE_LAYERS: Final = {
     "ACCOUNT_LIVE",
@@ -583,6 +584,88 @@ def _rolling(
     }
 
 
+def _horizon_results(
+    dates: Sequence[date], left: FloatArray, right: FloatArray
+) -> dict[str, dict[str, object]]:
+    results: dict[str, dict[str, object]] = {}
+    for horizon in TRADING_OBSERVATION_HORIZONS:
+        if len(dates) < horizon:
+            results[str(horizon)] = {
+                "correlation": None,
+                "observations": len(dates),
+                "observed_end": dates[-1].isoformat() if dates else None,
+                "observed_start": dates[0].isoformat() if dates else None,
+                "status": "UNAVAILABLE_INSUFFICIENT_HISTORY",
+                "window_observations": horizon,
+            }
+            continue
+        window_left = left[-horizon:]
+        window_right = right[-horizon:]
+        correlation = _pearson(window_left, window_right)
+        results[str(horizon)] = {
+            "correlation": _number(correlation),
+            "observations": horizon,
+            "observed_end": dates[-1].isoformat(),
+            "observed_start": dates[-horizon].isoformat(),
+            "status": (
+                "AVAILABLE"
+                if correlation is not None
+                else "UNAVAILABLE_CONSTANT_SERIES"
+            ),
+            "window_observations": horizon,
+        }
+    return results
+
+
+def _underwater_dates(rows: Sequence[ReturnRow]) -> set[date]:
+    wealth = 1.0
+    high_water_mark = 1.0
+    underwater: set[date] = set()
+    for row in rows:
+        wealth *= 1.0 + row.value
+        if wealth > high_water_mark:
+            high_water_mark = wealth
+        elif wealth < high_water_mark - 1e-14:
+            underwater.add(row.day)
+    return underwater
+
+
+def _conditioned_correlation(
+    dates: Sequence[date],
+    left: FloatArray,
+    right: FloatArray,
+    mask: npt.NDArray[np.bool_],
+    minimum_observations: int,
+    definition: str,
+) -> dict[str, object]:
+    conditioned_dates = [
+        day for day, accepted in zip(dates, mask, strict=True) if accepted
+    ]
+    conditioned_left = left[mask]
+    conditioned_right = right[mask]
+    correlation = (
+        None
+        if len(conditioned_dates) < minimum_observations
+        else _pearson(conditioned_left, conditioned_right)
+    )
+    return {
+        "conditioning_rule": definition,
+        "correlation": _number(correlation),
+        "observations": len(conditioned_dates),
+        "observed_end": conditioned_dates[-1].isoformat()
+        if conditioned_dates
+        else None,
+        "observed_start": conditioned_dates[0].isoformat()
+        if conditioned_dates
+        else None,
+        "status": (
+            "AVAILABLE"
+            if correlation is not None
+            else "UNAVAILABLE_INSUFFICIENT_OR_CONSTANT_DRAWDOWN"
+        ),
+    }
+
+
 def _unavailable_cell(
     left: str,
     right: str,
@@ -612,6 +695,35 @@ def _unavailable_cell(
             "multiple_vs_independence": None,
             "right_threshold": None,
             "status": "UNAVAILABLE",
+        },
+        "drawdown_regimes": {
+            "both_strategies_underwater": {
+                "conditioning_rule": "BOTH_WEALTH_INDICES_BELOW_PRIOR_RUNNING_HWM",
+                "correlation": None,
+                "observations": 0,
+                "observed_end": None,
+                "observed_start": None,
+                "status": "UNAVAILABLE",
+            },
+            "either_strategy_underwater": {
+                "conditioning_rule": "EITHER_WEALTH_INDEX_BELOW_PRIOR_RUNNING_HWM",
+                "correlation": None,
+                "observations": 0,
+                "observed_end": None,
+                "observed_start": None,
+                "status": "UNAVAILABLE",
+            },
+        },
+        "horizons": {
+            str(horizon): {
+                "correlation": None,
+                "observations": 0,
+                "observed_end": None,
+                "observed_start": None,
+                "status": "UNAVAILABLE",
+                "window_observations": horizon,
+            }
+            for horizon in TRADING_OBSERVATION_HORIZONS
         },
         "left": left,
         "pearson": None,
@@ -651,11 +763,13 @@ def _observed_cell(
         )
     left_by_day = {item.day: item.value for item in left_rows}
     right_by_day = {item.day: item.value for item in right_rows}
-    dates = sorted(set(left_by_day) & set(right_by_day))
+    dates = sorted(
+        day for day in set(left_by_day) & set(right_by_day) if day.weekday() < 5
+    )
     coverage = {
         "common_observations": len(dates),
         "evidence_layer": left_rows[0].evidence_layer,
-        "frequency": "DAILY_EXACT_DATE",
+        "frequency": "WEEKDAY_OBSERVED_EXACT_DATE",
         "left_observations": len(left_rows),
         "missing_from_left": len(set(right_by_day) - set(left_by_day)),
         "missing_from_right": len(set(left_by_day) - set(right_by_day)),
@@ -695,6 +809,14 @@ def _observed_cell(
         np.sum((left_values <= left_threshold) & (right_values <= right_threshold))
     )
     expected_joint = len(dates) * spec.tail_quantile**2
+    left_underwater = _underwater_dates(left_rows)
+    right_underwater = _underwater_dates(right_rows)
+    left_drawdown = np.asarray(
+        [day in left_underwater for day in dates], dtype=np.bool_
+    )
+    right_drawdown = np.asarray(
+        [day in right_underwater for day in dates], dtype=np.bool_
+    )
     return {
         "coverage": coverage,
         "downside": {
@@ -715,6 +837,25 @@ def _observed_cell(
             "right_threshold": _number(right_threshold),
             "status": "AVAILABLE",
         },
+        "drawdown_regimes": {
+            "both_strategies_underwater": _conditioned_correlation(
+                dates,
+                left_values,
+                right_values,
+                left_drawdown & right_drawdown,
+                spec.minimum_downside_observations,
+                "BOTH_WEALTH_INDICES_BELOW_PRIOR_RUNNING_HWM",
+            ),
+            "either_strategy_underwater": _conditioned_correlation(
+                dates,
+                left_values,
+                right_values,
+                left_drawdown | right_drawdown,
+                spec.minimum_downside_observations,
+                "EITHER_WEALTH_INDEX_BELOW_PRIOR_RUNNING_HWM",
+            ),
+        },
+        "horizons": _horizon_results(dates, left_values, right_values),
         "left": left,
         "pearson": _number(pearson),
         "right": right,
@@ -819,6 +960,23 @@ def _dependence_payload(
         ["1" if row == column else None for column in range(size)]
         for row in range(size)
     ]
+    horizon_matrices: dict[str, list[list[str | None]]] = {
+        str(horizon): [
+            ["1" if row == column else None for column in range(size)]
+            for row in range(size)
+        ]
+        for horizon in TRADING_OBSERVATION_HORIZONS
+    }
+    drawdown_matrices: dict[str, list[list[str | None]]] = {
+        regime: [
+            ["1" if row == column else None for column in range(size)]
+            for row in range(size)
+        ]
+        for regime in (
+            "either_strategy_underwater",
+            "both_strategies_underwater",
+        )
+    }
     prior_index = {(item.left, item.right): item for item in spec.priors}
     posterior_pre = np.eye(size, dtype=np.float64)
     stress_pre = np.eye(size, dtype=np.float64)
@@ -841,6 +999,18 @@ def _dependence_payload(
             observed_matrix[right_index][left_index] = cast(str | None, observed_text)
             spearman_matrix[left_index][right_index] = cast(str | None, spearman_text)
             spearman_matrix[right_index][left_index] = cast(str | None, spearman_text)
+            for horizon, horizon_result in cast(
+                dict[str, dict[str, object]], cell["horizons"]
+            ).items():
+                correlation_text = cast(str | None, horizon_result["correlation"])
+                horizon_matrices[horizon][left_index][right_index] = correlation_text
+                horizon_matrices[horizon][right_index][left_index] = correlation_text
+            for regime, regime_result in cast(
+                dict[str, dict[str, object]], cell["drawdown_regimes"]
+            ).items():
+                correlation_text = cast(str | None, regime_result["correlation"])
+                drawdown_matrices[regime][left_index][right_index] = correlation_text
+                drawdown_matrices[regime][right_index][left_index] = correlation_text
             common = cast(dict[str, Any], cell["coverage"])["common_observations"]
             weight = (
                 0.0
@@ -918,6 +1088,28 @@ def _dependence_payload(
             "status": "AVAILABLE_RECONCILED_SEPARATE_CONSERVATIVE_BOUND",
         },
         "implementation_cells": _implementation_cells(spec),
+        "drawdown_matrices": {
+            regime: {
+                "classification": (
+                    "MEASURED_CONDITIONED_ON_PAIR_WEALTH_DRAWDOWN_STATE"
+                ),
+                "conditioning_rule": (
+                    "EITHER_WEALTH_INDEX_BELOW_PRIOR_RUNNING_HWM"
+                    if regime == "either_strategy_underwater"
+                    else "BOTH_WEALTH_INDICES_BELOW_PRIOR_RUNNING_HWM"
+                ),
+                "values": values,
+            }
+            for regime, values in drawdown_matrices.items()
+        },
+        "horizon_matrices": {
+            horizon: {
+                "classification": "MEASURED_WEEKDAY_OBSERVATION_WINDOW",
+                "values": values,
+                "window_observations": int(horizon),
+            }
+            for horizon, values in horizon_matrices.items()
+        },
         "matrices": {
             "conceptual_prior": {
                 "classification": "CONCEPTUAL_NOT_MEASURED",
@@ -964,7 +1156,8 @@ def build_correlation(
         "dependence": _dependence_payload(spec, returns),
         "policy": {
             "evidence_layer_rule": "PAIRWISE_SAME_LAYER_ONLY",
-            "frequency": "DAILY_EXACT_DATE",
+            "frequency": "WEEKDAY_OBSERVED_EXACT_DATE_NO_HOLIDAY_INFERENCE",
+            "requested_horizons": list(TRADING_OBSERVATION_HORIZONS),
             "minimum_downside_observations": spec.minimum_downside_observations,
             "minimum_observations": spec.minimum_observations,
             "missing_diversification_credit": "ZERO",
