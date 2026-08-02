@@ -129,6 +129,13 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                         {"candidate_id": "GROWTH"},
                     ],
                 },
+                {
+                    "universe_id": "sector",
+                    "candidates": [
+                        {"candidate_id": "TECH"},
+                        {"candidate_id": "HEALTH"},
+                    ],
+                },
             ]
         },
     )
@@ -159,6 +166,14 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                 "return_type": "TOTAL",
                 "column_policy": "CANDIDATE_ID",
             },
+            "sector": {
+                "lens": "RETURN_INDUSTRY",
+                "universe_id": "sector",
+                "input_key": "sector_returns",
+                "risk_free_column": "BIL",
+                "return_type": "TOTAL",
+                "column_policy": "CANDIDATE_ID",
+            },
         },
         "strategies": [
             {
@@ -170,7 +185,12 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                         "source_key": "economic",
                         "constraint": "UNCONSTRAINED",
                         "factor_sets": [["MKT_RF"], ["MKT_RF", "SMB"]],
-                    }
+                    },
+                    {
+                        "source_key": "sector",
+                        "constraint": "UNCONSTRAINED",
+                        "model_policy": "EACH_CANDIDATE_ONE_FACTOR",
+                    },
                 ],
             },
             {
@@ -192,11 +212,13 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
         "us_factors": tmp_path / "us.csv",
         "europe_factors": tmp_path / "eu.csv",
         "style_returns": tmp_path / "style.csv",
+        "sector_returns": tmp_path / "sector.csv",
         "us_industries": tmp_path / "industries.csv",
     }
     _write_market(market_paths["us_factors"], ("rf", "mkt_rf", "smb"), days)
     _write_market(market_paths["europe_factors"], ("rf", "unused"), days)
     _write_market(market_paths["style_returns"], ("BIL", "VALUE", "GROWTH"), days)
+    _write_market(market_paths["sector_returns"], ("BIL", "TECH", "HEALTH"), days)
     _write_market(market_paths["us_industries"], ("rf", "unused"), days)
     factor_outputs = []
     for key in ("us_factors", "europe_factors", "us_industries"):
@@ -208,18 +230,33 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                 "bytes": len(content),
             }
         )
+    catalog_sha256 = hashlib.sha256(catalog.read_bytes()).hexdigest()
     factor_manifest = _write_json(
-        tmp_path / "factor-manifest.json", {"outputs": factor_outputs}
+        tmp_path / "factor-manifest.json",
+        {"catalog": {"sha256": catalog_sha256}, "outputs": factor_outputs},
     )
     style_content = market_paths["style_returns"].read_bytes()
     style_manifest = _write_json(
         tmp_path / "style-manifest.json",
         {
+            "catalog": {"sha256": catalog_sha256},
             "output": {
                 "path": market_paths["style_returns"].name,
                 "sha256": hashlib.sha256(style_content).hexdigest(),
                 "size_bytes": len(style_content),
-            }
+            },
+        },
+    )
+    sector_content = market_paths["sector_returns"].read_bytes()
+    sector_manifest = _write_json(
+        tmp_path / "sector-manifest.json",
+        {
+            "catalog": {"sha256": catalog_sha256},
+            "output": {
+                "path": market_paths["sector_returns"].name,
+                "sha256": hashlib.sha256(sector_content).hexdigest(),
+                "size_bytes": len(sector_content),
+            },
         },
     )
     return {
@@ -230,6 +267,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
         "market_paths": market_paths,
         "public_factor_manifest_path": factor_manifest,
         "style_manifest_path": style_manifest,
+        "sector_manifest_path": sector_manifest,
         "plan_document": plan_document,
     }
 
@@ -244,9 +282,10 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     assert {item["analysis_lens"] for item in manifest["specs"]} == {
         "ECONOMIC_FACTOR",
         "ETF_STYLE",
+        "RETURN_INDUSTRY",
     }
     dispositions = json.loads(outputs["candidate-dispositions.json"])
-    assert len(dispositions["candidate_dispositions"]) == 8
+    assert len(dispositions["candidate_dispositions"]) == 12
     economic = json.loads(outputs["specs/economic.json"])
     assert economic["models"][0]["test_start"] > economic["models"][0]["train_end"]
     assert {factor["factor_id"] for factor in economic["factor_source"]["factors"]} == {
@@ -285,7 +324,11 @@ def test_generated_specs_execute_under_the_closed_engine_contract(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
-    for relative in ("specs/economic.json", "specs/style.json"):
+    for relative in (
+        "specs/economic.json",
+        "specs/sector.json",
+        "specs/style.json",
+    ):
         result, manifest, _content = engine.build_decomposition(
             source_root / relative, source_root
         )

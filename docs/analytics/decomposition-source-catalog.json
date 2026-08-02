@@ -202,17 +202,17 @@
       "model_constraint": "SPARSE_UNCONSTRAINED",
       "selection_method": "TRAIN_ONLY_FORWARD_NESTED_TIME_SERIES",
       "candidates": [
-        {"candidate_id": "XLC", "source_id": "ssga-select-sector", "economic_family": "COMMUNICATION_SERVICES", "raw_orthogonal": false},
-        {"candidate_id": "XLY", "source_id": "ssga-select-sector", "economic_family": "CONSUMER_DISCRETIONARY", "raw_orthogonal": false},
-        {"candidate_id": "XLP", "source_id": "ssga-select-sector", "economic_family": "CONSUMER_STAPLES", "raw_orthogonal": false},
-        {"candidate_id": "XLE", "source_id": "ssga-select-sector", "economic_family": "ENERGY", "raw_orthogonal": false},
-        {"candidate_id": "XLF", "source_id": "ssga-select-sector", "economic_family": "FINANCIALS", "raw_orthogonal": false},
-        {"candidate_id": "XLV", "source_id": "ssga-select-sector", "economic_family": "HEALTH_CARE", "raw_orthogonal": false},
-        {"candidate_id": "XLI", "source_id": "ssga-select-sector", "economic_family": "INDUSTRIALS", "raw_orthogonal": false},
-        {"candidate_id": "XLB", "source_id": "ssga-select-sector", "economic_family": "MATERIALS", "raw_orthogonal": false},
-        {"candidate_id": "XLRE", "source_id": "ssga-select-sector", "economic_family": "REAL_ESTATE", "raw_orthogonal": false},
-        {"candidate_id": "XLK", "source_id": "ssga-select-sector", "economic_family": "INFORMATION_TECHNOLOGY", "raw_orthogonal": false},
-        {"candidate_id": "XLU", "source_id": "ssga-select-sector", "economic_family": "UTILITIES", "raw_orthogonal": false}
+        {"candidate_id": "XLC", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "COMMUNICATION_SERVICES", "raw_orthogonal": false},
+        {"candidate_id": "XLY", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "CONSUMER_DISCRETIONARY", "raw_orthogonal": false},
+        {"candidate_id": "XLP", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "CONSUMER_STAPLES", "raw_orthogonal": false},
+        {"candidate_id": "XLE", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "ENERGY", "raw_orthogonal": false},
+        {"candidate_id": "XLF", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "FINANCIALS", "raw_orthogonal": false},
+        {"candidate_id": "XLV", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "HEALTH_CARE", "raw_orthogonal": false},
+        {"candidate_id": "XLI", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "INDUSTRIALS", "raw_orthogonal": false},
+        {"candidate_id": "XLB", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "MATERIALS", "raw_orthogonal": false},
+        {"candidate_id": "XLRE", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "REAL_ESTATE", "raw_orthogonal": false},
+        {"candidate_id": "XLK", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "INFORMATION_TECHNOLOGY", "raw_orthogonal": false},
+        {"candidate_id": "XLU", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "UTILITIES", "raw_orthogonal": false}
       ]
     },
     {
