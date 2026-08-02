@@ -389,6 +389,131 @@
     $("#correlation-one-table").innerHTML = tableMarkup([["Strategy"], ["Weight", "numeric"], ["Adverse loss", "numeric"], ["Contribution", "numeric"]], componentRows.length ? componentRows : [emptyRow(4, "No component detail in this accepted fixture")]);
   }
 
+  const weekly = data.weekly_returns;
+  const weeklyGroupLabels = {
+    ALL: "All",
+    STRATEGY: "Strategies",
+    ECONOMIC_FACTOR_US: "U.S. factors",
+    ECONOMIC_FACTOR_EUROPE: "Europe factors",
+    STYLE_US_EQUITY: "Equity style",
+    STYLE_MULTI_ASSET: "Multi-asset style",
+    SECTOR: "Sectors",
+    INDUSTRY: "Industries",
+    CORE_BENCHMARK: "Benchmarks",
+  };
+  let selectedWeeklyMode = weekly?.default_evidence_mode || "LIVE_ONLY";
+  let selectedWeeklyGroup = "STRATEGY";
+  let selectedWeeklyWindow = "13";
+  let weeklyPage = 0;
+  let weeklySearch = "";
+  let includeCurrentWeek = false;
+  let selectedWeeklyCell = null;
+
+  function weeklyValue(row, week) {
+    if (row.primary_group === "STRATEGY") return row.values_by_mode?.[selectedWeeklyMode]?.[week] ?? null;
+    return row.values?.[week] ?? null;
+  }
+
+  function weeklyMeta(row, week) {
+    const raw = row.primary_group === "STRATEGY" ? row.observation_meta_by_mode?.[selectedWeeklyMode]?.[week] : row.observation_meta?.[week];
+    if (!Array.isArray(raw) || raw.length !== 5) return null;
+    return {
+      dailyCount: raw[0],
+      actualStart: raw[1],
+      actualEnd: raw[2],
+      coverageStatus: raw[3],
+      boundaryReasons: raw[4] || [],
+      calendarBasis: row.primary_group === "STRATEGY" ? row.calendar_basis_by_mode?.[selectedWeeklyMode] : row.calendar_basis,
+    };
+  }
+
+  function weeklyEnd(week) {
+    const value = new Date(`${week}T00:00:00Z`);
+    value.setUTCDate(value.getUTCDate() + 6);
+    return value.toISOString().slice(0, 10);
+  }
+
+  function weeklyVisibleWeeks() {
+    const all = (weekly?.weeks || []).filter((week) => includeCurrentWeek || week !== weekly.current_week?.week_start);
+    if (selectedWeeklyWindow !== "full") return all.slice(-Number(selectedWeeklyWindow));
+    const pageSize = 52;
+    const end = Math.max(0, all.length - weeklyPage * pageSize);
+    const start = Math.max(0, end - pageSize);
+    return all.slice(start, end);
+  }
+
+  function renderWeeklyDetail() {
+    if (!selectedWeeklyCell) {
+      $("#weekly-detail-title").textContent = "Choose a weekly cell";
+      $("#weekly-detail").innerHTML = `<div class="callout callout-neutral">A selected cell discloses its canonical series, source, return basis, evidence mode, week boundary, and explicit availability state.</div>`;
+      return;
+    }
+    const row = weekly.series.find((item) => item.series_id === selectedWeeklyCell.seriesId);
+    if (!row) return;
+    const value = weeklyValue(row, selectedWeeklyCell.week);
+    const meta = weeklyMeta(row, selectedWeeklyCell.week);
+    $("#weekly-detail-title").textContent = `${row.display_name} · week of ${selectedWeeklyCell.week}`;
+    $("#weekly-detail").innerHTML = `<div class="validation-card"><div><strong>Weekly return</strong><span>${value == null ? "No accepted observation in this week" : "Compounded from accepted daily returns"}</span></div><div class="validation-score">${value == null ? "UNAVAILABLE" : pct(value, 2)}</div></div><div class="evidence-grid"><dl class="detail-list"><div><dt>Canonical series</dt><dd>${safe(row.series_id)}</dd></div><div><dt>Group</dt><dd>${safe(weeklyGroupLabels[row.primary_group] || row.primary_group)}</dd></div><div><dt>Return basis</dt><dd>${statusText(row.return_basis)}</dd></div><div><dt>Calendar week</dt><dd>${safe(selectedWeeklyCell.week)} — ${safe(weeklyEnd(selectedWeeklyCell.week))}</dd></div></dl><dl class="detail-list"><div><dt>Source</dt><dd>${safe(row.source_key)}</dd></div><div><dt>Evidence mode</dt><dd>${row.primary_group === "STRATEGY" ? statusText(selectedWeeklyMode) : "NOT APPLICABLE"}</dd></div><div><dt>Accepted observations</dt><dd>${meta ? `${meta.dailyCount} · ${safe(meta.actualStart)} — ${safe(meta.actualEnd)}` : "UNAVAILABLE"}</dd></div><div><dt>Coverage / calendar</dt><dd>${meta ? `${statusText(meta.coverageStatus)} · ${statusText(meta.calendarBasis)}${meta.boundaryReasons.length ? ` · ${meta.boundaryReasons.map(statusText).join(", ")}` : ""}` : statusText(row.absent_value_status)}</dd></div></dl></div>`;
+  }
+
+  function renderWeeklyTable() {
+    if (!weekly?.series?.length) {
+      $("#weekly-table").innerHTML = `<div class="callout callout-danger">Weekly-return generation is unavailable in this snapshot.</div>`;
+      renderKpis("#weekly-kpis", [["Status", "UNAVAILABLE", "No governed weekly generation", "danger"]]);
+      return;
+    }
+    const query = weeklySearch.toLowerCase();
+    const rows = weekly.series.filter((row) => (selectedWeeklyGroup === "ALL" || row.display_groups.includes(selectedWeeklyGroup)) && (!query || `${row.display_name} ${row.series_id} ${row.source_key}`.toLowerCase().includes(query)));
+    const weeks = weeklyVisibleWeeks();
+    const missingCells = rows.reduce((count, row) => count + weeks.filter((week) => weeklyValue(row, week) == null).length, 0);
+    renderKpis("#weekly-kpis", [
+      ["Visible series", String(rows.length), weeklyGroupLabels[selectedWeeklyGroup] || selectedWeeklyGroup],
+      ["Displayed weeks", String(weeks.length), selectedWeeklyWindow === "full" ? `Full-history page ${weeklyPage + 1}` : `Latest ${selectedWeeklyWindow}`],
+      ["Unavailable cells", String(missingCells), "Missing is never zero", missingCells ? "warning" : "positive"],
+      ["Strategy evidence", selectedWeeklyMode, selectedWeeklyMode === "LIVE_ONLY" ? "Authoritative default" : "Version-matched pre-live backtest", selectedWeeklyMode === "LIVE_ONLY" ? "positive" : "warning"],
+    ]);
+    const header = `<thead><tr><th scope="col">Series / basis</th>${weeks.map((week) => `<th scope="col"><span class="weekly-date">${safe(week.slice(5))}</span><span class="cell-secondary">${safe(week.slice(0, 4))}</span></th>`).join("")}</tr></thead>`;
+    const body = rows.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(row.display_name)}</span><span class="cell-secondary">${safe(row.return_basis)} · ${safe(row.source_key)}</span></th>${weeks.map((week) => {
+      const value = weeklyValue(row, week);
+      const meta = weeklyMeta(row, week);
+      const numeric = value == null ? null : Number(value);
+      const intensity = numeric == null ? 0 : Math.min(1, Math.abs(numeric) / 0.08);
+      const partial = meta?.coverageStatus === "PARTIAL_BOUNDARY";
+      return `<td><button type="button" class="weekly-cell ${numeric == null ? "is-unavailable" : numeric < 0 ? "is-negative" : "is-positive"} ${partial ? "is-partial" : ""}" style="--weekly-intensity:${intensity}" data-weekly-series="${safe(row.series_id)}" data-weekly-week="${safe(week)}" aria-label="${safe(row.display_name)} ${safe(week)} ${numeric == null ? "unavailable" : pct(value, 2)}${partial ? " partial boundary" : ""}">${numeric == null ? "—" : pct(value, 1)}</button></td>`;
+    }).join("")}</tr>`).join("");
+    $("#weekly-table").innerHTML = `<table class="weekly-table"><caption>Weekly returns; absent cells are unavailable, not zero</caption>${header}<tbody>${body || `<tr><td colspan="${weeks.length + 1}">No series match the current filter.</td></tr>`}</tbody></table>`;
+    $("#weekly-table-title").textContent = selectedWeeklyWindow === "full" ? `Full history · 52-week page ${weeklyPage + 1}` : `Latest ${selectedWeeklyWindow} completed weeks`;
+    $("#weekly-page-older").disabled = selectedWeeklyWindow !== "full" || weeks[0] === (weekly.weeks || [])[0];
+    $("#weekly-page-newer").disabled = selectedWeeklyWindow !== "full" || weeklyPage === 0;
+    $$('[data-weekly-series]').forEach((button) => button.addEventListener("click", () => {
+      selectedWeeklyCell = { seriesId: button.dataset.weeklySeries, week: button.dataset.weeklyWeek };
+      renderWeeklyDetail();
+    }));
+    renderWeeklyDetail();
+  }
+
+  function renderWeekly() {
+    const groups = ["ALL", ...(weekly?.display_groups || [])];
+    $("#weekly-group-selector").innerHTML = groups.map((group) => `<button type="button" class="segment ${group === selectedWeeklyGroup ? "is-active" : ""}" data-weekly-group="${safe(group)}" aria-pressed="${group === selectedWeeklyGroup}">${safe(weeklyGroupLabels[group] || group)}</button>`).join("");
+    $$('[data-weekly-group]').forEach((button) => button.addEventListener("click", () => {
+      selectedWeeklyGroup = button.dataset.weeklyGroup;
+      weeklyPage = 0;
+      selectedWeeklyCell = null;
+      renderWeekly();
+    }));
+    $$('[data-weekly-mode]').forEach((button) => {
+      const active = button.dataset.weeklyMode === selectedWeeklyMode;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    $$('[data-weekly-window]').forEach((button) => {
+      const active = button.dataset.weeklyWindow === selectedWeeklyWindow;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    renderWeeklyTable();
+  }
+
   let tierFilter = "all";
   let candidateSearch = "";
   function renderCandidateTable() {
@@ -459,6 +584,30 @@
       selectedPair = null;
       renderDependence();
     }));
+    $$('[data-weekly-mode]').forEach((button) => button.addEventListener("click", () => {
+      selectedWeeklyMode = button.dataset.weeklyMode;
+      selectedWeeklyCell = null;
+      renderWeekly();
+    }));
+    $$('[data-weekly-window]').forEach((button) => button.addEventListener("click", () => {
+      selectedWeeklyWindow = button.dataset.weeklyWindow;
+      weeklyPage = 0;
+      selectedWeeklyCell = null;
+      renderWeekly();
+    }));
+    $("#weekly-current-toggle").addEventListener("change", (event) => {
+      includeCurrentWeek = event.target.checked;
+      weeklyPage = 0;
+      selectedWeeklyCell = null;
+      renderWeekly();
+    });
+    $("#weekly-search").addEventListener("input", (event) => {
+      weeklySearch = event.target.value.trim();
+      selectedWeeklyCell = null;
+      renderWeeklyTable();
+    });
+    $("#weekly-page-older").addEventListener("click", () => { weeklyPage += 1; selectedWeeklyCell = null; renderWeeklyTable(); });
+    $("#weekly-page-newer").addEventListener("click", () => { weeklyPage = Math.max(0, weeklyPage - 1); selectedWeeklyCell = null; renderWeeklyTable(); });
     $$('[data-matrix]').forEach((button) => button.addEventListener("click", () => {
       selectedMatrix = button.dataset.matrix;
       if (selectedMatrix !== "observed_pearson") selectedCorrelationWindow = "full";
@@ -485,10 +634,10 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 5) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 6) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
-      renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderCandidates(); renderData(); bindEvents();
+      renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderWeekly(); renderCandidates(); renderData(); bindEvents();
       $("#loading-state").hidden = true;
       $("#app").dataset.appState = "ready";
       const requested = location.hash.slice(1);

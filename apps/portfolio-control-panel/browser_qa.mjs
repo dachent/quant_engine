@@ -29,7 +29,7 @@ const launchOptions = {
     ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH }
     : {}),
 };
-const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "candidates", "data"];
+const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"];
 const viewports = [
   { name: "desktop", viewport: { width: 1440, height: 900 } },
   { name: "tablet", viewport: { width: 1024, height: 768 } },
@@ -98,7 +98,7 @@ async function visualLint(page) {
       const selector = selectorFor(element);
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
-      const intentionalScroll = element.matches("#app, .workspace, main, .view, .grid, .table-wrap, .matrix-shell, .scenario-row");
+      const intentionalScroll = element.matches("#app, .workspace, main, .view, .grid, .table-wrap, .matrix-shell, .weekly-table-shell, .scenario-row");
       if (text && !intentionalScroll && (element.scrollWidth > element.clientWidth + 3 || element.scrollHeight > element.clientHeight + 3)) {
         findings.push({ rule: "text_overflow", severity: "major", selector, message: "Element text appears clipped or scrollable.", sample: text.slice(0, 120), bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
       }

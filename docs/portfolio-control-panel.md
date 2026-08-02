@@ -46,6 +46,15 @@ without preserving stale calculations or hard-coded operator conclusions.
   conclusions. Individual series without eligible backtest prehistory remain
   live-only inside the hybrid view and report zero backtest rows. A schema-v1
   generation without the evidence-mode contract disables the hybrid selector.
+- Weekly returns come only from the accepted
+  `dataPortfolio/analytics/weekly-returns` generation. Every row uses an ISO
+  Monday-through-Sunday week and compounds accepted daily returns as
+  `product(1 + r) - 1`. The current partial week is hidden by default; a missing
+  week remains unavailable rather than becoming zero. Strategy rows default to
+  account-live evidence and may optionally use the same version-matched
+  pre-inception backtest boundary as Dependence. Factor rows remain labeled as
+  excess or long-short returns; strategy, ETF style, sector, industry, and core
+  benchmark rows retain their declared total-return or proxy basis.
 - The Candidates view is the hash-locked 2026-07-17 audit appendix. Its 33 rows
   are not `Strategy` identities and cannot update current totals, rank a new
   candidate, authorize diligence, or allocate capital.
@@ -77,12 +86,14 @@ $legacy = Join-Path $engine "_strategy_allocation_audit\model_harness_baseline\c
 $strategyEvidence = "<hash-bound current-strategy-provider-evidence.json>"
 $lensRoot = Join-Path $engine "dataPortfolio\analytics\decomposition-lenses"
 $planBundle = "<hash-bound decomposition planning bundle>"
+$weekly = Join-Path $engine "dataPortfolio\analytics\weekly-returns"
 
 uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
   --report-root $report --legacy-panel $legacy --output-root $output `
   --strategy-evidence $strategyEvidence `
   --decomposition-lenses-root $lensRoot `
-  --decomposition-plan-bundle $planBundle
+  --decomposition-plan-bundle $planBundle `
+  --weekly-returns-root $weekly
 ```
 
 The command resolves the accepted analytics roots as siblings of `reporting`:
@@ -102,10 +113,11 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
   --report-root $report --legacy-panel $legacy `
   --candidate-dir <candidate-directory> `
   --decomposition-lenses-root $lensRoot `
-  --decomposition-plan-bundle $planBundle
+  --decomposition-plan-bundle $planBundle `
+  --weekly-returns-root $weekly
 ```
 
-The verifier proves all eight views, local-only assets, lack of network or
+The verifier proves all nine views, local-only assets, lack of network or
 trade code, accepted capital/risk replay, the exact nine-strategy boundary, 19
 account identities, five separate decomposition lenses with nine explicit
 strategy dispositions each, the available and unavailable factor counts bound
@@ -114,6 +126,13 @@ estimator disclosures when present, measured/unavailable dependence counts
 derived exactly from the accepted generation, live-only default authority,
 optional version-matched backtest composition, explicit unavailable facts, and
 frozen-appendix isolation.
+
+The Weekly returns view exposes all accepted strategies, U.S. and European
+economic factors, U.S. equity and multi-asset ETF styles, sectors, 49
+industries, and nine core benchmarks. It provides 13-, 26-, and 52-week views
+plus paged full history, group and text filters, live-only versus eligible
+live-plus-backtest strategy evidence, an explicit partial-week control, and
+cell-level source/basis/availability detail.
 
 ## Browser and interaction QA
 
@@ -136,13 +155,14 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py qa `
   --candidate-dir <candidate-directory> --qa-dir $qa
 ```
 
-Acceptance requires all eight views at 1440×900, 1024×768, and 390×844 plus a
+Acceptance requires all nine views at 1440×900, 1024×768, and 390×844 plus a
 direct-file capture; no console or request failures; clean visual lint across
-all 24 viewport/view combinations; PDF export; eight-view navigation; factor
+all 27 viewport/view combinations; PDF export; nine-view navigation; factor
 selection; dynamic exposure-path and same-factor static-benchmark evidence
 when a dynamic model is selected; full-overlap, requested-horizon, and
 drawdown-regime matrix selection with cell drill-down; live-only versus
 live-plus-backtest selection when accepted layered evidence exists; allocation filters;
+weekly group/window/search/partial-week controls and cell drill-down;
 current-position
 attribution separated from historical General intervals; candidate
 filter/search; a responsive provenance control; and
@@ -160,11 +180,13 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --candidate-dir <candidate-directory> --qa-dir $qa --output-root $output `
   --strategy-evidence $strategyEvidence `
   --decomposition-lenses-root $lensRoot `
-  --decomposition-plan-bundle $planBundle
+  --decomposition-plan-bundle $planBundle `
+  --weekly-returns-root $weekly
 ```
 
-Publication hash-binds the accepted portfolio, decomposition, and correlation
-artifacts, stages an immutable generation, copies the panel and QA evidence,
+Publication hash-binds the accepted portfolio, decomposition, correlation, and
+weekly-return artifacts, stages an immutable generation, copies the panel and
+QA evidence,
 and advances `dataPortfolio/control-panel/CURRENT.json` only after all checks
 pass. A failed build or QA run remains a non-authoritative candidate; a failed
 publication leaves the prior pointer unchanged. The strategy-allocation audit
