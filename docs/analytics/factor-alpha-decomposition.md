@@ -112,6 +112,13 @@ joined exactly. No forward fill, interpolation, calendar coercion, or evidence
 layer concatenation occurs. Target-only weekdays are reported as missing
 factor observations; dates absent from both inputs are not invented.
 
+Each new specification also declares one closed `analysis_lens`:
+`ECONOMIC_FACTOR`, `ETF_STYLE`, or `RETURN_INDUSTRY`. Legacy specifications
+without the field remain explicitly labeled `HISTORICAL_MINIMUM_PROOF`. The
+lens is hash-bound into the analytics result and generation so factor, style,
+and industry models can be stored and rendered separately; no consumer may
+concatenate them into a single exposure model.
+
 Supported evidence layers are `ACCOUNT_LIVE`, `PROVIDER_LIVE`,
 `OFFICIAL_VEHICLE`, `PREDECESSOR`, `SHADOW_OOS`, `BACKTEST`, and
 `CONCEPTUAL_STRESS`. One series may have only one layer. The current portfolio

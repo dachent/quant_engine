@@ -197,6 +197,7 @@ def _spec(
     *,
     models: list[dict[str, object]] | None = None,
     maximum_staleness_days: int = 7,
+    analysis_lens: str | None = None,
 ) -> Path:
     factor_path = root / "factors.csv"
     target_hash, target_size = _hash(target_path)
@@ -237,6 +238,8 @@ def _spec(
             "schema_version": "1",
         },
     }
+    if analysis_lens is not None:
+        value["analysis_lens"] = analysis_lens
     spec_path = root / "spec.json"
     spec_path.write_text(
         json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
@@ -265,6 +268,7 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
 
     assert first_bytes == second_bytes
     assert manifest.generation_id == second_manifest.generation_id
+    assert first["analysis_lens"] == "HISTORICAL_MINIMUM_PROOF"
     model = _available(first)
     exposures = {
         item["factor_id"]: float(item["exposure"]) for item in model["exposures"]
@@ -306,6 +310,39 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
         assert reconstructed == pytest.approx(
             float(row["actual_excess_return"]), abs=5e-11
         )
+
+
+def test_explicit_analysis_lens_is_hash_bound_and_validated(tmp_path: Path) -> None:
+    source = tmp_path / "lens"
+    target_path, days = _write_sources(source)
+    style_spec = _spec(
+        source,
+        target_path,
+        days,
+        analysis_lens="ETF_STYLE",
+    )
+    style, style_manifest, _content = decomposition.build_decomposition(
+        style_spec, source
+    )
+    assert style["analysis_lens"] == "ETF_STYLE"
+
+    economic_spec = _spec(
+        source,
+        target_path,
+        days,
+        analysis_lens="ECONOMIC_FACTOR",
+    )
+    economic, economic_manifest, _content = decomposition.build_decomposition(
+        economic_spec, source
+    )
+    assert economic["analysis_lens"] == "ECONOMIC_FACTOR"
+    assert economic_manifest.generation_id != style_manifest.generation_id
+
+    invalid = json.loads(economic_spec.read_text(encoding="utf-8"))
+    invalid["analysis_lens"] = "MEGA_MODEL"
+    economic_spec.write_text(json.dumps(invalid), encoding="utf-8")
+    with pytest.raises(decomposition.DecompositionError, match="analysis_lens"):
+        decomposition.build_decomposition(economic_spec, source)
 
 
 def test_simplex_and_parsimony_selection_recover_known_truth(tmp_path: Path) -> None:
