@@ -11,6 +11,7 @@
     "acquisition_date",
     "source_artifacts",
     "accounts",
+    "capital_pools",
     "strategies",
     "assignments",
     "corrections",
@@ -24,6 +25,21 @@
     "acquisition_date": {"type": "string", "format": "date"},
     "source_artifacts": {"type": "array", "minItems": 1},
     "accounts": {"type": "array", "minItems": 1},
+    "capital_pools": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["base_currency", "name", "pool_id", "role"],
+        "properties": {
+          "base_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+          "name": {"type": "string", "minLength": 1},
+          "pool_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+          "role": {"enum": ["SYSTEMATIC", "RESERVE"]}
+        }
+      }
+    },
     "strategies": {
       "type": "array",
       "minItems": 9,

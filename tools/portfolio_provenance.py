@@ -38,6 +38,8 @@ CATALOG_SCHEMA_VERSION: Final = 1
 BUILDER_VERSION: Final = "1.0.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 CURRENT_STRATEGY_COUNT: Final = 9
+SYSTEMATIC_POOL_ID: Final = "systematic-capital"
+RESERVE_POOL_ID: Final = "reserve-capital"
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -530,6 +532,7 @@ def _import_tracker(
     strategies: Sequence[Mapping[str, Any]],
     alias_map: Mapping[str, str],
     reserve_value: object,
+    generation_as_of: date,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -580,6 +583,7 @@ def _import_tracker(
         accounts_by_alias[source_alias] = {
             "account_id": account_id,
             "aliases": [source_alias],
+            "current_pool_id": SYSTEMATIC_POOL_ID,
             "name": source_alias,
             "role": "INVESTMENT",
             "source_routes": [assignment_source],
@@ -604,15 +608,26 @@ def _import_tracker(
             and date.fromisoformat(period_end) < date.fromisoformat(period_start)
         ):
             raise ProvenanceValidationError("assignment interval is reversed")
+        is_current = (
+            not period_start or date.fromisoformat(period_start) <= generation_as_of
+        ) and (not period_end or date.fromisoformat(period_end) >= generation_as_of)
+        strategy_disposition = (
+            "STRATEGY_MAPPED"
+            if strategy_id is not None
+            else ("CURRENT_POOL_ONLY" if is_current else "HISTORICAL_POOL_ONLY")
+        )
         payload: dict[str, Any] = {
             "account_id": account_id,
             "effective_end": period_end or None,
             "effective_start": period_start or None,
             "mapping_status": "MAPPED" if strategy_id is not None else "UNMAPPED",
             "observed_label": observed_label,
+            "pool_id": SYSTEMATIC_POOL_ID,
+            "pool_mapping_status": "MAPPED",
             "source_classification": _text(row["source"], "assignment.source"),
             "source_id": assignment_source,
             "strategy_id": strategy_id,
+            "strategy_mapping_disposition": strategy_disposition,
         }
         assignments.append(
             {"assignment_id": _record_id("assignment", payload), **payload}
@@ -625,6 +640,7 @@ def _import_tracker(
         {
             "account_id": reserve_id,
             "aliases": list(_strings(reserve["aliases"], "reserve_account.aliases")),
+            "current_pool_id": RESERVE_POOL_ID,
             "name": _text(reserve["name"], "reserve_account.name"),
             "role": "RESERVE",
             "source_routes": list(reserve_routes),
@@ -706,6 +722,7 @@ def build_catalog(
         strategies=strategies,
         alias_map=alias_map,
         reserve_value=spec["reserve_account"],
+        generation_as_of=generation_as_of,
     )
     assumptions = _validate_assumptions(spec["assumptions"], source_ids)
     catalog: dict[str, Any] = {
@@ -717,6 +734,20 @@ def build_catalog(
         "assignments": assignments,
         "assumptions": assumptions,
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+        "capital_pools": [
+            {
+                "base_currency": "USD",
+                "name": "Systematic capital",
+                "pool_id": SYSTEMATIC_POOL_ID,
+                "role": "SYSTEMATIC",
+            },
+            {
+                "base_currency": "USD",
+                "name": "Reserve capital",
+                "pool_id": RESERVE_POOL_ID,
+                "role": "RESERVE",
+            },
+        ],
         "corrections": corrections,
         "open_gaps": open_gaps,
         "policy_version": POLICY_VERSION,
