@@ -24,6 +24,8 @@ Use only direct structured Kenneth French CSV zip feeds.
 - The provider returns a zip file containing a CSV member.
 - The embedded CSV commonly contains:
   - preamble lines describing the data source and methodology
+  - comma-only separator records such as `,,`, which are blank delimiters rather
+    than table headers
   - one or more blank-line-delimited table sections
   - section titles such as `Average Value Weighted Returns -- Monthly`
   - blank-first-column headers like `,Mkt-RF,SMB,HML,RF`
