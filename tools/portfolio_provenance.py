@@ -440,6 +440,9 @@ def _validate_strategies(
         version_ref = strategy["version_ref"]
         if version_ref is not None:
             version_ref = _text(version_ref, "strategy.version_ref")
+        version_disposition = (
+            "REFERENCE_ONLY" if version_ref is not None else "UNRESOLVED"
+        )
         accepted.append(
             {
                 "aliases": list(aliases),
@@ -459,6 +462,7 @@ def _validate_strategies(
                 "gaps": list(gaps),
                 "name": name,
                 "strategy_id": strategy_id,
+                "version_disposition": version_disposition,
                 "version_ref": version_ref,
             }
         )

@@ -25,6 +25,14 @@ from quant_engine.portfolio_ledger.reconciliation import (
     StrategyValue,
     reconcile_position_values,
 )
+from quant_engine.portfolio_ledger.strategy_versions import (
+    EvidenceComparison,
+    StrategyEvidenceVersion,
+    StrategyVersion,
+    StrategyVersionDisposition,
+    VersionMatchStatus,
+    compare_strategy_evidence,
+)
 
 __version__ = "0.2.0"
 
@@ -35,6 +43,7 @@ __all__ = [
     "AccountStrategyAssignment",
     "CashFlow",
     "CorporateAction",
+    "EvidenceComparison",
     "LedgerSlice",
     "LedgerValidationError",
     "MappingStatus",
@@ -45,9 +54,14 @@ __all__ = [
     "ReconciliationStatus",
     "Security",
     "Strategy",
+    "StrategyEvidenceVersion",
+    "StrategyVersion",
+    "StrategyVersionDisposition",
     "StrategyValue",
     "Transaction",
     "ValueStatus",
+    "VersionMatchStatus",
+    "compare_strategy_evidence",
     "decimal_text",
     "reconcile_position_values",
 ]
