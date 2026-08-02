@@ -434,6 +434,54 @@ def _material_hwm_coverage(
     }
 
 
+def _reconcile_hwm_coverage(
+    coverage: Sequence[Mapping[str, Any]], hwm_summary: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Make legacy report coverage agree with the accepted material HWM perimeter."""
+
+    normalized = [dict(row) for row in coverage]
+    missing = [str(name) for name in hwm_summary["uncovered_strategies"]]
+    for row in normalized:
+        if row.get("category") == "FACT_COVERAGE" and row.get("item") == "nav":
+            row["known_gap"] = (
+                f"{len(missing)} included current strategy lacks accepted daily "
+                f"NAV; {len(hwm_summary['excluded_strategies'])} de minimis "
+                "strategy is explicitly excluded from the HWM perimeter"
+            )
+            row["status"] = (
+                "PARTIAL" if missing else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+            )
+
+    hwm_rows = [
+        row
+        for row in normalized
+        if row.get("category") == "RECONCILIATION_EXCEPTION"
+        and row.get("item") == "full-systematic-hwm-unavailable"
+    ]
+    if not missing:
+        return [row for row in normalized if row not in hwm_rows]
+
+    gap = (
+        "BLOCKING_FOR_AUTOMATED_HWM: included sleeves without accepted daily NAV: "
+        + ", ".join(missing)
+    )
+    if hwm_rows:
+        for row in hwm_rows:
+            row["known_gap"] = gap
+            row["status"] = "UNAVAILABLE"
+    else:
+        normalized.append(
+            {
+                "category": "RECONCILIATION_EXCEPTION",
+                "item": "full-systematic-hwm-unavailable",
+                "known_gap": gap,
+                "status": "UNAVAILABLE",
+                "value": None,
+            }
+        )
+    return normalized
+
+
 def _provider_account_nav_performance(
     strategies: Sequence[Mapping[str, Any]],
     performance: Sequence[Mapping[str, Any]],
@@ -921,19 +969,7 @@ def _panel_data(
         for row in strategies
         if row.get("hwm_source") == "ACCOUNT_LIVE_PROVIDER_OVERLAY"
     )
-    coverage = [dict(row) for row in coverage]
-    for row in coverage:
-        if row.get("category") == "FACT_COVERAGE" and row.get("item") == "nav":
-            missing = hwm_summary["uncovered_strategies"]
-            row["known_gap"] = (
-                f"{len(missing)} included current strategy lacks accepted daily "
-                f"NAV; {len(hwm_summary['excluded_strategies'])} de minimis "
-                "strategy is explicitly excluded from the HWM "
-                "perimeter"
-            )
-            row["status"] = (
-                "PARTIAL" if missing else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
-            )
+    coverage = _reconcile_hwm_coverage(coverage, hwm_summary)
     normalized_allocations = []
     for row in allocations:
         strategy_id = row.get("strategy_id")
@@ -1001,24 +1037,6 @@ def _panel_data(
         if row.get("category") == "RECONCILIATION_EXCEPTION"
         and row.get("status") != "PASS"
     ]
-    hwm_block = next(
-        (
-            row
-            for row in blocking_items
-            if row.get("item") == "full-systematic-hwm-unavailable"
-        ),
-        None,
-    )
-    if hwm_block is not None:
-        missing_names = hwm_summary["uncovered_strategies"]
-        if missing_names:
-            hwm_block["known_gap"] = (
-                "BLOCKING_FOR_AUTOMATED_HWM: included sleeves without accepted "
-                f"daily NAV: {', '.join(missing_names)}"
-            )
-            hwm_block["status"] = "UNAVAILABLE"
-        else:
-            blocking_items.remove(hwm_block)
     providers = _objects(legacy.get("providers"), "legacy.providers")
     allowed_candidate_fields = (
         "candidate",
