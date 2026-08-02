@@ -52,6 +52,8 @@ for (const view of views) {
 checks.push(check("All eight navigation views activate", visited.length === views.length, visited));
 
 await page.locator('[data-nav="attribution"]').click();
+const factorLensButtons = await page.locator("[data-factor-lens]").count();
+await page.locator('[data-factor-lens="HISTORICAL_MINIMUM_PROOF"]').click();
 const factorRows = await page.locator("#factor-model-table tbody tr").count();
 const factorChips = await page.locator("[data-factor-strategy]").count();
 await page.locator("[data-factor-strategy]").first().click();
@@ -65,6 +67,13 @@ checks.push(check(
 await page.locator("[data-factor-strategy]").last().click();
 const unavailableFactorDetail = await page.locator("#factor-detail").textContent();
 checks.push(check("Factor and alpha coverage is interactive", factorRows === 9 && factorChips === 9 && unavailableFactorDetail?.includes("UNAVAILABLE"), { factor_chips: factorChips, factor_rows: factorRows, unavailable_visible: unavailableFactorDetail?.includes("UNAVAILABLE") }));
+await page.locator('[data-factor-lens="ECONOMIC_FACTOR"]').click();
+const economicBoundary = await page.locator("#factor-lens-boundary").textContent();
+checks.push(check(
+  "Economic, style, sector, industry, and historical lenses remain separate",
+  factorLensButtons === 5 && economicBoundary?.includes("EXCESS_AND_LONG_SHORT_FACTOR_RETURN") && economicBoundary?.includes("never concatenated"),
+  { factor_lenses: factorLensButtons, economic_boundary: economicBoundary },
+));
 
 await page.locator('[data-nav="dependence"]').click();
 const liveModePressed = await page.locator('[data-evidence-mode="LIVE_ONLY"]').getAttribute("aria-pressed");

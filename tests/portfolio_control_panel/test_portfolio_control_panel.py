@@ -660,6 +660,85 @@ def _publish_analytics(root: Path, filename: str, value: object, adapter: str) -
     publish_generation(root, manifest.generation_id)
 
 
+def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    lens_root = tmp_path / "analytics" / "decomposition-lenses"
+    assignments = {
+        "europe-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[1]}),
+        "multi-asset-style": (
+            "ETF_STYLE",
+            set(STRATEGY_NAMES[3:7]),
+        ),
+        "us-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[0]}),
+        "us-equity-style": ("ETF_STYLE", {STRATEGY_NAMES[2]}),
+        "us-industry": ("RETURN_INDUSTRY", {STRATEGY_NAMES[8]}),
+        "us-sector": ("RETURN_INDUSTRY", {STRATEGY_NAMES[7]}),
+    }
+    for source_key, (analysis_lens, selected_names) in assignments.items():
+        value = _decomposition()
+        value["analysis_lens"] = analysis_lens
+        value["model_selections"] = [
+            row
+            for row in value["model_selections"]
+            if row["series_id"] in selected_names
+        ]
+        value["model_results"] = [
+            row for row in value["model_results"] if row["series_id"] in selected_names
+        ]
+        _publish_analytics(
+            lens_root / source_key,
+            "decomposition.json",
+            value,
+            f"synthetic-{source_key}",
+        )
+
+    plan_bundle = tmp_path / ("a" * 64)
+    plan_path = (
+        plan_bundle
+        / "inputs"
+        / "governance"
+        / "current-strategy-decomposition-plan.json"
+    )
+    dispositions_path = plan_bundle / "candidate-dispositions.json"
+    plan = {
+        "schema_version": 1,
+        "strategies": [
+            {
+                "default_disposition": (
+                    "UNAVAILABLE_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
+                    if index == 7
+                    else "OUT_OF_SCOPE_UNDECLARED_LENS"
+                ),
+                "series_id": name,
+                "strategy_id": f"strategy-{index}",
+            }
+            for index, name in enumerate(STRATEGY_NAMES)
+        ],
+    }
+    _write_json(plan_path, plan)
+    _write_json(
+        dispositions_path,
+        {"candidate_dispositions": [], "policy": "synthetic", "schema_version": 1},
+    )
+    manifest = {
+        "bundle_id": plan_bundle.name,
+        "inputs": [
+            {
+                "path": "inputs/governance/current-strategy-decomposition-plan.json",
+                "sha256": _sha(plan_path),
+            }
+        ],
+        "outputs": [
+            {
+                "path": "candidate-dispositions.json",
+                "sha256": _sha(dispositions_path),
+            }
+        ],
+        "schema_version": 1,
+    }
+    _write_json(plan_bundle / "plan-manifest.json", manifest)
+    return lens_root, plan_bundle
+
+
 @pytest.fixture
 def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     report_root = tmp_path / "reporting"
@@ -798,7 +877,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             encoding="utf-8"
         )
     )
-    assert data["panel_schema_version"] == 4
+    assert data["panel_schema_version"] == 5
     assert data["positions"] == [
         {
             "account_id": "account-00",
@@ -820,6 +899,52 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     assert data["dependence_analysis"]["pair_count"] == 36
     assert data["default_dependence_mode"] == "LIVE_ONLY"
     assert list(data["dependence_modes"]) == ["LIVE_ONLY"]
+
+
+def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    lens_root, plan_bundle = _lens_inputs(tmp_path)
+    result = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        decomposition_lenses_root=lens_root,
+        decomposition_plan_bundle=plan_bundle,
+    )
+    candidate = Path(result["candidate_dir"])
+    verification = panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        decomposition_lenses_root=lens_root,
+        decomposition_plan_bundle=plan_bundle,
+    )
+    assert verification["all_passed"] is True
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    lenses = {row["lens_id"]: row for row in data["decomposition_lenses"]["lenses"]}
+    assert set(lenses) == {
+        "ECONOMIC_FACTOR",
+        "ETF_STYLE",
+        "HISTORICAL_MINIMUM_PROOF",
+        "RETURN_INDUSTRY",
+        "RETURN_SECTOR",
+    }
+    assert all(len(row["series"]) == 9 for row in lenses.values())
+    robuxio = next(
+        row
+        for row in lenses["ECONOMIC_FACTOR"]["series"]
+        if row["series_id"] == STRATEGY_NAMES[7]
+    )
+    assert robuxio["unavailable_reasons"] == [
+        "UNAVAILABLE_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
+    ]
+    assert lenses["ECONOMIC_FACTOR"]["return_basis"] == (
+        "EXCESS_AND_LONG_SHORT_FACTOR_RETURN"
+    )
+    assert lenses["ETF_STYLE"]["return_basis"] == "TOTAL_RETURN_ETF_PROXY"
 
 
 def test_layered_dependence_modes_are_preserved_without_changing_default_authority(

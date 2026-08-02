@@ -170,7 +170,10 @@
     $("#reconciliation-table").innerHTML = tableMarkup([["Check / exception"], ["Status"], ["Evidence / gap"]], reconciliationRows);
   }
 
+  const factorLenses = data.decomposition_lenses?.lenses || [data.factor_analysis];
+  let selectedFactorLens = data.decomposition_lenses?.default_lens || factorLenses[0]?.lens_id;
   let selectedFactorSeries = null;
+  const currentFactorAnalysis = () => factorLenses.find((item) => item.lens_id === selectedFactorLens) || factorLenses[0];
   function dynamicPathMarkup(row) {
     const dynamic = row.diagnostics?.dynamic;
     const path = dynamic?.exposure_path || [];
@@ -200,14 +203,14 @@
   }
 
   function renderFactorDetail() {
-    const analysis = data.factor_analysis;
+    const analysis = currentFactorAnalysis();
     const row = analysis.series.find((item) => item.series_id === selectedFactorSeries) || analysis.series[0];
     if (!row) return;
     selectedFactorSeries = row.series_id;
     $$("[data-factor-strategy]").forEach((button) => button.classList.toggle("is-active", button.dataset.factorStrategy === selectedFactorSeries));
     if (row.status !== "AVAILABLE") {
       const aligned = row.coverage?.aligned_observations ?? 0;
-      $("#factor-detail").innerHTML = `<div class="callout callout-danger"><strong>${safe(row.series_id)} — UNAVAILABLE</strong><br>${safe(row.unavailable_reasons.join(" · "))}. Accepted aligned observations: ${integer.format(aligned)}. No exposure or alpha is inferred.</div>`;
+      $("#factor-detail").innerHTML = `<div class="callout callout-danger"><strong>${safe(row.series_id)} — UNAVAILABLE FOR ${safe(analysis.lens_label || analysis.lens_id)}</strong><br>${safe(row.unavailable_reasons.join(" · "))}. Accepted aligned observations: ${integer.format(aligned)}. This is a decomposition-universe limitation; it does not imply that the strategy return series is unavailable. No exposure or alpha is inferred.</div>`;
       return;
     }
     const alpha = row.alpha;
@@ -232,23 +235,29 @@
   }
 
   function renderAttribution() {
-    const analysis = data.factor_analysis;
+    const analysis = currentFactorAnalysis();
     const firstAvailable = analysis.series.find((row) => row.status === "AVAILABLE");
+    if (!analysis.series.some((row) => row.series_id === selectedFactorSeries)) selectedFactorSeries = null;
     selectedFactorSeries ||= firstAvailable?.series_id || analysis.series[0]?.series_id;
+    $("#factor-lens-selector").innerHTML = factorLenses.map((item) => `<button type="button" class="segment ${item.lens_id === selectedFactorLens ? "is-active" : ""}" data-factor-lens="${safe(item.lens_id)}" aria-pressed="${item.lens_id === selectedFactorLens}">${safe(item.lens_label || item.lens_id)}</button>`).join("");
+    $$('[data-factor-lens]').forEach((button) => button.addEventListener("click", () => { selectedFactorLens = button.dataset.factorLens; selectedFactorSeries = null; renderAttribution(); }));
+    const sourceRows = Array.isArray(analysis.sources) ? analysis.sources : [];
+    const sourceSummary = sourceRows.map((item) => `${item.source_label || item.source_key} · through ${item.as_of_date}`).join(" · ") || "Single accepted historical proof generation";
+    $("#factor-lens-boundary").innerHTML = `<strong>${safe(analysis.lens_label || analysis.lens_id)}</strong> · ${safe(analysis.return_basis || "CONFIGURED_RETURN_BASIS")}<br>${safe(sourceSummary)}. Lenses remain separate and are never concatenated.`;
     renderKpis("#factor-kpis", [
       ["Pipeline-available models", `${analysis.available_count}/${analysis.series.length}`, "Accepted exact-date model evidence", "warning"],
       ["Dynamic FLS models", String(analysis.dynamic_available_count), "Clean-room time-varying exposure paths"],
       ["Unavailable", String(analysis.unavailable_count), "No inferred exposures or alpha", "danger"],
-      ["Methodology", analysis.methodology_version, analysis.method_label, "warning"],
+      ["Methodology", analysis.methodology_version, `${analysis.method_label} · ${analysis.lens_label || analysis.lens_id}`, "warning"],
     ]);
     $("#factor-method-badge").textContent = analysis.method_label.replaceAll("_", " ");
     const rows = analysis.series.map((row) => {
       const holdout = row.diagnostics?.holdout;
       const strategy = strategyByName(row.series_id);
       const providerCoverage = strategy?.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(strategy))}</span>` : "";
-      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(row.status)}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(row.exposures.map((item) => item.factor_id).join(" · ") || "—")}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")} · model input</span>${providerCoverage}</td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.unavailable_reasons.join(" · "))}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(row.status)}</td><td>${safe(row.source_label || "—")}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(row.exposures.map((item) => item.factor_id).join(" · ") || "—")}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")} · model input</span>${providerCoverage}</td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.unavailable_reasons.join(" · "))}</td></tr>`;
     });
-    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Status"], ["Estimator"], ["Factors"], ["Observed interval"], ["Aligned", "numeric"], ["Holdout R²", "numeric"], ["Net alpha", "numeric"], ["Gross / unavailable state"]], rows);
+    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Status"], ["Source"], ["Estimator"], ["Factors"], ["Observed interval"], ["Aligned", "numeric"], ["Holdout R²", "numeric"], ["Net alpha", "numeric"], ["Gross / unavailable state"]], rows);
     $("#factor-strategy-selector").innerHTML = analysis.series.map((row) => `<button type="button" class="strategy-chip ${row.status === "AVAILABLE" ? "" : "is-unavailable"}" data-factor-strategy="${safe(row.series_id)}">${safe(row.series_id)}</button>`).join("");
     $$("[data-factor-strategy]").forEach((button) => button.addEventListener("click", () => { selectedFactorSeries = button.dataset.factorStrategy; renderFactorDetail(); }));
     renderFactorDetail();
@@ -476,7 +485,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 4) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 5) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
       renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderCandidates(); renderData(); bindEvents();
