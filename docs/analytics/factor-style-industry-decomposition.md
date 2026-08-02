@@ -133,3 +133,26 @@ empty. These series are labeled `ADJUSTED_CLOSE_TOTAL_RETURN_PROXY`: they are
 useful traded style evidence, but they are neither official fund NAV nor
 orthogonal economic factors. BIL is retained as a cash/risk-free proxy and is
 not eligible for a fitted style weight.
+
+`docs/analytics/current-strategy-decomposition-plan.json` is the explicit
+strategy-to-lens routing decision. It prevents a broad source catalog from
+becoming an indiscriminate mega-model. The first current-book assignments are:
+
+- P123 AI Factor: U.S. economic factors, the Russell six-cell ETF style box,
+  and one-factor-at-a-time U.S. industry similarity;
+- P123 EU: European economic factors only;
+- QSI, TT, Volatis, and GrizzlyBears: declared multi-asset ETF style sets;
+- Robuxio: unavailable until an accepted crypto candidate source exists;
+- EchoTrade: unavailable because the current target history is insufficient;
+  and
+- Composer: dropped as immaterial from current scope.
+
+`tools/portfolio_current_decomposition_plan.py` verifies the plan, candidate
+catalog, target evidence, provider provenance, and market-source manifests. It
+then copies every input into a content-addressed local planning bundle and
+emits separate `ECONOMIC_FACTOR`, `ETF_STYLE`, and `RETURN_INDUSTRY`
+specifications. Every strategy/candidate pair receives an explicit disposition.
+Eligible candidates must be covered by the declared model sets, calendar joins
+use complete exact-date observations with no fill, and the final 20 percent
+(at least 20 observations) remains a sealed holdout. The planning bundle is not
+an accepted analytics publication and cannot change `CURRENT.json`.
