@@ -315,3 +315,157 @@ def test_invalid_priors_stress_and_mixed_layers_fail_closed(tmp_path: Path) -> N
     clean_spec.write_text(json.dumps(decoded), encoding="utf-8")
     with pytest.raises(correlation.CorrelationError, match="does not reconcile"):
         correlation.build_correlation(clean_spec, clean)
+
+
+def _write_mode_fixture(
+    root: Path, *, backtest_version: str = "v1", duplicate_live: bool = False
+) -> tuple[Path, Path, list[date]]:
+    root.mkdir(parents=True)
+    days = _days(20)
+    source = root / "returns.csv"
+    rows: list[list[str]] = []
+    for series_offset, series_id in enumerate(("a", "b")):
+        for index, day in enumerate(days):
+            value = 0.002 * math.sin(index / 2.0 + series_offset * 0.1)
+            rows.append(
+                [
+                    series_id,
+                    day.isoformat(),
+                    format(value, ".17g"),
+                    "BACKTEST",
+                    backtest_version,
+                ]
+            )
+            if index >= 10 and not (series_id == "a" and index == 14):
+                rows.append(
+                    [
+                        series_id,
+                        day.isoformat(),
+                        format(value + 0.0001, ".17g"),
+                        "ACCOUNT_LIVE",
+                        "v1",
+                    ]
+                )
+    if duplicate_live:
+        rows.append(list(rows[-1]))
+    with source.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(correlation.RETURN_HEADERS_V2)
+        writer.writerows(rows)
+
+    source_hash, source_size = _hash(source)
+    specification = {
+        "as_of_date": days[-1].isoformat(),
+        "conceptual_priors": [
+            {
+                "evidence_note": "SYNTHETIC conceptual prior",
+                "left": "a",
+                "right": "b",
+                "value": "0.2",
+            }
+        ],
+        "correlation_one": {
+            "components": [
+                {
+                    "adverse_loss_fraction": "0.3",
+                    "allocation_weight": "0.5",
+                    "series_id": series_id,
+                }
+                for series_id in ("a", "b")
+            ],
+            "expected_loss": "0.3",
+            "tolerance": "0.000000001",
+        },
+        "eigenvalue_floor": "0.00000001",
+        "evidence_mode_series": [
+            {
+                "live_evidence_layer": "ACCOUNT_LIVE",
+                "series_id": series_id,
+                "strategy_version": "v1",
+            }
+            for series_id in ("a", "b")
+        ],
+        "full_observed_weight_observations": 100,
+        "implementation_mappings": [],
+        "maximum_observed_weight": "0.4",
+        "minimum_downside_observations": 3,
+        "minimum_observations": 3,
+        "minimum_rolling_windows": 1,
+        "return_source": {
+            "artifact_id": "synthetic/returns.csv",
+            "expected_sha256": source_hash,
+            "expected_size_bytes": source_size,
+            "relative_path": "returns.csv",
+            "schema_name": "synthetic-layered-daily-returns",
+            "schema_version": "2",
+        },
+        "rolling_window": 3,
+        "schema_version": 2,
+        "series_ids": ["a", "b"],
+        "stress_cap": "0.95",
+        "stress_uplift": "0.15",
+        "tail_quantile": "0.1",
+    }
+    spec = root / "spec.json"
+    spec.write_text(
+        json.dumps(specification, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return source, spec, days
+
+
+def test_live_and_backtest_modes_are_separate_and_live_wins_overlap(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "mode-source"
+    _source, spec, days = _write_mode_fixture(root)
+    result, _manifest, _content = correlation.build_correlation(spec, root)
+
+    assert result["default_evidence_mode"] == "LIVE_ONLY"
+    modes = cast(dict[str, dict[str, Any]], result["dependence_modes"])
+    assert result["dependence"] == modes["LIVE_ONLY"]
+    live_composition = modes["LIVE_ONLY"]["series_composition"]["a"]
+    combined_composition = modes["LIVE_PLUS_BACKTEST"]["series_composition"]["a"]
+    assert live_composition["live_observations"] == 9
+    assert live_composition["backtest_observations_used"] == 0
+    assert combined_composition["backtest_observations_used"] == 10
+    assert (
+        combined_composition[
+            "backtest_observations_excluded_at_or_after_live_inception"
+        ]
+        == 10
+    )
+    assert combined_composition["live_inception"] == days[10].isoformat()
+    combined_cell = modes["LIVE_PLUS_BACKTEST"]["observed_cells"][0]
+    assert combined_cell["coverage"]["common_observations"] == 19
+    assert combined_cell["evidence_mode"] == "LIVE_PLUS_BACKTEST"
+    assert (
+        combined_cell["left_evidence_composition"]["status"]
+        == "AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE"
+    )
+
+
+def test_combined_mode_rejects_unmatched_version_and_duplicate_layer_date(
+    tmp_path: Path,
+) -> None:
+    mismatch_root = tmp_path / "mismatch"
+    _source, spec, _days_value = _write_mode_fixture(
+        mismatch_root, backtest_version="v0"
+    )
+    result, _manifest, _content = correlation.build_correlation(spec, mismatch_root)
+    modes = cast(dict[str, dict[str, Any]], result["dependence_modes"])
+    assert (
+        modes["LIVE_PLUS_BACKTEST"]["series_composition"]["a"]["status"]
+        == "UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+    )
+    assert (
+        modes["LIVE_PLUS_BACKTEST"]["observed_cells"][0]["status"]
+        == "UNAVAILABLE_MISSING_SERIES"
+    )
+
+    duplicate_root = tmp_path / "duplicate"
+    _source, duplicate_spec, _days_value = _write_mode_fixture(
+        duplicate_root, duplicate_live=True
+    )
+    with pytest.raises(correlation.CorrelationError, match="within an evidence layer"):
+        correlation.build_correlation(duplicate_spec, duplicate_root)
