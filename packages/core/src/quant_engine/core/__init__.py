@@ -1,5 +1,23 @@
 """Minimal provenance and generation envelope for quant_engine."""
 
+from quant_engine.core.authority import (
+    AdmissionDecision,
+    AuthorityCatalog,
+    AuthorityRule,
+    EvidenceLayer,
+    FactKey,
+    FactSlice,
+    FinalizationState,
+    FreshnessMode,
+    FreshnessPolicy,
+    FreshnessState,
+    GenerationEvidence,
+    PublicationDisposition,
+    RevisionPolicy,
+    SubjectType,
+    decide_admission,
+)
+
 from quant_engine.core.contracts import (
     AdapterIdentity,
     CoverageClaim,
@@ -26,18 +44,33 @@ from quant_engine.core.publication import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "AdmissionDecision",
     "AdapterIdentity",
+    "AuthorityCatalog",
+    "AuthorityRule",
     "CoverageClaim",
     "CoverageStatus",
     "CurrentPointer",
+    "EvidenceLayer",
+    "FactKey",
+    "FactSlice",
+    "FinalizationState",
+    "FreshnessMode",
+    "FreshnessPolicy",
+    "FreshnessState",
     "GenerationConflictError",
+    "GenerationEvidence",
     "GenerationManifest",
     "ManifestValidationError",
     "PointerIntegrityError",
+    "PublicationDisposition",
     "PublicationRejectedError",
     "PublicationState",
+    "RevisionPolicy",
     "SourceArtifact",
+    "SubjectType",
     "VerificationStatus",
+    "decide_admission",
     "hash_file",
     "publication_state",
     "publish_generation",

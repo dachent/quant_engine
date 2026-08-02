@@ -25,6 +25,19 @@ generation whose coverage is `COMPLETE_WITHIN_DECLARED_BOUNDARY`. A partial,
 failed, pending, tampered, or missing generation fails closed and cannot change
 the prior pointer. `read_current` binds the pointer to the exact manifest hash.
 
-The package does not choose provider authority, move legacy data, normalize
-portfolio facts, or implement a provider registry. Those capabilities require
-a concrete consumer and their own governing issues.
+Schema-v1 generation manifests remain immutable. Authority, freshness, and
+revision metadata is attached through a hash-bound `GenerationEvidence`
+sidecar, so an accepted generation never needs to be rewritten merely to adopt
+the newer operating contract.
+
+`AuthorityCatalog` defines exactly one rule by consumer, provider, internal
+subject, fact type, and effective interval. `decide_admission` fails closed on
+manifest hash mismatch, ambiguous authority, stale current evidence,
+unauthorized evidence layers, finalization mismatch, or unapproved partial
+gaps. A verified partial generation can supply an explicitly pinned fact slice
+only when the rule names the permitted gaps and allows non-current evidence.
+That does not upgrade the provider generation or another fact slice.
+
+The package does not move legacy data, normalize portfolio facts, or choose a
+business-specific authority. Concrete consumers supply governed rules and
+retain reconciliation evidence.
