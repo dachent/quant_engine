@@ -6,4 +6,5 @@ SOURCE_ANCHORS = {
     "general-runbook": "45ccbae0e5940d96ff3f50e5f233be284afe34ff0b04b107c22fc7215d099263",
     "schwab-capture": "9f1a6a25c1725d2e15bb019ac7e1af113e27ce988e36d4a23d66eddf053b7c90",
     "schwab-runbook": "64c534dd8ed7db8d680882d4bb91d1d9a9201dfe665449ff56abcfdd4490faf7",
+    "turingtrader-extraction": "714d5609d380382d72e44c2cb983bcec63644babc8362317c9e17fa5fa6636f3",
 }

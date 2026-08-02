@@ -20,6 +20,14 @@ from quant_engine.web_contracts.quantbase import (
     extract_quantbase_har,
 )
 from quant_engine.web_contracts.schwab import SCHWAB_CONTRACT
+from quant_engine.web_contracts.testfolio import (
+    TESTFOLIO_CONTRACT,
+    extract_testfolio_har,
+)
+from quant_engine.web_contracts.turingtrader import (
+    TURINGTRADER_CONTRACT,
+    extract_turingtrader_har,
+)
 
 __version__ = "0.1.0"
 
@@ -32,6 +40,10 @@ __all__ = [
     "REDACTION",
     "SCHWAB_CONTRACT",
     "SOURCE_ANCHORS",
+    "TESTFOLIO_CONTRACT",
+    "TURINGTRADER_CONTRACT",
+    "extract_testfolio_har",
+    "extract_turingtrader_har",
     "SemanticEffect",
     "SessionEnvelope",
     "WebContractError",

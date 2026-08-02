@@ -183,5 +183,5 @@ def test_transaction_post_shape_drift_fails_closed() -> None:
 def test_source_hashes_are_frozen_without_importing_private_paths() -> None:
     from quant_engine.web_contracts import SOURCE_ANCHORS
 
-    assert len(SOURCE_ANCHORS) == 5
+    assert len(SOURCE_ANCHORS) == 6
     assert all(len(value) == 64 for value in SOURCE_ANCHORS.values())
