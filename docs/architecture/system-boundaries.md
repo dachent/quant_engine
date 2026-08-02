@@ -149,6 +149,13 @@ revision, publication-disposition, evidence-layer, and freshness semantics.
 Consumers must obtain exactly one matching rule before a fact can enter a
 ledger or derived control surface.
 
+Cross-root publication uses the journaled coordination contract in
+[Coordinated release publication](../release-publication.md). A release binds
+the exact code commit, gate evidence, all proposed and predecessor pointers,
+and companion-file hashes. Partial commit failure restores the complete
+predecessor graph rather than leaving individually valid but mutually
+inconsistent `CURRENT.json` authorities.
+
 ## Public interaction surfaces
 
 The target CLI is one `quant-engine` command family:

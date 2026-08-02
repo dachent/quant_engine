@@ -41,3 +41,10 @@ That does not upgrade the provider generation or another fact slice.
 The package does not move legacy data, normalize portfolio facts, or choose a
 business-specific authority. Concrete consumers supply governed rules and
 retain reconciliation evidence.
+
+`prepare_release` and `commit_release` provide the multi-root coordination
+boundary documented in [coordinated release publication](../../docs/release-publication.md).
+Preparation records an immutable release identity and predecessor graph without
+changing authority. Commit advances every named pointer and companion under one
+lock; a failure restores the recorded predecessor graph and leaves a durable
+recovery journal.
