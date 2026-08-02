@@ -22,7 +22,7 @@
     if (/FAIL|UNAVAILABLE|UNMAPPED|DO_NOT|BLOCK|NONE|NOT_AUTOMATABLE|INCOMPLETE/.test(text)) return "danger";
     if (/PARTIAL|INFERRED|UNKNOWN|CONDITIONAL|FROZEN/.test(text)) return "warning";
     if (/PASS|AVAILABLE|COMPLETE|PUBLISHED|VERIFIED/.test(text)) return "positive";
-    if (/RESERVE|ZERO RISK/.test(text)) return "reserve";
+    if (/RESERVE|ZERO RISK|EXCLUDED_DE_MINIMIS/.test(text)) return "reserve";
     return "neutral";
   }
 
@@ -34,6 +34,9 @@
     SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL: "Selected with training-only time-series CV",
     NO_DIVERSIFICATION_CREDIT_MISSING_OBSERVATION: "No diversification credit: observations missing",
     NOT_AUTOMATABLE_MISSING_COMPLETE_DAILY_NAV: "Not automatable: systematic daily NAV is incomplete",
+    NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV: "Not automatable: material daily NAV is incomplete",
+    AVAILABLE_MATERIAL_PERIMETER: "Available across the material perimeter",
+    EXCLUDED_DE_MINIMIS: "Excluded de minimis",
   };
   const humanStatus = (status) => STATUS_LABELS[String(status)] || String(status || "Unknown").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
@@ -49,7 +52,7 @@
       ["Total liquid", currency(data.capital.total_liquid), "Systematic plus reserve"],
       ["Systematic capital", currency(data.capital.systematic), "Subject to the accepted HWM policy"],
       ["Reserve", currency(data.capital.reserve), "Zero strategy risk budget", "reserve"],
-      ["Daily NAV coverage", pct(data.advisory.nav_coverage), "Capital-weighted and explicitly partial", "warning"],
+      ["Material NAV coverage", pct(data.advisory.nav_coverage), "Composer remains reported but is outside the HWM denominator", "warning"],
     ]);
 
     const gateRows = data.gates.map((gate) => {
@@ -64,7 +67,7 @@
     $("#strategy-coverage-bars").innerHTML = data.strategies.map((row) => `<div class="coverage-status-row"><div class="bar-label"><span>${safe(row.strategy_name)}</span>${statusText(row.nav_status)}</div><div class="cell-secondary">${integer.format(row.available_twr_segments || 0)} coverage-qualified TWR segments · systematic weight ${pct(row.systematic_weight)}</div></div>`).join("");
     const currentMapped = data.positions.filter((row) => row.status === "AVAILABLE_MAPPED").length;
     const operatorLabels = {
-      "full-systematic-hwm-unavailable": "Full systematic HWM cannot yet be calculated",
+      "full-systematic-hwm-unavailable": "Material systematic HWM cannot yet be calculated",
       "assignment-mapping-partial": "Historical assignment intervals remain unresolved",
     };
     $("#operator-queue").innerHTML = data.blocking_items.map((item) => {
@@ -109,17 +112,19 @@
   }
 
   function renderRisk() {
-    const missingNav = data.strategies.filter((row) => row.nav_status !== "AVAILABLE").map((row) => row.strategy_name);
+    const missingNav = data.strategies.filter((row) => row.hwm_scope === "INCLUDED" && row.nav_status !== "AVAILABLE").map((row) => row.strategy_name);
+    const excludedNav = data.strategies.filter((row) => row.hwm_scope === "EXCLUDED_DE_MINIMIS").map((row) => row.strategy_name);
+    const robuxioHwm = data.strategies.find((row) => row.strategy_id === "robuxio-crypto" && row.nav_status === "AVAILABLE");
     renderKpis("#risk-kpis", [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Accepted adverse scenario", "danger"],
-      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${missingNav.length} uncovered current sleeves`, "danger"],
+      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${missingNav.length} uncovered material sleeve${missingNav.length === 1 ? "" : "s"}`, "danger"],
       ["TWR available", `${data.counts.twr_available}/${data.counts.twr_rows}`, "Account-strategy segments", "warning"],
       ["MWR available", `${data.counts.mwr_available}/${data.counts.twr_rows}`, "Complete flows required", data.counts.mwr_available ? "positive" : "danger"],
     ]);
     const stress = Number(data.advisory.correlation_one_stress);
     const passes = stress <= Number(data.advisory.hwm_limit);
     $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">Current portfolio</div><div class="scenario-track"><span class="scenario-limit" aria-hidden="true"></span><span class="scenario-fill ${passes ? "pass" : ""}" style="width:${Math.min(100, stress / 0.4 * 100)}%"></span></div><div class="scenario-value ${passes ? "" : "status-text danger"}">${pct(stress)}</div></div><div class="callout callout-danger">Stress exceeds the 15% HWM boundary. This is advisory evidence, not a liquidation instruction.</div>`;
-    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Full-systematic daily NAV</strong><span>${missingNav.length ? `${safe(missingNav.join(" · "))} lack accepted account-live daily NAV in this snapshot.` : "All current sleeves have accepted account-live daily NAV."}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of systematic capital in this immutable snapshot. Closed accounts are not forward-filled. Missing NAV and FX are not interpolated.</div>`;
+    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Material systematic daily NAV</strong><span>${missingNav.length ? `${safe(missingNav.join(" · "))} lack accepted daily NAV in this snapshot.` : "Every included material sleeve has accepted daily NAV."} ${excludedNav.length ? `${safe(excludedNav.join(" · "))} remain reported but are excluded de minimis.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of the material HWM perimeter. ${robuxioHwm ? `Robuxio: ${integer.format(robuxioHwm.nav_return_observations)} verified account-live returns from ${formatDate(robuxioHwm.nav_observed_start)} through ${formatDate(robuxioHwm.nav_observed_end)}; current drawdown ${pct(robuxioHwm.hwm_current_drawdown)}, observed maximum ${pct(robuxioHwm.hwm_max_drawdown)}.` : "Robuxio account-live evidence is unavailable."} Missing NAV and FX are not interpolated.</div>`;
     const mappedPerformance = data.performance.filter((row) => row.strategy_name);
     const historicalGaps = data.performance.filter((row) => !row.strategy_name);
     const rows = mappedPerformance.map((row) => `<tr><td><code>${safe(row.account_id)}</code></td><td>${safe(row.strategy_name)}</td><td>${safe(row.observed_start || row.effective_start || "—")}<span class="cell-secondary">${safe(row.observed_end || row.effective_end || "—")}</span></td><td class="numeric">${integer.format(row.nav_observations)}</td><td class="numeric">${pct(row.twr)}</td><td>${statusText(row.twr_status)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}</td></tr>`);
@@ -413,7 +418,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 3) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 4) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
       renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderCandidates(); renderData(); bindEvents();

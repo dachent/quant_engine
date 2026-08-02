@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import date
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -31,8 +32,8 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-PANEL_SCHEMA_VERSION: Final = 3
-BUILDER_VERSION: Final = "1.3.0"
+PANEL_SCHEMA_VERSION: Final = 4
+BUILDER_VERSION: Final = "1.4.0"
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
     "either_strategy_underwater",
@@ -42,6 +43,11 @@ SOURCE_CONTRACT = (
     Path(__file__).resolve().parents[1]
     / "contracts"
     / "portfolio-control-panel-source-v1.json"
+)
+HWM_POLICY = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-hwm-policy-v2.json"
 )
 DEFAULT_TEMPLATE_ROOT = (
     Path(__file__).resolve().parents[1] / "apps" / "portfolio-control-panel"
@@ -223,6 +229,193 @@ def _number_text(value: float) -> str:
     if abs(value) < 5e-16:
         value = 0.0
     return format(value, ".12g")
+
+
+def _hwm_policy() -> tuple[dict[str, Any], str]:
+    policy = _object(_load_json(HWM_POLICY, "HWM policy"), "HWM policy")
+    if policy.get("schema_version") != 2 or policy.get("policy_id") != "PORT-HWM-2":
+        raise ControlPanelValidationError("HWM policy identity is unsupported")
+    perimeter = _object(policy.get("material_perimeter"), "material_perimeter")
+    exclusions = _objects(perimeter.get("exclusions"), "material_perimeter.exclusions")
+    excluded_ids: set[str] = set()
+    for item in exclusions:
+        strategy_id = _text(item.get("strategy_id"), "HWM exclusion strategy_id")
+        if strategy_id in excluded_ids:
+            raise ControlPanelValidationError("HWM exclusion is duplicated")
+        if item.get("classification") != "EXCLUDED_DE_MINIMIS":
+            raise ControlPanelValidationError("HWM exclusion classification differs")
+        excluded_ids.add(strategy_id)
+    policy["excluded_strategy_ids"] = sorted(excluded_ids)
+    policy_hash, _size = hash_file(HWM_POLICY)
+    return policy, policy_hash
+
+
+def _decimal_value(value: object, field_name: str) -> Decimal:
+    try:
+        accepted = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ControlPanelValidationError(f"{field_name} must be decimal") from exc
+    if not accepted.is_finite():
+        raise ControlPanelValidationError(f"{field_name} must be finite")
+    return accepted
+
+
+def _material_hwm_coverage(
+    strategies: Sequence[Mapping[str, Any]],
+    factor_analysis: Mapping[str, Any],
+    policy: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    excluded = set(policy.get("excluded_strategy_ids", []))
+    factors = {
+        _text(row.get("series_id"), "factor series_id"): row
+        for row in _objects(factor_analysis.get("series"), "factor series")
+    }
+    accepted: list[dict[str, Any]] = []
+    covered = Decimal(0)
+    material = Decimal(0)
+    excluded_value = Decimal(0)
+    excluded_names: list[str] = []
+    uncovered: list[str] = []
+    for original in strategies:
+        row = dict(original)
+        strategy_id = _text(row.get("strategy_id"), "strategy.strategy_id")
+        strategy_name = _text(row.get("strategy_name"), "strategy.strategy_name")
+        value = _decimal_value(row.get("current_value_usd"), "strategy.current_value")
+        if strategy_id in excluded:
+            row.update(
+                {
+                    "hwm_scope": "EXCLUDED_DE_MINIMIS",
+                    "hwm_source": "PORT-HWM-2",
+                    "nav_status": "EXCLUDED_DE_MINIMIS",
+                }
+            )
+            excluded_value += value
+            excluded_names.append(strategy_name)
+            accepted.append(row)
+            continue
+
+        material += value
+        row["hwm_scope"] = "INCLUDED"
+        row["hwm_source"] = "PORTFOLIO_REPORT"
+        factor = factors.get(strategy_name)
+        if (
+            row.get("nav_status") != "AVAILABLE"
+            and factor is not None
+            and factor.get("status") == "AVAILABLE"
+            and factor.get("evidence_layer") == "ACCOUNT_LIVE"
+        ):
+            factor_coverage = _object(factor.get("coverage"), "factor.coverage")
+            row.update(
+                {
+                    "hwm_source": "ACCOUNT_LIVE_PROVIDER_OVERLAY",
+                    "nav_status": "AVAILABLE",
+                    "nav_observed_start": factor_coverage.get(
+                        "target_observed_start"
+                    ),
+                    "nav_observed_end": factor_coverage.get("target_observed_end"),
+                    "nav_return_observations": factor_coverage.get(
+                        "target_observations"
+                    ),
+                    "hwm_current_drawdown": factor_coverage.get(
+                        "target_current_drawdown"
+                    ),
+                    "hwm_max_drawdown": factor_coverage.get(
+                        "target_max_drawdown"
+                    ),
+                }
+            )
+        if row.get("nav_status") == "AVAILABLE":
+            covered += value
+        else:
+            uncovered.append(strategy_name)
+        accepted.append(row)
+
+    if material <= 0:
+        raise ControlPanelValidationError("material HWM perimeter is empty")
+    ratio = covered / material
+    status = (
+        "AVAILABLE_MATERIAL_PERIMETER"
+        if not uncovered
+        else "NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV"
+    )
+    return accepted, {
+        "covered_value_usd": format(covered, "f"),
+        "excluded_value_usd": format(excluded_value, "f"),
+        "excluded_strategies": sorted(excluded_names),
+        "material_value_usd": format(material, "f"),
+        "nav_coverage": format(ratio, "f"),
+        "status": status,
+        "uncovered_strategies": sorted(uncovered),
+    }
+
+
+def _provider_account_nav_performance(
+    strategies: Sequence[Mapping[str, Any]],
+    performance: Sequence[Mapping[str, Any]],
+    factor_analysis: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Promote a verified provider-custodied account NAV path into TWR evidence."""
+
+    factor_by_name = {
+        _text(row.get("series_id"), "factor series_id"): row
+        for row in _objects(factor_analysis.get("series"), "factor series")
+    }
+    accepted_strategies = [dict(row) for row in strategies]
+    accepted_performance = [dict(row) for row in performance]
+    for strategy in accepted_strategies:
+        if strategy.get("hwm_source") != "ACCOUNT_LIVE_PROVIDER_OVERLAY":
+            continue
+        strategy_id = _text(strategy.get("strategy_id"), "strategy.strategy_id")
+        strategy_name = _text(
+            strategy.get("strategy_name"), "strategy.strategy_name"
+        )
+        factor = factor_by_name.get(strategy_name)
+        if (
+            factor is None
+            or factor.get("status") != "AVAILABLE"
+            or factor.get("evidence_layer") != "ACCOUNT_LIVE"
+        ):
+            raise ControlPanelValidationError(
+                f"provider account NAV overlay is unavailable: {strategy_name}"
+            )
+        coverage = _object(factor.get("coverage"), "factor.coverage")
+        cumulative = coverage.get("target_cumulative_return")
+        maximum_drawdown = coverage.get("target_max_drawdown")
+        if cumulative is None or maximum_drawdown is None:
+            raise ControlPanelValidationError(
+                f"provider account NAV overlay lacks return evidence: {strategy_name}"
+            )
+        matches = [
+            row
+            for row in accepted_performance
+            if row.get("strategy_id") == strategy_id
+        ]
+        if len(matches) != 1:
+            raise ControlPanelValidationError(
+                f"provider account NAV overlay must match one account assignment: {strategy_name}"
+            )
+        performance_row = matches[0]
+        performance_row.update(
+            {
+                "nav_observations": coverage.get("target_observations"),
+                "observed_end": coverage.get("target_observed_end"),
+                "observed_start": coverage.get("target_observed_start"),
+                "twr": cumulative,
+                "twr_evidence": "ACCOUNT_LIVE_PROVIDER_CUSTODIED_NAV",
+                "twr_status": "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV",
+            }
+        )
+        strategy.update(
+            {
+                "account_live_cumulative_return": cumulative,
+                "account_live_max_drawdown": format(
+                    -_decimal_value(maximum_drawdown, "target_max_drawdown"), "f"
+                ),
+                "account_live_status": "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV",
+                "available_twr_segments": 1,
+            }
+        )
+    return accepted_strategies, accepted_performance
 
 
 def _factor_analysis(
@@ -617,6 +810,24 @@ def _panel_data(
     dependence_analysis = _dependence_analysis(
         correlation, correlation_identity, current_strategy_names
     )
+    hwm_policy, hwm_policy_hash = _hwm_policy()
+    strategies, hwm_summary = _material_hwm_coverage(
+        strategies, factor_analysis, hwm_policy
+    )
+    strategies, performance = _provider_account_nav_performance(
+        strategies, performance, factor_analysis
+    )
+    coverage = [dict(row) for row in coverage]
+    for row in coverage:
+        if row.get("category") == "FACT_COVERAGE" and row.get("item") == "nav":
+            missing = hwm_summary["uncovered_strategies"]
+            row["known_gap"] = (
+                f"{len(missing)} included current strategy lacks accepted daily "
+                f"NAV; {len(hwm_summary['excluded_strategies'])} de minimis "
+                "strategy is explicitly excluded from the HWM "
+                "perimeter"
+            )
+            row["status"] = "PARTIAL" if missing else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
     normalized_allocations = []
     for row in allocations:
         strategy_id = row.get("strategy_id")
@@ -679,11 +890,29 @@ def _panel_data(
             }
         )
     blocking_items = [
-        row
+        dict(row)
         for row in coverage
         if row.get("category") == "RECONCILIATION_EXCEPTION"
         and row.get("status") != "PASS"
     ]
+    hwm_block = next(
+        (
+            row
+            for row in blocking_items
+            if row.get("item") == "full-systematic-hwm-unavailable"
+        ),
+        None,
+    )
+    if hwm_block is not None:
+        missing_names = hwm_summary["uncovered_strategies"]
+        if missing_names:
+            hwm_block["known_gap"] = (
+                "BLOCKING_FOR_AUTOMATED_HWM: included sleeves without accepted "
+                f"daily NAV: {', '.join(missing_names)}"
+            )
+            hwm_block["status"] = "UNAVAILABLE"
+        else:
+            blocking_items.remove(hwm_block)
     providers = _objects(legacy.get("providers"), "legacy.providers")
     allowed_candidate_fields = (
         "candidate",
@@ -748,6 +977,14 @@ def _panel_data(
             "schema": "portfolio-correlation/1",
             "sha256": correlation_identity["sha256"],
         },
+        {
+            "artifact": "portfolio-hwm-policy",
+            "as_of_date": hwm_policy["material_perimeter"]["exclusions"][0][
+                "effective_date"
+            ],
+            "schema": "portfolio-hwm-policy/2",
+            "sha256": hwm_policy_hash,
+        },
     ]
     report_stress = _finite_float(
         _summary_value(summary, "Correlation-one stress"),
@@ -765,7 +1002,12 @@ def _panel_data(
         {
             "Read-only local artifact; no provider, broker, order, or deployment connection exists.",
             "The candidate view is a frozen audit appendix and is not strategy, selection, or allocation authority.",
-            "Full-systematic HWM is unavailable until complete reconciled daily NAV exists.",
+            (
+                "Material systematic HWM remains unavailable only for explicitly "
+                f"named included sleeves: {', '.join(hwm_summary['uncovered_strategies'])}."
+                if hwm_summary["uncovered_strategies"]
+                else "Material systematic HWM has complete accepted NAV coverage."
+            ),
             (
                 "Positions remain partial and FX remains unavailable; the panel does not infer either."
                 if position_count
@@ -781,10 +1023,16 @@ def _panel_data(
         "advisory": {
             "correlation_one_stress": _summary_value(summary, "Correlation-one stress"),
             "hwm_limit": "0.15",
-            "hwm_status": _summary_value(summary, "Full-systematic HWM"),
-            "nav_coverage": _summary_value(summary, "NAV coverage"),
+            "hwm_status": hwm_summary["status"],
+            "nav_coverage": hwm_summary["nav_coverage"],
             "readiness": _summary_value(summary, "Advisory readiness"),
-            "reason": "Full-systematic HWM, positions, FX, and complete attribution remain unavailable or partial.",
+            "reason": (
+                "Material HWM coverage now includes the accepted Matrixport "
+                "Robuxio account-live series; Composer is reported but excluded "
+                "de minimis. Remaining HWM gap: "
+                + ", ".join(hwm_summary["uncovered_strategies"])
+                + "."
+            ),
         },
         "allocations": normalized_allocations,
         "blocking_items": blocking_items,
@@ -828,6 +1076,7 @@ def _panel_data(
             "correlation_sha256": correlation_identity["sha256"],
             "decomposition_generation_id": decomposition_identity["generation_id"],
             "decomposition_sha256": decomposition_identity["sha256"],
+            "hwm_policy_sha256": hwm_policy_hash,
             "report_generation_id": report_identity["generation_id"],
             "report_sha256": report_identity["sha256"],
             "source_shell_hashes": source.get("observed_hashes"),
@@ -840,6 +1089,7 @@ def _panel_data(
         "provider_counts": dict(sorted(provider_counts.items())),
         "reconciliation_checks": reconciliations,
         "strategies": strategies,
+        "hwm_summary": hwm_summary,
     }
 
 
@@ -1099,8 +1349,9 @@ def verify_candidate(
     checks.append(
         _check(
             "Coverage-aware risk replay",
-            data["advisory"]["hwm_status"]
-            == "NOT_AUTOMATABLE_MISSING_COMPLETE_DAILY_NAV"
+            data["advisory"]["hwm_status"] == data["hwm_summary"]["status"]
+            and data["advisory"]["nav_coverage"]
+            == data["hwm_summary"]["nav_coverage"]
             and data["advisory"]["readiness"] == "DO_NOT_EXPAND_SYSTEMATIC_RISK",
             data["advisory"],
         )
@@ -1132,8 +1383,9 @@ def verify_candidate(
     checks.append(
         _check(
             "Accepted factor and alpha evidence is exact",
-            data["factor_analysis"]["available_count"] == 5
-            and data["factor_analysis"]["unavailable_count"] == 4
+            data["factor_analysis"]["available_count"]
+            + data["factor_analysis"]["unavailable_count"]
+            == 9
             and all(
                 row.get("contribution_summary") is None
                 or _finite_float(
@@ -1405,6 +1657,13 @@ def publish_panel(
             schema_name="portfolio-correlation",
             schema_version="1",
         ),
+        SourceArtifact.from_path(
+            HWM_POLICY,
+            artifact_id="input/portfolio-hwm-policy.json",
+            as_of_date=as_of,
+            schema_name="portfolio-hwm-policy",
+            schema_version="2",
+        ),
     ]
     for relative in (*PANEL_FILES, "candidate.json"):
         artifacts.append(
@@ -1433,11 +1692,12 @@ def publish_panel(
         adapter=AdapterIdentity("portfolio-control-panel-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="accepted portfolio, factor/alpha, and dependence generations rendered read-only with explicit gaps and a separate frozen candidate appendix",
+            boundary="accepted portfolio, factor/alpha, dependence, and material-HWM evidence rendered read-only with explicit gaps and a separate frozen candidate appendix",
             fact_types=(
                 "portfolio control panel",
                 "factor and alpha attribution",
                 "correlation and dependence",
+                "material HWM coverage",
                 "browser QA",
                 "frozen appendix",
             ),

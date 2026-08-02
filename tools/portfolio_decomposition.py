@@ -33,7 +33,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 ANALYTICS_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.2.1"
+BUILDER_VERSION: Final = "1.5.0"
 METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-2"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
 METHODOLOGY_PATH: Final = (
@@ -136,6 +136,7 @@ class Specification:
     risk_free_column: str
     factors: tuple[FactorDefinition, ...]
     models: tuple[ModelDefinition, ...]
+    provenance_sources: tuple[SourceDefinition, ...]
 
 
 @dataclass(frozen=True)
@@ -395,18 +396,17 @@ def _load_spec(path: Path) -> Specification:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DecompositionError("specification is not readable UTF-8 JSON") from exc
     root = _object(decoded, "specification")
-    _strict_keys(
-        root,
-        {
+    root_keys = {
             "as_of_date",
             "factor_source",
             "maximum_factor_staleness_days",
             "models",
             "schema_version",
             "target_source",
-        },
-        "specification",
-    )
+        }
+    if "provenance_sources" in root:
+        root_keys.add("provenance_sources")
+    _strict_keys(root, root_keys, "specification")
     if root["schema_version"] != 1:
         raise DecompositionError("specification schema_version is unsupported")
     factor_source_object = _object(root["factor_source"], "factor_source")
@@ -476,6 +476,12 @@ def _load_spec(path: Path) -> Specification:
         ),
         factors=factors,
         models=models,
+        provenance_sources=tuple(
+            _source_definition(item, f"provenance_sources[{index}]")
+            for index, item in enumerate(
+                _objects(root.get("provenance_sources", []), "provenance_sources")
+            )
+        ),
     )
 
 
@@ -1328,6 +1334,11 @@ def _model_result(
         "observed_end": None,
         "observed_start": None,
         "target_observations": len(target_rows or ()),
+        "target_cumulative_return": None,
+        "target_current_drawdown": None,
+        "target_max_drawdown": None,
+        "target_observed_end": target_rows[-1].day.isoformat() if target_rows else None,
+        "target_observed_start": target_rows[0].day.isoformat() if target_rows else None,
         "test_observations": 0,
         "train_observations": 0,
     }
@@ -1357,6 +1368,19 @@ def _model_result(
 
     train = [item for item in aligned if item[0].day <= model.train_end]
     test = [item for item in aligned if item[0].day >= model.test_start]
+    current_drawdown: float | None = None
+    maximum_drawdown: float | None = None
+    cumulative_return: float | None = None
+    if all(row.return_type == "TOTAL" for row in target_rows):
+        wealth = 1.0
+        peak = 1.0
+        maximum_drawdown = 0.0
+        for row in target_rows:
+            wealth *= 1.0 + row.value
+            peak = max(peak, wealth)
+            maximum_drawdown = max(maximum_drawdown, 1.0 - wealth / peak)
+        current_drawdown = 1.0 - wealth / peak
+        cumulative_return = wealth - 1.0
     coverage = {
         "aligned_observations": len(aligned),
         "alignment_ratio": _number(len(aligned) / len(target_rows)),
@@ -1366,6 +1390,11 @@ def _model_result(
         "observed_end": aligned[-1][0].day.isoformat() if aligned else None,
         "observed_start": aligned[0][0].day.isoformat() if aligned else None,
         "target_observations": len(target_rows),
+        "target_cumulative_return": _number(cumulative_return),
+        "target_current_drawdown": _number(current_drawdown),
+        "target_max_drawdown": _number(maximum_drawdown),
+        "target_observed_end": target_rows[-1].day.isoformat(),
+        "target_observed_start": target_rows[0].day.isoformat(),
         "test_observations": len(test),
         "train_observations": len(train),
     }
@@ -1679,6 +1708,10 @@ def build_decomposition(
     spec = _load_spec(spec_path)
     target_path = _verify_source(source_root, spec.target_source)
     factor_path = _verify_source(source_root, spec.factor_source)
+    provenance_paths = tuple(
+        (definition, _verify_source(source_root, definition))
+        for definition in spec.provenance_sources
+    )
     targets = _read_targets(target_path, spec.as_of_date)
     factors, _headers = _read_factors(factor_path, spec)
     definitions = {item.factor_id: item for item in spec.factors}
@@ -1705,6 +1738,14 @@ def build_decomposition(
             "sha256": spec.target_source.expected_sha256,
             "size_bytes": spec.target_source.expected_size_bytes,
         },
+        "provenance": [
+            {
+                "artifact_id": definition.artifact_id,
+                "sha256": definition.expected_sha256,
+                "size_bytes": definition.expected_size_bytes,
+            }
+            for definition, _path in provenance_paths
+        ],
     }
     payload: dict[str, object] = {
         "analytics_schema_version": ANALYTICS_SCHEMA_VERSION,
@@ -1744,6 +1785,17 @@ def build_decomposition(
             as_of_date=spec.as_of_date,
             schema_name=spec.factor_source.schema_name,
             schema_version=spec.factor_source.schema_version,
+        ),
+        *(
+            SourceArtifact(
+                artifact_id=definition.artifact_id,
+                sha256=definition.expected_sha256,
+                size_bytes=definition.expected_size_bytes,
+                as_of_date=spec.as_of_date,
+                schema_name=definition.schema_name,
+                schema_version=definition.schema_version,
+            )
+            for definition, _path in provenance_paths
         ),
         SourceArtifact(
             artifact_id="methodology/decomposition-methodology.json",

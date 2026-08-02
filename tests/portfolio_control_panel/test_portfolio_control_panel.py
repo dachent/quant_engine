@@ -753,7 +753,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             encoding="utf-8"
         )
     )
-    assert data["panel_schema_version"] == 3
+    assert data["panel_schema_version"] == 4
     assert data["positions"] == [
         {
             "account_id": "account-00",
@@ -857,3 +857,112 @@ def test_browser_qa_rejects_console_error(
     _write_json(qa / "desktop-risk" / "console-events.json", [{"text": "boom"}])
     with pytest.raises(panel.ControlPanelValidationError, match="browser QA failed"):
         panel.validate_qa(candidate, qa)
+
+
+def test_material_hwm_perimeter_excludes_composer_and_accepts_robuxio() -> None:
+    strategies = [
+        {
+            "strategy_id": "composer-holy-grail",
+            "strategy_name": "[Composer] - The Holy Grail (Buy Copy)",
+            "current_value_usd": "1",
+            "nav_status": "UNAVAILABLE",
+        },
+        {
+            "strategy_id": "robuxio-crypto",
+            "strategy_name": "Robuxio Crypto (High Sharpe High Vol)",
+            "current_value_usd": "80",
+            "nav_status": "UNAVAILABLE",
+        },
+        {
+            "strategy_id": "volatis-strategy",
+            "strategy_name": "Volatis Strategy",
+            "current_value_usd": "20",
+            "nav_status": "UNAVAILABLE",
+        },
+    ]
+    factors = {
+        "series": [
+            {
+                "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+                "status": "AVAILABLE",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "coverage": {
+                    "target_observed_start": "2025-08-14",
+                    "target_observed_end": "2026-07-26",
+                    "target_observations": 331,
+                    "target_cumulative_return": "0.42",
+                    "target_current_drawdown": "0.162",
+                    "target_max_drawdown": "0.196",
+                },
+            }
+        ]
+    }
+    policy = {"excluded_strategy_ids": ["composer-holy-grail"]}
+
+    rows, summary = panel._material_hwm_coverage(strategies, factors, policy)
+
+    by_id = {row["strategy_id"]: row for row in rows}
+    assert by_id["composer-holy-grail"]["nav_status"] == "EXCLUDED_DE_MINIMIS"
+    assert by_id["robuxio-crypto"]["nav_status"] == "AVAILABLE"
+    assert by_id["robuxio-crypto"]["hwm_source"] == "ACCOUNT_LIVE_PROVIDER_OVERLAY"
+    assert by_id["robuxio-crypto"]["nav_return_observations"] == 331
+    assert summary == {
+        "covered_value_usd": "80",
+        "excluded_value_usd": "1",
+        "excluded_strategies": ["[Composer] - The Holy Grail (Buy Copy)"],
+        "material_value_usd": "100",
+        "nav_coverage": "0.8",
+        "status": "NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV",
+        "uncovered_strategies": ["Volatis Strategy"],
+    }
+
+
+def test_provider_account_nav_overlay_promotes_twr_evidence() -> None:
+    strategies = [
+        {
+            "strategy_id": "robuxio-crypto",
+            "strategy_name": "Robuxio Crypto (High Sharpe High Vol)",
+            "hwm_source": "ACCOUNT_LIVE_PROVIDER_OVERLAY",
+        }
+    ]
+    performance = [
+        {
+            "account_id": "account-1",
+            "strategy_id": "robuxio-crypto",
+            "nav_observations": 0,
+            "twr": None,
+            "twr_status": "UNAVAILABLE_INSUFFICIENT_NAV",
+        }
+    ]
+    factors = {
+        "series": [
+            {
+                "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+                "status": "AVAILABLE",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "coverage": {
+                    "target_cumulative_return": "0.42",
+                    "target_max_drawdown": "0.196",
+                    "target_observations": 331,
+                    "target_observed_start": "2025-08-26",
+                    "target_observed_end": "2026-07-26",
+                },
+            }
+        ]
+    }
+
+    accepted_strategies, accepted_performance = (
+        panel._provider_account_nav_performance(strategies, performance, factors)
+    )
+
+    assert accepted_strategies[0]["account_live_status"] == (
+        "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV"
+    )
+    assert accepted_strategies[0]["account_live_cumulative_return"] == "0.42"
+    assert accepted_strategies[0]["account_live_max_drawdown"] == "-0.196"
+    assert accepted_strategies[0]["available_twr_segments"] == 1
+    assert accepted_performance[0]["nav_observations"] == 331
+    assert accepted_performance[0]["twr"] == "0.42"
+    assert accepted_performance[0]["twr_status"] == (
+        "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV"
+    )

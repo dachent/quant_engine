@@ -282,6 +282,13 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
         model["diagnostics"]["holdout"]["predicted_r_squared"]
     ) == pytest.approx(1.0, abs=1e-9)
     assert model["method_label"] == "MPI_INFORMED_NON_EQUIVALENT"
+    assert model["coverage"]["target_observed_start"] == days[0].isoformat()
+    assert model["coverage"]["target_cumulative_return"] is not None
+    assert model["coverage"]["target_observed_end"] == days[-1].isoformat()
+    assert 0 <= float(model["coverage"]["target_current_drawdown"]) < 1
+    assert float(model["coverage"]["target_max_drawdown"]) >= float(
+        model["coverage"]["target_current_drawdown"]
+    )
     for row in model["contributions"]:
         reconstructed = (
             float(row["alpha_contribution"])

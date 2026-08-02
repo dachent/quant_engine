@@ -200,7 +200,28 @@ calculation cannot advance the accepted report or generation pointer.
    `ELIGIBLE_FOR_REVIEW`, which still requires a new allocation decision and
    does not authorize capital movement or trading.
 
-### 10. Reproducibility
+### 10. Material HWM perimeter amendment
+
+The repository owner amended the HWM perimeter on 2026-08-01. The governed
+machine-readable policy is `contracts/portfolio-hwm-policy-v2.json` (`PORT-HWM-2`).
+
+1. Composer Holy Grail remains in capital, allocation, and consolidated-value
+   reporting, but is excluded de minimis from the material HWM denominator.
+   This is a named exception, not a general materiality threshold.
+2. Every other current systematic strategy remains in the material perimeter.
+3. Hash-verified provider-custodied account NAV is acceptable HWM evidence when
+   it is tied to exactly one positive live holding and normalized without
+   interpolation or evidence-layer substitution.
+4. Robuxio meets that rule through the accepted Matrixport generation. Its
+   account-live NAV path contributes to material HWM coverage. Full-material
+   HWM remains unavailable while any other included strategy lacks accepted
+   daily evidence through its declared boundary.
+
+This amendment changes HWM coverage only. It does not change reported capital,
+the 15% systematic drawdown limit, the distinction between sleeve and composite
+drawdown, or any trading authority.
+
+### 11. Reproducibility
 
 The synthetic conformance vectors in
 `contracts/portfolio-performance-policy-v1.json` are normative examples for

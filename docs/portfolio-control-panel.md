@@ -7,8 +7,9 @@ without preserving stale calculations or hard-coded operator conclusions.
 ## Authority boundary
 
 - Current accounts, allocations, strategies, positions, performance, costs,
-  gaps, coverage, reconciliation, HWM availability, stress, and readiness come
-  only from the current accepted `dataPortfolio/reporting` generation. A
+  gaps, coverage, reconciliation, stress, and readiness come from the current
+  accepted `dataPortfolio/reporting` generation. Material HWM coverage may also
+  consume a hash-verified `ACCOUNT_LIVE` provider overlay under `PORT-HWM-2`. A
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
@@ -17,6 +18,14 @@ without preserving stale calculations or hard-coded operator conclusions.
   RBSA and clean-room dynamic FLS results are both labeled
   `MPI_INFORMED_NON_EQUIVALENT`; neither is proprietary MPI output nor a claim
   to undisclosed MPI production behavior.
+- The material HWM perimeter is explicit: Composer remains visible in capital
+  reporting but is excluded de minimis; Robuxio uses the accepted Matrixport
+  account-NAV history; every other current systematic strategy remains
+  included. An uncovered included sleeve is named rather than hidden behind a
+  generic coverage complaint.
+- The same Robuxio unit-NAV path supplies its account-live sleeve TWR,
+  cumulative return, and maximum drawdown. It does not manufacture MWR, account
+  cash flows, or a full-portfolio composite.
 - Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
   matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come
@@ -73,8 +82,9 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
 ```
 
 The verifier proves all eight views, local-only assets, lack of network or
-trade code, accepted capital/risk replay, nine-strategy boundary, 19 account
-identities, five pipeline-available/four unavailable factor results, dynamic
+trade code, accepted capital/risk replay, the exact nine-strategy boundary, 19
+account identities, the available and unavailable factor counts bound to the
+analytics generation, dynamic
 estimator disclosures when present, 10 measured/26 unavailable dependence
 pairs, explicit unavailable facts, and frozen-appendix isolation.
 

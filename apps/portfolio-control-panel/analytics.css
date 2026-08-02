@@ -41,6 +41,14 @@ th {
   color: var(--danger);
 }
 
+.status-number {
+  min-width: 180px;
+}
+
+.status-number strong {
+  line-height: 1.3;
+}
+
 .kpi-value,
 .validation-score,
 .section-intro h2 {

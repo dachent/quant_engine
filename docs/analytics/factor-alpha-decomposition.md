@@ -122,6 +122,24 @@ model adds:
 Dynamic models intentionally require one disclosed ridge value and do not
 support inferred long-only, leverage, breakpoint, or transition constraints.
 
+## Provider-custodied account NAV normalization
+
+`tools/portfolio_target_series.py` provides the first governed account-live
+provider overlay. It reads an already accepted Matrixport generation; it makes
+no provider or credential call. Before emitting Robuxio returns it verifies the
+generation manifest plus the exact hashes and sizes of `csv/nav_daily.csv` and
+`csv/holdings.csv`, requires exactly one matching positive live holding, and
+converts consecutive after-fee NAV observations into `ACCOUNT_LIVE`, `NET`,
+`TOTAL` returns using `Decimal` arithmetic.
+
+The current frozen source contains 332 Robuxio NAV observations and therefore
+331 returns. Its cumulative return and drawdown path remain target-series
+facts, independent of whether a factor model explains them. The normalized
+target, source proof, and upstream generation
+manifest are hash-bound inputs to the decomposition generation. Private product
+identifiers and holdings remain outside Git. Missing dates, NAV, FX, and returns
+are not forward-filled or interpolated.
+
 ## Build, verify, publish, and recover
 
 With private inputs and the specification outside Git:
