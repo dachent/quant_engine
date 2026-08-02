@@ -20,12 +20,17 @@ from quant_engine.web_contracts.quantbase import (
     extract_quantbase_har,
 )
 from quant_engine.web_contracts.schwab import SCHWAB_CONTRACT
+from quant_engine.web_contracts.grizzlybulls import (
+    GRIZZLYBULLS_CONTRACT,
+    extract_grizzlybulls_har,
+)
 
 __version__ = "0.1.0"
 
 __all__ = [
     "EndpointContract",
     "ExtractedResponse",
+    "GRIZZLYBULLS_CONTRACT",
     "ProviderContract",
     "PORTFOLIO123_CONTRACT",
     "QUANTBASE_CONTRACT",
@@ -36,6 +41,7 @@ __all__ = [
     "SessionEnvelope",
     "WebContractError",
     "canonical_extraction",
+    "extract_grizzlybulls_har",
     "extract_har",
     "extract_quantbase_har",
 ]
