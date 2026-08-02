@@ -142,6 +142,13 @@ account, fact type, effective interval, and finalization state. Overlap produces
 `ReconciliationEvent` records. It never silently deletes non-authoritative
 evidence.
 
+The implemented core contract is documented in
+[Data authority and admission](../data-authority.md). Schema-v1 generation
+manifests remain readable; hash-bound operational sidecars add acquisition,
+revision, publication-disposition, evidence-layer, and freshness semantics.
+Consumers must obtain exactly one matching rule before a fact can enter a
+ledger or derived control surface.
+
 ## Public interaction surfaces
 
 The target CLI is one `quant-engine` command family:
