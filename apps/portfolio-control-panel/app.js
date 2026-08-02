@@ -37,6 +37,7 @@
     NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV: "Not automatable: material daily NAV is incomplete",
     AVAILABLE_MATERIAL_PERIMETER: "Available across the material perimeter",
     AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE: "Available: version-matched backtest prehistory plus live",
+    AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY: "Available live; no version-matched backtest prehistory",
     AVAILABLE_LIVE_ONLY: "Available: live only",
     EXCLUDED_DE_MINIMIS: "Excluded de minimis",
     UNAVAILABLE_MISSING_VERSION_MATCHED_LIVE: "No version-matched live series",

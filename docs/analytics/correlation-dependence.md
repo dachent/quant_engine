@@ -58,8 +58,11 @@ every requested series. The builder emits two complete dependence payloads:
 
 Backtest observations never fill a missing date after live inception. Overlap
 is resolved in favor of live evidence rather than averaged. Missing live data,
-missing version-matched backtest prehistory, and unresolved versions make the
-affected mode unavailable. Every mode and pair carries its evidence
+or an unresolved selected live version makes the affected series unavailable.
+When a selected live series has no eligible version-matched backtest prehistory,
+the hybrid mode retains its live observations, uses zero backtest rows, and
+labels that composition `AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY`.
+Every mode and pair carries its evidence
 composition, live boundary, observation counts, excluded overlap, and exact
 interval. The no-missing-diversification-credit matrix is rebuilt separately
 for both modes; a longer hybrid history does not change the authority of the
