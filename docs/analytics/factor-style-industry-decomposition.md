@@ -123,3 +123,13 @@ missing industry returns as empty observations. Its column order is directly
 compatible with the decomposition engine: date, risk-free return, then factor
 or industry returns. It never fills, interpolates, or treats missing values as
 zero.
+
+`tools/portfolio_public_style_sources.py` independently verifies the governed
+Yahoo adjusted-history artifact and its sibling source manifest, derives the
+exact ETF candidate set from the catalog, and publishes content-addressed
+daily returns in catalog order. It uses consecutive observed adjusted closes,
+retains the union of provider dates, and leaves unavailable ticker/date cells
+empty. These series are labeled `ADJUSTED_CLOSE_TOTAL_RETURN_PROXY`: they are
+useful traded style evidence, but they are neither official fund NAV nor
+orthogonal economic factors. BIL is retained as a cash/risk-free proxy and is
+not eligible for a fitted style weight.
