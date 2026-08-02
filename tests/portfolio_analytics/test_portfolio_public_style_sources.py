@@ -45,6 +45,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path, tuple[str, ...]]:
             ],
             "universes": [
                 {
+                    "universe_id": "style-fixture",
                     "lens": "ETF_STYLE",
                     "candidates": [
                         {
@@ -190,3 +191,23 @@ def test_write_is_content_addressed_and_idempotent(tmp_path: Path) -> None:
     (destination / sources.OUTPUT_NAME).write_text("tampered", encoding="utf-8")
     with pytest.raises(sources.StyleSourceError, match="differs from exact rebuild"):
         sources.write_bundle(catalog, source, manifest, output_root)
+
+
+def test_build_supports_a_closed_sector_return_universe(tmp_path: Path) -> None:
+    catalog, source, manifest, tickers = _inputs(tmp_path)
+    document = json.loads(catalog.read_text(encoding="utf-8"))
+    universe = document["universes"][0]
+    universe["universe_id"] = "us-sector-return"
+    universe["lens"] = "RETURN_INDUSTRY"
+    for candidate in universe["candidates"]:
+        candidate["source_id"] = "ssga-select-sector"
+        candidate["return_source_id"] = "yahoo-adjusted-etf-daily"
+    _write_json(catalog, document)
+
+    outputs, result = sources.build_bundle(
+        catalog, source, manifest, ("us-sector-return",)
+    )
+    assert set(outputs) == {sources.SECTOR_OUTPUT_NAME}
+    assert result["universe_ids"] == ["us-sector-return"]
+    assert [item["series_id"] for item in result["series"]] == list(tickers)
+    assert result["series"][0]["role"] == "SECTOR_RETURN_PROXY"

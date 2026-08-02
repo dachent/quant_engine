@@ -1,4 +1,4 @@
-"""Normalize governed Yahoo adjusted ETF histories into daily style returns."""
+"""Normalize governed Yahoo adjusted ETF histories into daily return lenses."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from typing import Any, cast, Mapping, Sequence
 
 BUILDER_VERSION = "0.1.0"
 OUTPUT_NAME = "etf_style_returns_daily.csv"
+SECTOR_OUTPUT_NAME = "us_sector_returns_daily.csv"
 YAHOO_COLUMNS = (
     "Ticker",
     "Ticker.Name",
@@ -82,7 +83,9 @@ def _integer(value: object, name: str) -> int:
     return int(numeric)
 
 
-def _catalog_tickers(catalog: Mapping[str, Any]) -> tuple[tuple[str, ...], str]:
+def _catalog_tickers(
+    catalog: Mapping[str, Any], universe_ids: Sequence[str] | None
+) -> tuple[tuple[str, ...], str, tuple[str, ...], str, str]:
     sources = catalog.get("sources")
     universes = catalog.get("universes")
     prior = catalog.get("prior_baseline")
@@ -99,27 +102,57 @@ def _catalog_tickers(catalog: Mapping[str, Any]) -> tuple[tuple[str, ...], str]:
     if not isinstance(yahoo, dict) or yahoo.get("feed_id") != "history_adjusted":
         raise StyleSourceError("catalog Yahoo adjusted-history source is unavailable")
 
+    requested_universes = tuple(universe_ids or ())
+    if len(requested_universes) != len(set(requested_universes)):
+        raise StyleSourceError("requested universe IDs must be unique")
     tickers: list[str] = []
+    selected_ids: list[str] = []
+    selected_lenses: set[str] = set()
     for universe in universes:
-        if not isinstance(universe, dict) or universe.get("lens") != "ETF_STYLE":
+        if not isinstance(universe, dict):
             continue
+        universe_id = _text(universe.get("universe_id"), "catalog universe_id")
+        lens = _text(universe.get("lens"), "catalog lens")
+        selected = (
+            universe_id in requested_universes
+            if requested_universes
+            else lens == "ETF_STYLE"
+        )
+        if not selected:
+            continue
+        selected_ids.append(universe_id)
+        selected_lenses.add(lens)
         candidates = universe.get("candidates")
         if not isinstance(candidates, list):
-            raise StyleSourceError("ETF style candidates must be an array")
+            raise StyleSourceError("ETF return candidates must be an array")
         for candidate in candidates:
             if not isinstance(candidate, dict):
-                raise StyleSourceError("ETF style candidate must be an object")
-            if candidate.get("source_id") != "yahoo-adjusted-etf-daily":
-                raise StyleSourceError("ETF style candidate has the wrong source")
+                raise StyleSourceError("ETF return candidate must be an object")
+            if (
+                candidate.get("source_id") != "yahoo-adjusted-etf-daily"
+                and candidate.get("return_source_id") != "yahoo-adjusted-etf-daily"
+            ):
+                raise StyleSourceError("ETF return candidate has the wrong source")
             ticker = _text(candidate.get("candidate_id"), "ETF candidate_id")
             if ticker not in tickers:
                 tickers.append(ticker)
+    if requested_universes and set(selected_ids) != set(requested_universes):
+        raise StyleSourceError("requested universe is absent from the catalog")
+    if len(selected_lenses) != 1:
+        raise StyleSourceError("one bundle may contain exactly one analysis lens")
     cash = _text(prior.get("risk_free_proxy"), "prior risk_free_proxy")
     if cash not in tickers:
         tickers.append(cash)
     if len(tickers) < 2:
-        raise StyleSourceError("catalog has no usable ETF style universe")
-    return tuple(tickers), cash
+        raise StyleSourceError("catalog has no usable ETF return universe")
+    lens = next(iter(selected_lenses))
+    output_name = (
+        SECTOR_OUTPUT_NAME
+        if tuple(selected_ids) == ("us-sector-return",)
+        else OUTPUT_NAME
+    )
+    role = "SECTOR_RETURN_PROXY" if lens == "RETURN_INDUSTRY" else "ETF_STYLE"
+    return tuple(tickers), cash, tuple(selected_ids), output_name, role
 
 
 def _verify_source(
@@ -261,22 +294,28 @@ def _return_output(
 
 
 def build_bundle(
-    catalog_path: Path, source_path: Path, manifest_path: Path
+    catalog_path: Path,
+    source_path: Path,
+    manifest_path: Path,
+    universe_ids: Sequence[str] | None = None,
 ) -> tuple[dict[str, bytes], dict[str, object]]:
-    """Build deterministic style-return artifacts without writing."""
+    """Build deterministic ETF-return artifacts without writing."""
 
     catalog, catalog_content = _load_json(catalog_path, "source catalog")
     source, source_content = _load_json(source_path, "Yahoo source")
     manifest, manifest_content = _load_json(manifest_path, "Yahoo manifest")
-    tickers, cash_proxy = _catalog_tickers(catalog)
+    tickers, cash_proxy, selected_ids, output_name, series_role = _catalog_tickers(
+        catalog, universe_ids
+    )
     _verify_source(source, source_content, manifest, manifest_path, tickers)
     output, coverage = _return_output(source, tickers)
     per_ticker = cast(dict[str, dict[str, object]], coverage["per_ticker"])
-    outputs = {OUTPUT_NAME: output}
+    outputs = {output_name: output}
     result: dict[str, object] = {
         "schema_version": 1,
         "builder": "portfolio-public-style-sources",
         "builder_version": BUILDER_VERSION,
+        "universe_ids": list(selected_ids),
         "catalog": {
             "sha256": _sha256(catalog_content),
             "size_bytes": len(catalog_content),
@@ -292,13 +331,15 @@ def build_bundle(
             {
                 "series_id": ticker,
                 "return_basis": "ADJUSTED_CLOSE_TOTAL_RETURN_PROXY",
-                "role": "CASH_RISK_FREE_PROXY" if ticker == cash_proxy else "ETF_STYLE",
+                "role": (
+                    "CASH_RISK_FREE_PROXY" if ticker == cash_proxy else series_role
+                ),
                 **per_ticker[ticker],
             }
             for ticker in tickers
         ],
         "output": {
-            "path": OUTPUT_NAME,
+            "path": output_name,
             "sha256": _sha256(output),
             "size_bytes": len(output),
             **{key: value for key, value in coverage.items() if key != "per_ticker"},
@@ -315,9 +356,15 @@ def build_bundle(
 
 
 def write_bundle(
-    catalog_path: Path, source_path: Path, manifest_path: Path, output_root: Path
+    catalog_path: Path,
+    source_path: Path,
+    manifest_path: Path,
+    output_root: Path,
+    universe_ids: Sequence[str] | None = None,
 ) -> dict[str, object]:
-    outputs, manifest = build_bundle(catalog_path, source_path, manifest_path)
+    outputs, manifest = build_bundle(
+        catalog_path, source_path, manifest_path, universe_ids
+    )
     bundle_id = _text(manifest["bundle_id"], "bundle_id")
     destination = output_root.resolve() / bundle_id
     expected = {**outputs, "source-manifest.json": _canonical_json(manifest)}
@@ -354,13 +401,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--yahoo-source", type=Path, required=True)
     parser.add_argument("--yahoo-manifest", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--universe-id", action="append", default=[])
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     result = write_bundle(
-        args.catalog, args.yahoo_source, args.yahoo_manifest, args.output_root
+        args.catalog,
+        args.yahoo_source,
+        args.yahoo_manifest,
+        args.output_root,
+        args.universe_id or None,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

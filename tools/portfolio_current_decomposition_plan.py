@@ -16,7 +16,13 @@ from typing import Any, Mapping, Sequence, cast
 
 BUILDER_VERSION = "0.1.0"
 LENSES = ("ECONOMIC_FACTOR", "ETF_STYLE", "RETURN_INDUSTRY")
-INPUT_KEYS = ("us_factors", "europe_factors", "style_returns", "us_industries")
+INPUT_KEYS = (
+    "us_factors",
+    "europe_factors",
+    "style_returns",
+    "sector_returns",
+    "us_industries",
+)
 TARGET_HEADERS = (
     "series_id",
     "date",
@@ -189,8 +195,15 @@ def _column(candidate: str, policy: str) -> str:
     raise CurrentPlanError(f"unsupported source column policy {policy!r}")
 
 
-def _verify_market_manifest(path: Path, manifest_path: Path) -> None:
+def _verify_market_manifest(
+    path: Path, manifest_path: Path, catalog_sha256: str
+) -> None:
     manifest, _content = _load_json(manifest_path, "market source manifest")
+    catalog = _object(manifest.get("catalog"), "market manifest catalog")
+    if catalog.get("sha256") != catalog_sha256:
+        raise CurrentPlanError(
+            "market manifest catalog differs from the current catalog"
+        )
     expected: dict[str, Any] | None = None
     if isinstance(manifest.get("outputs"), list):
         expected = next(
@@ -335,6 +348,7 @@ def build_bundle(
     market_paths: Mapping[str, Path],
     public_factor_manifest_path: Path,
     style_manifest_path: Path,
+    sector_manifest_path: Path,
 ) -> tuple[dict[str, bytes], dict[str, object]]:
     """Build a deterministic current-strategy planning bundle without writing."""
 
@@ -348,9 +362,17 @@ def build_bundle(
     for path in market_paths.values():
         if path.is_symlink() or not path.is_file():
             raise CurrentPlanError("market input must be a regular file")
+    catalog_sha256 = _sha256(catalog_content)
     for key in ("us_factors", "europe_factors", "us_industries"):
-        _verify_market_manifest(market_paths[key], public_factor_manifest_path)
-    _verify_market_manifest(market_paths["style_returns"], style_manifest_path)
+        _verify_market_manifest(
+            market_paths[key], public_factor_manifest_path, catalog_sha256
+        )
+    _verify_market_manifest(
+        market_paths["style_returns"], style_manifest_path, catalog_sha256
+    )
+    _verify_market_manifest(
+        market_paths["sector_returns"], sector_manifest_path, catalog_sha256
+    )
 
     target_definition = _object(base_spec.get("target_source"), "base.target_source")
     target_path = _verify_definition(base_source_root, target_definition, "base target")
@@ -380,10 +402,12 @@ def build_bundle(
 
     factor_manifest_content = public_factor_manifest_path.read_bytes()
     style_manifest_content = style_manifest_path.read_bytes()
+    sector_manifest_content = sector_manifest_path.read_bytes()
     outputs["inputs/governance/public-factor-source-manifest.json"] = (
         factor_manifest_content
     )
     outputs["inputs/governance/style-source-manifest.json"] = style_manifest_content
+    outputs["inputs/governance/sector-source-manifest.json"] = sector_manifest_content
     generated_provenance.extend(
         (
             _provenance_definition(
@@ -409,6 +433,12 @@ def build_bundle(
                 "inputs/governance/style-source-manifest.json",
                 style_manifest_content,
                 "portfolio-public-style-source-manifest",
+            ),
+            _provenance_definition(
+                "market/sector-source-manifest.json",
+                "inputs/governance/sector-source-manifest.json",
+                sector_manifest_content,
+                "portfolio-public-sector-source-manifest",
             ),
         )
     )
@@ -730,9 +760,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--us-factors", type=Path, required=True)
     parser.add_argument("--europe-factors", type=Path, required=True)
     parser.add_argument("--style-returns", type=Path, required=True)
+    parser.add_argument("--sector-returns", type=Path, required=True)
     parser.add_argument("--us-industries", type=Path, required=True)
     parser.add_argument("--public-factor-manifest", type=Path, required=True)
     parser.add_argument("--style-manifest", type=Path, required=True)
+    parser.add_argument("--sector-manifest", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     return parser
 
@@ -749,10 +781,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "us_factors": args.us_factors,
             "europe_factors": args.europe_factors,
             "style_returns": args.style_returns,
+            "sector_returns": args.sector_returns,
             "us_industries": args.us_industries,
         },
         public_factor_manifest_path=args.public_factor_manifest,
         style_manifest_path=args.style_manifest,
+        sector_manifest_path=args.sector_manifest,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

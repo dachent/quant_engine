@@ -126,20 +126,24 @@ zero.
 
 `tools/portfolio_public_style_sources.py` independently verifies the governed
 Yahoo adjusted-history artifact and its sibling source manifest, derives the
-exact ETF candidate set from the catalog, and publishes content-addressed
-daily returns in catalog order. It uses consecutive observed adjusted closes,
-retains the union of provider dates, and leaves unavailable ticker/date cells
-empty. These series are labeled `ADJUSTED_CLOSE_TOTAL_RETURN_PROXY`: they are
-useful traded style evidence, but they are neither official fund NAV nor
-orthogonal economic factors. BIL is retained as a cash/risk-free proxy and is
-not eligible for a fitted style weight.
+exact requested ETF candidate universe from the catalog, and publishes
+content-addressed daily returns in catalog order. Its default scope is the ETF
+style universes; `--universe-id us-sector-return` creates the separately
+labeled Select Sector return lens. The sector catalog preserves State Street
+as the vehicle and holdings authority while recording Yahoo adjusted history
+as the return-series transport. The normalizer uses consecutive observed
+adjusted closes, retains the union of provider dates, and leaves unavailable
+ticker/date cells empty. These series are labeled
+`ADJUSTED_CLOSE_TOTAL_RETURN_PROXY`: they are useful traded return evidence,
+but they are neither official fund NAV nor orthogonal economic factors. BIL is
+retained as a cash/risk-free proxy and is not eligible for a fitted weight.
 
 `docs/analytics/current-strategy-decomposition-plan.json` is the explicit
 strategy-to-lens routing decision. It prevents a broad source catalog from
 becoming an indiscriminate mega-model. The first current-book assignments are:
 
 - P123 AI Factor: U.S. economic factors, the Russell six-cell ETF style box,
-  and one-factor-at-a-time U.S. industry similarity;
+  and one-factor-at-a-time U.S. sector and industry similarity;
 - P123 EU: European economic factors only;
 - QSI, TT, Volatis, and GrizzlyBears: declared multi-asset ETF style sets;
 - Robuxio: unavailable until an accepted crypto candidate source exists;

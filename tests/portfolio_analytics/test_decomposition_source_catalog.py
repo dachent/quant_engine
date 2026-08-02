@@ -29,6 +29,11 @@ def test_catalog_has_unique_referentially_complete_sources_and_universes() -> No
         candidate_ids = [item["candidate_id"] for item in candidates]
         assert len(candidate_ids) == len(set(candidate_ids))
         assert {item["source_id"] for item in candidates} <= known_sources
+        assert {
+            item["return_source_id"]
+            for item in candidates
+            if "return_source_id" in item
+        } <= known_sources
 
 
 def test_catalog_separates_factor_style_and_industry_lenses() -> None:

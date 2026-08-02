@@ -42,6 +42,14 @@
       "return_type": "TOTAL",
       "column_policy": "CANDIDATE_ID"
     },
+    "us-sector": {
+      "lens": "RETURN_INDUSTRY",
+      "universe_id": "us-sector-return",
+      "input_key": "sector_returns",
+      "risk_free_column": "BIL",
+      "return_type": "TOTAL",
+      "column_policy": "CANDIDATE_ID"
+    },
     "us-industry": {
       "lens": "RETURN_INDUSTRY",
       "universe_id": "us-49-industry-return",
@@ -78,6 +86,11 @@
             ["IWS", "IWP", "IWN", "IWO"],
             ["IWX", "IWY", "IWS", "IWP", "IWN", "IWO"]
           ]
+        },
+        {
+          "source_key": "us-sector",
+          "constraint": "UNCONSTRAINED",
+          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
         },
         {
           "source_key": "us-industry",
