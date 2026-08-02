@@ -15,7 +15,9 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_public_style_sources.py"
-SPEC = importlib.util.spec_from_file_location("portfolio_public_style_sources", MODULE_PATH)
+SPEC = importlib.util.spec_from_file_location(
+    "portfolio_public_style_sources", MODULE_PATH
+)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("unable to load portfolio public style source normalizer")
 sources = importlib.util.module_from_spec(SPEC)

@@ -139,9 +139,11 @@ def _verify_source(
     if columns != list(YAHOO_COLUMNS):
         raise StyleSourceError("Yahoo adjusted-history columns differ")
     source_tickers = source.get("tickers")
-    if not isinstance(source_tickers, list) or set(source_tickers) != set(
-        expected_tickers
-    ) or len(source_tickers) != len(expected_tickers):
+    if (
+        not isinstance(source_tickers, list)
+        or set(source_tickers) != set(expected_tickers)
+        or len(source_tickers) != len(expected_tickers)
+    ):
         raise StyleSourceError("Yahoo requested ticker set differs from the catalog")
 
     if manifest.get("schema_version") != Decimal(1):
