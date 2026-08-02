@@ -994,6 +994,62 @@ def test_material_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
     }
 
 
+def test_hwm_coverage_removes_superseded_exception_when_material_perimeter_is_complete() -> (
+    None
+):
+    coverage = [
+        {
+            "category": "FACT_COVERAGE",
+            "item": "nav",
+            "known_gap": "legacy gap",
+            "status": "PARTIAL",
+            "value": None,
+        },
+        {
+            "category": "RECONCILIATION_EXCEPTION",
+            "item": "full-systematic-hwm-unavailable",
+            "known_gap": "BLOCKING_FOR_AUTOMATED_HWM",
+            "status": "UNAVAILABLE",
+            "value": None,
+        },
+    ]
+    summary = {
+        "excluded_strategies": ["[Composer] - The Holy Grail (Buy Copy)"],
+        "uncovered_strategies": [],
+    }
+
+    accepted = panel._reconcile_hwm_coverage(coverage, summary)
+
+    nav = next(row for row in accepted if row["item"] == "nav")
+    assert nav["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert "1 de minimis strategy" in nav["known_gap"]
+    assert not any(row["item"] == "full-systematic-hwm-unavailable" for row in accepted)
+
+
+def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> None:
+    coverage = [
+        {
+            "category": "FACT_COVERAGE",
+            "item": "nav",
+            "known_gap": None,
+            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+            "value": None,
+        }
+    ]
+    summary = {
+        "excluded_strategies": [],
+        "uncovered_strategies": ["Missing Strategy"],
+    }
+
+    accepted = panel._reconcile_hwm_coverage(coverage, summary)
+
+    exception = next(
+        row for row in accepted if row["item"] == "full-systematic-hwm-unavailable"
+    )
+    assert exception["status"] == "UNAVAILABLE"
+    assert exception["known_gap"].endswith("Missing Strategy")
+
+
 def test_provider_account_nav_overlay_promotes_twr_evidence() -> None:
     strategies = [
         {
