@@ -108,8 +108,20 @@ def clean_text(value: str) -> str:
 
 
 def is_header_line(line: str) -> bool:
-    stripped = line.lstrip()
-    return stripped.startswith(",") and "," in stripped
+    cells = split_csv_line(line)
+    return (
+        len(cells) > 1
+        and cells[0].strip() == ""
+        and any(cell.strip() for cell in cells[1:])
+    )
+
+
+def is_blank_line(line: str) -> bool:
+    if not line.strip():
+        return True
+    if "," not in line:
+        return False
+    return not any(cell.strip() for cell in split_csv_line(line))
 
 
 def split_blocks(text: str) -> list[list[str]]:
@@ -117,7 +129,7 @@ def split_blocks(text: str) -> list[list[str]]:
     current: list[str] = []
     for line in text.splitlines():
         raw_line = line.rstrip("\r")
-        if raw_line.strip():
+        if not is_blank_line(raw_line):
             current.append(raw_line)
         elif current:
             blocks.append(current)
@@ -128,7 +140,10 @@ def split_blocks(text: str) -> list[list[str]]:
 
 
 def split_csv_line(line: str) -> list[str]:
-    return next(csv.reader([line]))
+    cells = next(csv.reader([line]))
+    while len(cells) > 1 and cells[-1].strip() == "":
+        cells.pop()
+    return cells
 
 
 def parse_number(value: str) -> int | float | None:
@@ -189,7 +204,7 @@ def looks_like_title_block(block: list[str], block_text: str) -> bool:
         return False
     if len(block) > 2 or len(block_text) > 180:
         return False
-    if any(line.strip().endswith(".") for line in block):
+    if any(line.rstrip(",").strip().endswith(".") for line in block):
         return False
     return True
 
