@@ -281,6 +281,14 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
     assert float(
         model["diagnostics"]["holdout"]["predicted_r_squared"]
     ) == pytest.approx(1.0, abs=1e-9)
+    training_design = model["diagnostics"]["training_design"]
+    assert training_design["basis"] == "TRAIN_ONLY"
+    assert training_design["matrix_rank"] == 2
+    assert training_design["unregularized_status"] == "ELIGIBLE"
+    assert training_design["vif_status"] == "AVAILABLE"
+    assert training_design["transformation"]["fitted_basis"] == (
+        "RAW_CONFIGURED_FACTOR_RETURNS"
+    )
     assert model["method_label"] == "MPI_INFORMED_NON_EQUIVALENT"
     assert model["coverage"]["target_observed_start"] == days[0].isoformat()
     assert model["coverage"]["target_cumulative_return"] is not None
@@ -365,10 +373,32 @@ def test_holdout_is_not_used_to_fit_or_select_model_or_ridge(tmp_path: Path) -> 
 
     assert changed_model["model_id"] == original_model["model_id"]
     assert changed_model["selected_ridge"] == original_model["selected_ridge"]
+    assert (
+        changed_model["diagnostics"]["training_design"]
+        == (original_model["diagnostics"]["training_design"])
+    )
     assert [item["exposure"] for item in changed_model["exposures"]] == [
         item["exposure"] for item in original_model["exposures"]
     ]
     assert float(changed_model["diagnostics"]["holdout"]["predicted_r_squared"]) < 0
+
+
+def test_design_thresholds_match_the_governed_candidate_catalog() -> None:
+    catalog = json.loads(
+        (
+            REPOSITORY_ROOT / "docs" / "analytics" / "decomposition-source-catalog.json"
+        ).read_text(encoding="utf-8")
+    )
+    policy = catalog["selection_policy"]
+    assert decomposition.NEAR_DUPLICATE_ABSOLUTE_CORRELATION == float(
+        policy["near_duplicate_absolute_correlation"]
+    )
+    assert decomposition.UNREGULARIZED_VIF_LIMIT == float(
+        policy["unregularized_vif_limit"]
+    )
+    assert decomposition.UNREGULARIZED_CONDITION_NUMBER_LIMIT == float(
+        policy["unregularized_condition_number_limit"]
+    )
 
 
 def test_coverage_separates_missing_weekday_and_weekend_and_short_history(
@@ -409,9 +439,39 @@ def test_singular_stale_cost_and_evidence_fail_closed(tmp_path: Path) -> None:
     )
     singular_model = _available(singular_result)
     assert singular_model["diagnostics"]["rank_status"] == "SINGULAR_PSEUDOINVERSE"
+    assert float(singular_model["selected_ridge"]) > 0
+    singular_design = singular_model["diagnostics"]["training_design"]
+    assert singular_design["matrix_rank"] == 1
+    assert singular_design["unregularized_status"] == "BLOCKED_COLLINEAR_DESIGN"
+    assert singular_design["near_duplicate_pairs"][0]["factor_ids"] == [
+        "factor-one",
+        "factor-two",
+    ]
+    assert singular_model["ridge_sensitivity"][0]["eligibility"] == (
+        "BLOCKED_COLLINEAR_UNREGULARIZED_DESIGN"
+    )
     assert (
         singular_model["alpha"]["confidence_status"]
         == "UNAVAILABLE_METHOD_NOT_CLASSICAL_OLS"
+    )
+
+    blocked_root = tmp_path / "blocked-singular"
+    blocked_target, blocked_days = _write_sources(blocked_root, identical_factors=True)
+    blocked_model = _model(blocked_days)
+    blocked_model["ridge_candidates"] = ["0"]
+    blocked_spec = _spec(
+        blocked_root,
+        blocked_target,
+        blocked_days,
+        models=[blocked_model],
+    )
+    blocked_result, _manifest, _content = decomposition.build_decomposition(
+        blocked_spec, blocked_root
+    )
+    blocked = cast(list[dict[str, Any]], blocked_result["model_results"])[0]
+    assert blocked["status"] == "UNAVAILABLE_COLLINEAR_UNREGULARIZED_DESIGN"
+    assert blocked["diagnostics"]["training_design"]["vif_status"] == (
+        "UNAVAILABLE_SINGULAR_OR_CONSTANT_DESIGN"
     )
 
     stale_root = tmp_path / "stale"
