@@ -87,13 +87,15 @@ $strategyEvidence = "<hash-bound current-strategy-provider-evidence.json>"
 $lensRoot = Join-Path $engine "dataPortfolio\analytics\decomposition-lenses"
 $planBundle = "<hash-bound decomposition planning bundle>"
 $weekly = Join-Path $engine "dataPortfolio\analytics\weekly-returns"
+$freshness = Join-Path $engine "dataPortfolio\releases\freshness-health.json"
 
 uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
   --report-root $report --legacy-panel $legacy --output-root $output `
   --strategy-evidence $strategyEvidence `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
-  --weekly-returns-root $weekly
+  --weekly-returns-root $weekly `
+  --freshness-health $freshness
 ```
 
 The command resolves the accepted analytics roots as siblings of `reporting`:
@@ -114,7 +116,8 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
   --candidate-dir <candidate-directory> `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
-  --weekly-returns-root $weekly
+  --weekly-returns-root $weekly `
+  --freshness-health $freshness
 ```
 
 The verifier proves all nine views, local-only assets, lack of network or
@@ -181,7 +184,8 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --strategy-evidence $strategyEvidence `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
-  --weekly-returns-root $weekly
+  --weekly-returns-root $weekly `
+  --freshness-health $freshness
 ```
 
 Publication hash-binds the accepted portfolio, decomposition, correlation, and

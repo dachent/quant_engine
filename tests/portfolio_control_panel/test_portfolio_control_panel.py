@@ -1075,6 +1075,68 @@ def test_source_drift_fails_closed(inputs: dict[str, Path]) -> None:
         panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
 
 
+def test_freshness_health_is_visible_with_dates_and_reason(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    health = tmp_path / "freshness-health.json"
+    _write_json(
+        health,
+        {
+            "assessment_schema_version": 1,
+            "as_of_date": "2026-07-30",
+            "assessments": [
+                {
+                    "acquired_at": "2026-07-30T12:00:00+00:00",
+                    "blocks_current_consumers": False,
+                    "escalation_required": True,
+                    "evaluated_on": "2026-07-30",
+                    "fact_type": "nav",
+                    "last_accepted_date": "2026-07-28",
+                    "next_expected_date": "2026-07-29",
+                    "policy_id": "daily-current",
+                    "provider_id": "synthetic",
+                    "reason": "expected refresh is late but not yet stale",
+                    "revision_state": "REVISED",
+                    "state": "LATE",
+                    "subject_id": "account-internal-1",
+                }
+            ],
+        },
+    )
+
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=health,
+    )
+    data = json.loads(
+        (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    freshness = [row for row in data["coverage"] if row["category"] == "DATA_FRESHNESS"]
+
+    assert freshness == [
+        {
+            "acquired_at": "2026-07-30T12:00:00+00:00",
+            "blocks_current_consumers": False,
+            "category": "DATA_FRESHNESS",
+            "escalation_required": True,
+            "item": "synthetic:account-internal-1:nav",
+            "known_gap": (
+                "next expected 2026-07-29; expected refresh is late but not yet stale"
+            ),
+            "next_expected_date": "2026-07-29",
+            "policy_id": "daily-current",
+            "reason": "expected refresh is late but not yet stale",
+            "revision_state": "REVISED",
+            "status": "LATE",
+            "value": "2026-07-28",
+        }
+    ]
+
+
 def test_candidate_tamper_fails_closed(inputs: dict[str, Path]) -> None:
     result = panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
     candidate = Path(result["candidate_dir"])

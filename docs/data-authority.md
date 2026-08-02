@@ -55,6 +55,14 @@ their historical interval is old. Fidelity's bounded static history is the
 canonical example. A later source is a new generation or revision, not an
 in-place edit.
 
+`FreshnessPolicy.assess` records the last accepted date, expected next date,
+evaluation date, acquisition timestamp, original/revised state, human-readable
+reason, escalation flag, and whether current consumers must block. Local alert
+hooks return deterministic warning/error records without sending an external
+notification. A panel freshness bundle uses
+`schemas/core/freshness-assessment.schema.json`; its rows appear in the Data
+view with the accepted date, next due date, state, and reason.
+
 ## Failure and recovery
 
 Authority catalogs and sidecars are deterministic, closed-schema artifacts.
@@ -66,3 +74,4 @@ Schemas:
 
 - `schemas/core/fact-authority-catalog.schema.json`
 - `schemas/core/generation-evidence.schema.json`
+- `schemas/core/freshness-assessment.schema.json`

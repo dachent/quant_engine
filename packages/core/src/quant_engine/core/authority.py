@@ -53,6 +53,13 @@ class RevisionPolicy(StrEnum):
     FINITE_STATIC = "FINITE_STATIC"
 
 
+class RevisionState(StrEnum):
+    """Whether accepted provider evidence supersedes an earlier generation."""
+
+    ORIGINAL = "ORIGINAL"
+    REVISED = "REVISED"
+
+
 class PublicationDisposition(StrEnum):
     """Publication state of evidence offered to a consumer."""
 
@@ -443,6 +450,42 @@ class FreshnessPolicy:
             return FreshnessState.LATE
         return FreshnessState.STALE
 
+    def assess(
+        self,
+        observed_end: date | None,
+        as_of_date: date,
+        evidence: GenerationEvidence | None = None,
+    ) -> FreshnessAssessment:
+        state = self.evaluate(observed_end, as_of_date)
+        reasons = {
+            FreshnessState.FRESH: "accepted observation is within cadence and grace",
+            FreshnessState.LATE: "expected refresh is late but not yet stale",
+            FreshnessState.STALE: "accepted observation exceeded the stale boundary",
+            FreshnessState.FINITE_COMPLETE: (
+                "finite historical boundary is complete and has no recurring due date"
+            ),
+            FreshnessState.UNAVAILABLE: "no accepted observation is available",
+        }
+        return FreshnessAssessment(
+            policy_id=self.policy_id,
+            state=state,
+            evaluated_on=as_of_date,
+            last_accepted_date=observed_end,
+            next_expected_date=self.next_expected_date(observed_end),
+            acquired_at=evidence.acquired_at if evidence is not None else None,
+            revision_state=(
+                RevisionState.REVISED
+                if evidence is not None
+                and evidence.supersedes_generation_id is not None
+                else RevisionState.ORIGINAL
+            ),
+            escalation_required=state
+            in {FreshnessState.LATE, FreshnessState.STALE, FreshnessState.UNAVAILABLE},
+            blocks_current_consumers=state
+            in {FreshnessState.STALE, FreshnessState.UNAVAILABLE},
+            reason=reasons[state],
+        )
+
     def next_expected_date(self, observed_end: date | None) -> date | None:
         if observed_end is None or self.mode is FreshnessMode.FINITE:
             return None
@@ -487,6 +530,98 @@ class FreshnessPolicy:
             grace_days=value["grace_days"],
             stale_after_days=value["stale_after_days"],
         )
+
+
+@dataclass(frozen=True)
+class FreshnessAssessment:
+    """Operator-visible, serializable result for one fact policy."""
+
+    policy_id: str
+    state: FreshnessState
+    evaluated_on: date
+    last_accepted_date: date | None
+    next_expected_date: date | None
+    acquired_at: datetime | None
+    revision_state: RevisionState
+    escalation_required: bool
+    blocks_current_consumers: bool
+    reason: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "policy_id", _identifier(self.policy_id, "policy_id"))
+        object.__setattr__(self, "reason", _non_empty(self.reason, "reason"))
+        if self.acquired_at is not None and (
+            self.acquired_at.tzinfo is None or self.acquired_at.utcoffset() is None
+        ):
+            raise ManifestValidationError(
+                "freshness acquired_at must be timezone-aware"
+            )
+        if (
+            self.last_accepted_date is not None
+            and self.last_accepted_date > self.evaluated_on
+        ):
+            raise ManifestValidationError("freshness observation is after evaluation")
+        if self.state is FreshnessState.FINITE_COMPLETE:
+            if self.next_expected_date is not None:
+                raise ManifestValidationError("finite freshness cannot be next-due")
+            if self.blocks_current_consumers or self.escalation_required:
+                raise ManifestValidationError("finite-complete history cannot escalate")
+        if self.state in {FreshnessState.STALE, FreshnessState.UNAVAILABLE}:
+            if not self.blocks_current_consumers or not self.escalation_required:
+                raise ManifestValidationError("stale/unavailable freshness must block")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "acquired_at": (
+                self.acquired_at.isoformat() if self.acquired_at is not None else None
+            ),
+            "blocks_current_consumers": self.blocks_current_consumers,
+            "escalation_required": self.escalation_required,
+            "evaluated_on": self.evaluated_on.isoformat(),
+            "last_accepted_date": (
+                self.last_accepted_date.isoformat()
+                if self.last_accepted_date is not None
+                else None
+            ),
+            "next_expected_date": (
+                self.next_expected_date.isoformat()
+                if self.next_expected_date is not None
+                else None
+            ),
+            "policy_id": self.policy_id,
+            "reason": self.reason,
+            "revision_state": self.revision_state.value,
+            "state": self.state.value,
+        }
+
+
+@dataclass(frozen=True)
+class FreshnessAlert:
+    policy_id: str
+    state: FreshnessState
+    severity: str
+    message: str
+
+
+def local_freshness_alerts(
+    assessments: Iterable[FreshnessAssessment],
+) -> tuple[FreshnessAlert, ...]:
+    """Create deterministic local alert hooks without an external side effect."""
+
+    alerts = []
+    for assessment in assessments:
+        if not assessment.escalation_required:
+            continue
+        severity = "ERROR" if assessment.blocks_current_consumers else "WARNING"
+        alerts.append(
+            FreshnessAlert(
+                assessment.policy_id,
+                assessment.state,
+                severity,
+                assessment.reason,
+            )
+        )
+    return tuple(sorted(alerts, key=lambda item: (item.severity, item.policy_id)))
 
 
 @dataclass(frozen=True)
