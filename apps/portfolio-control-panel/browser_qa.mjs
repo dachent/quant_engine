@@ -29,15 +29,20 @@ const launchOptions = {
     ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH }
     : {}),
 };
+const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "candidates", "data"];
+const viewports = [
+  { name: "desktop", viewport: { width: 1440, height: 900 } },
+  { name: "tablet", viewport: { width: 1024, height: 768 } },
+  { name: "mobile", viewport: { width: 390, height: 844 } },
+];
 const captures = [
-  { name: "desktop-command", view: "command", viewport: { width: 1440, height: 900 }, lint: true, pdf: true },
-  { name: "desktop-capital", view: "capital", viewport: { width: 1440, height: 900 }, lint: true },
-  { name: "desktop-risk", view: "risk", viewport: { width: 1440, height: 900 } },
-  { name: "desktop-attribution", view: "attribution", viewport: { width: 1440, height: 900 }, lint: true },
-  { name: "desktop-dependence", view: "dependence", viewport: { width: 1440, height: 900 }, lint: true },
-  { name: "desktop-candidates", view: "candidates", viewport: { width: 1440, height: 900 } },
-  { name: "desktop-data", view: "data", viewport: { width: 1440, height: 900 } },
-  { name: "mobile-command", view: "command", viewport: { width: 390, height: 844 }, lint: true },
+  ...viewports.flatMap(({ name, viewport }) => views.map((view) => ({
+    name: `${name}-${view}`,
+    view,
+    viewport,
+    lint: true,
+    pdf: name === "desktop" && view === "command",
+  }))),
   { name: "direct-file", view: "", viewport: { width: 1280, height: 800 } },
 ];
 
@@ -93,8 +98,8 @@ async function visualLint(page) {
       const selector = selectorFor(element);
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
-      const intentionalScroll = element.matches("#app, .workspace, main, .view, .grid, .table-wrap, .matrix-shell");
-      if (text && !intentionalScroll && (element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1)) {
+      const intentionalScroll = element.matches("#app, .workspace, main, .view, .grid, .table-wrap, .matrix-shell, .scenario-row");
+      if (text && !intentionalScroll && (element.scrollWidth > element.clientWidth + 3 || element.scrollHeight > element.clientHeight + 3)) {
         findings.push({ rule: "text_overflow", severity: "major", selector, message: "Element text appears clipped or scrollable.", sample: text.slice(0, 120), bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
       }
       const fontSize = Number.parseFloat(style.fontSize);

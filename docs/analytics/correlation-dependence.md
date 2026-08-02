@@ -6,11 +6,12 @@ that must not be collapsed into one number:
 
 1. measured Pearson correlation on compatible exact-date observations;
 2. measured Spearman rank dependence;
-3. rolling, downside, and joint-tail diagnostics;
-4. explicitly conceptual priors;
-5. capped observed/prior posterior and stress matrices projected to positive
+3. trailing 5, 21, 22, 63, 126, 130, 252, and 260-observation matrices;
+4. rolling, negative-return, true drawdown-regime, and joint-tail diagnostics;
+5. explicitly conceptual priors;
+6. capped observed/prior posterior and stress matrices projected to positive
    semidefinite correlation matrices; and
-6. a separate correlation-one loss bound.
+7. a separate correlation-one loss bound.
 
 Missing series, short overlaps, constants, and incompatible evidence layers do
 not receive inferred correlations. Their observed cells are `UNAVAILABLE`.
@@ -29,8 +30,10 @@ series_id,date,return,evidence_layer
 ```
 
 Each series has one evidence layer and at most one observation per ISO date.
-Pairs are joined on exact dates without interpolation, forward fill, calendar
-coercion, or frequency conversion. Each observed cell records common and total
+Pairs are joined on exact accepted weekday dates without interpolation,
+forward fill, holiday inference, or frequency conversion. Weekend rows are
+excluded from trading-observation windows; this prevents stale weekend zeros
+from being counted as equity-market sessions. Each observed cell records common and total
 counts, start/end, missing dates on both sides, frequency, and evidence layer.
 
 The JSON specification enumerates every requested series and every conceptual
@@ -40,8 +43,12 @@ instrument/provider/venue mappings, and correlation-one component losses.
 Correlation-one weights must sum to 100%, and the calculated adverse loss must
 reconcile to the accepted expected loss within the declared tolerance.
 
-Downside correlation uses common dates on which either series has a negative
-return. Joint-tail dependence uses each series' configured lower quantile and
+The legacy negative-return statistic remains separately labeled `downside`; it
+is not a drawdown measure. Drawdown regimes compound each series into a wealth
+index and select common observations when either or both wealth indices are
+below their prior running high-water marks. Each regime reports its rule,
+sample, and exact observed interval. Joint-tail dependence uses each series'
+configured lower quantile and
 reports the observed joint-day count relative to independence. Rolling windows
 are observation windows on the already exact-date common sample; they are not
 called calendar days.

@@ -33,7 +33,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 ANALYTICS_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.0.0"
+BUILDER_VERSION: Final = "1.1.0"
 METHODOLOGY_VERSION: Final = "ANL-DECOMP-STATIC-1"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
 METHODOLOGY_PATH: Final = (
@@ -711,6 +711,15 @@ def _metrics(
     }
 
 
+def _annualize_coefficient_standard_error(
+    periodic_standard_error: float | None, periods_per_year: int
+) -> float | None:
+    """Apply the same linear transform used for an annualized coefficient."""
+    if periodic_standard_error is None:
+        return None
+    return periodic_standard_error * periods_per_year
+
+
 def _unavailable_result(
     model: ModelDefinition,
     rows: Sequence[TargetRow] | None,
@@ -975,10 +984,9 @@ def _model_result(
             gross_alpha = (fit.intercept + periodic_cost) * model.periods_per_year
             gross_status = "AVAILABLE_COMPLETE_COST_CONVERSION"
 
-    alpha_standard_error = (
-        None
-        if standard_errors is None
-        else float(standard_errors[0]) * math.sqrt(model.periods_per_year)
+    alpha_standard_error = _annualize_coefficient_standard_error(
+        None if standard_errors is None else float(standard_errors[0]),
+        model.periods_per_year,
     )
     return {
         "alpha": {
@@ -1039,11 +1047,18 @@ def _select_models(
         for result in results:
             if result["series_id"] != series_id or result["status"] != "AVAILABLE":
                 continue
-            diagnostics = cast(dict[str, Any], result["diagnostics"])
-            holdout = cast(dict[str, Any], diagnostics["holdout"])
-            score = holdout["predicted_r_squared"]
-            if score is not None:
-                available.append((result, float(score)))
+            selected_ridge = result["selected_ridge"]
+            sensitivity = cast(list[dict[str, Any]], result["ridge_sensitivity"])
+            selected_cv = next(
+                (
+                    item["cv_predicted_r_squared"]
+                    for item in sensitivity
+                    if item["ridge"] == selected_ridge
+                ),
+                None,
+            )
+            if selected_cv is not None:
+                available.append((result, float(selected_cv)))
         if not available:
             selections.append(
                 {
@@ -1060,7 +1075,7 @@ def _select_models(
             if best_score - item[1]
             <= definitions[cast(str, item[0]["model_id"])].parsimony_tolerance
         ]
-        selected, score = min(
+        selected, selection_score = min(
             eligible,
             key=lambda item: (
                 len(cast(list[object], item[0]["factor_ids"])),
@@ -1068,13 +1083,16 @@ def _select_models(
             ),
         )
         selected["selected_for_series"] = True
+        diagnostics = cast(dict[str, Any], selected["diagnostics"])
+        holdout = cast(dict[str, Any], diagnostics["holdout"])
         selections.append(
             {
                 "factor_count": len(cast(list[object], selected["factor_ids"])),
-                "holdout_predicted_r_squared": _number(score),
+                "holdout_predicted_r_squared": holdout["predicted_r_squared"],
                 "model_id": selected["model_id"],
+                "selection_cv_predicted_r_squared": _number(selection_score),
                 "series_id": series_id,
-                "status": "SELECTED_PARSIMONIOUS_HOLDOUT_MODEL",
+                "status": "SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL",
             }
         )
     return selections

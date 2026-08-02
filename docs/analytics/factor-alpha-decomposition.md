@@ -21,8 +21,9 @@ Ridge candidates are compared using expanding, time-ordered validation blocks.
 The final model is fitted only through `train_end` and evaluated from
 `test_start`; holdout Predicted R-squared uses the training mean as its naive
 forecast, so the holdout mean is not leaked. Competing factor sets for the same
-series are selected by holdout Predicted R-squared, with fewer factors winning
-within the declared parsimony tolerance.
+series are selected only by expanding training-window cross-validation, with
+fewer factors winning within the declared parsimony tolerance. The displayed
+holdout is therefore not consumed by ridge or factor-set selection.
 
 The output includes factor exposures, arithmetic periodic contributions,
 intercept/alpha, residuals, tracking error, in-sample R-squared and adjusted
@@ -34,7 +35,8 @@ excess return. Negative Predicted R-squared remains negative.
 Gross and net alpha are not silently interchanged. The observed return basis is
 always available when the model is available. Conversion to the other basis is
 reported only when every aligned observation has an accepted cost value.
-Classical coefficient standard errors are reported only for a full-rank,
+Annualized coefficient standard errors receive the same linear annualization
+transform as the reported periodic coefficient. Classical coefficient standard errors are reported only for a full-rank,
 unconstrained, unregularized fit; otherwise confidence is explicitly
 `UNAVAILABLE_METHOD_NOT_CLASSICAL_OLS`.
 

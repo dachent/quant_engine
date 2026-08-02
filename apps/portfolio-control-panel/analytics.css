@@ -4,6 +4,65 @@
   color: var(--text-soft);
 }
 
+.coverage-status-row {
+  border-bottom: 1px solid var(--line);
+  padding: 0.7rem 0;
+}
+
+.coverage-status-row:last-child {
+  border-bottom: 0;
+}
+
+.analytics-window-control {
+  display: grid;
+  gap: 0.55rem;
+  margin-bottom: 1rem;
+}
+
+.analytics-window-control .segmented {
+  flex-wrap: wrap;
+}
+
+th {
+  font-size: 12px;
+}
+
+.callout {
+  background: #132230;
+  color: #e5eef2;
+}
+
+.callout-danger {
+  background: #291c22;
+  color: #ffe3e5;
+}
+
+.validation-score .status-text.danger {
+  color: var(--danger);
+}
+
+.kpi-value,
+.validation-score,
+.section-intro h2 {
+  overflow-wrap: anywhere;
+}
+
+.section-intro > div,
+.scenario-row > * {
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .section-intro {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .section-intro > p {
+    max-width: none;
+  }
+}
+
 .strategy-selector {
   display: flex;
   flex-wrap: wrap;

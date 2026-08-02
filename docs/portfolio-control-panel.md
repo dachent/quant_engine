@@ -16,7 +16,8 @@ without preserving stale calculations or hard-coded operator conclusions.
   `dataPortfolio/analytics/decomposition` generation. The static method is
   labeled `MPI_INFORMED_NON_EQUIVALENT`; it is not proprietary MPI output or
   Dynamic Style Analysis.
-- Observed Pearson/Spearman cells, conceptual priors, posterior/stress
+- Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
+  matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come
   only from the accepted `dataPortfolio/analytics/correlation` generation and
   remain separately labeled.
@@ -72,7 +73,7 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
 
 The verifier proves all eight views, local-only assets, lack of network or
 trade code, accepted capital/risk replay, nine-strategy boundary, 19 account
-identities, five validated/four unavailable factor results, 10 measured/26
+identities, five pipeline-available/four unavailable static factor results, 10 measured/26
 unavailable dependence pairs, explicit unavailable facts, and frozen-appendix
 isolation.
 
@@ -97,12 +98,13 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py qa `
   --candidate-dir <candidate-directory> --qa-dir $qa
 ```
 
-Acceptance requires desktop Command, Capital, Risk, Factor & alpha, Dependence,
-Candidates, Data health, mobile Command, and direct-file captures; no console
-or request failures; clean Command, Capital, Factor & alpha, Dependence, and mobile
-visual lint; PDF export; eight-view navigation; factor selection; matrix
-selection and cell drill-down; allocation filters; current-position
-attribution; candidate filter/search; a responsive provenance control; and
+Acceptance requires all eight views at 1440×900, 1024×768, and 390×844 plus a
+direct-file capture; no console or request failures; clean visual lint across
+all 24 viewport/view combinations; PDF export; eight-view navigation; factor
+selection; full-overlap, requested-horizon, and drawdown-regime matrix
+selection with cell drill-down; allocation filters; current-position
+attribution separated from historical General intervals; candidate
+filter/search; a responsive provenance control; and
 absence of execution controls. Screenshots must also be inspected visually
 before publication.
 

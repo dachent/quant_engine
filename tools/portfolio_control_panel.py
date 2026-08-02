@@ -33,6 +33,11 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 PANEL_SCHEMA_VERSION: Final = 3
 BUILDER_VERSION: Final = "1.3.0"
+DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
+DEPENDENCE_DRAWDOWN_REGIMES: Final = (
+    "either_strategy_underwater",
+    "both_strategies_underwater",
+)
 SOURCE_CONTRACT = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -59,23 +64,12 @@ VIEWS: Final = (
     "candidates",
     "data",
 )
-CAPTURES: Final = (
-    "desktop-command",
-    "desktop-capital",
-    "desktop-risk",
-    "desktop-attribution",
-    "desktop-dependence",
-    "desktop-candidates",
-    "desktop-data",
-    "mobile-command",
-    "direct-file",
-)
-LINT_CAPTURES: Final = (
-    "desktop-command",
-    "desktop-capital",
-    "desktop-attribution",
-    "desktop-dependence",
-    "mobile-command",
+_QA_VIEWPORTS: Final = ("desktop", "tablet", "mobile")
+CAPTURES: Final = tuple(
+    f"{viewport}-{view}" for viewport in _QA_VIEWPORTS for view in VIEWS
+) + ("direct-file",)
+LINT_CAPTURES: Final = tuple(
+    f"{viewport}-{view}" for viewport in _QA_VIEWPORTS for view in VIEWS
 )
 
 
@@ -469,6 +463,35 @@ def _dependence_analysis(
         ):
             raise ControlPanelValidationError(f"matrix {name} column count differs")
 
+    horizon_matrices = _object(
+        dependence.get("horizon_matrices"), "dependence.horizon_matrices"
+    )
+    if set(horizon_matrices) != set(DEPENDENCE_HORIZONS):
+        raise ControlPanelValidationError("dependence horizon matrix set differs")
+    drawdown_matrices = _object(
+        dependence.get("drawdown_matrices"), "dependence.drawdown_matrices"
+    )
+    if set(drawdown_matrices) != set(DEPENDENCE_DRAWDOWN_REGIMES):
+        raise ControlPanelValidationError("dependence drawdown matrix set differs")
+    for group_name, group in (
+        ("horizon", horizon_matrices),
+        ("drawdown", drawdown_matrices),
+    ):
+        for name, matrix_value in group.items():
+            matrix = _object(matrix_value, f"{group_name}_matrices.{name}")
+            values = matrix.get("values")
+            if not isinstance(values, list) or len(values) != len(series_ids):
+                raise ControlPanelValidationError(
+                    f"{group_name} matrix {name} row count differs"
+                )
+            if any(
+                not isinstance(row, list) or len(row) != len(series_ids)
+                for row in values
+            ):
+                raise ControlPanelValidationError(
+                    f"{group_name} matrix {name} column count differs"
+                )
+
     observed = _objects(dependence.get("observed_cells"), "observed_cells")
     blends = _objects(dependence.get("blend_cells"), "blend_cells")
     implementation = _objects(
@@ -529,6 +552,8 @@ def _dependence_analysis(
         "cells": cells,
         "correlation_one": correlation_one,
         "generation_id": identity["generation_id"],
+        "drawdown_matrices": drawdown_matrices,
+        "horizon_matrices": horizon_matrices,
         "matrices": matrices,
         "pair_count": expected_cells,
         "series_ids": series_ids,
@@ -1120,7 +1145,9 @@ def verify_candidate(
             "Accepted dependence evidence is exact",
             data["dependence_analysis"]["pair_count"] == 36
             and data["dependence_analysis"]["available_pair_count"] == 10
-            and len(data["dependence_analysis"]["matrices"]) == 6,
+            and len(data["dependence_analysis"]["matrices"]) == 6
+            and len(data["dependence_analysis"]["horizon_matrices"]) == 8
+            and len(data["dependence_analysis"]["drawdown_matrices"]) == 2,
             {
                 "available_pairs": data["dependence_analysis"]["available_pair_count"],
                 "generation": data["meta"]["correlation_generation_id"],
@@ -1276,6 +1303,41 @@ def _copy_exact(source: Path, destination: Path) -> None:
         os.fsync(output_handle.fileno())
 
 
+def _publish_current_launcher(output_root: Path, generation_id: str) -> str:
+    """Atomically update the stable local entry point after pointer publication."""
+    if not re.fullmatch(r"[0-9a-f]{64}", generation_id):
+        raise ControlPanelValidationError("launcher generation ID is invalid")
+    launcher = output_root / "index.html"
+    if launcher.is_symlink():
+        raise ControlPanelValidationError("stable launcher cannot be a link")
+    target = f"generations/{generation_id}/index.html"
+    content = (
+        "<!doctype html>\n"
+        '<html lang="en"><head><meta charset="utf-8" />'
+        '<meta name="viewport" content="width=device-width,initial-scale=1" />'
+        '<meta name="robots" content="noindex,nofollow" />'
+        '<meta http-equiv="refresh" content="0; url=' + target + '" />'
+        "<title>V Capital — Current Portfolio Control</title></head>"
+        '<body><main><h1>Opening the current accepted portfolio snapshot</h1>'
+        '<p>This stable local launcher currently resolves to immutable generation '
+        + generation_id
+        + '.</p><p><a href="'
+        + target
+        + '">Open the accepted snapshot</a></p></main>'
+        '<script>location.replace("./'
+        + target
+        + '");</script></body></html>\n'
+    ).encode("utf-8")
+    output_root.mkdir(parents=True, exist_ok=True)
+    temporary = output_root / f".index-{generation_id}.tmp"
+    try:
+        _write_exact(temporary, content)
+        os.replace(temporary, launcher)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return hashlib.sha256(content).hexdigest()
+
+
 def publish_panel(
     report_root: Path,
     legacy_panel: Path,
@@ -1382,14 +1444,17 @@ def publish_panel(
     for path in qa_files:
         _copy_exact(path, generation_dir / "qa" / path.relative_to(qa_dir))
     pointer = publish_generation(output_root, manifest.generation_id)
+    launcher_hash = _publish_current_launcher(output_root, manifest.generation_id)
     return {
         "browser_checks": qa["checks_total"],
         "correlation_generation_id": data["meta"]["correlation_generation_id"],
         "decomposition_generation_id": data["meta"]["decomposition_generation_id"],
         "generation_id": manifest.generation_id,
+        "launcher_sha256": launcher_hash,
         "panel_id": verification["panel_id"],
         "publication_state": pointer.state.value,
         "report_generation_id": verification["report_generation_id"],
+        "stable_launcher": str(output_root / "index.html"),
     }
 
 

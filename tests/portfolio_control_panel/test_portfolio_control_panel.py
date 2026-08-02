@@ -222,7 +222,7 @@ def _decomposition() -> dict[str, object]:
                 "model_id": model_id,
                 "series_id": series_id,
                 "status": (
-                    "SELECTED_PARSIMONIOUS_HOLDOUT_MODEL"
+                    "SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL"
                     if model_id
                     else "UNAVAILABLE_NO_VALIDATED_MODEL"
                 ),
@@ -382,6 +382,41 @@ def _correlation() -> dict[str, object]:
                         "observations": 30 if available else 0,
                         "status": "AVAILABLE" if available else "UNAVAILABLE",
                     },
+                    "drawdown_regimes": {
+                        "both_strategies_underwater": {
+                            "conditioning_rule": "BOTH_WEALTH_INDICES_BELOW_PRIOR_RUNNING_HWM",
+                            "correlation": "0.35" if available else None,
+                            "observations": 25 if available else 0,
+                            "observed_end": "2026-07-30" if available else None,
+                            "observed_start": "2026-02-02" if available else None,
+                            "status": "AVAILABLE" if available else "UNAVAILABLE",
+                        },
+                        "either_strategy_underwater": {
+                            "conditioning_rule": "EITHER_WEALTH_INDEX_BELOW_PRIOR_RUNNING_HWM",
+                            "correlation": "0.4" if available else None,
+                            "observations": 40 if available else 0,
+                            "observed_end": "2026-07-30" if available else None,
+                            "observed_start": "2026-01-15" if available else None,
+                            "status": "AVAILABLE" if available else "UNAVAILABLE",
+                        },
+                    },
+                    "horizons": {
+                        str(horizon): {
+                            "correlation": (
+                                "0.5" if available and horizon <= 63 else None
+                            ),
+                            "observations": min(80, horizon) if available else 0,
+                            "observed_end": "2026-07-30" if available else None,
+                            "observed_start": "2026-01-02" if available else None,
+                            "status": (
+                                "AVAILABLE"
+                                if available and horizon <= 63
+                                else "UNAVAILABLE_INSUFFICIENT_HISTORY"
+                            ),
+                            "window_observations": horizon,
+                        }
+                        for horizon in (5, 21, 22, 63, 126, 130, 252, 260)
+                    },
                     "joint_tail": {
                         "joint_days": 4 if available else 0,
                         "left_threshold": "-0.02" if available else None,
@@ -451,6 +486,26 @@ def _correlation() -> dict[str, object]:
                 "status": "AVAILABLE_RECONCILED_SEPARATE_CONSERVATIVE_BOUND",
             },
             "implementation_cells": implementation,
+            "drawdown_matrices": {
+                "both_strategies_underwater": {
+                    "classification": "MEASURED_CONDITIONED_ON_PAIR_WEALTH_DRAWDOWN_STATE",
+                    "conditioning_rule": "BOTH_WEALTH_INDICES_BELOW_PRIOR_RUNNING_HWM",
+                    "values": matrix("0.35"),
+                },
+                "either_strategy_underwater": {
+                    "classification": "MEASURED_CONDITIONED_ON_PAIR_WEALTH_DRAWDOWN_STATE",
+                    "conditioning_rule": "EITHER_WEALTH_INDEX_BELOW_PRIOR_RUNNING_HWM",
+                    "values": matrix("0.4"),
+                },
+            },
+            "horizon_matrices": {
+                str(horizon): {
+                    "classification": "MEASURED_WEEKDAY_OBSERVATION_WINDOW",
+                    "values": matrix("0.5" if horizon <= 63 else None),
+                    "window_observations": horizon,
+                }
+                for horizon in (5, 21, 22, 63, 126, 130, 252, 260)
+            },
             "matrices": {
                 "conceptual_prior": {
                     "classification": "CONCEPTUAL_NOT_MEASURED",
@@ -745,6 +800,14 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
     generation = inputs["output"] / "generations" / pointer.generation_id
     assert (generation / "index.html").is_file()
     assert (generation / "qa" / "qa-validation.json").is_file()
+    launcher = inputs["output"] / "index.html"
+    assert launcher.is_file()
+    launcher_text = launcher.read_text(encoding="utf-8")
+    assert f"generations/{pointer.generation_id}/index.html" in launcher_text
+    assert published["stable_launcher"] == str(launcher)
+    assert published["launcher_sha256"] == hashlib.sha256(
+        launcher.read_bytes()
+    ).hexdigest()
 
 
 def test_browser_qa_rejects_console_error(

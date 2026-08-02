@@ -202,6 +202,9 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
     )
     assert model["alpha"]["net_status"] == "AVAILABLE_OBSERVED_BASIS"
     assert model["alpha"]["gross_status"] == "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
+    assert decomposition._annualize_coefficient_standard_error(
+        0.0004, 252
+    ) == pytest.approx(0.1008)
     assert float(
         model["diagnostics"]["holdout"]["predicted_r_squared"]
     ) == pytest.approx(1.0, abs=1e-9)
@@ -256,10 +259,14 @@ def test_simplex_and_parsimony_selection_recover_known_truth(tmp_path: Path) -> 
     assert selection["factor_count"] == 1
 
 
-def test_holdout_is_not_used_to_fit_or_select_ridge(tmp_path: Path) -> None:
+def test_holdout_is_not_used_to_fit_or_select_model_or_ridge(tmp_path: Path) -> None:
     source = tmp_path / "source"
     target_path, days = _write_sources(source)
-    spec_path = _spec(source, target_path, days)
+    models = [
+        _model(days, model_id="one-factor", factors=["factor-one"]),
+        _model(days, model_id="two-factor"),
+    ]
+    spec_path = _spec(source, target_path, days, models=models)
     original, _manifest, _content = decomposition.build_decomposition(spec_path, source)
     original_model = _available(original)
 
@@ -270,12 +277,13 @@ def test_holdout_is_not_used_to_fit_or_select_ridge(tmp_path: Path) -> None:
             row[2] = format(-float(row[2]), ".17g")
     with target_path.open("w", encoding="utf-8", newline="") as handle:
         csv.writer(handle).writerows(rows)
-    changed_spec = _spec(source, target_path, days)
+    changed_spec = _spec(source, target_path, days, models=models)
     changed, _manifest, _content = decomposition.build_decomposition(
         changed_spec, source
     )
     changed_model = _available(changed)
 
+    assert changed_model["model_id"] == original_model["model_id"]
     assert changed_model["selected_ridge"] == original_model["selected_ridge"]
     assert [item["exposure"] for item in changed_model["exposures"]] == [
         item["exposure"] for item in original_model["exposures"]

@@ -65,18 +65,37 @@ const matrixTitle = await page.locator("#matrix-title").textContent();
 await page.locator('[data-correlation-left]:not([disabled])').first().click();
 const pairDetail = await page.locator("#correlation-detail").textContent();
 checks.push(check("Dependence matrices and cell evidence are interactive", matrixCells === 81 && matrixTitle?.includes("Stress") && pairDetail?.includes("Observed status"), { cell_buttons: matrixCells, matrix_title: matrixTitle, pair_detail: Boolean(pairDetail?.includes("Observed status")) }));
+await page.locator('[data-correlation-window="21"]').click();
+const horizonTitle = await page.locator("#matrix-title").textContent();
+const horizonPressed = await page.locator('[data-correlation-window="21"]').getAttribute("aria-pressed");
+await page.locator('[data-correlation-window="either_drawdown"]').click();
+const drawdownTitle = await page.locator("#matrix-title").textContent();
+checks.push(check(
+  "Observed windows and true drawdown regimes are selectable",
+  horizonTitle?.includes("21 sessions") && horizonPressed === "true" && drawdownTitle?.includes("either strategy in drawdown"),
+  { drawdown_title: drawdownTitle, horizon_pressed: horizonPressed, horizon_title: horizonTitle },
+));
 
 await page.locator('[data-nav="capital"]').click();
 await page.locator('[data-allocation-filter="RESERVE"]').click();
+const reservePressed = await page.locator('[data-allocation-filter="RESERVE"]').getAttribute("aria-pressed");
 const reserveRows = Number(await page.locator("#allocation-table").getAttribute("data-visible-rows"));
 await page.locator('[data-allocation-filter="SYSTEMATIC"]').click();
 const systematicRows = Number(await page.locator("#allocation-table").getAttribute("data-visible-rows"));
 await page.locator('[data-allocation-filter="all"]').click();
 const allAllocationRows = Number(await page.locator("#allocation-table").getAttribute("data-visible-rows"));
-checks.push(check("Allocation filters preserve 9 plus reserve", reserveRows === 1 && systematicRows === 9 && allAllocationRows === 10, { all: allAllocationRows, reserve: reserveRows, systematic: systematicRows }));
+checks.push(check("Allocation filters preserve 9 plus reserve", reserveRows === 1 && systematicRows === 9 && allAllocationRows === 10 && reservePressed === "true", { all: allAllocationRows, reserve: reserveRows, reserve_pressed: reservePressed, systematic: systematicRows }));
 const positionRows = Number(await page.locator("#position-table").getAttribute("data-visible-rows"));
 const positionText = await page.locator("#position-table").textContent();
 checks.push(check("Current positions retain mapped strategy attribution", positionRows === 29 && !positionText?.includes("AVAILABLE UNMAPPED") && !positionText?.includes("No accepted strategy"), { mapped_rows: positionRows, unmapped_visible: Boolean(positionText?.includes("UNMAPPED")) }));
+await page.locator('[data-nav="risk"]').click();
+const historicalGapRows = await page.locator("#historical-gap-table tbody tr").count();
+const historicalGapHeading = await page.locator("#historical-gap-badge").textContent();
+checks.push(check(
+  "Current mapping is separated from historical General intervals",
+  historicalGapRows === 11 && historicalGapHeading?.includes("11 unresolved"),
+  { historical_gap_rows: historicalGapRows, label: historicalGapHeading, mapped_current_positions: positionRows },
+));
 
 await page.locator('[data-nav="candidates"]').click();
 await page.locator('[data-tier-filter="Tier 1"]').click();
