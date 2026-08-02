@@ -36,7 +36,11 @@
     NOT_AUTOMATABLE_MISSING_COMPLETE_DAILY_NAV: "Not automatable: systematic daily NAV is incomplete",
     NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV: "Not automatable: material daily NAV is incomplete",
     AVAILABLE_MATERIAL_PERIMETER: "Available across the material perimeter",
+    AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE: "Available: version-matched backtest prehistory plus live",
+    AVAILABLE_LIVE_ONLY: "Available: live only",
     EXCLUDED_DE_MINIMIS: "Excluded de minimis",
+    UNAVAILABLE_MISSING_VERSION_MATCHED_LIVE: "No version-matched live series",
+    UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY: "No version-matched backtest prehistory",
   };
   const humanStatus = (status) => STATUS_LABELS[String(status)] || String(status || "Unknown").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
@@ -260,6 +264,9 @@
   let selectedMatrix = "observed_pearson";
   let selectedCorrelationWindow = "full";
   let selectedPair = null;
+  const dependenceModes = data.dependence_modes || { LIVE_ONLY: data.dependence_analysis };
+  let selectedEvidenceMode = dependenceModes[data.default_dependence_mode] ? data.default_dependence_mode : "LIVE_ONLY";
+  const currentDependence = () => dependenceModes[selectedEvidenceMode] || data.dependence_analysis;
   const shortSeries = (value) => String(value).replace(" Portfolio", "").replace(" Strategy", "").replace(" Factor [P123]", " P123").replace("GrizzlyBears VTMA", "Grizzly").replace("Robuxio Crypto (High Sharpe High Vol)", "Robuxio").replace("[Composer] - The Holy Grail (Buy Copy)", "Composer").replace("Growth at Market Pivot Points [EchoTrade]", "EchoTrade");
   const pairKey = (left, right) => [left, right].sort().join("\u0000");
 
@@ -270,7 +277,8 @@
       detail.innerHTML = `<div class="callout callout-neutral">Diagonal values are 1.0 by definition. Select a non-diagonal cell to inspect pair evidence.</div>`;
       return;
     }
-    const cell = data.dependence_analysis.cells.find((item) => pairKey(item.left, item.right) === pairKey(left, right));
+    const dependence = currentDependence();
+    const cell = dependence.cells.find((item) => pairKey(item.left, item.right) === pairKey(left, right));
     if (!cell) return;
     const observed = cell.observed;
     const coverage = observed.coverage;
@@ -283,12 +291,20 @@
         ? observed.drawdown_regimes?.both_strategies_underwater
         : null;
     const selectedPeriod = horizon || drawdown;
+    const composition = (series) => {
+      const item = dependence.series_composition?.[series];
+      if (!item) return "";
+      return `${item.strategy_version} · live inception ${item.live_inception || "—"} · ${integer.format(item.live_observations || 0)} live · ${integer.format(item.backtest_observations_used || 0)} backtest used · ${integer.format(item.backtest_observations_excluded_at_or_after_live_inception || 0)} overlapping backtest excluded`;
+    };
+    const compositionBlock = dependence.series_composition?.[left] && dependence.series_composition?.[right]
+      ? `<div class="callout callout-neutral"><strong>${safe(shortSeries(left))}</strong>: ${safe(composition(left))}<br /><strong>${safe(shortSeries(right))}</strong>: ${safe(composition(right))}</div>`
+      : "";
     $("#correlation-detail-title").textContent = `${shortSeries(left)} × ${shortSeries(right)}`;
-    detail.innerHTML = `<div class="validation-card"><div><strong>Observed status</strong><span>${safe(coverage.evidence_layer || "No compatible measured layer")}</span></div><div class="validation-score">${statusText(observed.status)}</div></div><div class="evidence-grid"><dl class="detail-list"><div><dt>Full-overlap Pearson</dt><dd>${decimal(observed.pearson)}</dd></div><div><dt>Spearman</dt><dd>${decimal(observed.spearman)}</dd></div><div><dt>Selected period</dt><dd>${decimal(selectedPeriod?.correlation ?? observed.pearson)}</dd></div><div><dt>Selected sample</dt><dd>${integer.format(selectedPeriod?.observations ?? coverage.common_observations)}</dd></div><div><dt>Selected interval</dt><dd>${safe(selectedPeriod?.observed_start || coverage.observed_start || "—")}–${safe(selectedPeriod?.observed_end || coverage.observed_end || "—")}</dd></div><div><dt>Rolling window</dt><dd>${integer.format(observed.rolling_pearson.window_observations || 0)} observations · ${decimal(observed.rolling_pearson.latest)}</dd></div></dl><dl class="detail-list"><div><dt>Calendar</dt><dd>${safe(coverage.frequency)}</dd></div><div><dt>Missing left / right</dt><dd>${integer.format(coverage.missing_from_left)} / ${integer.format(coverage.missing_from_right)}</dd></div><div><dt>Either in drawdown</dt><dd>${decimal(observed.drawdown_regimes?.either_strategy_underwater?.correlation)} · ${integer.format(observed.drawdown_regimes?.either_strategy_underwater?.observations || 0)} obs.</dd></div><div><dt>Both in drawdown</dt><dd>${decimal(observed.drawdown_regimes?.both_strategies_underwater?.correlation)} · ${integer.format(observed.drawdown_regimes?.both_strategies_underwater?.observations || 0)} obs.</dd></div><div><dt>Conceptual prior</dt><dd>${decimal(blend.conceptual_prior)}</dd></div><div><dt>Implementation mapping</dt><dd>${statusText(implementation.status)}</dd></div></dl></div><div class="callout ${observed.status === "AVAILABLE" ? "callout-neutral" : "callout-danger"}">${statusText(blend.decision_status)}. ${safe(blend.conceptual_prior_note)}</div>`;
+    detail.innerHTML = `<div class="validation-card"><div><strong>Observed status</strong><span>${safe(coverage.evidence_layer || "No compatible measured layer")}</span></div><div class="validation-score">${statusText(observed.status)}</div></div><div class="evidence-grid"><dl class="detail-list"><div><dt>Full-overlap Pearson</dt><dd>${decimal(observed.pearson)}</dd></div><div><dt>Spearman</dt><dd>${decimal(observed.spearman)}</dd></div><div><dt>Selected period</dt><dd>${decimal(selectedPeriod?.correlation ?? observed.pearson)}</dd></div><div><dt>Selected sample</dt><dd>${integer.format(selectedPeriod?.observations ?? coverage.common_observations)}</dd></div><div><dt>Selected interval</dt><dd>${safe(selectedPeriod?.observed_start || coverage.observed_start || "—")}–${safe(selectedPeriod?.observed_end || coverage.observed_end || "—")}</dd></div><div><dt>Rolling window</dt><dd>${integer.format(observed.rolling_pearson.window_observations || 0)} observations · ${decimal(observed.rolling_pearson.latest)}</dd></div></dl><dl class="detail-list"><div><dt>Calendar</dt><dd>${safe(coverage.frequency)}</dd></div><div><dt>Missing left / right</dt><dd>${integer.format(coverage.missing_from_left)} / ${integer.format(coverage.missing_from_right)}</dd></div><div><dt>Either in drawdown</dt><dd>${decimal(observed.drawdown_regimes?.either_strategy_underwater?.correlation)} · ${integer.format(observed.drawdown_regimes?.either_strategy_underwater?.observations || 0)} obs.</dd></div><div><dt>Both in drawdown</dt><dd>${decimal(observed.drawdown_regimes?.both_strategies_underwater?.correlation)} · ${integer.format(observed.drawdown_regimes?.both_strategies_underwater?.observations || 0)} obs.</dd></div><div><dt>Conceptual prior</dt><dd>${decimal(blend.conceptual_prior)}</dd></div><div><dt>Implementation mapping</dt><dd>${statusText(implementation.status)}</dd></div></dl></div>${compositionBlock}<div class="callout ${observed.status === "AVAILABLE" ? "callout-neutral" : "callout-danger"}">${statusText(blend.decision_status)}. ${safe(blend.conceptual_prior_note)}</div>`;
   }
 
   function renderCorrelationMatrix() {
-    const dependence = data.dependence_analysis;
+    const dependence = currentDependence();
     let matrix = dependence.matrices[selectedMatrix];
     const series = dependence.series_ids;
     let label = matrixLabels[selectedMatrix];
@@ -329,13 +345,29 @@
   }
 
   function renderDependence() {
-    const dependence = data.dependence_analysis;
-    const corrOne = dependence.correlation_one;
+    const dependence = currentDependence();
+    const corrOne = data.dependence_analysis.correlation_one;
     const unavailable = dependence.pair_count - dependence.available_pair_count;
+    const combined = selectedEvidenceMode === "LIVE_PLUS_BACKTEST";
+    const modeBadge = $("#evidence-mode-badge");
+    modeBadge.textContent = combined ? "HYBRID BACKTEST + LIVE" : "LIVE ONLY · AUTHORITY";
+    modeBadge.classList.toggle("badge-warning", combined);
+    modeBadge.classList.toggle("badge-positive", !combined);
+    $("#evidence-mode-boundary").textContent = combined
+      ? "Exploratory hybrid view: only version-matched backtest observations before live inception are included. Live observations win from inception onward. This mode cannot change readiness, allocation, or risk-control authority."
+      : "Live-only evidence is the authoritative default for readiness, allocation, and risk controls.";
+    $$('[data-evidence-mode]').forEach((button) => {
+      const available = Boolean(dependenceModes[button.dataset.evidenceMode]);
+      button.disabled = !available;
+      const active = button.dataset.evidenceMode === selectedEvidenceMode;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+      if (!available) button.title = "This accepted correlation generation has no backtest mode";
+    });
     renderKpis("#dependence-kpis", [
-      ["Measured pairs", `${dependence.available_pair_count}/${dependence.pair_count}`, "Exact-date same-layer observations", "positive"],
+      ["Measured pairs", `${dependence.available_pair_count}/${dependence.pair_count}`, combined ? "Version-matched pre-live backtest plus authoritative live" : "Exact-date live observations", "positive"],
       ["Unavailable pairs", String(unavailable), "No inferred diversification credit", "danger"],
-      ["Correlation-one loss", pct(corrOne.loss), "Separate conservative portfolio bound", "danger"],
+      ["Correlation-one loss", pct(corrOne.loss), "Live-only authoritative conservative bound", "danger"],
       ["Analytics as of", formatDate(dependence.as_of_date), `Generation ${dependence.generation_id.slice(0, 12)}…`],
     ]);
     selectedPair ||= pairKey(dependence.cells.find((item) => item.observed.status === "AVAILABLE")?.left || dependence.series_ids[0], dependence.cells.find((item) => item.observed.status === "AVAILABLE")?.right || dependence.series_ids[1]);
@@ -410,6 +442,13 @@
     const selectButton = (selector, button) => $$(selector).forEach((item) => { const active = item === button; item.classList.toggle("is-active", active); item.setAttribute("aria-pressed", String(active)); });
     $$('[data-allocation-filter]').forEach((button) => button.addEventListener("click", () => { allocationFilter = button.dataset.allocationFilter; selectButton('[data-allocation-filter]', button); renderAllocationTable(); }));
     $$('[data-tier-filter]').forEach((button) => button.addEventListener("click", () => { tierFilter = button.dataset.tierFilter; selectButton('[data-tier-filter]', button); renderCandidateTable(); }));
+    $$('[data-evidence-mode]').forEach((button) => button.addEventListener("click", () => {
+      const mode = button.dataset.evidenceMode;
+      if (!dependenceModes[mode]) return;
+      selectedEvidenceMode = mode;
+      selectedPair = null;
+      renderDependence();
+    }));
     $$('[data-matrix]').forEach((button) => button.addEventListener("click", () => {
       selectedMatrix = button.dataset.matrix;
       if (selectedMatrix !== "observed_pearson") selectedCorrelationWindow = "full";
@@ -424,7 +463,7 @@
       $$('[data-matrix]').forEach((item) => { const active = item.dataset.matrix === selectedMatrix; item.classList.toggle("is-active", active); item.setAttribute("aria-pressed", String(active)); });
       renderCorrelationMatrix();
       if (selectedPair) {
-        const selected = data.dependence_analysis.cells.find((item) => pairKey(item.left, item.right) === selectedPair);
+        const selected = currentDependence().cells.find((item) => pairKey(item.left, item.right) === selectedPair);
         if (selected) renderCorrelationDetail(selected.left, selected.right);
       }
     }));

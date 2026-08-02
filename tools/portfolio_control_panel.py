@@ -33,7 +33,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 PANEL_SCHEMA_VERSION: Final = 4
-BUILDER_VERSION: Final = "1.5.0"
+BUILDER_VERSION: Final = "1.6.0"
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
     "either_strategy_underwater",
@@ -233,7 +233,7 @@ def _current_analytics(
     *,
     filename: str,
     field_name: str,
-    expected_schema_version: int,
+    expected_schema_version: int | Sequence[int],
 ) -> tuple[dict[str, Any], dict[str, str], Path]:
     try:
         pointer = read_current(root)
@@ -243,7 +243,12 @@ def _current_analytics(
         ) from exc
     path = root / "generations" / pointer.generation_id / filename
     value = _load_json(path, field_name)
-    if value.get("analytics_schema_version") != expected_schema_version:
+    accepted_versions = (
+        (expected_schema_version,)
+        if isinstance(expected_schema_version, int)
+        else tuple(expected_schema_version)
+    )
+    if value.get("analytics_schema_version") not in accepted_versions:
         raise ControlPanelValidationError(f"{field_name} schema is unsupported")
     return value, {"generation_id": pointer.generation_id, "sha256": _hash(path)}, path
 
@@ -769,8 +774,20 @@ def _dependence_analysis(
     correlation: Mapping[str, Any],
     identity: Mapping[str, str],
     strategy_names: set[str],
+    *,
+    dependence_payload: Mapping[str, Any] | None = None,
+    evidence_mode: str = "LIVE_ONLY",
 ) -> dict[str, Any]:
-    dependence = _object(correlation.get("dependence"), "dependence")
+    dependence = (
+        _object(correlation.get("dependence"), "dependence")
+        if dependence_payload is None
+        else dict(dependence_payload)
+    )
+    declared_mode = dependence.get("evidence_mode")
+    if declared_mode is not None and declared_mode != evidence_mode:
+        raise ControlPanelValidationError(
+            f"dependence mode {declared_mode!r} differs from {evidence_mode!r}"
+        )
     raw_series = dependence.get("series_ids")
     if not isinstance(raw_series, list):
         raise ControlPanelValidationError("dependence.series_ids must be an array")
@@ -878,6 +895,22 @@ def _dependence_analysis(
         )
     )
     correlation_one = _object(dependence.get("correlation_one"), "correlation_one")
+    raw_composition = dependence.get("series_composition")
+    if raw_composition is None:
+        series_composition: dict[str, dict[str, Any]] = {}
+    else:
+        composition = _object(raw_composition, "dependence.series_composition")
+        if set(composition) != set(series_ids):
+            raise ControlPanelValidationError(
+                "dependence series composition differs from the current strategy boundary"
+            )
+        series_composition = {
+            series_id: _object(
+                composition[series_id],
+                f"dependence.series_composition.{series_id}",
+            )
+            for series_id in series_ids
+        }
     return {
         "analytics_hash": _text(
             correlation.get("analytics_hash"), "correlation.analytics_hash"
@@ -888,12 +921,14 @@ def _dependence_analysis(
         ),
         "cells": cells,
         "correlation_one": correlation_one,
+        "evidence_mode": evidence_mode,
         "generation_id": identity["generation_id"],
         "drawdown_matrices": drawdown_matrices,
         "horizon_matrices": horizon_matrices,
         "matrices": matrices,
         "pair_count": expected_cells,
         "series_ids": series_ids,
+        "series_composition": series_composition,
         "source_sha256": identity["sha256"],
     }
 
@@ -943,9 +978,47 @@ def _panel_data(
     factor_analysis = _factor_analysis(
         decomposition, decomposition_identity, current_strategy_names
     )
-    dependence_analysis = _dependence_analysis(
-        correlation, correlation_identity, current_strategy_names
-    )
+    raw_modes = correlation.get("dependence_modes")
+    if raw_modes is None:
+        default_dependence_mode = "LIVE_ONLY"
+        dependence_analysis = _dependence_analysis(
+            correlation,
+            correlation_identity,
+            current_strategy_names,
+            evidence_mode=default_dependence_mode,
+        )
+        dependence_modes = {default_dependence_mode: dependence_analysis}
+    else:
+        if correlation.get("analytics_schema_version") != 2:
+            raise ControlPanelValidationError(
+                "dependence modes require correlation schema version 2"
+            )
+        default_dependence_mode = _text(
+            correlation.get("default_evidence_mode"), "default_evidence_mode"
+        )
+        if default_dependence_mode != "LIVE_ONLY":
+            raise ControlPanelValidationError("LIVE_ONLY must remain the default mode")
+        mode_payloads = _object(raw_modes, "dependence_modes")
+        if set(mode_payloads) != {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}:
+            raise ControlPanelValidationError("dependence mode set differs")
+        live_payload = _object(mode_payloads["LIVE_ONLY"], "dependence_modes.LIVE_ONLY")
+        if live_payload != _object(correlation.get("dependence"), "dependence"):
+            raise ControlPanelValidationError(
+                "default dependence payload differs from LIVE_ONLY"
+            )
+        dependence_modes = {
+            mode: _dependence_analysis(
+                correlation,
+                correlation_identity,
+                current_strategy_names,
+                dependence_payload=_object(
+                    mode_payloads[mode], f"dependence_modes.{mode}"
+                ),
+                evidence_mode=mode,
+            )
+            for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
+        }
+        dependence_analysis = dependence_modes[default_dependence_mode]
     hwm_policy, hwm_policy_hash = _hwm_policy()
     strategies, hwm_summary = _material_hwm_coverage(
         strategies, factor_analysis, hwm_policy
@@ -1200,7 +1273,9 @@ def _panel_data(
             "twr_rows": len(performance),
         },
         "coverage": coverage,
+        "default_dependence_mode": default_dependence_mode,
         "dependence_analysis": dependence_analysis,
+        "dependence_modes": dependence_modes,
         "factor_analysis": factor_analysis,
         "fact_status": {
             item: row.get("status") for item, row in sorted(fact_by_item.items())
@@ -1268,7 +1343,7 @@ def _rendered_files(
         resolved_correlation,
         filename="correlation.json",
         field_name="portfolio correlation",
-        expected_schema_version=1,
+        expected_schema_version=(1, 2),
     )
     legacy, source = _source_inputs(legacy_panel)
     data = _panel_data(
@@ -1619,6 +1694,24 @@ def verify_candidate(
                 "available_pairs": data["dependence_analysis"]["available_pair_count"],
                 "generation": data["meta"]["correlation_generation_id"],
                 "pairs": data["dependence_analysis"]["pair_count"],
+            },
+        )
+    )
+    checks.append(
+        _check(
+            "Dependence evidence modes preserve live-only authority",
+            data.get("default_dependence_mode") == "LIVE_ONLY"
+            and _object(data.get("dependence_modes"), "dependence modes").get(
+                "LIVE_ONLY"
+            )
+            == data["dependence_analysis"]
+            and set(_object(data.get("dependence_modes"), "dependence modes"))
+            <= {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"},
+            {
+                "default": data.get("default_dependence_mode"),
+                "modes": sorted(
+                    _object(data.get("dependence_modes"), "dependence modes")
+                ),
             },
         )
     )

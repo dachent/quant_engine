@@ -33,6 +33,13 @@ without preserving stale calculations or hard-coded operator conclusions.
   matrices, the decision-only no-credit view, and correlation-one loss come
   only from the accepted `dataPortfolio/analytics/correlation` generation and
   remain separately labeled.
+- Dependence defaults to `LIVE_ONLY`. When the accepted correlation generation
+  also contains `LIVE_PLUS_BACKTEST`, the operator may switch to an explicitly
+  labeled hybrid view. It uses only version-matched backtest observations before
+  live inception; live observations remain authoritative from inception onward,
+  and the hybrid view cannot change readiness, allocation, or risk-control
+  conclusions. A generation without accepted backtest composition disables the
+  hybrid selector rather than inferring history.
 - The Candidates view is the hash-locked 2026-07-17 audit appendix. Its 33 rows
   are not `Strategy` identities and cannot update current totals, rank a new
   candidate, authorize diligence, or allocate capital.
@@ -90,7 +97,8 @@ trade code, accepted capital/risk replay, the exact nine-strategy boundary, 19
 account identities, the available and unavailable factor counts bound to the
 analytics generation, dynamic
 estimator disclosures when present, measured/unavailable dependence counts
-derived exactly from the accepted generation, explicit unavailable facts, and
+derived exactly from the accepted generation, live-only default authority,
+optional version-matched backtest composition, explicit unavailable facts, and
 frozen-appendix isolation.
 
 ## Browser and interaction QA
@@ -119,7 +127,8 @@ direct-file capture; no console or request failures; clean visual lint across
 all 24 viewport/view combinations; PDF export; eight-view navigation; factor
 selection; dynamic exposure-path and same-factor static-benchmark evidence
 when a dynamic model is selected; full-overlap, requested-horizon, and
-drawdown-regime matrix selection with cell drill-down; allocation filters;
+drawdown-regime matrix selection with cell drill-down; live-only versus
+live-plus-backtest selection when accepted layered evidence exists; allocation filters;
 current-position
 attribution separated from historical General intervals; candidate
 filter/search; a responsive provenance control; and
