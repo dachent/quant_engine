@@ -65,6 +65,24 @@ def _ssg_category(capability: str, document: str) -> EndpointContract:
 GRIZZLYBULLS_CONTRACT = ProviderContract(
     provider="grizzlybulls",
     endpoints=(
+        # ── Runtime API — current signals / indicator values ──────────────
+        EndpointContract(
+            capability="models.signals",
+            method="GET",
+            origin=_ORIGIN,
+            path="/api/models",
+            semantic_effect=SemanticEffect.READ_ONLY,
+            authentication_header=None,
+        ),
+        EndpointContract(
+            capability="indicators.signals",
+            method="GET",
+            origin=_ORIGIN,
+            path="/api/indicators",
+            semantic_effect=SemanticEffect.READ_ONLY,
+            authentication_header=None,
+        ),
+        # ── SSG data routes ───────────────────────────────────────────────
         # Homepage — summary data for all 7 models
         _ssg_static("models.home", "index"),
         # Model index page
@@ -155,6 +173,11 @@ def extract_grizzlybulls_har(
             continue
         GRIZZLYBULLS_CONTRACT.route(method, url)
         response = _object(entry.get("response"), "response")
+        status = response.get("status")
+        if isinstance(status, bool) or not isinstance(status, int):
+            raise WebContractError("response status must be an integer")
+        if status < 200 or status >= 300:
+            continue
         content = _object(response.get("content"), "response.content")
         if content.get("text"):
             selected.append(entry)
