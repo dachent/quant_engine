@@ -38,8 +38,9 @@ without preserving stale calculations or hard-coded operator conclusions.
   labeled hybrid view. It uses only version-matched backtest observations before
   live inception; live observations remain authoritative from inception onward,
   and the hybrid view cannot change readiness, allocation, or risk-control
-  conclusions. A generation without accepted backtest composition disables the
-  hybrid selector rather than inferring history.
+  conclusions. Individual series without eligible backtest prehistory remain
+  live-only inside the hybrid view and report zero backtest rows. A schema-v1
+  generation without the evidence-mode contract disables the hybrid selector.
 - The Candidates view is the hash-locked 2026-07-17 audit appendix. Its 33 rows
   are not `Strategy` identities and cannot update current totals, rank a new
   candidate, authorize diligence, or allocate capital.

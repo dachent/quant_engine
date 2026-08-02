@@ -445,7 +445,7 @@ def test_live_and_backtest_modes_are_separate_and_live_wins_overlap(
     )
 
 
-def test_combined_mode_rejects_unmatched_version_and_duplicate_layer_date(
+def test_combined_mode_ignores_unmatched_backtest_and_rejects_duplicate_layer_date(
     tmp_path: Path,
 ) -> None:
     mismatch_root = tmp_path / "mismatch"
@@ -456,12 +456,17 @@ def test_combined_mode_rejects_unmatched_version_and_duplicate_layer_date(
     modes = cast(dict[str, dict[str, Any]], result["dependence_modes"])
     assert (
         modes["LIVE_PLUS_BACKTEST"]["series_composition"]["a"]["status"]
-        == "UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+        == "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
     )
     assert (
-        modes["LIVE_PLUS_BACKTEST"]["observed_cells"][0]["status"]
-        == "UNAVAILABLE_MISSING_SERIES"
+        modes["LIVE_PLUS_BACKTEST"]["series_composition"]["a"][
+            "backtest_observations_used"
+        ]
+        == 0
     )
+    combined_cell = modes["LIVE_PLUS_BACKTEST"]["observed_cells"][0]
+    assert combined_cell["status"] == "AVAILABLE"
+    assert combined_cell["coverage"]["common_observations"] == 9
 
     duplicate_root = tmp_path / "duplicate"
     _source, duplicate_spec, _days_value = _write_mode_fixture(

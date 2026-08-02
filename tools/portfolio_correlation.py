@@ -32,7 +32,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-BUILDER_VERSION: Final = "1.2.0"
+BUILDER_VERSION: Final = "1.2.1"
 TRADING_OBSERVATION_HORIZONS: Final = (5, 21, 22, 63, 126, 130, 252, 260)
 RETURN_HEADERS: Final = ("series_id", "date", "return", "evidence_layer")
 RETURN_HEADERS_V2: Final = (*RETURN_HEADERS, "strategy_version")
@@ -668,11 +668,20 @@ def _evidence_mode_returns(
         eligible_backtest = [item for item in backtest if item.day < first_live]
         excluded_backtest = len(backtest) - len(eligible_backtest)
         if not eligible_backtest:
+            modes["LIVE_PLUS_BACKTEST"][definition.series_id] = [
+                ReturnRow(
+                    item.day,
+                    item.value,
+                    "LIVE_PLUS_OPTIONAL_BACKTEST",
+                    item.strategy_version,
+                )
+                for item in live
+            ]
             compositions["LIVE_PLUS_BACKTEST"][definition.series_id] = (
                 _mode_composition(
                     definition=definition,
                     mode="LIVE_PLUS_BACKTEST",
-                    status="UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY",
+                    status="AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY",
                     live_rows=live,
                     backtest_rows_used=(),
                     backtest_rows_excluded=excluded_backtest,
@@ -685,7 +694,7 @@ def _evidence_mode_returns(
                 ReturnRow(
                     item.day,
                     item.value,
-                    "BACKTEST_PREHISTORY_PLUS_LIVE",
+                    "LIVE_PLUS_OPTIONAL_BACKTEST",
                     item.strategy_version,
                 )
                 for item in eligible_backtest
@@ -694,7 +703,7 @@ def _evidence_mode_returns(
                 ReturnRow(
                     item.day,
                     item.value,
-                    "BACKTEST_PREHISTORY_PLUS_LIVE",
+                    "LIVE_PLUS_OPTIONAL_BACKTEST",
                     item.strategy_version,
                 )
                 for item in live
