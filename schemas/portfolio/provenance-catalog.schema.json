@@ -24,10 +24,38 @@
     "acquisition_date": {"type": "string", "format": "date"},
     "source_artifacts": {"type": "array", "minItems": 1},
     "accounts": {"type": "array", "minItems": 1},
-    "strategies": {"type": "array", "minItems": 9, "maxItems": 9},
+    "strategies": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {"$ref": "#/$defs/strategy"}
+    },
     "assignments": {"type": "array"},
     "corrections": {"type": "array"},
     "open_gaps": {"type": "array"},
     "assumptions": {"type": "array"}
+  },
+  "$defs": {
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "aliases", "cost_status", "coverage_status", "economic_family",
+        "evidence_routes", "gaps", "name", "strategy_id",
+        "version_disposition", "version_ref"
+      ],
+      "properties": {
+        "aliases": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "cost_status": {"enum": ["KNOWN", "PARTIAL", "UNAVAILABLE"]},
+        "coverage_status": {"enum": ["COMPLETE_WITHIN_DECLARED_BOUNDARY", "PARTIAL", "FAILED"]},
+        "economic_family": {"type": "string", "minLength": 1},
+        "evidence_routes": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+        "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "name": {"type": "string", "minLength": 1},
+        "strategy_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+        "version_disposition": {"enum": ["EVIDENCED", "REFERENCE_ONLY", "UNRESOLVED"]},
+        "version_ref": {"type": ["string", "null"]}
+      }
+    }
   }
 }

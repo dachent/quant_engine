@@ -214,6 +214,12 @@ immutable ledger records become authority. Re-import is idempotent; a correction
 supersedes rather than mutates an accepted decision. Performance reports are
 derived outputs and cannot become accounting authority.
 
+Current strategy identity is paired with the effective-dated contract in
+[Strategy version authority](../strategy-version-authority.md). Backtest,
+provider-live, account-live, predecessor, shadow/OOS, and conceptual evidence
+retain their layer and version; mismatched or unresolved vintages cannot be
+silently joined.
+
 ## Broker boundary
 
 Broker Core owns immutable `OrderManifest`, `BrokerCapabilities`,

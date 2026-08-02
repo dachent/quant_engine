@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-engine.local/schemas/portfolio/strategy-version-catalog.schema.json",
+  "title": "Effective-dated strategy version catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["as_of_date", "catalog_schema_version", "strategies"],
+  "properties": {
+    "catalog_schema_version": {"const": 1},
+    "as_of_date": {"type": "string", "format": "date"},
+    "strategies": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/version"}
+    }
+  },
+  "$defs": {
+    "hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assumptions_version", "backtest_applicable",
+        "backtest_artifact_sha256", "cost_model_version",
+        "design_artifact_sha256", "disposition", "effective_end",
+        "effective_start", "gaps", "provider_configuration_sha256",
+        "provider_entity_fingerprint", "strategy_id", "version_ref"
+      ],
+      "properties": {
+        "assumptions_version": {"type": ["string", "null"]},
+        "backtest_applicable": {"type": "boolean"},
+        "backtest_artifact_sha256": {"$ref": "#/$defs/hash"},
+        "cost_model_version": {"type": ["string", "null"]},
+        "design_artifact_sha256": {"$ref": "#/$defs/hash"},
+        "disposition": {"enum": ["EVIDENCED", "REFERENCE_ONLY", "UNRESOLVED"]},
+        "effective_end": {"type": ["string", "null"], "format": "date"},
+        "effective_start": {"type": ["string", "null"], "format": "date"},
+        "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "provider_configuration_sha256": {"$ref": "#/$defs/hash"},
+        "provider_entity_fingerprint": {"$ref": "#/$defs/hash"},
+        "strategy_id": {"type": "string", "minLength": 1},
+        "version_ref": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

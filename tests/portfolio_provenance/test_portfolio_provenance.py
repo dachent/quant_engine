@@ -188,6 +188,9 @@ def test_stage_is_deterministic_private_and_imports_explicit_tracker_evidence(
         catalog["strategies"][0]["evidence_routes"][0]["evidence_layer"]
         != (catalog["strategies"][0]["evidence_routes"][1]["evidence_layer"])
     )
+    assert {item["version_disposition"] for item in catalog["strategies"]} == {
+        "UNRESOLVED"
+    }
     assert first["catalog_sha256"] == hashlib.sha256(catalog_bytes).hexdigest()
     assert not (output_root / "CURRENT.json").exists()
 
