@@ -44,6 +44,17 @@
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
   const emptyRow = (columns, message = "No matching rows") => `<tr><td colspan="${columns}" class="cell-secondary">${safe(message)}</td></tr>`;
   const tableMarkup = (headers, rows) => `<thead><tr>${headers.map(([label, cls = ""]) => `<th class="${cls}">${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
+  const strategyByName = (name) => data.strategies.find((row) => row.strategy_name === name);
+  const evidenceCoverage = (row) => {
+    const evidence = row.provider_evidence;
+    if (!evidence) return "No accepted provider overlay";
+    const account = evidence.account || {};
+    const accountLabel = evidence.provider_id === "quantbase" ? "Quantbase account" : "Account-live TWR";
+    const parts = [`Accepted ${formatDate(evidence.generation_as_of_date)}`, `${accountLabel}: ${formatDate(account.observed_start)}–${formatDate(account.observed_end)} · ${integer.format(account.return_observations || 0)} returns`];
+    if (evidence.provider) parts.push(`P123 live book: ${formatDate(evidence.provider.observed_start)}–${formatDate(evidence.provider.observed_end)} · ${integer.format(evidence.provider.return_observations || 0)} returns`);
+    if (evidence.current_snapshot) parts.push(`P123 account snapshot: ${formatDate(evidence.current_snapshot.observed_date)}`);
+    return parts.join(" · ");
+  };
 
   function renderCommand() {
     $("#command-heading").textContent = data.advisory.readiness.replaceAll("_", " ");
@@ -103,8 +114,8 @@
     const providers = Object.entries(data.provider_counts).sort((a, b) => b[1] - a[1]);
     const maxCount = Math.max(...providers.map(([, count]) => count), 1);
     $("#provider-bars").innerHTML = providers.map(([provider, count]) => `<div><div class="bar-label"><span>${safe(provider)}</span><strong>${integer.format(count)}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${count / maxCount * 100}%"></div></div></div>`).join("");
-    const rows = data.strategies.map((row) => `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)}</span></td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td>${statusText(row.nav_status)}</td><td>${safe(row.cost_status)}</td><td>${statusText(row.implementation_gap_status)}</td></tr>`);
-    $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV"], ["Cost"], ["Implementation gap"]], rows);
+    const rows = data.strategies.map((row) => `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)}</span></td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td>${statusText(row.nav_status)}${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${safe(row.cost_status)}</td><td>${statusText(row.implementation_gap_status)}</td></tr>`);
+    $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Implementation gap"]], rows);
     const positionRows = data.positions.map((row) => `<tr><td><span class="cell-primary">${safe(row.strategy_name || "UNMAPPED")}</span><span class="cell-secondary">${safe(row.strategy_id || "No accepted strategy")}</span></td><td><span class="cell-primary">${safe(row.symbol || "—")}</span><span class="cell-secondary">${safe(row.security_id || "—")}</span></td><td><code>${safe(row.account_id || "—")}</code></td><td class="numeric">${safe(row.quantity ?? "—")}</td><td class="numeric">${currency(row.market_value_usd)}</td><td>${formatDate(row.as_of_date)}</td><td>${statusText(row.status)}</td></tr>`);
     const positionTable = $("#position-table");
     positionTable.dataset.visibleRows = String(data.positions.length);
@@ -114,17 +125,18 @@
   function renderRisk() {
     const missingNav = data.strategies.filter((row) => row.hwm_scope === "INCLUDED" && row.nav_status !== "AVAILABLE").map((row) => row.strategy_name);
     const excludedNav = data.strategies.filter((row) => row.hwm_scope === "EXCLUDED_DE_MINIMIS").map((row) => row.strategy_name);
-    const robuxioHwm = data.strategies.find((row) => row.strategy_id === "robuxio-crypto" && row.nav_status === "AVAILABLE");
+    const providerHwm = data.strategies.filter((row) => row.hwm_source === "ACCOUNT_LIVE_PROVIDER_OVERLAY" && row.nav_status === "AVAILABLE");
     renderKpis("#risk-kpis", [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Accepted adverse scenario", "danger"],
-      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${missingNav.length} uncovered material sleeve${missingNav.length === 1 ? "" : "s"}`, "danger"],
+      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${missingNav.length} uncovered material sleeve${missingNav.length === 1 ? "" : "s"}`, missingNav.length ? "danger" : "positive"],
       ["TWR available", `${data.counts.twr_available}/${data.counts.twr_rows}`, "Account-strategy segments", "warning"],
       ["MWR available", `${data.counts.mwr_available}/${data.counts.twr_rows}`, "Complete flows required", data.counts.mwr_available ? "positive" : "danger"],
     ]);
     const stress = Number(data.advisory.correlation_one_stress);
     const passes = stress <= Number(data.advisory.hwm_limit);
     $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">Current portfolio</div><div class="scenario-track"><span class="scenario-limit" aria-hidden="true"></span><span class="scenario-fill ${passes ? "pass" : ""}" style="width:${Math.min(100, stress / 0.4 * 100)}%"></span></div><div class="scenario-value ${passes ? "" : "status-text danger"}">${pct(stress)}</div></div><div class="callout callout-danger">Stress exceeds the 15% HWM boundary. This is advisory evidence, not a liquidation instruction.</div>`;
-    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Material systematic daily NAV</strong><span>${missingNav.length ? `${safe(missingNav.join(" · "))} lack accepted daily NAV in this snapshot.` : "Every included material sleeve has accepted daily NAV."} ${excludedNav.length ? `${safe(excludedNav.join(" · "))} remain reported but are excluded de minimis.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of the material HWM perimeter. ${robuxioHwm ? `Robuxio: ${integer.format(robuxioHwm.nav_return_observations)} verified account-live returns from ${formatDate(robuxioHwm.nav_observed_start)} through ${formatDate(robuxioHwm.nav_observed_end)}; current drawdown ${pct(robuxioHwm.hwm_current_drawdown)}, observed maximum ${pct(robuxioHwm.hwm_max_drawdown)}.` : "Robuxio account-live evidence is unavailable."} Missing NAV and FX are not interpolated.</div>`;
+    const providerHwmSummary = providerHwm.map((row) => `${row.strategy_name}: ${integer.format(row.nav_return_observations)} verified account-live returns from ${formatDate(row.nav_observed_start)} through ${formatDate(row.nav_observed_end)}; current drawdown ${pct(row.hwm_current_drawdown)}, observed maximum ${pct(row.hwm_max_drawdown)}`).join(" · ");
+    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Material systematic daily NAV</strong><span>${missingNav.length ? `${safe(missingNav.join(" · "))} lack accepted daily NAV in this snapshot.` : "Every included material sleeve has accepted daily NAV."} ${excludedNav.length ? `${safe(excludedNav.join(" · "))} remain reported but are excluded de minimis.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of the material HWM perimeter. ${safe(providerHwmSummary || "Provider-custodied account NAV evidence is unavailable.")} Missing NAV and FX are not interpolated.</div>`;
     const mappedPerformance = data.performance.filter((row) => row.strategy_name);
     const historicalGaps = data.performance.filter((row) => !row.strategy_name);
     const rows = mappedPerformance.map((row) => `<tr><td><code>${safe(row.account_id)}</code></td><td>${safe(row.strategy_name)}</td><td>${safe(row.observed_start || row.effective_start || "—")}<span class="cell-secondary">${safe(row.observed_end || row.effective_end || "—")}</span></td><td class="numeric">${integer.format(row.nav_observations)}</td><td class="numeric">${pct(row.twr)}</td><td>${statusText(row.twr_status)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}</td></tr>`);
@@ -143,8 +155,12 @@
       ["Reconciliations passed", `${data.counts.reconciliation_passed}/${data.counts.reconciliation_checks}`, "Accepted report checks"],
       ["Automated action", "NONE", "Read-only advisory surface", "reserve"],
     ]);
-    const implementationRows = data.strategies.map((row) => `<tr><td>${safe(row.strategy_name)}</td><td>${statusText(row.account_live_status)}</td><td class="numeric">${pct(row.account_live_cumulative_return)}</td><td class="numeric">${pct(row.account_live_max_drawdown)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(row.cost_status)}</td><td>${safe(row.version_ref || "UNVERSIONED")}</td></tr>`);
-    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Account-live"], ["Cumulative", "numeric"], ["Max drawdown", "numeric"], ["Gap status"], ["Cost status"], ["Version"]], implementationRows);
+    const implementationRows = data.strategies.map((row) => {
+      const overlap = row.provider_evidence?.overlap;
+      const gap = overlap ? `${statusText(overlap.status)}<span class="cell-secondary">Account − provider ${pct(overlap.account_minus_provider_cumulative)} · corr ${decimal(overlap.daily_return_correlation)} · TE ${pct(overlap.annualized_tracking_error)}</span>` : statusText(row.implementation_gap_status);
+      return `<tr><td>${safe(row.strategy_name)}</td><td>${statusText(row.account_live_status)}${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td class="numeric">${pct(row.account_live_cumulative_return)}</td><td class="numeric">${pct(row.account_live_max_drawdown)}</td><td>${gap}</td><td>${safe(row.cost_status)}</td><td>${safe(row.version_ref || "UNVERSIONED")}</td></tr>`;
+    });
+    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Account / provider evidence"], ["Account cumulative", "numeric"], ["Account max drawdown", "numeric"], ["Implementation gap"], ["Cost status"], ["Version"]], implementationRows);
     const reconciliationRows = [...data.reconciliation_checks, ...data.blocking_items].map((row) => `<tr><td>${safe(row.check_id || row.item)}</td><td>${statusText(row.status)}</td><td>${safe(row.known_gap || row.value_usd || row.value || "—")}</td></tr>`);
     $("#reconciliation-table").innerHTML = tableMarkup([["Check / exception"], ["Status"], ["Evidence / gap"]], reconciliationRows);
   }
@@ -223,7 +239,9 @@
     $("#factor-method-badge").textContent = analysis.method_label.replaceAll("_", " ");
     const rows = analysis.series.map((row) => {
       const holdout = row.diagnostics?.holdout;
-      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(row.status)}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(row.exposures.map((item) => item.factor_id).join(" · ") || "—")}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")}</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.unavailable_reasons.join(" · "))}</td></tr>`;
+      const strategy = strategyByName(row.series_id);
+      const providerCoverage = strategy?.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(strategy))}</span>` : "";
+      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(row.status)}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(row.exposures.map((item) => item.factor_id).join(" · ") || "—")}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")} · model input</span>${providerCoverage}</td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.unavailable_reasons.join(" · "))}</td></tr>`;
     });
     $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Status"], ["Estimator"], ["Factors"], ["Observed interval"], ["Aligned", "numeric"], ["Holdout R²", "numeric"], ["Net alpha", "numeric"], ["Gross / unavailable state"]], rows);
     $("#factor-strategy-selector").innerHTML = analysis.series.map((row) => `<button type="button" class="strategy-chip ${row.status === "AVAILABLE" ? "" : "is-unavailable"}" data-factor-strategy="${safe(row.series_id)}">${safe(row.series_id)}</button>`).join("");

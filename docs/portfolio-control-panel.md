@@ -19,13 +19,15 @@ without preserving stale calculations or hard-coded operator conclusions.
   `MPI_INFORMED_NON_EQUIVALENT`; neither is proprietary MPI output nor a claim
   to undisclosed MPI production behavior.
 - The material HWM perimeter is explicit: Composer remains visible in capital
-  reporting but is excluded de minimis; Robuxio uses the accepted Matrixport
-  account-NAV history; every other current systematic strategy remains
-  included. An uncovered included sleeve is named rather than hidden behind a
-  generic coverage complaint.
-- The same Robuxio unit-NAV path supplies its account-live sleeve TWR,
-  cumulative return, and maximum drawdown. It does not manufacture MWR, account
-  cash flows, or a full-portfolio composite.
+  reporting but is excluded de minimis; Robuxio uses accepted Matrixport
+  account NAV and Volatis uses accepted Quantbase account value reconciled to
+  cash additions. Every other current systematic strategy remains included.
+- The provider-custodied account paths supply sleeve TWR, cumulative return,
+  and maximum drawdown. They do not manufacture MWR, unrelated account cash
+  flows, or a full-portfolio composite.
+- Portfolio123 provider-live evidence is displayed alongside, but never joined
+  to, the IBKR account-live TWR. Provider history, current account snapshot,
+  exact-date overlap, and implementation-gap dates remain separately labeled.
 - Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
   matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come
@@ -59,9 +61,11 @@ $engine = Split-Path -Parent $PWD
 $report = Join-Path $engine "dataPortfolio\reporting"
 $output = Join-Path $engine "dataPortfolio\control-panel"
 $legacy = Join-Path $engine "_strategy_allocation_audit\model_harness_baseline\control-panel-qa\portfolio_control_panel"
+$strategyEvidence = "<hash-bound current-strategy-provider-evidence.json>"
 
 uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
-  --report-root $report --legacy-panel $legacy --output-root $output
+  --report-root $report --legacy-panel $legacy --output-root $output `
+  --strategy-evidence $strategyEvidence
 ```
 
 The command resolves the accepted analytics roots as siblings of `reporting`:
@@ -85,8 +89,9 @@ The verifier proves all eight views, local-only assets, lack of network or
 trade code, accepted capital/risk replay, the exact nine-strategy boundary, 19
 account identities, the available and unavailable factor counts bound to the
 analytics generation, dynamic
-estimator disclosures when present, 10 measured/26 unavailable dependence
-pairs, explicit unavailable facts, and frozen-appendix isolation.
+estimator disclosures when present, measured/unavailable dependence counts
+derived exactly from the accepted generation, explicit unavailable facts, and
+frozen-appendix isolation.
 
 ## Browser and interaction QA
 
@@ -129,7 +134,8 @@ pass, publish the already accepted local candidate:
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --report-root $report --legacy-panel $legacy `
-  --candidate-dir <candidate-directory> --qa-dir $qa --output-root $output
+  --candidate-dir <candidate-directory> --qa-dir $qa --output-root $output `
+  --strategy-evidence $strategyEvidence
 ```
 
 Publication hash-binds the accepted portfolio, decomposition, and correlation

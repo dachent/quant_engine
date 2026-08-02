@@ -124,21 +124,52 @@ support inferred long-only, leverage, breakpoint, or transition constraints.
 
 ## Provider-custodied account NAV normalization
 
-`tools/portfolio_target_series.py` provides the first governed account-live
-provider overlay. It reads an already accepted Matrixport generation; it makes
-no provider or credential call. Before emitting Robuxio returns it verifies the
-generation manifest plus the exact hashes and sizes of `csv/nav_daily.csv` and
-`csv/holdings.csv`, requires exactly one matching positive live holding, and
-converts consecutive after-fee NAV observations into `ACCOUNT_LIVE`, `NET`,
-`TOTAL` returns using `Decimal` arithmetic.
+`tools/portfolio_target_series.py` provides the governed provider roll-forward.
+It reads already accepted Matrixport, Quantbase, and Portfolio123 generations;
+it makes no provider or credential call. Before emitting returns it verifies
+the generation manifest plus the exact hashes and sizes of every consumed
+artifact.
 
-The current frozen source contains 332 Robuxio NAV observations and therefore
-331 returns. Its cumulative return and drawdown path remain target-series
-facts, independent of whether a factor model explains them. The normalized
-target, source proof, and upstream generation
-manifest are hash-bound inputs to the decomposition generation. Private product
-identifiers and holdings remain outside Git. Missing dates, NAV, FX, and returns
-are not forward-filled or interpolated.
+- Matrixport consecutive after-fee unit NAV becomes Robuxio `ACCOUNT_LIVE`,
+  `NET`, `TOTAL` returns after proving one matching positive live holding.
+- Quantbase Volatis account value is adjusted for non-rebalance cash additions
+  only after each activity amount reconciles to an observed cost-basis increase
+  within two cents. The documented date-only convention is end-of-day booking.
+- Portfolio123 provider-live equity remains separate from the IBKR account-live
+  path. Exact-date overlap produces correlation, tracking error, and cumulative
+  implementation-gap evidence; no provider return is appended to account TWR.
+
+The normalized targets, source proofs, strategy-evidence overlay, and upstream
+generation manifests are hash-bound inputs to the decomposition generation.
+Private product/account identifiers and source data remain outside Git. Missing
+dates, NAV, FX, and returns are not forward-filled or interpolated.
+The overlay contract is
+`schemas/portfolio/strategy-provider-evidence.schema.json`.
+
+The roll-forward CLI takes explicit paths and provider identities from local
+configuration; none is hard-coded or committed:
+
+```powershell
+uv run --frozen --no-sync python tools/portfolio_target_series.py `
+  --base-targets "<accepted-targets.csv>" `
+  --base-decomposition-spec "<accepted-decomposition-spec.json>" `
+  --factors "<accepted-factors.csv>" `
+  --base-correlation-spec "<accepted-correlation-spec.json>" `
+  --base-correlation-returns "<accepted-correlation-returns.csv>" `
+  --quantbase-manifest "<dataQuantbase-generation.json>" `
+  --quantbase-history "<Volatis-account-history.csv>" `
+  --quantbase-activity "<Quantbase-account-activity.csv>" `
+  --quantbase-fund-id "<local-fund-id>" `
+  --quantbase-series-id "Volatis Strategy" `
+  --portfolio123-manifest "<data_Portfolio123-generation.json>" `
+  --portfolio123-equity "<har_equity_curve.parquet>" `
+  --portfolio123-metadata "<har_account_metadata.parquet>" `
+  --portfolio123-provider-entity-id "<local-provider-book-id>" `
+  --portfolio123-account-entity-id "<local-account-id>" `
+  --portfolio123-strategy-id "p123-ai-factor" `
+  --portfolio123-account-series-id "AI Factor [P123]" `
+  --output-root "<private-roll-forward-input-root>"
+```
 
 ## Build, verify, publish, and recover
 

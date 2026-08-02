@@ -22,6 +22,9 @@ SPEC.loader.exec_module(target_series)
 TargetSeriesError = target_series.TargetSeriesError
 build_matrixport_targets = target_series.build_matrixport_targets
 build_decomposition_inputs = target_series.build_decomposition_inputs
+build_quantbase_targets = target_series.build_quantbase_targets
+build_portfolio123_evidence = target_series.build_portfolio123_evidence
+build_strategy_evidence = target_series.build_strategy_evidence
 
 
 def _write(path: Path, content: str) -> tuple[str, int]:
@@ -140,3 +143,246 @@ def test_decomposition_inputs_rebind_exact_sources(tmp_path: Path) -> None:
     assert len(value["provenance_sources"]) == 2
     assert copied_factors == factors.read_bytes()
     assert copied_manifest == manifest.read_bytes()
+
+
+def test_quantbase_account_path_is_flow_adjusted_and_deterministic(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.csv"
+    _write(
+        base,
+        "series_id,date,return,evidence_layer,return_basis,return_type,cost\n"
+        "Existing,2026-01-02,0.01,ACCOUNT_LIVE,NET,TOTAL,\n",
+    )
+    history = tmp_path / "history.csv"
+    history_hash, history_size = _write(
+        history,
+        "time,value,cost_basis,profit_loss\n"
+        "01/01/2026,0,0,0\n"
+        "01/02/2026,100,100,0\n"
+        "01/03/2026,110,100,10\n"
+        "01/04/2026,220,200,20\n",
+    )
+    activity = tmp_path / "activity.csv"
+    activity_hash, activity_size = _write(
+        activity,
+        "activity_type,amount,fund,is_rebalance,time,type\n"
+        "filled_txn,100,107,false,2026-01-01T12:00:00Z,BUY\n"
+        "filled_txn,100,107,false,2026-01-03T12:00:00Z,BUY\n",
+    )
+    manifest = tmp_path / "quantbase-generation.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "generation_id": "b" * 64,
+                "as_of_date": "2026-01-04",
+                "verification": "VERIFIED",
+                "artifacts": [
+                    {
+                        "artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+                        "sha256": history_hash,
+                        "size_bytes": history_size,
+                    },
+                    {
+                        "artifact_id": "source/csv/account_activity.csv",
+                        "sha256": activity_hash,
+                        "size_bytes": activity_size,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    targets, proof_bytes = build_quantbase_targets(
+        base, manifest, history, activity, "107", "Volatis Strategy"
+    )
+    again, again_proof = build_quantbase_targets(
+        base, manifest, history, activity, "107", "Volatis Strategy"
+    )
+
+    assert targets == again
+    assert proof_bytes == again_proof
+    rows = [
+        row
+        for row in csv.DictReader(io.StringIO(targets.decode("utf-8")))
+        if row["series_id"] == "Volatis Strategy"
+    ]
+    assert [row["date"] for row in rows] == ["2026-01-03", "2026-01-04"]
+    assert [row["return"] for row in rows] == ["0.1", "0.090909090909090909090909091"]
+    proof = json.loads(proof_bytes)
+    assert proof["coverage"]["flow_events"] == 2
+    assert proof["coverage"]["return_observations"] == 2
+    assert proof["evidence_layer"] == "ACCOUNT_LIVE"
+
+
+def test_quantbase_account_path_rejects_manifest_drift(tmp_path: Path) -> None:
+    base = tmp_path / "base.csv"
+    _write(
+        base,
+        "series_id,date,return,evidence_layer,return_basis,return_type,cost\n"
+        "Existing,2026-01-02,0.01,ACCOUNT_LIVE,NET,TOTAL,\n",
+    )
+    history = tmp_path / "history.csv"
+    history_hash, history_size = _write(
+        history,
+        "time,value,cost_basis,profit_loss\n"
+        "01/01/2026,100,100,0\n"
+        "01/02/2026,101,100,1\n",
+    )
+    activity = tmp_path / "activity.csv"
+    activity_hash, activity_size = _write(
+        activity,
+        "activity_type,amount,fund,is_rebalance,time,type\n"
+        "filled_txn,100,107,false,2026-01-01T12:00:00Z,BUY\n",
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "generation_id": "b" * 64,
+                "as_of_date": "2026-01-02",
+                "verification": "VERIFIED",
+                "artifacts": [
+                    {
+                        "artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+                        "sha256": history_hash,
+                        "size_bytes": history_size,
+                    },
+                    {
+                        "artifact_id": "source/csv/account_activity.csv",
+                        "sha256": activity_hash,
+                        "size_bytes": activity_size,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    history.write_text(history.read_text(encoding="utf-8") + "01/03/2026,102,100,2\n")
+    with pytest.raises(TargetSeriesError, match="differs from the manifest"):
+        build_quantbase_targets(
+            base, manifest, history, activity, "107", "Volatis Strategy"
+        )
+
+
+def test_portfolio123_provider_and_account_paths_remain_separate(
+    tmp_path: Path,
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    targets = (
+        "series_id,date,return,evidence_layer,return_basis,return_type,cost\n"
+        "AI Factor [P123],2026-01-02,0.01,ACCOUNT_LIVE,NET,TOTAL,\n"
+        "AI Factor [P123],2026-01-03,-0.02,ACCOUNT_LIVE,NET,TOTAL,\n"
+    ).encode("utf-8")
+    equity = tmp_path / "equity.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "_entity_id": "provider-synthetic",
+                    "Date": "2026-01-01",
+                    "Total Equity": 100.0,
+                    "Cash Added": 0.0,
+                },
+                {
+                    "_entity_id": "provider-synthetic",
+                    "Date": "2026-01-02",
+                    "Total Equity": 102.0,
+                    "Cash Added": 0.0,
+                },
+                {
+                    "_entity_id": "provider-synthetic",
+                    "Date": "2026-01-03",
+                    "Total Equity": 101.0,
+                    "Cash Added": 0.0,
+                },
+            ]
+        ),
+        equity,
+    )
+    metadata = tmp_path / "metadata.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "id": "account-synthetic",
+                    "lastFix": 1767484800000,
+                    "netWorth": 48562.85,
+                    "netWorthPrevWithCashAdded": 48562.85,
+                    "isLive": True,
+                }
+            ]
+        ),
+        metadata,
+    )
+    equity_hash = hashlib.sha256(equity.read_bytes()).hexdigest()
+    metadata_hash = hashlib.sha256(metadata.read_bytes()).hexdigest()
+    manifest = tmp_path / "portfolio123-generation.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "generation_id": "c" * 64,
+                "as_of_date": "2026-01-05",
+                "verification": "VERIFIED",
+                "artifacts": [
+                    {
+                        "artifact_id": "tables/har_equity_curve.parquet",
+                        "sha256": equity_hash,
+                        "size_bytes": equity.stat().st_size,
+                    },
+                    {
+                        "artifact_id": "tables/har_account_metadata.parquet",
+                        "sha256": metadata_hash,
+                        "size_bytes": metadata.stat().st_size,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    evidence_bytes = build_portfolio123_evidence(
+        targets,
+        manifest,
+        equity,
+        metadata,
+        "provider-synthetic",
+        "account-synthetic",
+        "p123-ai-factor",
+        "AI Factor [P123]",
+    )
+    evidence = json.loads(evidence_bytes)
+
+    assert evidence["account"]["observed_end"] == "2026-01-03"
+    assert evidence["provider"]["observed_end"] == "2026-01-03"
+    assert evidence["provider"]["return_observations"] == 2
+    assert evidence["overlap"]["observations"] == 2
+    assert evidence["evidence_layer"] == ("PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE")
+    combined = json.loads(
+        build_strategy_evidence(
+            json.dumps(
+                {
+                    "coverage": {
+                        "observed_end": "2026-01-04",
+                        "observed_start": "2026-01-03",
+                        "return_observations": 1,
+                    },
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "generation_id": "d" * 64,
+                    "generation_as_of_date": "2026-01-04",
+                    "provider_id": "quantbase",
+                    "series_id": "Volatis Strategy",
+                    "sources": {},
+                    "strategy_id": "volatis-strategy",
+                }
+            ).encode("utf-8"),
+            evidence_bytes,
+        )
+    )
+    assert combined["as_of_date"] == "2026-01-05"
+    assert [row["strategy_id"] for row in combined["strategies"]] == [
+        "volatis-strategy",
+        "p123-ai-factor",
+    ]
