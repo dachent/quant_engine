@@ -146,8 +146,10 @@ def extract_grizzlybulls_har(
         parsed = urlsplit(url)
         if parsed.scheme != "https" or parsed.netloc != "grizzlybulls.com":
             continue
-        # Only consider SSG data routes
-        if not parsed.path.startswith("/_next/data/"):
+        # Only consider SSG data routes and reviewed API routes
+        is_ssg = parsed.path.startswith("/_next/data/")
+        is_api = parsed.path.startswith("/api/")
+        if not (is_ssg or is_api):
             continue
         if method.upper() != "GET":
             continue

@@ -115,6 +115,25 @@ def test_sensitive_fields_are_redacted() -> None:
     assert REDACTION.encode() in raw
 
 
+# ─── API route extraction ─────────────────────────────────────────────────────
+
+
+def test_api_routes_are_extracted() -> None:
+    document = _document(
+        _entry(
+            "https://grizzlybulls.com/api/models",
+            body=[{"shortName": "TA-MR Basic", "signal": "Buy", "slug": "ta-mr-basic"}],
+        ),
+        _entry(
+            "https://grizzlybulls.com/api/indicators",
+            body=[{"shortName": "CARP", "value": 100, "slug": "cyclically-adjusted-risk-premium"}],
+        ),
+    )
+    records = extract_grizzlybulls_har(document, session=_session())
+    capabilities = {r.capability for r in records}
+    assert capabilities == {"models.signals", "indicators.signals"}
+
+
 # ─── fail-closed behaviour ───────────────────────────────────────────────────
 
 
