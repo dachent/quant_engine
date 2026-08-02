@@ -36,6 +36,12 @@ ANALYTICS_SCHEMA_VERSION: Final = 1
 BUILDER_VERSION: Final = "1.6.0"
 METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-2"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
+ANALYSIS_LENSES: Final = {
+    "ECONOMIC_FACTOR",
+    "ETF_STYLE",
+    "HISTORICAL_MINIMUM_PROOF",
+    "RETURN_INDUSTRY",
+}
 NEAR_DUPLICATE_ABSOLUTE_CORRELATION: Final = 0.98
 UNREGULARIZED_CONDITION_NUMBER_LIMIT: Final = 1_000.0
 UNREGULARIZED_VIF_LIMIT: Final = 10.0
@@ -131,6 +137,7 @@ class ModelDefinition:
 
 @dataclass(frozen=True)
 class Specification:
+    analysis_lens: str
     as_of_date: date
     maximum_factor_staleness_days: int
     target_source: SourceDefinition
@@ -407,11 +414,19 @@ def _load_spec(path: Path) -> Specification:
         "schema_version",
         "target_source",
     }
+    if "analysis_lens" in root:
+        root_keys.add("analysis_lens")
     if "provenance_sources" in root:
         root_keys.add("provenance_sources")
     _strict_keys(root, root_keys, "specification")
     if root["schema_version"] != 1:
         raise DecompositionError("specification schema_version is unsupported")
+    analysis_lens = _text(
+        root.get("analysis_lens", "HISTORICAL_MINIMUM_PROOF"),
+        "specification.analysis_lens",
+    )
+    if analysis_lens not in ANALYSIS_LENSES:
+        raise DecompositionError("specification.analysis_lens is unsupported")
     factor_source_object = _object(root["factor_source"], "factor_source")
     _strict_keys(
         factor_source_object,
@@ -463,6 +478,7 @@ def _load_spec(path: Path) -> Specification:
                 f"model {model.model_id} references unknown factors {sorted(unknown)}"
             )
     return Specification(
+        analysis_lens=analysis_lens,
         as_of_date=_day(root["as_of_date"], "as_of_date"),
         maximum_factor_staleness_days=_integer(
             root["maximum_factor_staleness_days"],
@@ -1909,6 +1925,7 @@ def build_decomposition(
         ],
     }
     payload: dict[str, object] = {
+        "analysis_lens": spec.analysis_lens,
         "analytics_schema_version": ANALYTICS_SCHEMA_VERSION,
         "as_of_date": spec.as_of_date.isoformat(),
         "builder_version": BUILDER_VERSION,
@@ -1977,6 +1994,7 @@ def build_decomposition(
                 "unavailable underlying evidence remains an explicit model result."
             ),
             fact_types=(
+                "analysis-lens",
                 "alpha",
                 "coverage",
                 "factor-composition",
