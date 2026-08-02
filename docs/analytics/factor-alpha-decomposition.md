@@ -164,12 +164,28 @@ uv run --frozen --no-sync python tools/portfolio_target_series.py `
   --portfolio123-manifest "<data_Portfolio123-generation.json>" `
   --portfolio123-equity "<har_equity_curve.parquet>" `
   --portfolio123-metadata "<har_account_metadata.parquet>" `
+  --portfolio123-returns "<returns_daily.parquet>" `
+  --portfolio123-relationships "<strategy_relationships.parquet>" `
   --portfolio123-provider-entity-id "<local-provider-book-id>" `
+  --portfolio123-simulation-entity-id "<local-simulation-id>" `
   --portfolio123-account-entity-id "<local-account-id>" `
   --portfolio123-strategy-id "p123-ai-factor" `
   --portfolio123-account-series-id "AI Factor [P123]" `
   --output-root "<private-roll-forward-input-root>"
 ```
+
+When the three simulation arguments are present together, the roll-forward
+also emits a correlation schema-v2 source, proof, and Portfolio123 generation
+manifest. The simulation must be the accepted generation's unique
+`live_sim_twin` for the provider-live entity, and that provider path must have
+accepted exact-date reconciliation to the account-live series. Its indexed
+model path is converted to consecutive returns and bound to the same
+generation-derived strategy-version reference as the account-live series. The dependence builder
+uses those rows only before the first account-live observation. Other
+strategies remain available in the hybrid view with their live evidence and
+zero backtest observations; absent strategies remain unavailable. Omitting all
+three arguments preserves the replay-compatible schema-v1 output. Supplying a
+partial set fails closed.
 
 ## Build, verify, publish, and recover
 

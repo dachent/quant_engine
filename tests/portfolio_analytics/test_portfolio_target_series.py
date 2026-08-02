@@ -25,6 +25,7 @@ build_decomposition_inputs = target_series.build_decomposition_inputs
 build_quantbase_targets = target_series.build_quantbase_targets
 build_portfolio123_evidence = target_series.build_portfolio123_evidence
 build_strategy_evidence = target_series.build_strategy_evidence
+build_layered_correlation_inputs = target_series.build_layered_correlation_inputs
 
 
 def _write(path: Path, content: str) -> tuple[str, int]:
@@ -386,3 +387,200 @@ def test_portfolio123_provider_and_account_paths_remain_separate(
         "volatis-strategy",
         "p123-ai-factor",
     ]
+
+
+def test_layered_correlation_uses_generation_bound_live_sim_twin(
+    tmp_path: Path,
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    targets = (
+        "series_id,date,return,evidence_layer,return_basis,return_type,cost\n"
+        "AI Factor [P123],2026-01-05,0.01,ACCOUNT_LIVE,NET,TOTAL,\n"
+        "AI Factor [P123],2026-01-06,-0.02,ACCOUNT_LIVE,NET,TOTAL,\n"
+        "Other,2026-01-05,0.005,ACCOUNT_LIVE,NET,TOTAL,\n"
+        "Other,2026-01-06,0.006,ACCOUNT_LIVE,NET,TOTAL,\n"
+    ).encode("utf-8")
+    base_returns = tmp_path / "base-returns.csv"
+    base_returns.write_bytes(
+        b"series_id,date,return,evidence_layer\n"
+        b"AI Factor [P123],2026-01-05,0.01,ACCOUNT_LIVE\n"
+    )
+    base_hash = hashlib.sha256(base_returns.read_bytes()).hexdigest()
+    base_spec = tmp_path / "base-spec.json"
+    base_spec.write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-01-06",
+                "return_source": {
+                    "expected_sha256": base_hash,
+                    "expected_size_bytes": base_returns.stat().st_size,
+                },
+                "schema_version": 1,
+                "series_ids": ["AI Factor [P123]", "Other", "Missing"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    returns_path = tmp_path / "returns.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "entity_id": "sim-synthetic",
+                    "period_date": "2026-01-01",
+                    "model_return": 100.0,
+                    "source": "synthetic",
+                },
+                {
+                    "entity_id": "sim-synthetic",
+                    "period_date": "2026-01-02",
+                    "model_return": 101.0,
+                    "source": "synthetic",
+                },
+                {
+                    "entity_id": "sim-synthetic",
+                    "period_date": "2026-01-05",
+                    "model_return": 99.99,
+                    "source": "synthetic",
+                },
+            ]
+        ),
+        returns_path,
+    )
+    relationships_path = tmp_path / "relationships.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "entity_ref_a": "provider-synthetic",
+                    "entity_ref_b": "sim-synthetic",
+                    "relationship_type": "live_sim_twin",
+                    "notes": "SYNTHETIC explicit relationship",
+                }
+            ]
+        ),
+        relationships_path,
+    )
+    manifest = tmp_path / "generation.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "generation_id": "e" * 64,
+                "verification": "VERIFIED",
+                "artifacts": [
+                    {
+                        "artifact_id": "tables/returns_daily.parquet",
+                        "sha256": hashlib.sha256(returns_path.read_bytes()).hexdigest(),
+                        "size_bytes": returns_path.stat().st_size,
+                    },
+                    {
+                        "artifact_id": "tables/strategy_relationships.parquet",
+                        "sha256": hashlib.sha256(
+                            relationships_path.read_bytes()
+                        ).hexdigest(),
+                        "size_bytes": relationships_path.stat().st_size,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    strategy_evidence = json.dumps(
+        {
+            "strategies": [
+                {
+                    "evidence_layer": "PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE",
+                    "generation_id": "e" * 64,
+                    "overlap": {
+                        "observations": 2,
+                        "status": "TESTED_EXACT_DATE_PATHS",
+                    },
+                    "provider": {"entity_id": "provider-synthetic"},
+                    "provider_id": "portfolio123",
+                    "strategy_name": "AI Factor [P123]",
+                }
+            ]
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+
+    spec_bytes, returns_bytes, proof_bytes, manifest_bytes = (
+        build_layered_correlation_inputs(
+            base_spec,
+            base_returns,
+            targets,
+            manifest,
+            returns_path,
+            relationships_path,
+            "provider-synthetic",
+            "sim-synthetic",
+            "AI Factor [P123]",
+            strategy_evidence,
+            "2026-01-06",
+        )
+    )
+    spec = json.loads(spec_bytes)
+    proof = json.loads(proof_bytes)
+    rows = list(csv.DictReader(io.StringIO(returns_bytes.decode("utf-8"))))
+    ai = [row for row in rows if row["series_id"] == "AI Factor [P123]"]
+    backtest = [row for row in ai if row["evidence_layer"] == "BACKTEST"]
+    live = [row for row in ai if row["evidence_layer"] == "ACCOUNT_LIVE"]
+
+    assert spec["schema_version"] == 2
+    assert spec["return_source"]["schema_version"] == "2"
+    assert tuple(rows[0]) == target_series.CORRELATION_FIELDS_V2
+    assert len(backtest) == 2
+    assert float(backtest[0]["return"]) == pytest.approx(0.01)
+    assert float(backtest[1]["return"]) == pytest.approx(-0.01)
+    assert {row["strategy_version"] for row in [*backtest, *live]} == {
+        next(
+            item["strategy_version"]
+            for item in spec["evidence_mode_series"]
+            if item["series_id"] == "AI Factor [P123]"
+        )
+    }
+    missing = next(
+        item for item in proof["series_mappings"] if item["series_id"] == "Missing"
+    )
+    assert missing["live_observations"] == 0
+    assert missing["status"] == "ACCEPTED_LIVE_PATH_NO_MATCHED_BACKTEST"
+    assert proof["simulation_coverage"]["relationship_type"] == "live_sim_twin"
+    assert manifest_bytes == manifest.read_bytes()
+
+    wrong_relationship = tmp_path / "wrong-relationships.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "entity_ref_a": "provider-synthetic",
+                    "entity_ref_b": "sim-synthetic",
+                    "relationship_type": "book_component",
+                    "notes": "SYNTHETIC wrong relationship",
+                }
+            ]
+        ),
+        wrong_relationship,
+    )
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_value["artifacts"][1].update(
+        {
+            "sha256": hashlib.sha256(wrong_relationship.read_bytes()).hexdigest(),
+            "size_bytes": wrong_relationship.stat().st_size,
+        }
+    )
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+    with pytest.raises(TargetSeriesError, match="version mapping is not unique"):
+        build_layered_correlation_inputs(
+            base_spec,
+            base_returns,
+            targets,
+            manifest,
+            returns_path,
+            wrong_relationship,
+            "provider-synthetic",
+            "sim-synthetic",
+            "AI Factor [P123]",
+            strategy_evidence,
+            "2026-01-06",
+        )

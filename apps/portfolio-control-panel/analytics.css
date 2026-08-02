@@ -472,6 +472,11 @@ section[data-view="capital"] .callout-neutral {
   color: var(--text-soft);
 }
 
+#correlation-detail .callout {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 #correlation-detail .validation-score {
   max-width: 142px;
   color: var(--text-soft);

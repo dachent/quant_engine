@@ -71,6 +71,35 @@ live-only readiness decision.
 Schema version 1 remains supported for replay of accepted historical
 generations and preserves its one-layer-per-series rule.
 
+`tools/portfolio_target_series.py` can construct the private schema-v2 source
+from an accepted account-live roll-forward and an accepted Portfolio123
+generation. It verifies the Parquet artifacts against that generation,
+requires one explicit `live_sim_twin` relationship, and binds that provider
+book to the account-live series through accepted exact-date reconciliation
+evidence. It converts the simulation's indexed path to consecutive returns and
+emits a generation-bound version mapping plus source proof. It performs no
+provider call. Strategies without a matched backtest keep their live path in
+both modes; the builder does not invent or substitute historical observations.
+
+An accepted provider roll-forward can be upgraded without rebuilding its
+unrelated decomposition inputs:
+
+```powershell
+uv run --frozen --no-sync python tools/portfolio_target_series.py `
+  --layered-correlation-only `
+  --base-targets "<accepted-targets.csv>" `
+  --base-correlation-spec "<accepted-spec.json>" `
+  --base-correlation-returns "<accepted-returns.csv>" `
+  --portfolio123-manifest "<accepted-generation.json>" `
+  --portfolio123-returns "<returns_daily.parquet>" `
+  --portfolio123-relationships "<strategy_relationships.parquet>" `
+  --portfolio123-provider-entity-id "<local-live-id>" `
+  --portfolio123-simulation-entity-id "<local-simulation-id>" `
+  --portfolio123-strategy-evidence "<accepted-strategy-evidence.json>" `
+  --portfolio123-account-series-id "AI Factor [P123]" `
+  --output-root "<new-private-source-run/correlation>"
+```
+
 The legacy negative-return statistic remains separately labeled `downside`; it
 is not a drawdown measure. Drawdown regimes compound each series into a wealth
 index and select common observations when either or both wealth indices are
