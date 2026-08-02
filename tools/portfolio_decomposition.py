@@ -33,9 +33,12 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 ANALYTICS_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.5.0"
+BUILDER_VERSION: Final = "1.6.0"
 METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-2"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
+NEAR_DUPLICATE_ABSOLUTE_CORRELATION: Final = 0.98
+UNREGULARIZED_CONDITION_NUMBER_LIMIT: Final = 1_000.0
+UNREGULARIZED_VIF_LIMIT: Final = 10.0
 METHODOLOGY_PATH: Final = (
     Path(__file__).resolve().parents[1]
     / "docs"
@@ -676,6 +679,138 @@ def _predict(fit: Fit, matrix: FloatArray) -> FloatArray:
     return (fit.intercept + matrix @ fit.exposures).astype(np.float64)
 
 
+def _training_design_diagnostics(
+    matrix: FloatArray, factor_ids: Sequence[str]
+) -> dict[str, object]:
+    """Describe collinearity using training observations only."""
+
+    if matrix.ndim != 2 or matrix.shape[1] != len(factor_ids):
+        raise DecompositionError("training design differs from configured factors")
+    means = np.mean(matrix, axis=0)
+    standard_deviations = np.std(matrix, axis=0)
+    constant_indices = [
+        index
+        for index, value in enumerate(standard_deviations)
+        if float(value) <= 1e-15
+    ]
+    standardized = np.zeros_like(matrix, dtype=np.float64)
+    for index in range(matrix.shape[1]):
+        if index not in constant_indices:
+            standardized[:, index] = (
+                matrix[:, index] - means[index]
+            ) / standard_deviations[index]
+
+    rank = int(np.linalg.matrix_rank(standardized))
+    condition_raw = float(np.linalg.cond(standardized))
+    condition_number = condition_raw if math.isfinite(condition_raw) else None
+    correlation = np.full((matrix.shape[1], matrix.shape[1]), np.nan, dtype=np.float64)
+    for left in range(matrix.shape[1]):
+        if left in constant_indices:
+            continue
+        for right in range(matrix.shape[1]):
+            if right in constant_indices:
+                continue
+            correlation[left, right] = float(
+                np.mean(standardized[:, left] * standardized[:, right])
+            )
+
+    near_duplicates: list[dict[str, object]] = []
+    for left in range(matrix.shape[1]):
+        for right in range(left + 1, matrix.shape[1]):
+            value = correlation[left, right]
+            if math.isfinite(float(value)) and abs(float(value)) >= (
+                NEAR_DUPLICATE_ABSOLUTE_CORRELATION
+            ):
+                near_duplicates.append(
+                    {
+                        "absolute_correlation": _number(abs(float(value))),
+                        "correlation": _number(float(value)),
+                        "factor_ids": [factor_ids[left], factor_ids[right]],
+                    }
+                )
+
+    vif_values: list[float | None]
+    if constant_indices or rank < matrix.shape[1]:
+        vif_values = [None] * matrix.shape[1]
+        vif_status = "UNAVAILABLE_SINGULAR_OR_CONSTANT_DESIGN"
+    elif matrix.shape[1] == 1:
+        vif_values = [1.0]
+        vif_status = "AVAILABLE"
+    else:
+        inverse = np.linalg.inv(correlation)
+        vif_values = [float(inverse[index, index]) for index in range(matrix.shape[1])]
+        vif_status = "AVAILABLE"
+    finite_vifs = [value for value in vif_values if value is not None]
+    maximum_vif = max(finite_vifs) if finite_vifs else None
+
+    blocking_reasons: list[str] = []
+    if constant_indices:
+        blocking_reasons.append("CONSTANT_FACTOR")
+    if rank < matrix.shape[1]:
+        blocking_reasons.append("RANK_DEFICIENT")
+    if condition_number is None or condition_number > (
+        UNREGULARIZED_CONDITION_NUMBER_LIMIT
+    ):
+        blocking_reasons.append("CONDITION_NUMBER_ABOVE_LIMIT")
+    if maximum_vif is None or maximum_vif > UNREGULARIZED_VIF_LIMIT:
+        blocking_reasons.append("VIF_ABOVE_LIMIT_OR_UNAVAILABLE")
+
+    return {
+        "basis": "TRAIN_ONLY",
+        "correlation_matrix": [
+            {
+                "factor_id": factor_id,
+                "values": {
+                    other_id: (
+                        None
+                        if not math.isfinite(float(correlation[row, column]))
+                        else _number(float(correlation[row, column]))
+                    )
+                    for column, other_id in enumerate(factor_ids)
+                },
+            }
+            for row, factor_id in enumerate(factor_ids)
+        ],
+        "design_observations": matrix.shape[0],
+        "factor_count": matrix.shape[1],
+        "factor_standard_deviations": {
+            factor_id: _number(float(standard_deviations[index]))
+            for index, factor_id in enumerate(factor_ids)
+        },
+        "matrix_condition_number": _number(condition_number),
+        "matrix_rank": rank,
+        "near_duplicate_absolute_correlation_threshold": _number(
+            NEAR_DUPLICATE_ABSOLUTE_CORRELATION
+        ),
+        "near_duplicate_pairs": near_duplicates,
+        "transformation": {
+            "diagnostic_basis": "TRAIN_MEAN_ZERO_UNIT_POPULATION_STD",
+            "fitted_basis": "RAW_CONFIGURED_FACTOR_RETURNS",
+            "inverse_mapping": [
+                {
+                    "factor_id": factor_id,
+                    "raw_equals": factor_id,
+                    "status": "IDENTITY_NO_MODEL_TRANSFORMATION",
+                }
+                for factor_id in factor_ids
+            ],
+        },
+        "unregularized_blocking_reasons": blocking_reasons,
+        "unregularized_condition_number_limit": _number(
+            UNREGULARIZED_CONDITION_NUMBER_LIMIT
+        ),
+        "unregularized_status": (
+            "BLOCKED_COLLINEAR_DESIGN" if blocking_reasons else "ELIGIBLE"
+        ),
+        "unregularized_vif_limit": _number(UNREGULARIZED_VIF_LIMIT),
+        "vif": [
+            {"factor_id": factor_id, "value": _number(vif_values[index])}
+            for index, factor_id in enumerate(factor_ids)
+        ],
+        "vif_status": vif_status,
+    }
+
+
 def _linear_solve(matrix: FloatArray, right: FloatArray) -> tuple[FloatArray, bool]:
     """Solve a small deterministic system and disclose pseudoinverse fallback."""
 
@@ -963,6 +1098,7 @@ def _dynamic_model_result(
     test_matrix: FloatArray,
     test_target: FloatArray,
     coverage: Mapping[str, object],
+    training_design: Mapping[str, object],
 ) -> dict[str, object]:
     ridge = model.ridge_candidates[0]
     sensitivity: list[dict[str, object]] = []
@@ -1252,6 +1388,7 @@ def _dynamic_model_result(
             },
             "rank": None,
             "rank_status": train_fit.rank_status,
+            "training_design": dict(training_design),
             "train": _metrics(
                 train_target,
                 train_fit.fitted,
@@ -1452,6 +1589,7 @@ def _model_result(
     train_matrix, train_target = arrays(train)
     test_matrix, test_target = arrays(test)
     aligned_matrix, aligned_target = arrays(aligned)
+    training_design = _training_design_diagnostics(train_matrix, model.factor_ids)
     if model.estimator == "DYNAMIC_FLS":
         return _dynamic_model_result(
             model,
@@ -1466,10 +1604,22 @@ def _model_result(
             test_matrix,
             test_target,
             coverage,
+            training_design,
         )
     sensitivity: list[dict[str, object]] = []
     scored: list[tuple[float, float]] = []
     for ridge in model.ridge_candidates:
+        if ridge == 0.0 and training_design["unregularized_status"] != "ELIGIBLE":
+            sensitivity.append(
+                {
+                    "cv_observations": 0,
+                    "cv_predicted_r_squared": None,
+                    "eligibility": "BLOCKED_COLLINEAR_UNREGULARIZED_DESIGN",
+                    "holdout_predicted_r_squared": None,
+                    "ridge": _number(ridge),
+                }
+            )
+            continue
         cv_score, cv_observations = _cv_score(train_matrix, train_target, model, ridge)
         test_score: float | None = None
         if cv_score is not None:
@@ -1489,14 +1639,22 @@ def _model_result(
             {
                 "cv_observations": cv_observations,
                 "cv_predicted_r_squared": _number(cv_score),
+                "eligibility": "ELIGIBLE",
                 "holdout_predicted_r_squared": _number(test_score),
                 "ridge": _number(ridge),
             }
         )
     if not scored:
-        return _unavailable_result(
-            model, target_rows, "UNAVAILABLE_INSUFFICIENT_TIME_ORDERED_CV", coverage
+        status = (
+            "UNAVAILABLE_COLLINEAR_UNREGULARIZED_DESIGN"
+            if training_design["unregularized_status"] != "ELIGIBLE"
+            and all(ridge == 0.0 for ridge in model.ridge_candidates)
+            else "UNAVAILABLE_INSUFFICIENT_TIME_ORDERED_CV"
         )
+        unavailable = _unavailable_result(model, target_rows, status, coverage)
+        unavailable["diagnostics"] = {"training_design": training_design}
+        unavailable["ridge_sensitivity"] = sensitivity
+        return unavailable
     selected_ridge = min(scored, key=lambda item: (-item[0], item[1]))[1]
     fit = _fit(
         train_matrix,
@@ -1620,6 +1778,7 @@ def _model_result(
             },
             "rank": fit.rank,
             "rank_status": fit.rank_status,
+            "training_design": training_design,
             "train": _metrics(
                 train_target,
                 train_predicted,

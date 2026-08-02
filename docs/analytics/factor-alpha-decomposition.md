@@ -52,6 +52,17 @@ series are selected only by expanding training-window cross-validation, with
 fewer factors winning within the declared parsimony tolerance. The displayed
 holdout is therefore not consumed by ridge or factor-set selection.
 
+Every candidate model also records a training-only design diagnostic before
+fit selection: the factor correlation matrix, centered/standardized matrix
+rank and condition number, per-factor VIF, near-duplicate pairs, and an exact
+identity map back to the raw configured factors. The diagnostic transform is
+used only to make scale-independent collinearity evidence; the fitted model
+continues to use raw factor returns. An unregularized candidate is ineligible
+when the training design is rank-deficient, its condition number exceeds
+1,000, or its VIF exceeds 10 or cannot be computed. A declared regularized
+candidate may still compete in time-ordered validation, with the underlying
+collinearity and non-classical confidence limitation retained in the output.
+
 The output includes factor exposures, arithmetic periodic contributions,
 intercept/alpha, residuals, tracking error, in-sample R-squared and adjusted
 R-squared, holdout Predicted R-squared, sensitivity across ridge candidates,
