@@ -16,6 +16,7 @@ from quant_engine.core import (
     FactKey,
     FactSlice,
     FinalizationState,
+    FreshnessAssessment,
     FreshnessMode,
     FreshnessPolicy,
     FreshnessState,
@@ -24,10 +25,12 @@ from quant_engine.core import (
     ManifestValidationError,
     PublicationDisposition,
     RevisionPolicy,
+    RevisionState,
     SourceArtifact,
     SubjectType,
     VerificationStatus,
     decide_admission,
+    local_freshness_alerts,
 )
 
 
@@ -268,6 +271,51 @@ def test_finite_history_remains_valid_without_recurring_freshness() -> None:
     assert decision.admitted
     assert decision.freshness_state is FreshnessState.FINITE_COMPLETE
     assert decision.next_expected_date is None
+
+
+def test_freshness_assessment_distinguishes_all_recurring_states() -> None:
+    policy = FreshnessPolicy(
+        policy_id="daily-current",
+        mode=FreshnessMode.RECURRING,
+        expected_interval_days=1,
+        grace_days=1,
+        stale_after_days=5,
+    )
+
+    fresh = policy.assess(OBSERVED_END, date(2026, 8, 2))
+    late = policy.assess(OBSERVED_END, date(2026, 8, 3))
+    stale = policy.assess(OBSERVED_END, date(2026, 8, 6))
+    unavailable = policy.assess(None, date(2026, 8, 2))
+
+    assert fresh.state is FreshnessState.FRESH
+    assert fresh.next_expected_date == date(2026, 8, 1)
+    assert fresh.escalation_required is False
+    assert late.state is FreshnessState.LATE
+    assert late.escalation_required is True
+    assert late.blocks_current_consumers is False
+    assert stale.state is FreshnessState.STALE
+    assert stale.blocks_current_consumers is True
+    assert unavailable.state is FreshnessState.UNAVAILABLE
+    assert unavailable.last_accepted_date is None
+    assert [item.severity for item in local_freshness_alerts((fresh, late, stale))] == [
+        "ERROR",
+        "WARNING",
+    ]
+
+
+def test_finite_and_revised_evidence_are_visible_without_false_staleness() -> None:
+    manifest = _manifest()
+    revised = replace(_evidence(manifest), supersedes_generation_id="f" * 64)
+    finite = FreshnessPolicy(
+        policy_id="finite-history", mode=FreshnessMode.FINITE
+    ).assess(OBSERVED_END, date(2036, 8, 2), revised)
+
+    assert finite.state is FreshnessState.FINITE_COMPLETE
+    assert finite.revision_state is RevisionState.REVISED
+    assert finite.next_expected_date is None
+    assert finite.escalation_required is False
+    assert finite.acquired_at == revised.acquired_at
+    assert FreshnessAssessment(**finite.__dict__) == finite
 
 
 def test_overlapping_authorities_are_rejected() -> None:

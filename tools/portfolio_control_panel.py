@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -234,6 +234,93 @@ def _strategy_evidence(
         "sha256": sha256,
         "size_bytes": size_bytes,
     }
+
+
+def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str, Any]]:
+    """Render a governed freshness bundle into existing data-health rows."""
+
+    if path is None:
+        return []
+    payload = _load_json(path, "freshness health")
+    if set(payload) != {"assessment_schema_version", "as_of_date", "assessments"}:
+        raise ControlPanelValidationError("freshness health keys differ")
+    if payload["assessment_schema_version"] != 1:
+        raise ControlPanelValidationError("freshness health schema is unsupported")
+    as_of = _text(payload.get("as_of_date"), "freshness health as_of_date")
+    if as_of != portfolio_as_of:
+        raise ControlPanelValidationError(
+            "freshness health date differs from portfolio"
+        )
+    rows = []
+    accepted_states = {"FRESH", "LATE", "STALE", "FINITE_COMPLETE", "UNAVAILABLE"}
+    expected = {
+        "acquired_at",
+        "blocks_current_consumers",
+        "escalation_required",
+        "evaluated_on",
+        "fact_type",
+        "last_accepted_date",
+        "next_expected_date",
+        "policy_id",
+        "provider_id",
+        "reason",
+        "revision_state",
+        "state",
+        "subject_id",
+    }
+    for item in _objects(payload.get("assessments"), "freshness assessments"):
+        if set(item) != expected:
+            raise ControlPanelValidationError("freshness assessment keys differ")
+        state = _text(item.get("state"), "freshness state")
+        if state not in accepted_states:
+            raise ControlPanelValidationError("freshness state is unknown")
+        if _text(item.get("evaluated_on"), "freshness evaluated_on") != as_of:
+            raise ControlPanelValidationError("freshness evaluation date differs")
+        for field in ("blocks_current_consumers", "escalation_required"):
+            if not isinstance(item.get(field), bool):
+                raise ControlPanelValidationError(f"freshness {field} must be boolean")
+        revision_state = _text(item.get("revision_state"), "freshness revision_state")
+        if revision_state not in {"ORIGINAL", "REVISED"}:
+            raise ControlPanelValidationError("freshness revision state is unknown")
+        acquired_at = item.get("acquired_at")
+        if acquired_at is not None:
+            acquired_at = _text(acquired_at, "freshness acquired_at")
+            parsed_acquired = datetime.fromisoformat(acquired_at)
+            if parsed_acquired.tzinfo is None or parsed_acquired.utcoffset() is None:
+                raise ControlPanelValidationError(
+                    "freshness acquired_at must be timezone-aware"
+                )
+        provider_id = _text(item.get("provider_id"), "freshness provider_id")
+        subject_id = _text(item.get("subject_id"), "freshness subject_id")
+        fact_type = _text(item.get("fact_type"), "freshness fact_type")
+        last = item.get("last_accepted_date")
+        next_expected = item.get("next_expected_date")
+        if last is not None:
+            last = _text(last, "freshness last_accepted_date")
+            date.fromisoformat(last)
+        if next_expected is not None:
+            next_expected = _text(next_expected, "freshness next_expected_date")
+            date.fromisoformat(next_expected)
+        reason = _text(item.get("reason"), "freshness reason")
+        rows.append(
+            {
+                "acquired_at": acquired_at,
+                "blocks_current_consumers": item["blocks_current_consumers"],
+                "category": "DATA_FRESHNESS",
+                "escalation_required": item["escalation_required"],
+                "item": f"{provider_id}:{subject_id}:{fact_type}",
+                "known_gap": (
+                    f"next expected {next_expected or 'not recurring'}; {reason}"
+                ),
+                "next_expected_date": next_expected,
+                "policy_id": _text(item.get("policy_id"), "freshness policy_id"),
+                "reason": reason,
+                "revision_state": revision_state,
+                "status": state,
+                "value": last,
+            }
+        )
+    return sorted(rows, key=lambda item: str(item["item"]))
 
 
 def _hash(path: Path) -> str:
@@ -1262,6 +1349,7 @@ def _panel_data(
     strategy_evidence_path: Path | None = None,
     decomposition_lenses: Mapping[str, Any] | None = None,
     weekly_returns: Mapping[str, Any] | None = None,
+    freshness_health: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     summary = _summary(report)
     strategies = _objects(report.get("strategy_summary"), "strategy_summary")
@@ -1272,7 +1360,7 @@ def _panel_data(
     positions = (
         [] if positions_value is None else _objects(positions_value, "positions")
     )
-    coverage = _fact_rows(report)
+    coverage = [*_fact_rows(report), *(freshness_health or [])]
     reconciliations = _objects(
         report.get("reconciliation_checks"), "reconciliation_checks"
     )
@@ -1745,6 +1833,7 @@ def _rendered_files(
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
     weekly_returns_root: Path | None = None,
+    freshness_health_path: Path | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -1756,9 +1845,12 @@ def _rendered_files(
         Path | None,
         tuple[Path, ...],
         Path | None,
+        Path | None,
     ],
 ]:
     report, report_identity, report_path = _current_report(report_root)
+    portfolio_as_of = _text(report.get("as_of_date"), "report.as_of_date")
+    freshness_health = _freshness_health(freshness_health_path, portfolio_as_of)
     resolved_decomposition, resolved_correlation = _analytics_roots(
         report_root, decomposition_root, correlation_root
     )
@@ -1816,6 +1908,7 @@ def _rendered_files(
         strategy_evidence_path,
         lens_payload,
         weekly_payload,
+        freshness_health,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -1838,6 +1931,7 @@ def _rendered_files(
             strategy_evidence_path,
             lens_paths,
             weekly_path,
+            freshness_health_path,
         ),
     )
 
@@ -1878,6 +1972,7 @@ def build_candidate(
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
     weekly_returns_root: Path | None = None,
+    freshness_health_path: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -1889,6 +1984,7 @@ def build_candidate(
         decomposition_lenses_root,
         decomposition_plan_bundle,
         weekly_returns_root,
+        freshness_health_path,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -1939,6 +2035,7 @@ def verify_candidate(
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
     weekly_returns_root: Path | None = None,
+    freshness_health_path: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -1950,6 +2047,7 @@ def verify_candidate(
         decomposition_lenses_root,
         decomposition_plan_bundle,
         weekly_returns_root,
+        freshness_health_path,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -2484,6 +2582,7 @@ def publish_panel(
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
     weekly_returns_root: Path | None = None,
+    freshness_health_path: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         report_root,
@@ -2496,6 +2595,7 @@ def publish_panel(
         decomposition_lenses_root,
         decomposition_plan_bundle,
         weekly_returns_root,
+        freshness_health_path,
     )
     qa = validate_qa(candidate_dir, qa_dir)
     _, data, input_paths = _rendered_files(
@@ -2508,6 +2608,7 @@ def publish_panel(
         decomposition_lenses_root,
         decomposition_plan_bundle,
         weekly_returns_root,
+        freshness_health_path,
     )
     (
         report_path,
@@ -2517,6 +2618,7 @@ def publish_panel(
         strategy_evidence_source,
         decomposition_lens_sources,
         weekly_returns_source,
+        freshness_health_source,
     ) = input_paths
     as_of = date.fromisoformat(_text(data["meta"]["portfolio_as_of"], "as_of"))
     artifacts: list[SourceArtifact] = [
@@ -2585,6 +2687,16 @@ def publish_panel(
                 artifact_id="input/portfolio-weekly-returns.json",
                 as_of_date=date.fromisoformat(data["weekly_returns"]["as_of_date"]),
                 schema_name="portfolio-weekly-returns",
+                schema_version="1",
+            )
+        )
+    if freshness_health_source is not None:
+        artifacts.append(
+            SourceArtifact.from_path(
+                freshness_health_source,
+                artifact_id="input/freshness-health.json",
+                as_of_date=as_of,
+                schema_name="freshness-assessment",
                 schema_version="1",
             )
         )
@@ -2686,6 +2798,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--correlation-root", type=Path)
         command.add_argument("--weekly-returns-root", type=Path)
         command.add_argument("--strategy-evidence", type=Path)
+        command.add_argument("--freshness-health", type=Path)
         command.add_argument("--output-root", type=Path, required=name != "verify")
         if name != "build":
             command.add_argument("--candidate-dir", type=Path, required=True)
@@ -2712,6 +2825,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.decomposition_lenses_root,
                 args.decomposition_plan_bundle,
                 args.weekly_returns_root,
+                args.freshness_health,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -2725,6 +2839,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.decomposition_lenses_root,
                 args.decomposition_plan_bundle,
                 args.weekly_returns_root,
+                args.freshness_health,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -2742,6 +2857,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.decomposition_lenses_root,
                 args.decomposition_plan_bundle,
                 args.weekly_returns_root,
+                args.freshness_health,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)
