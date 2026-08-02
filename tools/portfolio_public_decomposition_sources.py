@@ -181,7 +181,9 @@ def _rows_by_date(
             raise PublicSourceError(f"{source.key} row {offset} has an invalid schema")
         period = _text(row.get("period"), f"{source.key} row {offset} period")
         if DATE_PATTERN.fullmatch(period) is None:
-            raise PublicSourceError(f"{source.key} row {offset} has invalid date {period}")
+            raise PublicSourceError(
+                f"{source.key} row {offset} has invalid date {period}"
+            )
         if period in indexed:
             raise PublicSourceError(f"{source.key} has duplicate date {period}")
         indexed[period] = row
@@ -203,15 +205,13 @@ def _factor_output(
     momentum: SourceDocument,
     momentum_column: str,
 ) -> tuple[bytes, dict[str, object]]:
-    _, factor_rows = _rows_by_date(
-        factors, "Daily", ("period", *FACTOR_COLUMNS)
-    )
-    _, momentum_rows = _rows_by_date(
-        momentum, "Daily", ("period", momentum_column)
-    )
+    _, factor_rows = _rows_by_date(factors, "Daily", ("period", *FACTOR_COLUMNS))
+    _, momentum_rows = _rows_by_date(momentum, "Daily", ("period", momentum_column))
     common_dates = sorted(set(factor_rows) & set(momentum_rows))
     if not common_dates:
-        raise PublicSourceError(f"{factors.key} and {momentum.key} have no common dates")
+        raise PublicSourceError(
+            f"{factors.key} and {momentum.key} have no common dates"
+        )
     output_rows: list[list[str]] = []
     missing_cells = 0
     for period in common_dates:
@@ -221,7 +221,9 @@ def _factor_output(
             _decimal(factor[name], f"{factors.key}.{period}.{name}")
             for name in FACTOR_COLUMNS
         ]
-        values.append(_decimal(mom[momentum_column], f"{momentum.key}.{period}.momentum"))
+        values.append(
+            _decimal(mom[momentum_column], f"{momentum.key}.{period}.momentum")
+        )
         missing_cells += sum(value is None for value in values)
         output_rows.append(
             [
@@ -248,14 +250,15 @@ def _industry_output(source: SourceDocument) -> tuple[bytes, dict[str, object]]:
     columns, rows = _rows_by_date(source, INDUSTRY_TITLE)
     industries = columns[1:]
     if len(industries) != 49:
-        raise PublicSourceError(f"industry source must contain 49 portfolios, found {len(industries)}")
+        raise PublicSourceError(
+            f"industry source must contain 49 portfolios, found {len(industries)}"
+        )
     output_rows: list[list[str]] = []
     missing_cells = 0
     for period in sorted(rows):
         row = rows[period]
         values = [
-            _decimal(row[name], f"{source.key}.{period}.{name}")
-            for name in industries
+            _decimal(row[name], f"{source.key}.{period}.{name}") for name in industries
         ]
         missing_cells += sum(value is None for value in values)
         output_rows.append(
@@ -360,7 +363,11 @@ def write_bundle(
             path.unlink(missing_ok=True)
         destination.rmdir()
         raise
-    return {"bundle_id": bundle_id, "destination": str(destination), "manifest": manifest}
+    return {
+        "bundle_id": bundle_id,
+        "destination": str(destination),
+        "manifest": manifest,
+    }
 
 
 def _parser() -> argparse.ArgumentParser:

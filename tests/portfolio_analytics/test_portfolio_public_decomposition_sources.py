@@ -27,7 +27,9 @@ def _write_json(path: Path, value: object) -> Path:
     return path
 
 
-def _document(feed_id: str, url: str, sections: list[dict[str, object]]) -> dict[str, object]:
+def _document(
+    feed_id: str, url: str, sections: list[dict[str, object]]
+) -> dict[str, object]:
     return {
         "provider": "famafrench",
         "feed_id": feed_id,
@@ -76,9 +78,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
     ]
     industry_names = [f"I{number:02d}" for number in range(1, 50)]
     industry_row: dict[str, object] = {"period": "20260102"}
-    industry_row.update(
-        {name: number for number, name in enumerate(industry_names, 1)}
-    )
+    industry_row.update({name: number for number, name in enumerate(industry_names, 1)})
     industry_row["I49"] = None
     paths = {
         "us_factors": _write_json(
@@ -175,17 +175,13 @@ def test_build_uses_exact_dates_decimal_returns_and_explicit_missing(
     ]
     europe_rows = _csv_rows(outputs["europe_factors_daily.csv"])
     assert [row[0] for row in europe_rows[1:]] == ["2026-01-02", "2026-01-05"]
-    industry_rows = _csv_rows(
-        outputs["us_49_industries_value_weighted_daily.csv"]
-    )
+    industry_rows = _csv_rows(outputs["us_49_industries_value_weighted_daily.csv"])
     assert industry_rows[1][-1] == ""
 
     output_manifest = {item["path"]: item for item in manifest["outputs"]}
     assert output_manifest["us_factors_daily.csv"]["factor_only_dates_dropped"] == 1
     assert output_manifest["us_factors_daily.csv"]["momentum_only_dates_dropped"] == 1
-    industry_manifest = output_manifest[
-        "us_49_industries_value_weighted_daily.csv"
-    ]
+    industry_manifest = output_manifest["us_49_industries_value_weighted_daily.csv"]
     assert industry_manifest["missing_cells"] == 1
     assert manifest["policies"]["date_join"] == "EXACT_INTERSECTION_NO_FILL"
 
@@ -219,9 +215,7 @@ def test_bundle_is_deterministic_and_hashes_every_output(tmp_path: Path) -> None
 def test_rejects_duplicate_dates_and_catalog_url_drift(tmp_path: Path) -> None:
     catalog, paths = _inputs(tmp_path)
     value = json.loads(paths["us_factors"].read_text(encoding="utf-8"))
-    value["sections"][0]["rows"].append(
-        dict(value["sections"][0]["rows"][0])
-    )
+    value["sections"][0]["rows"].append(dict(value["sections"][0]["rows"][0]))
     _write_json(paths["us_factors"], value)
     with pytest.raises(sources.PublicSourceError, match="duplicate date"):
         sources.build_bundle(catalog, paths)
