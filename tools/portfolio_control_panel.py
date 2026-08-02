@@ -45,9 +45,7 @@ SOURCE_CONTRACT = (
     / "portfolio-control-panel-source-v1.json"
 )
 HWM_POLICY = (
-    Path(__file__).resolve().parents[1]
-    / "contracts"
-    / "portfolio-hwm-policy-v2.json"
+    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v2.json"
 )
 DEFAULT_TEMPLATE_ROOT = (
     Path(__file__).resolve().parents[1] / "apps" / "portfolio-control-panel"
@@ -309,9 +307,7 @@ def _material_hwm_coverage(
                 {
                     "hwm_source": "ACCOUNT_LIVE_PROVIDER_OVERLAY",
                     "nav_status": "AVAILABLE",
-                    "nav_observed_start": factor_coverage.get(
-                        "target_observed_start"
-                    ),
+                    "nav_observed_start": factor_coverage.get("target_observed_start"),
                     "nav_observed_end": factor_coverage.get("target_observed_end"),
                     "nav_return_observations": factor_coverage.get(
                         "target_observations"
@@ -319,9 +315,7 @@ def _material_hwm_coverage(
                     "hwm_current_drawdown": factor_coverage.get(
                         "target_current_drawdown"
                     ),
-                    "hwm_max_drawdown": factor_coverage.get(
-                        "target_max_drawdown"
-                    ),
+                    "hwm_max_drawdown": factor_coverage.get("target_max_drawdown"),
                 }
             )
         if row.get("nav_status") == "AVAILABLE":
@@ -366,9 +360,7 @@ def _provider_account_nav_performance(
         if strategy.get("hwm_source") != "ACCOUNT_LIVE_PROVIDER_OVERLAY":
             continue
         strategy_id = _text(strategy.get("strategy_id"), "strategy.strategy_id")
-        strategy_name = _text(
-            strategy.get("strategy_name"), "strategy.strategy_name"
-        )
+        strategy_name = _text(strategy.get("strategy_name"), "strategy.strategy_name")
         factor = factor_by_name.get(strategy_name)
         if (
             factor is None
@@ -386,9 +378,7 @@ def _provider_account_nav_performance(
                 f"provider account NAV overlay lacks return evidence: {strategy_name}"
             )
         matches = [
-            row
-            for row in accepted_performance
-            if row.get("strategy_id") == strategy_id
+            row for row in accepted_performance if row.get("strategy_id") == strategy_id
         ]
         if len(matches) != 1:
             raise ControlPanelValidationError(
@@ -827,7 +817,9 @@ def _panel_data(
                 "strategy is explicitly excluded from the HWM "
                 "perimeter"
             )
-            row["status"] = "PARTIAL" if missing else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+            row["status"] = (
+                "PARTIAL" if missing else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+            )
     normalized_allocations = []
     for row in allocations:
         strategy_id = row.get("strategy_id")
@@ -1350,8 +1342,7 @@ def verify_candidate(
         _check(
             "Coverage-aware risk replay",
             data["advisory"]["hwm_status"] == data["hwm_summary"]["status"]
-            and data["advisory"]["nav_coverage"]
-            == data["hwm_summary"]["nav_coverage"]
+            and data["advisory"]["nav_coverage"] == data["hwm_summary"]["nav_coverage"]
             and data["advisory"]["readiness"] == "DO_NOT_EXPAND_SYSTEMATIC_RISK",
             data["advisory"],
         )

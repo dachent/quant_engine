@@ -397,13 +397,13 @@ def _load_spec(path: Path) -> Specification:
         raise DecompositionError("specification is not readable UTF-8 JSON") from exc
     root = _object(decoded, "specification")
     root_keys = {
-            "as_of_date",
-            "factor_source",
-            "maximum_factor_staleness_days",
-            "models",
-            "schema_version",
-            "target_source",
-        }
+        "as_of_date",
+        "factor_source",
+        "maximum_factor_staleness_days",
+        "models",
+        "schema_version",
+        "target_source",
+    }
     if "provenance_sources" in root:
         root_keys.add("provenance_sources")
     _strict_keys(root, root_keys, "specification")
@@ -1338,7 +1338,9 @@ def _model_result(
         "target_current_drawdown": None,
         "target_max_drawdown": None,
         "target_observed_end": target_rows[-1].day.isoformat() if target_rows else None,
-        "target_observed_start": target_rows[0].day.isoformat() if target_rows else None,
+        "target_observed_start": target_rows[0].day.isoformat()
+        if target_rows
+        else None,
         "test_observations": 0,
         "train_observations": 0,
     }

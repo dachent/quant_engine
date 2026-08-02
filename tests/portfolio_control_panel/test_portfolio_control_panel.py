@@ -951,8 +951,8 @@ def test_provider_account_nav_overlay_promotes_twr_evidence() -> None:
         ]
     }
 
-    accepted_strategies, accepted_performance = (
-        panel._provider_account_nav_performance(strategies, performance, factors)
+    accepted_strategies, accepted_performance = panel._provider_account_nav_performance(
+        strategies, performance, factors
     )
 
     assert accepted_strategies[0]["account_live_status"] == (

@@ -47,9 +47,7 @@ def _sources(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         "OTHER,2026-01-03T00:00:00+00:00,8\n",
     )
     holdings = tmp_path / "holdings.csv"
-    holding_hash, holding_size = _write(
-        holdings, "product_id,shares\nP1,100\n"
-    )
+    holding_hash, holding_size = _write(holdings, "product_id,shares\nP1,100\n")
     manifest = tmp_path / "generation.json"
     manifest.write_text(
         json.dumps(
@@ -96,17 +94,13 @@ def test_matrixport_target_rejects_manifest_drift(tmp_path: Path) -> None:
     base, manifest, nav, holdings = _sources(tmp_path)
     nav.write_text(nav.read_text(encoding="utf-8") + "P1,2026-01-04T00:00:00Z,1\n")
     with pytest.raises(TargetSeriesError, match="differs from the manifest"):
-        build_matrixport_targets(
-            base, manifest, nav, holdings, "P1", "Robuxio"
-        )
+        build_matrixport_targets(base, manifest, nav, holdings, "P1", "Robuxio")
 
 
 def test_matrixport_target_requires_matching_live_holding(tmp_path: Path) -> None:
     base, manifest, nav, holdings = _sources(tmp_path)
     with pytest.raises(TargetSeriesError, match="exactly one live holding"):
-        build_matrixport_targets(
-            base, manifest, nav, holdings, "UNKNOWN", "Robuxio"
-        )
+        build_matrixport_targets(base, manifest, nav, holdings, "UNKNOWN", "Robuxio")
 
 
 def test_decomposition_inputs_rebind_exact_sources(tmp_path: Path) -> None:
@@ -139,9 +133,9 @@ def test_decomposition_inputs_rebind_exact_sources(tmp_path: Path) -> None:
     )
     value = json.loads(rebound)
     assert value["as_of_date"] == "2026-01-03"
-    assert value["target_source"]["expected_sha256"] == hashlib.sha256(
-        targets
-    ).hexdigest()
+    assert (
+        value["target_source"]["expected_sha256"] == hashlib.sha256(targets).hexdigest()
+    )
     assert value["target_source"]["schema_version"] == "2"
     assert len(value["provenance_sources"]) == 2
     assert copied_factors == factors.read_bytes()

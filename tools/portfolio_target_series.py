@@ -32,9 +32,7 @@ TARGET_FIELDS: Final = (
     "return_type",
     "cost",
 )
-MATRIXPORT_NAV_FIELDS: Final = frozenset(
-    {"nav", "product_id", "timestamp_utc"}
-)
+MATRIXPORT_NAV_FIELDS: Final = frozenset({"nav", "product_id", "timestamp_utc"})
 MATRIXPORT_HOLDING_FIELDS: Final = frozenset({"product_id", "shares"})
 
 
@@ -167,7 +165,9 @@ def _matrixport_returns(
         if row["product_id"] == product_id
     ]
     if len(holdings) != 1:
-        raise TargetSeriesError("Matrixport product must match exactly one live holding")
+        raise TargetSeriesError(
+            "Matrixport product must match exactly one live holding"
+        )
     shares = _positive_decimal(holdings[0]["shares"], "Matrixport holding shares")
 
     observations: dict[date, Decimal] = {}
@@ -177,7 +177,9 @@ def _matrixport_returns(
         day = _utc_day(row["timestamp_utc"])
         nav = _positive_decimal(row["nav"], "Matrixport NAV")
         if day in observations and observations[day] != nav:
-            raise TargetSeriesError("Matrixport NAV contains conflicting duplicate dates")
+            raise TargetSeriesError(
+                "Matrixport NAV contains conflicting duplicate dates"
+            )
         observations[day] = nav
     if len(observations) < 2:
         raise TargetSeriesError("Matrixport product lacks a usable NAV history")
