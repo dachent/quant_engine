@@ -43,6 +43,31 @@ instrument/provider/venue mappings, and correlation-one component losses.
 Correlation-one weights must sum to 100%, and the calculated adverse loss must
 reconcile to the accepted expected loss within the declared tolerance.
 
+## Evidence modes
+
+Specification schema version 2 adds a versioned evidence-mode contract. Its
+return source adds `strategy_version` after `evidence_layer`, and
+`evidence_mode_series` selects one accepted live layer and strategy version for
+every requested series. The builder emits two complete dependence payloads:
+
+- `LIVE_ONLY` is the default and contains only the selected version's accepted
+  live observations.
+- `LIVE_PLUS_BACKTEST` is explicitly labeled hybrid evidence. It uses the same
+  strategy version's backtest only before the first live observation and uses
+  live observations on and after that boundary.
+
+Backtest observations never fill a missing date after live inception. Overlap
+is resolved in favor of live evidence rather than averaged. Missing live data,
+missing version-matched backtest prehistory, and unresolved versions make the
+affected mode unavailable. Every mode and pair carries its evidence
+composition, live boundary, observation counts, excluded overlap, and exact
+interval. The no-missing-diversification-credit matrix is rebuilt separately
+for both modes; a longer hybrid history does not change the authority of the
+live-only readiness decision.
+
+Schema version 1 remains supported for replay of accepted historical
+generations and preserves its one-layer-per-series rule.
+
 The legacy negative-return statistic remains separately labeled `downside`; it
 is not a drawdown measure. Drawdown regimes compound each series into a wealth
 index and select common observations when either or both wealth indices are

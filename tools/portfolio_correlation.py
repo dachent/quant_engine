@@ -32,10 +32,10 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-ANALYTICS_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.1.0"
+BUILDER_VERSION: Final = "1.2.0"
 TRADING_OBSERVATION_HORIZONS: Final = (5, 21, 22, 63, 126, 130, 252, 260)
 RETURN_HEADERS: Final = ("series_id", "date", "return", "evidence_layer")
+RETURN_HEADERS_V2: Final = (*RETURN_HEADERS, "strategy_version")
 EVIDENCE_LAYERS: Final = {
     "ACCOUNT_LIVE",
     "PROVIDER_LIVE",
@@ -68,6 +68,14 @@ class ReturnRow:
     day: date
     value: float
     evidence_layer: str
+    strategy_version: str | None = None
+
+
+@dataclass(frozen=True)
+class EvidenceModeSeries:
+    series_id: str
+    live_evidence_layer: str
+    strategy_version: str
 
 
 @dataclass(frozen=True)
@@ -95,6 +103,7 @@ class StressComponent:
 
 @dataclass(frozen=True)
 class Specification:
+    schema_version: int
     as_of_date: date
     source: SourceDefinition
     series_ids: tuple[str, ...]
@@ -113,6 +122,7 @@ class Specification:
     stress_components: tuple[StressComponent, ...]
     expected_correlation_one_loss: float
     correlation_one_tolerance: float
+    evidence_mode_series: tuple[EvidenceModeSeries, ...]
 
 
 def _strict_keys(value: Mapping[str, Any], expected: set[str], name: str) -> None:
@@ -288,6 +298,27 @@ def _stress_component(value: Mapping[str, Any], index: int) -> StressComponent:
     )
 
 
+def _evidence_mode_definition(
+    value: Mapping[str, Any], index: int
+) -> EvidenceModeSeries:
+    name = f"evidence_mode_series[{index}]"
+    _strict_keys(
+        value,
+        {"live_evidence_layer", "series_id", "strategy_version"},
+        name,
+    )
+    live_layer = _text(value["live_evidence_layer"], f"{name}.live_evidence_layer")
+    if live_layer not in {"ACCOUNT_LIVE", "PROVIDER_LIVE", "OFFICIAL_VEHICLE"}:
+        raise CorrelationError(
+            f"{name}.live_evidence_layer is not an accepted live layer"
+        )
+    return EvidenceModeSeries(
+        series_id=_text(value["series_id"], f"{name}.series_id"),
+        live_evidence_layer=live_layer,
+        strategy_version=_text(value["strategy_version"], f"{name}.strategy_version"),
+    )
+
+
 def _load_spec(path: Path) -> Specification:
     if path.is_symlink() or not path.is_file():
         raise CorrelationError("specification must be a regular local file")
@@ -296,30 +327,33 @@ def _load_spec(path: Path) -> Specification:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CorrelationError("specification is not readable UTF-8 JSON") from exc
     root = _object(decoded, "specification")
-    _strict_keys(
-        root,
-        {
-            "as_of_date",
-            "conceptual_priors",
-            "correlation_one",
-            "eigenvalue_floor",
-            "full_observed_weight_observations",
-            "implementation_mappings",
-            "maximum_observed_weight",
-            "minimum_downside_observations",
-            "minimum_observations",
-            "minimum_rolling_windows",
-            "return_source",
-            "rolling_window",
-            "schema_version",
-            "series_ids",
-            "stress_cap",
-            "stress_uplift",
-            "tail_quantile",
-        },
-        "specification",
-    )
-    if root["schema_version"] != 1:
+    raw_schema_version = root.get("schema_version")
+    if isinstance(raw_schema_version, bool) or not isinstance(raw_schema_version, int):
+        raise CorrelationError("specification schema_version is unsupported")
+    schema_version = raw_schema_version
+    expected_keys = {
+        "as_of_date",
+        "conceptual_priors",
+        "correlation_one",
+        "eigenvalue_floor",
+        "full_observed_weight_observations",
+        "implementation_mappings",
+        "maximum_observed_weight",
+        "minimum_downside_observations",
+        "minimum_observations",
+        "minimum_rolling_windows",
+        "return_source",
+        "rolling_window",
+        "schema_version",
+        "series_ids",
+        "stress_cap",
+        "stress_uplift",
+        "tail_quantile",
+    }
+    if schema_version == 2:
+        expected_keys.add("evidence_mode_series")
+    _strict_keys(root, expected_keys, "specification")
+    if schema_version not in {1, 2}:
         raise CorrelationError("specification schema_version is unsupported")
     raw_series = root["series_ids"]
     if not isinstance(raw_series, list):
@@ -383,7 +417,23 @@ def _load_spec(path: Path) -> Specification:
     )
     if rolling_window < minimum_observations:
         raise CorrelationError("rolling_window cannot be below minimum_observations")
+    evidence_mode_series = tuple(
+        _evidence_mode_definition(item, index)
+        for index, item in enumerate(
+            _objects(root.get("evidence_mode_series", []), "evidence_mode_series")
+        )
+    )
+    if schema_version == 2:
+        if len({item.series_id for item in evidence_mode_series}) != len(
+            evidence_mode_series
+        ):
+            raise CorrelationError("evidence mode series IDs must be unique")
+        if {item.series_id for item in evidence_mode_series} != set(series_ids):
+            raise CorrelationError(
+                "evidence mode definitions must cover every requested series"
+            )
     return Specification(
+        schema_version=schema_version,
         as_of_date=_day(root["as_of_date"], "as_of_date"),
         source=_source_definition(root["return_source"]),
         series_ids=series_ids,
@@ -443,6 +493,7 @@ def _load_spec(path: Path) -> Specification:
             minimum=0.0,
             maximum=0.1,
         ),
+        evidence_mode_series=evidence_mode_series,
     )
 
 
@@ -466,14 +517,17 @@ def _verify_source(root: Path, definition: SourceDefinition) -> Path:
     return path
 
 
-def _read_returns(path: Path, as_of_date: date) -> dict[str, list[ReturnRow]]:
+def _read_returns(
+    path: Path, as_of_date: date, schema_version: int = 1
+) -> dict[str, list[ReturnRow]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        if tuple(reader.fieldnames or ()) != RETURN_HEADERS:
+        expected_headers = RETURN_HEADERS if schema_version == 1 else RETURN_HEADERS_V2
+        if tuple(reader.fieldnames or ()) != expected_headers:
             raise CorrelationError("return CSV headers differ from the closed contract")
         grouped: dict[str, list[ReturnRow]] = {}
         layers: dict[str, str] = {}
-        seen: set[tuple[str, date]] = set()
+        seen: set[tuple[str, date, str]] = set()
         for line_number, row in enumerate(reader, start=2):
             series_id = _text(row["series_id"], f"return line {line_number} series_id")
             day = _day(row["date"], f"return line {line_number} date")
@@ -485,19 +539,178 @@ def _read_returns(path: Path, as_of_date: date) -> dict[str, list[ReturnRow]]:
             )
             if layer not in EVIDENCE_LAYERS:
                 raise CorrelationError("return evidence layer is unsupported")
-            if series_id in layers and layers[series_id] != layer:
+            if (
+                schema_version == 1
+                and series_id in layers
+                and layers[series_id] != layer
+            ):
                 raise CorrelationError("one series cannot mix evidence layers")
             layers[series_id] = layer
-            key = (series_id, day)
+            strategy_version = (
+                None
+                if schema_version == 1
+                else _text(
+                    row["strategy_version"],
+                    f"return line {line_number} strategy_version",
+                )
+            )
+            key = (series_id, day, layer)
             if key in seen:
-                raise CorrelationError("return series contains a duplicate date")
+                raise CorrelationError(
+                    "return series contains a duplicate date within an evidence layer"
+                )
             seen.add(key)
-            grouped.setdefault(series_id, []).append(ReturnRow(day, value, layer))
+            grouped.setdefault(series_id, []).append(
+                ReturnRow(day, value, layer, strategy_version)
+            )
     if not grouped:
         raise CorrelationError("return source contains no observations")
     for rows in grouped.values():
         rows.sort(key=lambda item: item.day)
     return grouped
+
+
+def _mode_composition(
+    *,
+    definition: EvidenceModeSeries,
+    mode: str,
+    status: str,
+    live_rows: Sequence[ReturnRow],
+    backtest_rows_used: Sequence[ReturnRow],
+    backtest_rows_excluded: int,
+    ignored_version_observations: int,
+) -> dict[str, object]:
+    combined = sorted([*live_rows, *backtest_rows_used], key=lambda item: item.day)
+    return {
+        "backtest_evidence_layer": "BACKTEST",
+        "backtest_observations_excluded_at_or_after_live_inception": (
+            backtest_rows_excluded
+        ),
+        "backtest_observations_used": len(backtest_rows_used),
+        "evidence_mode": mode,
+        "ignored_other_version_observations": ignored_version_observations,
+        "live_evidence_layer": definition.live_evidence_layer,
+        "live_inception": live_rows[0].day.isoformat() if live_rows else None,
+        "live_observations": len(live_rows),
+        "observed_end": combined[-1].day.isoformat() if combined else None,
+        "observed_start": combined[0].day.isoformat() if combined else None,
+        "series_id": definition.series_id,
+        "status": status,
+        "strategy_version": definition.strategy_version,
+    }
+
+
+def _evidence_mode_returns(
+    spec: Specification,
+    raw_returns: Mapping[str, list[ReturnRow]],
+) -> tuple[
+    dict[str, dict[str, list[ReturnRow]]],
+    dict[str, dict[str, dict[str, object]]],
+]:
+    modes: dict[str, dict[str, list[ReturnRow]]] = {
+        "LIVE_ONLY": {},
+        "LIVE_PLUS_BACKTEST": {},
+    }
+    compositions: dict[str, dict[str, dict[str, object]]] = {
+        "LIVE_ONLY": {},
+        "LIVE_PLUS_BACKTEST": {},
+    }
+    for definition in spec.evidence_mode_series:
+        raw = raw_returns.get(definition.series_id, [])
+        version_rows = [
+            item for item in raw if item.strategy_version == definition.strategy_version
+        ]
+        ignored_versions = len(raw) - len(version_rows)
+        live = sorted(
+            (
+                item
+                for item in version_rows
+                if item.evidence_layer == definition.live_evidence_layer
+            ),
+            key=lambda item: item.day,
+        )
+        if not live:
+            unavailable = _mode_composition(
+                definition=definition,
+                mode="LIVE_ONLY",
+                status="UNAVAILABLE_MISSING_VERSION_MATCHED_LIVE",
+                live_rows=(),
+                backtest_rows_used=(),
+                backtest_rows_excluded=0,
+                ignored_version_observations=ignored_versions,
+            )
+            compositions["LIVE_ONLY"][definition.series_id] = unavailable
+            compositions["LIVE_PLUS_BACKTEST"][definition.series_id] = {
+                **unavailable,
+                "evidence_mode": "LIVE_PLUS_BACKTEST",
+            }
+            continue
+        live_derived = [
+            ReturnRow(item.day, item.value, "LIVE_ONLY", item.strategy_version)
+            for item in live
+        ]
+        modes["LIVE_ONLY"][definition.series_id] = live_derived
+        compositions["LIVE_ONLY"][definition.series_id] = _mode_composition(
+            definition=definition,
+            mode="LIVE_ONLY",
+            status="AVAILABLE_LIVE_ONLY",
+            live_rows=live,
+            backtest_rows_used=(),
+            backtest_rows_excluded=0,
+            ignored_version_observations=ignored_versions,
+        )
+
+        first_live = live[0].day
+        backtest = sorted(
+            (item for item in version_rows if item.evidence_layer == "BACKTEST"),
+            key=lambda item: item.day,
+        )
+        eligible_backtest = [item for item in backtest if item.day < first_live]
+        excluded_backtest = len(backtest) - len(eligible_backtest)
+        if not eligible_backtest:
+            compositions["LIVE_PLUS_BACKTEST"][definition.series_id] = (
+                _mode_composition(
+                    definition=definition,
+                    mode="LIVE_PLUS_BACKTEST",
+                    status="UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY",
+                    live_rows=live,
+                    backtest_rows_used=(),
+                    backtest_rows_excluded=excluded_backtest,
+                    ignored_version_observations=ignored_versions,
+                )
+            )
+            continue
+        combined = [
+            *(
+                ReturnRow(
+                    item.day,
+                    item.value,
+                    "BACKTEST_PREHISTORY_PLUS_LIVE",
+                    item.strategy_version,
+                )
+                for item in eligible_backtest
+            ),
+            *(
+                ReturnRow(
+                    item.day,
+                    item.value,
+                    "BACKTEST_PREHISTORY_PLUS_LIVE",
+                    item.strategy_version,
+                )
+                for item in live
+            ),
+        ]
+        modes["LIVE_PLUS_BACKTEST"][definition.series_id] = combined
+        compositions["LIVE_PLUS_BACKTEST"][definition.series_id] = _mode_composition(
+            definition=definition,
+            mode="LIVE_PLUS_BACKTEST",
+            status="AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE",
+            live_rows=live,
+            backtest_rows_used=eligible_backtest,
+            backtest_rows_excluded=excluded_backtest,
+            ignored_version_observations=ignored_versions,
+        )
+    return modes, compositions
 
 
 def _number(value: float | np.floating[Any] | None) -> str | None:
@@ -938,7 +1151,11 @@ def _implementation_cells(
 
 
 def _dependence_payload(
-    spec: Specification, returns: Mapping[str, list[ReturnRow]]
+    spec: Specification,
+    returns: Mapping[str, list[ReturnRow]],
+    *,
+    evidence_mode: str | None = None,
+    series_composition: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     observed_cells: list[dict[str, object]] = []
     cell_index: dict[tuple[str, str], dict[str, object]] = {}
@@ -947,6 +1164,14 @@ def _dependence_payload(
             cell = _observed_cell(
                 left, right, returns.get(left), returns.get(right), spec
             )
+            if evidence_mode is not None and series_composition is not None:
+                cell["evidence_mode"] = evidence_mode
+                cell["left_evidence_composition"] = dict(
+                    series_composition.get(left, {})
+                )
+                cell["right_evidence_composition"] = dict(
+                    series_composition.get(right, {})
+                )
             observed_cells.append(cell)
             cell_index[(left, right)] = cell
 
@@ -1078,7 +1303,7 @@ def _dependence_payload(
         }
         for item in spec.stress_components
     ]
-    return {
+    result: dict[str, object] = {
         "blend_cells": blend_cells,
         "correlation_one": {
             "components": stress_contributions,
@@ -1141,6 +1366,13 @@ def _dependence_payload(
         "observed_cells": observed_cells,
         "series_ids": list(spec.series_ids),
     }
+    if evidence_mode is not None and series_composition is not None:
+        result["evidence_mode"] = evidence_mode
+        result["series_composition"] = {
+            series_id: dict(series_composition.get(series_id, {}))
+            for series_id in spec.series_ids
+        }
+    return result
 
 
 def build_correlation(
@@ -1148,14 +1380,34 @@ def build_correlation(
 ) -> tuple[dict[str, object], GenerationManifest, bytes]:
     spec = _load_spec(spec_path)
     source_path = _verify_source(source_root, spec.source)
-    returns = _read_returns(source_path, spec.as_of_date)
+    returns = _read_returns(source_path, spec.as_of_date, spec.schema_version)
+    dependence_modes: dict[str, dict[str, object]] | None = None
+    default_dependence: dict[str, object]
+    if spec.schema_version == 2:
+        mode_returns, compositions = _evidence_mode_returns(spec, returns)
+        dependence_modes = {
+            mode: _dependence_payload(
+                spec,
+                mode_returns[mode],
+                evidence_mode=mode,
+                series_composition=compositions[mode],
+            )
+            for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
+        }
+        default_dependence = dependence_modes["LIVE_ONLY"]
+    else:
+        default_dependence = _dependence_payload(spec, returns)
     payload: dict[str, object] = {
-        "analytics_schema_version": ANALYTICS_SCHEMA_VERSION,
+        "analytics_schema_version": spec.schema_version,
         "as_of_date": spec.as_of_date.isoformat(),
         "builder_version": BUILDER_VERSION,
-        "dependence": _dependence_payload(spec, returns),
+        "dependence": default_dependence,
         "policy": {
-            "evidence_layer_rule": "PAIRWISE_SAME_LAYER_ONLY",
+            "evidence_layer_rule": (
+                "EXPLICIT_MODE_DERIVATION_NO_POST_INCEPTION_BACKTEST_FILL"
+                if spec.schema_version == 2
+                else "PAIRWISE_SAME_LAYER_ONLY"
+            ),
             "frequency": "WEEKDAY_OBSERVED_EXACT_DATE_NO_HOLIDAY_INFERENCE",
             "requested_horizons": list(TRADING_OBSERVATION_HORIZONS),
             "minimum_downside_observations": spec.minimum_downside_observations,
@@ -1170,6 +1422,16 @@ def build_correlation(
             "size_bytes": spec.source.expected_size_bytes,
         },
     }
+    if dependence_modes is not None:
+        payload["default_evidence_mode"] = "LIVE_ONLY"
+        payload["dependence_modes"] = dependence_modes
+        cast(dict[str, object], payload["policy"])["evidence_modes"] = [
+            "LIVE_ONLY",
+            "LIVE_PLUS_BACKTEST",
+        ]
+        cast(dict[str, object], payload["policy"])["live_authority"] = (
+            "LIVE_WINS_ON_AND_AFTER_FIRST_LIVE_OBSERVATION"
+        )
     analytics_hash = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
     result: dict[str, object] = {"analytics_hash": analytics_hash, **payload}
     result_bytes = canonical_json_bytes(result)
@@ -1204,7 +1466,7 @@ def build_correlation(
                 artifact_id="spec/correlation-spec.json",
                 as_of_date=spec.as_of_date,
                 schema_name="portfolio-correlation-spec",
-                schema_version="1",
+                schema_version=str(spec.schema_version),
             ),
             SourceArtifact(
                 artifact_id=spec.source.artifact_id,
