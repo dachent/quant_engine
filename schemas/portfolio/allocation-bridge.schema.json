@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-engine.local/schemas/portfolio/allocation-bridge.schema.json",
+  "title": "Account to capital-pool allocation bridge reconciliation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "account_total", "as_of_date", "pool_total", "reconciled",
+    "reserve_total", "strategy_values", "systematic_total"
+  ],
+  "properties": {
+    "account_total": {"$ref": "#/$defs/decimal"},
+    "as_of_date": {"type": "string", "format": "date"},
+    "pool_total": {"$ref": "#/$defs/decimal"},
+    "reconciled": {"const": true},
+    "reserve_total": {"$ref": "#/$defs/decimal"},
+    "strategy_values": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["strategy_id", "value"],
+        "properties": {
+          "strategy_id": {"type": "string", "minLength": 1},
+          "value": {"$ref": "#/$defs/decimal"}
+        }
+      }
+    },
+    "systematic_total": {"$ref": "#/$defs/decimal"}
+  },
+  "$defs": {
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"}
+  }
+}

@@ -180,6 +180,16 @@ def test_stage_is_deterministic_private_and_imports_explicit_tracker_evidence(
         "INVESTMENT",
         "RESERVE",
     }
+    assert {item["role"] for item in catalog["capital_pools"]} == {
+        "SYSTEMATIC",
+        "RESERVE",
+    }
+    assert {item["pool_mapping_status"] for item in catalog["assignments"]} == {
+        "MAPPED"
+    }
+    assert {
+        item["strategy_mapping_disposition"] for item in catalog["assignments"]
+    } == {"STRATEGY_MAPPED", "HISTORICAL_POOL_ONLY"}
     assert {item["mapping_status"] for item in catalog["assignments"]} == {
         "MAPPED",
         "UNMAPPED",

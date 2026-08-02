@@ -27,6 +27,14 @@ adapter, performance engine, strategy service, or broker surface.
 - Strategy evidence layers remain distinct records. Aggregate and benchmark
   metric rows cannot become strategy identities.
 
+Account and allocation lineage follows
+[the account/pool/strategy bridge](allocation-lineage.md). `General` intervals
+retain systematic-pool identity without acquiring an invented strategy.
+Current pool completeness, current strategy attribution, and historical
+strategy gaps are reported independently. Allocation rows retain source,
+valuation, and publication dates; a later build date never relabels an older
+source value.
+
 The accepted tracker and allocation inputs now come from their immutable,
 hash-identified source-run copy inside the private `dataPortfolio` boundary.
 The former external working roots were removed only after provenance,

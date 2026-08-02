@@ -1173,7 +1173,10 @@ def _schwab_facts(
 
 
 def _allocations_and_coverage(
-    paths: Mapping[str, Path], strategy_aliases: Mapping[str, str], as_of: date
+    paths: Mapping[str, Path],
+    strategy_aliases: Mapping[str, str],
+    source_effective_date: date,
+    publication_date: date,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -1190,16 +1193,20 @@ def _allocations_and_coverage(
         assert value is not None and weight is not None
         by_strategy[strategy_id] = (value, weight)
         payload = {
-            "as_of_date": as_of.isoformat(),
+            "as_of_date": source_effective_date.isoformat(),
             "current_value": {
                 "currency": "USD",
                 "status": "AVAILABLE",
                 "value": decimal_text(value),
             },
+            "pool_id": "systematic-capital",
+            "publication_date": publication_date.isoformat(),
             "scope": "SYSTEMATIC",
             "source_key": "component-decision-table",
+            "source_effective_date": source_effective_date.isoformat(),
             "strategy_id": strategy_id,
             "systematic_weight": decimal_text(weight),
+            "valuation_date": source_effective_date.isoformat(),
         }
         allocations.append(
             {"allocation_id": _record_id("allocation", payload), **payload}
@@ -1441,11 +1448,21 @@ def _fact_coverage(
     positions: Sequence[Mapping[str, Any]],
     schwab_known_gaps: Sequence[str],
     missing_strategy_nav_count: int,
+    as_of_date: date,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     investment_count = sum(1 for item in accounts if item["role"] == "INVESTMENT")
     unmapped = [
         item for item in assignments if item.get("mapping_status") == "UNMAPPED"
     ]
+    current_unmapped: list[Mapping[str, Any]] = []
+    historical_unmapped: list[Mapping[str, Any]] = []
+    for item in unmapped:
+        start = item.get("effective_start")
+        end = item.get("effective_end")
+        active = (
+            start is None or _date(start, "assignment.effective_start") <= as_of_date
+        ) and (end is None or _date(end, "assignment.effective_end") >= as_of_date)
+        (current_unmapped if active else historical_unmapped).append(item)
     claims: list[dict[str, Any]] = [
         {
             "fact_type": "accounts",
@@ -1464,8 +1481,26 @@ def _fact_coverage(
         },
         {
             "fact_type": "assignments",
-            "known_gaps": [f"{len(unmapped)} legacy General assignments are UNMAPPED"],
-            "status": "PARTIAL",
+            "known_gaps": [],
+            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        },
+        {
+            "fact_type": "current_strategy_attribution",
+            "known_gaps": [
+                f"{len(current_unmapped)} current intervals are mapped to the systematic pool but not a strategy"
+            ],
+            "status": "PARTIAL"
+            if current_unmapped
+            else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        },
+        {
+            "fact_type": "historical_strategy_attribution",
+            "known_gaps": [
+                f"{len(historical_unmapped)} historical intervals remain pool-only"
+            ],
+            "status": "PARTIAL"
+            if historical_unmapped
+            else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
         },
         {
             "fact_type": "nav",
@@ -1531,11 +1566,18 @@ def _fact_coverage(
             "status": "UNAVAILABLE",
         },
         {
-            "exception_id": "assignment-mapping-partial",
-            "fact_type": "assignments",
-            "record_count": len(unmapped),
+            "exception_id": "current-strategy-attribution-partial",
+            "fact_type": "current_strategy_attribution",
+            "record_count": len(current_unmapped),
             "severity": "BLOCKING_FOR_FULL_ATTRIBUTION",
-            "status": "UNMAPPED",
+            "status": "PARTIAL" if current_unmapped else "PASS",
+        },
+        {
+            "exception_id": "historical-strategy-attribution-unresolved",
+            "fact_type": "historical_strategy_attribution",
+            "record_count": len(historical_unmapped),
+            "severity": "DISCLOSED_HISTORICAL_GAP",
+            "status": "PARTIAL" if historical_unmapped else "PASS",
         },
         {
             "exception_id": "account-nav-coverage-partial",
@@ -1571,6 +1613,10 @@ def build_catalog(
     as_of = _date(spec["as_of_date"], "spec.as_of_date")
     roots = _roots(spec["roots"])
     paths, source_artifacts, source_links = _sources(spec["sources"], roots, as_of)
+    source_dates = {
+        str(item["source_key"]): _date(item["as_of_date"], "source.as_of_date")
+        for item in source_links
+    }
     provenance, provenance_artifact, provenance_ref = _provenance(spec["provenance"])
     accounts, account_aliases = _account_index(provenance)
     strategies, strategy_aliases = _strategy_index(provenance)
@@ -1621,7 +1667,12 @@ def build_catalog(
             by_security.values(), key=lambda item: str(item["security_id"])
         )
     allocations, strategy_nav_coverage, costs, systematic_total, nav_covered = (
-        _allocations_and_coverage(paths, strategy_aliases, as_of)
+        _allocations_and_coverage(
+            paths,
+            strategy_aliases,
+            source_dates["component-decision-table"],
+            as_of,
+        )
     )
     layer_metrics, live_metrics, implementation_gaps = _normalize_strategy_evidence(
         paths, strategy_aliases
@@ -1631,17 +1682,21 @@ def build_catalog(
         str(item["account_id"]) for item in accounts if item["role"] == "RESERVE"
     )
     reserve_payload = {
-        "as_of_date": as_of.isoformat(),
+        "as_of_date": source_dates["current-portfolio-summary"].isoformat(),
         "current_value": {
             "currency": "USD",
             "status": "AVAILABLE",
             "value": decimal_text(reserve),
         },
+        "pool_id": "reserve-capital",
+        "publication_date": as_of.isoformat(),
         "scope": "RESERVE",
         "source_key": "current-portfolio-summary",
+        "source_effective_date": source_dates["current-portfolio-summary"].isoformat(),
         "strategy_id": None,
         "systematic_weight": None,
         "account_id": reserve_id,
+        "valuation_date": source_dates["current-portfolio-summary"].isoformat(),
     }
     allocations.append(
         {"allocation_id": _record_id("allocation", reserve_payload), **reserve_payload}
@@ -1660,6 +1715,7 @@ def build_catalog(
         positions,
         schwab_known_gaps,
         missing_strategy_nav_count,
+        as_of,
     )
     unmapped = sorted(
         [item for item in assignments if item.get("mapping_status") == "UNMAPPED"],
@@ -1687,6 +1743,21 @@ def build_catalog(
         "assumptions": provenance.get("assumptions", []),
         "baseline_schema_version": CATALOG_SCHEMA_VERSION,
         "calendar_coverage": calendar,
+        "capital_pools": provenance.get("capital_pools")
+        or [
+            {
+                "base_currency": "USD",
+                "name": "Systematic capital",
+                "pool_id": "systematic-capital",
+                "role": "SYSTEMATIC",
+            },
+            {
+                "base_currency": "USD",
+                "name": "Reserve capital",
+                "pool_id": "reserve-capital",
+                "role": "RESERVE",
+            },
+        ],
         "corrections": provenance.get("corrections", []),
         "costs": costs,
         "evidence_layer_metrics": layer_metrics,

@@ -84,11 +84,12 @@
     const currentMapped = data.positions.filter((row) => row.status === "AVAILABLE_MAPPED").length;
     const operatorLabels = {
       "full-systematic-hwm-unavailable": "Material systematic HWM cannot yet be calculated",
-      "assignment-mapping-partial": "Historical assignment intervals remain unresolved",
+      "current-strategy-attribution-partial": "Current pool-only intervals need strategy attribution",
+      "historical-strategy-attribution-unresolved": "Historical pool-only intervals remain unresolved",
     };
     $("#operator-queue").innerHTML = data.blocking_items.map((item) => {
-      const note = item.item === "assignment-mapping-partial"
-        ? `${currentMapped}/${data.positions.length} accepted current positions are mapped; the remaining gap concerns historical General intervals. ${item.known_gap || ""}`
+      const note = item.item === "current-strategy-attribution-partial"
+        ? `${currentMapped}/${data.positions.length} accepted current positions are strategy-mapped; other current General intervals remain valid at the systematic-pool layer only. ${item.known_gap || ""}`
         : item.known_gap;
       return `<li><div><strong>${safe(operatorLabels[item.item] || humanStatus(item.item))}</strong><span>${safe(note)}</span></div></li>`;
     }).join("");

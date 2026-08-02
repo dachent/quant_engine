@@ -1,5 +1,15 @@
 """Minimal canonical portfolio ledger for quant_engine."""
 
+from quant_engine.portfolio_ledger.allocation import (
+    AccountPoolAssignment,
+    AllocationBridgeReconciliation,
+    AllocationDecision,
+    CapitalPool,
+    CapitalPoolRole,
+    StrategyMappingDisposition,
+    reconcile_allocation_bridge,
+)
+
 from quant_engine.portfolio_ledger.models import (
     Account,
     AccountRole,
@@ -38,10 +48,15 @@ __version__ = "0.2.0"
 
 __all__ = [
     "Account",
+    "AccountPoolAssignment",
     "AccountPositionReconciliation",
     "AccountRole",
     "AccountStrategyAssignment",
+    "AllocationBridgeReconciliation",
+    "AllocationDecision",
     "CashFlow",
+    "CapitalPool",
+    "CapitalPoolRole",
     "CorporateAction",
     "EvidenceComparison",
     "LedgerSlice",
@@ -54,6 +69,7 @@ __all__ = [
     "ReconciliationStatus",
     "Security",
     "Strategy",
+    "StrategyMappingDisposition",
     "StrategyEvidenceVersion",
     "StrategyVersion",
     "StrategyVersionDisposition",
@@ -64,4 +80,5 @@ __all__ = [
     "compare_strategy_evidence",
     "decimal_text",
     "reconcile_position_values",
+    "reconcile_allocation_bridge",
 ]

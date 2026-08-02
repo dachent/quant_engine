@@ -499,6 +499,8 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
             "schema_name": f"synthetic-{source_key}",
             "schema_version": "1",
         }
+    sources["component-decision-table"]["as_of_date"] = "2026-07-25"
+    sources["current-portfolio-summary"]["as_of_date"] = "2026-07-25"
 
     provenance_root, generation_id, catalog_hash = _published_provenance(tmp_path)
     spec: dict[str, Any] = {
@@ -652,6 +654,26 @@ def test_stage_is_deterministic_reconciled_and_coverage_aware(tmp_path: Path) ->
     assert catalog["evidence_layer_metrics"][0]["status"] == "UNAVAILABLE_UNLABELED"
     assert catalog["replay"]["total_liquid_usd"] == "125"
     assert catalog["replay"]["nav_coverage"] == "0.6"
+    assert {item["role"] for item in catalog["capital_pools"]} == {
+        "SYSTEMATIC",
+        "RESERVE",
+    }
+    assert {item["as_of_date"] for item in catalog["allocations"]} == {"2026-07-25"}
+    assert {item["publication_date"] for item in catalog["allocations"]} == {
+        "2026-07-30"
+    }
+    assignment_coverage = next(
+        item for item in catalog["fact_coverage"] if item["fact_type"] == "assignments"
+    )
+    assert assignment_coverage == {
+        "fact_type": "assignments",
+        "known_gaps": [],
+        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+    }
+    assert {item["exception_id"] for item in catalog["reconciliation_exceptions"]} >= {
+        "current-strategy-attribution-partial",
+        "historical-strategy-attribution-unresolved",
+    }
     assert {item["status"] for item in catalog["calendar_coverage"]} >= {
         "NON_BUSINESS_WEEKEND",
         "MISSING_ON_PROVIDER_OBSERVED_DATE",

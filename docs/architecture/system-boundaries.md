@@ -227,6 +227,12 @@ provider-live, account-live, predecessor, shadow/OOS, and conceptual evidence
 retain their layer and version; mismatched or unresolved vintages cannot be
 silently joined.
 
+Account-to-strategy lineage passes through the effective-dated capital-pool
+contract in [Allocation lineage](../allocation-lineage.md). Reserve is a pool,
+not a strategy; an unknown `General` interval remains pool-only rather than
+being guessed into a strategy. Source-effective, valuation, and publication
+dates remain separately queryable.
+
 ## Broker boundary
 
 Broker Core owns immutable `OrderManifest`, `BrokerCapabilities`,
