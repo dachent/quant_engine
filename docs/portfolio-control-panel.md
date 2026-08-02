@@ -14,7 +14,12 @@ without preserving stale calculations or hard-coded operator conclusions.
   effective-dated account assignment.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
   contribution reconciliation, and any dated dynamic exposure path come only
-  from the accepted `dataPortfolio/analytics/decomposition` generation. Static
+  from accepted analytics generations. The historical proof remains under
+  `dataPortfolio/analytics/decomposition`; the current strategy views bind six
+  independently published generations under
+  `dataPortfolio/analytics/decomposition-lenses` for U.S./European economic
+  factors, U.S./multi-asset ETF style, U.S. sector returns, and U.S. 49-industry
+  returns. These lenses are selectable but never concatenated. Static
   RBSA and clean-room dynamic FLS results are both labeled
   `MPI_INFORMED_NON_EQUIVALENT`; neither is proprietary MPI output nor a claim
   to undisclosed MPI production behavior.
@@ -70,18 +75,23 @@ $report = Join-Path $engine "dataPortfolio\reporting"
 $output = Join-Path $engine "dataPortfolio\control-panel"
 $legacy = Join-Path $engine "_strategy_allocation_audit\model_harness_baseline\control-panel-qa\portfolio_control_panel"
 $strategyEvidence = "<hash-bound current-strategy-provider-evidence.json>"
+$lensRoot = Join-Path $engine "dataPortfolio\analytics\decomposition-lenses"
+$planBundle = "<hash-bound decomposition planning bundle>"
 
 uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
   --report-root $report --legacy-panel $legacy --output-root $output `
-  --strategy-evidence $strategyEvidence
+  --strategy-evidence $strategyEvidence `
+  --decomposition-lenses-root $lensRoot `
+  --decomposition-plan-bundle $planBundle
 ```
 
 The command resolves the accepted analytics roots as siblings of `reporting`:
 `dataPortfolio\analytics\decomposition` and
 `dataPortfolio\analytics\correlation`. `--decomposition-root` and
 `--correlation-root` may override those paths for isolated tests. The panel is
-not built if either pointer, schema, nine-strategy boundary, 36-pair boundary,
-factor contribution identity, or correlation-one reconciliation differs.
+not built if any lens pointer, plan hash, schema, nine-strategy boundary,
+36-pair boundary, factor contribution identity, or correlation-one
+reconciliation differs.
 
 The command prints the content-addressed candidate directory. Rebuilds from
 unchanged inputs produce the same panel ID. Verify that exact candidate before
@@ -90,13 +100,16 @@ browser work:
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
   --report-root $report --legacy-panel $legacy `
-  --candidate-dir <candidate-directory>
+  --candidate-dir <candidate-directory> `
+  --decomposition-lenses-root $lensRoot `
+  --decomposition-plan-bundle $planBundle
 ```
 
 The verifier proves all eight views, local-only assets, lack of network or
 trade code, accepted capital/risk replay, the exact nine-strategy boundary, 19
-account identities, the available and unavailable factor counts bound to the
-analytics generation, dynamic
+account identities, five separate decomposition lenses with nine explicit
+strategy dispositions each, the available and unavailable factor counts bound
+to the analytics generations, dynamic
 estimator disclosures when present, measured/unavailable dependence counts
 derived exactly from the accepted generation, live-only default authority,
 optional version-matched backtest composition, explicit unavailable facts, and
@@ -145,7 +158,9 @@ pass, publish the already accepted local candidate:
 uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --report-root $report --legacy-panel $legacy `
   --candidate-dir <candidate-directory> --qa-dir $qa --output-root $output `
-  --strategy-evidence $strategyEvidence
+  --strategy-evidence $strategyEvidence `
+  --decomposition-lenses-root $lensRoot `
+  --decomposition-plan-bundle $planBundle
 ```
 
 Publication hash-binds the accepted portfolio, decomposition, and correlation

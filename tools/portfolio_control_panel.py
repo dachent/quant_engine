@@ -32,8 +32,8 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-PANEL_SCHEMA_VERSION: Final = 4
-BUILDER_VERSION: Final = "1.6.0"
+PANEL_SCHEMA_VERSION: Final = 5
+BUILDER_VERSION: Final = "1.7.0"
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
     "either_strategy_underwater",
@@ -74,6 +74,40 @@ CAPTURES: Final = tuple(
 ) + ("direct-file",)
 LINT_CAPTURES: Final = tuple(
     f"{viewport}-{view}" for viewport in _QA_VIEWPORTS for view in VIEWS
+)
+DECOMPOSITION_LENS_SOURCES: Final = {
+    "europe-economic": ("ECONOMIC_FACTOR", "European economic factors"),
+    "multi-asset-style": ("ETF_STYLE", "Multi-asset ETF style"),
+    "us-economic": ("ECONOMIC_FACTOR", "U.S. economic factors"),
+    "us-equity-style": ("ETF_STYLE", "U.S. equity style"),
+    "us-industry": ("RETURN_INDUSTRY", "U.S. 49-industry returns"),
+    "us-sector": ("RETURN_INDUSTRY", "U.S. sector returns"),
+}
+DECOMPOSITION_LENS_GROUPS: Final = (
+    (
+        "ECONOMIC_FACTOR",
+        "Economic factors",
+        ("us-economic", "europe-economic"),
+        "EXCESS_AND_LONG_SHORT_FACTOR_RETURN",
+    ),
+    (
+        "ETF_STYLE",
+        "ETF style",
+        ("us-equity-style", "multi-asset-style"),
+        "TOTAL_RETURN_ETF_PROXY",
+    ),
+    (
+        "RETURN_SECTOR",
+        "Sector returns",
+        ("us-sector",),
+        "TOTAL_RETURN_ETF_PROXY",
+    ),
+    (
+        "RETURN_INDUSTRY",
+        "Industry returns",
+        ("us-industry",),
+        "TOTAL_RETURN_INDUSTRY_PORTFOLIO",
+    ),
 )
 
 
@@ -770,6 +804,200 @@ def _factor_analysis(
     }
 
 
+def _unavailable_factor_row(series_id: str, reason: str) -> dict[str, Any]:
+    return {
+        "alpha": None,
+        "contribution_summary": None,
+        "cost_coverage": "INCOMPLETE",
+        "coverage": None,
+        "diagnostics": None,
+        "estimator": None,
+        "evidence_layer": None,
+        "exposures": [],
+        "model_id": None,
+        "selection_status": reason,
+        "series_id": series_id,
+        "source_key": None,
+        "source_label": None,
+        "status": "UNAVAILABLE",
+        "unavailable_reasons": [reason],
+    }
+
+
+def _decomposition_lenses(
+    root: Path,
+    plan_bundle: Path,
+    strategy_names: Mapping[str, str],
+) -> tuple[dict[str, Any], tuple[Path, ...]]:
+    manifest_path = plan_bundle / "plan-manifest.json"
+    plan_path = (
+        plan_bundle
+        / "inputs"
+        / "governance"
+        / "current-strategy-decomposition-plan.json"
+    )
+    dispositions_path = plan_bundle / "candidate-dispositions.json"
+    manifest = _load_json(manifest_path, "decomposition plan manifest")
+    plan = _load_json(plan_path, "current decomposition plan")
+    dispositions = _load_json(dispositions_path, "candidate dispositions")
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("bundle_id") != plan_bundle.name
+    ):
+        raise ControlPanelValidationError("decomposition plan identity differs")
+    if plan.get("schema_version") != 1 or dispositions.get("schema_version") != 1:
+        raise ControlPanelValidationError("decomposition plan schema is unsupported")
+    manifest_artifacts = {
+        _text(item.get("path"), "plan artifact path"): _text(
+            item.get("sha256"), "plan artifact sha256"
+        )
+        for item in (
+            _objects(manifest.get("inputs"), "plan inputs")
+            + _objects(manifest.get("outputs"), "plan outputs")
+        )
+    }
+    expected_plan_path = "inputs/governance/current-strategy-decomposition-plan.json"
+    if manifest_artifacts.get(expected_plan_path) != _hash(
+        plan_path
+    ) or manifest_artifacts.get("candidate-dispositions.json") != _hash(
+        dispositions_path
+    ):
+        raise ControlPanelValidationError("decomposition plan artifact hash differs")
+
+    planned_strategies = _objects(plan.get("strategies"), "plan strategies")
+    planned_by_id = {
+        _text(item.get("strategy_id"), "plan strategy_id"): item
+        for item in planned_strategies
+    }
+    if set(planned_by_id) != set(strategy_names):
+        raise ControlPanelValidationError(
+            "decomposition plan differs from current strategy identities"
+        )
+    series_to_reason: dict[str, str] = {}
+    for strategy_id, strategy_name in strategy_names.items():
+        item = planned_by_id[strategy_id]
+        if _text(item.get("series_id"), "plan series_id") != strategy_name:
+            raise ControlPanelValidationError(
+                f"decomposition plan series differs: {strategy_id}"
+            )
+        series_to_reason[strategy_name] = _text(
+            item.get("default_disposition"), "plan default_disposition"
+        )
+
+    source_analyses: dict[str, dict[str, Any]] = {}
+    source_paths: list[Path] = []
+    for source_key, (expected_lens, source_label) in DECOMPOSITION_LENS_SOURCES.items():
+        decomposition, identity, path = _current_analytics(
+            root / source_key,
+            filename="decomposition.json",
+            field_name=f"{source_label} decomposition",
+            expected_schema_version=1,
+        )
+        if decomposition.get("analysis_lens") != expected_lens:
+            raise ControlPanelValidationError(
+                f"decomposition lens differs for {source_key}"
+            )
+        selected_names = {
+            _text(item.get("series_id"), "lens selection series_id")
+            for item in _objects(
+                decomposition.get("model_selections"), "lens model selections"
+            )
+        }
+        if not selected_names or not selected_names <= set(strategy_names.values()):
+            raise ControlPanelValidationError(
+                f"decomposition series boundary differs for {source_key}"
+            )
+        analysis = _factor_analysis(decomposition, identity, selected_names)
+        analysis["analysis_lens"] = expected_lens
+        analysis["source_key"] = source_key
+        analysis["source_label"] = source_label
+        analysis["series"] = [
+            {
+                **row,
+                "source_key": source_key,
+                "source_label": source_label,
+            }
+            for row in analysis["series"]
+        ]
+        source_analyses[source_key] = analysis
+        source_paths.append(path)
+
+    grouped: list[dict[str, Any]] = []
+    for lens_id, label, source_keys, return_basis in DECOMPOSITION_LENS_GROUPS:
+        analyses = [source_analyses[source_key] for source_key in source_keys]
+        rows_by_series: dict[str, dict[str, Any]] = {}
+        for analysis in analyses:
+            for row in analysis["series"]:
+                series_id = _text(row.get("series_id"), "lens series_id")
+                if series_id in rows_by_series:
+                    raise ControlPanelValidationError(
+                        f"decomposition lens duplicates {series_id}: {lens_id}"
+                    )
+                rows_by_series[series_id] = row
+        for series_id in strategy_names.values():
+            rows_by_series.setdefault(
+                series_id,
+                _unavailable_factor_row(series_id, series_to_reason[series_id]),
+            )
+        rows = [rows_by_series[name] for name in sorted(rows_by_series)]
+        source_identity = [
+            {
+                "analytics_hash": item["analytics_hash"],
+                "as_of_date": item["as_of_date"],
+                "generation_id": item["generation_id"],
+                "source_key": item["source_key"],
+                "source_label": item["source_label"],
+                "source_sha256": item["source_sha256"],
+            }
+            for item in analyses
+        ]
+        identity_payload = {
+            "lens_id": lens_id,
+            "plan_bundle_id": plan_bundle.name,
+            "sources": source_identity,
+        }
+        composite_hash = hashlib.sha256(
+            canonical_json_bytes(identity_payload)
+        ).hexdigest()
+        available_count = sum(row["status"] == "AVAILABLE" for row in rows)
+        grouped.append(
+            {
+                "analytics_hash": composite_hash,
+                "as_of_date": min(item["as_of_date"] for item in analyses),
+                "as_of_policy": "MINIMUM_ACCEPTED_SOURCE_DATE",
+                "available_count": available_count,
+                "dynamic_available_count": sum(
+                    row.get("estimator") == "DYNAMIC_FLS"
+                    and row.get("status") == "AVAILABLE"
+                    for row in rows
+                ),
+                "generation_id": composite_hash,
+                "lens_id": lens_id,
+                "lens_label": label,
+                "method_label": analyses[0]["method_label"],
+                "methodology_manifest_sha256": analyses[0][
+                    "methodology_manifest_sha256"
+                ],
+                "methodology_version": analyses[0]["methodology_version"],
+                "plan_bundle_id": plan_bundle.name,
+                "return_basis": return_basis,
+                "series": rows,
+                "source_sha256": composite_hash,
+                "sources": source_identity,
+                "unavailable_count": len(rows) - available_count,
+            }
+        )
+    return (
+        {
+            "default_lens": "ECONOMIC_FACTOR",
+            "lenses": grouped,
+            "plan_bundle_id": plan_bundle.name,
+            "plan_manifest_sha256": _hash(manifest_path),
+        },
+        tuple(source_paths + [manifest_path, plan_path, dispositions_path]),
+    )
+
+
 def _dependence_analysis(
     correlation: Mapping[str, Any],
     identity: Mapping[str, str],
@@ -944,6 +1172,7 @@ def _panel_data(
     source: Mapping[str, Any],
     template_root: Path,
     strategy_evidence_path: Path | None = None,
+    decomposition_lenses: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     summary = _summary(report)
     strategies = _objects(report.get("strategy_summary"), "strategy_summary")
@@ -978,6 +1207,39 @@ def _panel_data(
     factor_analysis = _factor_analysis(
         decomposition, decomposition_identity, current_strategy_names
     )
+    historical_factor_analysis = {
+        **factor_analysis,
+        "as_of_policy": "SINGLE_ACCEPTED_HISTORICAL_PROOF",
+        "lens_id": "HISTORICAL_MINIMUM_PROOF",
+        "lens_label": "Historical proof",
+        "return_basis": "CONFIGURED_EXCESS_RETURN",
+    }
+    if decomposition_lenses is None:
+        accepted_decomposition_lenses = {
+            "default_lens": "HISTORICAL_MINIMUM_PROOF",
+            "lenses": [historical_factor_analysis],
+            "plan_bundle_id": None,
+            "plan_manifest_sha256": None,
+        }
+    else:
+        accepted_decomposition_lenses = dict(decomposition_lenses)
+        lens_rows = _objects(
+            accepted_decomposition_lenses.get("lenses"), "decomposition lenses"
+        )
+        lens_ids = {
+            _text(row.get("lens_id"), "decomposition lens_id") for row in lens_rows
+        }
+        if lens_ids != {
+            "ECONOMIC_FACTOR",
+            "ETF_STYLE",
+            "RETURN_INDUSTRY",
+            "RETURN_SECTOR",
+        }:
+            raise ControlPanelValidationError("decomposition lens set differs")
+        accepted_decomposition_lenses["lenses"] = [
+            *lens_rows,
+            historical_factor_analysis,
+        ]
     raw_modes = correlation.get("dependence_modes")
     if raw_modes is None:
         default_dependence_mode = "LIVE_ONLY"
@@ -1168,6 +1430,21 @@ def _panel_data(
             "schema": "portfolio-factor-decomposition/1",
             "sha256": decomposition_identity["sha256"],
         },
+        *[
+            {
+                "artifact": "portfolio-decomposition-lens-"
+                + _text(source_row.get("source_key"), "lens source_key"),
+                "as_of_date": _text(source_row.get("as_of_date"), "lens as_of_date"),
+                "schema": "portfolio-factor-decomposition/1",
+                "sha256": _text(source_row.get("source_sha256"), "lens source_sha256"),
+            }
+            for lens in _objects(
+                accepted_decomposition_lenses.get("lenses"),
+                "accepted decomposition lenses",
+            )
+            if lens.get("lens_id") != "HISTORICAL_MINIMUM_PROOF"
+            for source_row in _objects(lens.get("sources"), "lens sources")
+        ],
         {
             "artifact": "portfolio-correlation-generation",
             "as_of_date": dependence_analysis["as_of_date"],
@@ -1277,6 +1554,7 @@ def _panel_data(
         "dependence_analysis": dependence_analysis,
         "dependence_modes": dependence_modes,
         "factor_analysis": factor_analysis,
+        "decomposition_lenses": accepted_decomposition_lenses,
         "fact_status": {
             item: row.get("status") for item, row in sorted(fact_by_item.items())
         },
@@ -1292,6 +1570,12 @@ def _panel_data(
             "correlation_sha256": correlation_identity["sha256"],
             "decomposition_generation_id": decomposition_identity["generation_id"],
             "decomposition_sha256": decomposition_identity["sha256"],
+            "decomposition_plan_bundle_id": accepted_decomposition_lenses.get(
+                "plan_bundle_id"
+            ),
+            "decomposition_plan_manifest_sha256": accepted_decomposition_lenses.get(
+                "plan_manifest_sha256"
+            ),
             "hwm_policy_sha256": hwm_policy_hash,
             "strategy_evidence_as_of": (
                 evidence_identity["as_of_date"]
@@ -1324,10 +1608,19 @@ def _rendered_files(
     decomposition_root: Path | None = None,
     correlation_root: Path | None = None,
     strategy_evidence_path: Path | None = None,
+    decomposition_lenses_root: Path | None = None,
+    decomposition_plan_bundle: Path | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
-    tuple[Path, Path, Path, Path, Path | None],
+    tuple[
+        Path,
+        Path,
+        Path,
+        Path,
+        Path | None,
+        tuple[Path, ...],
+    ],
 ]:
     report, report_identity, report_path = _current_report(report_root)
     resolved_decomposition, resolved_correlation = _analytics_roots(
@@ -1345,6 +1638,24 @@ def _rendered_files(
         field_name="portfolio correlation",
         expected_schema_version=(1, 2),
     )
+    if (decomposition_lenses_root is None) != (decomposition_plan_bundle is None):
+        raise ControlPanelValidationError(
+            "decomposition lens root and plan bundle must be supplied together"
+        )
+    lens_payload: dict[str, Any] | None = None
+    lens_paths: tuple[Path, ...] = ()
+    if decomposition_lenses_root is not None and decomposition_plan_bundle is not None:
+        current_strategy_names = {
+            _text(row.get("strategy_id"), "strategy.strategy_id"): _text(
+                row.get("strategy_name"), "strategy.strategy_name"
+            )
+            for row in _objects(report.get("strategy_summary"), "strategy_summary")
+        }
+        lens_payload, lens_paths = _decomposition_lenses(
+            decomposition_lenses_root,
+            decomposition_plan_bundle,
+            current_strategy_names,
+        )
     legacy, source = _source_inputs(legacy_panel)
     data = _panel_data(
         report,
@@ -1357,6 +1668,7 @@ def _rendered_files(
         source,
         template_root,
         strategy_evidence_path,
+        lens_payload,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -1377,6 +1689,7 @@ def _rendered_files(
             correlation_path,
             legacy_data,
             strategy_evidence_path,
+            lens_paths,
         ),
     )
 
@@ -1414,6 +1727,8 @@ def build_candidate(
     decomposition_root: Path | None = None,
     correlation_root: Path | None = None,
     strategy_evidence_path: Path | None = None,
+    decomposition_lenses_root: Path | None = None,
+    decomposition_plan_bundle: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -1422,6 +1737,8 @@ def build_candidate(
         decomposition_root,
         correlation_root,
         strategy_evidence_path,
+        decomposition_lenses_root,
+        decomposition_plan_bundle,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -1469,6 +1786,8 @@ def verify_candidate(
     decomposition_root: Path | None = None,
     correlation_root: Path | None = None,
     strategy_evidence_path: Path | None = None,
+    decomposition_lenses_root: Path | None = None,
+    decomposition_plan_bundle: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -1477,6 +1796,8 @@ def verify_candidate(
         decomposition_root,
         correlation_root,
         strategy_evidence_path,
+        decomposition_lenses_root,
+        decomposition_plan_bundle,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -1498,6 +1819,33 @@ def verify_candidate(
             "All eight operator views are present",
             all(f'data-view="{view}"' in html for view in VIEWS),
             list(VIEWS),
+        )
+    )
+    lens_payload = _object(data.get("decomposition_lenses"), "decomposition lenses")
+    lens_rows = _objects(lens_payload.get("lenses"), "decomposition lenses")
+    expected_lens_ids = {"HISTORICAL_MINIMUM_PROOF"}
+    if decomposition_lenses_root is not None:
+        expected_lens_ids |= {
+            "ECONOMIC_FACTOR",
+            "ETF_STYLE",
+            "RETURN_INDUSTRY",
+            "RETURN_SECTOR",
+        }
+    checks.append(
+        _check(
+            "Decomposition lenses remain separate and complete",
+            {_text(row.get("lens_id"), "lens_id") for row in lens_rows}
+            == expected_lens_ids
+            and all(
+                len(_objects(row.get("series"), "lens series")) == 9
+                for row in lens_rows
+            ),
+            {
+                "lenses": sorted(
+                    _text(row.get("lens_id"), "lens_id") for row in lens_rows
+                ),
+                "plan_bundle_id": lens_payload.get("plan_bundle_id"),
+            },
         )
     )
     checks.append(
@@ -1906,6 +2254,8 @@ def publish_panel(
     decomposition_root: Path | None = None,
     correlation_root: Path | None = None,
     strategy_evidence_path: Path | None = None,
+    decomposition_lenses_root: Path | None = None,
+    decomposition_plan_bundle: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         report_root,
@@ -1915,6 +2265,8 @@ def publish_panel(
         decomposition_root,
         correlation_root,
         strategy_evidence_path,
+        decomposition_lenses_root,
+        decomposition_plan_bundle,
     )
     qa = validate_qa(candidate_dir, qa_dir)
     _, data, input_paths = _rendered_files(
@@ -1924,6 +2276,8 @@ def publish_panel(
         decomposition_root,
         correlation_root,
         strategy_evidence_path,
+        decomposition_lenses_root,
+        decomposition_plan_bundle,
     )
     (
         report_path,
@@ -1931,6 +2285,7 @@ def publish_panel(
         correlation_path,
         legacy_data,
         strategy_evidence_source,
+        decomposition_lens_sources,
     ) = input_paths
     as_of = date.fromisoformat(_text(data["meta"]["portfolio_as_of"], "as_of"))
     artifacts: list[SourceArtifact] = [
@@ -1979,6 +2334,16 @@ def publish_panel(
                     _text(data["meta"]["strategy_evidence_as_of"], "evidence as_of")
                 ),
                 schema_name="current-strategy-provider-evidence",
+                schema_version="1",
+            )
+        )
+    for index, lens_source in enumerate(decomposition_lens_sources):
+        artifacts.append(
+            SourceArtifact.from_path(
+                lens_source,
+                artifact_id=f"input/decomposition-lens-{index:02d}-{lens_source.name}",
+                as_of_date=as_of,
+                schema_name="portfolio-decomposition-lens-input",
                 schema_version="1",
             )
         )
@@ -2056,6 +2421,8 @@ def _parser() -> argparse.ArgumentParser:
             "--template-root", type=Path, default=DEFAULT_TEMPLATE_ROOT
         )
         command.add_argument("--decomposition-root", type=Path)
+        command.add_argument("--decomposition-lenses-root", type=Path)
+        command.add_argument("--decomposition-plan-bundle", type=Path)
         command.add_argument("--correlation-root", type=Path)
         command.add_argument("--strategy-evidence", type=Path)
         command.add_argument("--output-root", type=Path, required=name != "verify")
@@ -2081,6 +2448,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.decomposition_root,
                 args.correlation_root,
                 args.strategy_evidence,
+                args.decomposition_lenses_root,
+                args.decomposition_plan_bundle,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -2091,6 +2460,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.decomposition_root,
                 args.correlation_root,
                 args.strategy_evidence,
+                args.decomposition_lenses_root,
+                args.decomposition_plan_bundle,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -2105,6 +2476,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.decomposition_root,
                 args.correlation_root,
                 args.strategy_evidence,
+                args.decomposition_lenses_root,
+                args.decomposition_plan_bundle,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)
