@@ -34,6 +34,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 PANEL_SCHEMA_VERSION: Final = 6
 BUILDER_VERSION: Final = "1.8.0"
+STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
     "either_strategy_underwater",
@@ -1048,6 +1049,36 @@ def _weekly_return_analysis(
         )
     if set(weekly.get("display_groups", [])) != required_groups:
         raise ControlPanelValidationError("weekly display group boundary differs")
+    meta_fields = weekly.get("observation_meta_fields")
+    if meta_fields != [
+        "daily_observation_count",
+        "actual_observed_start",
+        "actual_observed_end",
+        "coverage_status",
+        "boundary_reasons",
+    ]:
+        raise ControlPanelValidationError("weekly observation metadata fields differ")
+    for row in rows:
+        if row.get("primary_group") == "STRATEGY":
+            values_by_mode = _object(row.get("values_by_mode"), "weekly values by mode")
+            meta_by_mode = _object(
+                row.get("observation_meta_by_mode"), "weekly metadata by mode"
+            )
+            if set(values_by_mode) != set(STRATEGY_EVIDENCE_MODES) or set(
+                meta_by_mode
+            ) != set(STRATEGY_EVIDENCE_MODES):
+                raise ControlPanelValidationError("weekly strategy modes differ")
+            for mode in STRATEGY_EVIDENCE_MODES:
+                mode_values = _object(values_by_mode.get(mode), f"weekly values {mode}")
+                mode_meta = _object(meta_by_mode.get(mode), f"weekly metadata {mode}")
+                if set(mode_values) != set(mode_meta):
+                    raise ControlPanelValidationError(
+                        "weekly strategy value and metadata weeks differ"
+                    )
+        elif set(row.get("values", {})) != set(row.get("observation_meta", {})):
+            raise ControlPanelValidationError(
+                "weekly market value and metadata weeks differ"
+            )
     return {
         **weekly,
         "generation_id": identity["generation_id"],
@@ -1308,6 +1339,13 @@ def _panel_data(
             "default_evidence_mode": "LIVE_ONLY",
             "display_groups": [],
             "generation_id": None,
+            "observation_meta_fields": [
+                "daily_observation_count",
+                "actual_observed_start",
+                "actual_observed_end",
+                "coverage_status",
+                "boundary_reasons",
+            ],
             "series": [],
             "source_sha256": None,
             "status": "UNAVAILABLE_NOT_CONFIGURED",

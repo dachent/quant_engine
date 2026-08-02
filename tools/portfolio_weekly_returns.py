@@ -139,22 +139,68 @@ def _week_start(day: date) -> date:
     return day - timedelta(days=day.weekday())
 
 
-def _weekly_values(observations: Iterable[tuple[date, Decimal]]) -> dict[str, str]:
+def _weekly_series(
+    observations: Iterable[tuple[date, Decimal]], *, as_of: date
+) -> tuple[dict[str, str], dict[str, list[Any]], str]:
     daily: dict[date, Decimal] = {}
     for observed_date, observed_return in observations:
         if observed_date in daily:
             raise WeeklyReturnError(f"duplicate daily observation: {observed_date}")
         daily[observed_date] = observed_return
-    compounded: dict[date, Decimal] = {}
+    if not daily:
+        return {}, {}, "UNAVAILABLE_NO_CALENDAR_EVIDENCE"
+    calendar_basis = (
+        "CALENDAR_7_DAY" if any(day.weekday() >= 5 for day in daily) else "WEEKDAY"
+    )
+    grouped: dict[date, list[tuple[date, Decimal]]] = {}
     for observed_date, observed_return in sorted(daily.items()):
         start = _week_start(observed_date)
-        compounded[start] = compounded.get(start, Decimal("1")) * (
-            Decimal("1") + observed_return
+        grouped.setdefault(start, []).append((observed_date, observed_return))
+    first_observed = min(daily)
+    last_observed = max(daily)
+    values: dict[str, str] = {}
+    metadata: dict[str, list[Any]] = {}
+    for start, rows in sorted(grouped.items()):
+        value = Decimal("1")
+        for _, observed_return in rows:
+            value *= Decimal("1") + observed_return
+        actual_start = rows[0][0]
+        actual_end = rows[-1][0]
+        boundary_reasons: list[str] = []
+        if actual_start == first_observed and actual_start > start:
+            boundary_reasons.append("SOURCE_START")
+        expected_end = start + timedelta(
+            days=6 if calendar_basis == "CALENDAR_7_DAY" else 4
         )
-    return {
-        start.isoformat(): _decimal_text(value - Decimal("1"))
-        for start, value in sorted(compounded.items())
-    }
+        if (
+            actual_end == last_observed
+            and actual_end < min(expected_end, as_of)
+            and start <= _week_start(as_of)
+        ):
+            boundary_reasons.append("SOURCE_END")
+        if start == _week_start(as_of) and as_of < start + timedelta(days=6):
+            boundary_reasons.append("CURRENT_AS_OF")
+        status = (
+            "PARTIAL_BOUNDARY"
+            if boundary_reasons
+            else "COMPLETE_WITHIN_ACCEPTED_CALENDAR"
+        )
+        key = start.isoformat()
+        values[key] = _decimal_text(value - Decimal("1"))
+        metadata[key] = [
+            len(rows),
+            actual_start.isoformat(),
+            actual_end.isoformat(),
+            status,
+            boundary_reasons,
+        ]
+    return values, metadata, calendar_basis
+
+
+def _weekly_values(observations: Iterable[tuple[date, Decimal]]) -> dict[str, str]:
+    rows = list(observations)
+    as_of = max((row[0] for row in rows), default=date.min)
+    return _weekly_series(rows, as_of=as_of)[0]
 
 
 def _coverage(values: Mapping[str, str]) -> dict[str, Any]:
@@ -203,6 +249,7 @@ def _strategy_rows(
     strategy_returns: Path,
     correlation: Mapping[str, Any],
     generation_manifest: Mapping[str, Any],
+    as_of: date,
 ) -> list[dict[str, Any]]:
     expected = [
         item
@@ -265,6 +312,8 @@ def _strategy_rows(
     series_rows: list[dict[str, Any]] = []
     for series_id in sorted(compositions["LIVE_ONLY"]):
         values_by_mode: dict[str, dict[str, str]] = {}
+        observation_meta_by_mode: dict[str, dict[str, list[Any]]] = {}
+        calendar_by_mode: dict[str, str] = {}
         mode_coverage: dict[str, dict[str, Any]] = {}
         for mode in STRATEGY_MODES:
             item = compositions[mode][series_id]
@@ -294,8 +343,12 @@ def _strategy_rows(
                 raise WeeklyReturnError(
                     f"backtest observation count differs for {series_id}"
                 )
-            values = _weekly_values(selected)
+            values, observation_meta, calendar_basis = _weekly_series(
+                selected, as_of=as_of
+            )
             values_by_mode[mode] = values
+            observation_meta_by_mode[mode] = observation_meta
+            calendar_by_mode[mode] = calendar_basis
             mode_coverage[mode] = {
                 **_coverage(values),
                 "backtest_daily_observations": len(backtest)
@@ -307,9 +360,11 @@ def _strategy_rows(
         series_rows.append(
             {
                 "absent_value_status": "UNAVAILABLE_NO_OBSERVATION_IN_WEEK",
+                "calendar_basis_by_mode": calendar_by_mode,
                 "display_groups": ["STRATEGY"],
                 "display_name": series_id,
                 "mode_coverage": mode_coverage,
+                "observation_meta_by_mode": observation_meta_by_mode,
                 "primary_group": "STRATEGY",
                 "return_basis": "STRATEGY_TOTAL_RETURN",
                 "series_id": f"strategy:{series_id}",
@@ -370,7 +425,9 @@ def _wide_return_columns(
     return values
 
 
-def _public_rows(plan_bundle: Path) -> tuple[list[dict[str, Any]], list[Path]]:
+def _public_rows(
+    plan_bundle: Path, as_of: date
+) -> tuple[list[dict[str, Any]], list[Path]]:
     expected_hashes = _manifest_hashes(plan_bundle)
     rows_by_id: dict[str, dict[str, Any]] = {}
     input_paths: list[Path] = [plan_bundle / "plan-manifest.json"]
@@ -394,17 +451,21 @@ def _public_rows(plan_bundle: Path) -> tuple[list[dict[str, Any]], list[Path]]:
             else:
                 canonical_id = f"market:{column.upper()}"
                 display_name = column.upper()
-            values = _weekly_values(observations)
+            values, observation_meta, calendar_basis = _weekly_series(
+                observations, as_of=as_of
+            )
             display_groups = [primary_group]
             if column.upper() in CORE_BENCHMARKS:
                 display_groups.append("CORE_BENCHMARK")
                 display_name = f"{column.upper()} · {CORE_BENCHMARKS[column.upper()]}"
             item = {
                 "absent_value_status": "UNAVAILABLE_NO_OBSERVATION_IN_WEEK",
+                "calendar_basis": calendar_basis,
                 "coverage": _coverage(values),
                 "display_groups": display_groups,
                 "display_name": display_name,
                 "primary_group": primary_group,
+                "observation_meta": observation_meta,
                 "return_basis": return_basis,
                 "series_id": canonical_id,
                 "source_key": source_key,
@@ -436,8 +497,10 @@ def build_weekly_returns(
     as_of = date.fromisoformat(
         _text(generation_manifest.get("as_of_date"), "correlation as_of_date")
     )
-    strategy_rows = _strategy_rows(strategy_returns, correlation, generation_manifest)
-    public_rows, public_paths = _public_rows(plan_bundle)
+    strategy_rows = _strategy_rows(
+        strategy_returns, correlation, generation_manifest, as_of
+    )
+    public_rows, public_paths = _public_rows(plan_bundle, as_of)
     rows = [*strategy_rows, *public_rows]
     series_ids = [row["series_id"] for row in rows]
     if len(series_ids) != len(set(series_ids)):
@@ -471,6 +534,13 @@ def build_weekly_returns(
             "SECTOR",
             "INDUSTRY",
             "CORE_BENCHMARK",
+        ],
+        "observation_meta_fields": [
+            "daily_observation_count",
+            "actual_observed_start",
+            "actual_observed_end",
+            "coverage_status",
+            "boundary_reasons",
         ],
         "series": rows,
         "strategy_evidence_modes": list(STRATEGY_MODES),

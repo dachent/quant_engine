@@ -414,6 +414,25 @@
     return row.values?.[week] ?? null;
   }
 
+  function weeklyMeta(row, week) {
+    const raw = row.primary_group === "STRATEGY" ? row.observation_meta_by_mode?.[selectedWeeklyMode]?.[week] : row.observation_meta?.[week];
+    if (!Array.isArray(raw) || raw.length !== 5) return null;
+    return {
+      dailyCount: raw[0],
+      actualStart: raw[1],
+      actualEnd: raw[2],
+      coverageStatus: raw[3],
+      boundaryReasons: raw[4] || [],
+      calendarBasis: row.primary_group === "STRATEGY" ? row.calendar_basis_by_mode?.[selectedWeeklyMode] : row.calendar_basis,
+    };
+  }
+
+  function weeklyEnd(week) {
+    const value = new Date(`${week}T00:00:00Z`);
+    value.setUTCDate(value.getUTCDate() + 6);
+    return value.toISOString().slice(0, 10);
+  }
+
   function weeklyVisibleWeeks() {
     const all = (weekly?.weeks || []).filter((week) => includeCurrentWeek || week !== weekly.current_week?.week_start);
     if (selectedWeeklyWindow !== "full") return all.slice(-Number(selectedWeeklyWindow));
@@ -432,8 +451,9 @@
     const row = weekly.series.find((item) => item.series_id === selectedWeeklyCell.seriesId);
     if (!row) return;
     const value = weeklyValue(row, selectedWeeklyCell.week);
+    const meta = weeklyMeta(row, selectedWeeklyCell.week);
     $("#weekly-detail-title").textContent = `${row.display_name} · week of ${selectedWeeklyCell.week}`;
-    $("#weekly-detail").innerHTML = `<div class="validation-card"><div><strong>Weekly return</strong><span>${value == null ? "No accepted observation in this week" : "Compounded from accepted daily returns"}</span></div><div class="validation-score">${value == null ? "UNAVAILABLE" : pct(value, 2)}</div></div><div class="evidence-grid"><dl class="detail-list"><div><dt>Canonical series</dt><dd>${safe(row.series_id)}</dd></div><div><dt>Group</dt><dd>${safe(weeklyGroupLabels[row.primary_group] || row.primary_group)}</dd></div><div><dt>Return basis</dt><dd>${statusText(row.return_basis)}</dd></div></dl><dl class="detail-list"><div><dt>Source</dt><dd>${safe(row.source_key)}</dd></div><div><dt>Evidence mode</dt><dd>${row.primary_group === "STRATEGY" ? statusText(selectedWeeklyMode) : "NOT APPLICABLE"}</dd></div><div><dt>Missing policy</dt><dd>${statusText(row.absent_value_status)}</dd></div></dl></div>`;
+    $("#weekly-detail").innerHTML = `<div class="validation-card"><div><strong>Weekly return</strong><span>${value == null ? "No accepted observation in this week" : "Compounded from accepted daily returns"}</span></div><div class="validation-score">${value == null ? "UNAVAILABLE" : pct(value, 2)}</div></div><div class="evidence-grid"><dl class="detail-list"><div><dt>Canonical series</dt><dd>${safe(row.series_id)}</dd></div><div><dt>Group</dt><dd>${safe(weeklyGroupLabels[row.primary_group] || row.primary_group)}</dd></div><div><dt>Return basis</dt><dd>${statusText(row.return_basis)}</dd></div><div><dt>Calendar week</dt><dd>${safe(selectedWeeklyCell.week)} — ${safe(weeklyEnd(selectedWeeklyCell.week))}</dd></div></dl><dl class="detail-list"><div><dt>Source</dt><dd>${safe(row.source_key)}</dd></div><div><dt>Evidence mode</dt><dd>${row.primary_group === "STRATEGY" ? statusText(selectedWeeklyMode) : "NOT APPLICABLE"}</dd></div><div><dt>Accepted observations</dt><dd>${meta ? `${meta.dailyCount} · ${safe(meta.actualStart)} — ${safe(meta.actualEnd)}` : "UNAVAILABLE"}</dd></div><div><dt>Coverage / calendar</dt><dd>${meta ? `${statusText(meta.coverageStatus)} · ${statusText(meta.calendarBasis)}${meta.boundaryReasons.length ? ` · ${meta.boundaryReasons.map(statusText).join(", ")}` : ""}` : statusText(row.absent_value_status)}</dd></div></dl></div>`;
   }
 
   function renderWeeklyTable() {
@@ -455,9 +475,11 @@
     const header = `<thead><tr><th scope="col">Series / basis</th>${weeks.map((week) => `<th scope="col"><span class="weekly-date">${safe(week.slice(5))}</span><span class="cell-secondary">${safe(week.slice(0, 4))}</span></th>`).join("")}</tr></thead>`;
     const body = rows.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(row.display_name)}</span><span class="cell-secondary">${safe(row.return_basis)} · ${safe(row.source_key)}</span></th>${weeks.map((week) => {
       const value = weeklyValue(row, week);
+      const meta = weeklyMeta(row, week);
       const numeric = value == null ? null : Number(value);
       const intensity = numeric == null ? 0 : Math.min(1, Math.abs(numeric) / 0.08);
-      return `<td><button type="button" class="weekly-cell ${numeric == null ? "is-unavailable" : numeric < 0 ? "is-negative" : "is-positive"}" style="--weekly-intensity:${intensity}" data-weekly-series="${safe(row.series_id)}" data-weekly-week="${safe(week)}" aria-label="${safe(row.display_name)} ${safe(week)} ${numeric == null ? "unavailable" : pct(value, 2)}">${numeric == null ? "—" : pct(value, 1)}</button></td>`;
+      const partial = meta?.coverageStatus === "PARTIAL_BOUNDARY";
+      return `<td><button type="button" class="weekly-cell ${numeric == null ? "is-unavailable" : numeric < 0 ? "is-negative" : "is-positive"} ${partial ? "is-partial" : ""}" style="--weekly-intensity:${intensity}" data-weekly-series="${safe(row.series_id)}" data-weekly-week="${safe(week)}" aria-label="${safe(row.display_name)} ${safe(week)} ${numeric == null ? "unavailable" : pct(value, 2)}${partial ? " partial boundary" : ""}">${numeric == null ? "—" : pct(value, 1)}</button></td>`;
     }).join("")}</tr>`).join("");
     $("#weekly-table").innerHTML = `<table class="weekly-table"><caption>Weekly returns; absent cells are unavailable, not zero</caption>${header}<tbody>${body || `<tr><td colspan="${weeks.length + 1}">No series match the current filter.</td></tr>`}</tbody></table>`;
     $("#weekly-table-title").textContent = selectedWeeklyWindow === "full" ? `Full history · 52-week page ${weeklyPage + 1}` : `Latest ${selectedWeeklyWindow} completed weeks`;

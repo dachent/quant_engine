@@ -119,8 +119,8 @@ await page.locator("[data-weekly-series]").first().click();
 const weeklyDetail = await page.locator("#weekly-detail").textContent();
 checks.push(check(
   "Weekly returns expose every governed group without enabling the partial week",
-  weeklyRows === 9 && benchmarkRows === 9 && currentWeekIncluded === false && weeklyModePressed === "true" && weeklyDetail?.includes("Return basis"),
-  { strategy_rows: weeklyRows, benchmark_rows: benchmarkRows, partial_week_enabled: currentWeekIncluded, hybrid_pressed: weeklyModePressed, detail_visible: weeklyDetail?.includes("Return basis") },
+  weeklyRows === 9 && benchmarkRows === 9 && currentWeekIncluded === false && weeklyModePressed === "true" && weeklyDetail?.includes("Return basis") && weeklyDetail?.includes("Accepted observations") && weeklyDetail?.includes("Calendar week"),
+  { strategy_rows: weeklyRows, benchmark_rows: benchmarkRows, partial_week_enabled: currentWeekIncluded, hybrid_pressed: weeklyModePressed, detail_visible: weeklyDetail?.includes("Accepted observations") },
 ));
 
 await page.locator('[data-nav="capital"]').click();
