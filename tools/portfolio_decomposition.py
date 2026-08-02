@@ -753,9 +753,16 @@ def _training_design_diagnostics(
         vif_values = [1.0]
         vif_status = "AVAILABLE"
     else:
-        inverse = np.linalg.inv(correlation)
-        vif_values = [float(inverse[index, index]) for index in range(matrix.shape[1])]
-        vif_status = "AVAILABLE"
+        try:
+            inverse = np.linalg.inv(correlation)
+        except np.linalg.LinAlgError:
+            vif_values = [None] * matrix.shape[1]
+            vif_status = "UNAVAILABLE_SINGULAR_OR_CONSTANT_DESIGN"
+        else:
+            vif_values = [
+                float(inverse[index, index]) for index in range(matrix.shape[1])
+            ]
+            vif_status = "AVAILABLE"
     finite_vifs = [value for value in vif_values if value is not None]
     maximum_vif = max(finite_vifs) if finite_vifs else None
 

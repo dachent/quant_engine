@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "as_of_policy": "MIN_TARGET_AND_SOURCE_LAST_OBSERVATION",
+  "split_policy": {
+    "holdout_fraction": "0.20",
+    "minimum_holdout_observations": 20,
+    "minimum_training_observations_per_factor": 20,
+    "cv_folds": 3,
+    "parsimony_tolerance": "0.01",
+    "ridge_candidates": ["0", "0.000001", "0.0001"]
+  },
+  "sources": {
+    "us-economic": {
+      "lens": "ECONOMIC_FACTOR",
+      "universe_id": "us-equity-economic-factors",
+      "input_key": "us_factors",
+      "risk_free_column": "rf",
+      "return_type": "EXCESS",
+      "column_policy": "LOWER_CANDIDATE_ID"
+    },
+    "europe-economic": {
+      "lens": "ECONOMIC_FACTOR",
+      "universe_id": "europe-equity-economic-factors",
+      "input_key": "europe_factors",
+      "risk_free_column": "rf",
+      "return_type": "EXCESS",
+      "column_policy": "REMOVE_EU_PREFIX_THEN_LOWER"
+    },
+    "us-equity-style": {
+      "lens": "ETF_STYLE",
+      "universe_id": "us-equity-six-cell-style",
+      "input_key": "style_returns",
+      "risk_free_column": "BIL",
+      "return_type": "TOTAL",
+      "column_policy": "CANDIDATE_ID"
+    },
+    "multi-asset-style": {
+      "lens": "ETF_STYLE",
+      "universe_id": "multi-asset-etf-style",
+      "input_key": "style_returns",
+      "risk_free_column": "BIL",
+      "return_type": "TOTAL",
+      "column_policy": "CANDIDATE_ID"
+    },
+    "us-industry": {
+      "lens": "RETURN_INDUSTRY",
+      "universe_id": "us-49-industry-return",
+      "input_key": "us_industries",
+      "risk_free_column": "rf",
+      "return_type": "TOTAL",
+      "column_policy": "CANDIDATE_ID"
+    }
+  },
+  "strategies": [
+    {
+      "strategy_id": "p123-ai-factor",
+      "series_id": "AI Factor [P123]",
+      "archetype": "US_SMALL_MICROCAP_EQUITY",
+      "default_disposition": "OUT_OF_SCOPE_UNDECLARED_LENS",
+      "assignments": [
+        {
+          "source_key": "us-economic",
+          "constraint": "UNCONSTRAINED",
+          "factor_sets": [
+            ["MKT_RF"],
+            ["MKT_RF", "SMB", "HML"],
+            ["MKT_RF", "SMB", "HML", "RMW", "CMA", "MOM"]
+          ]
+        },
+        {
+          "source_key": "us-equity-style",
+          "constraint": "LONG_ONLY_SUM_TO_ONE",
+          "factor_sets": [
+            ["IWX", "IWY"],
+            ["IWS", "IWP"],
+            ["IWN", "IWO"],
+            ["IWX", "IWY", "IWN", "IWO"],
+            ["IWS", "IWP", "IWN", "IWO"],
+            ["IWX", "IWY", "IWS", "IWP", "IWN", "IWO"]
+          ]
+        },
+        {
+          "source_key": "us-industry",
+          "constraint": "UNCONSTRAINED",
+          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
+        }
+      ]
+    },
+    {
+      "strategy_id": "p123-eu",
+      "series_id": "EU [P123]",
+      "archetype": "EUROPE_EQUITY",
+      "default_disposition": "OUT_OF_SCOPE_REGION_MISMATCH",
+      "assignments": [
+        {
+          "source_key": "europe-economic",
+          "constraint": "UNCONSTRAINED",
+          "factor_sets": [
+            ["EU_MKT_RF"],
+            ["EU_MKT_RF", "EU_SMB", "EU_HML"],
+            ["EU_MKT_RF", "EU_SMB", "EU_HML", "EU_RMW", "EU_CMA", "EU_MOM"]
+          ]
+        }
+      ]
+    },
+    {
+      "strategy_id": "qsi",
+      "series_id": "QSI",
+      "archetype": "TACTICAL_MULTI_ASSET",
+      "default_disposition": "OUT_OF_SCOPE_ARCHETYPE_MISMATCH",
+      "assignments": [
+        {
+          "source_key": "multi-asset-style",
+          "constraint": "LONG_ONLY_SUM_TO_ONE",
+          "factor_sets": [
+            ["ITOT"],
+            ["ITOT", "IEFA", "IEMG"],
+            ["ITOT", "IEF", "TLT"],
+            ["ITOT", "HYG", "GLD"],
+            ["ITOT", "TLT", "LQD", "HYG", "VNQ", "GLD"],
+            ["ITOT", "IEFA", "IEMG", "IEF", "HYG", "GLD"],
+            ["ITOT", "TLT", "HYG", "GLD", "DBC", "UUP"]
+          ]
+        }
+      ]
+    },
+    {
+      "strategy_id": "tt-portfolio",
+      "series_id": "TT Portfolio",
+      "archetype": "TACTICAL_MULTI_ASSET",
+      "default_disposition": "OUT_OF_SCOPE_ARCHETYPE_MISMATCH",
+      "inherit_assignments_from": "qsi"
+    },
+    {
+      "strategy_id": "volatis-strategy",
+      "series_id": "Volatis Strategy",
+      "archetype": "TACTICAL_VOLATILITY",
+      "default_disposition": "OUT_OF_SCOPE_ARCHETYPE_MISMATCH",
+      "inherit_assignments_from": "qsi"
+    },
+    {
+      "strategy_id": "grizzlybears-vtma",
+      "series_id": "GrizzlyBears VTMA",
+      "archetype": "TACTICAL_VOLATILITY",
+      "default_disposition": "OUT_OF_SCOPE_ARCHETYPE_MISMATCH",
+      "inherit_assignments_from": "qsi"
+    },
+    {
+      "strategy_id": "robuxio-crypto",
+      "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+      "archetype": "CRYPTO_TACTICAL",
+      "default_disposition": "UNAVAILABLE_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
+    },
+    {
+      "strategy_id": "echotrade-growth-pivots",
+      "series_id": "Growth at Market Pivot Points [EchoTrade]",
+      "archetype": "UNVERIFIED_SIGNAL",
+      "default_disposition": "UNAVAILABLE_INSUFFICIENT_TARGET_HISTORY"
+    },
+    {
+      "strategy_id": "composer-holy-grail",
+      "series_id": "[Composer] - The Holy Grail (Buy Copy)",
+      "archetype": "DROPPED_IMMATERIAL",
+      "default_disposition": "DROPPED_IMMATERIAL_CURRENT_SCOPE"
+    }
+  ]
+}
