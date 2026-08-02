@@ -2396,6 +2396,20 @@ def _copy_exact(source: Path, destination: Path) -> None:
         os.fsync(output_handle.fileno())
 
 
+def _replace_exact(path: Path, content: bytes) -> None:
+    """Atomically replace one non-linked companion file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise ControlPanelValidationError("publication companion cannot be a link")
+    temporary = path.parent / f".{path.name}-{hashlib.sha256(content).hexdigest()}.tmp"
+    try:
+        _write_exact(temporary, content)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _publish_current_launcher(output_root: Path, generation_id: str) -> str:
     """Atomically update the stable local entry point after pointer publication."""
     if not re.fullmatch(r"[0-9a-f]{64}", generation_id):
@@ -2419,14 +2433,42 @@ def _publish_current_launcher(output_root: Path, generation_id: str) -> str:
         + '">Open the accepted snapshot</a></p></main>'
         '<script>location.replace("./' + target + '");</script></body></html>\n'
     ).encode("utf-8")
-    output_root.mkdir(parents=True, exist_ok=True)
-    temporary = output_root / f".index-{generation_id}.tmp"
-    try:
-        _write_exact(temporary, content)
-        os.replace(temporary, launcher)
-    finally:
-        temporary.unlink(missing_ok=True)
+    _replace_exact(launcher, content)
     return hashlib.sha256(content).hexdigest()
+
+
+def _restore_panel_publication(
+    output_root: Path,
+    failed_generation_id: str,
+    previous_pointer: Any,
+    previous_launcher: bytes | None,
+) -> None:
+    """Restore the exact accepted pointer and launcher after a local failure."""
+
+    try:
+        current = read_current(output_root)
+    except FileNotFoundError:
+        current = None
+    if current is not None and current.generation_id != failed_generation_id:
+        if previous_pointer is None or current != previous_pointer:
+            raise ControlPanelValidationError(
+                "control-panel authority changed during recovery"
+            )
+    elif previous_pointer is None:
+        current_path = output_root / "CURRENT.json"
+        if current_path.is_symlink():
+            raise ControlPanelValidationError("CURRENT.json cannot be a link")
+        current_path.unlink(missing_ok=True)
+    else:
+        publish_generation(output_root, previous_pointer.generation_id)
+
+    launcher = output_root / "index.html"
+    if previous_launcher is None:
+        if launcher.is_symlink():
+            raise ControlPanelValidationError("stable launcher cannot be a link")
+        launcher.unlink(missing_ok=True)
+    else:
+        _replace_exact(launcher, previous_launcher)
 
 
 def publish_panel(
@@ -2595,8 +2637,25 @@ def publish_panel(
         _copy_exact(candidate_dir / relative, generation_dir / relative)
     for path in qa_files:
         _copy_exact(path, generation_dir / "qa" / path.relative_to(qa_dir))
-    pointer = publish_generation(output_root, manifest.generation_id)
-    launcher_hash = _publish_current_launcher(output_root, manifest.generation_id)
+    try:
+        previous_pointer = read_current(output_root)
+    except FileNotFoundError:
+        previous_pointer = None
+    launcher_path = output_root / "index.html"
+    if launcher_path.is_symlink():
+        raise ControlPanelValidationError("stable launcher cannot be a link")
+    previous_launcher = launcher_path.read_bytes() if launcher_path.exists() else None
+    try:
+        pointer = publish_generation(output_root, manifest.generation_id)
+        launcher_hash = _publish_current_launcher(output_root, manifest.generation_id)
+    except Exception:
+        _restore_panel_publication(
+            output_root,
+            manifest.generation_id,
+            previous_pointer,
+            previous_launcher,
+        )
+        raise
     return {
         "browser_checks": qa["checks_total"],
         "correlation_generation_id": data["meta"]["correlation_generation_id"],

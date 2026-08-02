@@ -1109,6 +1109,56 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
     )
 
 
+def test_launcher_failure_restores_prior_pointer_and_launcher(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    previous = GenerationManifest.build(
+        as_of_date=date(2026, 7, 1),
+        adapter=AdapterIdentity("prior-panel", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="accepted prior control panel",
+            fact_types=("portfolio control panel",),
+            observed_start=date(2026, 7, 1),
+            observed_end=date(2026, 7, 1),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="panel/prior.html",
+                sha256=hashlib.sha256(b"prior accepted launcher\n").hexdigest(),
+                size_bytes=len(b"prior accepted launcher\n"),
+                as_of_date=date(2026, 7, 1),
+                schema_name="portfolio-control-panel-artifact",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation(inputs["output"], previous)
+    publish_generation(inputs["output"], previous.generation_id)
+    launcher = inputs["output"] / "index.html"
+    launcher.write_bytes(b"prior accepted launcher\n")
+
+    built = panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path)
+
+    original = panel._publish_current_launcher
+
+    def fail_after_launcher(root: Path, generation_id: str) -> str:
+        original(root, generation_id)
+        raise OSError("injected launcher publication failure")
+
+    monkeypatch.setattr(panel, "_publish_current_launcher", fail_after_launcher)
+    with pytest.raises(OSError, match="injected launcher"):
+        panel.publish_panel(
+            inputs["report"], inputs["legacy"], candidate, qa, inputs["output"]
+        )
+
+    assert read_current(inputs["output"]).generation_id == previous.generation_id
+    assert launcher.read_bytes() == b"prior accepted launcher\n"
+
+
 def test_browser_qa_rejects_console_error(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
