@@ -54,6 +54,14 @@ checks.push(check("All eight navigation views activate", visited.length === view
 await page.locator('[data-nav="attribution"]').click();
 const factorRows = await page.locator("#factor-model-table tbody tr").count();
 const factorChips = await page.locator("[data-factor-strategy]").count();
+await page.locator("[data-factor-strategy]").first().click();
+const dynamicChart = await page.locator(".dynamic-chart").count();
+const dynamicValidation = await page.locator("#factor-detail").textContent();
+checks.push(check(
+  "Dynamic factor path and static benchmark are visible",
+  dynamicChart === 1 && dynamicValidation?.includes("Dynamic minus static") && dynamicValidation?.includes("Train LOO predicted R²"),
+  { chart_count: dynamicChart, static_benchmark: dynamicValidation?.includes("Dynamic minus static"), training_validation: dynamicValidation?.includes("Train LOO predicted R²") },
+));
 await page.locator("[data-factor-strategy]").last().click();
 const unavailableFactorDetail = await page.locator("#factor-detail").textContent();
 checks.push(check("Factor and alpha coverage is interactive", factorRows === 9 && factorChips === 9 && unavailableFactorDetail?.includes("UNAVAILABLE"), { factor_chips: factorChips, factor_rows: factorRows, unavailable_visible: unavailableFactorDetail?.includes("UNAVAILABLE") }));

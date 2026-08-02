@@ -105,11 +105,12 @@
     },
     "factor_analysis": {
       "type": "object",
-      "required": ["analytics_hash", "as_of_date", "available_count", "generation_id", "method_label", "methodology_manifest_sha256", "methodology_version", "series", "source_sha256", "sources", "unavailable_count"],
+      "required": ["analytics_hash", "as_of_date", "available_count", "dynamic_available_count", "generation_id", "method_label", "methodology_manifest_sha256", "methodology_version", "series", "source_sha256", "sources", "unavailable_count"],
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
         "as_of_date": { "type": "string", "format": "date" },
         "available_count": { "type": "integer", "minimum": 0 },
+        "dynamic_available_count": { "type": "integer", "minimum": 0 },
         "generation_id": { "$ref": "#/$defs/hash" },
         "method_label": { "const": "MPI_INFORMED_NON_EQUIVALENT" },
         "methodology_manifest_sha256": { "$ref": "#/$defs/hash" },

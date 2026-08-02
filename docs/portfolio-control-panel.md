@@ -11,11 +11,12 @@ without preserving stale calculations or hard-coded operator conclusions.
   only from the current accepted `dataPortfolio/reporting` generation. A
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
-- Factor composition, net/gross alpha status, holdout fit, coverage, and
-  contribution reconciliation come only from the accepted
-  `dataPortfolio/analytics/decomposition` generation. The static method is
-  labeled `MPI_INFORMED_NON_EQUIVALENT`; it is not proprietary MPI output or
-  Dynamic Style Analysis.
+- Factor composition, net/gross alpha status, holdout fit, coverage,
+  contribution reconciliation, and any dated dynamic exposure path come only
+  from the accepted `dataPortfolio/analytics/decomposition` generation. Static
+  RBSA and clean-room dynamic FLS results are both labeled
+  `MPI_INFORMED_NON_EQUIVALENT`; neither is proprietary MPI output nor a claim
+  to undisclosed MPI production behavior.
 - Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
   matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come
@@ -73,9 +74,9 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
 
 The verifier proves all eight views, local-only assets, lack of network or
 trade code, accepted capital/risk replay, nine-strategy boundary, 19 account
-identities, five pipeline-available/four unavailable static factor results, 10 measured/26
-unavailable dependence pairs, explicit unavailable facts, and frozen-appendix
-isolation.
+identities, five pipeline-available/four unavailable factor results, dynamic
+estimator disclosures when present, 10 measured/26 unavailable dependence
+pairs, explicit unavailable facts, and frozen-appendix isolation.
 
 ## Browser and interaction QA
 
@@ -101,8 +102,10 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py qa `
 Acceptance requires all eight views at 1440×900, 1024×768, and 390×844 plus a
 direct-file capture; no console or request failures; clean visual lint across
 all 24 viewport/view combinations; PDF export; eight-view navigation; factor
-selection; full-overlap, requested-horizon, and drawdown-regime matrix
-selection with cell drill-down; allocation filters; current-position
+selection; dynamic exposure-path and same-factor static-benchmark evidence
+when a dynamic model is selected; full-overlap, requested-horizon, and
+drawdown-regime matrix selection with cell drill-down; allocation filters;
+current-position
 attribution separated from historical General intervals; candidate
 filter/search; a responsive provenance control; and
 absence of execution controls. Screenshots must also be inspected visually

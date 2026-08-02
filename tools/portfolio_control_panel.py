@@ -257,6 +257,7 @@ def _factor_analysis(
 
     rows: list[dict[str, Any]] = []
     available_count = 0
+    dynamic_available_count = 0
     for selection in sorted(selections, key=lambda row: str(row.get("series_id"))):
         series_id = _text(selection.get("series_id"), "selection.series_id")
         selected_model = selection.get("model_id")
@@ -283,6 +284,11 @@ def _factor_analysis(
                     "cost_coverage": "INCOMPLETE",
                     "coverage": best_coverage,
                     "diagnostics": None,
+                    "estimator": _text(
+                        best.get("estimator", "STATIC_RBSA"), "model.estimator"
+                    )
+                    if series_attempts
+                    else None,
                     "evidence_layer": None,
                     "exposures": [],
                     "model_id": None,
@@ -396,6 +402,9 @@ def _factor_analysis(
                 ),
                 "coverage": _object(model.get("coverage"), "model.coverage"),
                 "diagnostics": _object(model.get("diagnostics"), "model.diagnostics"),
+                "estimator": _text(
+                    model.get("estimator", "STATIC_RBSA"), "model.estimator"
+                ),
                 "evidence_layer": _text(
                     model.get("evidence_layer"), "model.evidence_layer"
                 ),
@@ -408,12 +417,15 @@ def _factor_analysis(
             }
         )
         available_count += 1
+        if model.get("estimator", "STATIC_RBSA") == "DYNAMIC_FLS":
+            dynamic_available_count += 1
     return {
         "analytics_hash": _text(
             decomposition.get("analytics_hash"), "factor.analytics_hash"
         ),
         "as_of_date": _text(decomposition.get("as_of_date"), "factor.as_of_date"),
         "available_count": available_count,
+        "dynamic_available_count": dynamic_available_count,
         "generation_id": identity["generation_id"],
         "method_label": method_label,
         "methodology_manifest_sha256": _text(

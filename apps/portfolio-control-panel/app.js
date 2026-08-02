@@ -145,6 +145,34 @@
   }
 
   let selectedFactorSeries = null;
+  function dynamicPathMarkup(row) {
+    const dynamic = row.diagnostics?.dynamic;
+    const path = dynamic?.exposure_path || [];
+    if (!dynamic || path.length < 2) return "";
+    const factorIds = row.exposures.map((item) => item.factor_id);
+    const palette = ["#58d5ce", "#83b7ff", "#f4bd61", "#ff7f8e", "#b79cff", "#8dd57f", "#f091d0", "#b8c6d9"];
+    const width = 900;
+    const height = 280;
+    const pad = { left: 52, right: 18, top: 22, bottom: 40 };
+    const values = path.flatMap((rowPath) => factorIds.map((factor) => Number(rowPath.exposures[factor]))).filter(Number.isFinite);
+    const minimum = Math.min(0, ...values);
+    const maximum = Math.max(0, ...values);
+    const span = Math.max(maximum - minimum, 0.01);
+    const x = (index) => pad.left + index * (width - pad.left - pad.right) / (path.length - 1);
+    const y = (value) => pad.top + (maximum - value) * (height - pad.top - pad.bottom) / span;
+    const zero = y(0);
+    const lines = factorIds.map((factor, factorIndex) => {
+      const points = path.map((rowPath, index) => `${x(index).toFixed(2)},${y(Number(rowPath.exposures[factor])).toFixed(2)}`).join(" ");
+      return `<polyline fill="none" stroke="${palette[factorIndex % palette.length]}" stroke-width="2.2" vector-effect="non-scaling-stroke" points="${points}"><title>${safe(factor)} dynamic exposure</title></polyline>`;
+    }).join("");
+    const holdoutIndex = path.findIndex((item) => item.estimation_state !== "TRAIN_SMOOTHED");
+    const holdoutLine = holdoutIndex > 0 ? `<line x1="${x(holdoutIndex)}" x2="${x(holdoutIndex)}" y1="${pad.top}" y2="${height - pad.bottom}" class="holdout-marker"/><text x="${x(holdoutIndex) + 6}" y="${pad.top + 12}" class="chart-label">walk-forward</text>` : "";
+    const legend = factorIds.map((factor, index) => `<span><i style="background:${palette[index % palette.length]}"></i>${safe(factor)}</span>`).join("");
+    const changes = (dynamic.largest_exposure_changes || []).map((item) => `<tr><td>${safe(item.date)}</td><td class="numeric">${decimal(item.exposure_change_l2)}</td></tr>`);
+    const comparison = dynamic.holdout_comparison || {};
+    return `<div class="grid grid-12 dynamic-analysis-grid"><div class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Dynamic exposure path</div><h3>Training-smoothed, then causal filtered</h3></div><span class="badge badge-warning">λ ${decimal(dynamic.selected_smoothness)}</span></div><svg class="dynamic-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Time-varying factor exposure paths"><line x1="${pad.left}" x2="${width - pad.right}" y1="${zero}" y2="${zero}" class="zero-line"/>${holdoutLine}${lines}<text x="${pad.left}" y="${height - 12}" class="chart-label">${safe(path[0].date)}</text><text x="${width - pad.right}" y="${height - 12}" text-anchor="end" class="chart-label">${safe(path[path.length - 1].date)}</text></svg><div class="chart-legend">${legend}</div></div><div class="panel span-4"><div class="panel-heading"><div><div class="eyebrow">Dynamic validation</div><h3>Predictive, not fitted-only</h3></div></div><dl class="detail-list"><div><dt>Train LOO predicted R²</dt><dd>${pct(dynamic.selection_predicted_r_squared)}</dd></div><div><dt>Static holdout R²</dt><dd>${pct(comparison.static_predicted_r_squared)}</dd></div><div><dt>Dynamic minus static</dt><dd>${pct(comparison.dynamic_minus_static_predicted_r_squared)}</dd></div><div><dt>Benchmark verdict</dt><dd>${statusText(comparison.status || "UNAVAILABLE")}</dd></div><div><dt>Smoothing selection</dt><dd>${statusText(dynamic.selection_rule)}</dd></div><div><dt>State transition</dt><dd>${statusText(dynamic.state_transition)}</dd></div><div><dt>Validation</dt><dd>${statusText(dynamic.validation)}</dd></div></dl><div class="table-wrap"><table><caption>Largest exposure changes; diagnostic only</caption>${tableMarkup([["Date"], ["L2 change", "numeric"]], changes)}</table></div></div></div>`;
+  }
+
   function renderFactorDetail() {
     const analysis = data.factor_analysis;
     const row = analysis.series.find((item) => item.series_id === selectedFactorSeries) || analysis.series[0];
@@ -164,7 +192,7 @@
       const exposure = Number(item.exposure);
       const width = Math.min(48, Math.abs(exposure) / maximumExposure * 48);
       const left = exposure < 0 ? 50 - width : 50;
-      const uncertainty = item.standard_error == null ? "Coefficient SE unavailable for fitted method" : `SE ${decimal(item.standard_error)}`;
+      const uncertainty = item.standard_error == null ? (row.estimator === "DYNAMIC_FLS" ? "Dynamic path uncertainty not estimated" : "Coefficient SE unavailable for fitted method") : `SE ${decimal(item.standard_error)}`;
       return `<div class="exposure-row"><div class="exposure-name"><strong>${safe(item.factor_id)}</strong><span>${safe(uncertainty)}</span></div><div class="exposure-track" aria-label="${safe(item.factor_id)} exposure ${decimal(item.exposure)}"><span class="exposure-fill ${exposure < 0 ? "is-negative" : ""}" style="left:${left}%;width:${width}%"></span></div><div class="exposure-value">${decimal(item.exposure)}×</div></div>`;
     }).join("");
     const contributionRows = [
@@ -174,7 +202,7 @@
       `<tr><td>Residual</td><td>Realized minus fitted</td><td class="numeric">${pct(summary.residual_mean, 3)}</td></tr>`,
       `<tr><td>Realized</td><td>Observed excess return</td><td class="numeric">${pct(summary.realized_mean, 3)}</td></tr>`,
     ];
-    $("#factor-detail").innerHTML = `<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Net alpha</div><div class="metric-value">${pct(alpha.net_annualized)}</div><div class="metric-note">${safe(alpha.net_status)} · observed basis</div></div><div class="metric-block"><div class="metric-label">Gross alpha</div><div class="metric-value">${pct(alpha.gross_annualized)}</div><div class="metric-note">${safe(alpha.gross_status)}</div></div><div class="metric-block"><div class="metric-label">Holdout predicted R²</div><div class="metric-value">${pct(holdout.predicted_r_squared)}</div><div class="metric-note">${integer.format(holdout.observation_count)} out-of-sample observations</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(holdout.tracking_error_annualized)}</div><div class="metric-note">Annualized holdout residual volatility</div></div><div class="metric-block"><div class="metric-label">Exact-date coverage</div><div class="metric-value">${integer.format(row.coverage.aligned_observations)}</div><div class="metric-note">${formatDate(row.coverage.observed_start)}–${formatDate(row.coverage.observed_end)}</div></div><div class="metric-block"><div class="metric-label">Reconciliation error</div><div class="metric-value">${safe(summary.maximum_reconciliation_error)}</div><div class="metric-note">Maximum absolute return identity error</div></div></div><div class="grid grid-12" style="margin-top:16px"><div class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Selected exposures</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(row.evidence_layer)}</span></div><div class="exposure-list">${exposures}</div></div><div class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge">n=${integer.format(summary.observations)}</span></div><div class="table-wrap"><table><caption>Holdout factor contribution reconciliation</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], contributionRows)}</table></div></div></div>`;
+    $("#factor-detail").innerHTML = `<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Estimator</div><div class="metric-value metric-value-compact">${statusText(row.estimator)}</div><div class="metric-note">${safe(analysis.method_label)}</div></div><div class="metric-block"><div class="metric-label">Net alpha</div><div class="metric-value">${pct(alpha.net_annualized)}</div><div class="metric-note">${safe(alpha.net_status)} · observed basis</div></div><div class="metric-block"><div class="metric-label">Gross alpha</div><div class="metric-value">${pct(alpha.gross_annualized)}</div><div class="metric-note">${safe(alpha.gross_status)}</div></div><div class="metric-block"><div class="metric-label">Holdout predicted R²</div><div class="metric-value">${pct(holdout.predicted_r_squared)}</div><div class="metric-note">${integer.format(holdout.observation_count)} out-of-sample observations</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(holdout.tracking_error_annualized)}</div><div class="metric-note">Annualized holdout residual volatility</div></div><div class="metric-block"><div class="metric-label">Exact-date coverage</div><div class="metric-value">${integer.format(row.coverage.aligned_observations)}</div><div class="metric-note">${formatDate(row.coverage.observed_start)}–${formatDate(row.coverage.observed_end)}</div></div><div class="metric-block"><div class="metric-label">Reconciliation error</div><div class="metric-value">${safe(summary.maximum_reconciliation_error)}</div><div class="metric-note">Maximum absolute return identity error</div></div></div>${dynamicPathMarkup(row)}<div class="grid grid-12" style="margin-top:16px"><div class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Latest accepted exposures</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(row.evidence_layer)}</span></div><div class="exposure-list">${exposures}</div></div><div class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge">n=${integer.format(summary.observations)}</span></div><div class="table-wrap"><table><caption>Holdout factor contribution reconciliation</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], contributionRows)}</table></div></div></div>`;
   }
 
   function renderAttribution() {
@@ -182,17 +210,17 @@
     const firstAvailable = analysis.series.find((row) => row.status === "AVAILABLE");
     selectedFactorSeries ||= firstAvailable?.series_id || analysis.series[0]?.series_id;
     renderKpis("#factor-kpis", [
-      ["Pipeline-available models", `${analysis.available_count}/${analysis.series.length}`, "Static prototype; not decision-grade validation", "warning"],
+      ["Pipeline-available models", `${analysis.available_count}/${analysis.series.length}`, "Accepted exact-date model evidence", "warning"],
+      ["Dynamic FLS models", String(analysis.dynamic_available_count), "Clean-room time-varying exposure paths"],
       ["Unavailable", String(analysis.unavailable_count), "No inferred exposures or alpha", "danger"],
       ["Methodology", analysis.methodology_version, analysis.method_label, "warning"],
-      ["Analytics as of", formatDate(analysis.as_of_date), `Generation ${analysis.generation_id.slice(0, 12)}…`],
     ]);
     $("#factor-method-badge").textContent = analysis.method_label.replaceAll("_", " ");
     const rows = analysis.series.map((row) => {
       const holdout = row.diagnostics?.holdout;
-      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(row.status)}</td><td>${safe(row.exposures.map((item) => item.factor_id).join(" · ") || "—")}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")}</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.unavailable_reasons.join(" · "))}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(row.status)}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(row.exposures.map((item) => item.factor_id).join(" · ") || "—")}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")}</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.unavailable_reasons.join(" · "))}</td></tr>`;
     });
-    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Status"], ["Factors"], ["Observed interval"], ["Aligned", "numeric"], ["Holdout R²", "numeric"], ["Net alpha", "numeric"], ["Gross / unavailable state"]], rows);
+    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Status"], ["Estimator"], ["Factors"], ["Observed interval"], ["Aligned", "numeric"], ["Holdout R²", "numeric"], ["Net alpha", "numeric"], ["Gross / unavailable state"]], rows);
     $("#factor-strategy-selector").innerHTML = analysis.series.map((row) => `<button type="button" class="strategy-chip ${row.status === "AVAILABLE" ? "" : "is-unavailable"}" data-factor-strategy="${safe(row.series_id)}">${safe(row.series_id)}</button>`).join("");
     $$("[data-factor-strategy]").forEach((button) => button.addEventListener("click", () => { selectedFactorSeries = button.dataset.factorStrategy; renderFactorDetail(); }));
     renderFactorDetail();

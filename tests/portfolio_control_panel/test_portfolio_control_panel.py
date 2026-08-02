@@ -241,6 +241,58 @@ def _decomposition() -> dict[str, object]:
             "train_observations": 78 if model_id else 0,
         }
         if model_id:
+            estimator = "DYNAMIC_FLS" if index == 0 else "STATIC_RBSA"
+            diagnostics: dict[str, object] = {
+                "holdout": {
+                    "adjusted_r_squared": "0.39",
+                    "observation_count": 2,
+                    "predicted_r_squared": "0.4",
+                    "r_squared": "0.4",
+                    "rmse": "0.01",
+                    "tracking_error_annualized": "0.15",
+                },
+                "rank": 2,
+                "rank_status": "FULL_RANK",
+                "train": {
+                    "adjusted_r_squared": "0.38",
+                    "observation_count": 78,
+                    "r_squared": "0.39",
+                    "rmse": "0.011",
+                    "tracking_error_annualized": "0.16",
+                },
+            }
+            if estimator == "DYNAMIC_FLS":
+                diagnostics["dynamic"] = {
+                    "exposure_path": [
+                        {
+                            "date": "2026-07-29",
+                            "estimation_state": "TRAIN_SMOOTHED",
+                            "exposure_change_l2": None,
+                            "exposures": {"SPY_XS": "0.7"},
+                        },
+                        {
+                            "date": "2026-07-30",
+                            "estimation_state": "HOLDOUT_FILTERED_CAUSAL",
+                            "exposure_change_l2": "0.1",
+                            "exposures": {"SPY_XS": "0.8"},
+                        },
+                    ],
+                    "holdout_comparison": {
+                        "dynamic_predicted_r_squared": "0.4",
+                        "dynamic_minus_static_predicted_r_squared": "0.1",
+                        "selection_effect": "DIAGNOSTIC_ONLY_HOLDOUT_NOT_USED_FOR_SELECTION",
+                        "static_predicted_r_squared": "0.3",
+                        "status": "OUTPERFORMS_STATIC_SAME_FACTORS_HOLDOUT",
+                    },
+                    "largest_exposure_changes": [
+                        {"date": "2026-07-30", "exposure_change_l2": "0.1"}
+                    ],
+                    "selected_smoothness": "0.0001",
+                    "selection_predicted_r_squared": "0.45",
+                    "selection_rule": "MAX_TRAIN_LOO_PREDICTED_R2_THEN_SMOOTHEST_WITHIN_TOLERANCE",
+                    "state_transition": "IDENTITY_RANDOM_WALK",
+                    "validation": "EXACT_LEAVE_ONE_OUT_TRAIN_ONLY",
+                }
             models.append(
                 {
                     "alpha": {
@@ -274,25 +326,8 @@ def _decomposition() -> dict[str, object]:
                     ],
                     "cost_coverage": "INCOMPLETE",
                     "coverage": coverage,
-                    "diagnostics": {
-                        "holdout": {
-                            "adjusted_r_squared": "0.39",
-                            "observation_count": 2,
-                            "predicted_r_squared": "0.4",
-                            "r_squared": "0.4",
-                            "rmse": "0.01",
-                            "tracking_error_annualized": "0.15",
-                        },
-                        "rank": 2,
-                        "rank_status": "FULL_RANK",
-                        "train": {
-                            "adjusted_r_squared": "0.38",
-                            "observation_count": 78,
-                            "r_squared": "0.39",
-                            "rmse": "0.011",
-                            "tracking_error_annualized": "0.16",
-                        },
-                    },
+                    "diagnostics": diagnostics,
+                    "estimator": estimator,
                     "evidence_layer": "ACCOUNT_LIVE",
                     "exposures": [
                         {
@@ -314,6 +349,7 @@ def _decomposition() -> dict[str, object]:
                 {
                     "cost_coverage": "INCOMPLETE",
                     "coverage": coverage,
+                    "estimator": "STATIC_RBSA",
                     "model_id": f"attempt-{index}",
                     "series_id": series_id,
                     "status": "UNAVAILABLE_UNKNOWN_TARGET_SERIES",
@@ -326,7 +362,7 @@ def _decomposition() -> dict[str, object]:
         "builder_version": "synthetic",
         "method_label": "MPI_INFORMED_NON_EQUIVALENT",
         "methodology_manifest_sha256": "e" * 64,
-        "methodology_version": "ANL-DECOMP-STATIC-1",
+        "methodology_version": "ANL-DECOMP-CLEANROOM-2",
         "model_results": models,
         "model_selections": selections,
         "sources": {
@@ -733,6 +769,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         }
     ]
     assert data["factor_analysis"]["available_count"] == 5
+    assert data["factor_analysis"]["dynamic_available_count"] == 1
     assert data["factor_analysis"]["unavailable_count"] == 4
     assert data["dependence_analysis"]["available_pair_count"] == 10
     assert data["dependence_analysis"]["pair_count"] == 36

@@ -6,27 +6,30 @@
       "unconstrained ridge regression",
       "long-only sum-to-one returns-based style analysis",
       "time-ordered cross-validation and holdout testing",
-      "transparent factor contribution and residual reconciliation"
+      "transparent factor contribution and residual reconciliation",
+      "clean-room unconstrained flexible least squares with identity state transitions",
+      "training-only exact leave-one-out selection of a disclosed smoothness grid",
+      "causal walk-forward holdout forecasts and filtered dynamic exposure paths"
     ],
     "label": "MPI_INFORMED_NON_EQUIVALENT",
     "not_implemented": [
-      "dynamic factor exposures",
-      "flexible-least-squares or Kalman smoothing",
       "MPI Factor Search heuristics",
-      "proprietary breakpoint, clustering, calibration, or stress defaults"
+      "proprietary breakpoint, clustering, calibration, constraint, or stress defaults",
+      "market-driven state transitions described but not completely specified in the paper",
+      "any claim of exact MPI or DSA product equivalence"
     ],
-    "reason": "The public materials do not disclose every production choice and the legal/IP gate for potentially claim-overlapping dynamic behavior is not cleared."
+    "reason": "The dynamic implementation is an independent private-research implementation of the public objective and validation equations. The public materials do not disclose every production choice, so all output remains explicitly non-equivalent."
   },
   "legal_ip_gate": {
     "checked_at_utc": "2026-08-01T04:44:21.909Z",
     "displayed_expiration_date": "2026-10-18",
     "displayed_status": "Active",
-    "disposition": "NOT_CLEARED_DYNAMIC_IMPLEMENTATION_EXCLUDED",
+    "disposition": "NOT_A_LEGAL_CONCLUSION_CLEANROOM_PUBLIC_METHOD_ONLY",
     "publication": "US7617142B2",
     "source": "https://patents.google.com/patent/US7617142B2/en",
     "source_caveat": "Google Patents states that its legal status is an assumption, is not a legal conclusion, and has not been independently analyzed by Google."
   },
-  "methodology_version": "ANL-DECOMP-STATIC-1",
+  "methodology_version": "ANL-DECOMP-CLEANROOM-2",
   "reading_list_artifact": {
     "artifact_id": "xBin/mpi_methodology_reading_list.md",
     "sha256": "a467290f2398ced4d19189a580314679699ef347308157c40627152ce7f00e00",
@@ -265,6 +268,22 @@
     "holdout_predicted_r_squared": "1 - SSE_holdout / sum_t (y_t - mean(y_train))^2",
     "ridge_objective": "min ||y - alpha - X beta||^2 + lambda ||beta||^2",
     "style_constraint": "beta_j >= 0 and sum_j beta_j = 1"
+  },
+  "dynamic_cleanroom_equations": {
+    "observation": "y_t = alpha + x_t^T beta_t + epsilon_t",
+    "state": "beta_t = beta_(t-1) + xi_t",
+    "objective": "min sum_t w_t * (y_t - alpha - x_t^T beta_t)^2 + lambda * sum_t ||beta_t - beta_(t-1)||^2 + ridge * sum_t ||beta_t||^2",
+    "leave_one_out_predicted_r_squared": "1 - sum_t (y_t - yhat_t_without_t)^2 / sum_t (y_t - mean(y_train))^2",
+    "smoothness_selection": "maximize training-only leave-one-out Predicted R-squared; choose the largest lambda within the disclosed parsimony tolerance",
+    "holdout": "one-step causal walk-forward prediction uses only the prior filtered state; each holdout observation may update later states but never the selected factor set, lambda, ridge, or training path"
+  },
+  "dynamic_independent_choices": {
+    "alpha": "one static training intercept; it is not a proprietary dynamic-alpha claim",
+    "constraints": "unconstrained only; proprietary or undisclosed dynamic constraints are not inferred",
+    "factor_search": "factor sets are explicit in the hash-bound specification; no proprietary clustering or branch pruning",
+    "linear_algebra": "deterministic block-tridiagonal solve with disclosed pseudoinverse fallback",
+    "path_semantics": "training states are smoothed within training; holdout states are causal filtered estimates; embargo observations do not update state",
+    "breakpoints": "largest observed exposure changes are diagnostics only; no proprietary breakpoint classifier or local smoothness relaxation"
   },
   "unknown_production_details": [
     "Current proprietary factor-search universe and hierarchy",

@@ -187,6 +187,91 @@ th {
   font-variant-numeric: tabular-nums;
 }
 
+.metric-block .metric-value-compact {
+  font-size: clamp(15px, 1.6vw, 19px);
+  line-height: 1.2;
+}
+
+.dynamic-analysis-grid {
+  margin-top: 16px;
+}
+
+.dynamic-analysis-grid > .panel {
+  align-self: start;
+}
+
+.dynamic-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 220px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(2, 12, 20, .42);
+}
+
+.dynamic-chart .zero-line {
+  stroke: rgba(184, 198, 217, .45);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.dynamic-chart .holdout-marker {
+  stroke: var(--warning);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+
+.dynamic-chart .chart-label {
+  fill: var(--muted);
+  font-size: 12px;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chart-legend i {
+  width: 16px;
+  height: 3px;
+  border-radius: 999px;
+}
+
+.dynamic-analysis-grid .detail-list {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+
+.dynamic-analysis-grid .detail-list div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dynamic-analysis-grid .detail-list dt {
+  color: var(--muted);
+}
+
+.dynamic-analysis-grid .detail-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
 .matrix-shell {
   overflow-x: auto;
   border: 1px solid var(--border);
