@@ -161,21 +161,23 @@ def test_build_uses_exact_dates_decimal_returns_and_explicit_missing(
 
     us_rows = _csv_rows(outputs["us_factors_daily.csv"])
     assert us_rows == [
-        ["date", "mkt_rf", "smb", "hml", "rmw", "cma", "rf", "mom"],
+        ["date", "rf", "mkt_rf", "smb", "hml", "rmw", "cma", "mom"],
         [
             "2026-01-02",
+            "0.0001",
             "0.01",
             "0.02",
             "0.03",
             "0.04",
             "0.05",
-            "0.0001",
             "0.06",
         ],
     ]
     europe_rows = _csv_rows(outputs["europe_factors_daily.csv"])
     assert [row[0] for row in europe_rows[1:]] == ["2026-01-02", "2026-01-05"]
     industry_rows = _csv_rows(outputs["us_49_industries_value_weighted_daily.csv"])
+    assert industry_rows[0][0:2] == ["date", "rf"]
+    assert industry_rows[1][0:2] == ["2026-01-02", "0.0001"]
     assert industry_rows[1][-1] == ""
 
     output_manifest = {item["path"]: item for item in manifest["outputs"]}

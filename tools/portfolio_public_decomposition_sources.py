@@ -17,7 +17,8 @@ from typing import Any, Mapping, Sequence
 BUILDER_VERSION = "0.1.0"
 DATE_PATTERN = re.compile(r"\d{8}")
 MISSING_SENTINELS = {Decimal("-99.99"), Decimal("-999")}
-FACTOR_COLUMNS = ("Mkt-RF", "SMB", "HML", "RMW", "CMA", "RF")
+FACTOR_RETURN_COLUMNS = ("Mkt-RF", "SMB", "HML", "RMW", "CMA")
+FACTOR_COLUMNS = (*FACTOR_RETURN_COLUMNS, "RF")
 INDUSTRY_TITLE = "Average Value Weighted Returns -- Daily"
 OUTPUT_NAMES = (
     "us_factors_daily.csv",
@@ -217,10 +218,14 @@ def _factor_output(
     for period in common_dates:
         factor = factor_rows[period]
         mom = momentum_rows[period]
-        values = [
+        risk_free = _decimal(factor["RF"], f"{factors.key}.{period}.RF")
+        if risk_free is None:
+            raise PublicSourceError(f"{factors.key}.{period}.RF cannot be missing")
+        values: list[Decimal | None] = [risk_free]
+        values.extend(
             _decimal(factor[name], f"{factors.key}.{period}.{name}")
-            for name in FACTOR_COLUMNS
-        ]
+            for name in FACTOR_RETURN_COLUMNS
+        )
         values.append(
             _decimal(mom[momentum_column], f"{momentum.key}.{period}.momentum")
         )
@@ -232,7 +237,7 @@ def _factor_output(
             ]
         )
     return _csv_bytes(
-        ("date", "mkt_rf", "smb", "hml", "rmw", "cma", "rf", "mom"),
+        ("date", "rf", "mkt_rf", "smb", "hml", "rmw", "cma", "mom"),
         output_rows,
     ), {
         "coverage": "COMPLETE_WITHIN_EXACT_DATE_INTERSECTION",
@@ -246,8 +251,13 @@ def _factor_output(
     }
 
 
-def _industry_output(source: SourceDocument) -> tuple[bytes, dict[str, object]]:
+def _industry_output(
+    source: SourceDocument, risk_free_source: SourceDocument
+) -> tuple[bytes, dict[str, object]]:
     columns, rows = _rows_by_date(source, INDUSTRY_TITLE)
+    _, factor_rows = _rows_by_date(
+        risk_free_source, "Daily", ("period", *FACTOR_COLUMNS)
+    )
     industries = columns[1:]
     if len(industries) != 49:
         raise PublicSourceError(
@@ -255,8 +265,20 @@ def _industry_output(source: SourceDocument) -> tuple[bytes, dict[str, object]]:
         )
     output_rows: list[list[str]] = []
     missing_cells = 0
-    for period in sorted(rows):
+    common_dates = sorted(set(rows) & set(factor_rows))
+    if not common_dates:
+        raise PublicSourceError(
+            "industry and US risk-free sources have no common dates"
+        )
+    for period in common_dates:
         row = rows[period]
+        risk_free = _decimal(
+            factor_rows[period]["RF"], f"{risk_free_source.key}.{period}.RF"
+        )
+        if risk_free is None:
+            raise PublicSourceError(
+                f"{risk_free_source.key}.{period}.RF cannot be missing"
+            )
         values = [
             _decimal(row[name], f"{source.key}.{period}.{name}") for name in industries
         ]
@@ -264,15 +286,18 @@ def _industry_output(source: SourceDocument) -> tuple[bytes, dict[str, object]]:
         output_rows.append(
             [
                 f"{period[0:4]}-{period[4:6]}-{period[6:8]}",
+                _format_decimal(risk_free),
                 *(_format_decimal(value) for value in values),
             ]
         )
-    return _csv_bytes(("date", *industries), output_rows), {
-        "coverage": "PARTIAL_WHERE_PROVIDER_REPORTS_MISSING_PORTFOLIO_RETURN",
+    return _csv_bytes(("date", "rf", *industries), output_rows), {
+        "coverage": "PARTIAL_WITHIN_EXACT_DATE_INTERSECTION",
         "first_date": output_rows[0][0],
         "last_date": output_rows[-1][0],
         "row_count": len(output_rows),
         "industry_count": len(industries),
+        "industry_only_dates_dropped": len(set(rows) - set(factor_rows)),
+        "risk_free_only_dates_dropped": len(set(factor_rows) - set(rows)),
         "missing_cells": missing_cells,
         "unit": "DECIMAL_DAILY_RETURN",
         "weighting": "VALUE_WEIGHTED",
@@ -295,7 +320,9 @@ def build_bundle(
     europe_data, europe_coverage = _factor_output(
         sources["europe_factors"], sources["europe_momentum"], "WML"
     )
-    industry_data, industry_coverage = _industry_output(sources["us_industries"])
+    industry_data, industry_coverage = _industry_output(
+        sources["us_industries"], sources["us_factors"]
+    )
     outputs = {
         OUTPUT_NAMES[0]: us_data,
         OUTPUT_NAMES[1]: europe_data,

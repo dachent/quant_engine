@@ -118,5 +118,8 @@ French parser outputs into three deterministic files: US factors, Europe
 factors, and US 49-industry value-weighted returns. It verifies every feed
 identity and URL, hashes every input and output, converts provider percentages
 to decimal returns, joins factor and momentum histories only on exact dates,
-and preserves missing industry returns as empty observations. It never fills,
-interpolates, or treats missing values as zero.
+joins US industries to the US risk-free series on exact dates, and preserves
+missing industry returns as empty observations. Its column order is directly
+compatible with the decomposition engine: date, risk-free return, then factor
+or industry returns. It never fills, interpolates, or treats missing values as
+zero.
