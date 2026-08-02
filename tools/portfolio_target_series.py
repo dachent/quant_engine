@@ -44,6 +44,7 @@ QUANTBASE_ACTIVITY_FIELDS: Final = frozenset(
     {"activity_type", "amount", "fund", "is_rebalance", "time", "type"}
 )
 CORRELATION_FIELDS: Final = ("series_id", "date", "return", "evidence_layer")
+CORRELATION_FIELDS_V2: Final = (*CORRELATION_FIELDS, "strategy_version")
 
 
 class TargetSeriesError(ValueError):
@@ -796,6 +797,352 @@ def _correlation_bytes(target_content: bytes) -> bytes:
     return buffer.getvalue().encode("utf-8")
 
 
+def _strategy_version(namespace: str, value: Mapping[str, object]) -> str:
+    digest = hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+    return f"{namespace}:{digest}"
+
+
+def _portfolio123_simulation_returns(
+    returns_path: Path,
+    relationships_path: Path,
+    provider_entity_id: str,
+    simulation_entity_id: str,
+    series_id: str,
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    relationships = [
+        row
+        for row in _parquet_rows(
+            relationships_path,
+            ("entity_ref_a", "entity_ref_b", "relationship_type", "notes"),
+            "Portfolio123 strategy relationships",
+        )
+        if row.get("relationship_type") == "live_sim_twin"
+        and {str(row.get("entity_ref_a") or ""), str(row.get("entity_ref_b") or "")}
+        == {provider_entity_id, simulation_entity_id}
+    ]
+    if len(relationships) != 1:
+        raise TargetSeriesError(
+            "Portfolio123 live/simulation version mapping is not unique"
+        )
+
+    indexed: dict[date, Decimal] = {}
+    sources: set[str] = set()
+    for row in _parquet_rows(
+        returns_path,
+        ("entity_id", "period_date", "model_return", "source"),
+        "Portfolio123 simulation returns",
+    ):
+        if str(row.get("entity_id") or "") != simulation_entity_id:
+            continue
+        try:
+            day = date.fromisoformat(str(row.get("period_date") or ""))
+        except ValueError as exc:
+            raise TargetSeriesError(
+                "Portfolio123 simulation return date is invalid"
+            ) from exc
+        level = _positive_decimal(
+            row.get("model_return") or "", "Portfolio123 simulation index"
+        )
+        if day in indexed and indexed[day] != level:
+            raise TargetSeriesError(
+                "Portfolio123 simulation returns have conflicting dates"
+            )
+        indexed[day] = level
+        source = str(row.get("source") or "").strip()
+        if source:
+            sources.add(source)
+    ordered = sorted(indexed.items())
+    if len(ordered) < 2:
+        raise TargetSeriesError("Portfolio123 simulation history is insufficient")
+
+    result: list[dict[str, str]] = []
+    previous = ordered[0][1]
+    for day, level in ordered[1:]:
+        period_return = level / previous - Decimal(1)
+        if period_return <= -1:
+            raise TargetSeriesError("Portfolio123 simulation return is invalid")
+        result.append(
+            {
+                "series_id": series_id,
+                "date": day.isoformat(),
+                "return": format(period_return.normalize(), "f"),
+                "evidence_layer": "BACKTEST",
+            }
+        )
+        previous = level
+    return result, {
+        "index_observations": len(ordered),
+        "observed_end": ordered[-1][0].isoformat(),
+        "observed_start": ordered[0][0].isoformat(),
+        "relationship_type": "live_sim_twin",
+        "return_observations": len(result),
+        "source_labels": sorted(sources),
+    }
+
+
+def build_layered_correlation_inputs(
+    base_spec_path: Path,
+    base_returns_path: Path,
+    target_content: bytes,
+    portfolio123_manifest_path: Path,
+    portfolio123_returns_path: Path,
+    portfolio123_relationships_path: Path,
+    portfolio123_provider_entity_id: str,
+    portfolio123_simulation_entity_id: str,
+    portfolio123_series_id: str,
+    strategy_evidence_content: bytes,
+    as_of_date: str,
+) -> tuple[bytes, bytes, bytes, bytes]:
+    """Build a hash-bound v2 live-plus-backtest correlation source.
+
+    Account-live observations remain the selected authority. A Portfolio123
+    simulation is admitted only when the accepted provider generation contains
+    one explicit ``live_sim_twin`` relationship. The correlation builder later
+    enforces the strict pre-live boundary.
+    """
+
+    spec = _load_json(base_spec_path, "base correlation spec")
+    source = spec.get("return_source")
+    if not isinstance(source, dict):
+        raise TargetSeriesError("correlation return source is invalid")
+    base_hash, base_size = _sha256(base_returns_path)
+    if (
+        source.get("expected_sha256") != base_hash
+        or source.get("expected_size_bytes") != base_size
+    ):
+        raise TargetSeriesError("base correlation return identity differs")
+
+    manifest = _load_json(
+        portfolio123_manifest_path, "Portfolio123 generation manifest"
+    )
+    if manifest.get("verification") != "VERIFIED":
+        raise TargetSeriesError("Portfolio123 generation is not verified")
+    generation_id = str(manifest.get("generation_id", ""))
+    if len(generation_id) != 64:
+        raise TargetSeriesError("Portfolio123 generation identity is invalid")
+    artifacts = _manifest_artifacts(manifest.get("artifacts"))
+    returns_artifact = _verify_artifact(
+        portfolio123_returns_path, artifacts, "tables/returns_daily.parquet"
+    )
+    relationships_artifact = _verify_artifact(
+        portfolio123_relationships_path,
+        artifacts,
+        "tables/strategy_relationships.parquet",
+    )
+    simulation_rows, simulation_coverage = _portfolio123_simulation_returns(
+        portfolio123_returns_path,
+        portfolio123_relationships_path,
+        portfolio123_provider_entity_id,
+        portfolio123_simulation_entity_id,
+        portfolio123_series_id,
+    )
+    try:
+        strategy_evidence = json.loads(strategy_evidence_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError("strategy evidence is not valid JSON") from exc
+    if not isinstance(strategy_evidence, dict):
+        raise TargetSeriesError("strategy evidence must be an object")
+    strategies = strategy_evidence.get("strategies")
+    if not isinstance(strategies, list):
+        raise TargetSeriesError("strategy evidence lacks strategies")
+    reconciled = [
+        item
+        for item in strategies
+        if isinstance(item, dict)
+        and item.get("strategy_name") == portfolio123_series_id
+        and item.get("provider_id") == "portfolio123"
+        and item.get("generation_id") == generation_id
+        and isinstance(item.get("provider"), dict)
+        and item["provider"].get("entity_id") == portfolio123_provider_entity_id
+        and item.get("evidence_layer") == "PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE"
+        and isinstance(item.get("overlap"), dict)
+        and item["overlap"].get("status") == "TESTED_EXACT_DATE_PATHS"
+        and isinstance(item["overlap"].get("observations"), int)
+        and item["overlap"]["observations"] > 0
+    ]
+    if len(reconciled) != 1:
+        raise TargetSeriesError(
+            "Portfolio123 provider/live account reconciliation is not unique"
+        )
+    strategy_evidence_hash = hashlib.sha256(strategy_evidence_content).hexdigest()
+
+    target_rows = _target_rows(target_content)
+    series_ids = spec.get("series_ids")
+    if not isinstance(series_ids, list) or any(
+        not isinstance(item, str) or not item for item in series_ids
+    ):
+        raise TargetSeriesError("correlation series IDs are invalid")
+    requested = set(series_ids)
+    if portfolio123_series_id not in requested:
+        raise TargetSeriesError("Portfolio123 series is absent from correlation spec")
+    unknown = {row["series_id"] for row in target_rows} - requested
+    if unknown:
+        raise TargetSeriesError("target rows contain unrequested correlation series")
+
+    rows_by_series: dict[str, list[dict[str, str]]] = {
+        series_id: [] for series_id in series_ids
+    }
+    for row in target_rows:
+        rows_by_series[row["series_id"]].append(row)
+    version_by_series: dict[str, str] = {}
+    live_layer_by_series: dict[str, str] = {}
+    mapping_proof: list[dict[str, object]] = []
+    for series_id in series_ids:
+        rows = sorted(rows_by_series[series_id], key=lambda item: item["date"])
+        layers = {row["evidence_layer"] for row in rows}
+        if len(layers) > 1:
+            raise TargetSeriesError("a live series has multiple evidence layers")
+        live_layer = next(iter(layers), "ACCOUNT_LIVE")
+        if live_layer not in {"ACCOUNT_LIVE", "PROVIDER_LIVE", "OFFICIAL_VEHICLE"}:
+            raise TargetSeriesError("a correlation series lacks an accepted live layer")
+        live_layer_by_series[series_id] = live_layer
+        if series_id == portfolio123_series_id:
+            version = _strategy_version(
+                "p123-live-sim-twin",
+                {
+                    "generation_id": generation_id,
+                    "provider_entity_id": portfolio123_provider_entity_id,
+                    "relationship_sha256": relationships_artifact.sha256,
+                    "relationship_type": "live_sim_twin",
+                    "simulation_entity_id": portfolio123_simulation_entity_id,
+                    "strategy_evidence_sha256": strategy_evidence_hash,
+                },
+            )
+            status = "ACCEPTED_GENERATION_BOUND_LIVE_SIM_TWIN"
+        else:
+            version = _strategy_version(
+                "accepted-live-path",
+                {"rows": rows, "series_id": series_id},
+            )
+            status = "ACCEPTED_LIVE_PATH_NO_MATCHED_BACKTEST"
+        version_by_series[series_id] = version
+        mapping_proof.append(
+            {
+                "backtest_source": (
+                    "portfolio123-live-sim-twin"
+                    if series_id == portfolio123_series_id
+                    else None
+                ),
+                "live_evidence_layer": live_layer,
+                "live_observations": len(rows),
+                "series_id": series_id,
+                "status": status,
+                "strategy_version": version,
+            }
+        )
+
+    combined: list[dict[str, str]] = []
+    for series_id in series_ids:
+        for row in rows_by_series[series_id]:
+            combined.append(
+                {
+                    "series_id": series_id,
+                    "date": row["date"],
+                    "return": row["return"],
+                    "evidence_layer": row["evidence_layer"],
+                    "strategy_version": version_by_series[series_id],
+                }
+            )
+    for row in simulation_rows:
+        combined.append(
+            {
+                **row,
+                "strategy_version": version_by_series[portfolio123_series_id],
+            }
+        )
+    series_order = {series_id: index for index, series_id in enumerate(series_ids)}
+    combined.sort(
+        key=lambda row: (
+            series_order[row["series_id"]],
+            row["date"],
+            0 if row["evidence_layer"] == "BACKTEST" else 1,
+        )
+    )
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        buffer, fieldnames=CORRELATION_FIELDS_V2, lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(combined)
+    correlation_content = buffer.getvalue().encode("utf-8")
+
+    spec["schema_version"] = 2
+    spec["as_of_date"] = max(str(spec.get("as_of_date", "")), as_of_date)
+    spec["evidence_mode_series"] = [
+        {
+            "live_evidence_layer": live_layer_by_series[series_id],
+            "series_id": series_id,
+            "strategy_version": version_by_series[series_id],
+        }
+        for series_id in series_ids
+    ]
+    source.update(
+        {
+            "artifact_id": "provider-rollforward/layered-strategy-returns.csv",
+            "expected_sha256": hashlib.sha256(correlation_content).hexdigest(),
+            "expected_size_bytes": len(correlation_content),
+            "relative_path": "returns.csv",
+            "schema_name": "portfolio-layered-strategy-returns",
+            "schema_version": "2",
+        }
+    )
+    proof = {
+        "as_of_date": spec["as_of_date"],
+        "builder": "portfolio-target-series/layered-correlation-1",
+        "evidence_mode_policy": {
+            "default": "LIVE_ONLY",
+            "hybrid": "BACKTEST_STRICTLY_BEFORE_FIRST_LIVE_THEN_LIVE",
+            "post_inception_backtest_fill": False,
+        },
+        "portfolio123_generation_id": generation_id,
+        "portfolio123_version_mapping": {
+            "provider_entity_id": portfolio123_provider_entity_id,
+            "relationship_type": "live_sim_twin",
+            "simulation_entity_id": portfolio123_simulation_entity_id,
+            "strategy_series_id": portfolio123_series_id,
+            "strategy_version": version_by_series[portfolio123_series_id],
+        },
+        "series_mappings": mapping_proof,
+        "simulation_coverage": simulation_coverage,
+        "sources": {
+            "accepted_target_rows": {
+                "sha256": hashlib.sha256(target_content).hexdigest(),
+                "size_bytes": len(target_content),
+            },
+            "account_provider_strategy_evidence": {
+                "sha256": strategy_evidence_hash,
+                "size_bytes": len(strategy_evidence_content),
+            },
+            "base_correlation_returns": {
+                "sha256": base_hash,
+                "size_bytes": base_size,
+            },
+            "base_correlation_spec": {
+                "sha256": _sha256(base_spec_path)[0],
+                "size_bytes": base_spec_path.stat().st_size,
+            },
+            "portfolio123_returns": {
+                "artifact_id": returns_artifact.artifact_id,
+                "sha256": returns_artifact.sha256,
+                "size_bytes": returns_artifact.size_bytes,
+            },
+            "portfolio123_relationships": {
+                "artifact_id": relationships_artifact.artifact_id,
+                "sha256": relationships_artifact.sha256,
+                "size_bytes": relationships_artifact.size_bytes,
+            },
+        },
+        "target_sha256": hashlib.sha256(correlation_content).hexdigest(),
+        "target_size_bytes": len(correlation_content),
+    }
+    return (
+        canonical_json_bytes(spec),
+        correlation_content,
+        canonical_json_bytes(proof),
+        portfolio123_manifest_path.read_bytes(),
+    )
+
+
 def build_correlation_inputs(
     base_spec_path: Path,
     base_returns_path: Path,
@@ -1021,10 +1368,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-manifest", type=Path)
     parser.add_argument("--portfolio123-equity", type=Path)
     parser.add_argument("--portfolio123-metadata", type=Path)
+    parser.add_argument("--portfolio123-returns", type=Path)
+    parser.add_argument("--portfolio123-relationships", type=Path)
     parser.add_argument("--portfolio123-provider-entity-id")
+    parser.add_argument("--portfolio123-simulation-entity-id")
+    parser.add_argument("--portfolio123-strategy-evidence", type=Path)
     parser.add_argument("--portfolio123-account-entity-id")
     parser.add_argument("--portfolio123-strategy-id")
     parser.add_argument("--portfolio123-account-series-id")
+    parser.add_argument("--layered-correlation-only", action="store_true")
     parser.add_argument("--output-root", type=Path, required=True)
     return parser
 
@@ -1039,7 +1391,50 @@ def _required(args: argparse.Namespace, names: Sequence[str], mode: str) -> None
 def main() -> int:
     args = _parser().parse_args()
     try:
-        if args.quantbase_manifest is not None:
+        if args.layered_correlation_only:
+            _required(
+                args,
+                (
+                    "base_correlation_spec",
+                    "base_correlation_returns",
+                    "portfolio123_manifest",
+                    "portfolio123_returns",
+                    "portfolio123_relationships",
+                    "portfolio123_provider_entity_id",
+                    "portfolio123_simulation_entity_id",
+                    "portfolio123_strategy_evidence",
+                    "portfolio123_account_series_id",
+                ),
+                "layered correlation",
+            )
+            manifest_value = _load_json(
+                args.portfolio123_manifest, "Portfolio123 generation manifest"
+            )
+            as_of_date = str(manifest_value.get("as_of_date", ""))
+            try:
+                date.fromisoformat(as_of_date)
+            except ValueError as exc:
+                raise TargetSeriesError(
+                    "Portfolio123 generation as-of date is invalid"
+                ) from exc
+            specification, returns, proof, manifest = build_layered_correlation_inputs(
+                args.base_correlation_spec,
+                args.base_correlation_returns,
+                args.base_targets.read_bytes(),
+                args.portfolio123_manifest,
+                args.portfolio123_returns,
+                args.portfolio123_relationships,
+                args.portfolio123_provider_entity_id,
+                args.portfolio123_simulation_entity_id,
+                args.portfolio123_account_series_id,
+                args.portfolio123_strategy_evidence.read_bytes(),
+                as_of_date,
+            )
+            _write_exact(args.output_root / "spec.json", specification)
+            _write_exact(args.output_root / "returns.csv", returns)
+            _write_exact(args.output_root / "evidence-proof.json", proof)
+            _write_exact(args.output_root / "portfolio123-generation.json", manifest)
+        elif args.quantbase_manifest is not None:
             _required(
                 args,
                 (
@@ -1123,13 +1518,52 @@ def main() -> int:
                     (args.base_decomposition_spec.parent / relative).read_bytes(),
                 )
             evidence_value = json.loads(strategy_evidence)
-            correlation_spec, correlation_returns = build_correlation_inputs(
-                args.base_correlation_spec,
-                args.base_correlation_returns,
-                targets,
-                str(evidence_value["as_of_date"]),
+            layered_arguments = (
+                args.portfolio123_returns,
+                args.portfolio123_relationships,
+                args.portfolio123_simulation_entity_id,
             )
+            if any(item is not None for item in layered_arguments) and not all(
+                item is not None for item in layered_arguments
+            ):
+                raise TargetSeriesError(
+                    "layered correlation requires Portfolio123 returns, "
+                    "relationships, and simulation entity ID together"
+                )
             correlation_root = args.output_root / "correlation"
+            if all(item is not None for item in layered_arguments):
+                (
+                    correlation_spec,
+                    correlation_returns,
+                    correlation_proof,
+                    correlation_p123_manifest,
+                ) = build_layered_correlation_inputs(
+                    args.base_correlation_spec,
+                    args.base_correlation_returns,
+                    targets,
+                    args.portfolio123_manifest,
+                    args.portfolio123_returns,
+                    args.portfolio123_relationships,
+                    args.portfolio123_provider_entity_id,
+                    args.portfolio123_simulation_entity_id,
+                    args.portfolio123_account_series_id,
+                    strategy_evidence,
+                    str(evidence_value["as_of_date"]),
+                )
+                _write_exact(
+                    correlation_root / "evidence-proof.json", correlation_proof
+                )
+                _write_exact(
+                    correlation_root / "portfolio123-generation.json",
+                    correlation_p123_manifest,
+                )
+            else:
+                correlation_spec, correlation_returns = build_correlation_inputs(
+                    args.base_correlation_spec,
+                    args.base_correlation_returns,
+                    targets,
+                    str(evidence_value["as_of_date"]),
+                )
             _write_exact(correlation_root / "spec.json", correlation_spec)
             _write_exact(correlation_root / "returns.csv", correlation_returns)
             _write_exact(args.output_root / "strategy-evidence.json", strategy_evidence)
