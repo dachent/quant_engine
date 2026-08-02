@@ -586,6 +586,51 @@ def _correlation() -> dict[str, object]:
     }
 
 
+def _correlation_v2() -> dict[str, object]:
+    value = json.loads(json.dumps(_correlation()))
+    value["analytics_schema_version"] = 2
+    live = value["dependence"]
+    live["evidence_mode"] = "LIVE_ONLY"
+    live["series_composition"] = {
+        series_id: {
+            "backtest_evidence_layer": "BACKTEST",
+            "backtest_observations_excluded_at_or_after_live_inception": 20,
+            "backtest_observations_used": 0,
+            "evidence_mode": "LIVE_ONLY",
+            "ignored_other_version_observations": 0,
+            "live_evidence_layer": "ACCOUNT_LIVE",
+            "live_inception": "2026-01-02",
+            "live_observations": 80,
+            "observed_end": "2026-07-30",
+            "observed_start": "2026-01-02",
+            "series_id": series_id,
+            "status": "AVAILABLE_LIVE_ONLY",
+            "strategy_version": "v1",
+        }
+        for series_id in STRATEGY_NAMES
+    }
+    combined = json.loads(json.dumps(live))
+    combined["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    for row in combined["series_composition"].values():
+        row["backtest_observations_used"] = 60
+        row["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+        row["observed_start"] = "2025-10-01"
+        row["status"] = "AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE"
+    for row in combined["observed_cells"]:
+        row["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+        row["left_evidence_composition"] = combined["series_composition"][row["left"]]
+        row["right_evidence_composition"] = combined["series_composition"][row["right"]]
+        if row["status"] == "AVAILABLE":
+            row["coverage"]["common_observations"] = 140
+            row["coverage"]["observed_start"] = "2025-10-01"
+    value["default_evidence_mode"] = "LIVE_ONLY"
+    value["dependence_modes"] = {
+        "LIVE_ONLY": live,
+        "LIVE_PLUS_BACKTEST": combined,
+    }
+    return value
+
+
 def _publish_analytics(root: Path, filename: str, value: object, adapter: str) -> None:
     source = root.parent / f"{adapter}.json"
     _write_json(source, value)
@@ -773,6 +818,35 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     assert data["factor_analysis"]["unavailable_count"] == 4
     assert data["dependence_analysis"]["available_pair_count"] == 10
     assert data["dependence_analysis"]["pair_count"] == 36
+    assert data["default_dependence_mode"] == "LIVE_ONLY"
+    assert list(data["dependence_modes"]) == ["LIVE_ONLY"]
+
+
+def test_layered_dependence_modes_are_preserved_without_changing_default_authority(
+    inputs: dict[str, Path],
+) -> None:
+    _publish_analytics(
+        inputs["correlation"],
+        "correlation.json",
+        _correlation_v2(),
+        "synthetic-correlation-v2",
+    )
+    result = panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+    data = json.loads(
+        (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert data["default_dependence_mode"] == "LIVE_ONLY"
+    assert data["dependence_analysis"] == data["dependence_modes"]["LIVE_ONLY"]
+    assert set(data["dependence_modes"]) == {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}
+    assert (
+        data["dependence_modes"]["LIVE_PLUS_BACKTEST"]["series_composition"][
+            STRATEGY_NAMES[0]
+        ]["backtest_observations_used"]
+        == 60
+    )
+    assert data["advisory"]["correlation_one_stress"] == "0.37249726899852387"
 
 
 def test_template_line_endings_do_not_change_identity(

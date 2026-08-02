@@ -23,6 +23,47 @@
   flex-wrap: wrap;
 }
 
+.evidence-mode-control {
+  align-items: end;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+  gap: 1rem;
+}
+
+.evidence-mode-control .eyebrow {
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+[data-evidence-mode]:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+#evidence-mode-boundary {
+  margin-bottom: 1rem;
+}
+
+#evidence-mode-badge.badge-positive {
+  background: #57d49b;
+  border-color: #57d49b;
+  color: #06130e;
+}
+
+#evidence-mode-badge.badge-warning {
+  background: #f2c66d;
+  border-color: #f2c66d;
+  color: #191205;
+}
+
+@media (max-width: 760px) {
+  .evidence-mode-control {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 th {
   font-size: 12px;
 }

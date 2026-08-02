@@ -91,6 +91,7 @@
     "blocking_items": { "$ref": "#/$defs/rows" },
     "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
     "coverage": { "$ref": "#/$defs/rows" },
+    "default_dependence_mode": { "const": "LIVE_ONLY" },
     "dependence_analysis": {
       "type": "object",
       "required": ["analytics_hash", "as_of_date", "available_pair_count", "cells", "correlation_one", "generation_id", "matrices", "pair_count", "series_ids", "source_sha256"],
@@ -100,11 +101,22 @@
         "available_pair_count": { "type": "integer", "minimum": 0 },
         "cells": { "type": "array", "minItems": 36, "maxItems": 36, "items": { "type": "object" } },
         "correlation_one": { "type": "object" },
+        "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
         "generation_id": { "$ref": "#/$defs/hash" },
         "matrices": { "type": "object", "minProperties": 6, "maxProperties": 6 },
         "pair_count": { "const": 36 },
         "series_ids": { "type": "array", "minItems": 9, "maxItems": 9, "items": { "type": "string" }, "uniqueItems": true },
+        "series_composition": { "type": "object", "additionalProperties": { "type": "object" } },
         "source_sha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "dependence_modes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["LIVE_ONLY"],
+      "properties": {
+        "LIVE_ONLY": { "$ref": "#/properties/dependence_analysis" },
+        "LIVE_PLUS_BACKTEST": { "$ref": "#/properties/dependence_analysis" }
       }
     },
     "factor_analysis": {

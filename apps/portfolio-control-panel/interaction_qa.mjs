@@ -67,6 +67,20 @@ const unavailableFactorDetail = await page.locator("#factor-detail").textContent
 checks.push(check("Factor and alpha coverage is interactive", factorRows === 9 && factorChips === 9 && unavailableFactorDetail?.includes("UNAVAILABLE"), { factor_chips: factorChips, factor_rows: factorRows, unavailable_visible: unavailableFactorDetail?.includes("UNAVAILABLE") }));
 
 await page.locator('[data-nav="dependence"]').click();
+const liveModePressed = await page.locator('[data-evidence-mode="LIVE_ONLY"]').getAttribute("aria-pressed");
+const hybridMode = page.locator('[data-evidence-mode="LIVE_PLUS_BACKTEST"]');
+const hybridDisabled = await hybridMode.isDisabled();
+let hybridBadge = null;
+if (!hybridDisabled) {
+  await hybridMode.click();
+  hybridBadge = await page.locator("#evidence-mode-badge").textContent();
+  await page.locator('[data-evidence-mode="LIVE_ONLY"]').click();
+}
+checks.push(check(
+  "Dependence evidence mode defaults to live-only and fails closed without backtest",
+  liveModePressed === "true" && (hybridDisabled || hybridBadge?.includes("HYBRID BACKTEST + LIVE")),
+  { hybrid_available: !hybridDisabled, hybrid_badge: hybridBadge, live_default: liveModePressed },
+));
 const matrixCells = await page.locator("[data-correlation-left]").count();
 await page.locator('[data-matrix="stress"]').click();
 const matrixTitle = await page.locator("#matrix-title").textContent();
