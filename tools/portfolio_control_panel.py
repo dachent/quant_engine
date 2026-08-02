@@ -32,8 +32,8 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-PANEL_SCHEMA_VERSION: Final = 5
-BUILDER_VERSION: Final = "1.7.0"
+PANEL_SCHEMA_VERSION: Final = 6
+BUILDER_VERSION: Final = "1.8.0"
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
     "either_strategy_underwater",
@@ -65,6 +65,7 @@ VIEWS: Final = (
     "signals",
     "attribution",
     "dependence",
+    "weekly",
     "candidates",
     "data",
 )
@@ -998,6 +999,62 @@ def _decomposition_lenses(
     )
 
 
+def _weekly_return_analysis(
+    weekly: Mapping[str, Any], identity: Mapping[str, str]
+) -> dict[str, Any]:
+    if weekly.get("analytics_schema_version") != 1:
+        raise ControlPanelValidationError("weekly-return schema is unsupported")
+    if weekly.get("default_evidence_mode") != "LIVE_ONLY":
+        raise ControlPanelValidationError("weekly returns must default to LIVE_ONLY")
+    modes = weekly.get("strategy_evidence_modes")
+    if modes != ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]:
+        raise ControlPanelValidationError("weekly strategy evidence modes differ")
+    week_policy = _object(weekly.get("week_policy"), "weekly week_policy")
+    if (
+        week_policy.get("aggregation") != "PRODUCT_OF_ONE_PLUS_DAILY_RETURN_MINUS_ONE"
+        or week_policy.get("absent_value") != "UNAVAILABLE_NOT_ZERO"
+    ):
+        raise ControlPanelValidationError("weekly aggregation policy differs")
+    current_week = _object(weekly.get("current_week"), "weekly current_week")
+    if current_week.get("default_visible") is not False:
+        raise ControlPanelValidationError("current partial week must default hidden")
+    weeks_value = weekly.get("weeks")
+    if not isinstance(weeks_value, list) or not weeks_value:
+        raise ControlPanelValidationError("weekly week boundary is empty")
+    weeks = [_text(item, "weekly week") for item in weeks_value]
+    if weeks != sorted(set(weeks)):
+        raise ControlPanelValidationError("weekly week identities differ")
+    rows = _objects(weekly.get("series"), "weekly series")
+    series_ids = [_text(row.get("series_id"), "weekly series_id") for row in rows]
+    if len(series_ids) != len(set(series_ids)):
+        raise ControlPanelValidationError("weekly series identity is duplicated")
+    strategy_count = sum(row.get("primary_group") == "STRATEGY" for row in rows)
+    benchmark_count = sum(
+        "CORE_BENCHMARK" in row.get("display_groups", []) for row in rows
+    )
+    required_groups = {
+        "STRATEGY",
+        "ECONOMIC_FACTOR_US",
+        "ECONOMIC_FACTOR_EUROPE",
+        "STYLE_US_EQUITY",
+        "STYLE_MULTI_ASSET",
+        "SECTOR",
+        "INDUSTRY",
+        "CORE_BENCHMARK",
+    }
+    if strategy_count != 9 or benchmark_count != 9:
+        raise ControlPanelValidationError(
+            "weekly strategy or benchmark boundary differs"
+        )
+    if set(weekly.get("display_groups", [])) != required_groups:
+        raise ControlPanelValidationError("weekly display group boundary differs")
+    return {
+        **weekly,
+        "generation_id": identity["generation_id"],
+        "source_sha256": identity["sha256"],
+    }
+
+
 def _dependence_analysis(
     correlation: Mapping[str, Any],
     identity: Mapping[str, str],
@@ -1173,6 +1230,7 @@ def _panel_data(
     template_root: Path,
     strategy_evidence_path: Path | None = None,
     decomposition_lenses: Mapping[str, Any] | None = None,
+    weekly_returns: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     summary = _summary(report)
     strategies = _objects(report.get("strategy_summary"), "strategy_summary")
@@ -1240,6 +1298,27 @@ def _panel_data(
             *lens_rows,
             historical_factor_analysis,
         ]
+    accepted_weekly_returns = (
+        dict(weekly_returns)
+        if weekly_returns is not None
+        else {
+            "analytics_schema_version": 1,
+            "as_of_date": _text(report.get("as_of_date"), "report.as_of_date"),
+            "current_week": {"default_visible": False, "is_partial": False},
+            "default_evidence_mode": "LIVE_ONLY",
+            "display_groups": [],
+            "generation_id": None,
+            "series": [],
+            "source_sha256": None,
+            "status": "UNAVAILABLE_NOT_CONFIGURED",
+            "strategy_evidence_modes": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+            "week_policy": {
+                "absent_value": "UNAVAILABLE_NOT_ZERO",
+                "aggregation": "PRODUCT_OF_ONE_PLUS_DAILY_RETURN_MINUS_ONE",
+            },
+            "weeks": [],
+        }
+    )
     raw_modes = correlation.get("dependence_modes")
     if raw_modes is None:
         default_dependence_mode = "LIVE_ONLY"
@@ -1445,6 +1524,18 @@ def _panel_data(
             if lens.get("lens_id") != "HISTORICAL_MINIMUM_PROOF"
             for source_row in _objects(lens.get("sources"), "lens sources")
         ],
+        *(
+            [
+                {
+                    "artifact": "portfolio-weekly-return-generation",
+                    "as_of_date": accepted_weekly_returns["as_of_date"],
+                    "schema": "portfolio-weekly-returns/1",
+                    "sha256": accepted_weekly_returns["source_sha256"],
+                }
+            ]
+            if weekly_returns is not None
+            else []
+        ),
         {
             "artifact": "portfolio-correlation-generation",
             "as_of_date": dependence_analysis["as_of_date"],
@@ -1589,6 +1680,10 @@ def _panel_data(
             "report_sha256": report_identity["sha256"],
             "source_shell_hashes": source.get("observed_hashes"),
             "template_hashes": template_hashes,
+            "weekly_returns_generation_id": accepted_weekly_returns.get(
+                "generation_id"
+            ),
+            "weekly_returns_sha256": accepted_weekly_returns.get("source_sha256"),
         },
         "panel_schema_version": PANEL_SCHEMA_VERSION,
         "performance": normalized_performance,
@@ -1598,6 +1693,7 @@ def _panel_data(
         "reconciliation_checks": reconciliations,
         "strategies": strategies,
         "hwm_summary": hwm_summary,
+        "weekly_returns": accepted_weekly_returns,
     }
 
 
@@ -1610,6 +1706,7 @@ def _rendered_files(
     strategy_evidence_path: Path | None = None,
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
+    weekly_returns_root: Path | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -1620,6 +1717,7 @@ def _rendered_files(
         Path,
         Path | None,
         tuple[Path, ...],
+        Path | None,
     ],
 ]:
     report, report_identity, report_path = _current_report(report_root)
@@ -1656,6 +1754,16 @@ def _rendered_files(
             decomposition_plan_bundle,
             current_strategy_names,
         )
+    weekly_payload: dict[str, Any] | None = None
+    weekly_path: Path | None = None
+    if weekly_returns_root is not None:
+        weekly, weekly_identity, weekly_path = _current_analytics(
+            weekly_returns_root,
+            filename="weekly-returns.json",
+            field_name="portfolio weekly returns",
+            expected_schema_version=1,
+        )
+        weekly_payload = _weekly_return_analysis(weekly, weekly_identity)
     legacy, source = _source_inputs(legacy_panel)
     data = _panel_data(
         report,
@@ -1669,6 +1777,7 @@ def _rendered_files(
         template_root,
         strategy_evidence_path,
         lens_payload,
+        weekly_payload,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -1690,6 +1799,7 @@ def _rendered_files(
             legacy_data,
             strategy_evidence_path,
             lens_paths,
+            weekly_path,
         ),
     )
 
@@ -1729,6 +1839,7 @@ def build_candidate(
     strategy_evidence_path: Path | None = None,
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
+    weekly_returns_root: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -1739,6 +1850,7 @@ def build_candidate(
         strategy_evidence_path,
         decomposition_lenses_root,
         decomposition_plan_bundle,
+        weekly_returns_root,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -1788,6 +1900,7 @@ def verify_candidate(
     strategy_evidence_path: Path | None = None,
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
+    weekly_returns_root: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -1798,6 +1911,7 @@ def verify_candidate(
         strategy_evidence_path,
         decomposition_lenses_root,
         decomposition_plan_bundle,
+        weekly_returns_root,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -1816,7 +1930,7 @@ def verify_candidate(
     javascript = expected["app.js"].decode("utf-8")
     checks.append(
         _check(
-            "All eight operator views are present",
+            "All nine operator views are present",
             all(f'data-view="{view}"' in html for view in VIEWS),
             list(VIEWS),
         )
@@ -1845,6 +1959,39 @@ def verify_candidate(
                     _text(row.get("lens_id"), "lens_id") for row in lens_rows
                 ),
                 "plan_bundle_id": lens_payload.get("plan_bundle_id"),
+            },
+        )
+    )
+    weekly_payload = _object(data.get("weekly_returns"), "weekly returns")
+    weekly_series = _objects(weekly_payload.get("series"), "weekly series")
+    weekly_expected = weekly_returns_root is not None
+    checks.append(
+        _check(
+            "Weekly return monitor is governed or explicitly unavailable",
+            (
+                weekly_expected
+                and weekly_payload.get("generation_id") is not None
+                and sum(row.get("primary_group") == "STRATEGY" for row in weekly_series)
+                == 9
+                and sum(
+                    "CORE_BENCHMARK" in row.get("display_groups", [])
+                    for row in weekly_series
+                )
+                == 9
+                and weekly_payload.get("default_evidence_mode") == "LIVE_ONLY"
+                and _object(
+                    weekly_payload.get("current_week"), "weekly current_week"
+                ).get("default_visible")
+                is False
+            )
+            or (
+                not weekly_expected
+                and weekly_payload.get("status") == "UNAVAILABLE_NOT_CONFIGURED"
+            ),
+            {
+                "generation": weekly_payload.get("generation_id"),
+                "series": len(weekly_series),
+                "status": weekly_payload.get("status", "AVAILABLE"),
             },
         )
     )
@@ -2256,6 +2403,7 @@ def publish_panel(
     strategy_evidence_path: Path | None = None,
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
+    weekly_returns_root: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         report_root,
@@ -2267,6 +2415,7 @@ def publish_panel(
         strategy_evidence_path,
         decomposition_lenses_root,
         decomposition_plan_bundle,
+        weekly_returns_root,
     )
     qa = validate_qa(candidate_dir, qa_dir)
     _, data, input_paths = _rendered_files(
@@ -2278,6 +2427,7 @@ def publish_panel(
         strategy_evidence_path,
         decomposition_lenses_root,
         decomposition_plan_bundle,
+        weekly_returns_root,
     )
     (
         report_path,
@@ -2286,6 +2436,7 @@ def publish_panel(
         legacy_data,
         strategy_evidence_source,
         decomposition_lens_sources,
+        weekly_returns_source,
     ) = input_paths
     as_of = date.fromisoformat(_text(data["meta"]["portfolio_as_of"], "as_of"))
     artifacts: list[SourceArtifact] = [
@@ -2347,6 +2498,16 @@ def publish_panel(
                 schema_version="1",
             )
         )
+    if weekly_returns_source is not None:
+        artifacts.append(
+            SourceArtifact.from_path(
+                weekly_returns_source,
+                artifact_id="input/portfolio-weekly-returns.json",
+                as_of_date=date.fromisoformat(data["weekly_returns"]["as_of_date"]),
+                schema_name="portfolio-weekly-returns",
+                schema_version="1",
+            )
+        )
     for relative in (*PANEL_FILES, "candidate.json"):
         artifacts.append(
             SourceArtifact.from_path(
@@ -2374,11 +2535,12 @@ def publish_panel(
         adapter=AdapterIdentity("portfolio-control-panel-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="accepted portfolio, factor/alpha, dependence, and material-HWM evidence rendered read-only with explicit gaps and a separate frozen candidate appendix",
+            boundary="accepted portfolio, factor/alpha, dependence, weekly-return, and material-HWM evidence rendered read-only with explicit gaps and a separate frozen candidate appendix",
             fact_types=(
                 "portfolio control panel",
                 "factor and alpha attribution",
                 "correlation and dependence",
+                "weekly returns by strategy, factor, style, sector, industry, and benchmark",
                 "material HWM coverage",
                 "browser QA",
                 "frozen appendix",
@@ -2406,6 +2568,7 @@ def publish_panel(
         "panel_id": verification["panel_id"],
         "publication_state": pointer.state.value,
         "report_generation_id": verification["report_generation_id"],
+        "weekly_returns_generation_id": data["meta"]["weekly_returns_generation_id"],
         "stable_launcher": str(output_root / "index.html"),
     }
 
@@ -2424,6 +2587,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--decomposition-lenses-root", type=Path)
         command.add_argument("--decomposition-plan-bundle", type=Path)
         command.add_argument("--correlation-root", type=Path)
+        command.add_argument("--weekly-returns-root", type=Path)
         command.add_argument("--strategy-evidence", type=Path)
         command.add_argument("--output-root", type=Path, required=name != "verify")
         if name != "build":
@@ -2450,6 +2614,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.strategy_evidence,
                 args.decomposition_lenses_root,
                 args.decomposition_plan_bundle,
+                args.weekly_returns_root,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -2462,6 +2627,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.strategy_evidence,
                 args.decomposition_lenses_root,
                 args.decomposition_plan_bundle,
+                args.weekly_returns_root,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -2478,6 +2644,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.strategy_evidence,
                 args.decomposition_lenses_root,
                 args.decomposition_plan_bundle,
+                args.weekly_returns_root,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)

@@ -877,7 +877,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             encoding="utf-8"
         )
     )
-    assert data["panel_schema_version"] == 5
+    assert data["panel_schema_version"] == 6
     assert data["positions"] == [
         {
             "account_id": "account-00",

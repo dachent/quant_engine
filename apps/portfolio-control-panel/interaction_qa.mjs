@@ -42,14 +42,14 @@ await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
 const checks = [];
-const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "candidates", "data"];
+const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"];
 const visited = [];
 for (const view of views) {
   await page.locator(`[data-nav="${view}"]`).click();
   const active = await page.locator(`[data-view="${view}"]`).evaluate((node) => !node.hidden && node.classList.contains("is-active"));
   if (active) visited.push(view);
 }
-checks.push(check("All eight navigation views activate", visited.length === views.length, visited));
+checks.push(check("All nine navigation views activate", visited.length === views.length, visited));
 
 await page.locator('[data-nav="attribution"]').click();
 const factorLensButtons = await page.locator("[data-factor-lens]").count();
@@ -90,6 +90,7 @@ checks.push(check(
   liveModePressed === "true" && (hybridDisabled || hybridBadge?.includes("HYBRID BACKTEST + LIVE")),
   { hybrid_available: !hybridDisabled, hybrid_badge: hybridBadge, live_default: liveModePressed },
 ));
+
 const matrixCells = await page.locator("[data-correlation-left]").count();
 await page.locator('[data-matrix="stress"]').click();
 const matrixTitle = await page.locator("#matrix-title").textContent();
@@ -105,6 +106,21 @@ checks.push(check(
   "Observed windows and true drawdown regimes are selectable",
   horizonTitle?.includes("21 sessions") && horizonPressed === "true" && drawdownTitle?.includes("either strategy in drawdown"),
   { drawdown_title: drawdownTitle, horizon_pressed: horizonPressed, horizon_title: horizonTitle },
+));
+
+await page.locator('[data-nav="weekly"]').click();
+const weeklyRows = await page.locator("#weekly-table tbody tr").count();
+const currentWeekIncluded = await page.locator("#weekly-current-toggle").isChecked();
+await page.locator('[data-weekly-group="CORE_BENCHMARK"]').click();
+const benchmarkRows = await page.locator("#weekly-table tbody tr").count();
+await page.locator('[data-weekly-mode="LIVE_PLUS_BACKTEST"]').click();
+const weeklyModePressed = await page.locator('[data-weekly-mode="LIVE_PLUS_BACKTEST"]').getAttribute("aria-pressed");
+await page.locator("[data-weekly-series]").first().click();
+const weeklyDetail = await page.locator("#weekly-detail").textContent();
+checks.push(check(
+  "Weekly returns expose every governed group without enabling the partial week",
+  weeklyRows === 9 && benchmarkRows === 9 && currentWeekIncluded === false && weeklyModePressed === "true" && weeklyDetail?.includes("Return basis"),
+  { strategy_rows: weeklyRows, benchmark_rows: benchmarkRows, partial_week_enabled: currentWeekIncluded, hybrid_pressed: weeklyModePressed, detail_visible: weeklyDetail?.includes("Return basis") },
 ));
 
 await page.locator('[data-nav="capital"]').click();
