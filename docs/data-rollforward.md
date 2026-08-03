@@ -15,6 +15,13 @@ validates the complete specification hash. Receipts contain
 only identities, attempts, states, and output hashes—not provider payloads or
 credentials.
 
+For the portfolio source-to-panel profile, planning and execution additionally
+fail closed unless the named repository has a clean worktree at the exact
+release commit, the Python executable and `uv.lock` hashes match, the live
+installed-distribution inventory matches, and each command executes a
+hash-bound repository entrypoint declared as an input. These checks prevent a
+declarative commit field from standing in for the code that actually ran.
+
 ## Operator commands
 
 Inventory each immutable generation before authoring the private specification:

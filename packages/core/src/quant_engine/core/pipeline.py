@@ -39,6 +39,26 @@ _SCHEMA_VERSION: Final = 1
 _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_PORTFOLIO_CONTRACT_GATE: Final = "portfolio-orchestration-contract"
+_POST_BUILD_SEMANTIC_GATE: Final = "post-build-semantic"
+_PORTFOLIO_PROFILE: Final = "PORTFOLIO_SOURCE_TO_PANEL_V1"
+_PORTFOLIO_STAGE_ORDER: Final = (
+    "ledger",
+    "baseline",
+    "attribution",
+    "analytics",
+    "report",
+    "workbook",
+    "panel",
+)
+_POST_BUILD_CHECKS: Final = {
+    "analytics_report_panel_equality",
+    "financial_identities",
+    "freshness",
+    "generation_invariants",
+    "ledger_bridges",
+    "mappings",
+}
 
 
 class PipelineValidationError(ValueError):
@@ -661,6 +681,574 @@ def load_pipeline_spec(path: Path) -> PipelineSpec:
     return PipelineSpec.from_json_bytes(path.read_bytes())
 
 
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(str(left.resolve())) == os.path.normcase(
+        str(right.resolve())
+    )
+
+
+def _within_path(path: Path, boundary: Path) -> bool:
+    try:
+        path.resolve().relative_to(boundary.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _contains_ambient_current(value: object) -> bool:
+    parts = str(value).replace("\\", "/").split("/")
+    return any(part.strip().lower() in {"current", "current.json"} for part in parts)
+
+
+def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
+    matches = [item for item in spec.gates if item.gate_id == _PORTFOLIO_CONTRACT_GATE]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise PipelineValidationError(
+            "portfolio orchestration contract gate is ambiguous"
+        )
+    gate = matches[0]
+    digest, _ = _file_hash(gate.path)
+    if digest != gate.sha256:
+        raise PipelineValidationError("portfolio orchestration contract differs")
+    try:
+        raw = _object(
+            json.loads(gate.path.read_text(encoding="utf-8")),
+            "portfolio orchestration contract",
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PipelineValidationError(
+            "portfolio orchestration contract is unreadable"
+        ) from exc
+    _strict(
+        raw,
+        {
+            "authority_snapshot",
+            "command_sources",
+            "profile",
+            "release_commit",
+            "runtime",
+            "schema_version",
+            "semantic_reconciliation_node",
+            "source_acquisitions",
+            "stages",
+        },
+        "portfolio orchestration contract",
+    )
+    if raw["schema_version"] != 1 or raw["profile"] != _PORTFOLIO_PROFILE:
+        raise PipelineValidationError("portfolio orchestration profile is unsupported")
+    release_commit = str(raw["release_commit"])
+    if _COMMIT.fullmatch(release_commit) is None:
+        raise PipelineValidationError("portfolio release_commit is invalid")
+    if release_commit != spec.code_commit:
+        raise PipelineValidationError("portfolio release commit differs from pipeline")
+
+    runtime = _object(raw["runtime"], "portfolio runtime")
+    _strict(
+        runtime,
+        {
+            "environment_sha256",
+            "executable_path",
+            "executable_sha256",
+            "lock_path",
+            "lock_sha256",
+            "repo_root",
+        },
+        "portfolio runtime",
+    )
+    executable_path = _absolute(
+        runtime["executable_path"], "portfolio runtime.executable_path"
+    )
+    lock_path = _absolute(runtime["lock_path"], "portfolio runtime.lock_path")
+    executable_sha256 = _hash(
+        runtime["executable_sha256"], "portfolio runtime.executable_sha256"
+    )
+    lock_sha256 = _hash(runtime["lock_sha256"], "portfolio runtime.lock_sha256")
+    environment_sha256 = _hash(
+        runtime["environment_sha256"], "portfolio runtime.environment_sha256"
+    )
+    repo_root = _absolute(runtime["repo_root"], "portfolio runtime.repo_root")
+
+    command_source_rows = _objects(raw["command_sources"], "portfolio command_sources")
+    if not command_source_rows:
+        raise PipelineValidationError("portfolio command sources are empty")
+    command_sources: list[dict[str, object]] = []
+    for row in command_source_rows:
+        _strict(
+            row,
+            {"entrypoint_path", "entrypoint_sha256", "node_id"},
+            "portfolio command source",
+        )
+        command_sources.append(
+            {
+                "entrypoint_path": _absolute(
+                    row["entrypoint_path"], "command source.entrypoint_path"
+                ),
+                "entrypoint_sha256": _hash(
+                    row["entrypoint_sha256"], "command source.entrypoint_sha256"
+                ),
+                "node_id": _identifier(row["node_id"], "command source.node_id"),
+            }
+        )
+    if len({str(row["node_id"]) for row in command_sources}) != len(command_sources):
+        raise PipelineValidationError("portfolio command source IDs must be unique")
+
+    acquisition_rows = _objects(
+        raw["source_acquisitions"], "portfolio source_acquisitions"
+    )
+    if not acquisition_rows:
+        raise PipelineValidationError("portfolio source acquisitions are empty")
+    acquisitions: list[dict[str, str]] = []
+    for row in acquisition_rows:
+        _strict(row, {"adapter_commit", "node_id"}, "portfolio source acquisition")
+        adapter_commit = str(row["adapter_commit"])
+        if _COMMIT.fullmatch(adapter_commit) is None:
+            raise PipelineValidationError("source adapter_commit is invalid")
+        acquisitions.append(
+            {
+                "adapter_commit": adapter_commit,
+                "node_id": _identifier(row["node_id"], "source acquisition.node_id"),
+            }
+        )
+    if len({row["node_id"] for row in acquisitions}) != len(acquisitions):
+        raise PipelineValidationError("portfolio source acquisition IDs must be unique")
+
+    authority = _object(raw["authority_snapshot"], "portfolio authority_snapshot")
+    _strict(
+        authority,
+        {"artifact_node", "command_node"},
+        "portfolio authority_snapshot",
+    )
+    authority_nodes = {
+        "artifact_node": _identifier(
+            authority["artifact_node"], "authority_snapshot.artifact_node"
+        ),
+        "command_node": _identifier(
+            authority["command_node"], "authority_snapshot.command_node"
+        ),
+    }
+
+    raw_stages = _object(raw["stages"], "portfolio stages")
+    if set(raw_stages) != set(_PORTFOLIO_STAGE_ORDER):
+        raise PipelineValidationError("portfolio stages differ from the required DAG")
+    stages: dict[str, dict[str, object]] = {}
+    for role in _PORTFOLIO_STAGE_ORDER:
+        stage = _object(raw_stages[role], f"portfolio stage {role}")
+        _strict(stage, {"command_node", "generation_nodes"}, f"portfolio stage {role}")
+        stages[role] = {
+            "command_node": _identifier(
+                stage["command_node"], f"portfolio stage {role}.command_node"
+            ),
+            "generation_nodes": tuple(
+                _identifier(item, f"portfolio stage {role}.generation_nodes")
+                for item in _strings(
+                    stage["generation_nodes"],
+                    f"portfolio stage {role}.generation_nodes",
+                )
+            ),
+        }
+    semantic_node = _identifier(
+        raw["semantic_reconciliation_node"],
+        "portfolio semantic_reconciliation_node",
+    )
+    return {
+        "acquisitions": tuple(acquisitions),
+        "authority": authority_nodes,
+        "command_sources": tuple(command_sources),
+        "contract_path": gate.path,
+        "release_commit": release_commit,
+        "runtime": {
+            "environment_sha256": environment_sha256,
+            "executable_path": executable_path,
+            "executable_sha256": executable_sha256,
+            "lock_path": lock_path,
+            "lock_sha256": lock_sha256,
+            "repo_root": repo_root,
+        },
+        "semantic_node": semantic_node,
+        "stages": stages,
+    }
+
+
+def _node_ancestors(spec: PipelineSpec) -> dict[str, frozenset[str]]:
+    by_id = {item.node_id: item for item in spec.nodes}
+    result: dict[str, frozenset[str]] = {}
+
+    def visit(node_id: str) -> frozenset[str]:
+        if node_id in result:
+            return result[node_id]
+        direct = by_id[node_id].depends_on
+        expanded = set(direct)
+        for dependency in direct:
+            expanded.update(visit(dependency))
+        result[node_id] = frozenset(expanded)
+        return result[node_id]
+
+    for node_id in by_id:
+        visit(node_id)
+    return result
+
+
+def runtime_environment_sha256(executable: Path) -> str:
+    """Hash the installed distribution inventory of one Python runtime."""
+
+    script = (
+        "import hashlib,importlib.metadata,json;"
+        "rows=sorted({((d.metadata.get('Name') or '').lower(),d.version) "
+        "for d in importlib.metadata.distributions()});"
+        "payload=json.dumps(rows,separators=(',',':'),ensure_ascii=True).encode();"
+        "print(hashlib.sha256(payload).hexdigest())"
+    )
+    try:
+        completed = subprocess.run(
+            [str(executable), "-I", "-c", script],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PipelineValidationError(
+            "portfolio runtime environment cannot be inspected"
+        ) from exc
+    value = completed.stdout.decode("ascii", errors="strict").strip()
+    return _hash(value, "portfolio runtime environment inventory")
+
+
+def _git_output(repo_root: Path, *args: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PipelineValidationError(
+            "portfolio Git identity cannot be inspected"
+        ) from exc
+    return completed.stdout.decode("utf-8", errors="strict").strip()
+
+
+def _verify_portfolio_runtime(contract: Mapping[str, Any], spec: PipelineSpec) -> None:
+    runtime = _object(contract["runtime"], "portfolio runtime")
+    executable = runtime["executable_path"]
+    lock = runtime["lock_path"]
+    if not isinstance(executable, Path) or not isinstance(lock, Path):
+        raise PipelineValidationError("portfolio runtime paths are invalid")
+    if _file_hash(executable)[0] != runtime["executable_sha256"]:
+        raise PipelineValidationError("portfolio runtime executable differs")
+    if _file_hash(lock)[0] != runtime["lock_sha256"]:
+        raise PipelineValidationError("portfolio runtime lock differs")
+    if runtime_environment_sha256(executable) != runtime["environment_sha256"]:
+        raise PipelineValidationError("portfolio runtime environment differs")
+    repo_root = runtime["repo_root"]
+    if not isinstance(repo_root, Path) or not repo_root.is_dir():
+        raise PipelineValidationError("portfolio repository root is invalid")
+    head = _git_output(repo_root, "rev-parse", "HEAD")
+    if head != spec.code_commit or head != contract["release_commit"]:
+        raise PipelineValidationError("portfolio repository HEAD differs")
+    if _git_output(repo_root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise PipelineValidationError("portfolio repository is not clean")
+
+
+def _validate_portfolio_orchestration(
+    spec: PipelineSpec, *, verify_runtime: bool
+) -> dict[str, Any] | None:
+    contract = _portfolio_contract(spec)
+    if contract is None:
+        return None
+    if verify_runtime:
+        _verify_portfolio_runtime(contract, spec)
+    by_id = {item.node_id: item for item in spec.nodes}
+    ancestors = _node_ancestors(spec)
+    runtime = _object(contract["runtime"], "portfolio runtime")
+    executable = runtime["executable_path"]
+    lock = runtime["lock_path"]
+    if not isinstance(executable, Path) or not isinstance(lock, Path):
+        raise PipelineValidationError("portfolio runtime paths are invalid")
+    command_sources = tuple(contract["command_sources"])
+    source_by_node = {str(row["node_id"]): row for row in command_sources}
+
+    def command(node_id: str, name: str, *, local_only: bool) -> CommandNode:
+        node = by_id.get(node_id)
+        if not isinstance(node, CommandNode):
+            raise PipelineValidationError(f"{name} must identify a command node")
+        if local_only and node.effect is not CommandEffect.LOCAL_ONLY:
+            raise PipelineValidationError(f"{name} must be local-only")
+        if node.retry_limit != 0:
+            raise PipelineValidationError(f"{name} must use a zero retry limit")
+        if not node.declared_writes:
+            raise PipelineValidationError(f"{name} must declare create-only outputs")
+        if not _same_path(Path(node.argv[0]), executable):
+            raise PipelineValidationError(f"{name} runtime differs")
+        if not any(_same_path(path, lock) for path in node.declared_reads):
+            raise PipelineValidationError(f"{name} does not bind the runtime lock")
+        receipt = _read_receipt(_receipt_path(spec, node.node_id))
+        if receipt is None and any(path.exists() for path in node.declared_writes):
+            raise PipelineValidationError(
+                f"{name} output predates its pipeline receipt"
+            )
+        return node
+
+    def reads_output(node: CommandNode, output: Path) -> bool:
+        return any(
+            _same_path(path, output) or _within_path(path, output)
+            for path in node.declared_reads
+        )
+
+    for node in spec.nodes:
+        values: list[object] = []
+        if isinstance(node, ArtifactNode):
+            values.append(node.path)
+        elif isinstance(node, GenerationNode):
+            if node.source_dir is not None:
+                values.append(node.source_dir)
+        else:
+            values.extend((*node.argv, *node.declared_reads, *node.declared_writes))
+        if any(_contains_ambient_current(value) for value in values):
+            raise PipelineValidationError(
+                f"{node.node_id} uses ambient CURRENT authority"
+            )
+
+    acquisition_rows = tuple(contract["acquisitions"])
+    acquisition_ids = tuple(row["node_id"] for row in acquisition_rows)
+    acquisition_commands = {
+        node_id: command(
+            node_id,
+            f"source acquisition {node_id}",
+            local_only=False,
+        )
+        for node_id in acquisition_ids
+    }
+    for row in acquisition_rows:
+        node_id = row["node_id"]
+        if row["adapter_commit"] != spec.code_commit:
+            raise PipelineValidationError(
+                f"source acquisition {node_id} adapter commit differs"
+            )
+        node = acquisition_commands[node_id]
+        if any(
+            "runs" not in {part.lower() for part in path.parts}
+            for path in node.declared_writes
+        ):
+            raise PipelineValidationError(
+                f"source acquisition {node_id} does not write an immutable run"
+            )
+
+    authority = _object(contract["authority"], "portfolio authority")
+    authority_command_id = str(authority["command_node"])
+    authority_command = command(
+        authority_command_id, "authority snapshot command", local_only=True
+    )
+    if not set(acquisition_ids) <= ancestors[authority_command_id]:
+        raise PipelineValidationError("authority snapshot omits a source acquisition")
+    if any(
+        not reads_output(authority_command, output)
+        for acquisition in acquisition_commands.values()
+        for output in acquisition.declared_writes
+    ):
+        raise PipelineValidationError(
+            "authority snapshot does not read every source acquisition"
+        )
+    authority_artifact_id = str(authority["artifact_node"])
+    authority_artifact = by_id.get(authority_artifact_id)
+    if not isinstance(authority_artifact, ArtifactNode):
+        raise PipelineValidationError(
+            "authority snapshot must identify an artifact node"
+        )
+    if authority_command_id not in ancestors[authority_artifact_id]:
+        raise PipelineValidationError(
+            "authority snapshot artifact is not command-built"
+        )
+    if not any(
+        _within_path(authority_artifact.path, path)
+        for path in authority_command.declared_writes
+    ):
+        raise PipelineValidationError(
+            "authority snapshot artifact is outside its output"
+        )
+
+    stage_contract = _object(contract["stages"], "portfolio stages")
+    stage_commands: dict[str, CommandNode] = {}
+    previous_id = authority_artifact_id
+    previous_outputs: tuple[Path, ...] = (authority_artifact.path,)
+    covered_generations: set[str] = set()
+    for role in _PORTFOLIO_STAGE_ORDER:
+        stage = _object(stage_contract[role], f"portfolio stage {role}")
+        command_id = str(stage["command_node"])
+        stage_command = command(command_id, f"portfolio stage {role}", local_only=True)
+        if previous_id not in ancestors[command_id]:
+            raise PipelineValidationError(
+                f"portfolio stage {role} is disconnected from its predecessor"
+            )
+        if any(not reads_output(stage_command, output) for output in previous_outputs):
+            raise PipelineValidationError(
+                f"portfolio stage {role} does not read its predecessor output"
+            )
+        stage_commands[role] = stage_command
+        previous_id = command_id
+        generation_ids = stage["generation_nodes"]
+        if not isinstance(generation_ids, tuple):
+            raise PipelineValidationError(f"portfolio stage {role} is invalid")
+        for generation_node_id in generation_ids:
+            generation = by_id.get(str(generation_node_id))
+            if (
+                not isinstance(generation, GenerationNode)
+                or not generation.release_target
+            ):
+                raise PipelineValidationError(
+                    f"portfolio stage {role} output is not a release generation"
+                )
+            if command_id not in ancestors[generation.node_id]:
+                raise PipelineValidationError(
+                    f"portfolio stage {role} generation is not command-built"
+                )
+            if generation.source_dir is None or not any(
+                _within_path(generation.source_dir, path)
+                for path in stage_command.declared_writes
+            ):
+                raise PipelineValidationError(
+                    f"portfolio stage {role} generation is outside its output"
+                )
+            if generation.node_id in covered_generations:
+                raise PipelineValidationError(
+                    "portfolio release generation is duplicated"
+                )
+            covered_generations.add(generation.node_id)
+        generated_outputs = tuple(
+            generation.source_dir
+            for generation_node_id in generation_ids
+            if isinstance(
+                (generation := by_id.get(str(generation_node_id))), GenerationNode
+            )
+            and generation.source_dir is not None
+        )
+        previous_outputs = generated_outputs or stage_command.declared_writes
+    release_target_nodes = {
+        node.node_id
+        for node in spec.nodes
+        if isinstance(node, GenerationNode) and node.release_target
+    }
+    if covered_generations != release_target_nodes:
+        raise PipelineValidationError(
+            "portfolio stage outputs differ from release generations"
+        )
+
+    semantic_id = str(contract["semantic_node"])
+    semantic = command(
+        semantic_id, "post-build semantic reconciliation", local_only=True
+    )
+    if not release_target_nodes <= ancestors[semantic_id]:
+        raise PipelineValidationError(
+            "post-build semantic reconciliation omits a release generation"
+        )
+    if stage_commands["panel"].node_id not in ancestors[semantic_id]:
+        raise PipelineValidationError(
+            "post-build semantic reconciliation precedes the panel"
+        )
+    release_generation_sources = tuple(
+        node.source_dir
+        for node in spec.nodes
+        if isinstance(node, GenerationNode)
+        and node.release_target
+        and node.source_dir is not None
+    )
+    semantic_inputs = (
+        authority_artifact.path,
+        *release_generation_sources,
+        *stage_commands["panel"].declared_writes,
+    )
+    if any(not reads_output(semantic, output) for output in semantic_inputs):
+        raise PipelineValidationError(
+            "post-build semantic reconciliation omits an explicit input"
+        )
+    semantic_gates = [
+        item for item in spec.gates if item.gate_id == _POST_BUILD_SEMANTIC_GATE
+    ]
+    if len(semantic_gates) != 1:
+        raise PipelineValidationError(
+            "post-build semantic gate is missing or ambiguous"
+        )
+    if not any(
+        _same_path(semantic_gates[0].path, path) for path in semantic.declared_writes
+    ):
+        raise PipelineValidationError("post-build semantic gate is not command-built")
+
+    required_command_ids = {
+        *acquisition_ids,
+        authority_command_id,
+        *(item.node_id for item in stage_commands.values()),
+        semantic_id,
+    }
+    if set(source_by_node) != required_command_ids:
+        raise PipelineValidationError(
+            "portfolio command sources differ from the executable DAG"
+        )
+    repo_root = runtime["repo_root"]
+    if not isinstance(repo_root, Path):
+        raise PipelineValidationError("portfolio repository root is invalid")
+    for node_id, row in source_by_node.items():
+        node = by_id[node_id]
+        if not isinstance(node, CommandNode):
+            raise PipelineValidationError(f"{node_id} command source is not executable")
+        entrypoint = row["entrypoint_path"]
+        if not isinstance(entrypoint, Path) or not _within_path(entrypoint, repo_root):
+            raise PipelineValidationError(
+                f"{node_id} entrypoint is outside the repository"
+            )
+        if _file_hash(entrypoint)[0] != row["entrypoint_sha256"]:
+            raise PipelineValidationError(f"{node_id} entrypoint differs")
+        if not any(_same_path(path, entrypoint) for path in node.declared_reads):
+            raise PipelineValidationError(f"{node_id} does not declare its entrypoint")
+        if not any(
+            _same_path(Path(token), entrypoint)
+            for token in node.argv[1:]
+            if Path(token).is_absolute()
+        ):
+            raise PipelineValidationError(f"{node_id} does not execute its entrypoint")
+    return contract
+
+
+def _verify_post_build_semantic_gate(spec: PipelineSpec, path: Path) -> None:
+    try:
+        payload = _object(
+            json.loads(path.read_text(encoding="utf-8")),
+            "post-build semantic gate",
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PipelineValidationError("post-build semantic gate is unreadable") from exc
+    _strict(
+        payload,
+        {
+            "as_of_date",
+            "checks",
+            "release_commit",
+            "release_generations",
+            "schema_version",
+            "unwaived_blocking_exceptions",
+            "verdict",
+        },
+        "post-build semantic gate",
+    )
+    checks = _object(payload["checks"], "post-build semantic checks")
+    if set(checks) != _POST_BUILD_CHECKS or any(
+        value != "PASS" for value in checks.values()
+    ):
+        raise PipelineValidationError("post-build semantic checks did not pass")
+    if (
+        payload["schema_version"] != 1
+        or payload["verdict"] != "PASS"
+        or payload["unwaived_blocking_exceptions"] != 0
+        or payload["as_of_date"] != spec.as_of_date.isoformat()
+        or payload["release_commit"] != spec.code_commit
+        or payload["release_generations"] != spec.release_generations
+    ):
+        raise PipelineValidationError(
+            "post-build semantic gate differs from the release"
+        )
+
+
 def _run_root(spec: PipelineSpec) -> Path:
     # Windows still encounters MAX_PATH-sensitive APIs in otherwise long-path-aware
     # processes. The full specification hash remains inside every receipt and
@@ -970,6 +1558,12 @@ def _execute_node(
                     f"{node.node_id} declared command outputs drifted"
                 )
             return existing
+        if state is ReceiptState.FAILED and int(existing.get("attempts", 0)) >= (
+            node.retry_limit + 1 if isinstance(node, CommandNode) else 1
+        ):
+            raise PipelineExecutionError(
+                f"{node.node_id} exhausted its declared attempt limit"
+            )
     attempts = int(existing.get("attempts", 0)) if existing else 0
     if isinstance(node, ArtifactNode):
         if _file_hash(node.path) != (node.sha256, node.size_bytes):
@@ -1096,6 +1690,7 @@ def _execute_node(
 def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
     """Return the exact non-mutating execution and release plan."""
 
+    _validate_portfolio_orchestration(spec, verify_runtime=True)
     nodes: list[dict[str, object]] = []
     for node in spec.ordered_nodes:
         row: dict[str, object] = {
@@ -1166,28 +1761,55 @@ def _verify_freshness_gate(path: Path, evaluation_date: date) -> None:
         payload = _object(
             json.loads(path.read_text(encoding="utf-8")), "freshness gate"
         )
-        if (
-            set(payload)
-            != {
+        schema_version = payload.get("assessment_schema_version")
+        expected_keys = (
+            {
                 "assessment_schema_version",
                 "as_of_date",
                 "assessments",
                 "policy",
             }
-            or payload.get("assessment_schema_version") != 2
-        ):
+            if schema_version == 2
+            else {
+                "assessment_schema_version",
+                "as_of_date",
+                "assessments",
+                "policies",
+            }
+            if schema_version == 3
+            else set()
+        )
+        if set(payload) != expected_keys:
             raise PipelineValidationError("freshness gate schema differs")
         assessed_on = date.fromisoformat(str(payload.get("as_of_date")))
         if assessed_on != evaluation_date:
             raise PipelineValidationError(
                 "freshness gate was not evaluated on the operational date"
             )
-        policy = FreshnessPolicy.from_dict(_object(payload.get("policy"), "policy"))
+        if schema_version == 2:
+            parsed = FreshnessPolicy.from_dict(_object(payload.get("policy"), "policy"))
+            policies = {parsed.policy_id: parsed}
+        else:
+            policies = {
+                parsed.policy_id: parsed
+                for parsed in (
+                    FreshnessPolicy.from_dict(item)
+                    for item in _objects(payload.get("policies"), "policies")
+                )
+            }
+            if not policies:
+                raise PipelineValidationError("freshness gate policies are unavailable")
         raw_assessments = payload.get("assessments")
         if not isinstance(raw_assessments, list) or not raw_assessments:
             raise PipelineValidationError("freshness gate assessments are unavailable")
         for raw in raw_assessments:
             item = _object(raw, "freshness assessment")
+            policy_id = item.get("policy_id")
+            if not isinstance(policy_id, str) or policy_id not in policies:
+                raise PipelineValidationError(
+                    "freshness gate policy reference is invalid"
+                )
+            policy = policies[policy_id]
             observed_text = item.get("last_accepted_date")
             observed = (
                 None
@@ -1217,6 +1839,7 @@ def _verify_freshness_gate(path: Path, evaluation_date: date) -> None:
 def _verify_gates(
     spec: PipelineSpec, evaluation_date: date
 ) -> tuple[GateEvidence, ...]:
+    _validate_portfolio_orchestration(spec, verify_runtime=True)
     result = []
     for gate in spec.gates:
         digest, _ = _file_hash(gate.path)
@@ -1224,6 +1847,8 @@ def _verify_gates(
             raise PipelineValidationError(f"pipeline gate differs: {gate.gate_id}")
         if gate.gate_id == "freshness-health":
             _verify_freshness_gate(gate.path, evaluation_date)
+        elif gate.gate_id == _POST_BUILD_SEMANTIC_GATE:
+            _verify_post_build_semantic_gate(spec, gate.path)
         result.append(GateEvidence(gate.gate_id, gate.sha256))
     return tuple(result)
 
@@ -1283,6 +1908,7 @@ def execute_pipeline(
 ) -> dict[str, object]:
     """Build, verify, prepare, and optionally commit one explicit-ID DAG."""
 
+    _validate_portfolio_orchestration(spec, verify_runtime=True)
     existing_release = _read_prepared(spec)
     for node in spec.ordered_nodes:
         _execute_node(

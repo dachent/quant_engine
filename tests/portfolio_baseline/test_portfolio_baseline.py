@@ -751,7 +751,7 @@ def test_strategy_for_date_is_effective_dated_and_fails_on_overlap() -> None:
         {
             "account_id": "account-a",
             "effective_end": "2026-01-31",
-            "effective_start": None,
+            "effective_start": "2026-01-01",
             "mapping_status": "MAPPED",
             "strategy_id": "strategy-old",
         },
@@ -791,6 +791,24 @@ def test_strategy_for_date_is_effective_dated_and_fails_on_overlap() -> None:
         match="multiple mapped strategies overlap",
     ):
         baseline._strategy_for_date(overlapping, "account-a", date(2026, 2, 1))
+
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="explicit effective_start",
+    ):
+        baseline._strategy_for_date(
+            [
+                {
+                    "account_id": "account-a",
+                    "effective_end": None,
+                    "effective_start": None,
+                    "mapping_status": "MAPPED",
+                    "strategy_id": "strategy-unknown-start",
+                }
+            ],
+            "account-a",
+            date(2026, 2, 1),
+        )
 
 
 def test_source_drift_nav_divergence_and_replay_difference_fail_closed(

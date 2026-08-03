@@ -51,6 +51,22 @@ class GenerationQualification(StrEnum):
     FINITE_STATIC = "FINITE_STATIC"
 
 
+class SourceAvailability(StrEnum):
+    """Whether accepted source observations exist, independent of modeling."""
+
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class AnalyticalModelStatus(StrEnum):
+    """Validation state of an analytical model using the source observations."""
+
+    NOT_EVALUATED = "NOT_EVALUATED"
+    VALIDATED = "VALIDATED"
+    DIAGNOSTIC_ONLY = "DIAGNOSTIC_ONLY"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
 def _text(value: str, name: str) -> str:
     normalized = value.strip()
     if not normalized:
@@ -63,6 +79,48 @@ def _hash(value: str, name: str) -> str:
     if _SHA256.fullmatch(normalized) is None:
         raise ProviderAdmissionError(f"{name} must be 64 lower-case hex")
     return normalized
+
+
+@dataclass(frozen=True)
+class SourceAnalyticalStatus:
+    """Keep data availability distinct from model acceptance."""
+
+    source_availability: SourceAvailability
+    analytical_model_status: AnalyticalModelStatus
+    analytical_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.analytical_reason is not None:
+            object.__setattr__(
+                self,
+                "analytical_reason",
+                _text(self.analytical_reason, "analytical_reason"),
+            )
+        if (
+            self.source_availability is SourceAvailability.UNAVAILABLE
+            and self.analytical_model_status is not AnalyticalModelStatus.UNAVAILABLE
+        ):
+            raise ProviderAdmissionError(
+                "analytical model cannot be available when source is unavailable"
+            )
+        if (
+            self.analytical_model_status
+            in {
+                AnalyticalModelStatus.DIAGNOSTIC_ONLY,
+                AnalyticalModelStatus.UNAVAILABLE,
+            }
+            and self.analytical_reason is None
+        ):
+            raise ProviderAdmissionError(
+                "non-validated analytical model status requires a reason"
+            )
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "analytical_model_status": self.analytical_model_status.value,
+            "analytical_reason": self.analytical_reason,
+            "source_availability": self.source_availability.value,
+        }
 
 
 @dataclass(frozen=True)
@@ -112,6 +170,7 @@ class ProviderFactAdmission:
     account_id: str | None = None
     pool_id: str | None = None
     strategy_id: str | None = None
+    account_reconciliation_sha256: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "provider_id", _text(self.provider_id, "provider_id"))
@@ -125,6 +184,27 @@ class ProviderFactAdmission:
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, _text(value, name))
+        if self.evidence_layer is EvidenceLayer.ACCOUNT_LIVE:
+            if self.account_id is None:
+                raise ProviderAdmissionError(
+                    "ACCOUNT_LIVE evidence requires account_id"
+                )
+            if self.account_reconciliation_sha256 is None:
+                raise ProviderAdmissionError(
+                    "ACCOUNT_LIVE evidence requires account reconciliation proof"
+                )
+            object.__setattr__(
+                self,
+                "account_reconciliation_sha256",
+                _hash(
+                    self.account_reconciliation_sha256,
+                    "account_reconciliation_sha256",
+                ),
+            )
+        elif self.account_reconciliation_sha256 is not None:
+            raise ProviderAdmissionError(
+                "non-account evidence cannot contain account reconciliation proof"
+            )
         if (
             self.disposition is AdmissionDisposition.AUTHORITATIVE
             and self.evidence_layer is not EvidenceLayer.ACCOUNT_LIVE
@@ -141,6 +221,7 @@ class ProviderFactAdmission:
     def to_dict(self) -> dict[str, object]:
         return {
             "account_id": self.account_id,
+            "account_reconciliation_sha256": self.account_reconciliation_sha256,
             "disposition": self.disposition.value,
             "effective_end": self.effective_end.isoformat(),
             "effective_start": self.effective_start.isoformat(),
@@ -167,12 +248,13 @@ def validate_provider_authority(
             admissions,
             key=lambda item: (
                 item.fact_type,
-                item.scope_key,
+                tuple(value or "" for value in item.scope_key),
                 item.effective_start,
                 item.effective_end,
                 item.provider_id,
                 item.evidence_layer.value,
                 item.disposition.value,
+                item.account_reconciliation_sha256 or "",
             ),
         )
     )
@@ -190,6 +272,7 @@ def validate_provider_authority(
             item.disposition,
             item.effective_start,
             item.effective_end,
+            item.account_reconciliation_sha256,
         )
         if identity in seen:
             raise ProviderAdmissionError("provider fact admission is duplicated")

@@ -785,6 +785,10 @@ def _strategy_for_date(
             continue
         start_value = assignment.get("effective_start")
         end_value = assignment.get("effective_end")
+        if assignment.get("mapping_status") == "MAPPED" and start_value is None:
+            raise BaselineValidationError(
+                "mapped assignment requires an explicit effective_start"
+            )
         if start_value is not None and event_date < _date(
             start_value, "assignment.start"
         ):

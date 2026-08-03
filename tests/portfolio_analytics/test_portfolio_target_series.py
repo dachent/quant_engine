@@ -21,6 +21,7 @@ sys.modules[SPEC.name] = target_series
 SPEC.loader.exec_module(target_series)
 TargetSeriesError = target_series.TargetSeriesError
 build_matrixport_targets = target_series.build_matrixport_targets
+build_matrixport_strategy_evidence = target_series.build_matrixport_strategy_evidence
 build_decomposition_inputs = target_series.build_decomposition_inputs
 build_quantbase_targets = target_series.build_quantbase_targets
 build_portfolio123_evidence = target_series.build_portfolio123_evidence
@@ -106,6 +107,61 @@ def test_matrixport_target_requires_matching_live_holding(tmp_path: Path) -> Non
     base, manifest, nav, holdings = _sources(tmp_path)
     with pytest.raises(TargetSeriesError, match="exactly one live holding"):
         build_matrixport_targets(base, manifest, nav, holdings, "UNKNOWN", "Robuxio")
+
+
+def test_matrixport_target_can_replace_one_generation_bound_series(
+    tmp_path: Path,
+) -> None:
+    base, manifest, nav, holdings = _sources(tmp_path)
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_value["as_of_date"] = "2026-01-03"
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+    base.write_text(
+        base.read_text(encoding="utf-8")
+        + "Robuxio,2025-12-31,0.5,ACCOUNT_LIVE,NET,TOTAL,\n",
+        encoding="utf-8",
+    )
+
+    targets, proof_bytes = build_matrixport_targets(
+        base,
+        manifest,
+        nav,
+        holdings,
+        "P1",
+        "Robuxio",
+        replace_existing=True,
+    )
+    rows = list(csv.DictReader(io.StringIO(targets.decode("utf-8"))))
+    robuxio = [row for row in rows if row["series_id"] == "Robuxio"]
+    assert [row["date"] for row in robuxio] == ["2026-01-02", "2026-01-03"]
+    proof = json.loads(proof_bytes)
+    assert proof["replacement"] == {
+        "enabled": True,
+        "prior_observed_end": "2025-12-31",
+        "prior_observed_start": "2025-12-31",
+        "removed_observations": 1,
+    }
+
+    evidence_path = tmp_path / "strategy-evidence.json"
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-01-01",
+                "schema_version": 1,
+                "strategies": [{"strategy_id": "other", "strategy_name": "Other"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    evidence = json.loads(
+        build_matrixport_strategy_evidence(evidence_path, proof_bytes, "robuxio-crypto")
+    )
+    assert evidence["as_of_date"] == "2026-01-03"
+    matrixport = next(
+        row for row in evidence["strategies"] if row["strategy_id"] == "robuxio-crypto"
+    )
+    assert matrixport["account"]["observed_end"] == "2026-01-03"
+    assert matrixport["generation_id"] == "a" * 64
 
 
 def test_decomposition_inputs_rebind_exact_sources(tmp_path: Path) -> None:

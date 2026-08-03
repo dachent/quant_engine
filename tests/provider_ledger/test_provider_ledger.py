@@ -58,6 +58,9 @@ def test_broker_returns_are_flow_adjusted_and_capital_weighted() -> None:
     assert len(rows) == 1
     assert rows[0]["return"] == "0.1"
     assert rows[0]["component_account_count"] == 2
+    assert rows[0]["component_account_ids"] == ["a", "b"]
+    assert rows[0]["beginning_capital"] == "400"
+    assert len(rows[0]["account_reconciliation_sha256"]) == 64
     assert rows[0]["flow_timing"] == "DATE_ONLY_END_OF_DAY"
 
 
@@ -76,6 +79,7 @@ def test_account_rollforward_appends_only_dates_newer_than_accepted_history() ->
             "evidence_layer": "ACCOUNT_LIVE",
             "provider_id": "schwab",
             "return": "0.02",
+            "beginning_capital": "100",
             "strategy_id": "strategy-a",
         },
         {
@@ -108,6 +112,7 @@ def test_account_overlap_is_retained_as_explicit_reconciliation_evidence() -> No
             "evidence_layer": "ACCOUNT_LIVE",
             "provider_id": "schwab",
             "return": "0.02",
+            "beginning_capital": "100",
             "strategy_id": "strategy-a",
         }
     ]
@@ -116,18 +121,76 @@ def test_account_overlap_is_retained_as_explicit_reconciliation_evidence() -> No
 
     assert checks == [
         {
+            "adjudication": (
+                "METHOD_AND_FLOW_BOUNDARY_VARIANCE; accepted tracker account "
+                "path retains its correction set; broker NAV path is retained "
+                "as reconciliation evidence and rollforward input only"
+            ),
             "authority_effect": (
                 "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
             ),
+            "blocking": False,
             "check_id": "strategy-return-overlap-strategy-a",
             "compared_date_count": 1,
             "exception_date_count": 1,
             "maximum_absolute_difference": "0.01",
-            "status": "EXCEPTION",
+            "maximum_estimated_dollar_impact": "1.00",
+            "status": "PASS_WITH_ADJUDICATED_VARIANCE",
             "strategy_id": "strategy-a",
             "tolerance": "0.000001",
         }
     ]
+
+
+def test_provider_mapping_is_recomputed_from_effective_assignments() -> None:
+    accounts = {"account-a"}
+    strategies = {"strategy-old", "strategy-current", "strategy-wrong"}
+    assignments = {
+        "account-a": [
+            {
+                "effective_start": "2026-01-01",
+                "effective_end": "2026-01-31",
+                "mapping_status": "MAPPED",
+                "strategy_id": "strategy-old",
+            },
+            {
+                "effective_start": "2026-02-01",
+                "effective_end": None,
+                "mapping_status": "MAPPED",
+                "strategy_id": "strategy-current",
+            },
+        ]
+    }
+
+    assert ledger._mapped_strategy(
+        {
+            "account_id": "account-a",
+            "as_of_date": "2026-01-15",
+            "mapping_status": "MAPPED",
+            "strategy_id": "strategy-wrong",
+        },
+        accounts,
+        strategies,
+        assignments,
+    ) == ("strategy-old", "MAPPED")
+
+
+def test_provider_assignment_index_rejects_unknown_mapped_start() -> None:
+    with pytest.raises(ledger.ProviderLedgerError, match="explicit effective_start"):
+        ledger._assignment_index(
+            {
+                "accounts": [{"account_id": "account-a"}],
+                "strategies": [{"strategy_id": "strategy-a"}],
+                "assignments": [
+                    {
+                        "account_id": "account-a",
+                        "effective_start": None,
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "strategy-a",
+                    }
+                ],
+            }
+        )
 
 
 def test_provider_live_strategy_path_never_becomes_account_authority() -> None:
@@ -193,6 +256,7 @@ def test_account_and_provider_lanes_keep_independent_provider_identity() -> None
     )
     rows = [
         {
+            "component_account_ids": ["account-p123-ai"],
             "date": "2026-01-01",
             "evidence_layer": "ACCOUNT_LIVE",
             "provider_id": "ibkr",
@@ -230,6 +294,9 @@ def test_account_and_provider_lanes_keep_independent_provider_identity() -> None
     assert evidence[0]["provider_id"] == "ibkr"
     assert evidence[0]["account"]["provider_id"] == "ibkr"
     assert evidence[0]["account"]["generation_id"] == "a" * 64
+    assert evidence[0]["account"]["account_scopes"][0]["account_id"] == (
+        "account-p123-ai"
+    )
     assert evidence[0]["provider"]["provider_id"] == "portfolio123"
     assert evidence[0]["provider"]["generation_id"] == "d" * 64
     assert {(item.provider_id, item.evidence_layer.value) for item in admissions} == {

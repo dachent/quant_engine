@@ -438,6 +438,79 @@ def build_generation(
     return catalog, manifest, catalog_bytes
 
 
+def draft_generation_spec(run_root: Path, as_of_date: date) -> bytes:
+    """Build the exact acceptance spec for one completed, verified export."""
+
+    root = run_root.expanduser().resolve(strict=True)
+    if root.is_symlink() or not root.is_dir():
+        raise MatrixportGenerationError("run_root must be a real directory")
+    run_id = root.name
+    required = tuple(sorted(_REQUIRED_REPORTS))
+    for relative in required:
+        _source_path(root, relative)
+    extraction = _object(
+        _json(root / "reports" / "extraction_summary.json", "extraction_summary"),
+        "extraction_summary",
+    )
+    verification = _object(
+        _json(root / "reports" / "verification.json", "verification"),
+        "verification",
+    )
+    checks = _object(verification.get("checks"), "verification.checks")
+    coverage_check = _object(checks.get("coverage"), "checks.coverage")
+    valuation_check = _object(checks.get("valuation"), "checks.valuation")
+    coverage_rows = _json(root / "reports" / "coverage.json", "coverage")
+    dataset_rows = _dataset_manifest(root / "reports" / "dataset_manifest.csv")
+    artifacts: list[dict[str, object]] = []
+    paths = [
+        *sorted((root / "csv").glob("*.csv")),
+        *(root.joinpath(*PurePosixPath(relative).parts) for relative in required),
+    ]
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        digest, size = hash_file(path)
+        if relative.startswith("csv/"):
+            schema_name = "matrixport-canonical-csv"
+        elif relative.endswith(".csv"):
+            schema_name = "matrixport-acceptance-csv"
+        elif relative.endswith(".jsonl"):
+            schema_name = "matrixport-acceptance-jsonl"
+        else:
+            schema_name = "matrixport-acceptance-json"
+        artifacts.append(
+            {
+                "artifact_id": relative,
+                "expected_sha256": digest,
+                "expected_size_bytes": size,
+                "relative_path": relative,
+                "schema_name": schema_name,
+                "schema_version": "1",
+            }
+        )
+    known_gaps = sorted(
+        _strings(
+            coverage_check.get("source_limited_reasons", []),
+            "source_limited_reasons",
+        )
+        + _strings(valuation_check.get("reasons", []), "valuation.reasons")
+    )
+    payload = {
+        "artifacts": artifacts,
+        "as_of_date": as_of_date.isoformat(),
+        "baseline": {
+            "artifact_count": len(artifacts),
+            "coverage_status_counts": _coverage_counts(coverage_rows),
+            "dataset_count": len(dataset_rows),
+            "known_gaps": known_gaps,
+            "request_count": _integer(extraction.get("request_count"), "request_count"),
+        },
+        "run_id": run_id,
+        "run_root": str(root),
+        "schema_version": SPEC_SCHEMA_VERSION,
+    }
+    return canonical_json_bytes(payload)
+
+
 def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, object]:
     """Create an immutable PARTIAL candidate; never advance CURRENT.json."""
 

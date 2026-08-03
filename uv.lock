@@ -389,6 +389,12 @@ wheels = [
 ]
 
 [[package]]
+name = "ibapi"
+version = "9.81.1.post1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/78/8f1322aa1be1fe7d747d06d445ede80141e873525120bde809ccae5484fa/ibapi-9.81.1.post1.tar.gz", hash = "sha256:49f6678bf4cced996920f32ad4b48e6897749ac30ba14a661082285f4ec09cd6", size = 61109, upload-time = "2020-12-06T03:18:39.916Z" }
+
+[[package]]
 name = "idna"
 version = "3.18"
 source = { registry = "https://pypi.org/simple" }
@@ -1131,11 +1137,18 @@ dependencies = [
     { name = "quant-engine-portfolio-ledger" },
 ]
 
+[package.optional-dependencies]
+gateway = [
+    { name = "ibapi" },
+]
+
 [package.metadata]
 requires-dist = [
+    { name = "ibapi", marker = "extra == 'gateway'", specifier = "==9.81.1.post1" },
     { name = "quant-engine-core", editable = "packages/core" },
     { name = "quant-engine-portfolio-ledger", editable = "packages/portfolio-ledger" },
 ]
+provides-extras = ["gateway"]
 
 [[package]]
 name = "quant-engine-matrixport"

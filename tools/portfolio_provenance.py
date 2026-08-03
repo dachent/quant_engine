@@ -575,8 +575,10 @@ def _import_tracker(
     strategy_ids = {str(item["strategy_id"]) for item in strategies}
     for row in assignment_rows:
         institution = _text(row["institution"], "assignment.institution")
-        account = row["account"].strip()
-        source_alias = institution if not account else f"{institution} | {account}"
+        account_label = row["account"].strip()
+        source_alias = (
+            institution if not account_label else f"{institution} | {account_label}"
+        )
         account_id = (
             f"account-{hashlib.sha256(source_alias.encode('utf-8')).hexdigest()[:16]}"
         )
@@ -598,6 +600,10 @@ def _import_tracker(
             raise ProvenanceValidationError("tracker alias maps to an unknown strategy")
         period_start = row["period_start"].strip()
         period_end = row["period_end"].strip()
+        if strategy_id is not None and not period_start:
+            raise ProvenanceValidationError(
+                f"mapped tracker assignment requires period_start: {observed_label}"
+            )
         if period_start:
             _date(period_start, "assignment.period_start")
         if period_end:
@@ -632,6 +638,49 @@ def _import_tracker(
         assignments.append(
             {"assignment_id": _record_id("assignment", payload), **payload}
         )
+
+    # A current legacy ``General`` row is the account-level implementation of
+    # the reserve pool, not a missing systematic strategy.  Keep historical
+    # General intervals on systematic accounts explicitly unmapped, but route
+    # accounts whose current state is only General to reserve capital.
+    active_by_account: dict[str, list[dict[str, Any]]] = {}
+    for assignment in assignments:
+        start_value = assignment.get("effective_start")
+        end_value = assignment.get("effective_end")
+        if (
+            start_value is not None
+            and date.fromisoformat(str(start_value)) > generation_as_of
+        ):
+            continue
+        if (
+            end_value is not None
+            and date.fromisoformat(str(end_value)) < generation_as_of
+        ):
+            continue
+        active_by_account.setdefault(str(assignment["account_id"]), []).append(
+            assignment
+        )
+    for account_id, active in active_by_account.items():
+        if not active or any(item["mapping_status"] == "MAPPED" for item in active):
+            continue
+        if not all(
+            str(item["observed_label"]).casefold() in unmapped_labels for item in active
+        ):
+            continue
+        account_row = next(
+            item
+            for item in accounts_by_alias.values()
+            if item["account_id"] == account_id
+        )
+        account_row["current_pool_id"] = RESERVE_POOL_ID
+        for assignment in active:
+            assignment["pool_id"] = RESERVE_POOL_ID
+            assignment["strategy_mapping_disposition"] = "RESERVE_NOT_APPLICABLE"
+    for assignment in assignments:
+        payload = {
+            key: value for key, value in assignment.items() if key != "assignment_id"
+        }
+        assignment["assignment_id"] = _record_id("assignment", payload)
 
     accounts = sorted(
         accounts_by_alias.values(), key=lambda item: str(item["account_id"])

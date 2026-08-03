@@ -13,16 +13,18 @@ without preserving stale calculations or hard-coded operator conclusions.
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
-  contribution reconciliation, and any dated dynamic exposure path come only
-  from accepted analytics generations. The historical proof remains under
-  `dataPortfolio/analytics/decomposition`; the current strategy views bind six
+  contribution reconciliation, and each dated dynamic exposure path come only
+  from accepted analytics generations. The clean-room dynamic FLS lens remains
+  under `dataPortfolio/analytics/decomposition`; the current strategy views bind six
   independently published generations under
   `dataPortfolio/analytics/decomposition-lenses` for U.S./European economic
   factors, U.S./multi-asset ETF style, U.S. sector returns, and U.S. 49-industry
   returns. These lenses are selectable but never concatenated. Static
   RBSA and clean-room dynamic FLS results are both labeled
   `MPI_INFORMED_NON_EQUIVALENT`; neither is proprietary MPI output nor a claim
-  to undisclosed MPI production behavior.
+  to undisclosed MPI production behavior. Dynamic smoothness selection uses
+  training evidence only, reports a sealed holdout, and displays the same-factor
+  static benchmark beside the effective-dated exposure path.
 - The material HWM perimeter is explicit: Composer remains visible in capital
   reporting but is excluded de minimis; Robuxio uses accepted Matrixport
   account NAV and Volatis uses accepted Quantbase account value reconciled to
@@ -190,6 +192,65 @@ attribution separated from historical General intervals; candidate
 filter/search; a responsive provenance control; and
 absence of execution controls. Screenshots must also be inspected visually
 before publication.
+
+## Governed source-to-panel orchestration
+
+The perpetual portfolio rollforward uses the existing
+`quant_engine.core.pipeline` executor and release coordinator. A portfolio run
+is identified by a normal pipeline specification containing a
+`portfolio-orchestration-contract` gate with profile
+`PORTFOLIO_SOURCE_TO_PANEL_V1`. The hash-bound contract names:
+
+- every immutable source-acquisition command and its adapter commit;
+- the command-produced AuthoritySnapshot artifact;
+- command nodes for ledger, baseline, attribution, analytics, report,
+  workbook, and panel, together with their release-generation outputs;
+- the command that produces the `post-build-semantic` gate; and
+- the absolute runtime executable and lock file plus both SHA-256 identities;
+- the hash of the runtime's installed distribution inventory; and
+- the repository root, exact release `HEAD`, clean-worktree requirement, and
+  SHA-256 of the repository entrypoint executed by every command node.
+
+This is an execution contract, not a wrapper around existing candidates. On a
+new pipeline identity, every declared command output must be absent until its
+receipt-producing command runs. Release generations must be under the declared
+output of their assigned stage command, and every release target must be
+assigned to exactly one stage. Source commands write beneath an explicit
+immutable `runs/<run-id>` boundary. All contract commands use zero automatic
+retries; an external-read exception or nonzero result therefore cannot become
+an unobserved retry. Completed receipts provide resumability for an unchanged
+specification.
+
+The graph is strictly source acquisitions → AuthoritySnapshot → ledger →
+baseline → attribution → analytics → report → workbook → panel → post-build
+semantic reconciliation. Command arguments, declared reads and writes, and
+generation sources may not reference `CURRENT` or `CURRENT.json`; every input
+is an explicit path or ID. The runtime, installed environment, lock, clean Git
+`HEAD`, and every command entrypoint are checked before the first command and
+again before release preparation or commit. An adapter commit must equal that
+observed release commit; putting a commit-looking string in command arguments
+does not establish code identity.
+
+The post-build semantic file is machine-validated rather than accepted only by
+hash. It must bind the pipeline as-of date, unchanged release commit, and exact
+release-generation map; report `PASS` for ledger bridges, financial identities,
+mappings, analytics/report/panel equality, freshness, and generation-wide
+invariants; and report zero unwaived blocking exceptions. A failure prevents
+release preparation, leaving publication authority unchanged.
+
+Use the same CLI for the portfolio profile:
+
+```powershell
+uv run --frozen --no-sync python tools/data_pipeline.py plan `
+  --spec <explicit-portfolio-pipeline-spec.json>
+uv run --frozen --no-sync python tools/data_pipeline.py execute `
+  --spec <explicit-portfolio-pipeline-spec.json>
+```
+
+The second command builds and prepares but does not publish. `--commit` remains
+the separately governed atomic multi-root publication effect; `recover` uses
+the existing journaled reverse-order recovery path and does not depend on the
+build runtime still being available.
 
 ## Publish and recover
 

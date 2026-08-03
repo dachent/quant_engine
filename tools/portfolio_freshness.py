@@ -1,4 +1,4 @@
-"""Build deterministic current-strategy freshness health from a provider ledger."""
+"""Build provider-, fact-, and lane-aware freshness from a provider ledger."""
 
 from __future__ import annotations
 
@@ -10,7 +10,13 @@ from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
 
-from quant_engine.core import FreshnessMode, FreshnessPolicy, hash_file, read_generation
+from quant_engine.core import (
+    FreshnessCalendar,
+    FreshnessMode,
+    FreshnessPolicy,
+    hash_file,
+    read_generation,
+)
 from quant_engine.core.contracts import canonical_json_bytes
 
 
@@ -53,6 +59,98 @@ def _load_catalog(root: Path, generation_id: str) -> Mapping[str, Any]:
     return _object(catalog, "provider ledger catalog")
 
 
+_CANONICAL_FACTS = (
+    "balances",
+    "positions",
+    "transactions",
+    "flows",
+    "fx",
+    "costs",
+)
+_FACT_TOKENS = {
+    "balances": ("balance", "nav", "equity", "portfolio_history"),
+    "positions": ("position", "holding", "portfolio_snapshot"),
+    "transactions": ("transaction", "trade", "order", "activity"),
+    "flows": ("cash_flow", "transfer", "deposit", "withdrawal", "wallet_bill"),
+    "fx": ("fx", "currency_rate", "forex"),
+    "costs": ("fee", "commission", "cost", "subscription"),
+}
+
+
+def _policies() -> dict[str, FreshnessPolicy]:
+    return {
+        "daily-calendar-24x7": FreshnessPolicy(
+            policy_id="daily-calendar-24x7",
+            mode=FreshnessMode.RECURRING,
+            expected_interval_days=1,
+            grace_days=2,
+            stale_after_days=5,
+            calendar=FreshnessCalendar.CALENDAR_DAY,
+        ),
+        "daily-weekday-session": FreshnessPolicy(
+            policy_id="daily-weekday-session",
+            mode=FreshnessMode.RECURRING,
+            expected_interval_days=1,
+            grace_days=2,
+            stale_after_days=5,
+            calendar=FreshnessCalendar.WEEKDAY_SESSION,
+        ),
+        "finite-history": FreshnessPolicy(
+            policy_id="finite-history",
+            mode=FreshnessMode.FINITE,
+            calendar=FreshnessCalendar.CALENDAR_DAY,
+        ),
+    }
+
+
+def _provider_policy(
+    provider_id: str, policies: Mapping[str, FreshnessPolicy]
+) -> FreshnessPolicy:
+    if provider_id == "matrixport":
+        return policies["daily-calendar-24x7"]
+    if provider_id in {"alpaca", "fidelity"}:
+        return policies["finite-history"]
+    return policies["daily-weekday-session"]
+
+
+def _supports_fact(declared: Sequence[str], canonical_fact: str) -> bool:
+    tokens = _FACT_TOKENS[canonical_fact]
+    normalized = [item.casefold().replace("-", "_") for item in declared]
+    return any(token in item for item in normalized for token in tokens)
+
+
+def _assessment(
+    *,
+    policy: FreshnessPolicy,
+    observed_end: date | None,
+    as_of: date,
+    provider_id: str,
+    subject_id: str,
+    subject_type: str,
+    fact_type: str,
+    lane: str,
+    coverage_status: str,
+    required_for_current: bool,
+) -> dict[str, object]:
+    assessed = policy.assess(observed_end, as_of).to_dict()
+    if not required_for_current:
+        assessed = {
+            **assessed,
+            "blocks_current_consumers": False,
+            "escalation_required": False,
+        }
+    return {
+        **assessed,
+        "coverage_status": coverage_status,
+        "fact_type": fact_type,
+        "lane": lane,
+        "provider_id": provider_id,
+        "required_for_current": required_for_current,
+        "subject_id": subject_id,
+        "subject_type": subject_type,
+    }
+
+
 def build_health(
     provider_ledger_root: Path,
     provider_ledger_generation_id: str,
@@ -70,52 +168,107 @@ def build_health(
     evidence = catalog.get("strategy_evidence")
     if not isinstance(evidence, list) or not evidence:
         raise PortfolioFreshnessError("strategy evidence is unavailable")
-    policy = FreshnessPolicy(
-        policy_id="daily-current-strategy",
-        mode=FreshnessMode.RECURRING,
-        expected_interval_days=1,
-        grace_days=2,
-        stale_after_days=5,
-    )
-    assessments = []
-    seen: set[str] = set()
+    policies = _policies()
+    assessments: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
     for raw in evidence:
         item = _object(raw, "strategy evidence")
         strategy_id = _text(item.get("strategy_id"), "strategy_id")
-        if strategy_id in seen:
-            raise PortfolioFreshnessError("strategy evidence identity is duplicated")
-        seen.add(strategy_id)
-        lane_name = (
-            "account" if isinstance(item.get("account"), Mapping) else "provider"
-        )
-        lane = _object(item.get(lane_name), f"{strategy_id}.{lane_name}")
-        provider_id = _text(
-            lane.get("provider_id") or item.get("provider_id"),
-            f"{strategy_id}.provider_id",
-        )
-        observed_text = lane.get("observed_end")
-        observed_end = (
+        for lane_name in ("account", "provider"):
+            if not isinstance(item.get(lane_name), Mapping):
+                continue
+            lane = _object(item[lane_name], f"{strategy_id}.{lane_name}")
+            provider_id = _text(
+                lane.get("provider_id") or item.get("provider_id"),
+                f"{strategy_id}.{lane_name}.provider_id",
+            )
+            identity = (strategy_id, lane_name, provider_id)
+            if identity in seen:
+                raise PortfolioFreshnessError(
+                    "strategy freshness lane identity is duplicated"
+                )
+            seen.add(identity)
+            observed_text = lane.get("observed_end")
+            observed_end = (
+                None
+                if observed_text is None
+                else date.fromisoformat(
+                    _text(observed_text, f"{strategy_id}.{lane_name}.observed_end")
+                )
+            )
+            assessments.append(
+                _assessment(
+                    policy=_provider_policy(provider_id, policies),
+                    observed_end=observed_end,
+                    as_of=as_of,
+                    provider_id=provider_id,
+                    subject_id=strategy_id,
+                    subject_type="STRATEGY",
+                    fact_type="strategy-returns",
+                    lane=lane_name.upper(),
+                    coverage_status="AVAILABLE" if observed_end else "UNAVAILABLE",
+                    required_for_current=lane_name == "account",
+                )
+            )
+
+    coverage_rows = catalog.get("provider_coverage")
+    if not isinstance(coverage_rows, list) or not coverage_rows:
+        raise PortfolioFreshnessError("provider coverage is unavailable")
+    for raw in coverage_rows:
+        row = _object(raw, "provider coverage")
+        provider_id = _text(row.get("provider_id"), "provider coverage provider_id")
+        coverage = _object(row.get("coverage"), f"{provider_id}.coverage")
+        declared_raw = coverage.get("fact_types")
+        if not isinstance(declared_raw, list) or not all(
+            isinstance(item, str) and item.strip() for item in declared_raw
+        ):
+            raise PortfolioFreshnessError(
+                f"{provider_id}.coverage.fact_types must be text"
+            )
+        generation_as_of = row.get("generation_as_of_date")
+        generation_day = (
             None
-            if observed_text is None
-            else date.fromisoformat(_text(observed_text, f"{strategy_id}.observed_end"))
+            if generation_as_of is None
+            else date.fromisoformat(
+                _text(generation_as_of, f"{provider_id}.generation_as_of_date")
+            )
         )
-        assessment = policy.assess(observed_end, as_of)
-        assessments.append(
-            {
-                **assessment.to_dict(),
-                "fact_type": "strategy-returns",
-                "provider_id": provider_id,
-                "subject_id": strategy_id,
-            }
-        )
+        policy = _provider_policy(provider_id, policies)
+        for fact_type in _CANONICAL_FACTS:
+            supported = _supports_fact(declared_raw, fact_type)
+            assessments.append(
+                _assessment(
+                    policy=policy,
+                    observed_end=generation_day if supported else None,
+                    as_of=as_of,
+                    provider_id=provider_id,
+                    subject_id=provider_id,
+                    subject_type="DATASET",
+                    fact_type=fact_type,
+                    lane="PROVIDER_CAPTURE",
+                    coverage_status=(
+                        _text(coverage.get("status"), f"{provider_id}.coverage.status")
+                        if supported
+                        else "OUT_OF_BOUNDARY"
+                    ),
+                    required_for_current=supported
+                    and policy.mode is FreshnessMode.RECURRING,
+                )
+            )
     return {
-        "assessment_schema_version": 2,
+        "assessment_schema_version": 3,
         "as_of_date": as_of.isoformat(),
         "assessments": sorted(
             assessments,
-            key=lambda item: (str(item["subject_id"]), str(item["provider_id"])),
+            key=lambda item: (
+                str(item["subject_type"]),
+                str(item["subject_id"]),
+                str(item["lane"]),
+                str(item["provider_id"]),
+                str(item["fact_type"]),
+            ),
         ),
-        "policy": policy.to_dict(),
+        "policies": [policies[key].to_dict() for key in sorted(policies)],
     }
 
 

@@ -42,13 +42,13 @@ await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
 const checks = [];
-const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"];
+const views = ["command", "capital", "risk", "attribution", "dependence", "weekly", "data"];
 const requiredFactorLenses = [
-  "HISTORICAL_MINIMUM_PROOF",
   "ECONOMIC_FACTOR",
   "ETF_STYLE",
   "RETURN_INDUSTRY",
   "RETURN_SECTOR",
+  "DYNAMIC_STYLE",
 ];
 const requiredCorrelationWindows = ["5", "21", "22", "63", "126", "130", "252", "260"];
 const requiredDrawdownRegimes = ["either_drawdown", "both_drawdown"];
@@ -69,7 +69,7 @@ for (const view of views) {
   const active = await page.locator(`[data-view="${view}"]`).evaluate((node) => !node.hidden && node.classList.contains("is-active"));
   if (active) visited.push(view);
 }
-checks.push(check("All nine navigation views activate", visited.length === views.length, visited));
+checks.push(check("All seven operator surfaces activate", visited.length === views.length, visited));
 
 await page.locator('[data-nav="attribution"]').click();
 const factorLensButtons = await page.locator("[data-factor-lens]").count();
@@ -86,30 +86,40 @@ for (const lens of requiredFactorLenses) {
   });
 }
 checks.push(check(
-  "All five decomposition lenses are rendered and exercised",
+  "All five production decomposition lenses are rendered and exercised",
   factorLensButtons === requiredFactorLenses.length
     && factorLensEvidence.length === requiredFactorLenses.length
     && factorLensEvidence.every((item) => item.active === "true" && item.boundary?.includes("never concatenated") && item.chips === 9 && item.rows === 9),
   factorLensEvidence,
 ));
-await page.locator('[data-factor-lens="HISTORICAL_MINIMUM_PROOF"]').click();
+await page.locator('[data-factor-lens="DYNAMIC_STYLE"]').click();
 const factorRows = await page.locator("#factor-model-table tbody tr").count();
 const factorChips = await page.locator("[data-factor-strategy]").count();
-await page.locator("[data-factor-strategy]").first().click();
+await page.locator('[data-factor-strategy]:not(.is-unavailable):not(.is-diagnostic)').first().click();
 const dynamicChart = await page.locator(".dynamic-chart").count();
 const dynamicValidation = await page.locator("#factor-detail").textContent();
 checks.push(check(
-  "Dynamic factor path and static benchmark are visible",
-  dynamicChart === 1 && dynamicValidation?.includes("Dynamic minus static") && dynamicValidation?.includes("Train LOO predicted R²"),
-  { chart_count: dynamicChart, static_benchmark: dynamicValidation?.includes("Dynamic minus static"), training_validation: dynamicValidation?.includes("Train LOO predicted R²") },
+  "Clean-room dynamic FLS path and same-factor validation are rendered",
+  dynamicChart === 1
+    && dynamicValidation?.includes("MPI-informed and non-equivalent")
+    && dynamicValidation?.includes("Same-factor static benchmark"),
+  {
+    chart_count: dynamicChart,
+    methodology_boundary: dynamicValidation?.includes("MPI-informed and non-equivalent"),
+    static_benchmark: dynamicValidation?.includes("Same-factor static benchmark"),
+  },
 ));
+await page.screenshot({
+  fullPage: true,
+  path: path.join(path.dirname(output), "dynamic-style.png"),
+});
 await page.locator("[data-factor-strategy]").last().click();
 const unavailableFactorDetail = await page.locator("#factor-detail").textContent();
-checks.push(check("Factor and alpha coverage is interactive", factorRows === 9 && factorChips === 9 && unavailableFactorDetail?.includes("UNAVAILABLE"), { factor_chips: factorChips, factor_rows: factorRows, unavailable_visible: unavailableFactorDetail?.includes("UNAVAILABLE") }));
+checks.push(check("Factor source and model states remain separate", factorRows === 9 && factorChips === 9 && unavailableFactorDetail?.includes("Source state") && unavailableFactorDetail.includes("Model state"), { factor_chips: factorChips, factor_rows: factorRows, state_separation_visible: unavailableFactorDetail?.includes("Source state") && unavailableFactorDetail.includes("Model state") }));
 await page.locator('[data-factor-lens="ECONOMIC_FACTOR"]').click();
 const economicBoundary = await page.locator("#factor-lens-boundary").textContent();
 checks.push(check(
-  "Economic, style, sector, industry, and historical lenses remain separate",
+  "Economic, style, sector, and industry lenses remain separate",
   factorLensButtons === requiredFactorLenses.length && economicBoundary?.includes("EXCESS_AND_LONG_SHORT_FACTOR_RETURN") && economicBoundary?.includes("never concatenated"),
   { exercised_lenses: factorLensEvidence.map((item) => item.lens), factor_lenses: factorLensButtons, economic_boundary: economicBoundary },
 ));
@@ -237,6 +247,12 @@ checks.push(check(
 ));
 
 await page.locator('[data-nav="capital"]').click();
+const targetStateText = await page.locator("#allocation-table").textContent();
+checks.push(check(
+  "Allocation target and drift fail closed when no target is admitted",
+  targetStateText?.includes("No accepted target decision") && !targetStateText.includes("Target inferred"),
+  { no_accepted_target_visible: targetStateText?.includes("No accepted target decision") },
+));
 await page.locator('[data-allocation-filter="RESERVE"]').click();
 const reservePressed = await page.locator('[data-allocation-filter="RESERVE"]').getAttribute("aria-pressed");
 const reserveRows = Number(await page.locator("#allocation-table").getAttribute("data-visible-rows"));
@@ -248,6 +264,54 @@ checks.push(check("Allocation filters preserve 9 plus reserve", reserveRows === 
 const positionRows = Number(await page.locator("#position-table").getAttribute("data-visible-rows"));
 const positionText = await page.locator("#position-table").textContent();
 checks.push(check("Current positions retain mapped strategy attribution", positionRows > 0 && !positionText?.includes("AVAILABLE UNMAPPED") && !positionText?.includes("No accepted strategy"), { mapped_rows: positionRows, unmapped_visible: Boolean(positionText?.includes("UNMAPPED")) }));
+const accountOptions = await page.locator("#context-account option").evaluateAll((nodes) => nodes.map((node) => ({ label: node.textContent?.trim(), value: node.value })));
+const firstPositionAccount = await page.evaluate(() => window.PORTFOLIO_DATA.positions[0]?.account_id);
+await page.locator("#context-account").selectOption(firstPositionAccount);
+const selectedAccountLabel = await page.locator("#context-account option:checked").textContent();
+const accountContextSummary = await page.locator("#context-summary").textContent();
+const filteredPositionRows = Number(await page.locator("#position-table").getAttribute("data-visible-rows"));
+const lifecycleAccountRows = await page.locator("#lifecycle-table tbody tr[data-account-id]").evaluateAll((nodes) => nodes.map((node) => ({ account: node.dataset.accountId, label: node.cells[0]?.textContent?.trim() })));
+const positionAccountRows = await page.locator("#position-table tbody tr[data-account-id]").evaluateAll((nodes) => nodes.map((node) => ({ account: node.dataset.accountId, label: node.cells[2]?.textContent?.trim() })));
+await page.locator('[data-nav="risk"]').click();
+const persistentAccount = await page.locator("#context-account").inputValue();
+const riskAccountRows = await page.locator("#performance-table tbody tr[data-account-id], #historical-gap-table tbody tr[data-account-id]").evaluateAll((nodes) => nodes.map((node) => ({ account: node.dataset.accountId, label: node.cells[0]?.textContent?.trim() })));
+checks.push(check(
+  "Privacy-safe account context filters lifecycle, positions, and performance",
+  accountOptions.length === 20
+    && new Set(accountOptions.map((item) => item.label)).size === 20
+    && firstPositionAccount
+    && persistentAccount === firstPositionAccount
+    && selectedAccountLabel
+    && selectedAccountLabel !== "Provider account"
+    && accountContextSummary?.includes(selectedAccountLabel)
+    && filteredPositionRows > 0
+    && lifecycleAccountRows.length > 0
+    && positionAccountRows.length > 0
+    && riskAccountRows.length > 0
+    && [...lifecycleAccountRows, ...positionAccountRows, ...riskAccountRows].every((row) => row.account === firstPositionAccount && row.label === selectedAccountLabel),
+  {
+    account_options: accountOptions.length,
+    filtered_positions: filteredPositionRows,
+    lifecycle_rows: lifecycleAccountRows.length,
+    performance_rows: riskAccountRows.length,
+    persisted_account: persistentAccount,
+    selected_account: firstPositionAccount,
+    selected_label: selectedAccountLabel,
+  },
+));
+await page.locator("#context-reset").click();
+await page.locator('[data-nav="capital"]').click();
+const firstStrategy = await page.locator("#context-strategy option").nth(1).getAttribute("value");
+await page.locator("#context-strategy").selectOption(firstStrategy);
+const contextualSummary = await page.locator("#context-summary").textContent();
+await page.locator('[data-nav="risk"]').click();
+const persistentStrategy = await page.locator("#context-strategy").inputValue();
+checks.push(check(
+  "Account and strategy context persists across surfaces",
+  firstStrategy && persistentStrategy === firstStrategy && contextualSummary?.includes(firstStrategy),
+  { selected_strategy: firstStrategy, persisted_strategy: persistentStrategy, summary: contextualSummary },
+));
+await page.locator("#context-reset").click();
 await page.locator('[data-nav="risk"]').click();
 const historicalGapRows = await page.locator("#historical-gap-table tbody tr").count();
 const historicalGapHeading = await page.locator("#historical-gap-badge").textContent();
@@ -257,7 +321,9 @@ checks.push(check(
   { historical_gap_rows: historicalGapRows, label: historicalGapHeading, mapped_current_positions: positionRows },
 ));
 
-await page.locator('[data-nav="candidates"]').click();
+await page.locator('[data-nav="data"]').click();
+await page.locator("#candidate-appendix-button").click();
+const candidateActive = await page.locator('[data-view="candidates"]').evaluate((node) => !node.hidden && node.classList.contains("is-active"));
 await page.locator('[data-tier-filter="Tier 1"]').click();
 const tier1Rows = Number(await page.locator("#candidate-table").getAttribute("data-visible-rows"));
 await page.locator("#candidate-search").fill("CAOS");
@@ -267,7 +333,7 @@ await page.locator('[data-tier-filter="all"]').click();
 const allCandidateRows = Number(await page.locator("#candidate-table").getAttribute("data-visible-rows"));
 checks.push(check("Frozen candidate tier filter is stable", tier1Rows === 5, { tier1: tier1Rows }));
 checks.push(check("Frozen candidate search is stable", caosRows === 1, { query: "CAOS", rows: caosRows }));
-checks.push(check("Frozen candidate appendix contains 33 rows", allCandidateRows === 33, { rows: allCandidateRows }));
+checks.push(check("Frozen candidate appendix remains separate from primary navigation", candidateActive && allCandidateRows === 33 && await page.locator('[data-nav="candidates"]').count() === 0, { active_from_appendix_link: candidateActive, primary_nav_buttons: await page.locator('[data-nav="candidates"]').count(), rows: allCandidateRows }));
 
 await page.locator("#snapshot-button").click();
 const toast = await page.locator("#toast").textContent();
@@ -290,7 +356,8 @@ checks.push(check(
 await page.locator('[data-nav="risk"]').click();
 const mobileHwmColumns = await page.locator("#hwm-status .validation-card").first().evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").filter(Boolean).length);
 checks.push(check("Mobile HWM governor uses one readable column", mobileHwmColumns === 1, { rendered_columns: mobileHwmColumns }));
-await page.locator('[data-nav="signals"]').click();
+await page.locator('[data-nav="command"]').click();
+await page.locator('[data-open-view="signals"]').first().click();
 const robuxioEvidence = await page.locator("#implementation-table tbody tr", { hasText: "Robuxio" }).textContent();
 checks.push(check(
   "Provider-custodied Robuxio account NAV is labeled account-live",

@@ -15,22 +15,20 @@
       <aside class="sidebar" aria-label="Control panel navigation">
         <div class="brand"><span class="brand-mark" aria-hidden="true">VC</span><div><div class="brand-name">V Capital</div><div class="brand-subtitle">Portfolio control</div></div></div>
         <nav class="nav-stack" aria-label="Dashboard sections">
-          <button class="nav-item is-active" type="button" data-nav="command" aria-current="page"><span class="nav-index">01</span><span>Command</span></button>
-          <button class="nav-item" type="button" data-nav="capital"><span class="nav-index">02</span><span>Capital</span></button>
-          <button class="nav-item" type="button" data-nav="risk"><span class="nav-index">03</span><span>Risk</span></button>
-          <button class="nav-item" type="button" data-nav="signals"><span class="nav-index">04</span><span>Signals</span></button>
-          <button class="nav-item" type="button" data-nav="attribution"><span class="nav-index">05</span><span>Factor &amp; alpha</span></button>
-          <button class="nav-item" type="button" data-nav="dependence"><span class="nav-index">06</span><span>Dependence</span></button>
-          <button class="nav-item" type="button" data-nav="weekly"><span class="nav-index">07</span><span>Weekly returns</span></button>
-          <button class="nav-item" type="button" data-nav="candidates"><span class="nav-index">08</span><span>Candidates</span></button>
-          <button class="nav-item" type="button" data-nav="data"><span class="nav-index">09</span><span>Data health</span></button>
+          <button class="nav-item is-active" type="button" data-nav="command" aria-current="page"><span class="nav-index">01</span><span>Portfolio</span></button>
+          <button class="nav-item" type="button" data-nav="capital"><span class="nav-index">02</span><span>Allocation &amp; lifecycle</span></button>
+          <button class="nav-item" type="button" data-nav="risk"><span class="nav-index">03</span><span>Performance &amp; HWM</span></button>
+          <button class="nav-item" type="button" data-nav="attribution"><span class="nav-index">04</span><span>Factors &amp; alpha</span></button>
+          <button class="nav-item" type="button" data-nav="dependence"><span class="nav-index">05</span><span>Dependence</span></button>
+          <button class="nav-item" type="button" data-nav="weekly"><span class="nav-index">06</span><span>Weekly returns</span></button>
+          <button class="nav-item" type="button" data-nav="data"><span class="nav-index">07</span><span>Data health</span></button>
         </nav>
         <div class="sidebar-note"><div class="eyebrow">Mandate firewall</div><div class="reserve-lock"><span aria-hidden="true">◆</span> Reserve risk budget: $0</div><p>Read-only local evidence. No brokerage connection, order path, or trade authorization.</p></div>
       </aside>
 
       <div class="workspace">
         <header class="topbar">
-          <div><div class="eyebrow">Immutable accepted snapshot · not a live URL</div><h1 id="page-title" aria-live="polite">Command</h1></div>
+          <div><div class="eyebrow">Immutable accepted snapshot · not a live URL</div><h1 id="page-title" aria-live="polite">Portfolio</h1></div>
           <div class="topbar-meta">
             <div class="as-of"><span>Portfolio</span><strong id="portfolio-as-of">Loading…</strong></div>
             <div class="as-of"><span>Freshness</span><strong id="freshness-as-of">Loading…</strong></div>
@@ -39,6 +37,14 @@
             <button id="snapshot-button" class="ghost-button" type="button">Snapshot info</button>
           </div>
         </header>
+
+        <section class="context-bar" aria-label="Persistent portfolio context">
+          <div class="context-heading"><span class="eyebrow">Analysis context</span><strong id="context-summary">All accepted accounts and strategies</strong></div>
+          <label><span>Account</span><select id="context-account"><option value="ALL">All accounts</option></select></label>
+          <label><span>Strategy</span><select id="context-strategy"><option value="ALL">All strategies</option></select></label>
+          <div class="context-as-of"><span>Accepted as of</span><strong id="context-as-of">Loading…</strong></div>
+          <button id="context-reset" class="ghost-button" type="button">Reset context</button>
+        </section>
 
         <main id="main-content" tabindex="-1">
           <div id="loading-state" class="loading-state" role="status"><span class="loading-pulse" aria-hidden="true"></span>Loading accepted portfolio evidence…</div>
@@ -51,28 +57,31 @@
               <article class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Evidence gates</div><h3>Every unavailable fact stays unavailable</h3></div><span class="badge badge-danger">Fail closed</span></div><div id="gate-stack" class="gate-stack"></div></article>
               <article class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Capital perimeter</div><h3>Reserve remains outside strategy risk</h3></div></div><div id="capital-ring" class="ring-layout"></div></article>
               <article class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Current strategy evidence</div><h3>Account-live coverage by strategy</h3></div><span class="badge badge-warning">Coverage-aware</span></div><div id="strategy-coverage-bars" class="bar-list"></div></article>
-              <article class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Operator queue</div><h3>What blocks a capital decision</h3></div></div><ol id="operator-queue" class="operator-queue"></ol></article>
+              <article class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Material exceptions</div><h3>Open the evidence needed to remediate</h3></div></div><ol id="operator-queue" class="operator-queue"></ol></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Implementation and cost</div><h3>Current-strategy evidence at a glance</h3></div><button class="ghost-button" type="button" data-open-view="signals">Inspect reconciliation detail</button></div><div class="table-wrap wide"><table id="portfolio-implementation-table"><caption>Implementation, costs, and model readiness</caption></table></div></article>
               <article class="panel span-12 thesis-panel"><div class="eyebrow">Decision boundary</div><blockquote>Current evidence supports monitoring and reconciliation—not additional systematic risk or execution.</blockquote><div id="construction-points" class="thesis-points"></div></article>
             </div>
           </section>
 
           <section class="view" data-view="capital" aria-labelledby="capital-heading" hidden>
-            <div class="section-intro"><div><div class="eyebrow">Capital map</div><h2 id="capital-heading">Where the money is, with identity and coverage intact</h2></div><p>Current positions inherit strategy identity only from one effective account assignment. Missing or ambiguous mappings are never inferred.</p></div>
+            <div class="section-intro"><div><div class="eyebrow">Allocation &amp; lifecycle</div><h2 id="capital-heading">Actual capital, accepted targets, and effective assignments</h2></div><p>Actual holdings and lifecycle intervals come from accepted evidence. Target and drift remain unavailable unless a target decision has been admitted—never reverse-engineered from current weights.</p></div>
             <div id="capital-kpis" class="kpi-grid"></div>
             <div class="grid grid-12">
-              <article class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Current allocation</div><h3>Nine strategies plus reserve</h3></div><div class="segmented" aria-label="Allocation scope filter"><button type="button" class="segment is-active" data-allocation-filter="all">All</button><button type="button" class="segment" data-allocation-filter="SYSTEMATIC">Systematic</button><button type="button" class="segment" data-allocation-filter="RESERVE">Reserve</button></div></div><div class="table-wrap"><table id="allocation-table"><caption>Accepted current allocations</caption></table></div></article>
+              <article class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Allocation state</div><h3>Actual versus accepted target</h3></div><div class="segmented" aria-label="Allocation scope filter"><button type="button" class="segment is-active" data-allocation-filter="all">All</button><button type="button" class="segment" data-allocation-filter="SYSTEMATIC">Systematic</button><button type="button" class="segment" data-allocation-filter="RESERVE">Reserve</button></div></div><div class="callout callout-neutral">If no accepted target is present, target and drift display as unavailable. Actual allocation is not treated as its own target.</div><div class="table-wrap"><table id="allocation-table"><caption>Accepted actual allocations and target state</caption></table></div></article>
               <article class="panel span-4"><div class="panel-heading"><div><div class="eyebrow">Provider footprint</div><h3>Accounts by provider</h3></div></div><div id="provider-bars" class="bar-list"></div><div class="callout callout-neutral">Counts describe accepted account identities, not provider completeness.</div></article>
               <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Strategy register</div><h3>Economic family, cost, performance, and gaps</h3></div></div><div class="table-wrap wide"><table id="strategy-table"><caption>Current strategy evidence</caption></table></div></article>
-              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Current holdings</div><h3>Positions attributed by effective account assignment</h3></div><span class="badge">No holding-based inference</span></div><div class="table-wrap wide"><table id="position-table"><caption>Accepted current positions and strategy attribution</caption></table></div></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Assignment lifecycle</div><h3>Effective-dated account-to-strategy intervals</h3></div><span class="badge badge-warning">Not target history</span></div><div class="table-wrap wide"><table id="lifecycle-table"><caption>Accepted effective assignment intervals</caption></table></div></article>
+              <article class="panel span-12"><div class="panel-heading position-heading"><div><div class="eyebrow">Current holdings</div><h3>Positions attributed by effective account assignment</h3></div><div class="position-tools"><label class="search-control"><span class="sr-only">Search positions</span><input id="position-search" type="search" placeholder="Search strategy or security" /></label><span id="position-summary" class="badge">Loading</span></div></div><div class="table-wrap wide"><table id="position-table"><caption>Accepted current positions and strategy attribution</caption></table></div><div class="table-pagination"><button id="position-page-previous" class="ghost-button" type="button">Previous</button><span id="position-page-status">Page 1</span><button id="position-page-next" class="ghost-button" type="button">Next</button></div></article>
             </div>
           </section>
 
           <section class="view" data-view="risk" aria-labelledby="risk-heading" hidden>
-            <div class="section-intro"><div><div class="eyebrow">Risk evidence</div><h2 id="risk-heading">Governed HWM perimeter, with every exclusion named</h2></div><p>The 15% HWM applies to the explicitly governed systematic perimeter. Composer is the only approved de-minimis exclusion; all other assigned sleeves, including residual values, remain inside until a mandate revision. Provider-custodied NAV qualifies only while its governed freshness and evidence gates pass.</p></div>
+            <div class="section-intro"><div><div class="eyebrow">Performance &amp; HWM</div><h2 id="risk-heading">Coverage-aware performance and the governed HWM perimeter</h2></div><p>HWM automation can be blocked even when source NAV exists: provider-custodied NAV qualifies only while its governed freshness and evidence gates pass. Performance comparisons never concatenate incompatible evidence layers.</p></div>
             <div id="risk-kpis" class="kpi-grid"></div>
             <div class="grid grid-12">
               <article class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Correlation-one stress</div><h3>Accepted adverse scenario</h3></div><span class="badge">15% HWM boundary</span></div><div id="stress-bar" class="scenario-bars"></div></article>
               <article class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">HWM governor</div><h3>Availability, not an inferred number</h3></div></div><div id="hwm-status" class="validation-cards"></div></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Comparison context</div><h3>Selected strategy and benchmark evidence</h3></div></div><div id="performance-comparison" class="analytics-detail-grid"></div></article>
               <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Performance evidence</div><h3>Account-by-strategy TWR and MWR availability</h3></div><span class="badge badge-warning">No evidence concatenation</span></div><div class="table-wrap wide"><table id="performance-table"><caption>Coverage-aware performance segments</caption></table></div></article>
               <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Historical attribution gaps</div><h3>Legacy General intervals—not current-position mapping failures</h3></div><span id="historical-gap-badge" class="badge badge-danger">Unresolved history</span></div><div class="callout callout-neutral">Accepted current positions are reported separately on Capital. These intervals block complete historical account-by-strategy attribution; they do not imply that current holdings are unmapped.</div><div class="table-wrap wide"><table id="historical-gap-table"><caption>Unresolved historical assignment intervals</caption></table></div></article>
             </div>
@@ -88,11 +97,11 @@
           </section>
 
           <section class="view" data-view="attribution" aria-labelledby="attribution-heading" hidden>
-            <div class="section-intro"><div><div class="eyebrow">Factor composition and alpha</div><h2 id="attribution-heading">Explain changing exposures; expose what is missing</h2></div><p>Static RBSA and clean-room dynamic FLS models use training-only selection and sealed walk-forward holdouts. This is an MPI-informed, non-equivalent implementation—not MPI software or a reproduction of undisclosed defaults.</p></div>
+            <div class="section-intro"><div><div class="eyebrow">Factor composition and alpha</div><h2 id="attribution-heading">Independent factor, style, industry, and dynamic lenses</h2></div><p>Source returns, model computation, and PM validation are separate states. Static lenses remain distinct from the clean-room dynamic FLS path; the latter is MPI-informed and explicitly non-equivalent to proprietary MPI output.</p></div>
             <div id="factor-kpis" class="kpi-grid"></div>
             <div class="grid grid-12">
               <article class="panel span-12 factor-lens-control"><div><span class="eyebrow">Independent analysis lens</span><div id="factor-lens-selector" class="segmented" aria-label="Factor and style analysis lens"></div></div><div id="factor-lens-boundary" class="callout callout-neutral"></div></article>
-              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Current-strategy model register</div><h3>Estimator evidence and sealed-holdout decision state</h3></div><span id="factor-method-badge" class="badge badge-warning">Non-equivalent methodology</span></div><div class="table-wrap wide"><table id="factor-model-table"><caption>Current strategy factor and alpha model coverage</caption></table></div></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Current-strategy model register</div><h3>Source availability and model acceptance</h3></div><span id="factor-method-badge" class="badge badge-warning">Non-equivalent methodology</span></div><div class="table-wrap wide"><table id="factor-model-table"><caption>Current strategy source and factor-model coverage</caption></table></div></article>
               <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Strategy detail</div><h3>Exposure, alpha, fit, and holdout contribution</h3></div><div id="factor-strategy-selector" class="strategy-selector" aria-label="Factor strategy selection"></div></div><div id="factor-detail"></div></article>
               <article class="panel span-12 analytics-boundary"><div class="eyebrow">Interpretation boundary</div><p>Exposure is a fitted sensitivity, not a holding. Net alpha is reported only on the observed return basis. Gross alpha stays unavailable until cost coverage is complete. Factor, alpha, fitted return, and residual reconcile within the accepted analytics tolerance.</p></article>
             </div>
@@ -120,7 +129,7 @@
           </section>
 
           <section class="view" data-view="candidates" aria-labelledby="candidates-heading" hidden>
-            <div class="section-intro"><div><div class="eyebrow">Frozen audit appendix</div><h2 id="candidates-heading">Candidate research is not current strategy authority</h2></div><p id="candidate-boundary">This dated appendix is preserved for context only. It is not refreshed, ranked, or connected to capital.</p></div>
+            <div class="section-intro"><div><div class="eyebrow">Frozen audit appendix</div><h2 id="candidates-heading">Candidate research is not current strategy authority</h2></div><div><p id="candidate-boundary">This dated appendix is preserved for context only. It is not refreshed, ranked, or connected to capital.</p><button class="ghost-button" type="button" data-open-view="data">Return to data health</button></div></div>
             <div id="candidate-kpis" class="kpi-grid"></div>
             <div class="grid grid-12"><article class="panel span-12"><div class="panel-heading candidate-tools"><div><div class="eyebrow">Frozen retail universe</div><h3>Provider and implementation screen</h3></div><div class="filter-row"><div class="segmented" aria-label="Candidate tier filter"><button type="button" class="segment is-active" data-tier-filter="all">All</button><button type="button" class="segment" data-tier-filter="Tier 1">Tier 1</button><button type="button" class="segment" data-tier-filter="Tier 2">Tier 2</button><button type="button" class="segment" data-tier-filter="Tier 3">Tier 3</button><button type="button" class="segment" data-tier-filter="Tier 4">Tier 4</button></div><label class="search-control"><span class="sr-only">Search frozen candidates</span><input id="candidate-search" type="search" placeholder="Search frozen candidate or role" /></label></div></div><div class="table-wrap wide"><table id="candidate-table"><caption>Frozen candidate/provider audit appendix</caption></table></div></article></div>
           </section>
@@ -131,8 +140,10 @@
             <div class="grid grid-12">
               <article class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Coverage</div><h3>Fact availability and known gaps</h3></div></div><div class="table-wrap"><table id="coverage-table"><caption>Coverage and data quality</caption></table></div></article>
               <article class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Generation authority</div><h3>Accepted local inputs</h3></div></div><div id="validation-cards" class="validation-cards"></div></article>
-              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Lineage</div><h3>Source and generation hashes</h3></div></div><div class="table-wrap wide"><table id="source-table"><caption>Accepted report provenance</caption></table></div></article>
-              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Known limits</div><h3>What this control panel does not prove</h3></div></div><ul id="limitations-list" class="limitations-list"></ul></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Remediation queue</div><h3>Material exceptions and their evidence destination</h3></div></div><div class="table-wrap wide"><table id="remediation-table"><caption>Blocking exceptions and remediation routes</caption></table></div></article>
+              <details class="panel span-12 disclosure-panel"><summary><span><span class="eyebrow">Lineage</span><strong>Source and generation hashes</strong></span><span>Open evidence</span></summary><div class="table-wrap wide"><table id="source-table"><caption>Accepted report provenance</caption></table></div></details>
+              <details class="panel span-12 disclosure-panel"><summary><span><span class="eyebrow">Known limits</span><strong>What this control panel does not prove</strong></span><span>Open limits</span></summary><ul id="limitations-list" class="limitations-list"></ul></details>
+              <article class="panel span-12 appendix-card"><div><div class="eyebrow">Separate research appendix</div><h3>Frozen candidate catalog</h3><p>Dated research context only. It cannot change current strategies, readiness, or allocation.</p></div><button id="candidate-appendix-button" class="ghost-button" type="button" data-open-view="candidates">Open frozen appendix</button></article>
             </div>
           </section>
         </main>

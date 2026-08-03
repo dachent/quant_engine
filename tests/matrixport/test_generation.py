@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import date
 import hashlib
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 from quant_engine.matrixport import (
     MatrixportGenerationError,
     build_generation,
+    draft_generation_spec,
     stage_generation_candidate,
 )
 
@@ -199,3 +201,16 @@ def test_hash_coverage_and_gap_drift_fail_closed(tmp_path: Path) -> None:
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(MatrixportGenerationError, match="known gaps differ"):
         build_generation(spec)
+
+
+def test_verified_export_can_draft_its_hash_bound_spec(tmp_path: Path) -> None:
+    original = _spec(tmp_path)
+    run_root = Path(json.loads(original.read_text(encoding="utf-8"))["run_root"])
+    drafted = tmp_path / "drafted.json"
+    drafted.write_bytes(draft_generation_spec(run_root, date(2026, 7, 26)))
+
+    catalog, manifest, _ = build_generation(drafted)
+
+    assert catalog["request_count"] == 2
+    assert len(catalog["datasets"]) == 2
+    assert manifest.as_of_date == date(2026, 7, 26)
