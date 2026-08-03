@@ -2223,7 +2223,7 @@ def _panel_data(
                     )
                     + "."
                     if hwm_summary["uncovered_strategies"]
-                    else "Every included HWM-perimeter sleeve has qualified daily NAV."
+                    else "Every included HWM-perimeter sleeve has qualified governed account-live or provider-live return evidence."
                 )
             ),
         },
