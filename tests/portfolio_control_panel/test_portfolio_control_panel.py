@@ -1330,6 +1330,7 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
     assert launcher.is_file()
     launcher_text = launcher.read_text(encoding="utf-8")
     assert f"generations/{pointer.generation_id}/index.html" in launcher_text
+    assert '"+location.hash' in launcher_text
     assert published["stable_launcher"] == str(launcher)
     assert (
         published["launcher_sha256"]
@@ -1396,6 +1397,54 @@ def test_stable_launcher_browser_qa_proves_redirect(
         (launcher_qa / "stable-launcher-validation.json").read_text(encoding="utf-8")
     )
     assert persisted == result
+
+
+def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "candidate")
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
+    launcher = inputs["output"] / "index.html"
+    launcher_qa = _qa(candidate, tmp_path / "launcher")
+    launcher_url = launcher.resolve().as_uri()
+    generation_url = (
+        (
+            inputs["output"]
+            / "generations"
+            / str(published["generation_id"])
+            / "index.html"
+        )
+        .resolve()
+        .as_uri()
+    )
+    for name in panel.CAPTURES:
+        manifest_path = launcher_qa / name / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["target"] = f"{launcher_url}#{name}"
+        manifest["final_url"] = generation_url
+        _write_json(manifest_path, manifest)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="stable launcher browser QA failed",
+    ):
+        panel.validate_stable_launcher_qa(
+            launcher, launcher_qa, str(published["generation_id"])
+        )
 
 
 def test_publication_manifest_uses_later_operational_freshness_date(
