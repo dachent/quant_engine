@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -134,8 +135,31 @@ def test_complete_recovery_rehearsal_passes(tmp_path: Path) -> None:
     assert boundary["caught_boundary_count"] == 9
     assert boundary["crash_boundary_count"] == 6
     assert boundary["rollback_interruption"]["status"] == "PASS"
+    assert boundary["rollback_interruption"]["case_count"] == 3
+    assert {item["case_id"] for item in boundary["rollback_interruptions"]} == {
+        "TARGET_WITH_WORK_REMAINING",
+        "COMPANION_RESTORE_PREVIOUS_WITH_TARGETS_REMAINING",
+        "COMPANION_DELETE_PREVIOUSLY_ABSENT_WITH_TARGETS_REMAINING",
+    }
+    assert all(
+        item["interrupted_state"] == "ROLLING_BACK"
+        and item["resumed_state"] == "ROLLED_BACK"
+        and item["process_id"] > 0
+        and item["exit_code"] != 0
+        for item in boundary["rollback_interruptions"]
+    )
     assert (
         boundary["process_termination_method"] == "OPERATING_SYSTEM_PROCESS_TERMINATION"
+    )
+    terminations = boundary["process_terminations"]
+    assert boundary["process_termination_count"] == len(terminations) == 18
+    assert all(
+        item["process_id"] > 0 and item["exit_code"] != 0 for item in terminations
+    )
+    assert all(
+        item["process_id"] > 0 and item["exit_code"] != 0
+        for item in boundary["boundaries"]
+        if item["failure_mode"] == "PROCESS_TERMINATION"
     )
     assert {
         (item["stale_state"], item["recovered_state"])
@@ -158,7 +182,17 @@ def test_complete_recovery_rehearsal_passes(tmp_path: Path) -> None:
     assert dated["append_only_correction"] is True
     assert dated["restored_release_two"] is True
     assert Path(str(result["evidence_path"])).is_file()
+    durable = json.loads(
+        (output / "recovery-rehearsal.json").read_text(encoding="utf-8")
+    )
+    assert durable["boundary_rehearsal"]["process_terminations"] == terminations
+    assert (
+        durable["boundary_rehearsal"]["rollback_interruptions"]
+        == boundary["rollback_interruptions"]
+    )
     assert (output / "rb").is_dir()
+    assert (output / "rc" / "p").is_dir()
+    assert (output / "rc" / "a").is_dir()
     assert not (output / "rollback-interruption").exists()
 
 

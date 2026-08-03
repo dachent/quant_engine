@@ -208,6 +208,25 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
 
 Publication hash-binds the accepted portfolio, decomposition, correlation, and
 weekly-return artifacts, stages an immutable generation, copies the panel and
+both the browser and content-addressed semantic validation results, then creates
+the relative stable launcher. Before coordinated release, run the same browser
+suite against that staged launcher and validate that every capture begins at
+the launcher and resolves to the expected immutable generation:
+
+```powershell
+node apps/portfolio-control-panel/browser_qa.mjs `
+  --html (Join-Path <staged-panel-root> "index.html") `
+  --output <stable-launcher-qa-directory>
+uv run --frozen --no-sync python tools/portfolio_control_panel.py launcher-qa `
+  --launcher (Join-Path <staged-panel-root> "index.html") `
+  --qa-dir <stable-launcher-qa-directory> `
+  --expected-generation-id <generation-id>
+```
+
+Hash the resulting `stable-launcher-validation.json` as a release gate. Repeat
+the launcher browser capture against the production launcher after coordinated
+commit so acceptance proves the actual released `file://` entry point as well
+as the byte-identical staged companion.
 QA evidence,
 and advances `dataPortfolio/control-panel/CURRENT.json` only after all checks
 pass. A failed build or QA run remains a non-authoritative candidate; a failed
