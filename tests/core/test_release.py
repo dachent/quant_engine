@@ -24,6 +24,7 @@ from quant_engine.core import (
     publish_generation,
     read_current,
     read_release,
+    recover_release,
     stage_generation,
 )
 
@@ -323,4 +324,169 @@ def test_existing_release_lock_blocks_commit(tmp_path: Path) -> None:
             coordination_root=coordination,
             release_id=manifest.release_id,
             roots={"root": root},
+        )
+
+
+class _HardCrash(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("crash_step", ("after-target-intent", "after-target"))
+def test_explicit_recovery_closes_target_crash_windows(
+    tmp_path: Path, crash_step: str
+) -> None:
+    root = tmp_path / "root"
+    previous, proposed = _stage_pair(root, "crash-window")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    def crash(step: str, item: str) -> None:
+        if step == crash_step and item == "root":
+            raise _HardCrash()
+
+    with pytest.raises(_HardCrash):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            fault_hook=crash,
+        )
+    _, interrupted = read_release(coordination, manifest.release_id)
+    assert interrupted.state is ReleaseState.COMMITTING
+    assert interrupted.applied_targets == ("root",)
+
+    # A real process termination can leave this durable lock behind.
+    (coordination / "release.lock").write_text(
+        manifest.release_id + "\n", encoding="ascii"
+    )
+    with pytest.raises(ReleaseConflictError, match="explicit confirmation"):
+        recover_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+    recovered = recover_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+        clear_stale_lock=True,
+    )
+    assert recovered.state is ReleaseState.ROLLED_BACK
+    assert read_current(root).generation_id == previous.generation_id
+
+
+def test_interrupted_rollback_is_idempotently_resumed(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    previous, proposed = _stage_pair(root, "rollback-crash")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    def crash_commit(step: str, item: str) -> None:
+        if step == "after-target" and item == "root":
+            raise _HardCrash()
+
+    with pytest.raises(_HardCrash):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            fault_hook=crash_commit,
+        )
+
+    def crash_rollback(step: str, item: str) -> None:
+        if step == "after-target-restore" and item == "root":
+            raise _HardCrash()
+
+    with pytest.raises(_HardCrash):
+        recover_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            fault_hook=crash_rollback,
+        )
+    assert read_current(root).generation_id == previous.generation_id
+    _, interrupted = read_release(coordination, manifest.release_id)
+    assert interrupted.state is ReleaseState.ROLLING_BACK
+
+    recovered = recover_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+    )
+    assert recovered.state is ReleaseState.ROLLED_BACK
+    assert read_current(root).generation_id == previous.generation_id
+
+
+def test_post_mutation_conflict_is_rolled_back(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    previous, proposed = _stage_pair(root, "conflict")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    def conflict(step: str, item: str) -> None:
+        if step == "after-target" and item == "root":
+            raise ReleaseConflictError("injected post-mutation conflict")
+
+    with pytest.raises(ReleaseCommitError, match="predecessor graph was restored"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            fault_hook=conflict,
+        )
+    assert read_current(root).generation_id == previous.generation_id
+
+
+def test_recovery_refuses_stale_lock_for_another_release(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "wrong-lock")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    def crash(step: str, item: str) -> None:
+        if step == "after-target-intent":
+            raise _HardCrash()
+
+    with pytest.raises(_HardCrash):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            fault_hook=crash,
+        )
+    (coordination / "release.lock").write_text("f" * 64 + "\n", encoding="ascii")
+    with pytest.raises(ReleaseConflictError, match="identity differs"):
+        recover_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            clear_stale_lock=True,
         )

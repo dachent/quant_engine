@@ -26,11 +26,13 @@ from quant_engine.core.release import (
     CompanionInput,
     GateEvidence,
     ReleaseCommitError,
+    ReleaseConflictError,
     ReleaseManifest,
     ReleaseState,
     commit_release,
     prepare_release,
     read_release,
+    recover_release,
 )
 
 
@@ -136,7 +138,7 @@ def _restore_companion(
 def rehearse_release_boundaries(
     *, spec: PipelineSpec, release_id: str, output_root: Path
 ) -> dict[str, object]:
-    """Inject a failure before and after every accepted release boundary."""
+    """Prove caught-failure and process-termination recovery at every boundary."""
 
     source_before, manifest = _source_state(spec, release_id)
     if manifest.release_id != release_id:
@@ -152,16 +154,30 @@ def rehearse_release_boundaries(
     proposed_companions = {
         item.companion_id: item.source_path.read_bytes() for item in spec.companions
     }
-    boundaries = [
+    caught_boundaries = [
         *(("before-target", item.root_id) for item in manifest.targets),
+        *(("after-target-intent", item.root_id) for item in manifest.targets),
         *(("after-target", item.root_id) for item in manifest.targets),
         *(("before-companion", item.companion_id) for item in manifest.companions),
+        *(
+            ("after-companion-intent", item.companion_id)
+            for item in manifest.companions
+        ),
+        *(("after-companion", item.companion_id) for item in manifest.companions),
+    ]
+    crash_boundaries = [
+        *(("after-target-intent", item.root_id) for item in manifest.targets),
+        *(("after-target", item.root_id) for item in manifest.targets),
+        *(
+            ("after-companion-intent", item.companion_id)
+            for item in manifest.companions
+        ),
         *(("after-companion", item.companion_id) for item in manifest.companions),
     ]
     rows = []
     matrix_root = output_root / "f"
-    for index, (failure_step, failure_item) in enumerate(boundaries, start=1):
-        scenario = matrix_root / f"{index:02d}"
+
+    def prepare_scenario(scenario: Path) -> tuple[dict[str, Path], ReleaseManifest]:
         roots: dict[str, Path] = {}
         for target in manifest.targets:
             source_root = spec.roots[target.root_id]
@@ -205,9 +221,22 @@ def rehearse_release_boundaries(
                 for item in manifest.companions
             ),
         )
+        return roots, prepared
+
+    boundary_cases = [
+        *(("CAUGHT_EXCEPTION", *item) for item in caught_boundaries),
+        *(("PROCESS_TERMINATION", *item) for item in crash_boundaries),
+    ]
+    for index, (failure_mode, failure_step, failure_item) in enumerate(
+        boundary_cases, start=1
+    ):
+        scenario = matrix_root / f"{index:02d}"
+        roots, prepared = prepare_scenario(scenario)
 
         def fail(step: str, item: str) -> None:
             if (step, item) == (failure_step, failure_item):
+                if failure_mode == "PROCESS_TERMINATION":
+                    raise _ProcessTermination()
                 raise OSError(f"injected failure at {step}:{item}")
 
         try:
@@ -219,7 +248,29 @@ def rehearse_release_boundaries(
                 fault_hook=fail,
             )
         except ReleaseCommitError:
-            pass
+            if failure_mode != "CAUGHT_EXCEPTION":
+                raise RehearsalError("process termination was caught as an exception")
+        except _ProcessTermination:
+            if failure_mode != "PROCESS_TERMINATION":
+                raise RehearsalError("caught failure escaped as process termination")
+            lock = scenario / "c" / "release.lock"
+            lock.write_text(prepared.release_id + "\n", encoding="ascii")
+            try:
+                recover_release(
+                    coordination_root=scenario / "c",
+                    release_id=prepared.release_id,
+                    roots=roots,
+                )
+            except ReleaseConflictError:
+                pass
+            else:
+                raise RehearsalError("stale lock did not require confirmation")
+            recover_release(
+                coordination_root=scenario / "c",
+                release_id=prepared.release_id,
+                roots=roots,
+                clear_stale_lock=True,
+            )
         else:
             raise RehearsalError("injected boundary did not fail")
         _, journal = read_release(scenario / "c", prepared.release_id)
@@ -240,23 +291,84 @@ def rehearse_release_boundaries(
         rows.append(
             {
                 "failure_item": failure_item,
+                "failure_mode": failure_mode,
                 "failure_step": failure_step,
                 "journal_state": journal.state.value,
                 "restored": True,
             }
         )
+
+    # Prove rollback can itself be interrupted after an effect and resumed.
+    rollback_scenario = output_root / "rollback-interruption"
+    index += 1
+    roots, prepared = prepare_scenario(rollback_scenario)
+    first_target = manifest.targets[0].root_id
+
+    def terminate_commit(step: str, item: str) -> None:
+        if (step, item) == ("after-target", first_target):
+            raise _ProcessTermination()
+
+    try:
+        commit_release(
+            coordination_root=rollback_scenario / "c",
+            release_id=prepared.release_id,
+            roots=roots,
+            companion_contents=proposed_companions,
+            fault_hook=terminate_commit,
+        )
+    except _ProcessTermination:
+        pass
+    else:
+        raise RehearsalError("rollback interruption setup did not terminate")
+
+    def terminate_rollback(step: str, item: str) -> None:
+        if (step, item) == ("after-target-restore", first_target):
+            raise _ProcessTermination()
+
+    try:
+        recover_release(
+            coordination_root=rollback_scenario / "c",
+            release_id=prepared.release_id,
+            roots=roots,
+            fault_hook=terminate_rollback,
+        )
+    except _ProcessTermination:
+        pass
+    else:
+        raise RehearsalError("rollback interruption did not terminate")
+    _, interrupted = read_release(rollback_scenario / "c", prepared.release_id)
+    if interrupted.state is not ReleaseState.ROLLING_BACK:
+        raise RehearsalError("interrupted rollback journal state differs")
+    resumed = recover_release(
+        coordination_root=rollback_scenario / "c",
+        release_id=prepared.release_id,
+        roots=roots,
+    )
+    if resumed.state is not ReleaseState.ROLLED_BACK:
+        raise RehearsalError("interrupted rollback did not resume")
     source_after, _ = _source_state(spec, release_id)
     if source_after != source_before:
         raise RehearsalError("accepted source state changed during rehearsal")
     return {
         "boundary_count": len(rows),
         "boundaries": rows,
+        "caught_boundary_count": len(caught_boundaries),
+        "crash_boundary_count": len(crash_boundaries),
+        "rollback_interruption": {
+            "interrupted_state": ReleaseState.ROLLING_BACK.value,
+            "resumed_state": resumed.state.value,
+            "status": "PASS",
+        },
         "source_state_sha256": hashlib.sha256(
             canonical_json_bytes(source_before)
         ).hexdigest(),
         "source_unchanged": True,
         "status": "PASS",
     }
+
+
+class _ProcessTermination(BaseException):
+    """Fault used to model interpreter/process termination, not a caught error."""
 
 
 def _synthetic_manifest(label: str, as_of_date: date) -> GenerationManifest:

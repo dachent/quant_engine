@@ -86,7 +86,7 @@ $legacy = Join-Path $engine "_strategy_allocation_audit\model_harness_baseline\c
 $lensRoot = Join-Path $engine "dataPortfolio\analytics\decomposition-lenses"
 $planBundle = "<hash-bound decomposition planning bundle>"
 $weekly = Join-Path $engine "dataPortfolio\analytics\weekly-returns"
-$freshness = Join-Path $engine "dataPortfolio\releases\freshness-health.json"
+$freshness = "<exact hash-bound release freshness-health.json>"
 
 uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
   --report-root $report --legacy-panel $legacy --output-root $output `
@@ -103,6 +103,22 @@ The command resolves the accepted analytics roots as siblings of `reporting`:
 not built if any lens pointer, plan hash, schema, nine-strategy boundary,
 36-pair boundary, factor contribution identity, or correlation-one
 reconciliation differs.
+
+`--freshness-health` is mandatory. Build it deterministically from the exact
+provider-ledger generation before panel construction:
+
+```powershell
+uv run --frozen --no-sync python tools/portfolio_freshness.py `
+  --provider-ledger-root (Join-Path $engine "dataPortfolio\provider-ledger") `
+  --output $freshness
+```
+
+Every material strategy must have a `nav` or `strategy-returns` assessment.
+`STALE`, `UNAVAILABLE`, or an absent assessment revokes the HWM-available
+claim and reduces freshness-adjusted NAV coverage. `LATE` remains visible and
+escalated but does not yet block current consumers. The exact freshness file
+is also an input artifact of the panel generation and a required
+`DATA-PIPE-001` node and gate.
 
 The command prints the content-addressed candidate directory. Rebuilds from
 unchanged inputs produce the same panel ID. Verify that exact candidate before

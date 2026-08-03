@@ -63,6 +63,7 @@ from quant_engine.core.pipeline import (
     load_pipeline_spec,
     pipeline_status,
     plan_pipeline,
+    recover_pipeline,
 )
 from quant_engine.core.release import (
     CompanionInput,
@@ -78,6 +79,7 @@ from quant_engine.core.release import (
     commit_release,
     prepare_release,
     read_release,
+    recover_release,
     rollback_release,
 )
 from quant_engine.core.rehearsal import (
@@ -155,9 +157,11 @@ __all__ = [
     "load_pipeline_spec",
     "pipeline_status",
     "plan_pipeline",
+    "recover_pipeline",
     "read_current",
     "read_generation",
     "read_release",
+    "recover_release",
     "rehearse_dated_rollforwards",
     "rehearse_release_boundaries",
     "rollback_release",

@@ -128,7 +128,10 @@ def test_complete_recovery_rehearsal_passes(tmp_path: Path) -> None:
     assert result["status"] == "PASS"
     boundary = result["boundary_rehearsal"]
     assert isinstance(boundary, dict)
-    assert boundary["boundary_count"] == 6
+    assert boundary["boundary_count"] == 15
+    assert boundary["caught_boundary_count"] == 9
+    assert boundary["crash_boundary_count"] == 6
+    assert boundary["rollback_interruption"]["status"] == "PASS"
     assert boundary["source_unchanged"] is True
     dated = result["dated_rollforwards"]
     assert isinstance(dated, dict)

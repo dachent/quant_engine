@@ -90,6 +90,43 @@ def test_account_rollforward_appends_only_dates_newer_than_accepted_history() ->
     assert rows[-1]["strategy_name"] == "Strategy A"
 
 
+def test_account_overlap_is_retained_as_explicit_reconciliation_evidence() -> None:
+    source = [
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+            "strategy_id": "strategy-a",
+        }
+    ]
+    broker = [
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "schwab",
+            "return": "0.02",
+            "strategy_id": "strategy-a",
+        }
+    ]
+
+    checks = ledger._strategy_return_overlap_checks(source, broker)
+
+    assert checks == [
+        {
+            "authority_effect": (
+                "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
+            ),
+            "check_id": "strategy-return-overlap-strategy-a",
+            "compared_date_count": 1,
+            "exception_date_count": 1,
+            "maximum_absolute_difference": "0.01",
+            "status": "EXCEPTION",
+            "strategy_id": "strategy-a",
+            "tolerance": "0.000001",
+        }
+    ]
+
+
 def test_provider_live_strategy_path_never_becomes_account_authority() -> None:
     generation = ProviderGenerationIdentity(
         provider_id="matrixport",
@@ -134,3 +171,65 @@ def test_provider_live_strategy_path_never_becomes_account_authority() -> None:
     assert admissions[0].evidence_layer.value == "PROVIDER_LIVE"
     assert admissions[0].disposition.value == "RECONCILIATION_ONLY"
     assert admissions[0].account_id is None
+
+
+def test_account_and_provider_lanes_keep_independent_provider_identity() -> None:
+    ibkr = ProviderGenerationIdentity(
+        provider_id="ibkr",
+        generation_id="a" * 64,
+        manifest_sha256="b" * 64,
+        catalog_sha256="c" * 64,
+        qualification=GenerationQualification.ACCEPTED_PARTIAL,
+    )
+    p123 = ProviderGenerationIdentity(
+        provider_id="portfolio123",
+        generation_id="d" * 64,
+        manifest_sha256="e" * 64,
+        catalog_sha256="f" * 64,
+        qualification=GenerationQualification.ACCEPTED_PARTIAL,
+    )
+    rows = [
+        {
+            "date": "2026-01-01",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "ibkr",
+            "return": "0.01",
+            "strategy_id": "p123-ai-factor",
+        },
+        {
+            "date": "2026-01-01",
+            "evidence_layer": "PROVIDER_LIVE",
+            "provider_id": "portfolio123",
+            "return": "0.02",
+            "strategy_id": "p123-ai-factor",
+        },
+    ]
+    prior = [
+        {
+            "provider_id": "portfolio123",
+            "generation_id": "0" * 64,
+            "generation_as_of_date": "2025-12-31",
+            "strategy_id": "p123-ai-factor",
+            "strategy_name": "P123 AI Factor",
+            "provider": {"entity_id": "p123-model"},
+        }
+    ]
+
+    evidence = ledger._refresh_strategy_evidence(
+        rows,
+        prior,
+        {"p123-ai-factor": "P123 AI Factor"},
+        {"ibkr": ibkr, "portfolio123": p123},
+        {"ibkr": date(2026, 1, 2), "portfolio123": date(2026, 1, 3)},
+    )
+    admissions = ledger._admissions({}, evidence)
+
+    assert evidence[0]["provider_id"] == "ibkr"
+    assert evidence[0]["account"]["provider_id"] == "ibkr"
+    assert evidence[0]["account"]["generation_id"] == "a" * 64
+    assert evidence[0]["provider"]["provider_id"] == "portfolio123"
+    assert evidence[0]["provider"]["generation_id"] == "d" * 64
+    assert {(item.provider_id, item.evidence_layer.value) for item in admissions} == {
+        ("ibkr", "ACCOUNT_LIVE"),
+        ("portfolio123", "PROVIDER_LIVE"),
+    }

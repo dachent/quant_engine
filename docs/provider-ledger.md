@@ -21,6 +21,15 @@ not become account-live performance. Portfolio123 provider returns are also
 retained separately from IBKR account-live returns. The report and control
 panel may display both, but neither may rewrite the other.
 
+Each strategy evidence lane carries its own `provider_id`, `generation_id`,
+and generation as-of date. A top-level account-live identity therefore cannot
+relabel a Portfolio123 provider-live path as IBKR. Account-derived returns that
+overlap inherited accepted history are compared by exact strategy/date. The
+inherited path remains authority, while counts, tolerance, maximum absolute
+difference, and any exception are retained in `reconciliation_checks`; an
+overlapping broker path is never silently promoted or discarded without this
+evidence.
+
 Provider qualifications are explicit:
 
 - `PUBLISHED_COMPLETE` for a published provider generation within its boundary;
