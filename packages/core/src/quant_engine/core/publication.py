@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import time
 
 from quant_engine.core.contracts import (
     CoverageStatus,
@@ -23,6 +24,7 @@ from quant_engine.core.contracts import (
 
 _GENERATION_ID = re.compile(r"^[0-9a-f]{64}$")
 _POINTER_SCHEMA_VERSION = 1
+_STAGE_RENAME_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
 
 
 class GenerationConflictError(RuntimeError):
@@ -148,18 +150,24 @@ def stage_generation(root: Path, manifest: GenerationManifest) -> Path:
     temporary = Path(tempfile.mkdtemp(prefix=".stage-", dir=generations))
     try:
         _write_and_sync(temporary / "generation.json", content)
-        try:
-            temporary.rename(final_manifest.parent)
-        except FileExistsError:
-            if (
-                final_manifest.exists()
-                and not final_manifest.is_symlink()
-                and final_manifest.read_bytes() == content
-            ):
-                return final_manifest
-            raise GenerationConflictError(
-                "generation path appeared with different evidence"
-            ) from None
+        for attempt in range(len(_STAGE_RENAME_RETRY_DELAYS) + 1):
+            try:
+                temporary.rename(final_manifest.parent)
+                break
+            except FileExistsError:
+                if (
+                    final_manifest.exists()
+                    and not final_manifest.is_symlink()
+                    and final_manifest.read_bytes() == content
+                ):
+                    return final_manifest
+                raise GenerationConflictError(
+                    "generation path appeared with different evidence"
+                ) from None
+            except PermissionError:
+                if attempt == len(_STAGE_RENAME_RETRY_DELAYS):
+                    raise
+                time.sleep(_STAGE_RENAME_RETRY_DELAYS[attempt])
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)

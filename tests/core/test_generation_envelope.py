@@ -166,6 +166,29 @@ def test_stage_is_create_only_and_idempotent(tmp_path: Path) -> None:
         stage_generation(tmp_path, manifest)
 
 
+def test_stage_retries_transient_directory_rename_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest()
+    original_rename = Path.rename
+    attempts = 0
+
+    def transient_denial(source: Path, target: Path) -> Path:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("synthetic sync-provider denial")
+        return original_rename(source, target)
+
+    monkeypatch.setattr(Path, "rename", transient_denial)
+    monkeypatch.setattr(publication.time, "sleep", lambda _: None)
+
+    staged = stage_generation(tmp_path, manifest)
+
+    assert attempts == 2
+    assert staged.read_bytes() == manifest.to_json_bytes()
+
+
 def test_complete_verified_generation_publishes_atomically(tmp_path: Path) -> None:
     manifest = _manifest()
     stage_generation(tmp_path, manifest)
