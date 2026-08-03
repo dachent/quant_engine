@@ -1257,6 +1257,8 @@ def test_stale_material_strategy_blocks_hwm_claim(inputs: dict[str, Path]) -> No
     assert Decimal(data["hwm_summary"]["nav_coverage"]) < Decimal("1")
     assert data["strategies"][0]["hwm_freshness_status"] == "BLOCKED"
     assert STRATEGY_NAMES[0] not in data["advisory"]["reason"].split(";", 1)[0]
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    assert 'row.hwm_freshness_status !== "ACCEPTED"' in renderer
 
 
 def test_candidate_tamper_fails_closed(inputs: dict[str, Path]) -> None:

@@ -129,7 +129,7 @@
   }
 
   function renderRisk() {
-    const missingNav = data.strategies.filter((row) => row.hwm_scope === "INCLUDED" && row.nav_status !== "AVAILABLE").map((row) => row.strategy_name);
+    const missingNav = data.strategies.filter((row) => row.hwm_scope === "INCLUDED" && (row.nav_status !== "AVAILABLE" || row.hwm_freshness_status !== "ACCEPTED")).map((row) => row.strategy_name);
     const excludedNav = data.strategies.filter((row) => row.hwm_scope === "EXCLUDED_DE_MINIMIS").map((row) => row.strategy_name);
     const providerHwm = data.strategies.filter((row) => row.hwm_source === "ACCOUNT_LIVE_PROVIDER_OVERLAY" && row.nav_status === "AVAILABLE");
     renderKpis("#risk-kpis", [
