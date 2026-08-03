@@ -1612,6 +1612,17 @@ def test_risk_template_does_not_hard_code_provider_coverage() -> None:
     )
 
 
+def test_source_contract_tracks_frozen_legacy_renderer_not_current_template() -> None:
+    contract = json.loads(panel.SOURCE_CONTRACT.read_text(encoding="utf-8"))
+
+    assert contract["source_files"]["app.js"] == (
+        "15e406b2b9df40f5e8b2e6205eaf18669dfd5119a73f796353039ed7f3ab929c"
+    )
+    assert contract["source_files"]["app.js"] != _sha(
+        panel.DEFAULT_TEMPLATE_ROOT / "app.js"
+    )
+
+
 def test_renderer_derives_provider_lineage_labels_from_provider_payload() -> None:
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
 
