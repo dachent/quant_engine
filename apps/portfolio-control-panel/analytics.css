@@ -669,6 +669,12 @@ section[data-view="capital"] .callout-neutral {
   .matrix-shell { overflow: visible; }
 }
 
+[data-coverage-item].is-remediation-focus {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
 /* Seven-surface operator shell. The immutable snapshot remains the only data authority. */
 .context-bar {
   display: grid;

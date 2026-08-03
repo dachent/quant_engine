@@ -69,6 +69,121 @@ def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> Non
     ]
 
 
+def test_positions_select_latest_authoritative_snapshot_per_account() -> None:
+    catalog = {
+        "positions": [
+            {
+                "account_id": "account-a",
+                "as_of_date": "2026-07-01",
+                "mapping_status": "MAPPED",
+                "market_value": _amount("100"),
+                "quantity": "1",
+                "security_id": "security-old",
+                "strategy_id": "strategy-1",
+            },
+            {
+                "account_id": "account-a",
+                "as_of_date": "2026-08-01",
+                "mapping_status": "MAPPED",
+                "market_value": _amount("110"),
+                "quantity": "1",
+                "security_id": "security-new",
+                "strategy_id": "strategy-1",
+            },
+            {
+                "account_id": "account-b",
+                "as_of_date": "2026-07-15",
+                "mapping_status": "MAPPED",
+                "market_value": _amount("25"),
+                "quantity": "2",
+                "security_id": "security-b",
+                "strategy_id": "strategy-2",
+            },
+        ]
+    }
+
+    rows = reporter._positions(catalog)
+
+    assert {(row["account_id"], row["as_of_date"]) for row in rows} == {
+        ("account-a", "2026-08-01"),
+        ("account-b", "2026-07-15"),
+    }
+    assert {row["security_id"] for row in rows} == {"security-new", "security-b"}
+    assert {row["snapshot_status"] for row in rows} == {
+        "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
+    }
+
+
+def test_performance_preserves_pool_disposition_and_account_live_return_path() -> None:
+    catalog = {
+        "assignments": [
+            {
+                "account_id": "account-live",
+                "assignment_id": "assignment-live",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "pool_id": "systematic-capital",
+                "pool_mapping_status": "MAPPED",
+                "strategy_id": "strategy-live",
+                "strategy_mapping_disposition": "STRATEGY_MAPPED",
+            },
+            {
+                "account_id": "account-reserve",
+                "assignment_id": "assignment-reserve",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "mapping_status": "UNMAPPED",
+                "pool_id": "reserve-capital",
+                "pool_mapping_status": "MAPPED",
+                "strategy_id": None,
+                "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            },
+        ],
+        "calendar_coverage": [],
+        "flows": [],
+        "nav_observations": [],
+        "strategy_provider_evidence": [
+            {
+                "account": {
+                    "account_scopes": [{"account_id": "account-live"}],
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": "a" * 64,
+                "strategy_id": "strategy-live",
+            }
+        ],
+        "strategy_returns": [
+            {
+                "date": "2026-01-01",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.01",
+                "strategy_id": "strategy-live",
+            },
+            {
+                "date": "2026-01-02",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.02",
+                "strategy_id": "strategy-live",
+            },
+        ],
+    }
+
+    rows = reporter._account_strategy_performance(catalog)
+    live = next(row for row in rows if row["assignment_id"] == "assignment-live")
+    reserve = next(row for row in rows if row["assignment_id"] == "assignment-reserve")
+
+    assert live["twr_status"] == "UNAVAILABLE_INSUFFICIENT_NAV"
+    assert live["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+    assert live["return_path_observations"] == 2
+    assert live["return_path_cumulative_return"] == "0.0302"
+    assert reserve["pool_id"] == "reserve-capital"
+    assert reserve["pool_mapping_status"] == "MAPPED"
+    assert reserve["strategy_mapping_disposition"] == "RESERVE_NOT_APPLICABLE"
+
+
 def _amount(value: str) -> dict[str, str]:
     return {"currency": "USD", "status": "AVAILABLE", "value": value}
 

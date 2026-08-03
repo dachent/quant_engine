@@ -184,6 +184,32 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             ].add(_date(record.get("date"), "calendar.date"))
 
     rows: list[dict[str, Any]] = []
+    account_live_paths: dict[tuple[str, str], dict[str, Any]] = {}
+    canonical_live = _account_live_return_series(catalog)
+    for evidence in _objects(
+        catalog.get("strategy_provider_evidence", []),
+        "strategy_provider_evidence",
+    ):
+        if evidence.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(evidence.get("strategy_id"), "evidence.strategy_id")
+        canonical = canonical_live.get(strategy_id)
+        if canonical is None:
+            continue
+        account = _object(evidence.get("account"), "evidence.account")
+        for scope in _objects(account.get("account_scopes", []), "account_scopes"):
+            account_id = _text(scope.get("account_id"), "account_scope.account_id")
+            account_live_paths[(account_id, strategy_id)] = {
+                "return_path_authority": "CANONICAL_ACCOUNT_LIVE_STRATEGY_RETURNS",
+                "return_path_cumulative_return": canonical["cumulative_return"],
+                "return_path_evidence_layer": "ACCOUNT_LIVE",
+                "return_path_generation_id": evidence.get("generation_id"),
+                "return_path_observations": canonical["return_observations"],
+                "return_path_observed_end": canonical["observed_end"],
+                "return_path_observed_start": canonical["observed_start"],
+                "return_path_series_sha256": canonical["return_series_sha256"],
+                "return_path_status": "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH",
+            }
     assignments = _objects(catalog.get("assignments"), "assignments")
     for assignment in assignments:
         account_id = _text(assignment.get("account_id"), "assignment.account_id")
@@ -212,6 +238,11 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             "mwr_status": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
             "mwr_xirr": None,
             "nav_observations": 0,
+            "pool_id": assignment.get("pool_id"),
+            "pool_mapping_status": assignment.get("pool_mapping_status"),
+            "strategy_mapping_disposition": assignment.get(
+                "strategy_mapping_disposition"
+            ),
             "strategy_id": assignment.get("strategy_id"),
             "twr": None,
             "twr_status": "UNAVAILABLE",
@@ -221,6 +252,7 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             rows.append(base)
             continue
         strategy_id = _text(assignment.get("strategy_id"), "assignment.strategy_id")
+        base.update(account_live_paths.get((account_id, strategy_id), {}))
         nav = [
             item
             for item in nav_by_account.get(account_id, [])
@@ -779,8 +811,22 @@ def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "symbol": None,
             }
         ]
-    accepted: list[dict[str, Any]] = []
+    latest_by_account: dict[str, str] = {}
     for item in rows:
+        account_id = _text(item.get("account_id"), "position.account_id")
+        as_of_date = _text(item.get("as_of_date"), "position.as_of_date")
+        if (
+            account_id not in latest_by_account
+            or as_of_date > latest_by_account[account_id]
+        ):
+            latest_by_account[account_id] = as_of_date
+    current_rows = [
+        item
+        for item in rows
+        if item.get("as_of_date") == latest_by_account[str(item.get("account_id"))]
+    ]
+    accepted: list[dict[str, Any]] = []
+    for item in current_rows:
         amount = _object(item.get("market_value"), "position.market_value")
         status = _text(amount.get("status"), "position.market_value.status")
         accepted.append(
@@ -795,6 +841,7 @@ def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 ),
                 "quantity": item.get("quantity"),
                 "security_id": item.get("security_id"),
+                "snapshot_status": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT",
                 "status": (
                     "AVAILABLE_UNMAPPED"
                     if item.get("mapping_status") == "UNMAPPED"

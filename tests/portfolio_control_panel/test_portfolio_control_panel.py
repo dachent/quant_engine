@@ -931,6 +931,9 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         freshness_health_path=inputs["freshness"],
     )
     assert first["panel_id"] == second["panel_id"]
+    assert (
+        Path(first["candidate_dir"]) / "data" / "freshness-health.json"
+    ).read_bytes() == inputs["freshness"].read_bytes()
     result = panel.verify_candidate(
         inputs["report"],
         inputs["legacy"],
@@ -2042,4 +2045,9 @@ def test_context_and_material_exceptions_have_operator_routes() -> None:
     assert 'id="context-strategy"' in template
     assert "function applyContext()" in renderer
     assert 'data-open-view="${safe(route.view)}"' in renderer
+    assert 'data-focus-coverage="${safe(item.item)}"' in renderer
+    assert 'data-coverage-item="${safe(row.item)}"' in renderer
+    assert "target.scrollIntoView" in renderer
+    assert 'row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE"' in renderer
+    assert "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH" in renderer
     assert 'id="remediation-table"' in template

@@ -61,6 +61,7 @@ PANEL_FILES: Final = (
     "app.js",
     "data/dashboard_data.json",
     "data/dashboard_data.js",
+    "data/freshness-health.json",
 )
 VIEWS: Final = (
     "command",
@@ -2342,6 +2343,8 @@ def _rendered_files(
     report, report_identity, report_path = _current_report(report_root)
     portfolio_as_of = _text(report.get("as_of_date"), "report.as_of_date")
     freshness_health = _freshness_health(freshness_health_path, portfolio_as_of)
+    if freshness_health_path is None:
+        raise ControlPanelValidationError("freshness health artifact is mandatory")
     resolved_decomposition, resolved_correlation = _analytics_roots(
         report_root, decomposition_root, correlation_root
     )
@@ -2409,6 +2412,7 @@ def _rendered_files(
         "app.js": _template_bytes(template_root / "app.js"),
         "data/dashboard_data.json": data_bytes,
         "data/dashboard_data.js": b"window.PORTFOLIO_DATA = " + data_bytes + b";\n",
+        "data/freshness-health.json": freshness_health_path.read_bytes(),
     }
     legacy_data = legacy_panel / "data" / "dashboard_data.json"
     return (

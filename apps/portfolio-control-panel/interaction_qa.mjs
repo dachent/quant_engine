@@ -42,6 +42,23 @@ await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
 const checks = [];
+await page.evaluate(() => {
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+});
+await page.keyboard.press("Tab");
+const firstKeyboardTarget = await page.evaluate(() => ({
+  className: document.activeElement?.className,
+  text: document.activeElement?.textContent?.trim(),
+}));
+await page.keyboard.press("Enter");
+const skipTarget = await page.evaluate(() => document.activeElement?.id);
+checks.push(check(
+  "Keyboard skip link reaches the dashboard main region",
+  String(firstKeyboardTarget.className).includes("skip-link")
+    && firstKeyboardTarget.text === "Skip to dashboard"
+    && skipTarget === "main-content",
+  { first_keyboard_target: firstKeyboardTarget, skip_target: skipTarget },
+));
 const views = ["command", "capital", "risk", "attribution", "dependence", "weekly", "data"];
 const requiredFactorLenses = [
   "ECONOMIC_FACTOR",
@@ -315,13 +332,44 @@ await page.locator("#context-reset").click();
 await page.locator('[data-nav="risk"]').click();
 const historicalGapRows = await page.locator("#historical-gap-table tbody tr").count();
 const historicalGapHeading = await page.locator("#historical-gap-badge").textContent();
+const volatisPerformance = await page.locator("#performance-table tbody tr", { hasText: "Volatis" }).textContent();
+const robuxioPerformance = await page.locator("#performance-table tbody tr", { hasText: "Robuxio" }).textContent();
 checks.push(check(
-  "Current mapping is separated from historical General intervals",
-  historicalGapRows === 11 && historicalGapHeading?.includes("11 unresolved"),
+  "Volatis and Robuxio expose their accepted account-live return paths",
+  volatisPerformance?.includes("canonical account-live returns")
+    && volatisPerformance.includes("Available account-live return path")
+    && robuxioPerformance?.includes("canonical account-live returns")
+    && robuxioPerformance.includes("Available account-live return path"),
+  { robuxio: robuxioPerformance, volatis: volatisPerformance },
+));
+checks.push(check(
+  "Reserve assignments are excluded from historical systematic mapping gaps",
+  historicalGapRows === 7 && historicalGapHeading?.includes("7 unresolved"),
   { historical_gap_rows: historicalGapRows, label: historicalGapHeading, mapped_current_positions: positionRows },
+));
+await page.locator('[data-nav="capital"]').click();
+const reserveLifecycleRows = await page.locator("#lifecycle-table tbody tr", { hasText: "Reserve — strategy not applicable" }).count();
+checks.push(check(
+  "Reserve lifecycle intervals are labeled not applicable rather than unmapped strategy gaps",
+  reserveLifecycleRows === 4,
+  { reserve_rows: reserveLifecycleRows },
 ));
 
 await page.locator('[data-nav="data"]').click();
+const remediationButton = page.locator("#remediation-table [data-focus-coverage]").first();
+const remediationItem = await remediationButton.getAttribute("data-focus-coverage");
+await remediationButton.click();
+const remediationFocus = await page.evaluate(() => ({
+  active_item: document.activeElement?.getAttribute("data-coverage-item"),
+  active_view: document.querySelector('[data-view="data"]')?.classList.contains("is-active"),
+}));
+checks.push(check(
+  "Data-health remediation routes focus the exact producing exception",
+  Boolean(remediationItem)
+    && remediationFocus.active_view === true
+    && remediationFocus.active_item === remediationItem,
+  { requested_item: remediationItem, ...remediationFocus },
+));
 await page.locator("#candidate-appendix-button").click();
 const candidateActive = await page.locator('[data-view="candidates"]').evaluate((node) => !node.hidden && node.classList.contains("is-active"));
 await page.locator('[data-tier-filter="Tier 1"]').click();
@@ -340,6 +388,24 @@ const toast = await page.locator("#toast").textContent();
 checks.push(check("Snapshot provenance control responds", Boolean(toast?.includes("Report") && toast.includes("read-only")), toast));
 const executionControls = await page.locator('button, a').evaluateAll((nodes) => nodes.filter((node) => /place order|submit order|execute trade|connect broker/i.test(node.textContent || "")).length);
 checks.push(check("No execution control is present", executionControls === 0, { execution_controls: executionControls }));
+const unnamedControls = await page.locator("button, input, select, textarea, a[href]").evaluateAll((nodes) => nodes.map((node) => {
+  const labels = "labels" in node && node.labels
+    ? Array.from(node.labels).map((label) => label.textContent?.trim()).filter(Boolean)
+    : [];
+  const name = node.getAttribute("aria-label")
+    || node.getAttribute("title")
+    || labels.join(" ")
+    || node.textContent?.trim()
+    || node.getAttribute("placeholder")
+    || "";
+  return { id: node.id, name, tag: node.tagName };
+}).filter((item) => !item.name));
+const mainRegions = await page.locator("main").count();
+checks.push(check(
+  "Interactive controls have accessible names and one main region",
+  unnamedControls.length === 0 && mainRegions === 1,
+  { main_regions: mainRegions, unnamed_controls: unnamedControls },
+));
 
 await page.setViewportSize({ width: 390, height: 844 });
 await page.locator('[data-nav="command"]').click();
@@ -352,6 +418,22 @@ checks.push(check(
   "Mobile header retains portfolio date, freshness date, and coverage",
   mobileFacts.length === 3 && mobileFacts.every((item) => item.visible && item.text && item.text !== "Loading…"),
   mobileFacts,
+));
+await page.locator('[data-nav="data"]').click();
+const mobileRemediation = page.locator("#remediation-table [data-focus-coverage]").first();
+const mobileRemediationItem = await mobileRemediation.getAttribute("data-focus-coverage");
+await mobileRemediation.click();
+const mobileRemediationEvidence = await page.evaluate(() => ({
+  active_item: document.activeElement?.getAttribute("data-coverage-item"),
+  in_view: document.activeElement instanceof HTMLElement
+    && document.activeElement.getBoundingClientRect().top >= 0
+    && document.activeElement.getBoundingClientRect().bottom <= window.innerHeight,
+}));
+checks.push(check(
+  "Mobile remediation action remains operable and focused",
+  mobileRemediationEvidence.active_item === mobileRemediationItem
+    && mobileRemediationEvidence.in_view === true,
+  { requested_item: mobileRemediationItem, ...mobileRemediationEvidence },
 ));
 await page.locator('[data-nav="risk"]').click();
 const mobileHwmColumns = await page.locator("#hwm-status .validation-card").first().evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").filter(Boolean).length);

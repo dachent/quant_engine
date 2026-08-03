@@ -7,6 +7,7 @@
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
   const integer = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
   const safe = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
+  const domToken = (value) => String(value || "item").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "item";
   const number = (value) => value == null || value === "" || Number.isNaN(Number(value)) ? null : Number(value);
   const currency = (value) => number(value) == null ? "—" : money.format(Number(value));
   const pct = (value, digits = 1) => number(value) == null ? "—" : `${(Number(value) * 100).toFixed(digits)}%`;
@@ -60,6 +61,8 @@
     MODEL_COMPUTED_NOT_VALIDATED: "Model computed; PM use blocked",
     MODEL_UNAVAILABLE: "Model unavailable",
     TARGET_UNAVAILABLE_NOT_ADMITTED: "No accepted target decision",
+    AVAILABLE_ACCOUNT_LIVE_RETURN_PATH: "Available account-live return path",
+    NOT_APPLICABLE_RESERVE: "Reserve — strategy not applicable",
   };
   const humanStatus = (status) => STATUS_LABELS[String(status)] || String(status || "Unknown").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
@@ -208,7 +211,8 @@
         ? `${currentMapped}/${data.positions.length} accepted current positions are strategy-mapped; other current General intervals remain valid at the systematic-pool layer only. ${item.known_gap || ""}`
         : item.known_gap;
       const route = remediationRoute[item.item] || { view: "data", label: "Inspect data health" };
-      return `<li><div><strong>${safe(operatorLabels[item.item] || humanStatus(item.item))}</strong><span>${safe(note)}</span><button type="button" class="text-action" data-open-view="${safe(route.view)}">${safe(route.label)} →</button></div></li>`;
+      const focus = route.view === "data" ? ` data-focus-coverage="${safe(item.item)}"` : "";
+      return `<li><div><strong>${safe(operatorLabels[item.item] || humanStatus(item.item))}</strong><span>${safe(note)}</span><button type="button" class="text-action" data-open-view="${safe(route.view)}"${focus} aria-label="${safe(route.label)} for ${safe(humanStatus(item.item))}">${safe(route.label)} →</button></div></li>`;
     }).join("");
     const implementationRows = data.strategies.map((row) => {
       const factorRow = factorLenses.flatMap((lens) => lens.series || []).find((item) => item.series_id === row.strategy_name);
@@ -241,7 +245,12 @@
 
   function renderLifecycleTable() {
     const assignments = data.performance.filter(matchesContext);
-    const rows = assignments.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name || "Systematic pool only")}</td><td>${safe(row.effective_start || "Open/unknown")}</td><td>${safe(row.effective_end || "Open")}</td><td>${statusText(row.strategy_name ? "AVAILABLE" : "UNMAPPED")}</td><td><code>${safe(row.assignment_id || "—")}</code></td></tr>`);
+    const rows = assignments.map((row) => {
+      const reserve = row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE" || row.pool_id === "reserve-capital";
+      const assignment = row.strategy_name || (reserve ? "Reserve — strategy not applicable" : "Systematic pool only");
+      const mapping = row.strategy_name ? "AVAILABLE" : reserve ? "NOT_APPLICABLE_RESERVE" : "UNMAPPED";
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(assignment)}</td><td>${safe(row.effective_start || "Open/unknown")}</td><td>${safe(row.effective_end || "Open")}</td><td>${statusText(mapping)}</td><td><code>${safe(row.assignment_id || "—")}</code></td></tr>`;
+    });
     $("#lifecycle-table").innerHTML = tableMarkup([["Account"], ["Assignment"], ["Effective start"], ["Effective end"], ["Mapping state"], ["Evidence identity"]], rows.length ? rows : [emptyRow(6, "No lifecycle intervals match the selected context")]);
   }
 
@@ -314,16 +323,23 @@
     const passes = stress <= Number(data.advisory.hwm_limit);
     $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">Current portfolio</div><div class="scenario-track"><span class="scenario-limit" aria-hidden="true"></span><span class="scenario-fill ${passes ? "pass" : ""}" style="width:${Math.min(100, stress / 0.4 * 100)}%"></span></div><div class="scenario-value ${passes ? "" : "status-text danger"}">${pct(stress)}</div></div><div class="callout callout-danger">Stress exceeds the 15% HWM boundary. This is advisory evidence, not a liquidation instruction.</div>`;
     const unavailableHwmSummary = unavailableHwm.map(({ row, qualification }) => `${row.strategy_name}: ${qualification.note}`).join(" · ");
-    const acceptedHwmSummary = acceptedHwmEvidence.map((row) => `${row.strategy_name}: ${integer.format(row.nav_return_observations)} ${hwmEvidenceLabel(row)} returns from ${formatDate(row.nav_observed_start)} through ${formatDate(row.nav_observed_end)}`).join(" · ");
-    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Governed systematic daily NAV</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has qualified daily NAV."} ${excludedNav.length ? `${safe(excludedNav.join(" · "))} remain reported but are excluded by explicit de-minimis policy.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of the governed HWM perimeter. ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No daily NAV evidence currently qualifies for HWM."} Missing NAV and FX are not interpolated.</div>`;
+    const acceptedHwmSummary = acceptedHwmEvidence.map((row) => `${row.strategy_name}: ${integer.format(row.nav_return_observations)} ${hwmEvidenceLabel(row)} return observations from ${formatDate(row.nav_observed_start)} through ${formatDate(row.nav_observed_end)}`).join(" · ");
+    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Governed systematic return / NAV evidence</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has a qualified account-live or provider-live return path."} ${excludedNav.length ? `${safe(excludedNav.join(" · "))} remain reported but are excluded by explicit de-minimis policy.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of the governed HWM perimeter. ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No governed return/NAV evidence currently qualifies for HWM."} Account NAV observations and canonical account-live return paths remain separately labeled; missing NAV and FX are not interpolated.</div>`;
     renderPerformanceComparison();
     const contextualPerformance = data.performance.filter(matchesContext);
     const mappedPerformance = contextualPerformance.filter((row) => row.strategy_name);
-    const historicalGaps = contextualPerformance.filter((row) => !row.strategy_name);
-    const rows = mappedPerformance.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${safe(row.observed_start || row.effective_start || "—")}<span class="cell-secondary">${safe(row.observed_end || row.effective_end || "—")}</span></td><td class="numeric">${integer.format(row.nav_observations)}</td><td class="numeric">${pct(row.twr)}</td><td>${statusText(row.twr_status)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}</td></tr>`);
-    $("#performance-table").innerHTML = tableMarkup([["Account"], ["Strategy"], ["Observed interval"], ["NAV obs.", "numeric"], ["TWR", "numeric"], ["TWR status"], ["MWR", "numeric"], ["MWR status"]], rows);
+    const historicalGaps = contextualPerformance.filter((row) => !row.strategy_name && row.strategy_mapping_disposition !== "RESERVE_NOT_APPLICABLE" && row.pool_id !== "reserve-capital");
+    const rows = mappedPerformance.map((row) => {
+      const acceptedReturn = row.twr ?? row.return_path_cumulative_return;
+      const returnStatus = row.twr != null ? row.twr_status : row.return_path_status || row.twr_status;
+      const observedStart = row.observed_start || row.return_path_observed_start || row.effective_start || "—";
+      const observedEnd = row.observed_end || row.return_path_observed_end || row.effective_end || "—";
+      const evidence = row.twr != null ? `${integer.format(row.nav_observations)} account NAV observations` : row.return_path_status ? `${integer.format(row.return_path_observations)} canonical account-live returns` : `${integer.format(row.nav_observations)} account NAV observations`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}</td></tr>`;
+    });
+    $("#performance-table").innerHTML = tableMarkup([["Account"], ["Strategy"], ["Observed interval"], ["Accepted evidence"], ["Accepted return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]], rows);
     $("#historical-gap-badge").textContent = `${historicalGaps.length} unresolved intervals`;
-    const historicalRows = historicalGaps.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td><code>${safe(row.assignment_id)}</code></td><td>${safe(row.effective_start || "Open/unknown")}<span class="cell-secondary">${safe(row.effective_end || "Open/unknown")}</span></td><td>${statusText(row.twr_status)}</td><td>Legacy General label requires historical adjudication</td></tr>`);
+    const historicalRows = historicalGaps.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td><code>${safe(row.assignment_id)}</code></td><td>${safe(row.effective_start || "Open/unknown")}<span class="cell-secondary">${safe(row.effective_end || "Open/unknown")}</span></td><td>${statusText(row.twr_status)}</td><td>${safe(row.strategy_mapping_disposition === "HISTORICAL_POOL_ONLY" ? "Systematic-pool interval requires historical strategy adjudication" : "Assignment requires adjudication")}</td></tr>`);
     $("#historical-gap-table").innerHTML = tableMarkup([["Account"], ["Assignment"], ["Effective interval"], ["Historical attribution"], ["Required disposition"]], historicalRows.length ? historicalRows : [emptyRow(5, "No unresolved historical assignment intervals")]);
   }
 
@@ -734,7 +750,7 @@
       ["Coverage exceptions", String(data.blocking_items.length), "Visible and blocking where declared", "warning"],
       ["External connections", "0", "Direct-file local operation", "reserve"],
     ]);
-    const coverageRows = data.coverage.map((row) => `<tr><td><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></td><td>${statusText(row.status)}</td><td>${safe(row.value ?? "—")}</td><td>${formatDate(row.evaluated_on)}</td><td>${safe(row.known_gap || "—")}</td></tr>`);
+    const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><td><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></td><td>${statusText(row.status)}</td><td>${safe(row.value ?? "—")}</td><td>${formatDate(row.evaluated_on)}</td><td>${safe(row.known_gap || "—")}</td></tr>`);
     $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status"], ["Value"], ["Freshness evaluated"], ["Known gap"]], coverageRows);
     $("#validation-cards").innerHTML = `<div class="validation-card"><div><strong>Portfolio report</strong><span>${safe(data.meta.report_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Factor / alpha</strong><span>${safe(data.meta.decomposition_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Dependence</strong><span>${safe(data.meta.correlation_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Frozen candidate appendix</strong><span>${safe(data.candidate_appendix.as_of_date)} · hash locked</span></div><div class="validation-score">FROZEN</div></div><div class="callout callout-neutral">Portfolio, analytics, and appendix generations retain separate authority. Candidate rows never enter current strategy totals.</div>`;
     const sourceRows = data.provenance.map((row) => `<tr><td><span class="cell-primary">${safe(row.artifact)}</span><span class="cell-secondary">${safe(row.schema)}</span></td><td>${formatDate(row.as_of_date)}</td><td><code>${safe(row.sha256.slice(0, 16))}…</code></td></tr>`);
@@ -747,7 +763,8 @@
     };
     const remediationRows = data.blocking_items.map((item) => {
       const [view, action] = routes[item.item] || ["data", "Resolve the declared coverage exception in its producing generation"];
-      return `<tr><td><span class="cell-primary">${safe(humanStatus(item.item))}</span><span class="cell-secondary">${safe(item.known_gap || "No further detail recorded")}</span></td><td>${statusText(item.status)}</td><td>${safe(action)}</td><td><button type="button" class="text-action" data-open-view="${safe(view)}">Open ${safe(VIEW_TITLES[view])} →</button></td></tr>`;
+      const focus = view === "data" ? ` data-focus-coverage="${safe(item.item)}"` : "";
+      return `<tr><td><span class="cell-primary">${safe(humanStatus(item.item))}</span><span class="cell-secondary">${safe(item.known_gap || "No further detail recorded")}</span></td><td>${statusText(item.status)}</td><td>${safe(action)}</td><td><button type="button" class="text-action" data-open-view="${safe(view)}"${focus} aria-label="Open ${safe(VIEW_TITLES[view])} evidence for ${safe(humanStatus(item.item))}">Open ${safe(VIEW_TITLES[view])} →</button></td></tr>`;
     });
     $("#remediation-table").innerHTML = tableMarkup([["Exception"], ["State"], ["Required evidence"], ["Destination"]], remediationRows.length ? remediationRows : [emptyRow(4, "No material blocking exceptions")]);
   }
@@ -794,7 +811,21 @@
 
   function bindEvents() {
     $$('[data-nav]').forEach((button) => button.addEventListener("click", () => setView(button.dataset.nav)));
-    $$('[data-open-view]').forEach((button) => button.addEventListener("click", () => setView(button.dataset.openView)));
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-open-view]");
+      if (!button) return;
+      setView(button.dataset.openView);
+      const coverageItem = button.dataset.focusCoverage;
+      if (!coverageItem) return;
+      window.requestAnimationFrame(() => {
+        const target = $(`[data-coverage-item="${CSS.escape(coverageItem)}"]`);
+        if (!target) return;
+        target.classList.add("is-remediation-focus");
+        target.focus({ preventScroll: true });
+        target.scrollIntoView({ block: "center", behavior: "auto" });
+        window.setTimeout(() => target.classList.remove("is-remediation-focus"), 5000);
+      });
+    });
     const selectButton = (selector, button) => $$(selector).forEach((item) => { const active = item === button; item.classList.toggle("is-active", active); item.setAttribute("aria-pressed", String(active)); });
     $$('[data-allocation-filter]').forEach((button) => button.addEventListener("click", () => { allocationFilter = button.dataset.allocationFilter; positionPage = 0; selectButton('[data-allocation-filter]', button); renderAllocationTable(); }));
     $$('[data-tier-filter]').forEach((button) => button.addEventListener("click", () => { tierFilter = button.dataset.tierFilter; selectButton('[data-tier-filter]', button); renderCandidateTable(); }));
