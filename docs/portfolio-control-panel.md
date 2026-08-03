@@ -83,7 +83,6 @@ $engine = Split-Path -Parent $PWD
 $report = Join-Path $engine "dataPortfolio\reporting"
 $output = Join-Path $engine "dataPortfolio\control-panel"
 $legacy = Join-Path $engine "_strategy_allocation_audit\model_harness_baseline\control-panel-qa\portfolio_control_panel"
-$strategyEvidence = "<hash-bound current-strategy-provider-evidence.json>"
 $lensRoot = Join-Path $engine "dataPortfolio\analytics\decomposition-lenses"
 $planBundle = "<hash-bound decomposition planning bundle>"
 $weekly = Join-Path $engine "dataPortfolio\analytics\weekly-returns"
@@ -91,7 +90,6 @@ $freshness = Join-Path $engine "dataPortfolio\releases\freshness-health.json"
 
 uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
   --report-root $report --legacy-panel $legacy --output-root $output `
-  --strategy-evidence $strategyEvidence `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `
@@ -181,7 +179,6 @@ pass, publish the already accepted local candidate:
 uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --report-root $report --legacy-panel $legacy `
   --candidate-dir <candidate-directory> --qa-dir $qa --output-root $output `
-  --strategy-evidence $strategyEvidence `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `

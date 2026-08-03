@@ -1244,53 +1244,29 @@ def test_material_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
             "strategy_id": "robuxio-crypto",
             "strategy_name": "Robuxio Crypto (High Sharpe High Vol)",
             "current_value_usd": "80",
-            "nav_status": "UNAVAILABLE",
+            "nav_status": "AVAILABLE",
+            "nav_observed_start": "2025-08-14",
+            "nav_observed_end": "2026-07-26",
+            "nav_return_observations": 331,
         },
         {
             "strategy_id": "volatis-strategy",
             "strategy_name": "Volatis Strategy",
             "current_value_usd": "20",
-            "nav_status": "UNAVAILABLE",
+            "nav_status": "AVAILABLE",
+            "nav_observed_start": "2024-10-16",
+            "nav_observed_end": "2026-07-29",
+            "nav_return_observations": 650,
         },
     ]
-    factors = {
-        "series": [
-            {
-                "series_id": "Robuxio Crypto (High Sharpe High Vol)",
-                "status": "AVAILABLE",
-                "evidence_layer": "ACCOUNT_LIVE",
-                "coverage": {
-                    "target_observed_start": "2025-08-14",
-                    "target_observed_end": "2026-07-26",
-                    "target_observations": 331,
-                    "target_cumulative_return": "0.42",
-                    "target_current_drawdown": "0.162",
-                    "target_max_drawdown": "0.196",
-                },
-            },
-            {
-                "series_id": "Volatis Strategy",
-                "status": "AVAILABLE",
-                "evidence_layer": "ACCOUNT_LIVE",
-                "coverage": {
-                    "target_observed_start": "2024-10-16",
-                    "target_observed_end": "2026-07-29",
-                    "target_observations": 650,
-                    "target_cumulative_return": "0.63",
-                    "target_current_drawdown": "0.199",
-                    "target_max_drawdown": "0.320",
-                },
-            },
-        ]
-    }
     policy = {"excluded_strategy_ids": ["composer-holy-grail"]}
 
-    rows, summary = panel._material_hwm_coverage(strategies, factors, policy)
+    rows, summary = panel._material_hwm_coverage(strategies, policy)
 
     by_id = {row["strategy_id"]: row for row in rows}
     assert by_id["composer-holy-grail"]["nav_status"] == "EXCLUDED_DE_MINIMIS"
     assert by_id["robuxio-crypto"]["nav_status"] == "AVAILABLE"
-    assert by_id["robuxio-crypto"]["hwm_source"] == "ACCOUNT_LIVE_PROVIDER_OVERLAY"
+    assert by_id["robuxio-crypto"]["hwm_source"] == "PORTFOLIO_REPORT"
     assert by_id["robuxio-crypto"]["nav_return_observations"] == 331
     assert by_id["volatis-strategy"]["nav_status"] == "AVAILABLE"
     assert by_id["volatis-strategy"]["nav_return_observations"] == 650
@@ -1359,57 +1335,3 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
     )
     assert exception["status"] == "UNAVAILABLE"
     assert exception["known_gap"].endswith("Missing Strategy")
-
-
-def test_provider_account_nav_overlay_promotes_twr_evidence() -> None:
-    strategies = [
-        {
-            "strategy_id": "robuxio-crypto",
-            "strategy_name": "Robuxio Crypto (High Sharpe High Vol)",
-            "hwm_source": "ACCOUNT_LIVE_PROVIDER_OVERLAY",
-        }
-    ]
-    performance = [
-        {
-            "account_id": "account-1",
-            "strategy_id": "robuxio-crypto",
-            "nav_observations": 0,
-            "twr": None,
-            "twr_status": "UNAVAILABLE_INSUFFICIENT_NAV",
-        }
-    ]
-    factors = {
-        "series": [
-            {
-                "series_id": "Robuxio Crypto (High Sharpe High Vol)",
-                "status": "AVAILABLE",
-                "evidence_layer": "ACCOUNT_LIVE",
-                "coverage": {
-                    "target_cumulative_return": "0.42",
-                    "target_max_drawdown": "0.196",
-                    "target_observations": 331,
-                    "target_observed_start": "2025-08-26",
-                    "target_observed_end": "2026-07-26",
-                },
-            }
-        ]
-    }
-
-    accepted_strategies, accepted_performance = panel._provider_account_nav_performance(
-        strategies, performance, factors
-    )
-
-    assert accepted_strategies[0]["account_live_status"] == (
-        "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV"
-    )
-    assert accepted_strategies[0]["account_live_cumulative_return"] == "0.42"
-    assert accepted_strategies[0]["account_live_max_drawdown"] == "-0.196"
-    assert accepted_strategies[0]["available_twr_segments"] == 1
-    assert accepted_strategies[0]["implementation_gap_status"] == (
-        "NOT_APPLICABLE_PROVIDER_CUSTODIED_ACCOUNT"
-    )
-    assert accepted_performance[0]["nav_observations"] == 331
-    assert accepted_performance[0]["twr"] == "0.42"
-    assert accepted_performance[0]["twr_status"] == (
-        "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV"
-    )

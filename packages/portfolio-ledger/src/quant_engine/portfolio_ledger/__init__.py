@@ -35,6 +35,15 @@ from quant_engine.portfolio_ledger.reconciliation import (
     StrategyValue,
     reconcile_position_values,
 )
+from quant_engine.portfolio_ledger.provider_admission import (
+    AdmissionDisposition,
+    EvidenceLayer,
+    GenerationQualification,
+    ProviderAdmissionError,
+    ProviderFactAdmission,
+    ProviderGenerationIdentity,
+    validate_provider_authority,
+)
 from quant_engine.portfolio_ledger.strategy_versions import (
     EvidenceComparison,
     StrategyEvidenceVersion,
@@ -52,6 +61,7 @@ __all__ = [
     "AccountPositionReconciliation",
     "AccountRole",
     "AccountStrategyAssignment",
+    "AdmissionDisposition",
     "AllocationBridgeReconciliation",
     "AllocationDecision",
     "CashFlow",
@@ -59,12 +69,17 @@ __all__ = [
     "CapitalPoolRole",
     "CorporateAction",
     "EvidenceComparison",
+    "EvidenceLayer",
+    "GenerationQualification",
     "LedgerSlice",
     "LedgerValidationError",
     "MappingStatus",
     "NavObservation",
     "ObservedAmount",
     "PositionSnapshot",
+    "ProviderAdmissionError",
+    "ProviderFactAdmission",
+    "ProviderGenerationIdentity",
     "ReconciliationException",
     "ReconciliationStatus",
     "Security",
@@ -81,4 +96,5 @@ __all__ = [
     "decimal_text",
     "reconcile_position_values",
     "reconcile_allocation_bridge",
+    "validate_provider_authority",
 ]

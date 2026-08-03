@@ -14,7 +14,7 @@
     "replay"
   ],
   "properties": {
-    "schema_version": {"enum": [1, 2]},
+    "schema_version": {"enum": [1, 2, 3]},
     "policy_version": {"const": "PORT-PERF-1"},
     "as_of_date": {"type": "string", "format": "date"},
     "provenance": {"$ref": "#/$defs/provenance"},
@@ -72,6 +72,7 @@
       "required": ["schwab"],
       "properties": {"schwab": {"$ref": "#/$defs/provider_generation"}}
     },
+    "provider_ledger": {"$ref": "#/$defs/provider_generation"},
     "replay": {"$ref": "#/$defs/replay"}
   },
   "allOf": [
@@ -81,7 +82,11 @@
     },
     {
       "if": {"properties": {"schema_version": {"const": 1}}},
-      "then": {"not": {"required": ["provider_generations"]}}
+      "then": {"not": {"anyOf": [{"required": ["provider_generations"]}, {"required": ["provider_ledger"]}]}}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 3}}},
+      "then": {"required": ["provider_ledger"], "not": {"required": ["provider_generations"]}}
     }
   ],
   "$defs": {

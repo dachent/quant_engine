@@ -12,6 +12,11 @@
     "account_summary",
     "strategy_summary",
     "positions",
+    "provider_admissions",
+    "provider_coverage",
+    "provider_strategy_returns",
+    "strategy_provider_evidence",
+    "strategy_returns",
     "transactions_and_flows",
     "twr_mwr",
     "allocation_history",
@@ -37,6 +42,11 @@
     "portfolio_summary": {"type": "array", "minItems": 8, "items": {"type": "object"}},
     "account_summary": {"type": "array", "minItems": 1, "items": {"type": "object"}},
     "strategy_summary": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "provider_admissions": {"type": "array", "items": {"type": "object"}},
+    "provider_coverage": {"type": "array", "items": {"type": "object"}},
+    "provider_strategy_returns": {"type": "array", "items": {"type": "object"}},
+    "strategy_provider_evidence": {"type": "array", "items": {"type": "object"}},
+    "strategy_returns": {"type": "array", "items": {"type": "object"}},
     "positions": {
       "type": "array",
       "minItems": 1,
@@ -92,6 +102,7 @@
             "UNAVAILABLE_INSUFFICIENT_NAV",
             "UNAVAILABLE_MISSING_NAV",
             "UNAVAILABLE_FLOW_WITHOUT_SAME_DATE_NAV",
+            "UNAVAILABLE_FLOW_AMOUNT",
             "UNAVAILABLE_NONPOSITIVE_PRIOR_NAV"
           ]
         },

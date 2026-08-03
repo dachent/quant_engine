@@ -75,3 +75,7 @@ Schemas:
 - `schemas/core/fact-authority-catalog.schema.json`
 - `schemas/core/generation-evidence.schema.json`
 - `schemas/core/freshness-assessment.schema.json`
+- `schemas/portfolio/provider-ledger.schema.json`
+
+The seven-provider portfolio admission and reconciliation implementation is
+documented in `docs/provider-ledger.md`.

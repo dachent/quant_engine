@@ -45,8 +45,8 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-SPEC_SCHEMA_VERSION: Final = 2
-SUPPORTED_SPEC_SCHEMA_VERSIONS: Final = frozenset({1, 2})
+SPEC_SCHEMA_VERSION: Final = 3
+SUPPORTED_SPEC_SCHEMA_VERSIONS: Final = frozenset({1, 2, 3})
 CATALOG_SCHEMA_VERSION: Final = 1
 BUILDER_VERSION: Final = "1.2.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
@@ -332,8 +332,10 @@ def _load_spec(spec_path: Path) -> dict[str, Any]:
         "schema_version",
         "sources",
     }
-    if version == SPEC_SCHEMA_VERSION:
+    if version == 2:
         keys.add("provider_generations")
+    elif version == SPEC_SCHEMA_VERSION:
+        keys.add("provider_ledger")
     _strict_keys(
         spec,
         keys,
@@ -447,6 +449,103 @@ def _schwab_generation(
     return catalog, artifacts, links
 
 
+def _provider_ledger(
+    value: object,
+    roots: Mapping[str, Path],
+    baseline_as_of: date,
+) -> tuple[dict[str, Any], tuple[SourceArtifact, ...], list[dict[str, Any]]]:
+    ref = _object(value, "provider_ledger")
+    _strict_keys(
+        ref,
+        {"catalog_sha256", "generation_id", "manifest_sha256", "root_id"},
+        "provider_ledger",
+    )
+    root_id = _identifier(ref["root_id"], "provider_ledger.root_id")
+    if root_id not in roots:
+        raise BaselineValidationError("provider-ledger root is unknown")
+    generation_id = _text(ref["generation_id"], "provider_ledger.generation_id")
+    catalog_sha256 = _text(ref["catalog_sha256"], "provider_ledger.catalog_sha256")
+    manifest_sha256 = _text(ref["manifest_sha256"], "provider_ledger.manifest_sha256")
+    if any(
+        _SHA256.fullmatch(item) is None
+        for item in (generation_id, catalog_sha256, manifest_sha256)
+    ):
+        raise BaselineValidationError("provider-ledger identity is invalid")
+    generation_root = roots[root_id] / "generations" / generation_id
+    catalog_path = generation_root / "provider-ledger.json"
+    manifest_path = generation_root / "generation.json"
+    if any(
+        path.is_symlink() or not path.is_file()
+        for path in (catalog_path, manifest_path)
+    ):
+        raise BaselineValidationError("provider-ledger generation is incomplete")
+    actual_catalog_hash, catalog_size = hash_file(catalog_path)
+    actual_manifest_hash, manifest_size = hash_file(manifest_path)
+    if actual_catalog_hash != catalog_sha256 or actual_manifest_hash != manifest_sha256:
+        raise BaselineValidationError("provider-ledger generation hash differs")
+    try:
+        manifest = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
+    except ValueError as exc:
+        raise BaselineValidationError("provider-ledger manifest is invalid") from exc
+    if (
+        manifest.generation_id != generation_id
+        or manifest.verification.value != "VERIFIED"
+    ):
+        raise BaselineValidationError("provider-ledger generation is not verified")
+    catalog = _load_json(catalog_path, "provider-ledger catalog")
+    if catalog.get("catalog_schema_version") != 1:
+        raise BaselineValidationError("provider-ledger catalog schema is unsupported")
+    provider_as_of = _date(catalog.get("as_of_date"), "provider-ledger as_of_date")
+    if provider_as_of > baseline_as_of:
+        raise BaselineValidationError("provider-ledger is newer than baseline")
+    provider_ids = {
+        _text(item.get("provider_id"), "provider-ledger provider_id")
+        for item in _objects(
+            catalog.get("provider_generations"), "provider-ledger generations"
+        )
+    }
+    if provider_ids != {
+        "alpaca",
+        "fidelity",
+        "ibkr",
+        "matrixport",
+        "portfolio123",
+        "quantbase",
+        "schwab",
+    }:
+        raise BaselineValidationError("provider-ledger provider scope differs")
+    artifacts = (
+        SourceArtifact(
+            artifact_id="providers/provider-ledger/generation.json",
+            sha256=actual_manifest_hash,
+            size_bytes=manifest_size,
+            as_of_date=provider_as_of,
+            schema_name="generation-manifest",
+            schema_version="1",
+        ),
+        SourceArtifact(
+            artifact_id="providers/provider-ledger/provider-ledger.json",
+            sha256=actual_catalog_hash,
+            size_bytes=catalog_size,
+            as_of_date=provider_as_of,
+            schema_name="provider-ledger-catalog",
+            schema_version="1",
+        ),
+    )
+    links = [
+        {
+            "artifact_id": item.artifact_id,
+            "as_of_date": provider_as_of.isoformat(),
+            "schema_name": item.schema_name,
+            "schema_version": item.schema_version,
+            "sha256": item.sha256,
+            "source_key": "provider-ledger-generation",
+        }
+        for item in artifacts
+    ]
+    return catalog, artifacts, links
+
+
 def _roots(value: object) -> dict[str, Path]:
     roots = _object(value, "roots")
     if not roots:
@@ -547,6 +646,8 @@ def _sources(
 
 def _provenance(
     value: object,
+    *,
+    require_current: bool = True,
 ) -> tuple[dict[str, Any], SourceArtifact, dict[str, Any]]:
     ref = _object(value, "provenance")
     _strict_keys(ref, {"catalog_sha256", "generation_id", "root"}, "provenance")
@@ -562,12 +663,15 @@ def _provenance(
         or _SHA256.fullmatch(expected_hash) is None
     ):
         raise BaselineValidationError("provenance identity is invalid")
-    try:
-        pointer = read_current(root)
-    except (OSError, ValueError) as exc:
-        raise BaselineValidationError("provenance pointer is not accepted") from exc
-    if pointer.generation_id != generation_id:
-        raise BaselineValidationError("provenance generation is not current authority")
+    if require_current:
+        try:
+            pointer = read_current(root)
+        except (OSError, ValueError) as exc:
+            raise BaselineValidationError("provenance pointer is not accepted") from exc
+        if pointer.generation_id != generation_id:
+            raise BaselineValidationError(
+                "provenance generation is not current authority"
+            )
     path = root / "generations" / generation_id / "portfolio-provenance.json"
     if path.is_symlink() or not path.is_file():
         raise BaselineValidationError("provenance catalog is missing or linked")
@@ -1172,6 +1276,157 @@ def _schwab_facts(
     )
 
 
+def _provider_ledger_facts(
+    catalog: Mapping[str, Any],
+    accounts: Sequence[Mapping[str, Any]],
+    legacy_nav: Sequence[Mapping[str, Any]],
+    legacy_flows: Sequence[Mapping[str, Any]],
+    legacy_transactions: Sequence[Mapping[str, Any]],
+    legacy_securities: Sequence[Mapping[str, Any]],
+    baseline_as_of: date,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+    list[str],
+]:
+    """Select admitted account facts while retaining legacy-only observations."""
+
+    accepted_accounts = {str(item["account_id"]) for item in accounts}
+
+    def admitted(name: str) -> list[dict[str, Any]]:
+        accepted: list[dict[str, Any]] = []
+        for item in _objects(catalog.get(name), f"provider-ledger.{name}"):
+            account_id = _text(item.get("account_id"), f"{name}.account_id")
+            if (
+                account_id not in accepted_accounts
+                or item.get("mapping_status") != "MAPPED"
+            ):
+                continue
+            day_value = item.get("as_of_date") or item.get("event_date")
+            if _date(day_value, f"{name}.date") > baseline_as_of:
+                raise BaselineValidationError(
+                    "provider-ledger fact is newer than baseline"
+                )
+            record = dict(item)
+            record.update(
+                {
+                    "provider": _text(
+                        item.get("provider_id"), f"{name}.provider_id"
+                    ).upper(),
+                    "source_key": "provider-ledger",
+                }
+            )
+            accepted.append(record)
+        return accepted
+
+    provider_nav = admitted("nav_observations")
+    provider_flows = admitted("flows")
+    provider_transactions = admitted("transactions")
+    provider_positions = admitted("positions")
+
+    nav_by_key = {
+        (str(item["account_id"]), str(item["as_of_date"])): dict(item)
+        for item in legacy_nav
+    }
+    conflicts = 0
+    for item in provider_nav:
+        key = (str(item["account_id"]), str(item["as_of_date"]))
+        prior = nav_by_key.get(key)
+        if prior is not None and prior.get("nav") != item.get("nav"):
+            conflicts += 1
+        nav_by_key[key] = item
+
+    def replace_accounts(
+        legacy: Sequence[Mapping[str, Any]], provider: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        provider_accounts = {str(item["account_id"]) for item in provider}
+        combined = [
+            dict(item)
+            for item in legacy
+            if str(item["account_id"]) not in provider_accounts
+        ]
+        combined.extend(dict(item) for item in provider)
+        identifiers = [str(item["record_id"]) for item in combined]
+        if len(identifiers) != len(set(identifiers)):
+            raise BaselineValidationError("provider-ledger fact identifiers collide")
+        return combined
+
+    flows = replace_accounts(legacy_flows, provider_flows)
+    transactions = replace_accounts(legacy_transactions, provider_transactions)
+
+    latest_position: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in provider_positions:
+        security_id = _text(item.get("security_id"), "position.security_id")
+        key = (str(item["account_id"]), security_id)
+        prior = latest_position.get(key)
+        if prior is None or str(prior["as_of_date"]) < str(item["as_of_date"]):
+            latest_position[key] = item
+
+    used_securities = {
+        str(item["security_id"])
+        for item in (*transactions, *latest_position.values())
+        if item.get("security_id") is not None
+    }
+    securities: dict[str, dict[str, Any]] = {
+        str(item["security_id"]): dict(item) for item in legacy_securities
+    }
+    for item in _objects(catalog.get("securities"), "provider-ledger.securities"):
+        security_id = str(item.get("security_id") or "")
+        if security_id in used_securities and security_id not in securities:
+            securities[security_id] = dict(item)
+
+    known_gaps = sorted(
+        {
+            _text(gap, "provider coverage known_gap")
+            for item in _objects(
+                catalog.get("provider_coverage"), "provider-ledger.provider_coverage"
+            )
+            for gap in _object(item.get("coverage"), "provider coverage").get(
+                "known_gaps", []
+            )
+        }
+    )
+    quality_findings = _objects(
+        catalog.get("quality_findings"), "provider-ledger.quality_findings"
+    )
+    reconciliation = {
+        "admitted_flow_count": len(provider_flows),
+        "admitted_nav_count": len(provider_nav),
+        "admitted_position_count": len(latest_position),
+        "admitted_transaction_count": len(provider_transactions),
+        "check_id": "provider-ledger-to-portfolio-baseline",
+        "nav_conflict_count": conflicts,
+        "quality_finding_count": len(quality_findings),
+        "status": "PASS_WITH_EXPLICIT_RECONCILIATION",
+    }
+    return (
+        sorted(
+            nav_by_key.values(),
+            key=lambda item: (str(item["account_id"]), str(item["as_of_date"])),
+        ),
+        sorted(
+            flows, key=lambda item: (str(item["event_date"]), str(item["record_id"]))
+        ),
+        sorted(
+            transactions,
+            key=lambda item: (str(item["event_date"]), str(item["record_id"])),
+        ),
+        sorted(
+            latest_position.values(),
+            key=lambda item: (str(item["account_id"]), str(item["security_id"])),
+        ),
+        sorted(securities.values(), key=lambda item: str(item["security_id"])),
+        quality_findings,
+        reconciliation,
+        known_gaps,
+    )
+
+
 def _allocations_and_coverage(
     paths: Mapping[str, Path],
     strategy_aliases: Mapping[str, str],
@@ -1617,7 +1872,9 @@ def build_catalog(
         str(item["source_key"]): _date(item["as_of_date"], "source.as_of_date")
         for item in source_links
     }
-    provenance, provenance_artifact, provenance_ref = _provenance(spec["provenance"])
+    provenance, provenance_artifact, provenance_ref = _provenance(
+        spec["provenance"], require_current=spec["schema_version"] < 3
+    )
     accounts, account_aliases = _account_index(provenance)
     strategies, strategy_aliases = _strategy_index(provenance)
     assignments = _objects(provenance.get("assignments"), "provenance.assignments")
@@ -1631,12 +1888,18 @@ def build_catalog(
         paths["alpaca-events"], account_aliases, assignments
     )
     positions: list[dict[str, Any]] = []
-    schwab_known_gaps: list[str] = []
+    provider_known_gaps: list[str] = []
     schwab_reconciliation: dict[str, Any] | None = None
     position_reconciliation: dict[str, Any] | None = None
     provider_artifacts: tuple[SourceArtifact, ...] = ()
     provider_links: list[dict[str, Any]] = []
-    if spec["schema_version"] == SPEC_SCHEMA_VERSION:
+    provider_admissions: list[dict[str, Any]] = []
+    provider_coverage: list[dict[str, Any]] = []
+    provider_unmapped: list[dict[str, Any]] = []
+    strategy_provider_evidence: list[dict[str, Any]] = []
+    strategy_returns: list[dict[str, Any]] = []
+    provider_strategy_returns: list[dict[str, Any]] = []
+    if spec["schema_version"] == 2:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
             spec["provider_generations"], roots, accounts, as_of
         )
@@ -1646,7 +1909,7 @@ def build_catalog(
             schwab_securities,
             schwab_reconciliation,
             position_reconciliation,
-            schwab_known_gaps,
+            provider_known_gaps,
         ) = _schwab_facts(schwab_catalog, accounts, assignments, nav, as_of)
         transactions.extend(schwab_transactions)
         transactions.sort(
@@ -1666,6 +1929,69 @@ def build_catalog(
         securities = sorted(
             by_security.values(), key=lambda item: str(item["security_id"])
         )
+    elif spec["schema_version"] == SPEC_SCHEMA_VERSION:
+        provider_catalog, provider_artifacts, provider_links = _provider_ledger(
+            spec["provider_ledger"], roots, as_of
+        )
+        (
+            nav,
+            flows,
+            transactions,
+            positions,
+            securities,
+            raw_provider_unmapped,
+            schwab_reconciliation,
+            provider_known_gaps,
+        ) = _provider_ledger_facts(
+            provider_catalog,
+            accounts,
+            nav,
+            flows,
+            transactions,
+            securities,
+            as_of,
+        )
+        provider_admissions = _objects(
+            provider_catalog.get("admissions"), "provider-ledger.admissions"
+        )
+        provider_coverage = _objects(
+            provider_catalog.get("provider_coverage"),
+            "provider-ledger.provider_coverage",
+        )
+        strategy_provider_evidence = _objects(
+            provider_catalog.get("strategy_evidence"),
+            "provider-ledger.strategy_evidence",
+        )
+        strategy_returns = _objects(
+            provider_catalog.get("strategy_returns"),
+            "provider-ledger.strategy_returns",
+        )
+        provider_strategy_returns = _objects(
+            provider_catalog.get("provider_strategy_returns"),
+            "provider-ledger.provider_strategy_returns",
+        )
+        grouped_unmapped: dict[tuple[str, str], int] = {}
+        for item in raw_provider_unmapped:
+            key = (
+                _text(item.get("provider_id"), "quality provider_id"),
+                _text(item.get("fact_type"), "quality fact_type"),
+            )
+            grouped_unmapped[key] = grouped_unmapped.get(key, 0) + 1
+        provider_unmapped = [
+            {
+                "fact_type": fact_type,
+                "provider_id": provider_id,
+                "record_count": count,
+                "source_key": "provider-ledger",
+                "status": "UNMAPPED",
+            }
+            for (provider_id, fact_type), count in sorted(grouped_unmapped.items())
+        ]
+        for record in nav:
+            provider_dates.setdefault(
+                str(record.get("provider", "UNKNOWN")), set()
+            ).add(_date(record["as_of_date"], "nav.as_of_date"))
+        calendar = _calendar_statuses(accounts, nav, provider_dates)
     allocations, strategy_nav_coverage, costs, systematic_total, nav_covered = (
         _allocations_and_coverage(
             paths,
@@ -1713,14 +2039,17 @@ def build_catalog(
         transactions,
         flows,
         positions,
-        schwab_known_gaps,
+        provider_known_gaps,
         missing_strategy_nav_count,
         as_of,
     )
-    unmapped = sorted(
-        [item for item in assignments if item.get("mapping_status") == "UNMAPPED"],
-        key=lambda item: str(item.get("assignment_id")),
-    )
+    unmapped = [
+        *sorted(
+            [item for item in assignments if item.get("mapping_status") == "UNMAPPED"],
+            key=lambda item: str(item.get("assignment_id")),
+        ),
+        *provider_unmapped,
+    ]
     evidence_links = [
         {
             "evidence_layer": route["evidence_layer"],
@@ -1775,6 +2104,9 @@ def build_catalog(
         "nav_observations": nav,
         "policy_version": POLICY_VERSION,
         "positions": positions,
+        "provider_admissions": provider_admissions,
+        "provider_coverage": provider_coverage,
+        "provider_strategy_returns": provider_strategy_returns,
         "provenance": provenance_ref,
         "reconciliation_checks": [
             nav_reconciliation,
@@ -1798,6 +2130,8 @@ def build_catalog(
         "strategies": strategies,
         "strategy_live_metrics": live_metrics,
         "strategy_nav_coverage": strategy_nav_coverage,
+        "strategy_provider_evidence": strategy_provider_evidence,
+        "strategy_returns": strategy_returns,
         "transactions": transactions,
         "unmapped_records": unmapped,
     }
