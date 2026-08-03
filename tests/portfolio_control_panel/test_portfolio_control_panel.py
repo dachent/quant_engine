@@ -926,8 +926,12 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             encoding="utf-8"
         )
     )
-    assert data["panel_schema_version"] == 7
+    assert data["panel_schema_version"] == 8
     assert data["meta"]["freshness_evaluated_on"] == "2026-07-30"
+    assert data["meta"]["hwm_status_code_version"] == 2
+    assert data["meta"]["hwm_status_semantics"] == "EXPLICIT_GOVERNED_HWM_PERIMETER"
+    assert data["advisory"]["hwm_status_code_version"] == 2
+    assert data["advisory"]["hwm_status_semantics"] == "EXPLICIT_GOVERNED_HWM_PERIMETER"
     assert data["positions"] == [
         {
             "account_id": "account-00",
@@ -1242,7 +1246,7 @@ def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -
         panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
 
 
-def test_stale_material_strategy_blocks_hwm_claim(inputs: dict[str, Path]) -> None:
+def test_stale_governed_strategy_blocks_hwm_claim(inputs: dict[str, Path]) -> None:
     payload = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
     payload["assessments"][0].update(
         {
@@ -1269,7 +1273,7 @@ def test_stale_material_strategy_blocks_hwm_claim(inputs: dict[str, Path]) -> No
     )
 
     assert data["hwm_summary"]["status"] == (
-        "NOT_AUTOMATABLE_STALE_OR_MISSING_MATERIAL_DAILY_NAV"
+        "NOT_AUTOMATABLE_STALE_OR_MISSING_GOVERNED_HWM_DAILY_NAV"
     )
     assert Decimal(data["hwm_summary"]["nav_coverage"]) < Decimal("1")
     assert data["strategies"][0]["hwm_freshness_status"] == "BLOCKED"
@@ -1563,7 +1567,7 @@ def test_browser_qa_rejects_console_error(
         panel.validate_qa(candidate, qa)
 
 
-def test_material_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> None:
+def test_governed_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> None:
     strategies = [
         {
             "strategy_id": "composer-holy-grail",
@@ -1601,7 +1605,7 @@ def test_material_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
         "excluded_strategy_ids": ["composer-holy-grail"],
     }
 
-    rows, summary = panel._material_hwm_coverage(strategies, policy)
+    rows, summary = panel._governed_hwm_coverage(strategies, policy)
 
     by_id = {row["strategy_id"]: row for row in rows}
     assert by_id["composer-holy-grail"]["nav_status"] == "EXCLUDED_DE_MINIMIS"
@@ -1614,9 +1618,11 @@ def test_material_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
         "covered_value_usd": "100",
         "excluded_value_usd": "1",
         "excluded_strategies": ["[Composer] - The Holy Grail (Buy Copy)"],
-        "material_value_usd": "100",
+        "governed_perimeter_value_usd": "100",
         "nav_coverage": "1",
-        "status": "AVAILABLE_MATERIAL_PERIMETER",
+        "status": "AVAILABLE_GOVERNED_HWM_PERIMETER",
+        "status_code_version": 2,
+        "status_semantics": "EXPLICIT_GOVERNED_HWM_PERIMETER",
         "uncovered_details": [],
         "uncovered_strategies": [],
     }
@@ -1631,7 +1637,7 @@ def test_hwm_policy_enforces_exclusion_effective_date() -> None:
 
 
 def test_hwm_coverage_rejects_unaccepted_nav_evidence_class() -> None:
-    rows, summary = panel._material_hwm_coverage(
+    rows, summary = panel._governed_hwm_coverage(
         [
             {
                 "current_value_usd": "100",
@@ -1657,7 +1663,7 @@ def test_hwm_coverage_rejects_unaccepted_nav_evidence_class() -> None:
 
 
 def test_hwm_coverage_names_freshness_block_without_denigrating_nav() -> None:
-    rows, summary = panel._material_hwm_coverage(
+    rows, summary = panel._governed_hwm_coverage(
         [
             {
                 "current_value_usd": "0.19",
@@ -1763,6 +1769,27 @@ def test_renderer_discloses_operational_freshness_and_provider_authority() -> No
     assert "Freshness evaluated" in renderer
     assert "governed provider-ledger classification" in renderer
     assert "not brokerage-account authority" in renderer
+
+
+def test_renderer_qualifies_provider_live_availability_separately() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'statusText("PROVIDER_LIVE_AVAILABLE")' in renderer
+    assert "Account-live unavailable" in renderer
+    assert 'row.nav_evidence_layer === "PROVIDER_LIVE"' in renderer
+    assert "evidenceAvailability(row)" in renderer
+
+
+def test_mobile_layout_retains_dates_and_single_column_hwm() -> None:
+    css = (panel.DEFAULT_TEMPLATE_ROOT / "analytics.css").read_text(encoding="utf-8")
+    qa = (panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs").read_text(
+        encoding="utf-8"
+    )
+
+    assert ".topbar-meta {\n    display: grid;" in css
+    assert ".validation-card { grid-template-columns: 1fr; }" in css
+    assert "Mobile header retains portfolio date, freshness date, and coverage" in qa
+    assert "Mobile HWM governor uses one readable column" in qa
 
 
 def test_hwm_prose_uses_qualified_evidence_instead_of_legacy_source_label() -> None:

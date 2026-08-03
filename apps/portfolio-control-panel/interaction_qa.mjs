@@ -161,6 +161,29 @@ const toast = await page.locator("#toast").textContent();
 checks.push(check("Snapshot provenance control responds", Boolean(toast?.includes("Report") && toast.includes("read-only")), toast));
 const executionControls = await page.locator('button, a').evaluateAll((nodes) => nodes.filter((node) => /place order|submit order|execute trade|connect broker/i.test(node.textContent || "")).length);
 checks.push(check("No execution control is present", executionControls === 0, { execution_controls: executionControls }));
+
+await page.setViewportSize({ width: 390, height: 844 });
+await page.locator('[data-nav="command"]').click();
+const mobileFacts = await page.locator("#portfolio-as-of, #freshness-as-of, #coverage-status").evaluateAll((nodes) => nodes.map((node) => ({
+  id: node.id,
+  text: node.textContent?.trim(),
+  visible: Boolean(node.getClientRects().length) && getComputedStyle(node).visibility !== "hidden",
+})));
+checks.push(check(
+  "Mobile header retains portfolio date, freshness date, and coverage",
+  mobileFacts.length === 3 && mobileFacts.every((item) => item.visible && item.text && item.text !== "Loading…"),
+  mobileFacts,
+));
+await page.locator('[data-nav="risk"]').click();
+const mobileHwmColumns = await page.locator("#hwm-status .validation-card").first().evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").filter(Boolean).length);
+checks.push(check("Mobile HWM governor uses one readable column", mobileHwmColumns === 1, { rendered_columns: mobileHwmColumns }));
+await page.locator('[data-nav="signals"]').click();
+const robuxioEvidence = await page.locator("#implementation-table tbody tr", { hasText: "Robuxio" }).textContent();
+checks.push(check(
+  "Provider-live evidence is not mislabeled as wholly unavailable",
+  robuxioEvidence?.includes("Provider-live available") && robuxioEvidence?.includes("Account-live unavailable"),
+  robuxioEvidence,
+));
 checks.push(check("No console errors occur", consoleErrors.length === 0, consoleErrors));
 
 const result = {
