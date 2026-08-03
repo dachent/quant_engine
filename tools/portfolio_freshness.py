@@ -130,8 +130,11 @@ def write_health(
             handle.flush()
             os.fsync(handle.fileno())
     digest, size = hash_file(output)
+    assessments = payload["assessments"]
+    if not isinstance(assessments, list):
+        raise PortfolioFreshnessError("generated freshness assessments differ")
     return {
-        "assessment_count": len(payload["assessments"]),
+        "assessment_count": len(assessments),
         "as_of_date": payload["as_of_date"],
         "output": str(output),
         "provider_ledger_generation_id": provider_ledger_generation_id,
