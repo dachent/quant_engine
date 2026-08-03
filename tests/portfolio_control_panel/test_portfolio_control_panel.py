@@ -1750,6 +1750,8 @@ def test_renderer_distinguishes_nav_presence_from_hwm_qualification() -> None:
     assert "HWM ${statusText(qualification.status)}" in renderer
     assert "uncovered material sleeve" not in renderer
     assert "lacks accepted daily NAV" not in renderer
+    assert '["Material NAV coverage"' not in renderer
+    assert "governed HWM daily NAV is stale or incomplete" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
