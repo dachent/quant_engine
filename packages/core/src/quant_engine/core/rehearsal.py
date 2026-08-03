@@ -28,6 +28,7 @@ from quant_engine.core.release import (
     GateEvidence,
     ReleaseCommitError,
     ReleaseConflictError,
+    ReleaseJournal,
     ReleaseManifest,
     ReleaseState,
     commit_release,
@@ -192,12 +193,17 @@ def _recover_until_terminated(
 
 def _terminate_at_checkpoint(
     target: Callable[..., None], args: tuple[object, ...]
-) -> None:
+) -> tuple[int, int]:
     context = multiprocessing.get_context("spawn")
     ready = context.Event()
     hold = context.Event()
     process = context.Process(target=target, args=(*args, ready, hold))
     process.start()
+    process_id = process.pid
+    if process_id is None:
+        process.terminate()
+        process.join(30)
+        raise RehearsalError("terminated worker did not report a process ID")
     if not ready.wait(30):
         process.terminate()
         process.join(30)
@@ -213,6 +219,7 @@ def _terminate_at_checkpoint(
     process.close()
     if exitcode in {None, 0}:
         raise RehearsalError("terminated worker did not exit abnormally")
+    return process_id, exitcode
 
 
 def rehearse_release_boundaries(
@@ -255,9 +262,12 @@ def rehearse_release_boundaries(
         *(("after-companion", item.companion_id) for item in manifest.companions),
     ]
     rows = []
+    process_terminations: list[dict[str, object]] = []
     matrix_root = output_root / "f"
 
-    def prepare_scenario(scenario: Path) -> tuple[dict[str, Path], ReleaseManifest]:
+    def prepare_scenario(
+        scenario: Path, *, preserve_companion_predecessors: bool = True
+    ) -> tuple[dict[str, Path], ReleaseManifest]:
         roots: dict[str, Path] = {}
         for target in manifest.targets:
             source_root = spec.roots[target.root_id]
@@ -274,14 +284,15 @@ def rehearse_release_boundaries(
                     rehearsal_root, target.previous_pointer.generation_id
                 )
         for companion in manifest.companions:
-            _restore_companion(
-                spec,
-                release_id,
-                companion.companion_id,
-                roots[companion.root_id],
-                companion.relative_path,
-                companion.previous_sha256,
-            )
+            if preserve_companion_predecessors:
+                _restore_companion(
+                    spec,
+                    release_id,
+                    companion.companion_id,
+                    roots[companion.root_id],
+                    companion.relative_path,
+                    companion.previous_sha256,
+                )
         prepared = prepare_release(
             coordination_root=scenario / "c",
             roots=roots,
@@ -303,6 +314,27 @@ def rehearse_release_boundaries(
         )
         return roots, prepared
 
+    def terminate_case(
+        *,
+        case_id: str,
+        operation: str,
+        checkpoint: str,
+        item: str,
+        target: Callable[..., None],
+        args: tuple[object, ...],
+    ) -> dict[str, object]:
+        process_id, exit_code = _terminate_at_checkpoint(target, args)
+        row: dict[str, object] = {
+            "case_id": case_id,
+            "checkpoint": checkpoint,
+            "exit_code": exit_code,
+            "item": item,
+            "operation": operation,
+            "process_id": process_id,
+        }
+        process_terminations.append(row)
+        return row
+
     boundary_cases = [
         *(("CAUGHT_EXCEPTION", *item) for item in caught_boundaries),
         *(("PROCESS_TERMINATION", *item) for item in crash_boundaries),
@@ -318,9 +350,13 @@ def rehearse_release_boundaries(
                 raise OSError(f"injected failure at {step}:{item}")
 
         if failure_mode == "PROCESS_TERMINATION":
-            _terminate_at_checkpoint(
-                _commit_until_terminated,
-                (
+            termination = terminate_case(
+                case_id=f"commit-boundary-{index:02d}",
+                operation="COMMIT",
+                checkpoint=failure_step,
+                item=failure_item,
+                target=_commit_until_terminated,
+                args=(
                     scenario / "c",
                     prepared.release_id,
                     roots,
@@ -373,17 +409,78 @@ def rehearse_release_boundaries(
             actual = _file_hash(path) if path.exists() else None
             if actual != companion.previous_sha256:
                 raise RehearsalError("predecessor companion was not restored")
-        rows.append(
-            {
-                "failure_item": failure_item,
-                "failure_mode": failure_mode,
-                "failure_step": failure_step,
-                "journal_state": journal.state.value,
-                "restored": True,
-            }
-        )
+        row: dict[str, object] = {
+            "failure_item": failure_item,
+            "failure_mode": failure_mode,
+            "failure_step": failure_step,
+            "journal_state": journal.state.value,
+            "restored": True,
+        }
+        if failure_mode == "PROCESS_TERMINATION":
+            row.update(
+                {
+                    "exit_code": termination["exit_code"],
+                    "process_id": termination["process_id"],
+                }
+            )
+        rows.append(row)
 
-    # Prove rollback can itself be interrupted after an effect and resumed.
+    # Prove rollback can itself be interrupted with effects still outstanding and
+    # resumed. Keep scenario directories deliberately short. Generation identifiers
+    # are already 64 characters, and descriptive names can exceed legacy MAX_PATH.
+    if len(manifest.targets) < 2:
+        raise RehearsalError("recovery rehearsal requires at least two targets")
+    if not manifest.companions:
+        raise RehearsalError("recovery rehearsal requires a companion boundary")
+
+    def resume_interrupted_rollback(
+        scenario: Path,
+        release: ReleaseManifest,
+        scenario_roots: dict[str, Path],
+    ) -> ReleaseJournal:
+        _, interrupted = read_release(scenario / "c", release.release_id)
+        if interrupted.state is not ReleaseState.ROLLING_BACK:
+            raise RehearsalError("interrupted rollback journal state differs")
+        try:
+            recover_release(
+                coordination_root=scenario / "c",
+                release_id=release.release_id,
+                roots=scenario_roots,
+            )
+        except ReleaseConflictError:
+            pass
+        else:
+            raise RehearsalError("rollback stale lock did not require confirmation")
+        resumed_journal = recover_release(
+            coordination_root=scenario / "c",
+            release_id=release.release_id,
+            roots=scenario_roots,
+            clear_stale_lock=True,
+        )
+        if resumed_journal.state is not ReleaseState.ROLLED_BACK:
+            raise RehearsalError("interrupted rollback did not resume")
+        return resumed_journal
+
+    def require_predecessor_graph(
+        release: ReleaseManifest, scenario_roots: dict[str, Path]
+    ) -> None:
+        for target in release.targets:
+            root = scenario_roots[target.root_id]
+            actual = read_current(root) if (root / "CURRENT.json").exists() else None
+            if actual != target.previous_pointer:
+                raise RehearsalError("resumed rollback pointer graph differs")
+        for companion in release.companions:
+            path = scenario_roots[companion.root_id] / PurePosixPath(
+                companion.relative_path
+            )
+            actual_hash = _file_hash(path) if path.exists() else None
+            if actual_hash != companion.previous_sha256:
+                raise RehearsalError("resumed rollback companion graph differs")
+
+    rollback_rows: list[dict[str, object]] = []
+
+    # Apply two targets, restore the later one, terminate, and prove that the earlier
+    # target remains proposed until the resumed rollback completes it.
     # Keep the scenario directory deliberately short.  Generation identifiers are
     # already 64 characters, and a descriptive directory name can push otherwise
     # valid rehearsal paths beyond the legacy Windows MAX_PATH boundary.
@@ -391,49 +488,144 @@ def rehearse_release_boundaries(
     index += 1
     roots, prepared = prepare_scenario(rollback_scenario)
     first_target = manifest.targets[0].root_id
-    _terminate_at_checkpoint(
-        _commit_until_terminated,
-        (
+    second_target = manifest.targets[1].root_id
+    terminate_case(
+        case_id="rollback-target-setup",
+        operation="COMMIT",
+        checkpoint="after-target",
+        item=second_target,
+        target=_commit_until_terminated,
+        args=(
             rollback_scenario / "c",
             prepared.release_id,
             roots,
             proposed_companions,
             "after-target",
-            first_target,
+            second_target,
         ),
     )
-    _terminate_at_checkpoint(
-        _recover_until_terminated,
-        (
+    target_termination = terminate_case(
+        case_id="rollback-target-with-work-remaining",
+        operation="RECOVER",
+        checkpoint="after-target-restore",
+        item=second_target,
+        target=_recover_until_terminated,
+        args=(
             rollback_scenario / "c",
             prepared.release_id,
             roots,
             True,
             "after-target-restore",
-            first_target,
+            second_target,
         ),
     )
-    _, interrupted = read_release(rollback_scenario / "c", prepared.release_id)
-    if interrupted.state is not ReleaseState.ROLLING_BACK:
-        raise RehearsalError("interrupted rollback journal state differs")
-    try:
-        recover_release(
-            coordination_root=rollback_scenario / "c",
-            release_id=prepared.release_id,
-            roots=roots,
+    if read_current(roots[second_target]) != next(
+        item.previous_pointer
+        for item in prepared.targets
+        if item.root_id == second_target
+    ) or read_current(roots[first_target]).generation_id != next(
+        item.proposed_generation_id
+        for item in prepared.targets
+        if item.root_id == first_target
+    ):
+        raise RehearsalError(
+            "target rollback interruption left the wrong partial graph"
         )
-    except ReleaseConflictError:
-        pass
-    else:
-        raise RehearsalError("rollback stale lock did not require confirmation")
-    resumed = recover_release(
-        coordination_root=rollback_scenario / "c",
-        release_id=prepared.release_id,
-        roots=roots,
-        clear_stale_lock=True,
+    resumed = resume_interrupted_rollback(rollback_scenario, prepared, roots)
+    require_predecessor_graph(prepared, roots)
+    rollback_rows.append(
+        {
+            "case_id": "TARGET_WITH_WORK_REMAINING",
+            "exit_code": target_termination["exit_code"],
+            "interrupted_state": ReleaseState.ROLLING_BACK.value,
+            "process_id": target_termination["process_id"],
+            "remaining_effect": first_target,
+            "resumed_state": resumed.state.value,
+            "status": "PASS",
+        }
     )
-    if resumed.state is not ReleaseState.ROLLED_BACK:
-        raise RehearsalError("interrupted rollback did not resume")
+
+    # Exercise both companion predecessor branches. In each case the companion is
+    # restored first, all target pointers remain proposed, and a fresh process must
+    # finish their rollback.
+    companion_plan = manifest.companions[0]
+    for branch, preserves_predecessor in (
+        ("RESTORE_PREVIOUS", True),
+        ("DELETE_PREVIOUSLY_ABSENT", False),
+    ):
+        scenario = output_root / "rc" / ("p" if preserves_predecessor else "a")
+        scenario_roots, scenario_release = prepare_scenario(
+            scenario,
+            preserve_companion_predecessors=preserves_predecessor,
+        )
+        terminate_case(
+            case_id=f"rollback-companion-{branch.lower()}-setup",
+            operation="COMMIT",
+            checkpoint="after-companion",
+            item=companion_plan.companion_id,
+            target=_commit_until_terminated,
+            args=(
+                scenario / "c",
+                scenario_release.release_id,
+                scenario_roots,
+                proposed_companions,
+                "after-companion",
+                companion_plan.companion_id,
+            ),
+        )
+        companion_termination = terminate_case(
+            case_id=f"rollback-companion-{branch.lower()}-with-targets-remaining",
+            operation="RECOVER",
+            checkpoint="after-companion-restore",
+            item=companion_plan.companion_id,
+            target=_recover_until_terminated,
+            args=(
+                scenario / "c",
+                scenario_release.release_id,
+                scenario_roots,
+                True,
+                "after-companion-restore",
+                companion_plan.companion_id,
+            ),
+        )
+        scenario_companion = next(
+            item
+            for item in scenario_release.companions
+            if item.companion_id == companion_plan.companion_id
+        )
+        companion_path = scenario_roots[scenario_companion.root_id] / PurePosixPath(
+            scenario_companion.relative_path
+        )
+        actual_companion_hash = (
+            _file_hash(companion_path) if companion_path.exists() else None
+        )
+        targets_still_proposed = all(
+            read_current(scenario_roots[item.root_id]).generation_id
+            == item.proposed_generation_id
+            for item in scenario_release.targets
+        )
+        if (
+            actual_companion_hash != scenario_companion.previous_sha256
+            or not targets_still_proposed
+        ):
+            raise RehearsalError(
+                "companion rollback interruption left the wrong partial graph"
+            )
+        companion_resumed = resume_interrupted_rollback(
+            scenario, scenario_release, scenario_roots
+        )
+        require_predecessor_graph(scenario_release, scenario_roots)
+        rollback_rows.append(
+            {
+                "case_id": f"COMPANION_{branch}_WITH_TARGETS_REMAINING",
+                "exit_code": companion_termination["exit_code"],
+                "interrupted_state": ReleaseState.ROLLING_BACK.value,
+                "process_id": companion_termination["process_id"],
+                "remaining_effects": len(scenario_release.targets),
+                "resumed_state": companion_resumed.state.value,
+                "status": "PASS",
+            }
+        )
 
     def require_stale_confirmation(
         scenario: Path, release: ReleaseManifest, scenario_roots: dict[str, Path]
@@ -451,9 +643,13 @@ def rehearse_release_boundaries(
     lock_rows = []
     prepared_scenario = output_root / "l" / "p"
     prepared_roots, prepared_release = prepare_scenario(prepared_scenario)
-    _terminate_at_checkpoint(
-        _commit_until_terminated,
-        (
+    prepared_termination = terminate_case(
+        case_id="stale-lock-prepared",
+        operation="COMMIT",
+        checkpoint="after-lock-acquire",
+        item=prepared_release.release_id,
+        target=_commit_until_terminated,
+        args=(
             prepared_scenario / "c",
             prepared_release.release_id,
             prepared_roots,
@@ -476,6 +672,8 @@ def rehearse_release_boundaries(
     )
     lock_rows.append(
         {
+            "exit_code": prepared_termination["exit_code"],
+            "process_id": prepared_termination["process_id"],
             "recovered_state": prepared_recovered.state.value,
             "stale_state": ReleaseState.PREPARED.value,
             "status": "PASS",
@@ -484,9 +682,13 @@ def rehearse_release_boundaries(
 
     committed_scenario = output_root / "l" / "c"
     committed_roots, committed_release = prepare_scenario(committed_scenario)
-    _terminate_at_checkpoint(
-        _commit_until_terminated,
-        (
+    committed_termination = terminate_case(
+        case_id="stale-lock-committed",
+        operation="COMMIT",
+        checkpoint="after-committed-journal",
+        item=committed_release.release_id,
+        target=_commit_until_terminated,
+        args=(
             committed_scenario / "c",
             committed_release.release_id,
             committed_roots,
@@ -504,6 +706,8 @@ def rehearse_release_boundaries(
     )
     lock_rows.append(
         {
+            "exit_code": committed_termination["exit_code"],
+            "process_id": committed_termination["process_id"],
             "recovered_state": committed_recovered.state.value,
             "stale_state": ReleaseState.COMMITTED.value,
             "status": "PASS",
@@ -512,9 +716,13 @@ def rehearse_release_boundaries(
 
     rolled_scenario = output_root / "l" / "r"
     rolled_roots, rolled_release = prepare_scenario(rolled_scenario)
-    _terminate_at_checkpoint(
-        _commit_until_terminated,
-        (
+    terminate_case(
+        case_id="stale-lock-rolled-back-setup",
+        operation="COMMIT",
+        checkpoint="after-target",
+        item=first_target,
+        target=_commit_until_terminated,
+        args=(
             rolled_scenario / "c",
             rolled_release.release_id,
             rolled_roots,
@@ -523,9 +731,13 @@ def rehearse_release_boundaries(
             first_target,
         ),
     )
-    _terminate_at_checkpoint(
-        _recover_until_terminated,
-        (
+    rolled_termination = terminate_case(
+        case_id="stale-lock-rolled-back",
+        operation="RECOVER",
+        checkpoint="after-rolled-back-journal",
+        item=rolled_release.release_id,
+        target=_recover_until_terminated,
+        args=(
             rolled_scenario / "c",
             rolled_release.release_id,
             rolled_roots,
@@ -543,6 +755,8 @@ def rehearse_release_boundaries(
     )
     lock_rows.append(
         {
+            "exit_code": rolled_termination["exit_code"],
+            "process_id": rolled_termination["process_id"],
             "recovered_state": rolled_recovered.state.value,
             "stale_state": ReleaseState.ROLLED_BACK.value,
             "status": "PASS",
@@ -552,9 +766,13 @@ def rehearse_release_boundaries(
     conflict_rows = []
     pointer_scenario = output_root / "x" / "p"
     pointer_roots, pointer_release = prepare_scenario(pointer_scenario)
-    _terminate_at_checkpoint(
-        _commit_until_terminated,
-        (
+    pointer_termination = terminate_case(
+        case_id="recovery-failed-pointer-setup",
+        operation="COMMIT",
+        checkpoint="after-target",
+        item=first_target,
+        target=_commit_until_terminated,
+        args=(
             pointer_scenario / "c",
             pointer_release.release_id,
             pointer_roots,
@@ -600,20 +818,23 @@ def rehearse_release_boundaries(
     conflict_rows.append(
         {
             "conflict_kind": "POINTER",
+            "exit_code": pointer_termination["exit_code"],
             "failed_state": pointer_failed.state.value,
+            "process_id": pointer_termination["process_id"],
             "resumed_state": pointer_resumed.state.value,
             "status": "PASS",
         }
     )
 
-    if not manifest.companions:
-        raise RehearsalError("recovery rehearsal requires a companion boundary")
-    companion_plan = manifest.companions[0]
     companion_scenario = output_root / "x" / "c"
     companion_roots, companion_release = prepare_scenario(companion_scenario)
-    _terminate_at_checkpoint(
-        _commit_until_terminated,
-        (
+    conflict_termination = terminate_case(
+        case_id="recovery-failed-companion-setup",
+        operation="COMMIT",
+        checkpoint="after-companion",
+        item=companion_plan.companion_id,
+        target=_commit_until_terminated,
+        args=(
             companion_scenario / "c",
             companion_release.release_id,
             companion_roots,
@@ -655,7 +876,9 @@ def rehearse_release_boundaries(
     conflict_rows.append(
         {
             "conflict_kind": "COMPANION",
+            "exit_code": conflict_termination["exit_code"],
             "failed_state": companion_failed.state.value,
+            "process_id": conflict_termination["process_id"],
             "resumed_state": companion_resumed.state.value,
             "status": "PASS",
         }
@@ -670,13 +893,17 @@ def rehearse_release_boundaries(
         "caught_boundary_count": len(caught_boundaries),
         "crash_boundary_count": len(crash_boundaries),
         "lock_lifecycle": lock_rows,
+        "process_termination_count": len(process_terminations),
         "process_termination_method": "OPERATING_SYSTEM_PROCESS_TERMINATION",
+        "process_terminations": process_terminations,
         "recovery_failed_conflicts": conflict_rows,
         "rollback_interruption": {
+            "case_count": len(rollback_rows),
             "interrupted_state": ReleaseState.ROLLING_BACK.value,
             "resumed_state": resumed.state.value,
             "status": "PASS",
         },
+        "rollback_interruptions": rollback_rows,
         "source_state_sha256": hashlib.sha256(
             canonical_json_bytes(source_before)
         ).hexdigest(),

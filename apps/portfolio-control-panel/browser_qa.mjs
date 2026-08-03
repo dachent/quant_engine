@@ -148,6 +148,7 @@ try {
       request_failures_path: path.join(folder, "request-failures.json"),
       screenshot_path: path.join(folder, "screenshot.png"),
       target,
+      final_url: page.url(),
       title: await page.title(),
       tool: "portfolio_control_panel_browser_qa",
       viewport: capture.viewport,

@@ -1320,6 +1320,12 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
     generation = inputs["output"] / "generations" / pointer.generation_id
     assert (generation / "index.html").is_file()
     assert (generation / "qa" / "qa-validation.json").is_file()
+    semantic = json.loads(
+        (generation / "qa" / "semantic-validation.json").read_text(encoding="utf-8")
+    )
+    assert semantic["all_passed"] is True
+    assert semantic["checks_total"] >= 16
+    assert semantic["panel_id"] == built["panel_id"]
     launcher = inputs["output"] / "index.html"
     assert launcher.is_file()
     launcher_text = launcher.read_text(encoding="utf-8")
@@ -1336,6 +1342,60 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
         if item["artifact_id"] == "input/freshness-health.json"
     )
     assert freshness_artifact["schema"]["version"] == "2"
+
+
+def test_stable_launcher_browser_qa_proves_redirect(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "candidate")
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
+    launcher = inputs["output"] / "index.html"
+    launcher_qa = _qa(candidate, tmp_path / "launcher")
+    launcher_url = launcher.resolve().as_uri()
+    generation_url = (
+        (
+            inputs["output"]
+            / "generations"
+            / str(published["generation_id"])
+            / "index.html"
+        )
+        .resolve()
+        .as_uri()
+    )
+    for name in panel.CAPTURES:
+        manifest_path = launcher_qa / name / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["target"] = f"{launcher_url}#{name}"
+        manifest["final_url"] = f"{generation_url}#{name}"
+        _write_json(manifest_path, manifest)
+
+    result = panel.validate_stable_launcher_qa(
+        launcher, launcher_qa, str(published["generation_id"])
+    )
+
+    assert result["all_passed"] is True
+    assert result["checks_total"] == 5
+    assert (
+        result["launcher_sha256"] == hashlib.sha256(launcher.read_bytes()).hexdigest()
+    )
+    persisted = json.loads(
+        (launcher_qa / "stable-launcher-validation.json").read_text(encoding="utf-8")
+    )
+    assert persisted == result
 
 
 def test_publication_manifest_uses_later_operational_freshness_date(
@@ -1550,6 +1610,37 @@ def test_risk_template_does_not_hard_code_provider_coverage() -> None:
         "qualifies only while its governed freshness and evidence gates pass"
         in template
     )
+
+
+def test_renderer_derives_provider_lineage_labels_from_provider_payload() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "P123 live book" not in renderer
+    assert "P123 account snapshot" not in renderer
+    assert "providerName(provider.provider_id || evidence.provider_id)" in renderer
+    assert 'matrixport: "Matrixport"' in renderer
+    assert "if (account) parts.push" in renderer
+
+
+def test_renderer_distinguishes_nav_presence_from_hwm_qualification() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'row.nav_status !== "AVAILABLE"' in renderer
+    assert 'row.hwm_evidence_status !== "ACCEPTED"' in renderer
+    assert 'row.hwm_freshness_status === "BLOCKED"' in renderer
+    assert "Daily NAV evidence is present but stale for HWM" in renderer
+    assert "Evidence ${statusText(row.nav_status)}" in renderer
+    assert "HWM ${statusText(qualification.status)}" in renderer
+
+
+def test_hwm_prose_uses_qualified_evidence_instead_of_legacy_source_label() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "ACCOUNT_LIVE_PROVIDER_OVERLAY" not in renderer
+    assert "acceptedHwmEvidence" in renderer
+    assert "hwmEvidenceLabel(row)" in renderer
+    assert "Accepted account-live/provider-overlay evidence:" in renderer
+    assert "Provider-custodied account NAV evidence is unavailable" not in renderer
 
 
 def test_hwm_coverage_removes_superseded_exception_when_material_perimeter_is_complete() -> (

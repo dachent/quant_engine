@@ -39,7 +39,12 @@
     AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE: "Available: version-matched backtest prehistory plus live",
     AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY: "Available live; no version-matched backtest prehistory",
     AVAILABLE_LIVE_ONLY: "Available: live only",
+    AVAILABLE_HWM_QUALIFIED: "Available for HWM",
     EXCLUDED_DE_MINIMIS: "Excluded de minimis",
+    UNAVAILABLE_MISSING_DAILY_NAV: "Daily NAV evidence missing",
+    UNAVAILABLE_STALE_FOR_HWM: "Daily NAV present but stale for HWM",
+    UNAVAILABLE_UNACCEPTED_EVIDENCE: "Daily NAV layer not admitted for HWM",
+    UNAVAILABLE_MISSING_FRESHNESS: "Daily NAV freshness unavailable",
     UNAVAILABLE_MISSING_VERSION_MATCHED_LIVE: "No version-matched live series",
     UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY: "No version-matched backtest prehistory",
   };
@@ -50,15 +55,41 @@
   const emptyRow = (columns, message = "No matching rows") => `<tr><td colspan="${columns}" class="cell-secondary">${safe(message)}</td></tr>`;
   const tableMarkup = (headers, rows) => `<thead><tr>${headers.map(([label, cls = ""]) => `<th class="${cls}">${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
   const strategyByName = (name) => data.strategies.find((row) => row.strategy_name === name);
+  const providerName = (providerId) => ({
+    alpaca: "Alpaca",
+    fidelity: "Fidelity",
+    ibkr: "IBKR",
+    matrixport: "Matrixport",
+    portfolio123: "Portfolio123",
+    quantbase: "Quantbase",
+    schwab: "Schwab",
+  })[String(providerId || "").toLowerCase()] || String(providerId || "Provider");
   const evidenceCoverage = (row) => {
     const evidence = row.provider_evidence;
     if (!evidence) return "No accepted provider overlay";
-    const account = evidence.account || {};
-    const accountLabel = evidence.provider_id === "quantbase" ? "Quantbase account" : "Account-live TWR";
-    const parts = [`Accepted ${formatDate(evidence.generation_as_of_date)}`, `${accountLabel}: ${formatDate(account.observed_start)}–${formatDate(account.observed_end)} · ${integer.format(account.return_observations || 0)} returns`];
-    if (evidence.provider) parts.push(`P123 live book: ${formatDate(evidence.provider.observed_start)}–${formatDate(evidence.provider.observed_end)} · ${integer.format(evidence.provider.return_observations || 0)} returns`);
-    if (evidence.current_snapshot) parts.push(`P123 account snapshot: ${formatDate(evidence.current_snapshot.observed_date)}`);
+    const account = evidence.account;
+    const provider = evidence.provider;
+    const parts = [`Accepted ${formatDate(evidence.generation_as_of_date)}`];
+    if (account) parts.push(`${providerName(account.provider_id || evidence.provider_id)} account-live TWR: ${formatDate(account.observed_start)}–${formatDate(account.observed_end)} · ${integer.format(account.return_observations || 0)} returns`);
+    if (provider) parts.push(`${providerName(provider.provider_id || evidence.provider_id)} provider-live book: ${formatDate(provider.observed_start)}–${formatDate(provider.observed_end)} · ${integer.format(provider.return_observations || 0)} returns`);
+    if (evidence.current_snapshot) parts.push(`${providerName(provider?.provider_id || evidence.provider_id)} account snapshot: ${formatDate(evidence.current_snapshot.observed_date)}`);
     return parts.join(" · ");
+  };
+  const hwmQualification = (row) => {
+    if (row.hwm_scope === "EXCLUDED_DE_MINIMIS") return { status: "EXCLUDED_DE_MINIMIS", note: "Reported, outside the material HWM perimeter" };
+    if (row.nav_status !== "AVAILABLE") return { status: "UNAVAILABLE_MISSING_DAILY_NAV", note: "No daily NAV evidence is present" };
+    if (row.hwm_evidence_status !== "ACCEPTED") return { status: "UNAVAILABLE_UNACCEPTED_EVIDENCE", note: "Daily NAV evidence is present but its evidence layer is not admitted for HWM" };
+    if (row.hwm_freshness_status === "BLOCKED") return { status: "UNAVAILABLE_STALE_FOR_HWM", note: "Daily NAV evidence is present but stale for HWM" };
+    if (row.hwm_freshness_status !== "ACCEPTED") return { status: "UNAVAILABLE_MISSING_FRESHNESS", note: "Daily NAV evidence is present but its freshness assessment is unavailable" };
+    return { status: "AVAILABLE_HWM_QUALIFIED", note: "Daily NAV evidence is present and HWM-qualified" };
+  };
+  const hwmEvidenceLabel = (row) => {
+    const evidence = row.provider_evidence || {};
+    const sourceProvider = row.nav_evidence_layer === "PROVIDER_LIVE"
+      ? evidence.provider?.provider_id || evidence.provider_id
+      : evidence.account?.provider_id || evidence.provider_id;
+    const layer = row.nav_evidence_layer === "PROVIDER_LIVE" ? "provider-live" : "account-live";
+    return `${providerName(sourceProvider)} ${layer}`;
   };
 
   function renderCommand() {
@@ -80,7 +111,10 @@
     const systematicShare = total ? Number(data.capital.systematic) / total * 100 : 0;
     $("#capital-ring").innerHTML = `<div class="capital-donut" style="background:conic-gradient(var(--accent) 0 ${systematicShare}%, var(--reserve) ${systematicShare}% 100%)"><div class="donut-center"><strong>${currency(total)}</strong><span>liquid</span></div></div><div class="legend-list"><div class="legend-item"><span class="legend-dot" style="background:var(--accent)"></span><span>Systematic · ${systematicShare.toFixed(1)}%</span><strong>${currency(data.capital.systematic)}</strong></div><div class="legend-item"><span class="legend-dot" style="background:var(--reserve)"></span><span>Reserve · ${(100 - systematicShare).toFixed(1)}%</span><strong>${currency(data.capital.reserve)}</strong></div></div>`;
 
-    $("#strategy-coverage-bars").innerHTML = data.strategies.map((row) => `<div class="coverage-status-row"><div class="bar-label"><span>${safe(row.strategy_name)}</span>${statusText(row.nav_status)}</div><div class="cell-secondary">${integer.format(row.available_twr_segments || 0)} coverage-qualified TWR segments · systematic weight ${pct(row.systematic_weight)}</div></div>`).join("");
+    $("#strategy-coverage-bars").innerHTML = data.strategies.map((row) => {
+      const qualification = hwmQualification(row);
+      return `<div class="coverage-status-row"><div class="bar-label"><span>${safe(row.strategy_name)}</span><span>Evidence ${statusText(row.nav_status)} · HWM ${statusText(qualification.status)}</span></div><div class="cell-secondary">${safe(qualification.note)} · ${integer.format(row.available_twr_segments || 0)} coverage-qualified TWR segments · systematic weight ${pct(row.systematic_weight)}</div></div>`;
+    }).join("");
     const currentMapped = data.positions.filter((row) => row.status === "AVAILABLE_MAPPED").length;
     const operatorLabels = {
       "full-systematic-hwm-unavailable": "Material systematic HWM cannot yet be calculated",
@@ -120,7 +154,10 @@
     const providers = Object.entries(data.provider_counts).sort((a, b) => b[1] - a[1]);
     const maxCount = Math.max(...providers.map(([, count]) => count), 1);
     $("#provider-bars").innerHTML = providers.map(([provider, count]) => `<div><div class="bar-label"><span>${safe(provider)}</span><strong>${integer.format(count)}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${count / maxCount * 100}%"></div></div></div>`).join("");
-    const rows = data.strategies.map((row) => `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)}</span></td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td>${statusText(row.nav_status)}${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${safe(row.cost_status)}</td><td>${statusText(row.implementation_gap_status)}</td></tr>`);
+    const rows = data.strategies.map((row) => {
+      const qualification = hwmQualification(row);
+      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)}</span></td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td><span class="cell-primary">Evidence ${statusText(row.nav_status)}</span><span class="cell-secondary">HWM ${statusText(qualification.status)} · ${safe(qualification.note)}</span>${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${safe(row.cost_status)}</td><td>${statusText(row.implementation_gap_status)}</td></tr>`;
+    });
     $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Implementation gap"]], rows);
     const positionRows = data.positions.map((row) => `<tr><td><span class="cell-primary">${safe(row.strategy_name || "UNMAPPED")}</span><span class="cell-secondary">${safe(row.strategy_id || "No accepted strategy")}</span></td><td><span class="cell-primary">${safe(row.symbol || "—")}</span><span class="cell-secondary">${safe(row.security_id || "—")}</span></td><td><code>${safe(row.account_id || "—")}</code></td><td class="numeric">${safe(row.quantity ?? "—")}</td><td class="numeric">${currency(row.market_value_usd)}</td><td>${formatDate(row.as_of_date)}</td><td>${statusText(row.status)}</td></tr>`);
     const positionTable = $("#position-table");
@@ -129,20 +166,22 @@
   }
 
   function renderRisk() {
-    const missingNav = data.strategies.filter((row) => row.hwm_scope === "INCLUDED" && (row.nav_status !== "AVAILABLE" || row.hwm_freshness_status !== "ACCEPTED")).map((row) => row.strategy_name);
+    const includedHwm = data.strategies.filter((row) => row.hwm_scope === "INCLUDED").map((row) => ({ row, qualification: hwmQualification(row) }));
+    const unavailableHwm = includedHwm.filter(({ qualification }) => qualification.status !== "AVAILABLE_HWM_QUALIFIED");
     const excludedNav = data.strategies.filter((row) => row.hwm_scope === "EXCLUDED_DE_MINIMIS").map((row) => row.strategy_name);
-    const providerHwm = data.strategies.filter((row) => row.hwm_source === "ACCOUNT_LIVE_PROVIDER_OVERLAY" && row.nav_status === "AVAILABLE");
+    const acceptedHwmEvidence = includedHwm.filter(({ qualification }) => qualification.status === "AVAILABLE_HWM_QUALIFIED").map(({ row }) => row);
     renderKpis("#risk-kpis", [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Accepted adverse scenario", "danger"],
-      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${missingNav.length} uncovered material sleeve${missingNav.length === 1 ? "" : "s"}`, missingNav.length ? "danger" : "positive"],
+      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${unavailableHwm.length} uncovered material sleeve${unavailableHwm.length === 1 ? "" : "s"}`, unavailableHwm.length ? "danger" : "positive"],
       ["TWR available", `${data.counts.twr_available}/${data.counts.twr_rows}`, "Account-strategy segments", "warning"],
       ["MWR available", `${data.counts.mwr_available}/${data.counts.twr_rows}`, "Complete flows required", data.counts.mwr_available ? "positive" : "danger"],
     ]);
     const stress = Number(data.advisory.correlation_one_stress);
     const passes = stress <= Number(data.advisory.hwm_limit);
     $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">Current portfolio</div><div class="scenario-track"><span class="scenario-limit" aria-hidden="true"></span><span class="scenario-fill ${passes ? "pass" : ""}" style="width:${Math.min(100, stress / 0.4 * 100)}%"></span></div><div class="scenario-value ${passes ? "" : "status-text danger"}">${pct(stress)}</div></div><div class="callout callout-danger">Stress exceeds the 15% HWM boundary. This is advisory evidence, not a liquidation instruction.</div>`;
-    const providerHwmSummary = providerHwm.map((row) => `${row.strategy_name}: ${integer.format(row.nav_return_observations)} verified account-live returns from ${formatDate(row.nav_observed_start)} through ${formatDate(row.nav_observed_end)}; current drawdown ${pct(row.hwm_current_drawdown)}, observed maximum ${pct(row.hwm_max_drawdown)}`).join(" · ");
-    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Material systematic daily NAV</strong><span>${missingNav.length ? `${safe(missingNav.join(" · "))} lack accepted daily NAV in this snapshot.` : "Every included material sleeve has accepted daily NAV."} ${excludedNav.length ? `${safe(excludedNav.join(" · "))} remain reported but are excluded de minimis.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of the material HWM perimeter. ${safe(providerHwmSummary || "Provider-custodied account NAV evidence is unavailable.")} Missing NAV and FX are not interpolated.</div>`;
+    const unavailableHwmSummary = unavailableHwm.map(({ row, qualification }) => `${row.strategy_name}: ${qualification.note}`).join(" · ");
+    const acceptedHwmSummary = acceptedHwmEvidence.map((row) => `${row.strategy_name}: ${integer.format(row.nav_return_observations)} ${hwmEvidenceLabel(row)} returns from ${formatDate(row.nav_observed_start)} through ${formatDate(row.nav_observed_end)}`).join(" · ");
+    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Material systematic daily NAV</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included material sleeve has HWM-qualified daily NAV."} ${excludedNav.length ? `${safe(excludedNav.join(" · "))} remain reported but are excluded de minimis.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of the material HWM perimeter. ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No daily NAV evidence currently qualifies for HWM."} Missing NAV and FX are not interpolated.</div>`;
     const mappedPerformance = data.performance.filter((row) => row.strategy_name);
     const historicalGaps = data.performance.filter((row) => !row.strategy_name);
     const rows = mappedPerformance.map((row) => `<tr><td><code>${safe(row.account_id)}</code></td><td>${safe(row.strategy_name)}</td><td>${safe(row.observed_start || row.effective_start || "—")}<span class="cell-secondary">${safe(row.observed_end || row.effective_end || "—")}</span></td><td class="numeric">${integer.format(row.nav_observations)}</td><td class="numeric">${pct(row.twr)}</td><td>${statusText(row.twr_status)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}</td></tr>`);

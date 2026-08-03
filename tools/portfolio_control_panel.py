@@ -2542,6 +2542,104 @@ def validate_qa(candidate_dir: Path, qa_dir: Path) -> dict[str, Any]:
     return result
 
 
+def validate_stable_launcher_qa(
+    launcher_path: Path,
+    qa_dir: Path,
+    expected_generation_id: str,
+) -> dict[str, Any]:
+    """Prove that the stable file launcher resolves to one accepted generation."""
+
+    if launcher_path.is_symlink() or not launcher_path.is_file():
+        raise ControlPanelValidationError("stable launcher is missing or linked")
+    launcher_text = launcher_path.read_text(encoding="utf-8")
+    generation_fragment = f"generations/{expected_generation_id}/index.html"
+    checks: list[dict[str, Any]] = [
+        _check(
+            "Stable launcher names the expected generation",
+            launcher_text.count(generation_fragment) >= 3,
+            expected_generation_id,
+        )
+    ]
+    launcher_url = launcher_path.resolve().as_uri()
+    expected_final_fragment = f"/generations/{expected_generation_id}/index.html"
+    targets: dict[str, bool] = {}
+    resolutions: dict[str, bool] = {}
+    console_counts: dict[str, int] = {}
+    request_counts: dict[str, int] = {}
+    screenshot_sizes: dict[str, int] = {}
+    for name in CAPTURES:
+        capture = qa_dir / name
+        manifest = _load_json(capture / "manifest.json", f"{name} manifest")
+        target = str(manifest.get("target", ""))
+        final_url = str(manifest.get("final_url", ""))
+        targets[name] = target.split("#", 1)[0] == launcher_url
+        resolutions[name] = expected_final_fragment in final_url
+        console_counts[name] = len(
+            _json_array(capture / "console-events.json", f"{name} console evidence")
+        )
+        request_counts[name] = len(
+            _json_array(capture / "request-failures.json", f"{name} request evidence")
+        )
+        screenshot = capture / "screenshot.png"
+        screenshot_sizes[name] = (
+            screenshot.stat().st_size if screenshot.is_file() else 0
+        )
+    checks.extend(
+        [
+            _check(
+                "Every capture starts at the stable launcher",
+                all(targets.values()),
+                targets,
+            ),
+            _check(
+                "Every capture resolves to the expected immutable generation",
+                all(resolutions.values()),
+                resolutions,
+            ),
+            _check(
+                "Stable-launcher captures have no runtime failures",
+                all(value == 0 for value in console_counts.values())
+                and all(value == 0 for value in request_counts.values())
+                and all(value > 0 for value in screenshot_sizes.values()),
+                {
+                    "console": console_counts,
+                    "requests": request_counts,
+                    "screenshots": screenshot_sizes,
+                },
+            ),
+        ]
+    )
+    lint_counts: dict[str, int] = {}
+    for name in LINT_CAPTURES:
+        lint = _load_json(qa_dir / name / "visual-lint.json", f"{name} visual lint")
+        count = lint.get("finding_count")
+        if not isinstance(count, int):
+            raise ControlPanelValidationError(f"{name} visual lint count is invalid")
+        lint_counts[name] = count
+    checks.append(
+        _check(
+            "Stable-launcher visual lint is clean",
+            all(value == 0 for value in lint_counts.values()),
+            lint_counts,
+        )
+    )
+    result = {
+        "all_passed": all(row["status"] == "PASS" for row in checks),
+        "checks": checks,
+        "checks_passed": sum(row["status"] == "PASS" for row in checks),
+        "checks_total": len(checks),
+        "expected_generation_id": expected_generation_id,
+        "launcher": str(launcher_path.resolve()),
+        "launcher_sha256": hashlib.sha256(launcher_path.read_bytes()).hexdigest(),
+    }
+    if not result["all_passed"]:
+        raise ControlPanelValidationError("stable launcher browser QA failed")
+    _write_exact(
+        qa_dir / "stable-launcher-validation.json", canonical_json_bytes(result)
+    )
+    return result
+
+
 def _copy_exact(source: Path, destination: Path) -> None:
     content = source.read_bytes()
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2667,6 +2765,9 @@ def publish_panel(
         freshness_health_path,
     )
     qa = validate_qa(candidate_dir, qa_dir)
+    _write_exact(
+        qa_dir / "semantic-validation.json", canonical_json_bytes(verification)
+    )
     _, data, input_paths = _rendered_files(
         report_root,
         legacy_panel,
@@ -2893,6 +2994,10 @@ def _parser() -> argparse.ArgumentParser:
     qa = commands.add_parser("qa")
     qa.add_argument("--candidate-dir", type=Path, required=True)
     qa.add_argument("--qa-dir", type=Path, required=True)
+    launcher_qa = commands.add_parser("launcher-qa")
+    launcher_qa.add_argument("--launcher", type=Path, required=True)
+    launcher_qa.add_argument("--qa-dir", type=Path, required=True)
+    launcher_qa.add_argument("--expected-generation-id", required=True)
     return parser
 
 
@@ -2929,6 +3034,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
+        elif args.command == "launcher-qa":
+            result = validate_stable_launcher_qa(
+                args.launcher, args.qa_dir, args.expected_generation_id
+            )
         else:
             result = publish_panel(
                 args.report_root,
