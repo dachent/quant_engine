@@ -224,7 +224,9 @@ def _decomposition() -> dict[str, object]:
                 "model_id": model_id,
                 "series_id": series_id,
                 "status": (
-                    "SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL"
+                    "SELECTED_DIAGNOSTIC_ONLY_TRAIN_CV_MODEL"
+                    if index == 4
+                    else "SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL"
                     if model_id
                     else "UNAVAILABLE_NO_VALIDATED_MODEL"
                 ),
@@ -249,7 +251,7 @@ def _decomposition() -> dict[str, object]:
                 "holdout": {
                     "adjusted_r_squared": "0.39",
                     "observation_count": 2,
-                    "predicted_r_squared": "0.4",
+                    "predicted_r_squared": "-0.1" if index == 4 else "0.4",
                     "r_squared": "0.4",
                     "rmse": "0.01",
                     "tracking_error_annualized": "0.15",
@@ -346,12 +348,20 @@ def _decomposition() -> dict[str, object]:
                     "model_id": model_id,
                     "model_quality": {
                         "decision_rule": "SEALED_HOLDOUT_PREDICTED_R2_GT_ZERO",
-                        "decision_status": "PM_VALID",
-                        "gate_reason": "POSITIVE_SEALED_HOLDOUT_PREDICTED_R2",
-                        "holdout_predicted_r_squared": "0.4",
+                        "decision_status": (
+                            "DIAGNOSTIC_ONLY" if index == 4 else "PM_VALID"
+                        ),
+                        "gate_reason": (
+                            "NON_POSITIVE_SEALED_HOLDOUT_PREDICTED_R2"
+                            if index == 4
+                            else "POSITIVE_SEALED_HOLDOUT_PREDICTED_R2"
+                        ),
+                        "holdout_predicted_r_squared": (
+                            "-0.1" if index == 4 else "0.4"
+                        ),
                     },
                     "series_id": series_id,
-                    "status": "AVAILABLE",
+                    "status": "DIAGNOSTIC_ONLY" if index == 4 else "AVAILABLE",
                 }
             )
         else:
@@ -954,7 +964,8 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             "symbol": "SYNTH",
         }
     ]
-    assert data["factor_analysis"]["available_count"] == 5
+    assert data["factor_analysis"]["available_count"] == 4
+    assert data["factor_analysis"]["diagnostic_count"] == 1
     assert data["factor_analysis"]["dynamic_available_count"] == 1
     assert data["factor_analysis"]["unavailable_count"] == 4
     assert data["dependence_analysis"]["available_pair_count"] == 10

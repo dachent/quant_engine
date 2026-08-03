@@ -2726,6 +2726,7 @@ def verify_candidate(
         _check(
             "Accepted factor and alpha evidence is exact",
             data["factor_analysis"]["available_count"]
+            + data["factor_analysis"]["diagnostic_count"]
             + data["factor_analysis"]["unavailable_count"]
             == 9
             and all(
@@ -2741,6 +2742,7 @@ def verify_candidate(
             ),
             {
                 "available": data["factor_analysis"]["available_count"],
+                "diagnostic_only": data["factor_analysis"]["diagnostic_count"],
                 "generation": data["meta"]["decomposition_generation_id"],
                 "unavailable": data["factor_analysis"]["unavailable_count"],
             },
