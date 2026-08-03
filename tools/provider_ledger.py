@@ -1104,6 +1104,47 @@ def _admissions(
     return validate_provider_authority(admissions)
 
 
+def _provider_coverage(
+    provider_id: str,
+    manifest_coverage: CoverageClaim,
+    provider_catalog: Mapping[str, Any],
+) -> dict[str, object]:
+    """Retain provider-declared limitations without replacing manifest authority."""
+
+    raw_catalog_coverage = provider_catalog.get("coverage")
+    if raw_catalog_coverage is None:
+        catalog_coverage: Mapping[str, Any] = {}
+    else:
+        catalog_coverage = _object(
+            raw_catalog_coverage, f"{provider_id} catalog coverage"
+        )
+
+    def limitations(field: str) -> list[str]:
+        raw = catalog_coverage.get(field, [])
+        if not isinstance(raw, list):
+            raise ProviderLedgerError(
+                f"{provider_id} catalog coverage.{field} must be a list"
+            )
+        return sorted(
+            {_text(item, f"{provider_id} catalog coverage.{field}") for item in raw}
+        )
+
+    catalog_known_gaps = limitations("known_gaps")
+    out_of_boundary = limitations("out_of_boundary")
+    authoritative = manifest_coverage.to_dict()
+    authoritative["known_gaps"] = sorted(
+        {
+            *(
+                _text(item, f"{provider_id} manifest coverage.known_gaps")
+                for item in manifest_coverage.known_gaps
+            ),
+            *catalog_known_gaps,
+        }
+    )
+    authoritative["out_of_boundary"] = out_of_boundary
+    return authoritative
+
+
 def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, bytes]:
     """Build one deterministic provider-ledger catalog and manifest."""
 
@@ -1128,7 +1169,9 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
         provider_artifacts.extend(artifacts)
         provider_coverage.append(
             {
-                "coverage": manifest.coverage.to_dict(),
+                "coverage": _provider_coverage(
+                    provider_id, manifest.coverage, provider_catalog
+                ),
                 "generation_id": manifest.generation_id,
                 "provider_id": provider_id,
                 "qualification": identity.qualification.value,

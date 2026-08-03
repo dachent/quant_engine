@@ -33,8 +33,8 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-PANEL_SCHEMA_VERSION: Final = 8
-BUILDER_VERSION: Final = "2.0.0"
+PANEL_SCHEMA_VERSION: Final = 9
+BUILDER_VERSION: Final = "2.1.0"
 HWM_STATUS_CODE_VERSION: Final = 2
 HWM_STATUS_SEMANTICS: Final = "EXPLICIT_GOVERNED_HWM_PERIMETER"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
@@ -1431,6 +1431,157 @@ def _dependence_analysis(
     }
 
 
+def _canonical_strategy_series_contracts(
+    evidence_by_strategy: Mapping[str, Mapping[str, Any]],
+    strategy_names: Mapping[str, str],
+    factor_analysis: Mapping[str, Any],
+    dependence_analysis: Mapping[str, Any],
+    weekly_returns: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Prove that every analytical view consumed the canonical live path."""
+
+    if (
+        not evidence_by_strategy
+        or weekly_returns.get("generation_id") is None
+        or not dependence_analysis.get("series_composition")
+    ):
+        return []
+    composition = _object(
+        dependence_analysis.get("series_composition"),
+        "dependence series composition",
+    )
+    factor_by_name = {
+        _text(row.get("series_id"), "factor series_id"): row
+        for row in _objects(factor_analysis.get("series"), "factor series")
+    }
+    weekly_by_name = {
+        _text(row.get("display_name"), "weekly display_name"): row
+        for row in _objects(weekly_returns.get("series"), "weekly series")
+        if row.get("primary_group") == "STRATEGY"
+    }
+    contracts: list[dict[str, Any]] = []
+    for strategy_id, evidence in sorted(evidence_by_strategy.items()):
+        series_id = strategy_names[strategy_id]
+        layer = _text(evidence.get("evidence_layer"), "canonical evidence layer")
+        selected_key = "account" if layer == "ACCOUNT_LIVE" else "provider"
+        selected = _object(
+            evidence.get(selected_key), f"canonical {series_id} {selected_key}"
+        )
+        observation_count = selected.get("return_observations")
+        if (
+            isinstance(observation_count, bool)
+            or not isinstance(observation_count, int)
+            or observation_count <= 0
+        ):
+            raise ControlPanelValidationError(
+                f"canonical strategy series is empty: {series_id}"
+            )
+        expected = {
+            "evidence_layer": layer,
+            "generation_id": _text(
+                evidence.get("generation_id"), "canonical generation_id"
+            ),
+            "observed_end": _text(
+                selected.get("observed_end"), "canonical observed_end"
+            ),
+            "observed_start": _text(
+                selected.get("observed_start"), "canonical observed_start"
+            ),
+            "return_observations": observation_count,
+            "series_id": series_id,
+            "strategy_id": strategy_id,
+        }
+        dependence = _object(
+            composition.get(series_id), f"dependence series composition {series_id}"
+        )
+        dependence_observed = {
+            "evidence_layer": dependence.get("live_evidence_layer"),
+            "observed_end": dependence.get("observed_end"),
+            "observed_start": dependence.get("observed_start"),
+            "return_observations": dependence.get("live_observations"),
+        }
+        if dependence_observed != {
+            key: expected[key]
+            for key in (
+                "evidence_layer",
+                "observed_end",
+                "observed_start",
+                "return_observations",
+            )
+        }:
+            raise ControlPanelValidationError(
+                f"dependence canonical-series parity failed: {series_id}"
+            )
+        strategy_version = _text(
+            dependence.get("strategy_version"),
+            f"dependence strategy version {series_id}",
+        )
+
+        factor = factor_by_name.get(series_id)
+        if factor is None or not isinstance(factor.get("coverage"), dict):
+            raise ControlPanelValidationError(
+                f"factor canonical-series coverage is absent: {series_id}"
+            )
+        factor_coverage = _object(factor["coverage"], f"factor coverage {series_id}")
+        factor_observed = {
+            "observed_end": factor_coverage.get("target_observed_end"),
+            "observed_start": factor_coverage.get("target_observed_start"),
+            "return_observations": factor_coverage.get("target_observations"),
+        }
+        if factor_observed != {
+            key: expected[key]
+            for key in ("observed_end", "observed_start", "return_observations")
+        }:
+            raise ControlPanelValidationError(
+                f"factor canonical-series parity failed: {series_id}"
+            )
+
+        weekly = weekly_by_name.get(series_id)
+        if weekly is None:
+            raise ControlPanelValidationError(
+                f"weekly canonical-series coverage is absent: {series_id}"
+            )
+        mode_coverage = _object(
+            _object(weekly.get("mode_coverage"), "weekly mode coverage").get(
+                "LIVE_ONLY"
+            ),
+            f"weekly LIVE_ONLY coverage {series_id}",
+        )
+        observation_meta = _object(
+            _object(
+                weekly.get("observation_meta_by_mode"),
+                "weekly observation metadata",
+            ).get("LIVE_ONLY"),
+            f"weekly LIVE_ONLY observations {series_id}",
+        )
+        weekly_bounds = [
+            value
+            for value in observation_meta.values()
+            if isinstance(value, list) and len(value) >= 3
+        ]
+        if not weekly_bounds:
+            raise ControlPanelValidationError(
+                f"weekly canonical-series observations are absent: {series_id}"
+            )
+        weekly_observed = {
+            "observed_end": max(str(value[2]) for value in weekly_bounds),
+            "observed_start": min(str(value[1]) for value in weekly_bounds),
+            "return_observations": mode_coverage.get("live_daily_observations"),
+            "strategy_version": mode_coverage.get("strategy_version"),
+        }
+        if weekly_observed != {
+            "observed_end": expected["observed_end"],
+            "observed_start": expected["observed_start"],
+            "return_observations": expected["return_observations"],
+            "strategy_version": strategy_version,
+        }:
+            raise ControlPanelValidationError(
+                f"weekly canonical-series parity failed: {series_id}"
+            )
+        contracts.append({**expected, "strategy_version": strategy_version})
+    return contracts
+
+
 def _panel_data(
     report: Mapping[str, Any],
     report_identity: Mapping[str, str],
@@ -1594,6 +1745,13 @@ def _panel_data(
             for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
         }
         dependence_analysis = dependence_modes[default_dependence_mode]
+    canonical_strategy_series = _canonical_strategy_series_contracts(
+        evidence_by_strategy,
+        strategy_names,
+        factor_analysis,
+        dependence_analysis,
+        accepted_weekly_returns,
+    )
     freshness_dates = {
         _text(item.get("evaluated_on"), "freshness evaluated_on")
         for item in freshness_health
@@ -1900,6 +2058,7 @@ def _panel_data(
             "twr_rows": len(performance),
         },
         "coverage": coverage,
+        "canonical_strategy_series": canonical_strategy_series,
         "default_dependence_mode": default_dependence_mode,
         "dependence_analysis": dependence_analysis,
         "dependence_modes": dependence_modes,
@@ -2270,6 +2429,40 @@ def verify_candidate(
             },
         )
     )
+    canonical_series = _objects(
+        data.get("canonical_strategy_series", []), "canonical strategy series"
+    )
+    expected_canonical_count = sum(
+        isinstance(row.get("provider_evidence"), dict)
+        for row in _objects(data.get("strategies"), "strategies")
+    )
+    checks.append(
+        _check(
+            "Canonical strategy series agree across report, factor, dependence, and weekly views",
+            (not weekly_expected and not canonical_series)
+            or (
+                weekly_expected
+                and expected_canonical_count > 0
+                and len(canonical_series) == expected_canonical_count
+                and len(
+                    {
+                        (
+                            row.get("series_id"),
+                            row.get("evidence_layer"),
+                            row.get("generation_id"),
+                            row.get("strategy_version"),
+                        )
+                        for row in canonical_series
+                    }
+                )
+                == expected_canonical_count
+            ),
+            {
+                "canonical_series": len(canonical_series),
+                "report_series": expected_canonical_count,
+            },
+        )
+    )
     checks.append(
         _check(
             "No external frontend dependency",
@@ -2386,11 +2579,10 @@ def verify_candidate(
                 and volatis.get("hwm_source") == "PORTFOLIO_REPORT"
                 and volatis_evidence.get("provider_id") == "quantbase"
                 and robuxio.get("nav_status") == "AVAILABLE"
-                and robuxio.get("nav_evidence_layer") == "PROVIDER_LIVE"
-                and robuxio.get("account_live_status") == "UNAVAILABLE"
+                and robuxio.get("nav_evidence_layer") == "ACCOUNT_LIVE"
+                and robuxio.get("account_live_status") == "AVAILABLE"
                 and robuxio_evidence.get("provider_id") == "matrixport"
-                and robuxio_evidence.get("account") is None
-                and isinstance(robuxio_evidence.get("provider"), dict)
+                and isinstance(robuxio_evidence.get("account"), dict)
                 and p123_evidence.get("provider_id") == "ibkr"
                 and p123_account.get("observed_end")
                 != p123_provider.get("observed_end")

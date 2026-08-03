@@ -43,6 +43,26 @@ await page.waitForFunction(() => document.querySelector("#app")?.dataset.appStat
 
 const checks = [];
 const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"];
+const requiredFactorLenses = [
+  "HISTORICAL_MINIMUM_PROOF",
+  "ECONOMIC_FACTOR",
+  "ETF_STYLE",
+  "RETURN_INDUSTRY",
+  "RETURN_SECTOR",
+];
+const requiredCorrelationWindows = ["5", "21", "22", "63", "126", "130", "252", "260"];
+const requiredDrawdownRegimes = ["either_drawdown", "both_drawdown"];
+const requiredWeeklyGroups = [
+  "ALL",
+  "STRATEGY",
+  "ECONOMIC_FACTOR_US",
+  "ECONOMIC_FACTOR_EUROPE",
+  "STYLE_US_EQUITY",
+  "STYLE_MULTI_ASSET",
+  "SECTOR",
+  "INDUSTRY",
+  "CORE_BENCHMARK",
+];
 const visited = [];
 for (const view of views) {
   await page.locator(`[data-nav="${view}"]`).click();
@@ -53,6 +73,25 @@ checks.push(check("All nine navigation views activate", visited.length === views
 
 await page.locator('[data-nav="attribution"]').click();
 const factorLensButtons = await page.locator("[data-factor-lens]").count();
+const factorLensEvidence = [];
+for (const lens of requiredFactorLenses) {
+  const button = page.locator(`[data-factor-lens="${lens}"]`);
+  await button.click();
+  factorLensEvidence.push({
+    active: await page.locator(`[data-factor-lens="${lens}"]`).getAttribute("aria-pressed"),
+    boundary: (await page.locator("#factor-lens-boundary").textContent())?.trim(),
+    chips: await page.locator("[data-factor-strategy]").count(),
+    lens,
+    rows: await page.locator("#factor-model-table tbody tr").count(),
+  });
+}
+checks.push(check(
+  "All five decomposition lenses are rendered and exercised",
+  factorLensButtons === requiredFactorLenses.length
+    && factorLensEvidence.length === requiredFactorLenses.length
+    && factorLensEvidence.every((item) => item.active === "true" && item.boundary?.includes("never concatenated") && item.chips === 9 && item.rows === 9),
+  factorLensEvidence,
+));
 await page.locator('[data-factor-lens="HISTORICAL_MINIMUM_PROOF"]').click();
 const factorRows = await page.locator("#factor-model-table tbody tr").count();
 const factorChips = await page.locator("[data-factor-strategy]").count();
@@ -71,24 +110,41 @@ await page.locator('[data-factor-lens="ECONOMIC_FACTOR"]').click();
 const economicBoundary = await page.locator("#factor-lens-boundary").textContent();
 checks.push(check(
   "Economic, style, sector, industry, and historical lenses remain separate",
-  factorLensButtons === 5 && economicBoundary?.includes("EXCESS_AND_LONG_SHORT_FACTOR_RETURN") && economicBoundary?.includes("never concatenated"),
-  { factor_lenses: factorLensButtons, economic_boundary: economicBoundary },
+  factorLensButtons === requiredFactorLenses.length && economicBoundary?.includes("EXCESS_AND_LONG_SHORT_FACTOR_RETURN") && economicBoundary?.includes("never concatenated"),
+  { exercised_lenses: factorLensEvidence.map((item) => item.lens), factor_lenses: factorLensButtons, economic_boundary: economicBoundary },
 ));
 
 await page.locator('[data-nav="dependence"]').click();
 const liveModePressed = await page.locator('[data-evidence-mode="LIVE_ONLY"]').getAttribute("aria-pressed");
+const liveModeBadge = await page.locator("#evidence-mode-badge").textContent();
+const liveModeBoundary = await page.locator("#evidence-mode-boundary").textContent();
 const hybridMode = page.locator('[data-evidence-mode="LIVE_PLUS_BACKTEST"]');
 const hybridDisabled = await hybridMode.isDisabled();
 let hybridBadge = null;
+let hybridBoundary = null;
 if (!hybridDisabled) {
   await hybridMode.click();
   hybridBadge = await page.locator("#evidence-mode-badge").textContent();
+  hybridBoundary = await page.locator("#evidence-mode-boundary").textContent();
   await page.locator('[data-evidence-mode="LIVE_ONLY"]').click();
 }
 checks.push(check(
-  "Dependence evidence mode defaults to live-only and fails closed without backtest",
-  liveModePressed === "true" && (hybridDisabled || hybridBadge?.includes("HYBRID BACKTEST + LIVE")),
-  { hybrid_available: !hybridDisabled, hybrid_badge: hybridBadge, live_default: liveModePressed },
+  "Dependence live and hybrid evidence disclosures are exercised",
+  liveModePressed === "true"
+    && liveModeBadge?.includes("LIVE ONLY")
+    && liveModeBoundary?.includes("authoritative default")
+    && (hybridDisabled
+      || (hybridBadge?.includes("HYBRID BACKTEST + LIVE")
+        && hybridBoundary?.includes("Exploratory hybrid view")
+        && hybridBoundary?.includes("cannot change readiness"))),
+  {
+    hybrid_available: !hybridDisabled,
+    hybrid_badge: hybridBadge,
+    hybrid_boundary: hybridBoundary,
+    live_badge: liveModeBadge,
+    live_boundary: liveModeBoundary,
+    live_default: liveModePressed,
+  },
 ));
 
 const matrixCells = await page.locator("[data-correlation-left]").count();
@@ -97,30 +153,87 @@ const matrixTitle = await page.locator("#matrix-title").textContent();
 await page.locator('[data-correlation-left]:not([disabled])').first().click();
 const pairDetail = await page.locator("#correlation-detail").textContent();
 checks.push(check("Dependence matrices and cell evidence are interactive", matrixCells === 81 && matrixTitle?.includes("Stress") && pairDetail?.includes("Observed status"), { cell_buttons: matrixCells, matrix_title: matrixTitle, pair_detail: Boolean(pairDetail?.includes("Observed status")) }));
-await page.locator('[data-correlation-window="21"]').click();
-const horizonTitle = await page.locator("#matrix-title").textContent();
-const horizonPressed = await page.locator('[data-correlation-window="21"]').getAttribute("aria-pressed");
-await page.locator('[data-correlation-window="either_drawdown"]').click();
-const drawdownTitle = await page.locator("#matrix-title").textContent();
+const horizonEvidence = [];
+for (const window of requiredCorrelationWindows) {
+  await page.locator(`[data-correlation-window="${window}"]`).click();
+  const detail = await page.locator("#correlation-detail").textContent();
+  horizonEvidence.push({
+    active: await page.locator(`[data-correlation-window="${window}"]`).getAttribute("aria-pressed"),
+    detail_has_selected_period: detail?.includes("Selected period") && detail.includes("Selected sample"),
+    title: (await page.locator("#matrix-title").textContent())?.trim(),
+    window,
+  });
+}
+const drawdownEvidence = [];
+for (const regime of requiredDrawdownRegimes) {
+  await page.locator(`[data-correlation-window="${regime}"]`).click();
+  const detail = await page.locator("#correlation-detail").textContent();
+  drawdownEvidence.push({
+    active: await page.locator(`[data-correlation-window="${regime}"]`).getAttribute("aria-pressed"),
+    detail_has_selected_period: detail?.includes("Selected period") && detail.includes("Selected sample"),
+    regime,
+    title: (await page.locator("#matrix-title").textContent())?.trim(),
+  });
+}
 checks.push(check(
-  "Observed windows and true drawdown regimes are selectable",
-  horizonTitle?.includes("21 sessions") && horizonPressed === "true" && drawdownTitle?.includes("either strategy in drawdown"),
-  { drawdown_title: drawdownTitle, horizon_pressed: horizonPressed, horizon_title: horizonTitle },
+  "All observed windows and both true drawdown regimes are exercised",
+  horizonEvidence.length === requiredCorrelationWindows.length
+    && horizonEvidence.every((item) => item.active === "true" && item.title?.includes(`${item.window} sessions`) && item.detail_has_selected_period)
+    && drawdownEvidence.length === requiredDrawdownRegimes.length
+    && drawdownEvidence.every((item) => item.active === "true"
+      && item.title?.includes(item.regime === "either_drawdown" ? "either strategy in drawdown" : "both strategies in drawdown")
+      && item.detail_has_selected_period),
+  { drawdown_regimes: drawdownEvidence, observed_windows: horizonEvidence },
 ));
 
 await page.locator('[data-nav="weekly"]').click();
-const weeklyRows = await page.locator("#weekly-table tbody tr").count();
 const currentWeekIncluded = await page.locator("#weekly-current-toggle").isChecked();
-await page.locator('[data-weekly-group="CORE_BENCHMARK"]').click();
-const benchmarkRows = await page.locator("#weekly-table tbody tr").count();
+const weeklyGroupEvidence = [];
+for (const group of requiredWeeklyGroups) {
+  await page.locator(`[data-weekly-group="${group}"]`).click();
+  const cell = page.locator("[data-weekly-series]").first();
+  await cell.click();
+  weeklyGroupEvidence.push({
+    active: await page.locator(`[data-weekly-group="${group}"]`).getAttribute("aria-pressed"),
+    detail: (await page.locator("#weekly-detail").textContent())?.trim(),
+    group,
+    rows: await page.locator("#weekly-table tbody tr").count(),
+  });
+}
+const weeklyRows = weeklyGroupEvidence.find((item) => item.group === "STRATEGY")?.rows;
+const benchmarkRows = weeklyGroupEvidence.find((item) => item.group === "CORE_BENCHMARK")?.rows;
+checks.push(check(
+  "Every weekly display group is rendered and exercised",
+  weeklyGroupEvidence.length === requiredWeeklyGroups.length
+    && weeklyGroupEvidence.every((item) => item.active === "true" && item.rows > 0 && item.detail?.includes("Return basis") && item.detail.includes("Calendar week")),
+  weeklyGroupEvidence,
+));
+await page.locator('[data-weekly-group="STRATEGY"]').click();
+await page.locator('[data-weekly-mode="LIVE_ONLY"]').click();
+await page.locator("[data-weekly-series]").first().click();
+const weeklyLiveDetail = await page.locator("#weekly-detail").textContent();
 await page.locator('[data-weekly-mode="LIVE_PLUS_BACKTEST"]').click();
 const weeklyModePressed = await page.locator('[data-weekly-mode="LIVE_PLUS_BACKTEST"]').getAttribute("aria-pressed");
 await page.locator("[data-weekly-series]").first().click();
-const weeklyDetail = await page.locator("#weekly-detail").textContent();
+const weeklyHybridDetail = await page.locator("#weekly-detail").textContent();
 checks.push(check(
-  "Weekly returns expose every governed group without enabling the partial week",
-  weeklyRows === 9 && benchmarkRows === 9 && currentWeekIncluded === false && weeklyModePressed === "true" && weeklyDetail?.includes("Return basis") && weeklyDetail?.includes("Accepted observations") && weeklyDetail?.includes("Calendar week"),
-  { strategy_rows: weeklyRows, benchmark_rows: benchmarkRows, partial_week_enabled: currentWeekIncluded, hybrid_pressed: weeklyModePressed, detail_visible: weeklyDetail?.includes("Accepted observations") },
+  "Weekly returns disclose live and hybrid strategy evidence without enabling the partial week",
+  weeklyRows === 9
+    && benchmarkRows === 9
+    && currentWeekIncluded === false
+    && weeklyModePressed === "true"
+    && weeklyLiveDetail?.includes("Live only")
+    && weeklyLiveDetail.includes("Accepted observations")
+    && weeklyHybridDetail?.includes("Live plus backtest")
+    && weeklyHybridDetail.includes("Accepted observations"),
+  {
+    benchmark_rows: benchmarkRows,
+    hybrid_detail_visible: weeklyHybridDetail?.includes("Live plus backtest"),
+    hybrid_pressed: weeklyModePressed,
+    live_detail_visible: weeklyLiveDetail?.includes("Live only"),
+    partial_week_enabled: currentWeekIncluded,
+    strategy_rows: weeklyRows,
+  },
 ));
 
 await page.locator('[data-nav="capital"]').click();
@@ -180,8 +293,8 @@ checks.push(check("Mobile HWM governor uses one readable column", mobileHwmColum
 await page.locator('[data-nav="signals"]').click();
 const robuxioEvidence = await page.locator("#implementation-table tbody tr", { hasText: "Robuxio" }).textContent();
 checks.push(check(
-  "Provider-live evidence is not mislabeled as wholly unavailable",
-  robuxioEvidence?.includes("Provider-live available") && robuxioEvidence?.includes("Account-live unavailable"),
+  "Provider-custodied Robuxio account NAV is labeled account-live",
+  robuxioEvidence?.includes("Account-live available") && !robuxioEvidence?.includes("Account-live unavailable"),
   robuxioEvidence,
 ));
 checks.push(check("No console errors occur", consoleErrors.length === 0, consoleErrors));

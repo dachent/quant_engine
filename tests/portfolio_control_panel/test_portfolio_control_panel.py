@@ -926,7 +926,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             encoding="utf-8"
         )
     )
-    assert data["panel_schema_version"] == 8
+    assert data["panel_schema_version"] == 9
     assert data["meta"]["freshness_evaluated_on"] == "2026-07-30"
     assert data["meta"]["hwm_status_code_version"] == 2
     assert data["meta"]["hwm_status_semantics"] == "EXPLICIT_GOVERNED_HWM_PERIMETER"
@@ -1790,6 +1790,43 @@ def test_mobile_layout_retains_dates_and_single_column_hwm() -> None:
     assert ".validation-card { grid-template-columns: 1fr; }" in css
     assert "Mobile header retains portfolio date, freshness date, and coverage" in qa
     assert "Mobile HWM governor uses one readable column" in qa
+
+
+def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
+    qa = (panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs").read_text(
+        encoding="utf-8"
+    )
+
+    for lens in (
+        "HISTORICAL_MINIMUM_PROOF",
+        "ECONOMIC_FACTOR",
+        "ETF_STYLE",
+        "RETURN_INDUSTRY",
+        "RETURN_SECTOR",
+    ):
+        assert f'  "{lens}",' in qa
+    assert (
+        'const requiredCorrelationWindows = ["5", "21", "22", "63", '
+        '"126", "130", "252", "260"]'
+    ) in qa
+    assert 'const requiredDrawdownRegimes = ["either_drawdown", "both_drawdown"]' in qa
+    for group in (
+        "ALL",
+        "STRATEGY",
+        "ECONOMIC_FACTOR_US",
+        "ECONOMIC_FACTOR_EUROPE",
+        "STYLE_US_EQUITY",
+        "STYLE_MULTI_ASSET",
+        "SECTOR",
+        "INDUSTRY",
+        "CORE_BENCHMARK",
+    ):
+        assert f'  "{group}",' in qa
+    assert "All five decomposition lenses are rendered and exercised" in qa
+    assert "All observed windows and both true drawdown regimes are exercised" in qa
+    assert "Every weekly display group is rendered and exercised" in qa
+    assert "Dependence live and hybrid evidence disclosures are exercised" in qa
+    assert "Weekly returns disclose live and hybrid strategy evidence" in qa
 
 
 def test_hwm_prose_uses_qualified_evidence_instead_of_legacy_source_label() -> None:
