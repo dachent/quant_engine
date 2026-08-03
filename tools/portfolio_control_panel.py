@@ -2763,13 +2763,21 @@ def publish_panel(
             )
         )
     if freshness_health_source is not None:
+        freshness_artifact = _load_json(
+            freshness_health_source, "freshness health artifact"
+        )
         artifacts.append(
             SourceArtifact.from_path(
                 freshness_health_source,
                 artifact_id="input/freshness-health.json",
-                as_of_date=as_of,
+                as_of_date=date.fromisoformat(
+                    _text(
+                        freshness_artifact.get("as_of_date"),
+                        "freshness health artifact as_of_date",
+                    )
+                ),
                 schema_name="freshness-assessment",
-                schema_version="1",
+                schema_version="2",
             )
         )
     for relative in (*PANEL_FILES, "candidate.json"):
