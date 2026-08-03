@@ -33,8 +33,8 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-PANEL_SCHEMA_VERSION: Final = 6
-BUILDER_VERSION: Final = "1.8.0"
+PANEL_SCHEMA_VERSION: Final = 7
+BUILDER_VERSION: Final = "1.9.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -589,6 +589,7 @@ def _material_hwm_coverage(
     excluded_value = Decimal(0)
     excluded_names: list[str] = []
     uncovered: list[str] = []
+    uncovered_details: list[dict[str, Any]] = []
     freshness_by_strategy: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for freshness in freshness_health or []:
         if freshness.get("fact_type") in {"nav", "strategy-returns"}:
@@ -627,6 +628,14 @@ def _material_hwm_coverage(
             item.get("blocks_current_consumers") is True for item in strategy_freshness
         )
         freshness_missing = require_freshness and not strategy_freshness
+        freshness_state = next(
+            (
+                str(item["state"])
+                for item in strategy_freshness
+                if isinstance(item.get("state"), str) and item["state"]
+            ),
+            None,
+        )
         row["hwm_freshness_status"] = (
             "UNAVAILABLE"
             if freshness_missing
@@ -634,6 +643,7 @@ def _material_hwm_coverage(
             if freshness_blocked
             else "ACCEPTED"
         )
+        row["hwm_freshness_state"] = freshness_state
         if (
             row.get("nav_status") == "AVAILABLE"
             and not evidence_blocked
@@ -643,6 +653,25 @@ def _material_hwm_coverage(
             covered += value
         else:
             uncovered.append(strategy_name)
+            if row.get("nav_status") != "AVAILABLE":
+                qualification_gap = "MISSING_DAILY_NAV"
+            elif evidence_blocked:
+                qualification_gap = "UNACCEPTED_EVIDENCE"
+            elif freshness_missing:
+                qualification_gap = "FRESHNESS_UNAVAILABLE"
+            elif freshness_blocked:
+                qualification_gap = f"FRESHNESS_{freshness_state or 'BLOCKED'}"
+            else:
+                qualification_gap = "UNQUALIFIED"
+            uncovered_details.append(
+                {
+                    "current_value_usd": format(value, "f"),
+                    "qualification_gap": qualification_gap,
+                    "strategy_id": strategy_id,
+                    "strategy_name": strategy_name,
+                    "systematic_weight": row.get("systematic_weight"),
+                }
+            )
         accepted.append(row)
 
     if material <= 0:
@@ -660,6 +689,9 @@ def _material_hwm_coverage(
         "material_value_usd": format(material, "f"),
         "nav_coverage": format(ratio, "f"),
         "status": status,
+        "uncovered_details": sorted(
+            uncovered_details, key=lambda item: str(item["strategy_name"])
+        ),
         "uncovered_strategies": sorted(uncovered),
     }
 
@@ -671,13 +703,37 @@ def _reconcile_hwm_coverage(
 
     normalized = [dict(row) for row in coverage]
     missing = [str(name) for name in hwm_summary["uncovered_strategies"]]
+    details = [
+        dict(item)
+        for item in hwm_summary.get("uncovered_details", [])
+        if isinstance(item, Mapping)
+    ]
+    detail_by_name = {
+        str(item.get("strategy_name")): str(
+            item.get("qualification_gap", "UNQUALIFIED")
+        )
+        for item in details
+    }
+    gap_details = ", ".join(
+        f"{name} ({detail_by_name.get(name, 'UNQUALIFIED')})" for name in missing
+    )
+    excluded_count = len(hwm_summary["excluded_strategies"])
+    exclusion_text = (
+        f"{excluded_count} strateg{'y is' if excluded_count == 1 else 'ies are'} "
+        "explicitly excluded de minimis by policy"
+    )
     for row in normalized:
         if row.get("category") == "FACT_COVERAGE" and row.get("item") == "nav":
             row["known_gap"] = (
-                f"{len(missing)} included current strategy lacks accepted daily "
-                f"NAV; {len(hwm_summary['excluded_strategies'])} de minimis "
-                "strategy is explicitly excluded from the HWM perimeter"
+                (
+                    f"{len(missing)} included HWM-perimeter strateg"
+                    f"{'y is' if len(missing) == 1 else 'ies are'} not HWM-qualified"
+                    + (f": {gap_details}" if gap_details else "")
+                )
+                if missing
+                else "Every included HWM-perimeter strategy is qualified"
             )
+            row["known_gap"] += f"; {exclusion_text}"
             row["status"] = (
                 "PARTIAL" if missing else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
             )
@@ -692,8 +748,8 @@ def _reconcile_hwm_coverage(
         return [row for row in normalized if row not in hwm_rows]
 
     gap = (
-        "BLOCKING_FOR_AUTOMATED_HWM: included sleeves without accepted daily NAV: "
-        + ", ".join(missing)
+        "BLOCKING_FOR_AUTOMATED_HWM: included HWM-perimeter strategies are not "
+        "qualified: " + gap_details
     )
     if hwm_rows:
         for row in hwm_rows:
@@ -1397,6 +1453,17 @@ def _panel_data(
         [] if positions_value is None else _objects(positions_value, "positions")
     )
     coverage = [*_fact_rows(report), *(freshness_health or [])]
+    freshness_evaluated_dates = sorted(
+        {
+            _text(row.get("evaluated_on"), "freshness.evaluated_on")
+            for row in freshness_health
+        }
+    )
+    if len(freshness_evaluated_dates) != 1:
+        raise ControlPanelValidationError(
+            "freshness health must share one operational evaluation date"
+        )
+    freshness_evaluated_on = freshness_evaluated_dates[0]
     reconciliations = _objects(
         report.get("reconciliation_checks"), "reconciliation_checks"
     )
@@ -1761,10 +1828,11 @@ def _panel_data(
             "Read-only local artifact; no provider, broker, order, or deployment connection exists.",
             "The candidate view is a frozen audit appendix and is not strategy, selection, or allocation authority.",
             (
-                "Material systematic HWM remains unavailable only for explicitly "
-                f"named included sleeves: {', '.join(hwm_summary['uncovered_strategies'])}."
+                "Governed systematic HWM remains unavailable for explicitly named "
+                "included-perimeter sleeves that are not HWM-qualified: "
+                f"{', '.join(hwm_summary['uncovered_strategies'])}."
                 if hwm_summary["uncovered_strategies"]
-                else "Material systematic HWM has complete accepted NAV coverage."
+                else "Governed systematic HWM has complete qualified NAV coverage."
             ),
             (
                 "Positions remain partial and FX remains unavailable; the panel does not infer either."
@@ -1786,14 +1854,17 @@ def _panel_data(
             "readiness": _summary_value(summary, "Advisory readiness"),
             "reason": (
                 "Canonical report admitted NAV now covers "
-                + (", ".join(admitted_nav_names) or "no material sleeves")
-                + "; Composer is reported but excluded de minimis. "
+                + (", ".join(admitted_nav_names) or "no included-perimeter sleeves")
+                + "; Composer is reported but excluded by explicit de-minimis policy. "
                 + (
-                    "Remaining HWM gap: "
-                    + ", ".join(hwm_summary["uncovered_strategies"])
+                    "Remaining HWM qualification gap: "
+                    + ", ".join(
+                        f"{item['strategy_name']} ({item['qualification_gap']})"
+                        for item in hwm_summary["uncovered_details"]
+                    )
                     + "."
                     if hwm_summary["uncovered_strategies"]
-                    else "Every material systematic sleeve has accepted daily NAV."
+                    else "Every included HWM-perimeter sleeve has qualified daily NAV."
                 )
             ),
         },
@@ -1838,6 +1909,7 @@ def _panel_data(
             ),
             "panel_mode": "LOCAL_DIRECT_FILE_READ_ONLY",
             "portfolio_as_of": _text(report.get("as_of_date"), "report.as_of_date"),
+            "freshness_evaluated_on": freshness_evaluated_on,
             "correlation_generation_id": correlation_identity["generation_id"],
             "correlation_sha256": correlation_identity["sha256"],
             "decomposition_generation_id": decomposition_identity["generation_id"],

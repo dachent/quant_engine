@@ -926,7 +926,8 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             encoding="utf-8"
         )
     )
-    assert data["panel_schema_version"] == 6
+    assert data["panel_schema_version"] == 7
+    assert data["meta"]["freshness_evaluated_on"] == "2026-07-30"
     assert data["positions"] == [
         {
             "account_id": "account-00",
@@ -1616,6 +1617,7 @@ def test_material_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
         "material_value_usd": "100",
         "nav_coverage": "1",
         "status": "AVAILABLE_MATERIAL_PERIMETER",
+        "uncovered_details": [],
         "uncovered_strategies": [],
     }
 
@@ -1649,6 +1651,61 @@ def test_hwm_coverage_rejects_unaccepted_nav_evidence_class() -> None:
     assert rows[0]["hwm_evidence_status"] == "UNACCEPTED"
     assert summary["covered_value_usd"] == "0"
     assert summary["uncovered_strategies"] == ["Strategy One"]
+    assert summary["uncovered_details"][0]["qualification_gap"] == (
+        "UNACCEPTED_EVIDENCE"
+    )
+
+
+def test_hwm_coverage_names_freshness_block_without_denigrating_nav() -> None:
+    rows, summary = panel._material_hwm_coverage(
+        [
+            {
+                "current_value_usd": "0.19",
+                "nav_evidence_layer": "ACCOUNT_LIVE",
+                "nav_status": "AVAILABLE",
+                "strategy_id": "echo-trade",
+                "strategy_name": "EchoTrade",
+                "systematic_weight": "0.000000463",
+            }
+        ],
+        {
+            "accepted_daily_nav_evidence": ["ACCOUNT_LIVE"],
+            "accepted_provider_live_strategy_ids": [],
+            "excluded_strategy_ids": [],
+        },
+        freshness_health=[
+            {
+                "blocks_current_consumers": True,
+                "fact_type": "strategy-returns",
+                "state": "STALE",
+                "subject_id": "echo-trade",
+            }
+        ],
+        require_freshness=True,
+    )
+
+    assert rows[0]["nav_status"] == "AVAILABLE"
+    assert rows[0]["hwm_evidence_status"] == "ACCEPTED"
+    assert rows[0]["hwm_freshness_status"] == "BLOCKED"
+    assert rows[0]["hwm_freshness_state"] == "STALE"
+    assert summary["uncovered_details"][0]["qualification_gap"] == "FRESHNESS_STALE"
+
+    reconciled = panel._reconcile_hwm_coverage(
+        [
+            {
+                "category": "FACT_COVERAGE",
+                "item": "nav",
+                "known_gap": None,
+                "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                "value": None,
+            }
+        ],
+        summary,
+    )
+    nav = next(row for row in reconciled if row["item"] == "nav")
+    assert "not HWM-qualified" in nav["known_gap"]
+    assert "EchoTrade (FRESHNESS_STALE)" in nav["known_gap"]
+    assert "lacks accepted daily NAV" not in nav["known_gap"]
 
 
 def test_risk_template_does_not_hard_code_provider_coverage() -> None:
@@ -1688,9 +1745,22 @@ def test_renderer_distinguishes_nav_presence_from_hwm_qualification() -> None:
     assert 'row.nav_status !== "AVAILABLE"' in renderer
     assert 'row.hwm_evidence_status !== "ACCEPTED"' in renderer
     assert 'row.hwm_freshness_status === "BLOCKED"' in renderer
-    assert "Daily NAV evidence is present but stale for HWM" in renderer
+    assert "row.hwm_freshness_state" in renderer
     assert "Evidence ${statusText(row.nav_status)}" in renderer
     assert "HWM ${statusText(qualification.status)}" in renderer
+    assert "uncovered material sleeve" not in renderer
+    assert "lacks accepted daily NAV" not in renderer
+
+
+def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
+
+    assert 'id="freshness-as-of"' in template
+    assert "data.meta.freshness_evaluated_on" in renderer
+    assert "Freshness evaluated" in renderer
+    assert "governed provider-ledger classification" in renderer
+    assert "not brokerage-account authority" in renderer
 
 
 def test_hwm_prose_uses_qualified_evidence_instead_of_legacy_source_label() -> None:
@@ -1731,7 +1801,8 @@ def test_hwm_coverage_removes_superseded_exception_when_material_perimeter_is_co
 
     nav = next(row for row in accepted if row["item"] == "nav")
     assert nav["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
-    assert "1 de minimis strategy" in nav["known_gap"]
+    assert "Every included HWM-perimeter strategy is qualified" in nav["known_gap"]
+    assert "1 strategy is explicitly excluded de minimis by policy" in nav["known_gap"]
     assert not any(row["item"] == "full-systematic-hwm-unavailable" for row in accepted)
 
 
@@ -1756,4 +1827,4 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
         row for row in accepted if row["item"] == "full-systematic-hwm-unavailable"
     )
     assert exception["status"] == "UNAVAILABLE"
-    assert exception["known_gap"].endswith("Missing Strategy")
+    assert "Missing Strategy (UNQUALIFIED)" in exception["known_gap"]

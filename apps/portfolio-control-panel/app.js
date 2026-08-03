@@ -71,15 +71,15 @@
     const provider = evidence.provider;
     const parts = [`Accepted ${formatDate(evidence.generation_as_of_date)}`];
     if (account) parts.push(`${providerName(account.provider_id || evidence.provider_id)} account-live TWR: ${formatDate(account.observed_start)}–${formatDate(account.observed_end)} · ${integer.format(account.return_observations || 0)} returns`);
-    if (provider) parts.push(`${providerName(provider.provider_id || evidence.provider_id)} provider-live book: ${formatDate(provider.observed_start)}–${formatDate(provider.observed_end)} · ${integer.format(provider.return_observations || 0)} returns`);
+    if (provider) parts.push(`${providerName(provider.provider_id || evidence.provider_id)} provider-live book: ${formatDate(provider.observed_start)}–${formatDate(provider.observed_end)} · ${integer.format(provider.return_observations || 0)} returns · governed provider-ledger classification, not brokerage-account authority`);
     if (evidence.current_snapshot) parts.push(`${providerName(provider?.provider_id || evidence.provider_id)} account snapshot: ${formatDate(evidence.current_snapshot.observed_date)}`);
     return parts.join(" · ");
   };
   const hwmQualification = (row) => {
-    if (row.hwm_scope === "EXCLUDED_DE_MINIMIS") return { status: "EXCLUDED_DE_MINIMIS", note: "Reported, outside the material HWM perimeter" };
+    if (row.hwm_scope === "EXCLUDED_DE_MINIMIS") return { status: "EXCLUDED_DE_MINIMIS", note: "Explicit policy exclusion; not a computed size threshold" };
     if (row.nav_status !== "AVAILABLE") return { status: "UNAVAILABLE_MISSING_DAILY_NAV", note: "No daily NAV evidence is present" };
     if (row.hwm_evidence_status !== "ACCEPTED") return { status: "UNAVAILABLE_UNACCEPTED_EVIDENCE", note: "Daily NAV evidence is present but its evidence layer is not admitted for HWM" };
-    if (row.hwm_freshness_status === "BLOCKED") return { status: "UNAVAILABLE_STALE_FOR_HWM", note: "Daily NAV evidence is present but stale for HWM" };
+    if (row.hwm_freshness_status === "BLOCKED") return { status: "UNAVAILABLE_STALE_FOR_HWM", note: `Daily NAV evidence is accepted but ${String(row.hwm_freshness_state || "stale").toLowerCase()} for HWM` };
     if (row.hwm_freshness_status !== "ACCEPTED") return { status: "UNAVAILABLE_MISSING_FRESHNESS", note: "Daily NAV evidence is present but its freshness assessment is unavailable" };
     return { status: "AVAILABLE_HWM_QUALIFIED", note: "Daily NAV evidence is present and HWM-qualified" };
   };
@@ -117,7 +117,7 @@
     }).join("");
     const currentMapped = data.positions.filter((row) => row.status === "AVAILABLE_MAPPED").length;
     const operatorLabels = {
-      "full-systematic-hwm-unavailable": "Material systematic HWM cannot yet be calculated",
+      "full-systematic-hwm-unavailable": "Governed systematic HWM cannot yet be calculated",
       "current-strategy-attribution-partial": "Current pool-only intervals need strategy attribution",
       "historical-strategy-attribution-unresolved": "Historical pool-only intervals remain unresolved",
     };
@@ -172,7 +172,7 @@
     const acceptedHwmEvidence = includedHwm.filter(({ qualification }) => qualification.status === "AVAILABLE_HWM_QUALIFIED").map(({ row }) => row);
     renderKpis("#risk-kpis", [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Accepted adverse scenario", "danger"],
-      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${unavailableHwm.length} uncovered material sleeve${unavailableHwm.length === 1 ? "" : "s"}`, unavailableHwm.length ? "danger" : "positive"],
+      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${unavailableHwm.length} included perimeter sleeve${unavailableHwm.length === 1 ? " is" : "s are"} not HWM-qualified`, unavailableHwm.length ? "danger" : "positive"],
       ["TWR available", `${data.counts.twr_available}/${data.counts.twr_rows}`, "Account-strategy segments", "warning"],
       ["MWR available", `${data.counts.mwr_available}/${data.counts.twr_rows}`, "Complete flows required", data.counts.mwr_available ? "positive" : "danger"],
     ]);
@@ -181,7 +181,7 @@
     $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">Current portfolio</div><div class="scenario-track"><span class="scenario-limit" aria-hidden="true"></span><span class="scenario-fill ${passes ? "pass" : ""}" style="width:${Math.min(100, stress / 0.4 * 100)}%"></span></div><div class="scenario-value ${passes ? "" : "status-text danger"}">${pct(stress)}</div></div><div class="callout callout-danger">Stress exceeds the 15% HWM boundary. This is advisory evidence, not a liquidation instruction.</div>`;
     const unavailableHwmSummary = unavailableHwm.map(({ row, qualification }) => `${row.strategy_name}: ${qualification.note}`).join(" · ");
     const acceptedHwmSummary = acceptedHwmEvidence.map((row) => `${row.strategy_name}: ${integer.format(row.nav_return_observations)} ${hwmEvidenceLabel(row)} returns from ${formatDate(row.nav_observed_start)} through ${formatDate(row.nav_observed_end)}`).join(" · ");
-    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Material systematic daily NAV</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included material sleeve has HWM-qualified daily NAV."} ${excludedNav.length ? `${safe(excludedNav.join(" · "))} remain reported but are excluded de minimis.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of the material HWM perimeter. ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No daily NAV evidence currently qualifies for HWM."} Missing NAV and FX are not interpolated.</div>`;
+    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Governed systematic daily NAV</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has qualified daily NAV."} ${excludedNav.length ? `${safe(excludedNav.join(" · "))} remain reported but are excluded by explicit de-minimis policy.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of the governed HWM perimeter. ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No daily NAV evidence currently qualifies for HWM."} Missing NAV and FX are not interpolated.</div>`;
     const mappedPerformance = data.performance.filter((row) => row.strategy_name);
     const historicalGaps = data.performance.filter((row) => !row.strategy_name);
     const rows = mappedPerformance.map((row) => `<tr><td><code>${safe(row.account_id)}</code></td><td>${safe(row.strategy_name)}</td><td>${safe(row.observed_start || row.effective_start || "—")}<span class="cell-secondary">${safe(row.observed_end || row.effective_end || "—")}</span></td><td class="numeric">${integer.format(row.nav_observations)}</td><td class="numeric">${pct(row.twr)}</td><td>${statusText(row.twr_status)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}</td></tr>`);
@@ -584,8 +584,8 @@
       ["Coverage exceptions", String(data.blocking_items.length), "Visible and blocking where declared", "warning"],
       ["External connections", "0", "Direct-file local operation", "reserve"],
     ]);
-    const coverageRows = data.coverage.map((row) => `<tr><td><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></td><td>${statusText(row.status)}</td><td>${safe(row.value ?? "—")}</td><td>${safe(row.known_gap || "—")}</td></tr>`);
-    $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status"], ["Value"], ["Known gap"]], coverageRows);
+    const coverageRows = data.coverage.map((row) => `<tr><td><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></td><td>${statusText(row.status)}</td><td>${safe(row.value ?? "—")}</td><td>${formatDate(row.evaluated_on)}</td><td>${safe(row.known_gap || "—")}</td></tr>`);
+    $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status"], ["Value"], ["Freshness evaluated"], ["Known gap"]], coverageRows);
     $("#validation-cards").innerHTML = `<div class="validation-card"><div><strong>Portfolio report</strong><span>${safe(data.meta.report_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Factor / alpha</strong><span>${safe(data.meta.decomposition_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Dependence</strong><span>${safe(data.meta.correlation_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Frozen candidate appendix</strong><span>${safe(data.candidate_appendix.as_of_date)} · hash locked</span></div><div class="validation-score">FROZEN</div></div><div class="callout callout-neutral">Portfolio, analytics, and appendix generations retain separate authority. Candidate rows never enter current strategy totals.</div>`;
     const sourceRows = data.provenance.map((row) => `<tr><td><span class="cell-primary">${safe(row.artifact)}</span><span class="cell-secondary">${safe(row.schema)}</span></td><td>${formatDate(row.as_of_date)}</td><td><code>${safe(row.sha256.slice(0, 16))}…</code></td></tr>`);
     $("#source-table").innerHTML = tableMarkup([["Artifact / schema"], ["As of"], ["SHA-256"]], sourceRows);
@@ -667,15 +667,16 @@
       }
     }));
     $("#candidate-search").addEventListener("input", (event) => { candidateSearch = event.target.value.trim(); renderCandidateTable(); });
-    $("#snapshot-button").addEventListener("click", () => showToast(`Report ${data.meta.report_generation_id.slice(0, 12)}… · factors ${data.meta.decomposition_generation_id.slice(0, 12)}… · dependence ${data.meta.correlation_generation_id.slice(0, 12)}… · read-only local artifact.`));
+    $("#snapshot-button").addEventListener("click", () => showToast(`Portfolio facts ${formatDate(data.meta.portfolio_as_of)} · freshness evaluated ${formatDate(data.meta.freshness_evaluated_on)} · report ${data.meta.report_generation_id.slice(0, 12)}… · read-only local artifact.`));
     $$('.segment').forEach((button) => button.setAttribute("aria-pressed", String(button.classList.contains("is-active"))));
     window.addEventListener("hashchange", () => setView(location.hash.slice(1) || "command", false));
   }
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 6) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 7) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
+      $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
       renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderWeekly(); renderCandidates(); renderData(); bindEvents();
       $("#loading-state").hidden = true;
