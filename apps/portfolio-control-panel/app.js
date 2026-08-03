@@ -34,9 +34,11 @@
     SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL: "Selected with training-only time-series CV",
     NO_DIVERSIFICATION_CREDIT_MISSING_OBSERVATION: "No diversification credit: observations missing",
     NOT_AUTOMATABLE_MISSING_COMPLETE_DAILY_NAV: "Not automatable: systematic daily NAV is incomplete",
-    NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV: "Not automatable: governed HWM daily NAV is incomplete",
-    NOT_AUTOMATABLE_STALE_OR_MISSING_MATERIAL_DAILY_NAV: "Not automatable: governed HWM daily NAV is stale or incomplete",
-    AVAILABLE_MATERIAL_PERIMETER: "Available across the governed HWM perimeter",
+    NOT_AUTOMATABLE_STALE_OR_MISSING_GOVERNED_HWM_DAILY_NAV: "Not automatable: governed HWM daily NAV is stale or incomplete",
+    AVAILABLE_GOVERNED_HWM_PERIMETER: "Available across the governed HWM perimeter",
+    ACCOUNT_LIVE_AVAILABLE: "Account-live available",
+    ACCOUNT_LIVE_UNAVAILABLE: "Account-live unavailable",
+    PROVIDER_LIVE_AVAILABLE: "Provider-live available",
     AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE: "Available: version-matched backtest prehistory plus live",
     AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY: "Available live; no version-matched backtest prehistory",
     AVAILABLE_LIVE_ONLY: "Available: live only",
@@ -75,6 +77,20 @@
     if (provider) parts.push(`${providerName(provider.provider_id || evidence.provider_id)} provider-live book: ${formatDate(provider.observed_start)}–${formatDate(provider.observed_end)} · ${integer.format(provider.return_observations || 0)} returns · governed provider-ledger classification, not brokerage-account authority`);
     if (evidence.current_snapshot) parts.push(`${providerName(provider?.provider_id || evidence.provider_id)} account snapshot: ${formatDate(evidence.current_snapshot.observed_date)}`);
     return parts.join(" · ");
+  };
+  const evidenceAvailability = (row) => {
+    const accountAvailable = row.account_live_status === "AVAILABLE";
+    const providerLiveAvailable = row.nav_status === "AVAILABLE" && row.nav_evidence_layer === "PROVIDER_LIVE" && Boolean(row.provider_evidence?.provider);
+    const primary = providerLiveAvailable && !accountAvailable
+      ? statusText("PROVIDER_LIVE_AVAILABLE")
+      : statusText(accountAvailable ? "ACCOUNT_LIVE_AVAILABLE" : "ACCOUNT_LIVE_UNAVAILABLE");
+    const accountQualification = providerLiveAvailable && !accountAvailable
+      ? '<span class="cell-secondary">Account-live unavailable</span>'
+      : "";
+    const lineage = row.provider_evidence
+      ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>`
+      : "";
+    return `${primary}${accountQualification}${lineage}`;
   };
   const hwmQualification = (row) => {
     if (row.hwm_scope === "EXCLUDED_DE_MINIMIS") return { status: "EXCLUDED_DE_MINIMIS", note: "Explicit policy exclusion; not a computed size threshold" };
@@ -204,9 +220,9 @@
     const implementationRows = data.strategies.map((row) => {
       const overlap = row.provider_evidence?.overlap;
       const gap = overlap ? `${statusText(overlap.status)}<span class="cell-secondary">Account − provider ${pct(overlap.account_minus_provider_cumulative)} · corr ${decimal(overlap.daily_return_correlation)} · TE ${pct(overlap.annualized_tracking_error)}</span>` : statusText(row.implementation_gap_status);
-      return `<tr><td>${safe(row.strategy_name)}</td><td>${statusText(row.account_live_status)}${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td class="numeric">${pct(row.account_live_cumulative_return)}</td><td class="numeric">${pct(row.account_live_max_drawdown)}</td><td>${gap}</td><td>${safe(row.cost_status)}</td><td>${safe(row.version_ref || "UNVERSIONED")}</td></tr>`;
+      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${pct(row.account_live_cumulative_return)}</td><td class="numeric">${pct(row.account_live_max_drawdown)}</td><td>${gap}</td><td>${safe(row.cost_status)}</td><td>${safe(row.version_ref || "UNVERSIONED")}</td></tr>`;
     });
-    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Account / provider evidence"], ["Account cumulative", "numeric"], ["Account max drawdown", "numeric"], ["Implementation gap"], ["Cost status"], ["Version"]], implementationRows);
+    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative", "numeric"], ["Account max drawdown", "numeric"], ["Implementation gap"], ["Cost status"], ["Version"]], implementationRows);
     const reconciliationRows = [...data.reconciliation_checks, ...data.blocking_items].map((row) => `<tr><td>${safe(row.check_id || row.item)}</td><td>${statusText(row.status)}</td><td>${safe(row.known_gap || row.value_usd || row.value || "—")}</td></tr>`);
     $("#reconciliation-table").innerHTML = tableMarkup([["Check / exception"], ["Status"], ["Evidence / gap"]], reconciliationRows);
   }
@@ -675,7 +691,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 7) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 8) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;

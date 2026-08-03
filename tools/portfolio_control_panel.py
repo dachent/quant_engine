@@ -33,8 +33,10 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-PANEL_SCHEMA_VERSION: Final = 7
-BUILDER_VERSION: Final = "1.9.0"
+PANEL_SCHEMA_VERSION: Final = 8
+BUILDER_VERSION: Final = "2.0.0"
+HWM_STATUS_CODE_VERSION: Final = 2
+HWM_STATUS_SEMANTICS: Final = "EXPLICIT_GOVERNED_HWM_PERIMETER"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -573,7 +575,7 @@ def _decimal_value(value: object, field_name: str) -> Decimal:
     return accepted
 
 
-def _material_hwm_coverage(
+def _governed_hwm_coverage(
     strategies: Sequence[Mapping[str, Any]],
     policy: Mapping[str, Any],
     freshness_health: Sequence[Mapping[str, Any]] | None = None,
@@ -585,7 +587,7 @@ def _material_hwm_coverage(
     accepted_provider_live = set(policy.get("accepted_provider_live_strategy_ids", []))
     accepted: list[dict[str, Any]] = []
     covered = Decimal(0)
-    material = Decimal(0)
+    governed_perimeter = Decimal(0)
     excluded_value = Decimal(0)
     excluded_names: list[str] = []
     uncovered: list[str] = []
@@ -612,7 +614,7 @@ def _material_hwm_coverage(
             accepted.append(row)
             continue
 
-        material += value
+        governed_perimeter += value
         row["hwm_scope"] = "INCLUDED"
         row["hwm_source"] = "PORTFOLIO_REPORT"
         evidence_layer = row.get("nav_evidence_layer")
@@ -675,21 +677,23 @@ def _material_hwm_coverage(
             )
         accepted.append(row)
 
-    if material <= 0:
-        raise ControlPanelValidationError("material HWM perimeter is empty")
-    ratio = covered / material
+    if governed_perimeter <= 0:
+        raise ControlPanelValidationError("governed HWM perimeter is empty")
+    ratio = covered / governed_perimeter
     status = (
-        "AVAILABLE_MATERIAL_PERIMETER"
+        "AVAILABLE_GOVERNED_HWM_PERIMETER"
         if not uncovered
-        else "NOT_AUTOMATABLE_STALE_OR_MISSING_MATERIAL_DAILY_NAV"
+        else "NOT_AUTOMATABLE_STALE_OR_MISSING_GOVERNED_HWM_DAILY_NAV"
     )
     return accepted, {
         "covered_value_usd": format(covered, "f"),
         "excluded_value_usd": format(excluded_value, "f"),
         "excluded_strategies": sorted(excluded_names),
-        "material_value_usd": format(material, "f"),
+        "governed_perimeter_value_usd": format(governed_perimeter, "f"),
         "nav_coverage": format(ratio, "f"),
         "status": status,
+        "status_code_version": HWM_STATUS_CODE_VERSION,
+        "status_semantics": HWM_STATUS_SEMANTICS,
         "uncovered_details": sorted(
             uncovered_details, key=lambda item: str(item["strategy_name"])
         ),
@@ -700,7 +704,7 @@ def _material_hwm_coverage(
 def _reconcile_hwm_coverage(
     coverage: Sequence[Mapping[str, Any]], hwm_summary: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
-    """Make legacy report coverage agree with the accepted material HWM perimeter."""
+    """Make legacy report coverage agree with the governed HWM perimeter."""
 
     normalized = [dict(row) for row in coverage]
     missing = [str(name) for name in hwm_summary["uncovered_strategies"]]
@@ -1599,7 +1603,7 @@ def _panel_data(
     hwm_policy, hwm_policy_hash = _hwm_policy(
         date.fromisoformat(next(iter(freshness_dates)))
     )
-    strategies, hwm_summary = _material_hwm_coverage(
+    strategies, hwm_summary = _governed_hwm_coverage(
         strategies,
         hwm_policy,
         freshness_health,
@@ -1851,6 +1855,8 @@ def _panel_data(
             "correlation_one_stress": _summary_value(summary, "Correlation-one stress"),
             "hwm_limit": "0.15",
             "hwm_status": hwm_summary["status"],
+            "hwm_status_code_version": hwm_summary["status_code_version"],
+            "hwm_status_semantics": hwm_summary["status_semantics"],
             "nav_coverage": hwm_summary["nav_coverage"],
             "readiness": _summary_value(summary, "Advisory readiness"),
             "reason": (
@@ -1922,6 +1928,8 @@ def _panel_data(
                 "plan_manifest_sha256"
             ),
             "hwm_policy_sha256": hwm_policy_hash,
+            "hwm_status_code_version": HWM_STATUS_CODE_VERSION,
+            "hwm_status_semantics": HWM_STATUS_SEMANTICS,
             "strategy_evidence_as_of": (
                 evidence_identity["as_of_date"]
                 if evidence_identity is not None
@@ -2993,13 +3001,13 @@ def publish_panel(
         adapter=AdapterIdentity("portfolio-control-panel-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="accepted portfolio, factor/alpha, dependence, weekly-return, and material-HWM evidence rendered read-only with explicit gaps and a separate frozen candidate appendix",
+            boundary="accepted portfolio, factor/alpha, dependence, weekly-return, and governed-HWM evidence rendered read-only with explicit gaps and a separate frozen candidate appendix",
             fact_types=(
                 "portfolio control panel",
                 "factor and alpha attribution",
                 "correlation and dependence",
                 "weekly returns by strategy, factor, style, sector, industry, and benchmark",
-                "material HWM coverage",
+                "governed HWM coverage",
                 "browser QA",
                 "frozen appendix",
             ),
