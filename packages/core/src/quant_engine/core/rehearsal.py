@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 import hashlib
+import multiprocessing
 from pathlib import Path, PurePosixPath
-from typing import Final, Mapping
+from typing import Callable, Final, Mapping, Protocol
 
 from quant_engine.core.contracts import (
     AdapterIdentity,
@@ -36,11 +37,17 @@ from quant_engine.core.release import (
 )
 
 
-_SCHEMA_VERSION: Final = 1
+_SCHEMA_VERSION: Final = 2
 
 
 class RehearsalError(RuntimeError):
     """The recovery rehearsal did not restore the required graph."""
+
+
+class _EventLike(Protocol):
+    def set(self) -> None: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
 
 
 def _file_hash(path: Path) -> str:
@@ -133,6 +140,79 @@ def _restore_companion(
     if hashlib.sha256(content).hexdigest() != previous_sha256:
         raise RehearsalError("source recovery companion differs")
     destination.write_bytes(content)
+
+
+def _commit_until_terminated(
+    coordination_root: Path,
+    release_id: str,
+    roots: dict[str, Path],
+    companion_contents: dict[str, bytes],
+    failure_step: str,
+    failure_item: str,
+    ready: _EventLike,
+    hold: _EventLike,
+) -> None:
+    def pause(step: str, item: str) -> None:
+        if (step, item) == (failure_step, failure_item):
+            ready.set()
+            hold.wait()
+
+    commit_release(
+        coordination_root=coordination_root,
+        release_id=release_id,
+        roots=roots,
+        companion_contents=companion_contents,
+        fault_hook=pause,
+    )
+
+
+def _recover_until_terminated(
+    coordination_root: Path,
+    release_id: str,
+    roots: dict[str, Path],
+    clear_stale_lock: bool,
+    failure_step: str,
+    failure_item: str,
+    ready: _EventLike,
+    hold: _EventLike,
+) -> None:
+    def pause(step: str, item: str) -> None:
+        if (step, item) == (failure_step, failure_item):
+            ready.set()
+            hold.wait()
+
+    recover_release(
+        coordination_root=coordination_root,
+        release_id=release_id,
+        roots=roots,
+        clear_stale_lock=clear_stale_lock,
+        fault_hook=pause,
+    )
+
+
+def _terminate_at_checkpoint(
+    target: Callable[..., None], args: tuple[object, ...]
+) -> None:
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    hold = context.Event()
+    process = context.Process(target=target, args=(*args, ready, hold))
+    process.start()
+    if not ready.wait(30):
+        process.terminate()
+        process.join(30)
+        raise RehearsalError(
+            f"termination checkpoint was not reached; exit={process.exitcode}"
+        )
+    process.terminate()
+    process.join(30)
+    if process.is_alive():
+        process.kill()
+        process.join(30)
+    exitcode = process.exitcode
+    process.close()
+    if exitcode in {None, 0}:
+        raise RehearsalError("terminated worker did not exit abnormally")
 
 
 def rehearse_release_boundaries(
@@ -235,26 +315,20 @@ def rehearse_release_boundaries(
 
         def fail(step: str, item: str) -> None:
             if (step, item) == (failure_step, failure_item):
-                if failure_mode == "PROCESS_TERMINATION":
-                    raise _ProcessTermination()
                 raise OSError(f"injected failure at {step}:{item}")
 
-        try:
-            commit_release(
-                coordination_root=scenario / "c",
-                release_id=prepared.release_id,
-                roots=roots,
-                companion_contents=proposed_companions,
-                fault_hook=fail,
+        if failure_mode == "PROCESS_TERMINATION":
+            _terminate_at_checkpoint(
+                _commit_until_terminated,
+                (
+                    scenario / "c",
+                    prepared.release_id,
+                    roots,
+                    proposed_companions,
+                    failure_step,
+                    failure_item,
+                ),
             )
-        except ReleaseCommitError:
-            if failure_mode != "CAUGHT_EXCEPTION":
-                raise RehearsalError("process termination was caught as an exception")
-        except _ProcessTermination:
-            if failure_mode != "PROCESS_TERMINATION":
-                raise RehearsalError("caught failure escaped as process termination")
-            lock = scenario / "c" / "release.lock"
-            lock.write_text(prepared.release_id + "\n", encoding="ascii")
             try:
                 recover_release(
                     coordination_root=scenario / "c",
@@ -272,7 +346,18 @@ def rehearse_release_boundaries(
                 clear_stale_lock=True,
             )
         else:
-            raise RehearsalError("injected boundary did not fail")
+            try:
+                commit_release(
+                    coordination_root=scenario / "c",
+                    release_id=prepared.release_id,
+                    roots=roots,
+                    companion_contents=proposed_companions,
+                    fault_hook=fail,
+                )
+            except ReleaseCommitError:
+                pass
+            else:
+                raise RehearsalError("injected boundary did not fail")
         _, journal = read_release(scenario / "c", prepared.release_id)
         if journal.state is not ReleaseState.ROLLED_BACK:
             raise RehearsalError("failed release did not roll back")
@@ -306,49 +391,280 @@ def rehearse_release_boundaries(
     index += 1
     roots, prepared = prepare_scenario(rollback_scenario)
     first_target = manifest.targets[0].root_id
-
-    def terminate_commit(step: str, item: str) -> None:
-        if (step, item) == ("after-target", first_target):
-            raise _ProcessTermination()
-
-    try:
-        commit_release(
-            coordination_root=rollback_scenario / "c",
-            release_id=prepared.release_id,
-            roots=roots,
-            companion_contents=proposed_companions,
-            fault_hook=terminate_commit,
-        )
-    except _ProcessTermination:
-        pass
-    else:
-        raise RehearsalError("rollback interruption setup did not terminate")
-
-    def terminate_rollback(step: str, item: str) -> None:
-        if (step, item) == ("after-target-restore", first_target):
-            raise _ProcessTermination()
-
+    _terminate_at_checkpoint(
+        _commit_until_terminated,
+        (
+            rollback_scenario / "c",
+            prepared.release_id,
+            roots,
+            proposed_companions,
+            "after-target",
+            first_target,
+        ),
+    )
+    _terminate_at_checkpoint(
+        _recover_until_terminated,
+        (
+            rollback_scenario / "c",
+            prepared.release_id,
+            roots,
+            True,
+            "after-target-restore",
+            first_target,
+        ),
+    )
+    _, interrupted = read_release(rollback_scenario / "c", prepared.release_id)
+    if interrupted.state is not ReleaseState.ROLLING_BACK:
+        raise RehearsalError("interrupted rollback journal state differs")
     try:
         recover_release(
             coordination_root=rollback_scenario / "c",
             release_id=prepared.release_id,
             roots=roots,
-            fault_hook=terminate_rollback,
         )
-    except _ProcessTermination:
+    except ReleaseConflictError:
         pass
     else:
-        raise RehearsalError("rollback interruption did not terminate")
-    _, interrupted = read_release(rollback_scenario / "c", prepared.release_id)
-    if interrupted.state is not ReleaseState.ROLLING_BACK:
-        raise RehearsalError("interrupted rollback journal state differs")
+        raise RehearsalError("rollback stale lock did not require confirmation")
     resumed = recover_release(
         coordination_root=rollback_scenario / "c",
         release_id=prepared.release_id,
         roots=roots,
+        clear_stale_lock=True,
     )
     if resumed.state is not ReleaseState.ROLLED_BACK:
         raise RehearsalError("interrupted rollback did not resume")
+
+    def require_stale_confirmation(
+        scenario: Path, release: ReleaseManifest, scenario_roots: dict[str, Path]
+    ) -> None:
+        try:
+            recover_release(
+                coordination_root=scenario / "c",
+                release_id=release.release_id,
+                roots=scenario_roots,
+            )
+        except ReleaseConflictError:
+            return
+        raise RehearsalError("terminal stale lock did not require confirmation")
+
+    lock_rows = []
+    prepared_scenario = output_root / "l" / "p"
+    prepared_roots, prepared_release = prepare_scenario(prepared_scenario)
+    _terminate_at_checkpoint(
+        _commit_until_terminated,
+        (
+            prepared_scenario / "c",
+            prepared_release.release_id,
+            prepared_roots,
+            proposed_companions,
+            "after-lock-acquire",
+            prepared_release.release_id,
+        ),
+    )
+    _, prepared_journal = read_release(
+        prepared_scenario / "c", prepared_release.release_id
+    )
+    if prepared_journal.state is not ReleaseState.PREPARED:
+        raise RehearsalError("pre-commit termination journal differs")
+    require_stale_confirmation(prepared_scenario, prepared_release, prepared_roots)
+    prepared_recovered = recover_release(
+        coordination_root=prepared_scenario / "c",
+        release_id=prepared_release.release_id,
+        roots=prepared_roots,
+        clear_stale_lock=True,
+    )
+    lock_rows.append(
+        {
+            "recovered_state": prepared_recovered.state.value,
+            "stale_state": ReleaseState.PREPARED.value,
+            "status": "PASS",
+        }
+    )
+
+    committed_scenario = output_root / "l" / "c"
+    committed_roots, committed_release = prepare_scenario(committed_scenario)
+    _terminate_at_checkpoint(
+        _commit_until_terminated,
+        (
+            committed_scenario / "c",
+            committed_release.release_id,
+            committed_roots,
+            proposed_companions,
+            "after-committed-journal",
+            committed_release.release_id,
+        ),
+    )
+    require_stale_confirmation(committed_scenario, committed_release, committed_roots)
+    committed_recovered = recover_release(
+        coordination_root=committed_scenario / "c",
+        release_id=committed_release.release_id,
+        roots=committed_roots,
+        clear_stale_lock=True,
+    )
+    lock_rows.append(
+        {
+            "recovered_state": committed_recovered.state.value,
+            "stale_state": ReleaseState.COMMITTED.value,
+            "status": "PASS",
+        }
+    )
+
+    rolled_scenario = output_root / "l" / "r"
+    rolled_roots, rolled_release = prepare_scenario(rolled_scenario)
+    _terminate_at_checkpoint(
+        _commit_until_terminated,
+        (
+            rolled_scenario / "c",
+            rolled_release.release_id,
+            rolled_roots,
+            proposed_companions,
+            "after-target",
+            first_target,
+        ),
+    )
+    _terminate_at_checkpoint(
+        _recover_until_terminated,
+        (
+            rolled_scenario / "c",
+            rolled_release.release_id,
+            rolled_roots,
+            True,
+            "after-rolled-back-journal",
+            rolled_release.release_id,
+        ),
+    )
+    require_stale_confirmation(rolled_scenario, rolled_release, rolled_roots)
+    rolled_recovered = recover_release(
+        coordination_root=rolled_scenario / "c",
+        release_id=rolled_release.release_id,
+        roots=rolled_roots,
+        clear_stale_lock=True,
+    )
+    lock_rows.append(
+        {
+            "recovered_state": rolled_recovered.state.value,
+            "stale_state": ReleaseState.ROLLED_BACK.value,
+            "status": "PASS",
+        }
+    )
+
+    conflict_rows = []
+    pointer_scenario = output_root / "x" / "p"
+    pointer_roots, pointer_release = prepare_scenario(pointer_scenario)
+    _terminate_at_checkpoint(
+        _commit_until_terminated,
+        (
+            pointer_scenario / "c",
+            pointer_release.release_id,
+            pointer_roots,
+            proposed_companions,
+            "after-target",
+            first_target,
+        ),
+    )
+    unexpected = _synthetic_manifest("third-pointer-state", manifest.created_at.date())
+    stage_generation(pointer_roots[first_target], unexpected)
+    publish_generation(pointer_roots[first_target], unexpected.generation_id)
+    try:
+        recover_release(
+            coordination_root=pointer_scenario / "c",
+            release_id=pointer_release.release_id,
+            roots=pointer_roots,
+            clear_stale_lock=True,
+        )
+    except ReleaseCommitError:
+        pass
+    else:
+        raise RehearsalError("third pointer state did not fail recovery")
+    _, pointer_failed = read_release(
+        pointer_scenario / "c", pointer_release.release_id
+    )
+    if (
+        pointer_failed.state is not ReleaseState.RECOVERY_FAILED
+        or read_current(pointer_roots[first_target]).generation_id
+        != unexpected.generation_id
+    ):
+        raise RehearsalError("pointer conflict was not preserved")
+    publish_generation(
+        pointer_roots[first_target],
+        next(
+            item.proposed_generation_id
+            for item in pointer_release.targets
+            if item.root_id == first_target
+        ),
+    )
+    pointer_resumed = recover_release(
+        coordination_root=pointer_scenario / "c",
+        release_id=pointer_release.release_id,
+        roots=pointer_roots,
+    )
+    conflict_rows.append(
+        {
+            "conflict_kind": "POINTER",
+            "failed_state": pointer_failed.state.value,
+            "resumed_state": pointer_resumed.state.value,
+            "status": "PASS",
+        }
+    )
+
+    if not manifest.companions:
+        raise RehearsalError("recovery rehearsal requires a companion boundary")
+    companion_plan = manifest.companions[0]
+    companion_scenario = output_root / "x" / "c"
+    companion_roots, companion_release = prepare_scenario(companion_scenario)
+    _terminate_at_checkpoint(
+        _commit_until_terminated,
+        (
+            companion_scenario / "c",
+            companion_release.release_id,
+            companion_roots,
+            proposed_companions,
+            "after-companion",
+            companion_plan.companion_id,
+        ),
+    )
+    companion_path = (
+        companion_roots[companion_plan.root_id] / companion_plan.relative_path
+    )
+    conflicting_content = b"external third companion state\n"
+    companion_path.write_bytes(conflicting_content)
+    try:
+        recover_release(
+            coordination_root=companion_scenario / "c",
+            release_id=companion_release.release_id,
+            roots=companion_roots,
+            clear_stale_lock=True,
+        )
+    except ReleaseCommitError:
+        pass
+    else:
+        raise RehearsalError("third companion state did not fail recovery")
+    _, companion_failed = read_release(
+        companion_scenario / "c", companion_release.release_id
+    )
+    if (
+        companion_failed.state is not ReleaseState.RECOVERY_FAILED
+        or companion_path.read_bytes() != conflicting_content
+    ):
+        raise RehearsalError("companion conflict was not preserved")
+    companion_path.write_bytes(
+        proposed_companions[companion_plan.companion_id]
+    )
+    companion_resumed = recover_release(
+        coordination_root=companion_scenario / "c",
+        release_id=companion_release.release_id,
+        roots=companion_roots,
+    )
+    conflict_rows.append(
+        {
+            "conflict_kind": "COMPANION",
+            "failed_state": companion_failed.state.value,
+            "resumed_state": companion_resumed.state.value,
+            "status": "PASS",
+        }
+    )
+
     source_after, _ = _source_state(spec, release_id)
     if source_after != source_before:
         raise RehearsalError("accepted source state changed during rehearsal")
@@ -357,6 +673,9 @@ def rehearse_release_boundaries(
         "boundaries": rows,
         "caught_boundary_count": len(caught_boundaries),
         "crash_boundary_count": len(crash_boundaries),
+        "lock_lifecycle": lock_rows,
+        "process_termination_method": "OPERATING_SYSTEM_PROCESS_TERMINATION",
+        "recovery_failed_conflicts": conflict_rows,
         "rollback_interruption": {
             "interrupted_state": ReleaseState.ROLLING_BACK.value,
             "resumed_state": resumed.state.value,
@@ -368,12 +687,6 @@ def rehearse_release_boundaries(
         "source_unchanged": True,
         "status": "PASS",
     }
-
-
-class _ProcessTermination(BaseException):
-    """Fault used to model interpreter/process termination, not a caught error."""
-
-
 def _synthetic_manifest(label: str, as_of_date: date) -> GenerationManifest:
     payload = (label + "\n").encode()
     return GenerationManifest.build(

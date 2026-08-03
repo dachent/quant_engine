@@ -9,7 +9,7 @@
     "schema_version", "source_release_spec_sha256", "status"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "release_id": {"$ref": "#/$defs/sha256"},
     "source_release_spec_sha256": {"$ref": "#/$defs/sha256"},
     "status": {"const": "PASS"},
@@ -18,7 +18,8 @@
       "additionalProperties": false,
       "required": [
         "boundaries", "boundary_count", "caught_boundary_count",
-        "crash_boundary_count", "rollback_interruption",
+        "crash_boundary_count", "lock_lifecycle", "process_termination_method",
+        "recovery_failed_conflicts", "rollback_interruption",
         "source_state_sha256", "source_unchanged", "status"
       ],
       "properties": {
@@ -51,6 +52,46 @@
         "boundary_count": {"type": "integer", "minimum": 1},
         "caught_boundary_count": {"type": "integer", "minimum": 1},
         "crash_boundary_count": {"type": "integer", "minimum": 1},
+        "lock_lifecycle": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["recovered_state", "stale_state", "status"],
+            "properties": {
+              "recovered_state": {
+                "enum": ["PREPARED", "COMMITTED", "ROLLED_BACK"]
+              },
+              "stale_state": {
+                "enum": ["PREPARED", "COMMITTED", "ROLLED_BACK"]
+              },
+              "status": {"const": "PASS"}
+            }
+          }
+        },
+        "process_termination_method": {
+          "const": "OPERATING_SYSTEM_PROCESS_TERMINATION"
+        },
+        "recovery_failed_conflicts": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "conflict_kind", "failed_state", "resumed_state", "status"
+            ],
+            "properties": {
+              "conflict_kind": {"enum": ["POINTER", "COMPANION"]},
+              "failed_state": {"const": "RECOVERY_FAILED"},
+              "resumed_state": {"const": "ROLLED_BACK"},
+              "status": {"const": "PASS"}
+            }
+          }
+        },
         "rollback_interruption": {
           "type": "object",
           "additionalProperties": false,

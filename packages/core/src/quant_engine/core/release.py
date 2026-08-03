@@ -614,6 +614,52 @@ def _validate_prepared_state(
             != target.proposed_manifest_sha256
         ):
             raise ReleaseConflictError(f"proposed manifest changed: {target.root_id}")
+    for companion in manifest.companions:
+        path = roots[companion.root_id].resolve() / companion.relative_path
+        if _companion_hash(path) != companion.previous_sha256:
+            raise ReleaseConflictError(
+                f"companion changed after prepare: {companion.companion_id}"
+            )
+
+
+def _validate_committed_state(
+    manifest: ReleaseManifest, roots: Mapping[str, Path]
+) -> None:
+    if set(roots) != {item.root_id for item in manifest.targets}:
+        raise ReleaseValidationError("runtime roots differ from release roots")
+    for target in manifest.targets:
+        pointer = read_current(roots[target.root_id].resolve())
+        if (
+            pointer.generation_id != target.proposed_generation_id
+            or pointer.manifest_sha256 != target.proposed_manifest_sha256
+        ):
+            raise ReleaseConflictError(
+                f"committed pointer graph differs: {target.root_id}"
+            )
+    for companion in manifest.companions:
+        path = roots[companion.root_id].resolve() / companion.relative_path
+        if _companion_hash(path) != companion.proposed_sha256:
+            raise ReleaseConflictError(
+                f"committed companion differs: {companion.companion_id}"
+            )
+
+
+def _validate_rolled_back_state(
+    manifest: ReleaseManifest, roots: Mapping[str, Path]
+) -> None:
+    if set(roots) != {item.root_id for item in manifest.targets}:
+        raise ReleaseValidationError("runtime roots differ from release roots")
+    for target in manifest.targets:
+        if _read_optional_current(roots[target.root_id].resolve()) != target.previous_pointer:
+            raise ReleaseConflictError(
+                f"rolled-back pointer graph differs: {target.root_id}"
+            )
+    for companion in manifest.companions:
+        path = roots[companion.root_id].resolve() / companion.relative_path
+        if _companion_hash(path) != companion.previous_sha256:
+            raise ReleaseConflictError(
+                f"rolled-back companion differs: {companion.companion_id}"
+            )
 
 
 FaultHook = Callable[[str, str], None]
@@ -719,6 +765,8 @@ def rollback_release(
             rolling.last_error,
         )
         _write_journal(coordination_root, recovered)
+        if fault_hook is not None:
+            fault_hook("after-rolled-back-journal", manifest.release_id)
         return recovered
     except Exception as exc:
         failed = ReleaseJournal(
@@ -745,6 +793,28 @@ def _acquire_lock(lock: Path, release_id: str) -> None:
         os.fsync(handle.fileno())
 
 
+def _clear_confirmed_stale_lock(
+    lock: Path, release_id: str, *, confirmed: bool
+) -> bool:
+    present = lock.exists() or lock.is_symlink()
+    if not present:
+        return False
+    if not confirmed:
+        raise ReleaseConflictError(
+            "interrupted release lock requires explicit confirmation"
+        )
+    if lock.is_symlink() or not lock.is_file():
+        raise ReleaseConflictError("interrupted release lock is not a file")
+    try:
+        lock_release_id = lock.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ReleaseConflictError("interrupted release lock is unreadable") from exc
+    if lock_release_id != release_id:
+        raise ReleaseConflictError("interrupted release lock identity differs")
+    lock.unlink()
+    return True
+
+
 def recover_release(
     *,
     coordination_root: Path,
@@ -760,16 +830,6 @@ def recover_release(
     """
 
     manifest, journal = read_release(coordination_root, release_id)
-    if journal.state is ReleaseState.COMMITTED:
-        return journal
-    if journal.state is ReleaseState.ROLLED_BACK:
-        return journal
-    if journal.state not in {
-        ReleaseState.COMMITTING,
-        ReleaseState.ROLLING_BACK,
-        ReleaseState.RECOVERY_FAILED,
-    }:
-        raise ReleaseConflictError(f"release is not recoverable: {journal.state.value}")
     normalized_roots = {
         _identifier(key, "root_id"): value for key, value in roots.items()
     }
@@ -777,22 +837,37 @@ def recover_release(
         raise ReleaseValidationError("runtime roots differ from release roots")
     coordination_root = coordination_root.resolve()
     lock = coordination_root / "release.lock"
-    if lock.exists():
-        if not clear_stale_lock:
-            raise ReleaseConflictError(
-                "interrupted release lock requires explicit confirmation"
+    lock_present = lock.exists() or lock.is_symlink()
+    if journal.state is ReleaseState.PREPARED:
+        if not lock_present:
+            raise ReleaseConflictError("release is not recoverable: PREPARED")
+        _validate_prepared_state(manifest, normalized_roots)
+        _clear_confirmed_stale_lock(
+            lock, release_id, confirmed=clear_stale_lock
+        )
+        return journal
+    if journal.state is ReleaseState.COMMITTED:
+        _validate_committed_state(manifest, normalized_roots)
+        if lock_present:
+            _clear_confirmed_stale_lock(
+                lock, release_id, confirmed=clear_stale_lock
             )
-        if lock.is_symlink() or not lock.is_file():
-            raise ReleaseConflictError("interrupted release lock is not a file")
-        try:
-            lock_release_id = lock.read_text(encoding="ascii").strip()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ReleaseConflictError(
-                "interrupted release lock is unreadable"
-            ) from exc
-        if lock_release_id != release_id:
-            raise ReleaseConflictError("interrupted release lock identity differs")
-        lock.unlink()
+        return journal
+    if journal.state is ReleaseState.ROLLED_BACK:
+        _validate_rolled_back_state(manifest, normalized_roots)
+        if lock_present:
+            _clear_confirmed_stale_lock(
+                lock, release_id, confirmed=clear_stale_lock
+            )
+        return journal
+    if journal.state not in {
+        ReleaseState.COMMITTING,
+        ReleaseState.ROLLING_BACK,
+        ReleaseState.RECOVERY_FAILED,
+    }:
+        raise ReleaseConflictError(f"release is not recoverable: {journal.state.value}")
+    if lock_present:
+        _clear_confirmed_stale_lock(lock, release_id, confirmed=clear_stale_lock)
     _acquire_lock(lock, release_id)
     try:
         return rollback_release(
@@ -828,6 +903,8 @@ def commit_release(
     coordination_root.mkdir(parents=True, exist_ok=True)
     lock = coordination_root / "release.lock"
     _acquire_lock(lock, manifest.release_id)
+    if fault_hook is not None:
+        fault_hook("after-lock-acquire", manifest.release_id)
 
     current: ReleaseJournal | None = None
     try:
@@ -900,6 +977,8 @@ def commit_release(
             current.applied_companions,
         )
         _write_journal(coordination_root, committed)
+        if fault_hook is not None:
+            fault_hook("after-committed-journal", manifest.release_id)
         return committed
     except Exception as exc:
         if current is None:

@@ -6,8 +6,10 @@ only in a new isolated output root. It never publishes to, edits, or deletes an
 accepted source generation.
 
 For every target and companion in the accepted release, the tool injects both
-caught exceptions and simulated process termination after journal intent and
-after publication. Each scenario must finish with a
+caught exceptions and operating-system process termination after journal
+intent and after publication. The worker is terminated only after signaling a
+durable fault checkpoint, so its cleanup handlers do not run. Each scenario
+must finish with a
 `ROLLED_BACK` journal, the complete predecessor pointer graph, and the exact
 predecessor companion bytes. A full before/after fingerprint proves the source
 release was unchanged.
@@ -16,6 +18,11 @@ The rehearsal also terminates rollback after a restore effect, verifies the
 durable `ROLLING_BACK` journal, and explicitly resumes the same idempotent
 rollback to `ROLLED_BACK`. A surviving lock can be cleared only when the
 operator confirms it and the lock names the exact interrupted release.
+The lock lifecycle also terminates workers in `PREPARED`, `COMMITTED`, and
+`ROLLED_BACK` after lock acquisition but before cleanup, then proves confirmed
+identity-bound recovery. Separate pointer and companion third-state conflicts
+must reach `RECOVERY_FAILED`, preserve the conflicting bytes, and resume to
+`ROLLED_BACK` only after explicit repair.
 
 The second lane creates four synthetic domains—account ledger, Excel report,
 analytics, and panel—and proves:
