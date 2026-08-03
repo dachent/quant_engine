@@ -303,3 +303,18 @@ def test_dependency_cycle_fails_before_any_write(tmp_path: Path) -> None:
         _parse(raw)
 
     assert not (tmp_path / "state").exists()
+
+
+def test_receipt_path_is_bounded_for_windows_workspace(tmp_path: Path) -> None:
+    raw, _, _, _ = _spec_dict(tmp_path)
+    padding = "x" * max(1, 110 - len(str(tmp_path)) - 1)
+    long_root = tmp_path / padding
+    raw["state_root"] = str(long_root)
+    spec = _parse(raw)
+
+    result = execute_pipeline(spec)
+
+    receipts = list(long_root.rglob("*.json"))
+    assert result["release_state"] == "PREPARED"
+    assert any(path.parent.name == "receipts" for path in receipts)
+    assert max(len(str(path)) for path in receipts) < 240
