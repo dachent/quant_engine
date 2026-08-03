@@ -17,8 +17,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "boundaries", "boundary_count", "source_state_sha256",
-        "source_unchanged", "status"
+        "boundaries", "boundary_count", "caught_boundary_count",
+        "crash_boundary_count", "rollback_interruption",
+        "source_state_sha256", "source_unchanged", "status"
       ],
       "properties": {
         "boundaries": {
@@ -27,11 +28,20 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["failure_item", "failure_step", "journal_state", "restored"],
+            "required": [
+              "failure_item", "failure_mode", "failure_step",
+              "journal_state", "restored"
+            ],
             "properties": {
               "failure_item": {"type": "string", "minLength": 1},
+              "failure_mode": {
+                "enum": ["CAUGHT_EXCEPTION", "PROCESS_TERMINATION"]
+              },
               "failure_step": {
-                "enum": ["before-target", "after-target", "before-companion", "after-companion"]
+                "enum": [
+                  "before-target", "after-target-intent", "after-target",
+                  "before-companion", "after-companion-intent", "after-companion"
+                ]
               },
               "journal_state": {"const": "ROLLED_BACK"},
               "restored": {"const": true}
@@ -39,6 +49,18 @@
           }
         },
         "boundary_count": {"type": "integer", "minimum": 1},
+        "caught_boundary_count": {"type": "integer", "minimum": 1},
+        "crash_boundary_count": {"type": "integer", "minimum": 1},
+        "rollback_interruption": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["interrupted_state", "resumed_state", "status"],
+          "properties": {
+            "interrupted_state": {"const": "ROLLING_BACK"},
+            "resumed_state": {"const": "ROLLED_BACK"},
+            "status": {"const": "PASS"}
+          }
+        },
         "source_state_sha256": {"$ref": "#/$defs/sha256"},
         "source_unchanged": {"const": true},
         "status": {"const": "PASS"}

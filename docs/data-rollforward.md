@@ -54,6 +54,21 @@ A read-only external command requires `--allow-external-read`, has zero retry,
 and carries a stable request identity. A timeout or exception records
 `UNKNOWN`; resume fails closed and will not send that request again.
 
+If a process terminates after a release journal reaches `COMMITTING` or while
+it is `ROLLING_BACK`, use the explicit recovery path. It never retries the
+forward release:
+
+```powershell
+uv run --frozen --no-sync python tools/data_pipeline.py recover `
+  --spec 'C:\absolute\private\pipeline-spec.json' `
+  --confirm-stale-lock
+```
+
+`--confirm-stale-lock` is needed only when an exact release-owned lock survived
+process termination. A missing, unreadable, linked, or different-release lock
+fails closed. Recovery is idempotent when a pointer or companion was already
+restored before a second interruption.
+
 ## Publication and recovery boundaries
 
 - Candidate generations are copied create-only and verified byte-for-byte.
@@ -61,8 +76,12 @@ and carries a stable request identity. A timeout or exception records
   `COMPLETE_WITHIN_DECLARED_BOUNDARY`.
 - Preparation records the complete predecessor pointer graph and companion
   recovery bytes without changing authority.
-- Commit is coordinated under one lock. Any injected or real failure restores
-  applied pointer and companion steps in reverse order.
+- Commit is coordinated under one lock. Journal intent is durable before every
+  pointer or companion effect. Any caught post-mutation failure restores the
+  intended pointer and companion steps in reverse order; process termination
+  is handled by the explicit recovery command above.
+- A current-portfolio release must include the exact freshness-health artifact
+  as both a DAG node and a hash gate. A panel cannot be built without it.
 - A committed resume reports `COMMITTED`; it does not mislabel an accepted
   release as merely prepared.
 - Provider/network acquisition remains a separate, explicitly authorized

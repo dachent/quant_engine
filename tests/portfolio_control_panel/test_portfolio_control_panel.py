@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 import hashlib
 import importlib.util
 import json
@@ -826,9 +827,36 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     contract_path = tmp_path / "source-contract.json"
     contract_path.write_bytes(canonical_json_bytes(contract))
     monkeypatch.setattr(panel, "SOURCE_CONTRACT", contract_path)
+    freshness = tmp_path / "freshness-health.json"
+    _write_json(
+        freshness,
+        {
+            "assessment_schema_version": 1,
+            "as_of_date": "2026-07-30",
+            "assessments": [
+                {
+                    "acquired_at": "2026-07-30T12:00:00+00:00",
+                    "blocks_current_consumers": False,
+                    "escalation_required": False,
+                    "evaluated_on": "2026-07-30",
+                    "fact_type": "strategy-returns",
+                    "last_accepted_date": "2026-07-30",
+                    "next_expected_date": "2026-07-31",
+                    "policy_id": "daily-current",
+                    "provider_id": "synthetic",
+                    "reason": "accepted observation is within cadence and grace",
+                    "revision_state": "ORIGINAL",
+                    "state": "FRESH",
+                    "subject_id": f"strategy-{index}",
+                }
+                for index in range(9)
+            ],
+        },
+    )
     return {
         "correlation": correlation_root,
         "decomposition": decomposition_root,
+        "freshness": freshness,
         "legacy": legacy,
         "output": tmp_path / "control-panel",
         "report": report_root,
@@ -864,11 +892,24 @@ def _qa(candidate: Path, root: Path) -> Path:
 
 
 def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
-    first = panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
-    second = panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+    first = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
+    second = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
     assert first["panel_id"] == second["panel_id"]
     result = panel.verify_candidate(
-        inputs["report"], inputs["legacy"], Path(first["candidate_dir"])
+        inputs["report"],
+        inputs["legacy"],
+        Path(first["candidate_dir"]),
+        freshness_health_path=inputs["freshness"],
     )
     assert result["all_passed"] is True
     assert result["checks_passed"] == result["checks_total"]
@@ -911,6 +952,7 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
         inputs["output"],
         decomposition_lenses_root=lens_root,
         decomposition_plan_bundle=plan_bundle,
+        freshness_health_path=inputs["freshness"],
     )
     candidate = Path(result["candidate_dir"])
     verification = panel.verify_candidate(
@@ -919,6 +961,7 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
         candidate,
         decomposition_lenses_root=lens_root,
         decomposition_plan_bundle=plan_bundle,
+        freshness_health_path=inputs["freshness"],
     )
     assert verification["all_passed"] is True
     data = json.loads(
@@ -956,7 +999,12 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
         _correlation_v2(),
         "synthetic-correlation-v2",
     )
-    result = panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+    result = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
     data = json.loads(
         (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
             encoding="utf-8"
@@ -997,12 +1045,14 @@ def test_template_line_endings_do_not_change_identity(
         inputs["legacy"],
         tmp_path / "lf-output",
         lf_template,
+        freshness_health_path=inputs["freshness"],
     )
     crlf = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
         tmp_path / "crlf-output",
         crlf_template,
+        freshness_health_path=inputs["freshness"],
     )
     assert lf["panel_id"] == crlf["panel_id"]
 
@@ -1052,6 +1102,7 @@ def test_provider_evidence_overlay_preserves_separate_account_and_provider_dates
         inputs["legacy"],
         inputs["output"],
         strategy_evidence_path=evidence,
+        freshness_health_path=inputs["freshness"],
     )
     data = json.loads(
         (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
@@ -1072,7 +1123,12 @@ def test_provider_evidence_overlay_preserves_separate_account_and_provider_dates
 def test_source_drift_fails_closed(inputs: dict[str, Path]) -> None:
     (inputs["legacy"] / "styles.css").write_text("changed", encoding="utf-8")
     with pytest.raises(panel.ControlPanelValidationError, match="source hash differs"):
-        panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+        )
 
 
 def test_freshness_health_is_visible_with_dates_and_reason(
@@ -1099,7 +1155,25 @@ def test_freshness_health_is_visible_with_dates_and_reason(
                     "revision_state": "REVISED",
                     "state": "LATE",
                     "subject_id": "account-internal-1",
-                }
+                },
+                *[
+                    {
+                        "acquired_at": "2026-07-30T12:00:00+00:00",
+                        "blocks_current_consumers": False,
+                        "escalation_required": False,
+                        "evaluated_on": "2026-07-30",
+                        "fact_type": "strategy-returns",
+                        "last_accepted_date": "2026-07-30",
+                        "next_expected_date": "2026-07-31",
+                        "policy_id": "daily-current",
+                        "provider_id": "synthetic",
+                        "reason": "accepted observation is within cadence and grace",
+                        "revision_state": "ORIGINAL",
+                        "state": "FRESH",
+                        "subject_id": f"strategy-{index}",
+                    }
+                    for index in range(9)
+                ],
             ],
         },
     )
@@ -1115,7 +1189,11 @@ def test_freshness_health_is_visible_with_dates_and_reason(
             encoding="utf-8"
         )
     )
-    freshness = [row for row in data["coverage"] if row["category"] == "DATA_FRESHNESS"]
+    freshness = [
+        row
+        for row in data["coverage"]
+        if row.get("item") == "synthetic:account-internal-1:nav"
+    ]
 
     assert freshness == [
         {
@@ -1123,36 +1201,99 @@ def test_freshness_health_is_visible_with_dates_and_reason(
             "blocks_current_consumers": False,
             "category": "DATA_FRESHNESS",
             "escalation_required": True,
+            "fact_type": "nav",
             "item": "synthetic:account-internal-1:nav",
             "known_gap": (
                 "next expected 2026-07-29; expected refresh is late but not yet stale"
             ),
             "next_expected_date": "2026-07-29",
             "policy_id": "daily-current",
+            "provider_id": "synthetic",
             "reason": "expected refresh is late but not yet stale",
             "revision_state": "REVISED",
             "status": "LATE",
+            "subject_id": "account-internal-1",
             "value": "2026-07-28",
         }
     ]
 
 
+def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -> None:
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="freshness health is mandatory"
+    ):
+        panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+
+
+def test_stale_material_strategy_blocks_hwm_claim(inputs: dict[str, Path]) -> None:
+    payload = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
+    payload["assessments"][0].update(
+        {
+            "blocks_current_consumers": True,
+            "escalation_required": True,
+            "last_accepted_date": "2026-07-17",
+            "next_expected_date": "2026-07-18",
+            "reason": "accepted observation exceeded the stale boundary",
+            "state": "STALE",
+        }
+    )
+    _write_json(inputs["freshness"], payload)
+
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
+    data = json.loads(
+        (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert data["hwm_summary"]["status"] == (
+        "NOT_AUTOMATABLE_STALE_OR_MISSING_MATERIAL_DAILY_NAV"
+    )
+    assert Decimal(data["hwm_summary"]["nav_coverage"]) < Decimal("1")
+    assert data["strategies"][0]["hwm_freshness_status"] == "BLOCKED"
+
+
 def test_candidate_tamper_fails_closed(inputs: dict[str, Path]) -> None:
-    result = panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+    result = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
     candidate = Path(result["candidate_dir"])
     (candidate / "app.js").write_text("tampered", encoding="utf-8")
     with pytest.raises(panel.ControlPanelValidationError, match="verification failed"):
-        panel.verify_candidate(inputs["report"], inputs["legacy"], candidate)
+        panel.verify_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            freshness_health_path=inputs["freshness"],
+        )
 
 
 def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> None:
-    built = panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
     qa_result = panel.validate_qa(candidate, qa)
     assert qa_result["all_passed"] is True
     published = panel.publish_panel(
-        inputs["report"], inputs["legacy"], candidate, qa, inputs["output"]
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
     )
     pointer = read_current(inputs["output"])
     assert published["publication_state"] == "PUBLISHED"
@@ -1201,7 +1342,12 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
     launcher = inputs["output"] / "index.html"
     launcher.write_bytes(b"prior accepted launcher\n")
 
-    built = panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
 
@@ -1214,7 +1360,12 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
     monkeypatch.setattr(panel, "_publish_current_launcher", fail_after_launcher)
     with pytest.raises(OSError, match="injected launcher"):
         panel.publish_panel(
-            inputs["report"], inputs["legacy"], candidate, qa, inputs["output"]
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
         )
 
     assert read_current(inputs["output"]).generation_id == previous.generation_id
@@ -1224,7 +1375,12 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
 def test_browser_qa_rejects_console_error(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
-    built = panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
     _write_json(qa / "desktop-risk" / "console-events.json", [{"text": "boom"}])

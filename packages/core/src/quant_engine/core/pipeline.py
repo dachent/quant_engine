@@ -28,6 +28,7 @@ from quant_engine.core.release import (
     commit_release,
     prepare_release,
     read_release,
+    recover_release,
 )
 
 
@@ -1110,5 +1111,27 @@ def pipeline_status(spec: PipelineSpec) -> dict[str, object]:
         "receipts": receipts,
         "release_id": release_id,
         "release_state": release_state,
+        "spec_sha256": spec.spec_sha256,
+    }
+
+
+def recover_pipeline(
+    spec: PipelineSpec, *, clear_stale_lock: bool = False
+) -> dict[str, object]:
+    """Explicitly resume rollback for this specification's prepared release."""
+
+    release_id = _read_prepared(spec)
+    if release_id is None:
+        raise PipelineValidationError("pipeline has no prepared release")
+    journal = recover_release(
+        coordination_root=spec.coordination_root,
+        release_id=release_id,
+        roots={key: spec.roots[key] for key in spec.release_generations},
+        clear_stale_lock=clear_stale_lock,
+    )
+    return {
+        "pipeline_id": spec.pipeline_id,
+        "release_id": release_id,
+        "release_state": journal.state.value,
         "spec_sha256": spec.spec_sha256,
     }

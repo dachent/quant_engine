@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -291,7 +291,9 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
     """Render a governed freshness bundle into existing data-health rows."""
 
     if path is None:
-        return []
+        raise ControlPanelValidationError(
+            "freshness health is mandatory for current portfolio claims"
+        )
     payload = _load_json(path, "freshness health")
     if set(payload) != {"assessment_schema_version", "as_of_date", "assessments"}:
         raise ControlPanelValidationError("freshness health keys differ")
@@ -359,15 +361,18 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
                 "blocks_current_consumers": item["blocks_current_consumers"],
                 "category": "DATA_FRESHNESS",
                 "escalation_required": item["escalation_required"],
+                "fact_type": fact_type,
                 "item": f"{provider_id}:{subject_id}:{fact_type}",
                 "known_gap": (
                     f"next expected {next_expected or 'not recurring'}; {reason}"
                 ),
                 "next_expected_date": next_expected,
                 "policy_id": _text(item.get("policy_id"), "freshness policy_id"),
+                "provider_id": provider_id,
                 "reason": reason,
                 "revision_state": revision_state,
                 "status": state,
+                "subject_id": subject_id,
                 "value": last,
             }
         )
@@ -531,6 +536,9 @@ def _decimal_value(value: object, field_name: str) -> Decimal:
 def _material_hwm_coverage(
     strategies: Sequence[Mapping[str, Any]],
     policy: Mapping[str, Any],
+    freshness_health: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    require_freshness: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     excluded = set(policy.get("excluded_strategy_ids", []))
     accepted: list[dict[str, Any]] = []
@@ -539,6 +547,10 @@ def _material_hwm_coverage(
     excluded_value = Decimal(0)
     excluded_names: list[str] = []
     uncovered: list[str] = []
+    freshness_by_strategy: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for freshness in freshness_health or []:
+        if freshness.get("fact_type") in {"nav", "strategy-returns"}:
+            freshness_by_strategy[str(freshness.get("subject_id"))].append(freshness)
     for original in strategies:
         row = dict(original)
         strategy_id = _text(row.get("strategy_id"), "strategy.strategy_id")
@@ -560,7 +572,23 @@ def _material_hwm_coverage(
         material += value
         row["hwm_scope"] = "INCLUDED"
         row["hwm_source"] = "PORTFOLIO_REPORT"
-        if row.get("nav_status") == "AVAILABLE":
+        strategy_freshness = freshness_by_strategy.get(strategy_id, [])
+        freshness_blocked = any(
+            item.get("blocks_current_consumers") is True for item in strategy_freshness
+        )
+        freshness_missing = require_freshness and not strategy_freshness
+        row["hwm_freshness_status"] = (
+            "UNAVAILABLE"
+            if freshness_missing
+            else "BLOCKED"
+            if freshness_blocked
+            else "ACCEPTED"
+        )
+        if (
+            row.get("nav_status") == "AVAILABLE"
+            and not freshness_blocked
+            and not freshness_missing
+        ):
             covered += value
         else:
             uncovered.append(strategy_name)
@@ -572,7 +600,7 @@ def _material_hwm_coverage(
     status = (
         "AVAILABLE_MATERIAL_PERIMETER"
         if not uncovered
-        else "NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV"
+        else "NOT_AUTOMATABLE_STALE_OR_MISSING_MATERIAL_DAILY_NAV"
     )
     return accepted, {
         "covered_value_usd": format(covered, "f"),
@@ -1442,7 +1470,12 @@ def _panel_data(
         }
         dependence_analysis = dependence_modes[default_dependence_mode]
     hwm_policy, hwm_policy_hash = _hwm_policy()
-    strategies, hwm_summary = _material_hwm_coverage(strategies, hwm_policy)
+    strategies, hwm_summary = _material_hwm_coverage(
+        strategies,
+        hwm_policy,
+        freshness_health,
+        require_freshness=True,
+    )
     strategies = [
         {
             **row,
@@ -2775,7 +2808,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--correlation-root", type=Path)
         command.add_argument("--weekly-returns-root", type=Path)
         command.add_argument("--strategy-evidence", type=Path)
-        command.add_argument("--freshness-health", type=Path)
+        command.add_argument("--freshness-health", type=Path, required=True)
         command.add_argument("--output-root", type=Path, required=name != "verify")
         if name != "build":
             command.add_argument("--candidate-dir", type=Path, required=True)

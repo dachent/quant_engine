@@ -616,14 +616,28 @@ def _validate_prepared_state(
             raise ReleaseConflictError(f"proposed manifest changed: {target.root_id}")
 
 
+FaultHook = Callable[[str, str], None]
+
+
+def _companion_hash(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise ReleaseConflictError(
+            f"release companion is not a regular file: {path.name}"
+        )
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def rollback_release(
     *,
     coordination_root: Path,
     manifest: ReleaseManifest,
     journal: ReleaseJournal,
     roots: Mapping[str, Path],
+    fault_hook: FaultHook | None = None,
 ) -> ReleaseJournal:
-    """Restore exactly the targets recorded as applied, in reverse order."""
+    """Idempotently restore every recorded release intent in reverse order."""
 
     rolling = ReleaseJournal(
         manifest.release_id,
@@ -638,9 +652,22 @@ def rollback_release(
         for companion_id in reversed(rolling.applied_companions):
             plan = companions[companion_id]
             companion_path = roots[plan.root_id].resolve() / plan.relative_path
-            if plan.previous_sha256 is None:
-                companion_path.unlink(missing_ok=True)
-            else:
+            current_hash = _companion_hash(companion_path)
+            if current_hash == plan.previous_sha256:
+                pass
+            elif current_hash == plan.proposed_sha256:
+                if plan.previous_sha256 is None:
+                    companion_path.unlink(missing_ok=True)
+                else:
+                    recovery = (
+                        _release_dir(coordination_root, manifest.release_id)
+                        / "recovery"
+                        / f"{companion_id}.bin"
+                    ).read_bytes()
+                    if hashlib.sha256(recovery).hexdigest() != plan.previous_sha256:
+                        raise ReleaseConflictError("companion recovery hash differs")
+                    _atomic_write(companion_path, recovery)
+            elif plan.previous_sha256 is not None:
                 recovery = (
                     _release_dir(coordination_root, manifest.release_id)
                     / "recovery"
@@ -648,27 +675,42 @@ def rollback_release(
                 ).read_bytes()
                 if hashlib.sha256(recovery).hexdigest() != plan.previous_sha256:
                     raise ReleaseConflictError("companion recovery hash differs")
-                _atomic_write(companion_path, recovery)
+                raise ReleaseConflictError(
+                    f"cannot safely roll back changed companion: {companion_id}"
+                )
+            else:
+                raise ReleaseConflictError(
+                    f"cannot safely roll back changed companion: {companion_id}"
+                )
+            if fault_hook is not None:
+                fault_hook("after-companion-restore", companion_id)
         targets = {item.root_id: item for item in manifest.targets}
         for root_id in reversed(rolling.applied_targets):
             release_target = targets[root_id]
             root = roots[root_id].resolve()
             current = _read_optional_current(root)
-            if (
-                current is None
-                or current.generation_id != release_target.proposed_generation_id
+            if current == release_target.previous_pointer:
+                pass
+            elif (
+                current is not None
+                and current.generation_id == release_target.proposed_generation_id
             ):
+                if release_target.previous_pointer is None:
+                    (root / "CURRENT.json").unlink(missing_ok=True)
+                else:
+                    restored = publish_generation(
+                        root, release_target.previous_pointer.generation_id
+                    )
+                    if restored != release_target.previous_pointer:
+                        raise ReleaseConflictError(
+                            f"restored pointer differs: {root_id}"
+                        )
+            else:
                 raise ReleaseConflictError(
                     f"cannot safely roll back changed root: {root_id}"
                 )
-            if release_target.previous_pointer is None:
-                (root / "CURRENT.json").unlink()
-            else:
-                restored = publish_generation(
-                    root, release_target.previous_pointer.generation_id
-                )
-                if restored != release_target.previous_pointer:
-                    raise ReleaseConflictError(f"restored pointer differs: {root_id}")
+            if fault_hook is not None:
+                fault_hook("after-target-restore", root_id)
         recovered = ReleaseJournal(
             manifest.release_id,
             ReleaseState.ROLLED_BACK,
@@ -690,7 +732,78 @@ def rollback_release(
         raise ReleaseCommitError("release recovery failed") from exc
 
 
-FaultHook = Callable[[str, str], None]
+def _acquire_lock(lock: Path, release_id: str) -> None:
+    try:
+        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise ReleaseConflictError(
+            "another release holds the coordination lock"
+        ) from exc
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write((release_id + "\n").encode("ascii"))
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def recover_release(
+    *,
+    coordination_root: Path,
+    release_id: str,
+    roots: Mapping[str, Path],
+    clear_stale_lock: bool = False,
+    fault_hook: FaultHook | None = None,
+) -> ReleaseJournal:
+    """Explicitly resume rollback for an interrupted release.
+
+    A surviving lock is never guessed to be stale. The caller must explicitly
+    confirm its removal, and its contents must name this exact release.
+    """
+
+    manifest, journal = read_release(coordination_root, release_id)
+    if journal.state is ReleaseState.COMMITTED:
+        return journal
+    if journal.state is ReleaseState.ROLLED_BACK:
+        return journal
+    if journal.state not in {
+        ReleaseState.COMMITTING,
+        ReleaseState.ROLLING_BACK,
+        ReleaseState.RECOVERY_FAILED,
+    }:
+        raise ReleaseConflictError(f"release is not recoverable: {journal.state.value}")
+    normalized_roots = {
+        _identifier(key, "root_id"): value for key, value in roots.items()
+    }
+    if set(normalized_roots) != {item.root_id for item in manifest.targets}:
+        raise ReleaseValidationError("runtime roots differ from release roots")
+    coordination_root = coordination_root.resolve()
+    lock = coordination_root / "release.lock"
+    if lock.exists():
+        if not clear_stale_lock:
+            raise ReleaseConflictError(
+                "interrupted release lock requires explicit confirmation"
+            )
+        if lock.is_symlink() or not lock.is_file():
+            raise ReleaseConflictError("interrupted release lock is not a file")
+        try:
+            lock_release_id = lock.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ReleaseConflictError(
+                "interrupted release lock is unreadable"
+            ) from exc
+        if lock_release_id != release_id:
+            raise ReleaseConflictError("interrupted release lock identity differs")
+        lock.unlink()
+    _acquire_lock(lock, release_id)
+    try:
+        return rollback_release(
+            coordination_root=coordination_root,
+            manifest=manifest,
+            journal=journal,
+            roots=normalized_roots,
+            fault_hook=fault_hook,
+        )
+    finally:
+        lock.unlink(missing_ok=True)
 
 
 def commit_release(
@@ -714,17 +827,9 @@ def commit_release(
     coordination_root = coordination_root.resolve()
     coordination_root.mkdir(parents=True, exist_ok=True)
     lock = coordination_root / "release.lock"
-    try:
-        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as exc:
-        raise ReleaseConflictError(
-            "another release holds the coordination lock"
-        ) from exc
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write((manifest.release_id + "\n").encode("ascii"))
-        handle.flush()
-        os.fsync(handle.fileno())
+    _acquire_lock(lock, manifest.release_id)
 
+    current: ReleaseJournal | None = None
     try:
         _validate_prepared_state(manifest, normalized_roots)
         companion_contents = companion_contents or {}
@@ -744,9 +849,6 @@ def commit_release(
         for target in manifest.targets:
             if fault_hook is not None:
                 fault_hook("before-target", target.root_id)
-            publish_generation(
-                normalized_roots[target.root_id], target.proposed_generation_id
-            )
             current = ReleaseJournal(
                 manifest.release_id,
                 ReleaseState.COMMITTING,
@@ -755,14 +857,15 @@ def commit_release(
             )
             _write_journal(coordination_root, current)
             if fault_hook is not None:
+                fault_hook("after-target-intent", target.root_id)
+            publish_generation(
+                normalized_roots[target.root_id], target.proposed_generation_id
+            )
+            if fault_hook is not None:
                 fault_hook("after-target", target.root_id)
         for companion in manifest.companions:
             if fault_hook is not None:
                 fault_hook("before-companion", companion.companion_id)
-            _atomic_write(
-                normalized_roots[companion.root_id] / companion.relative_path,
-                companion_contents[companion.companion_id],
-            )
             current = ReleaseJournal(
                 manifest.release_id,
                 ReleaseState.COMMITTING,
@@ -770,6 +873,12 @@ def commit_release(
                 (*current.applied_companions, companion.companion_id),
             )
             _write_journal(coordination_root, current)
+            if fault_hook is not None:
+                fault_hook("after-companion-intent", companion.companion_id)
+            _atomic_write(
+                normalized_roots[companion.root_id] / companion.relative_path,
+                companion_contents[companion.companion_id],
+            )
             if fault_hook is not None:
                 fault_hook("after-companion", companion.companion_id)
         for target in manifest.targets:
@@ -792,9 +901,9 @@ def commit_release(
         )
         _write_journal(coordination_root, committed)
         return committed
-    except (ReleaseValidationError, ReleaseConflictError):
-        raise
     except Exception as exc:
+        if current is None:
+            raise
         failed = ReleaseJournal(
             manifest.release_id,
             ReleaseState.COMMITTING,

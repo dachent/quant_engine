@@ -748,6 +748,49 @@ def _merge_account_returns(
     return result
 
 
+def _strategy_return_overlap_checks(
+    source_rows: Sequence[Mapping[str, Any]],
+    broker_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, object]]:
+    """Retain explicit parity evidence for broker observations not rolled forward."""
+
+    tolerance = Decimal("0.000001")
+    source = {
+        (str(row["strategy_id"]), str(row["date"])): row
+        for row in source_rows
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+    }
+    comparisons: dict[str, list[Decimal]] = defaultdict(list)
+    for broker in broker_rows:
+        identity = (str(broker["strategy_id"]), str(broker["date"]))
+        inherited = source.get(identity)
+        if inherited is None:
+            continue
+        difference = abs(
+            _decimal(inherited["return"], "inherited strategy return")
+            - _decimal(broker["return"], "broker strategy return")
+        )
+        comparisons[identity[0]].append(difference)
+    rows: list[dict[str, object]] = []
+    for strategy_id, differences in sorted(comparisons.items()):
+        exception_count = sum(item > tolerance for item in differences)
+        rows.append(
+            {
+                "authority_effect": (
+                    "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
+                ),
+                "check_id": f"strategy-return-overlap-{strategy_id}",
+                "compared_date_count": len(differences),
+                "exception_date_count": exception_count,
+                "maximum_absolute_difference": format(max(differences), "f"),
+                "status": "EXCEPTION" if exception_count else "PASS",
+                "strategy_id": strategy_id,
+                "tolerance": format(tolerance, "f"),
+            }
+        )
+    return rows
+
+
 def _path_statistics(rows: Sequence[Mapping[str, Any]]) -> dict[str, object]:
     ordered = sorted(rows, key=lambda item: str(item["date"]))
     if not ordered:
@@ -790,34 +833,61 @@ def _refresh_strategy_evidence(
         prior = existing.get(strategy_id, {})
         account_rows = by_strategy_layer.get((strategy_id, "ACCOUNT_LIVE"), [])
         provider_rows = by_strategy_layer.get((strategy_id, "PROVIDER_LIVE"), [])
-        accepted_rows = account_rows or provider_rows
-        providers = sorted(
+        account_providers = sorted(
             {
                 str(item["provider_id"])
-                for item in accepted_rows
+                for item in account_rows
                 if item.get("provider_id")
             }
         )
-        provider_id = (
-            providers[0]
-            if len(providers) == 1
+        provider_providers = sorted(
+            {
+                str(item["provider_id"])
+                for item in provider_rows
+                if item.get("provider_id")
+            }
+        )
+        account_provider_id = (
+            account_providers[0]
+            if len(account_providers) == 1
             else str(prior.get("provider_id", "portfolio-tracker"))
         )
-        generation = provider_generations.get(provider_id)
+        prior_provider = (
+            dict(prior["provider"])
+            if isinstance(prior.get("provider"), Mapping)
+            else {}
+        )
+        provider_provider_id = str(
+            prior_provider.get("provider_id")
+            or (
+                prior.get("provider_id")
+                if prior_provider
+                else provider_providers[0]
+                if len(provider_providers) == 1
+                else "portfolio-tracker"
+            )
+        )
+        accepted_provider_rows = [
+            item
+            for item in provider_rows
+            if str(item.get("provider_id")) == provider_provider_id
+        ] or provider_rows
+        top_provider_id = account_provider_id if account_rows else provider_provider_id
+        top_generation = provider_generations.get(top_provider_id)
         refreshed_row = {
             **prior,
             "evidence_layer": ("ACCOUNT_LIVE" if account_rows else "PROVIDER_LIVE"),
             "generation_as_of_date": (
-                provider_as_of_dates[provider_id].isoformat()
-                if generation is not None
+                provider_as_of_dates[top_provider_id].isoformat()
+                if top_generation is not None
                 else prior.get("generation_as_of_date")
             ),
             "generation_id": (
-                generation.generation_id
-                if generation is not None
+                top_generation.generation_id
+                if top_generation is not None
                 else prior.get("generation_id")
             ),
-            "provider_id": provider_id,
+            "provider_id": top_provider_id,
             "sources": prior.get("sources")
             or {
                 (
@@ -828,16 +898,43 @@ def _refresh_strategy_evidence(
             "strategy_name": strategy_names[strategy_id],
         }
         if account_rows:
-            refreshed_row["account"] = _path_statistics(account_rows)
-        if provider_rows:
-            existing_provider = prior.get("provider")
+            account_generation = provider_generations.get(account_provider_id)
+            refreshed_row["account"] = {
+                **_path_statistics(account_rows),
+                "generation_as_of_date": (
+                    provider_as_of_dates[account_provider_id].isoformat()
+                    if account_generation is not None
+                    else prior.get("generation_as_of_date")
+                ),
+                "generation_id": (
+                    account_generation.generation_id
+                    if account_generation is not None
+                    else prior.get("generation_id")
+                ),
+                "provider_id": account_provider_id,
+            }
+        if accepted_provider_rows or prior_provider:
+            provider_generation = provider_generations.get(provider_provider_id)
             refreshed_row["provider"] = {
+                **prior_provider,
                 **(
-                    dict(existing_provider)
-                    if isinstance(existing_provider, Mapping)
+                    _path_statistics(accepted_provider_rows)
+                    if accepted_provider_rows
                     else {}
                 ),
-                **_path_statistics(provider_rows),
+                "generation_as_of_date": (
+                    provider_as_of_dates[provider_provider_id].isoformat()
+                    if provider_generation is not None
+                    else prior_provider.get("generation_as_of_date")
+                    or prior.get("generation_as_of_date")
+                ),
+                "generation_id": (
+                    provider_generation.generation_id
+                    if provider_generation is not None
+                    else prior_provider.get("generation_id")
+                    or prior.get("generation_id")
+                ),
+                "provider_id": provider_provider_id,
             }
         refreshed.append(refreshed_row)
     return refreshed
@@ -961,13 +1058,16 @@ def _admissions(
             )
         )
     for item in evidence_rows:
-        provider_id = _text(item.get("provider_id"), "strategy evidence provider_id")
         strategy_id = _text(item.get("strategy_id"), "strategy evidence strategy_id")
         if item.get("account") is not None:
             account = _object(item["account"], "strategy evidence account")
+            account_provider_id = _text(
+                account.get("provider_id") or item.get("provider_id"),
+                "strategy evidence account provider_id",
+            )
             admissions.append(
                 ProviderFactAdmission(
-                    provider_id=provider_id,
+                    provider_id=account_provider_id,
                     fact_type="strategy_returns",
                     evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
                     disposition=AdmissionDisposition.AUTHORITATIVE,
@@ -982,9 +1082,13 @@ def _admissions(
             )
         if item.get("provider") is not None:
             provider = _object(item["provider"], "strategy evidence provider")
+            provider_provider_id = _text(
+                provider.get("provider_id") or item.get("provider_id"),
+                "strategy evidence provider provider_id",
+            )
             admissions.append(
                 ProviderFactAdmission(
-                    provider_id=provider_id,
+                    provider_id=provider_provider_id,
                     fact_type="strategy_returns",
                     evidence_layer=EvidenceLayer.PROVIDER_LIVE,
                     disposition=AdmissionDisposition.RECONCILIATION_ONLY,
@@ -1060,13 +1164,16 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
     strategy_returns = _merge_account_returns(
         source_strategy_returns, broker_returns, strategy_names
     )
+    overlap_checks = _strategy_return_overlap_checks(
+        source_strategy_returns, broker_returns
+    )
     provider_strategy_returns = _portfolio123_provider_returns(
         _object(spec["providers"], "providers")["portfolio123"],
         manifests["portfolio123"],
         evidence_rows,
     )
     evidence_rows = _refresh_strategy_evidence(
-        strategy_returns,
+        [*strategy_returns, *provider_strategy_returns],
         evidence_rows,
         strategy_names,
         {item.provider_id: item for item in identities},
@@ -1133,6 +1240,7 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
                 "check_id": "broker-nav-rollforward",
                 "status": "PASS",
             },
+            *overlap_checks,
         ],
         "securities": sorted(
             [

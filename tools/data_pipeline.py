@@ -17,18 +17,21 @@ from quant_engine.core import (
     load_pipeline_spec,
     pipeline_status,
     plan_pipeline,
+    recover_pipeline,
 )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("plan", "execute", "status"):
+    for name in ("plan", "execute", "status", "recover"):
         command = commands.add_parser(name)
         command.add_argument("--spec", type=Path, required=True)
         if name == "execute":
             command.add_argument("--commit", action="store_true")
             command.add_argument("--allow-external-read", action="store_true")
+        elif name == "recover":
+            command.add_argument("--confirm-stale-lock", action="store_true")
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--generation-dir", type=Path, required=True)
     return parser
@@ -45,6 +48,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = plan_pipeline(spec)
             elif args.command == "status":
                 result = pipeline_status(spec)
+            elif args.command == "recover":
+                result = recover_pipeline(
+                    spec, clear_stale_lock=args.confirm_stale_lock
+                )
             else:
                 result = execute_pipeline(
                     spec,
