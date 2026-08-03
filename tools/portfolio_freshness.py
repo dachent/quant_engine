@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
 
-from quant_engine.core import FreshnessMode, FreshnessPolicy, hash_file, read_current
+from quant_engine.core import FreshnessMode, FreshnessPolicy, hash_file, read_generation
 from quant_engine.core.contracts import canonical_json_bytes
 
 
@@ -30,20 +30,14 @@ def _text(value: object, field: str) -> str:
     return value.strip()
 
 
-def _load_catalog(root: Path) -> Mapping[str, Any]:
-    pointer = read_current(root)
-    generation = root / "generations" / pointer.generation_id
-    manifest_path = generation / "generation.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, list):
-        raise PortfolioFreshnessError("provider ledger manifest artifacts differ")
+def _load_catalog(root: Path, generation_id: str) -> Mapping[str, Any]:
+    accepted_manifest = read_generation(root, generation_id)
+    generation = root / "generations" / accepted_manifest.generation_id
     expected = next(
         (
             item
-            for item in artifacts
-            if isinstance(item, Mapping)
-            and item.get("artifact_id") == "normalized/provider-ledger.json"
+            for item in accepted_manifest.artifacts
+            if item.artifact_id == "normalized/provider-ledger.json"
         ),
         None,
     )
@@ -53,14 +47,18 @@ def _load_catalog(root: Path) -> Mapping[str, Any]:
     if not catalog_path.is_file() or catalog_path.is_symlink():
         raise PortfolioFreshnessError("provider ledger catalog is unavailable")
     digest, size = hash_file(catalog_path)
-    if (digest, size) != (expected.get("sha256"), expected.get("size_bytes")):
+    if (digest, size) != (expected.sha256, expected.size_bytes):
         raise PortfolioFreshnessError("provider ledger catalog differs from manifest")
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     return _object(catalog, "provider ledger catalog")
 
 
-def build_health(provider_ledger_root: Path) -> dict[str, object]:
-    catalog = _load_catalog(provider_ledger_root.resolve())
+def build_health(
+    provider_ledger_root: Path, provider_ledger_generation_id: str
+) -> dict[str, object]:
+    catalog = _load_catalog(
+        provider_ledger_root.resolve(), provider_ledger_generation_id
+    )
     as_of = date.fromisoformat(_text(catalog.get("as_of_date"), "as_of_date"))
     evidence = catalog.get("strategy_evidence")
     if not isinstance(evidence, list) or not evidence:
@@ -113,8 +111,12 @@ def build_health(provider_ledger_root: Path) -> dict[str, object]:
     }
 
 
-def write_health(provider_ledger_root: Path, output: Path) -> dict[str, object]:
-    payload = build_health(provider_ledger_root)
+def write_health(
+    provider_ledger_root: Path,
+    provider_ledger_generation_id: str,
+    output: Path,
+) -> dict[str, object]:
+    payload = build_health(provider_ledger_root, provider_ledger_generation_id)
     content = canonical_json_bytes(payload)
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +134,7 @@ def write_health(provider_ledger_root: Path, output: Path) -> dict[str, object]:
         "assessment_count": len(payload["assessments"]),
         "as_of_date": payload["as_of_date"],
         "output": str(output),
+        "provider_ledger_generation_id": provider_ledger_generation_id,
         "sha256": digest,
         "size_bytes": size,
     }
@@ -140,6 +143,7 @@ def write_health(provider_ledger_root: Path, output: Path) -> dict[str, object]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider-ledger-root", type=Path, required=True)
+    parser.add_argument("--provider-ledger-generation-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -147,7 +151,11 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        result = write_health(args.provider_ledger_root, args.output)
+        result = write_health(
+            args.provider_ledger_root,
+            args.provider_ledger_generation_id,
+            args.output,
+        )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-freshness: FAIL: {exc}", file=sys.stderr)
         return 1
