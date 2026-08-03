@@ -577,9 +577,7 @@ def rehearse_release_boundaries(
         pass
     else:
         raise RehearsalError("third pointer state did not fail recovery")
-    _, pointer_failed = read_release(
-        pointer_scenario / "c", pointer_release.release_id
-    )
+    _, pointer_failed = read_release(pointer_scenario / "c", pointer_release.release_id)
     if (
         pointer_failed.state is not ReleaseState.RECOVERY_FAILED
         or read_current(pointer_roots[first_target]).generation_id
@@ -648,9 +646,7 @@ def rehearse_release_boundaries(
         or companion_path.read_bytes() != conflicting_content
     ):
         raise RehearsalError("companion conflict was not preserved")
-    companion_path.write_bytes(
-        proposed_companions[companion_plan.companion_id]
-    )
+    companion_path.write_bytes(proposed_companions[companion_plan.companion_id])
     companion_resumed = recover_release(
         coordination_root=companion_scenario / "c",
         release_id=companion_release.release_id,
@@ -687,6 +683,8 @@ def rehearse_release_boundaries(
         "source_unchanged": True,
         "status": "PASS",
     }
+
+
 def _synthetic_manifest(label: str, as_of_date: date) -> GenerationManifest:
     payload = (label + "\n").encode()
     return GenerationManifest.build(

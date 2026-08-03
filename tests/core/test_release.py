@@ -634,14 +634,14 @@ def test_recovery_failed_preserves_conflict_and_can_resume(
         created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
         gates=_gate(),
         companions=(
-            CompanionInput(
-                "panel-launcher", "root", "index.html", proposed_launcher
-            ),
+            CompanionInput("panel-launcher", "root", "index.html", proposed_launcher),
         ),
     )
 
     def crash(step: str, item: str) -> None:
-        expected_step = "after-target" if conflict_kind == "pointer" else "after-companion"
+        expected_step = (
+            "after-target" if conflict_kind == "pointer" else "after-companion"
+        )
         expected_item = "root" if conflict_kind == "pointer" else "panel-launcher"
         if (step, item) == (expected_step, expected_item):
             raise _HardCrash()

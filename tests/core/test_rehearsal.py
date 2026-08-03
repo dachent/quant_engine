@@ -135,8 +135,7 @@ def test_complete_recovery_rehearsal_passes(tmp_path: Path) -> None:
     assert boundary["crash_boundary_count"] == 6
     assert boundary["rollback_interruption"]["status"] == "PASS"
     assert (
-        boundary["process_termination_method"]
-        == "OPERATING_SYSTEM_PROCESS_TERMINATION"
+        boundary["process_termination_method"] == "OPERATING_SYSTEM_PROCESS_TERMINATION"
     )
     assert {
         (item["stale_state"], item["recovered_state"])
