@@ -667,7 +667,7 @@
       }
     }));
     $("#candidate-search").addEventListener("input", (event) => { candidateSearch = event.target.value.trim(); renderCandidateTable(); });
-    $("#snapshot-button").addEventListener("click", () => showToast(`Portfolio facts ${formatDate(data.meta.portfolio_as_of)} · freshness evaluated ${formatDate(data.meta.freshness_evaluated_on)} · report ${data.meta.report_generation_id.slice(0, 12)}… · read-only local artifact.`));
+    $("#snapshot-button").addEventListener("click", () => showToast(`Portfolio facts ${formatDate(data.meta.portfolio_as_of)} · freshness evaluated ${formatDate(data.meta.freshness_evaluated_on)} · Report ${data.meta.report_generation_id.slice(0, 12)}… · read-only local artifact.`));
     $$('.segment').forEach((button) => button.setAttribute("aria-pressed", String(button.classList.contains("is-active"))));
     window.addEventListener("hashchange", () => setView(location.hash.slice(1) || "command", false));
   }
