@@ -5,6 +5,9 @@ import importlib.util
 from pathlib import Path
 import sys
 
+import pytest
+
+from quant_engine.core import CoverageClaim, CoverageStatus
 from quant_engine.portfolio_ledger import (
     GenerationQualification,
     ProviderGenerationIdentity,
@@ -233,3 +236,93 @@ def test_account_and_provider_lanes_keep_independent_provider_identity() -> None
         ("ibkr", "ACCOUNT_LIVE"),
         ("portfolio123", "PROVIDER_LIVE"),
     }
+
+
+def test_provider_coverage_preserves_alpaca_like_declared_limitations() -> None:
+    manifest_coverage = CoverageClaim(
+        status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+        boundary="hash-bound exported account and order snapshot",
+        fact_types=("nav_observations", "orders"),
+        observed_start=date(2025, 10, 1),
+        observed_end=date(2026, 7, 17),
+    )
+    out_of_boundary = [
+        "account activities were not exported; no provider-observed cash flows are published",
+        "positions were not exported; no position snapshot is published",
+        "order history spans only the observed export interval",
+        "portfolio history is a finite snapshot",
+        "one account capture is truncated and retained only as failed evidence",
+        "an inferred withdrawal remains tracker evidence rather than provider evidence",
+    ]
+    provider_catalog = {
+        "coverage": {
+            "boundary": "catalog text must not replace the manifest boundary",
+            "known_gaps": [],
+            "out_of_boundary": list(reversed(out_of_boundary)),
+            "status": "FAILED",
+        }
+    }
+
+    coverage = ledger._provider_coverage("alpaca", manifest_coverage, provider_catalog)
+
+    assert coverage == {
+        "boundary": "hash-bound exported account and order snapshot",
+        "fact_types": ["nav_observations", "orders"],
+        "known_gaps": [],
+        "observed_end": "2026-07-17",
+        "observed_start": "2025-10-01",
+        "out_of_boundary": sorted(out_of_boundary),
+        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+    }
+
+
+def test_provider_coverage_merges_catalog_known_gaps_without_replacing_status() -> None:
+    manifest_coverage = CoverageClaim(
+        status=CoverageStatus.PARTIAL,
+        boundary="accepted account history",
+        fact_types=("transactions",),
+        known_gaps=("manifest-declared gap",),
+    )
+
+    coverage = ledger._provider_coverage(
+        "schwab",
+        manifest_coverage,
+        {
+            "coverage": {
+                "known_gaps": [
+                    "provider-catalog gap",
+                    "manifest-declared gap",
+                ],
+                "out_of_boundary": ["checking account outside brokerage boundary"],
+                "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+            }
+        },
+    )
+
+    assert coverage["status"] == "PARTIAL"
+    assert coverage["boundary"] == "accepted account history"
+    assert coverage["known_gaps"] == [
+        "manifest-declared gap",
+        "provider-catalog gap",
+    ]
+    assert coverage["out_of_boundary"] == [
+        "checking account outside brokerage boundary"
+    ]
+
+
+def test_provider_coverage_rejects_non_list_catalog_limitations() -> None:
+    manifest_coverage = CoverageClaim(
+        status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+        boundary="accepted export",
+        fact_types=("transactions",),
+    )
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match=r"alpaca catalog coverage\.out_of_boundary must be a list",
+    ):
+        ledger._provider_coverage(
+            "alpaca",
+            manifest_coverage,
+            {"coverage": {"out_of_boundary": "not-a-list"}},
+        )

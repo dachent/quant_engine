@@ -797,6 +797,165 @@ def _correlation_bytes(target_content: bytes) -> bytes:
     return buffer.getvalue().encode("utf-8")
 
 
+def build_provider_ledger_targets(
+    manifest_path: Path,
+    catalog_path: Path,
+) -> tuple[bytes, bytes, bytes, bytes]:
+    """Export the accepted provider ledger as the sole live strategy source.
+
+    This adapter deliberately performs no provider access.  It verifies the
+    immutable provider-ledger generation, preserves the ratified evidence layer
+    for each strategy, and emits both the target CSV and a compact series
+    contract used by downstream parity gates.
+    """
+
+    manifest = _load_json(manifest_path, "provider-ledger generation manifest")
+    if manifest.get("verification") != "VERIFIED":
+        raise TargetSeriesError("provider-ledger generation is not verified")
+    generation_id = str(manifest.get("generation_id", ""))
+    if len(generation_id) != 64:
+        raise TargetSeriesError("provider-ledger generation identity is invalid")
+    artifacts = _manifest_artifacts(manifest.get("artifacts"))
+    catalog_artifact = _verify_artifact(
+        catalog_path, artifacts, "normalized/provider-ledger.json"
+    )
+    catalog = _load_json(catalog_path, "provider-ledger catalog")
+    if catalog.get("catalog_schema_version") != 1:
+        raise TargetSeriesError("provider-ledger catalog schema differs")
+    as_of_date = str(catalog.get("as_of_date", ""))
+    try:
+        accepted_as_of = date.fromisoformat(as_of_date)
+        manifest_as_of = date.fromisoformat(str(manifest.get("as_of_date", "")))
+    except ValueError as exc:
+        raise TargetSeriesError("provider-ledger as-of date is invalid") from exc
+    if accepted_as_of != manifest_as_of:
+        raise TargetSeriesError("provider-ledger manifest and catalog dates differ")
+
+    raw_rows = catalog.get("strategy_returns")
+    if not isinstance(raw_rows, list) or not raw_rows:
+        raise TargetSeriesError("provider-ledger strategy returns are unavailable")
+    accepted_layers = {"ACCOUNT_LIVE", "PROVIDER_LIVE", "OFFICIAL_VEHICLE"}
+    names_by_strategy: dict[str, str] = {}
+    rows_by_series: dict[str, list[dict[str, str]]] = {}
+    identities: set[tuple[str, str]] = set()
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("provider-ledger strategy return is invalid")
+        strategy_id = str(raw.get("strategy_id", "")).strip()
+        series_id = str(raw.get("strategy_name", "")).strip()
+        layer = str(raw.get("evidence_layer", "")).strip()
+        if not strategy_id or not series_id or layer not in accepted_layers:
+            raise TargetSeriesError("provider-ledger strategy return contract differs")
+        prior_name = names_by_strategy.setdefault(strategy_id, series_id)
+        if prior_name != series_id:
+            raise TargetSeriesError("provider-ledger strategy name is inconsistent")
+        try:
+            observed = date.fromisoformat(str(raw.get("date", "")))
+        except ValueError as exc:
+            raise TargetSeriesError(
+                "provider-ledger strategy return date is invalid"
+            ) from exc
+        if observed > accepted_as_of:
+            raise TargetSeriesError("provider-ledger strategy return exceeds as-of")
+        identity = (series_id, observed.isoformat())
+        if identity in identities:
+            raise TargetSeriesError("provider-ledger strategy return is duplicated")
+        identities.add(identity)
+        period_return = _decimal(raw.get("return"), "provider-ledger strategy return")
+        if period_return <= -1:
+            raise TargetSeriesError("provider-ledger strategy return is invalid")
+        rows_by_series.setdefault(series_id, []).append(
+            {
+                "series_id": series_id,
+                "date": observed.isoformat(),
+                "return": format(period_return, "f"),
+                "evidence_layer": layer,
+                "return_basis": str(raw.get("return_basis") or "NET"),
+                "return_type": str(raw.get("return_type") or "TOTAL"),
+                "cost": "" if raw.get("cost") is None else str(raw["cost"]),
+            }
+        )
+
+    evidence_rows = catalog.get("strategy_evidence")
+    if not isinstance(evidence_rows, list):
+        raise TargetSeriesError("provider-ledger strategy evidence is unavailable")
+    evidence_by_name = {
+        str(item.get("strategy_name")): item
+        for item in evidence_rows
+        if isinstance(item, dict) and item.get("strategy_name")
+    }
+    contracts: list[dict[str, object]] = []
+    for series_id, series_rows in sorted(rows_by_series.items()):
+        series_rows.sort(key=lambda item: item["date"])
+        layers = {item["evidence_layer"] for item in series_rows}
+        if len(layers) != 1:
+            raise TargetSeriesError(
+                "one canonical strategy has conflicting live layers"
+            )
+        evidence = evidence_by_name.get(series_id)
+        if evidence is None:
+            raise TargetSeriesError("provider-ledger strategy evidence is incomplete")
+        layer = next(iter(layers))
+        if evidence.get("evidence_layer") != layer:
+            raise TargetSeriesError("provider-ledger return and evidence layers differ")
+        selected = evidence.get("account" if layer == "ACCOUNT_LIVE" else "provider")
+        if not isinstance(selected, dict):
+            raise TargetSeriesError("provider-ledger selected evidence path is absent")
+        expected = {
+            "observed_start": series_rows[0]["date"],
+            "observed_end": series_rows[-1]["date"],
+            "return_observations": len(series_rows),
+        }
+        if any(selected.get(key) != value for key, value in expected.items()):
+            raise TargetSeriesError("provider-ledger evidence statistics differ")
+        contracts.append(
+            {
+                "evidence_layer": layer,
+                "generation_id": evidence.get("generation_id"),
+                "observed_end": expected["observed_end"],
+                "observed_start": expected["observed_start"],
+                "provider_id": evidence.get("provider_id"),
+                "return_observations": expected["return_observations"],
+                "series_id": series_id,
+                "strategy_id": evidence.get("strategy_id"),
+            }
+        )
+
+    ordered_rows = [
+        row for series_id in sorted(rows_by_series) for row in rows_by_series[series_id]
+    ]
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=TARGET_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(ordered_rows)
+    target_content = buffer.getvalue().encode("utf-8")
+    evidence_content = canonical_json_bytes(
+        {
+            "as_of_date": as_of_date,
+            "provider_ledger_generation_id": generation_id,
+            "schema_version": 1,
+            "strategies": evidence_rows,
+        }
+    )
+    proof_content = canonical_json_bytes(
+        {
+            "as_of_date": as_of_date,
+            "builder": "portfolio-target-series/provider-ledger-1",
+            "provider_ledger": {
+                "catalog_artifact_id": catalog_artifact.artifact_id,
+                "catalog_sha256": catalog_artifact.sha256,
+                "catalog_size_bytes": catalog_artifact.size_bytes,
+                "generation_id": generation_id,
+                "manifest_sha256": _sha256(manifest_path)[0],
+            },
+            "series_contracts": contracts,
+            "target_sha256": hashlib.sha256(target_content).hexdigest(),
+            "target_size_bytes": len(target_content),
+        }
+    )
+    return target_content, evidence_content, proof_content, manifest_path.read_bytes()
+
+
 def _strategy_version(namespace: str, value: Mapping[str, object]) -> str:
     digest = hashlib.sha256(canonical_json_bytes(value)).hexdigest()
     return f"{namespace}:{digest}"
@@ -950,11 +1109,13 @@ def build_layered_correlation_inputs(
         for item in strategies
         if isinstance(item, dict)
         and item.get("strategy_name") == portfolio123_series_id
-        and item.get("provider_id") == "portfolio123"
-        and item.get("generation_id") == generation_id
         and isinstance(item.get("provider"), dict)
         and item["provider"].get("entity_id") == portfolio123_provider_entity_id
-        and item.get("evidence_layer") == "PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE"
+        and item["provider"].get("provider_id") == "portfolio123"
+        and item["provider"].get("generation_id") == generation_id
+        and item.get("evidence_layer")
+        in {"ACCOUNT_LIVE", "PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE"}
+        and isinstance(item.get("account"), dict)
         and isinstance(item.get("overlap"), dict)
         and item["overlap"].get("status") == "TESTED_EXACT_DATE_PATHS"
         and isinstance(item["overlap"].get("observations"), int)
@@ -1338,6 +1499,93 @@ def build_provider_rollforward_inputs(
     )
 
 
+def build_provider_ledger_decomposition_inputs(
+    base_spec_path: Path,
+    factor_path: Path,
+    base_targets_path: Path,
+    target_content: bytes,
+    evidence_content: bytes,
+    proof_content: bytes,
+    provider_ledger_manifest_path: Path,
+    provider_ledger_catalog_path: Path,
+) -> tuple[bytes, bytes, dict[str, bytes]]:
+    """Rebind one decomposition lens to the accepted provider-ledger series."""
+
+    spec = _load_json(base_spec_path, "base decomposition spec")
+    target_source = spec.get("target_source")
+    factor_source = spec.get("factor_source")
+    if not isinstance(target_source, dict) or not isinstance(factor_source, dict):
+        raise TargetSeriesError("decomposition spec source contracts are invalid")
+    base_hash, base_size = _sha256(base_targets_path)
+    if (
+        target_source.get("expected_sha256") != base_hash
+        or target_source.get("expected_size_bytes") != base_size
+    ):
+        raise TargetSeriesError("base decomposition target identity differs")
+    factor_hash, factor_size = _sha256(factor_path)
+    if (
+        factor_source.get("expected_sha256") != factor_hash
+        or factor_source.get("expected_size_bytes") != factor_size
+    ):
+        raise TargetSeriesError("base decomposition factor identity differs")
+    proof = json.loads(proof_content)
+    if not isinstance(proof, dict) or not isinstance(
+        proof.get("series_contracts"), list
+    ):
+        raise TargetSeriesError("provider-ledger target proof is invalid")
+    try:
+        original_as_of = date.fromisoformat(str(spec.get("as_of_date", "")))
+        ledger_as_of = date.fromisoformat(str(proof.get("as_of_date", "")))
+    except ValueError as exc:
+        raise TargetSeriesError(
+            "provider-ledger decomposition date is invalid"
+        ) from exc
+    spec["as_of_date"] = max(original_as_of, ledger_as_of).isoformat()
+    target_source.update(
+        {
+            "artifact_id": "provider-ledger/canonical-strategy-returns.csv",
+            "expected_sha256": hashlib.sha256(target_content).hexdigest(),
+            "expected_size_bytes": len(target_content),
+            "relative_path": "targets.csv",
+            "schema_name": "portfolio-canonical-strategy-returns",
+            "schema_version": "1",
+        }
+    )
+    artifacts = {
+        "provider-ledger-generation.json": provider_ledger_manifest_path.read_bytes(),
+        "provider-ledger.json": provider_ledger_catalog_path.read_bytes(),
+        "provider-ledger-source-proof.json": proof_content,
+        "strategy-evidence.json": evidence_content,
+    }
+    target_prefixes = ("provider-overlay/", "provider-rollforward/", "provider-ledger/")
+    retained = []
+    for source in spec.get("provenance_sources", []):
+        if not isinstance(source, dict):
+            raise TargetSeriesError("decomposition provenance source is invalid")
+        if not str(source.get("artifact_id", "")).startswith(target_prefixes):
+            retained.append(source)
+    additions = []
+    schemas = {
+        "provider-ledger-generation.json": "generation-manifest",
+        "provider-ledger.json": "provider-ledger-catalog",
+        "provider-ledger-source-proof.json": "portfolio-canonical-series-proof",
+        "strategy-evidence.json": "portfolio-strategy-provider-evidence",
+    }
+    for relative_path, content in artifacts.items():
+        additions.append(
+            {
+                "artifact_id": f"provider-ledger/{relative_path}",
+                "expected_sha256": hashlib.sha256(content).hexdigest(),
+                "expected_size_bytes": len(content),
+                "relative_path": relative_path,
+                "schema_name": schemas[relative_path],
+                "schema_version": "1",
+            }
+        )
+    spec["provenance_sources"] = [*retained, *additions]
+    return canonical_json_bytes(spec), factor_path.read_bytes(), artifacts
+
+
 def _write_exact(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -1376,6 +1624,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-account-entity-id")
     parser.add_argument("--portfolio123-strategy-id")
     parser.add_argument("--portfolio123-account-series-id")
+    parser.add_argument("--provider-ledger-manifest", type=Path)
+    parser.add_argument("--provider-ledger-catalog", type=Path)
     parser.add_argument("--layered-correlation-only", action="store_true")
     parser.add_argument("--output-root", type=Path, required=True)
     return parser
@@ -1391,7 +1641,92 @@ def _required(args: argparse.Namespace, names: Sequence[str], mode: str) -> None
 def main() -> int:
     args = _parser().parse_args()
     try:
-        if args.layered_correlation_only:
+        if args.provider_ledger_manifest is not None:
+            _required(
+                args,
+                (
+                    "provider_ledger_catalog",
+                    "base_decomposition_spec",
+                    "factors",
+                    "base_correlation_spec",
+                    "base_correlation_returns",
+                    "portfolio123_manifest",
+                    "portfolio123_returns",
+                    "portfolio123_relationships",
+                    "portfolio123_provider_entity_id",
+                    "portfolio123_simulation_entity_id",
+                    "portfolio123_account_series_id",
+                ),
+                "provider-ledger roll-forward",
+            )
+            targets, strategy_evidence, proof, ledger_manifest = (
+                build_provider_ledger_targets(
+                    args.provider_ledger_manifest, args.provider_ledger_catalog
+                )
+            )
+            spec, factors, ledger_artifacts = (
+                build_provider_ledger_decomposition_inputs(
+                    args.base_decomposition_spec,
+                    args.factors,
+                    args.base_targets,
+                    targets,
+                    strategy_evidence,
+                    proof,
+                    args.provider_ledger_manifest,
+                    args.provider_ledger_catalog,
+                )
+            )
+            decomposition_root = args.output_root / "decomposition"
+            _write_exact(decomposition_root / "targets.csv", targets)
+            _write_exact(decomposition_root / "factors.csv", factors)
+            _write_exact(decomposition_root / "spec.json", spec)
+            for relative_path, content in ledger_artifacts.items():
+                _write_exact(decomposition_root / relative_path, content)
+            rebound = json.loads(spec)
+            for source in rebound.get("provenance_sources", []):
+                if not isinstance(source, dict):
+                    raise TargetSeriesError("rebound provenance source is invalid")
+                relative = str(source.get("relative_path", ""))
+                destination = decomposition_root / relative
+                if destination.exists():
+                    continue
+                _write_exact(
+                    destination,
+                    (args.base_decomposition_spec.parent / relative).read_bytes(),
+                )
+            evidence_value = json.loads(strategy_evidence)
+            (
+                correlation_spec,
+                correlation_returns,
+                correlation_proof,
+                correlation_p123_manifest,
+            ) = build_layered_correlation_inputs(
+                args.base_correlation_spec,
+                args.base_correlation_returns,
+                targets,
+                args.portfolio123_manifest,
+                args.portfolio123_returns,
+                args.portfolio123_relationships,
+                args.portfolio123_provider_entity_id,
+                args.portfolio123_simulation_entity_id,
+                args.portfolio123_account_series_id,
+                strategy_evidence,
+                str(evidence_value["as_of_date"]),
+            )
+            correlation_root = args.output_root / "correlation"
+            _write_exact(correlation_root / "spec.json", correlation_spec)
+            _write_exact(correlation_root / "returns.csv", correlation_returns)
+            _write_exact(correlation_root / "evidence-proof.json", correlation_proof)
+            _write_exact(
+                correlation_root / "portfolio123-generation.json",
+                correlation_p123_manifest,
+            )
+            _write_exact(args.output_root / "strategy-evidence.json", strategy_evidence)
+            _write_exact(args.output_root / "provider-ledger-source-proof.json", proof)
+            _write_exact(
+                args.output_root / "provider-ledger-generation.json", ledger_manifest
+            )
+        elif args.layered_correlation_only:
             _required(
                 args,
                 (

@@ -26,6 +26,7 @@ build_quantbase_targets = target_series.build_quantbase_targets
 build_portfolio123_evidence = target_series.build_portfolio123_evidence
 build_strategy_evidence = target_series.build_strategy_evidence
 build_layered_correlation_inputs = target_series.build_layered_correlation_inputs
+build_provider_ledger_targets = target_series.build_provider_ledger_targets
 
 
 def _write(path: Path, content: str) -> tuple[str, int]:
@@ -490,14 +491,19 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
         {
             "strategies": [
                 {
-                    "evidence_layer": "PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE",
-                    "generation_id": "e" * 64,
+                    "account": {"provider_id": "ibkr"},
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "generation_id": "f" * 64,
                     "overlap": {
                         "observations": 2,
                         "status": "TESTED_EXACT_DATE_PATHS",
                     },
-                    "provider": {"entity_id": "provider-synthetic"},
-                    "provider_id": "portfolio123",
+                    "provider": {
+                        "entity_id": "provider-synthetic",
+                        "generation_id": "e" * 64,
+                        "provider_id": "portfolio123",
+                    },
+                    "provider_id": "ibkr",
                     "strategy_name": "AI Factor [P123]",
                 }
             ]
@@ -584,3 +590,127 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
             strategy_evidence,
             "2026-01-06",
         )
+
+
+def _provider_ledger_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    catalog = tmp_path / "provider-ledger.json"
+    catalog.write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-07-31",
+                "catalog_schema_version": 1,
+                "strategy_evidence": [
+                    {
+                        "account": {
+                            "observed_end": "2026-07-31",
+                            "observed_start": "2026-07-30",
+                            "provider_id": "matrixport",
+                            "return_observations": 2,
+                        },
+                        "evidence_layer": "ACCOUNT_LIVE",
+                        "generation_id": "a" * 64,
+                        "provider_id": "matrixport",
+                        "strategy_id": "robuxio-crypto",
+                        "strategy_name": "Robuxio",
+                    }
+                ],
+                "strategy_returns": [
+                    {
+                        "cost": None,
+                        "date": "2026-07-30",
+                        "evidence_layer": "ACCOUNT_LIVE",
+                        "provider_id": "matrixport",
+                        "return": "0.01",
+                        "return_basis": "NET",
+                        "return_type": "TOTAL",
+                        "strategy_id": "robuxio-crypto",
+                        "strategy_name": "Robuxio",
+                    },
+                    {
+                        "cost": None,
+                        "date": "2026-07-31",
+                        "evidence_layer": "ACCOUNT_LIVE",
+                        "provider_id": "matrixport",
+                        "return": "-0.02",
+                        "return_basis": "NET",
+                        "return_type": "TOTAL",
+                        "strategy_id": "robuxio-crypto",
+                        "strategy_name": "Robuxio",
+                    },
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "generation.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "artifacts": [
+                    {
+                        "artifact_id": "normalized/provider-ledger.json",
+                        "sha256": hashlib.sha256(catalog.read_bytes()).hexdigest(),
+                        "size_bytes": catalog.stat().st_size,
+                    }
+                ],
+                "as_of_date": "2026-07-31",
+                "generation_id": "b" * 64,
+                "verification": "VERIFIED",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return manifest, catalog
+
+
+def test_provider_ledger_targets_preserve_one_canonical_series_contract(
+    tmp_path: Path,
+) -> None:
+    manifest, catalog = _provider_ledger_fixture(tmp_path)
+
+    targets, evidence, proof, manifest_bytes = build_provider_ledger_targets(
+        manifest, catalog
+    )
+
+    rows = list(csv.DictReader(io.StringIO(targets.decode("utf-8"))))
+    assert tuple(rows[0]) == target_series.TARGET_FIELDS
+    assert [row["return"] for row in rows] == ["0.01", "-0.02"]
+    assert {row["evidence_layer"] for row in rows} == {"ACCOUNT_LIVE"}
+    contract = json.loads(proof)["series_contracts"][0]
+    assert contract == {
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": "a" * 64,
+        "observed_end": "2026-07-31",
+        "observed_start": "2026-07-30",
+        "provider_id": "matrixport",
+        "return_observations": 2,
+        "series_id": "Robuxio",
+        "strategy_id": "robuxio-crypto",
+    }
+    assert json.loads(evidence)["provider_ledger_generation_id"] == "b" * 64
+    assert manifest_bytes == manifest.read_bytes()
+
+
+def test_provider_ledger_targets_reject_conflicting_live_layers(tmp_path: Path) -> None:
+    manifest, catalog = _provider_ledger_fixture(tmp_path)
+    value = json.loads(catalog.read_text(encoding="utf-8"))
+    value["strategy_returns"][1]["evidence_layer"] = "PROVIDER_LIVE"
+    catalog.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_value["artifacts"][0].update(
+        {
+            "sha256": hashlib.sha256(catalog.read_bytes()).hexdigest(),
+            "size_bytes": catalog.stat().st_size,
+        }
+    )
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+
+    with pytest.raises(TargetSeriesError, match="conflicting live layers"):
+        build_provider_ledger_targets(manifest, catalog)
