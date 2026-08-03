@@ -643,7 +643,11 @@ def load_pipeline_spec(path: Path) -> PipelineSpec:
 
 
 def _run_root(spec: PipelineSpec) -> Path:
-    return spec.state_root / "pipelines" / spec.pipeline_id / spec.spec_sha256
+    # Windows still encounters MAX_PATH-sensitive APIs in otherwise long-path-aware
+    # processes. The full specification hash remains inside every receipt and
+    # evidence payload; a 16-hex path key is sufficient only for directory routing.
+    run_key = f"{spec.pipeline_id}-{spec.spec_sha256[:16]}"
+    return spec.state_root / "pipelines" / run_key
 
 
 def _receipt_path(spec: PipelineSpec, node_id: str) -> Path:

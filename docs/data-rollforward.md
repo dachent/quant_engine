@@ -9,7 +9,9 @@ exact ID and SHA-256. It never discovers authority through an ambient
 
 The repository contract is `schemas/core/data-pipeline.schema.json`; runtime
 validation is implemented in `quant_engine.core.pipeline`. The execution state
-is content-addressed by pipeline ID and specification hash. Receipts contain
+directory uses the pipeline ID plus a shortened routing prefix to remain safe
+under Windows path limits; every receipt and evidence payload retains and
+validates the complete specification hash. Receipts contain
 only identities, attempts, states, and output hashes—not provider payloads or
 credentials.
 
