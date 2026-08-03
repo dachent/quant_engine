@@ -636,3 +636,56 @@ def test_cli_output_contains_only_sanitized_counts(
     assert parsed["strategy_count"] == 9
     assert "Synthetic Strategy" not in output
     assert "SYNTHETIC ACCOUNT" not in output
+
+
+def test_provider_live_nav_is_available_without_becoming_account_live() -> None:
+    catalog = {
+        "allocations": [
+            {
+                "current_value": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "100",
+                },
+                "scope": "SYSTEMATIC",
+                "strategy_id": "robuxio-crypto",
+                "systematic_weight": "1",
+            }
+        ],
+        "costs": [],
+        "implementation_gaps": [],
+        "strategies": [
+            {
+                "economic_family": "crypto",
+                "name": "Robuxio Crypto",
+                "strategy_id": "robuxio-crypto",
+                "version_ref": None,
+            }
+        ],
+        "strategy_live_metrics": [],
+        "strategy_nav_coverage": [],
+        "strategy_provider_evidence": [
+            {
+                "evidence_layer": "PROVIDER_LIVE",
+                "generation_id": "a" * 64,
+                "provider": {
+                    "cumulative_return": "0.2",
+                    "current_drawdown": "-0.1",
+                    "maximum_drawdown": "-0.3",
+                    "observed_end": "2026-01-31",
+                    "observed_start": "2025-01-01",
+                    "return_observations": 250,
+                },
+                "provider_id": "matrixport",
+                "strategy_id": "robuxio-crypto",
+            }
+        ],
+    }
+
+    rows = reporter._strategies(catalog, [])
+
+    assert rows[0]["nav_status"] == "AVAILABLE"
+    assert rows[0]["nav_evidence_layer"] == "PROVIDER_LIVE"
+    assert rows[0]["account_live_status"] == "UNAVAILABLE"
+    assert rows[0]["account_live_cumulative_return"] is None
+    assert rows[0]["hwm_max_drawdown"] == "-0.3"

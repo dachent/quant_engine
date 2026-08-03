@@ -251,6 +251,13 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             base["twr_status"] = "UNAVAILABLE_FLOW_WITHOUT_SAME_DATE_NAV"
             rows.append(base)
             continue
+        if any(
+            _object(item.get("amount"), "flow.amount").get("status") != "AVAILABLE"
+            for item in flows
+        ):
+            base["twr_status"] = "UNAVAILABLE_FLOW_AMOUNT"
+            rows.append(base)
+            continue
         flow_by_date: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
         for flow in flows:
             flow_by_date[_date(flow.get("event_date"), "flow.date")] += _amount(
@@ -409,6 +416,13 @@ def _strategies(
         )
         if item.get("strategy_id") is not None
     }
+    provider_evidence = {
+        str(item["strategy_id"]): item
+        for item in _objects(
+            catalog.get("strategy_provider_evidence", []),
+            "strategy_provider_evidence",
+        )
+    }
     performance_count: dict[str, tuple[int, int]] = {}
     for strategy_id in allocations:
         items = [item for item in performance if item.get("strategy_id") == strategy_id]
@@ -426,6 +440,32 @@ def _strategies(
         allocation = allocations[strategy_id]
         live_row = live.get(strategy_id)
         metrics = _object(live_row.get("metrics"), "live.metrics") if live_row else {}
+        provider_row = provider_evidence.get(strategy_id)
+        account_path = (
+            _object(provider_row["account"], "provider evidence account")
+            if provider_row and provider_row.get("account") is not None
+            else {}
+        )
+        provider_path = (
+            _object(provider_row["provider"], "provider evidence provider")
+            if provider_row and provider_row.get("provider") is not None
+            else {}
+        )
+        admitted_account_nav = bool(
+            provider_row
+            and provider_row.get("evidence_layer") == "ACCOUNT_LIVE"
+            and account_path.get("observed_start") is not None
+            and account_path.get("observed_end") is not None
+            and account_path.get("return_observations") is not None
+        )
+        admitted_provider_nav = bool(
+            provider_row
+            and provider_row.get("evidence_layer") == "PROVIDER_LIVE"
+            and provider_path.get("observed_start") is not None
+            and provider_path.get("observed_end") is not None
+            and provider_path.get("return_observations") is not None
+        )
+        strategy_path = account_path if admitted_account_nav else provider_path
         cost_row = costs.get(strategy_id, {})
         gap_row = gaps.get(strategy_id, {})
         coverage_row = coverage.get(strategy_id, {})
@@ -439,11 +479,40 @@ def _strategies(
                 "systematic_weight": allocation.get("systematic_weight"),
                 "available_twr_segments": available_segments,
                 "total_assignment_segments": total_segments,
-                "account_live_status": "AVAILABLE" if live_row else "UNAVAILABLE",
+                "account_live_status": (
+                    "AVAILABLE" if live_row or admitted_account_nav else "UNAVAILABLE"
+                ),
                 "account_live_cagr": metrics.get("cagr"),
-                "account_live_cumulative_return": metrics.get("cumulative_return"),
-                "account_live_max_drawdown": metrics.get("max_drawdown"),
-                "nav_status": coverage_row.get("status", "UNAVAILABLE"),
+                "account_live_cumulative_return": account_path.get(
+                    "cumulative_return", metrics.get("cumulative_return")
+                ),
+                "account_live_max_drawdown": account_path.get(
+                    "maximum_drawdown", metrics.get("max_drawdown")
+                ),
+                "account_live_observed_end": account_path.get("observed_end"),
+                "account_live_observed_start": account_path.get("observed_start"),
+                "account_live_return_observations": account_path.get(
+                    "return_observations"
+                ),
+                "account_live_source_generation": (
+                    provider_row.get("generation_id") if provider_row else None
+                ),
+                "account_live_source_provider": (
+                    provider_row.get("provider_id") if provider_row else None
+                ),
+                "nav_status": (
+                    "AVAILABLE"
+                    if admitted_account_nav or admitted_provider_nav
+                    else coverage_row.get("status", "UNAVAILABLE")
+                ),
+                "nav_observed_start": strategy_path.get("observed_start"),
+                "nav_observed_end": strategy_path.get("observed_end"),
+                "nav_return_observations": strategy_path.get("return_observations"),
+                "hwm_current_drawdown": strategy_path.get("current_drawdown"),
+                "hwm_max_drawdown": strategy_path.get("maximum_drawdown"),
+                "nav_evidence_layer": (
+                    provider_row.get("evidence_layer") if provider_row else None
+                ),
                 "cost_status": cost_row.get("cost_status", "UNAVAILABLE"),
                 "implementation_gap_status": gap_row.get("status", "UNAVAILABLE"),
                 "version_ref": strategy.get("version_ref"),
@@ -563,7 +632,12 @@ def _flow_reconciliation(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
         groups[(str(flow.get("provider")), str(flow.get("flow_type")))].append(flow)
     rows = []
     for (provider, flow_type), values in sorted(groups.items()):
-        total = sum((_amount(item, "amount") for item in values), Decimal("0"))
+        available = [
+            item
+            for item in values
+            if _object(item.get("amount"), "flow.amount").get("status") == "AVAILABLE"
+        ]
+        total = sum((_amount(item, "amount") for item in available), Decimal("0"))
         rows.append(
             {
                 "flow_type": flow_type,
@@ -573,7 +647,12 @@ def _flow_reconciliation(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "net_amount_usd": decimal_text(total),
                 "provider": provider,
                 "record_count": len(values),
-                "status": "PARTIAL_SOURCE_COVERAGE",
+                "status": (
+                    "PARTIAL_UNAVAILABLE_AMOUNTS"
+                    if len(available) != len(values)
+                    else "PARTIAL_SOURCE_COVERAGE"
+                ),
+                "unavailable_amount_count": len(values) - len(available),
             }
         )
     return rows
@@ -643,6 +722,17 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "value": item.get("record_count"),
             }
         )
+    for item in _objects(catalog.get("provider_coverage", []), "provider_coverage"):
+        claim = _object(item.get("coverage"), "provider coverage")
+        rows.append(
+            {
+                "category": "PROVIDER_COVERAGE",
+                "item": item.get("provider_id"),
+                "known_gap": "; ".join(str(gap) for gap in claim.get("known_gaps", [])),
+                "status": claim.get("status"),
+                "value": item.get("qualification"),
+            }
+        )
     return rows
 
 
@@ -707,6 +797,9 @@ def build_report_data(
         ],
         "portfolio_summary": _portfolio_summary(catalog),
         "positions": _positions(catalog),
+        "provider_admissions": catalog.get("provider_admissions", []),
+        "provider_coverage": catalog.get("provider_coverage", []),
+        "provider_strategy_returns": catalog.get("provider_strategy_returns", []),
         "provenance": [
             {
                 "artifact": "baseline-generation",
@@ -735,6 +828,8 @@ def build_report_data(
         "reconciliation_checks": catalog.get("reconciliation_checks", []),
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "strategy_summary": _strategies(catalog, performance),
+        "strategy_provider_evidence": catalog.get("strategy_provider_evidence", []),
+        "strategy_returns": catalog.get("strategy_returns", []),
         "transactions_and_flows": _transactions_and_flows(catalog),
         "twr_mwr": performance,
     }

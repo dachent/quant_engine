@@ -145,15 +145,12 @@ def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     return _object(decoded, field_name)
 
 
-def _strategy_evidence(
-    path: Path | None,
+def _validated_strategy_evidence(
+    evidence: Mapping[str, Any],
     strategy_ids: set[str],
-) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
-    """Load an optional provider/account evidence overlay without joining paths."""
+) -> dict[str, dict[str, Any]]:
+    """Validate provider/account evidence without granting it override authority."""
 
-    if path is None:
-        return {}, None
-    evidence = _load_json(path, "strategy evidence")
     if evidence.get("schema_version") != 1:
         raise ControlPanelValidationError("strategy evidence schema is unsupported")
     as_of_date = _text(evidence.get("as_of_date"), "strategy evidence as_of_date")
@@ -196,30 +193,39 @@ def _strategy_evidence(
         evidence_layer = _text(
             row.get("evidence_layer"), "strategy evidence evidence_layer"
         )
-        account = _object(row.get("account"), "strategy evidence account")
-        for field in ("observed_start", "observed_end", "return_observations"):
-            if account.get(field) is None:
+        paths = [
+            (name, _object(row[name], f"strategy evidence {name}"))
+            for name in ("account", "provider")
+            if row.get(name) is not None
+        ]
+        if not paths:
+            raise ControlPanelValidationError(
+                f"strategy evidence lacks an observed path: {strategy_id}"
+            )
+        for name, observed in paths:
+            for field in ("observed_start", "observed_end", "return_observations"):
+                if observed.get(field) is None:
+                    raise ControlPanelValidationError(
+                        f"strategy evidence {name} lacks {field}: {strategy_id}"
+                    )
+            try:
+                observed_start = date.fromisoformat(str(observed["observed_start"]))
+                observed_end = date.fromisoformat(str(observed["observed_end"]))
+            except ValueError as exc:
                 raise ControlPanelValidationError(
-                    f"strategy evidence account lacks {field}: {strategy_id}"
+                    f"strategy evidence {name} date is invalid: {strategy_id}"
+                ) from exc
+            if observed_end < observed_start:
+                raise ControlPanelValidationError(
+                    f"strategy evidence {name} interval is reversed: {strategy_id}"
                 )
-        try:
-            observed_start = date.fromisoformat(str(account["observed_start"]))
-            observed_end = date.fromisoformat(str(account["observed_end"]))
-        except ValueError as exc:
-            raise ControlPanelValidationError(
-                f"strategy evidence account date is invalid: {strategy_id}"
-            ) from exc
-        if observed_end < observed_start:
-            raise ControlPanelValidationError(
-                f"strategy evidence account interval is reversed: {strategy_id}"
-            )
-        if (
-            not isinstance(account["return_observations"], int)
-            or account["return_observations"] <= 0
-        ):
-            raise ControlPanelValidationError(
-                f"strategy evidence return observations are invalid: {strategy_id}"
-            )
+            if (
+                not isinstance(observed["return_observations"], int)
+                or observed["return_observations"] <= 0
+            ):
+                raise ControlPanelValidationError(
+                    f"strategy evidence {name} return observations are invalid: {strategy_id}"
+                )
         by_id[strategy_id] = {
             **row,
             "evidence_layer": evidence_layer,
@@ -227,12 +233,57 @@ def _strategy_evidence(
             "generation_as_of_date": generation_as_of_date,
             "provider_id": provider_id,
         }
+    return by_id
+
+
+def _strategy_evidence(
+    report: Mapping[str, Any],
+    report_identity: Mapping[str, str],
+    path: Path | None,
+    strategy_ids: set[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
+    """Use report evidence as authority; an optional legacy file may only agree."""
+
+    report_rows = _objects(
+        report.get("strategy_provider_evidence", []),
+        "strategy_provider_evidence",
+    )
+    if report_rows:
+        payload = {
+            "as_of_date": _text(report.get("as_of_date"), "report.as_of_date"),
+            "schema_version": 1,
+            "strategies": report_rows,
+        }
+        by_id = _validated_strategy_evidence(payload, strategy_ids)
+        evidence_bytes = canonical_json_bytes(payload)
+        if path is not None:
+            external = _load_json(path, "strategy evidence")
+            _validated_strategy_evidence(external, strategy_ids)
+            if canonical_json_bytes(external) != evidence_bytes:
+                raise ControlPanelValidationError(
+                    "strategy evidence file contradicts canonical report"
+                )
+        return by_id, {
+            "as_of_date": payload["as_of_date"],
+            "path": path,
+            "sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+            "size_bytes": len(evidence_bytes),
+            "source": "CANONICAL_PORTFOLIO_REPORT",
+            "report_sha256": report_identity["sha256"],
+        }
+
+    if path is None:
+        return {}, None
+    legacy = _load_json(path, "strategy evidence")
+    by_id = _validated_strategy_evidence(legacy, strategy_ids)
     sha256, size_bytes = hash_file(path)
     return by_id, {
-        "as_of_date": as_of_date,
+        "as_of_date": _text(legacy.get("as_of_date"), "strategy evidence as_of_date"),
         "path": path,
         "sha256": sha256,
         "size_bytes": size_bytes,
+        "source": "LEGACY_COMPATIBILITY_INPUT",
+        "report_sha256": report_identity["sha256"],
     }
 
 
@@ -479,14 +530,9 @@ def _decimal_value(value: object, field_name: str) -> Decimal:
 
 def _material_hwm_coverage(
     strategies: Sequence[Mapping[str, Any]],
-    factor_analysis: Mapping[str, Any],
     policy: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     excluded = set(policy.get("excluded_strategy_ids", []))
-    factors = {
-        _text(row.get("series_id"), "factor series_id"): row
-        for row in _objects(factor_analysis.get("series"), "factor series")
-    }
     accepted: list[dict[str, Any]] = []
     covered = Decimal(0)
     material = Decimal(0)
@@ -514,29 +560,6 @@ def _material_hwm_coverage(
         material += value
         row["hwm_scope"] = "INCLUDED"
         row["hwm_source"] = "PORTFOLIO_REPORT"
-        factor = factors.get(strategy_name)
-        if (
-            row.get("nav_status") != "AVAILABLE"
-            and factor is not None
-            and factor.get("status") == "AVAILABLE"
-            and factor.get("evidence_layer") == "ACCOUNT_LIVE"
-        ):
-            factor_coverage = _object(factor.get("coverage"), "factor.coverage")
-            row.update(
-                {
-                    "hwm_source": "ACCOUNT_LIVE_PROVIDER_OVERLAY",
-                    "nav_status": "AVAILABLE",
-                    "nav_observed_start": factor_coverage.get("target_observed_start"),
-                    "nav_observed_end": factor_coverage.get("target_observed_end"),
-                    "nav_return_observations": factor_coverage.get(
-                        "target_observations"
-                    ),
-                    "hwm_current_drawdown": factor_coverage.get(
-                        "target_current_drawdown"
-                    ),
-                    "hwm_max_drawdown": factor_coverage.get("target_max_drawdown"),
-                }
-            )
         if row.get("nav_status") == "AVAILABLE":
             covered += value
         else:
@@ -608,74 +631,6 @@ def _reconcile_hwm_coverage(
             }
         )
     return normalized
-
-
-def _provider_account_nav_performance(
-    strategies: Sequence[Mapping[str, Any]],
-    performance: Sequence[Mapping[str, Any]],
-    factor_analysis: Mapping[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Promote a verified provider-custodied account NAV path into TWR evidence."""
-
-    factor_by_name = {
-        _text(row.get("series_id"), "factor series_id"): row
-        for row in _objects(factor_analysis.get("series"), "factor series")
-    }
-    accepted_strategies = [dict(row) for row in strategies]
-    accepted_performance = [dict(row) for row in performance]
-    for strategy in accepted_strategies:
-        if strategy.get("hwm_source") != "ACCOUNT_LIVE_PROVIDER_OVERLAY":
-            continue
-        strategy_id = _text(strategy.get("strategy_id"), "strategy.strategy_id")
-        strategy_name = _text(strategy.get("strategy_name"), "strategy.strategy_name")
-        factor = factor_by_name.get(strategy_name)
-        if (
-            factor is None
-            or factor.get("status") != "AVAILABLE"
-            or factor.get("evidence_layer") != "ACCOUNT_LIVE"
-        ):
-            raise ControlPanelValidationError(
-                f"provider account NAV overlay is unavailable: {strategy_name}"
-            )
-        coverage = _object(factor.get("coverage"), "factor.coverage")
-        cumulative = coverage.get("target_cumulative_return")
-        maximum_drawdown = coverage.get("target_max_drawdown")
-        if cumulative is None or maximum_drawdown is None:
-            raise ControlPanelValidationError(
-                f"provider account NAV overlay lacks return evidence: {strategy_name}"
-            )
-        matches = [
-            row for row in accepted_performance if row.get("strategy_id") == strategy_id
-        ]
-        if len(matches) != 1:
-            raise ControlPanelValidationError(
-                f"provider account NAV overlay must match one account assignment: {strategy_name}"
-            )
-        performance_row = matches[0]
-        performance_row.update(
-            {
-                "nav_observations": coverage.get("target_observations"),
-                "observed_end": coverage.get("target_observed_end"),
-                "observed_start": coverage.get("target_observed_start"),
-                "twr": cumulative,
-                "twr_evidence": "ACCOUNT_LIVE_PROVIDER_CUSTODIED_NAV",
-                "twr_status": "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV",
-            }
-        )
-        strategy.update(
-            {
-                "account_live_cumulative_return": cumulative,
-                "account_live_max_drawdown": format(
-                    -_decimal_value(maximum_drawdown, "target_max_drawdown"), "f"
-                ),
-                "account_live_status": "AVAILABLE_PROVIDER_CUSTODIED_ACCOUNT_NAV",
-                "available_twr_segments": 1,
-                "implementation_gap_status": (
-                    "NOT_APPLICABLE_PROVIDER_CUSTODIED_ACCOUNT"
-                ),
-            }
-        )
-    return accepted_strategies, accepted_performance
 
 
 def _factor_analysis(
@@ -1378,7 +1333,7 @@ def _panel_data(
         for row in strategies
     }
     evidence_by_strategy, evidence_identity = _strategy_evidence(
-        strategy_evidence_path, set(strategy_names)
+        report, report_identity, strategy_evidence_path, set(strategy_names)
     )
     current_strategy_names = set(strategy_names.values())
     factor_analysis = _factor_analysis(
@@ -1487,12 +1442,7 @@ def _panel_data(
         }
         dependence_analysis = dependence_modes[default_dependence_mode]
     hwm_policy, hwm_policy_hash = _hwm_policy()
-    strategies, hwm_summary = _material_hwm_coverage(
-        strategies, factor_analysis, hwm_policy
-    )
-    strategies, performance = _provider_account_nav_performance(
-        strategies, performance, factor_analysis
-    )
+    strategies, hwm_summary = _material_hwm_coverage(strategies, hwm_policy)
     strategies = [
         {
             **row,
@@ -1504,10 +1454,12 @@ def _panel_data(
         }
         for row in strategies
     ]
-    provider_nav_names = sorted(
+    admitted_nav_names = sorted(
         _text(row.get("strategy_name"), "provider NAV strategy_name")
         for row in strategies
-        if row.get("hwm_source") == "ACCOUNT_LIVE_PROVIDER_OVERLAY"
+        if row.get("hwm_source") == "PORTFOLIO_REPORT"
+        and row.get("nav_status") == "AVAILABLE"
+        and row.get("nav_evidence_layer") in {"ACCOUNT_LIVE", "PROVIDER_LIVE"}
     )
     coverage = _reconcile_hwm_coverage(coverage, hwm_summary)
     normalized_allocations = []
@@ -1679,9 +1631,17 @@ def _panel_data(
         *(
             [
                 {
-                    "artifact": "current-strategy-provider-evidence",
+                    "artifact": (
+                        "canonical-report-strategy-provider-evidence"
+                        if evidence_identity["source"] == "CANONICAL_PORTFOLIO_REPORT"
+                        else "current-strategy-provider-evidence"
+                    ),
                     "as_of_date": evidence_identity["as_of_date"],
-                    "schema": "current-strategy-provider-evidence/1",
+                    "schema": (
+                        "portfolio-report-data/strategy-provider-evidence/1"
+                        if evidence_identity["source"] == "CANONICAL_PORTFOLIO_REPORT"
+                        else "current-strategy-provider-evidence/1"
+                    ),
                     "sha256": evidence_identity["sha256"],
                 }
             ]
@@ -1730,8 +1690,8 @@ def _panel_data(
             "nav_coverage": hwm_summary["nav_coverage"],
             "readiness": _summary_value(summary, "Advisory readiness"),
             "reason": (
-                "Accepted provider-custodied account NAV now covers "
-                + (", ".join(provider_nav_names) or "no additional sleeves")
+                "Canonical report admitted NAV now covers "
+                + (", ".join(admitted_nav_names) or "no material sleeves")
                 + "; Composer is reported but excluded de minimis. "
                 + (
                     "Remaining HWM gap: "
@@ -1801,6 +1761,9 @@ def _panel_data(
             ),
             "strategy_evidence_sha256": (
                 evidence_identity["sha256"] if evidence_identity is not None else None
+            ),
+            "strategy_evidence_source": (
+                evidence_identity["source"] if evidence_identity is not None else None
             ),
             "report_generation_id": report_identity["generation_id"],
             "report_sha256": report_identity["sha256"],
@@ -2221,12 +2184,13 @@ def verify_candidate(
             data["advisory"],
         )
     )
-    if strategy_evidence_path is not None:
+    if report.get("strategy_provider_evidence"):
         strategy_rows = {
             _text(row.get("strategy_id"), "strategy strategy_id"): row
             for row in _objects(data.get("strategies"), "strategies")
         }
         volatis = strategy_rows.get("volatis-strategy", {})
+        robuxio = strategy_rows.get("robuxio-crypto", {})
         p123 = strategy_rows.get("p123-ai-factor", {})
         volatis_evidence = _object(
             volatis.get("provider_evidence"), "Volatis provider evidence"
@@ -2234,15 +2198,24 @@ def verify_candidate(
         p123_evidence = _object(
             p123.get("provider_evidence"), "Portfolio123 provider evidence"
         )
+        robuxio_evidence = _object(
+            robuxio.get("provider_evidence"), "Robuxio provider evidence"
+        )
         p123_account = _object(p123_evidence.get("account"), "P123 account evidence")
         p123_provider = _object(p123_evidence.get("provider"), "P123 provider evidence")
         checks.append(
             _check(
                 "Provider evidence remains explicit and separate",
                 volatis.get("nav_status") == "AVAILABLE"
-                and volatis.get("hwm_source") == "ACCOUNT_LIVE_PROVIDER_OVERLAY"
+                and volatis.get("hwm_source") == "PORTFOLIO_REPORT"
                 and volatis_evidence.get("provider_id") == "quantbase"
-                and p123_evidence.get("provider_id") == "portfolio123"
+                and robuxio.get("nav_status") == "AVAILABLE"
+                and robuxio.get("nav_evidence_layer") == "PROVIDER_LIVE"
+                and robuxio.get("account_live_status") == "UNAVAILABLE"
+                and robuxio_evidence.get("provider_id") == "matrixport"
+                and robuxio_evidence.get("account") is None
+                and isinstance(robuxio_evidence.get("provider"), dict)
+                and p123_evidence.get("provider_id") == "ibkr"
                 and p123_account.get("observed_end")
                 != p123_provider.get("observed_end")
                 and isinstance(p123_evidence.get("overlap"), dict)
@@ -2251,6 +2224,7 @@ def verify_candidate(
                     "p123_account_end": p123_account.get("observed_end"),
                     "p123_generation_as_of": p123_evidence.get("generation_as_of_date"),
                     "p123_provider_end": p123_provider.get("observed_end"),
+                    "robuxio_layer": robuxio.get("nav_evidence_layer"),
                     "volatis_account_end": _object(
                         volatis_evidence.get("account"),
                         "Volatis account evidence",
@@ -2658,7 +2632,10 @@ def publish_panel(
             schema_version="2",
         ),
     ]
-    if strategy_evidence_source is not None:
+    if (
+        strategy_evidence_source is not None
+        and data["meta"].get("strategy_evidence_source") == "LEGACY_COMPATIBILITY_INPUT"
+    ):
         artifacts.append(
             SourceArtifact.from_path(
                 strategy_evidence_source,

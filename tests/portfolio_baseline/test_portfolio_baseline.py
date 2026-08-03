@@ -839,7 +839,7 @@ def test_spec_and_catalog_schemas_are_closed_and_preserve_yagni_boundary() -> No
     )
     assert catalog_schema["additionalProperties"] is False
     assert catalog_schema["properties"]["positions"]["items"] == {"type": "object"}
-    assert spec_schema["properties"]["schema_version"] == {"enum": [1, 2]}
+    assert spec_schema["properties"]["schema_version"] == {"enum": [1, 2, 3]}
     assert catalog_schema["properties"]["strategies"]["minItems"] == 9
     assert catalog_schema["properties"]["strategies"]["maxItems"] == 9
 
