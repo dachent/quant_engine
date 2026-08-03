@@ -1329,6 +1329,52 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
         published["launcher_sha256"]
         == hashlib.sha256(launcher.read_bytes()).hexdigest()
     )
+    manifest = json.loads((generation / "generation.json").read_text(encoding="utf-8"))
+    freshness_artifact = next(
+        item
+        for item in manifest["artifacts"]
+        if item["artifact_id"] == "input/freshness-health.json"
+    )
+    assert freshness_artifact["schema"]["version"] == "2"
+
+
+def test_publication_manifest_uses_later_operational_freshness_date(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    freshness = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
+    freshness["as_of_date"] = "2026-07-31"
+    for assessment in freshness["assessments"]:
+        assessment["evaluated_on"] = "2026-07-31"
+    _write_json(inputs["freshness"], freshness)
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path)
+
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
+
+    generation = inputs["output"] / "generations" / str(published["generation_id"])
+    manifest = json.loads((generation / "generation.json").read_text(encoding="utf-8"))
+    freshness_artifact = next(
+        item
+        for item in manifest["artifacts"]
+        if item["artifact_id"] == "input/freshness-health.json"
+    )
+    assert manifest["as_of_date"] == "2026-07-31"
+    assert manifest["coverage"]["observed_start"] == "2026-07-30"
+    assert manifest["coverage"]["observed_end"] == "2026-07-31"
+    assert freshness_artifact["as_of_date"] == "2026-07-31"
 
 
 def test_launcher_failure_restores_prior_pointer_and_launcher(

@@ -2689,12 +2689,26 @@ def publish_panel(
         weekly_returns_source,
         freshness_health_source,
     ) = input_paths
-    as_of = date.fromisoformat(_text(data["meta"]["portfolio_as_of"], "as_of"))
+    portfolio_as_of = date.fromisoformat(
+        _text(data["meta"]["portfolio_as_of"], "as_of")
+    )
+    if freshness_health_source is None:
+        raise ControlPanelValidationError("freshness health artifact is mandatory")
+    freshness_artifact = _load_json(
+        freshness_health_source, "freshness health artifact"
+    )
+    freshness_as_of = date.fromisoformat(
+        _text(
+            freshness_artifact.get("as_of_date"),
+            "freshness health artifact as_of_date",
+        )
+    )
+    publication_as_of = max(portfolio_as_of, freshness_as_of)
     artifacts: list[SourceArtifact] = [
         SourceArtifact.from_path(
             report_path,
             artifact_id="input/portfolio-report-data.json",
-            as_of_date=as_of,
+            as_of_date=portfolio_as_of,
             schema_name="portfolio-report-data",
             schema_version="1",
         ),
@@ -2722,7 +2736,7 @@ def publish_panel(
         SourceArtifact.from_path(
             HWM_POLICY,
             artifact_id="input/portfolio-hwm-policy.json",
-            as_of_date=as_of,
+            as_of_date=publication_as_of,
             schema_name="portfolio-hwm-policy",
             schema_version="2",
         ),
@@ -2747,7 +2761,7 @@ def publish_panel(
             SourceArtifact.from_path(
                 lens_source,
                 artifact_id=f"input/decomposition-lens-{index:02d}-{lens_source.name}",
-                as_of_date=as_of,
+                as_of_date=portfolio_as_of,
                 schema_name="portfolio-decomposition-lens-input",
                 schema_version="1",
             )
@@ -2763,19 +2777,11 @@ def publish_panel(
             )
         )
     if freshness_health_source is not None:
-        freshness_artifact = _load_json(
-            freshness_health_source, "freshness health artifact"
-        )
         artifacts.append(
             SourceArtifact.from_path(
                 freshness_health_source,
                 artifact_id="input/freshness-health.json",
-                as_of_date=date.fromisoformat(
-                    _text(
-                        freshness_artifact.get("as_of_date"),
-                        "freshness health artifact as_of_date",
-                    )
-                ),
+                as_of_date=freshness_as_of,
                 schema_name="freshness-assessment",
                 schema_version="2",
             )
@@ -2785,7 +2791,7 @@ def publish_panel(
             SourceArtifact.from_path(
                 candidate_dir / relative,
                 artifact_id=f"panel/{relative}",
-                as_of_date=as_of,
+                as_of_date=publication_as_of,
                 schema_name="portfolio-control-panel-artifact",
                 schema_version="1",
             )
@@ -2797,13 +2803,13 @@ def publish_panel(
             SourceArtifact.from_path(
                 path,
                 artifact_id=f"evidence/{relative}",
-                as_of_date=as_of,
+                as_of_date=publication_as_of,
                 schema_name="portfolio-control-panel-qa",
                 schema_version="1",
             )
         )
     manifest = GenerationManifest.build(
-        as_of_date=as_of,
+        as_of_date=publication_as_of,
         adapter=AdapterIdentity("portfolio-control-panel-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -2817,8 +2823,8 @@ def publish_panel(
                 "browser QA",
                 "frozen appendix",
             ),
-            observed_start=as_of,
-            observed_end=as_of,
+            observed_start=portfolio_as_of,
+            observed_end=publication_as_of,
         ),
         artifacts=tuple(artifacts),
         verification=VerificationStatus.VERIFIED,
