@@ -630,9 +630,10 @@ def _material_hwm_coverage(
         freshness_missing = require_freshness and not strategy_freshness
         freshness_state = next(
             (
-                str(item["state"])
+                str(item.get("state") or item.get("status"))
                 for item in strategy_freshness
-                if isinstance(item.get("state"), str) and item["state"]
+                if isinstance(item.get("state") or item.get("status"), str)
+                and (item.get("state") or item.get("status"))
             ),
             None,
         )
