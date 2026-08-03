@@ -650,7 +650,10 @@ def _validate_rolled_back_state(
     if set(roots) != {item.root_id for item in manifest.targets}:
         raise ReleaseValidationError("runtime roots differ from release roots")
     for target in manifest.targets:
-        if _read_optional_current(roots[target.root_id].resolve()) != target.previous_pointer:
+        if (
+            _read_optional_current(roots[target.root_id].resolve())
+            != target.previous_pointer
+        ):
             raise ReleaseConflictError(
                 f"rolled-back pointer graph differs: {target.root_id}"
             )
@@ -842,23 +845,17 @@ def recover_release(
         if not lock_present:
             raise ReleaseConflictError("release is not recoverable: PREPARED")
         _validate_prepared_state(manifest, normalized_roots)
-        _clear_confirmed_stale_lock(
-            lock, release_id, confirmed=clear_stale_lock
-        )
+        _clear_confirmed_stale_lock(lock, release_id, confirmed=clear_stale_lock)
         return journal
     if journal.state is ReleaseState.COMMITTED:
         _validate_committed_state(manifest, normalized_roots)
         if lock_present:
-            _clear_confirmed_stale_lock(
-                lock, release_id, confirmed=clear_stale_lock
-            )
+            _clear_confirmed_stale_lock(lock, release_id, confirmed=clear_stale_lock)
         return journal
     if journal.state is ReleaseState.ROLLED_BACK:
         _validate_rolled_back_state(manifest, normalized_roots)
         if lock_present:
-            _clear_confirmed_stale_lock(
-                lock, release_id, confirmed=clear_stale_lock
-            )
+            _clear_confirmed_stale_lock(lock, release_id, confirmed=clear_stale_lock)
         return journal
     if journal.state not in {
         ReleaseState.COMMITTING,
