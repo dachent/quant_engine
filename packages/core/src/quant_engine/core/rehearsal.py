@@ -280,9 +280,18 @@ def rehearse_release_boundaries(
                     target.previous_pointer.generation_id,
                     rehearsal_root,
                 )
-                publish_generation(
-                    rehearsal_root, target.previous_pointer.generation_id
+                # Preserve the predecessor pointer contract exactly.  Calling
+                # publish_generation here would silently upgrade a legacy v1
+                # predecessor to v2 and make a valid schema-transition release
+                # look unrecoverable even though release recovery restores the
+                # recorded predecessor bytes.
+                (rehearsal_root / "CURRENT.json").write_bytes(
+                    target.previous_pointer.to_json_bytes()
                 )
+                if read_current(rehearsal_root) != target.previous_pointer:
+                    raise RehearsalError(
+                        "rehearsal predecessor pointer could not be reproduced"
+                    )
         for companion in manifest.companions:
             if preserve_companion_predecessors:
                 _restore_companion(
