@@ -111,10 +111,14 @@ provider-ledger generation before panel construction:
 uv run --frozen --no-sync python tools/portfolio_freshness.py `
   --provider-ledger-root (Join-Path $engine "dataPortfolio\provider-ledger") `
   --provider-ledger-generation-id '<exact-generation-id>' `
+  --evaluation-date (Get-Date -Format 'yyyy-MM-dd') `
   --output $freshness
 ```
 
 Every material strategy must have a `nav` or `strategy-returns` assessment.
+The evaluation date is the local operational publication date, not merely the
+provider-ledger date. Pipeline preparation and commit both recompute every
+assessment from the embedded policy and reject an older or forged bundle.
 `STALE`, `UNAVAILABLE`, or an absent assessment revokes the HWM-available
 claim and reduces freshness-adjusted NAV coverage. `LATE` remains visible and
 escalated but does not yet block current consumers. The exact freshness file

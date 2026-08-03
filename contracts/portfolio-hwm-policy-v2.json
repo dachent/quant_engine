@@ -15,7 +15,10 @@
   },
   "accepted_daily_nav_evidence": [
     "ACCOUNT_LIVE",
-    "PROVIDER_CUSTODIED_ACCOUNT_NAV"
+    "PROVIDER_LIVE"
+  ],
+  "accepted_provider_live_strategy_ids": [
+    "robuxio-crypto"
   ],
   "availability_rule": "Every included current strategy must have an accepted daily NAV or return series through its declared observed boundary. Excluded strategies remain reported but do not enter the HWM coverage denominator.",
   "missing_data_rule": "Do not interpolate missing NAV, FX, or returns. Name every uncovered included strategy."

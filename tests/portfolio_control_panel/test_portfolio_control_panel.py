@@ -64,6 +64,7 @@ def _report() -> dict[str, object]:
             "current_value_usd": str(1000 + index),
             "economic_family": f"Synthetic family {index}",
             "implementation_gap_status": "tested" if index < 4 else "UNAVAILABLE",
+            "nav_evidence_layer": "ACCOUNT_LIVE",
             "nav_status": "AVAILABLE" if index < 6 else "UNAVAILABLE",
             "strategy_id": f"strategy-{index}",
             "strategy_name": STRATEGY_NAMES[index],
@@ -831,7 +832,7 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     _write_json(
         freshness,
         {
-            "assessment_schema_version": 1,
+            "assessment_schema_version": 2,
             "as_of_date": "2026-07-30",
             "assessments": [
                 {
@@ -851,6 +852,13 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
                 }
                 for index in range(9)
             ],
+            "policy": {
+                "expected_interval_days": 1,
+                "grace_days": 0,
+                "mode": "RECURRING",
+                "policy_id": "daily-current",
+                "stale_after_days": 5,
+            },
         },
     )
     return {
@@ -1138,7 +1146,7 @@ def test_freshness_health_is_visible_with_dates_and_reason(
     _write_json(
         health,
         {
-            "assessment_schema_version": 1,
+            "assessment_schema_version": 2,
             "as_of_date": "2026-07-30",
             "assessments": [
                 {
@@ -1175,6 +1183,13 @@ def test_freshness_health_is_visible_with_dates_and_reason(
                     for index in range(9)
                 ],
             ],
+            "policy": {
+                "expected_interval_days": 1,
+                "grace_days": 0,
+                "mode": "RECURRING",
+                "policy_id": "daily-current",
+                "stale_after_days": 5,
+            },
         },
     )
 
@@ -1201,6 +1216,7 @@ def test_freshness_health_is_visible_with_dates_and_reason(
             "blocks_current_consumers": False,
             "category": "DATA_FRESHNESS",
             "escalation_required": True,
+            "evaluated_on": "2026-07-30",
             "fact_type": "nav",
             "item": "synthetic:account-internal-1:nav",
             "known_gap": (
@@ -1404,6 +1420,7 @@ def test_material_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
             "strategy_name": "Robuxio Crypto (High Sharpe High Vol)",
             "current_value_usd": "80",
             "nav_status": "AVAILABLE",
+            "nav_evidence_layer": "PROVIDER_LIVE",
             "nav_observed_start": "2025-08-14",
             "nav_observed_end": "2026-07-26",
             "nav_return_observations": 331,
@@ -1413,12 +1430,20 @@ def test_material_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
             "strategy_name": "Volatis Strategy",
             "current_value_usd": "20",
             "nav_status": "AVAILABLE",
+            "nav_evidence_layer": "ACCOUNT_LIVE",
             "nav_observed_start": "2024-10-16",
             "nav_observed_end": "2026-07-29",
             "nav_return_observations": 650,
         },
     ]
-    policy = {"excluded_strategy_ids": ["composer-holy-grail"]}
+    policy = {
+        "accepted_daily_nav_evidence": [
+            "ACCOUNT_LIVE",
+            "PROVIDER_LIVE",
+        ],
+        "accepted_provider_live_strategy_ids": ["robuxio-crypto"],
+        "excluded_strategy_ids": ["composer-holy-grail"],
+    }
 
     rows, summary = panel._material_hwm_coverage(strategies, policy)
 
@@ -1438,6 +1463,37 @@ def test_material_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
         "status": "AVAILABLE_MATERIAL_PERIMETER",
         "uncovered_strategies": [],
     }
+
+
+def test_hwm_policy_enforces_exclusion_effective_date() -> None:
+    before, _ = panel._hwm_policy(date(2026, 7, 31))
+    effective, _ = panel._hwm_policy(date(2026, 8, 1))
+
+    assert before["excluded_strategy_ids"] == []
+    assert effective["excluded_strategy_ids"] == ["composer-holy-grail"]
+
+
+def test_hwm_coverage_rejects_unaccepted_nav_evidence_class() -> None:
+    rows, summary = panel._material_hwm_coverage(
+        [
+            {
+                "current_value_usd": "100",
+                "nav_evidence_layer": "BACKTEST",
+                "nav_status": "AVAILABLE",
+                "strategy_id": "strategy-one",
+                "strategy_name": "Strategy One",
+            }
+        ],
+        {
+            "accepted_daily_nav_evidence": ["ACCOUNT_LIVE"],
+            "accepted_provider_live_strategy_ids": [],
+            "excluded_strategy_ids": [],
+        },
+    )
+
+    assert rows[0]["hwm_evidence_status"] == "UNACCEPTED"
+    assert summary["covered_value_usd"] == "0"
+    assert summary["uncovered_strategies"] == ["Strategy One"]
 
 
 def test_hwm_coverage_removes_superseded_exception_when_material_perimeter_is_complete() -> (

@@ -86,6 +86,10 @@ then removes the orphan lock without changing the terminal state.
   is handled by the explicit recovery command above.
 - A current-portfolio release must include the exact freshness-health artifact
   as both a DAG node and a hash gate. A panel cannot be built without it.
+  Preparation and commit independently require its evaluation date to equal
+  the local operational date and recompute every state from the embedded
+  policy, so a release cannot carry yesterday's still-fresh conclusion across
+  a stale boundary.
 - A committed resume reports `COMMITTED`; it does not mislabel an accepted
   release as merely prepared.
 - Provider/network acquisition remains a separate, explicitly authorized
