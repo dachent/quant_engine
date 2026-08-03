@@ -1496,6 +1496,16 @@ def test_hwm_coverage_rejects_unaccepted_nav_evidence_class() -> None:
     assert summary["uncovered_strategies"] == ["Strategy One"]
 
 
+def test_risk_template_does_not_hard_code_provider_coverage() -> None:
+    template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
+
+    assert "covers Robuxio and Volatis" not in template
+    assert (
+        "qualifies only while its governed freshness and evidence gates pass"
+        in template
+    )
+
+
 def test_hwm_coverage_removes_superseded_exception_when_material_perimeter_is_complete() -> (
     None
 ):
