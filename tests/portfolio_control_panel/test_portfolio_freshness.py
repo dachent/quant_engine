@@ -53,6 +53,14 @@ def _provider_ledger(root: Path) -> str:
                 "provider_id": "tracker",
                 "strategy_id": "stale-one",
             },
+            {
+                "provider": {
+                    "observed_end": "2026-07-26",
+                    "provider_id": "matrixport",
+                },
+                "provider_id": "matrixport",
+                "strategy_id": "late-one",
+            },
         ],
     }
     source = root.parent / "provider-ledger.json"
@@ -98,6 +106,22 @@ def test_freshness_prefers_account_lane_and_blocks_stale_strategy(
     assert by_id["current-one"]["blocks_current_consumers"] is False
     assert by_id["stale-one"]["state"] == "STALE"
     assert by_id["stale-one"]["blocks_current_consumers"] is True
+    assert by_id["late-one"]["state"] == "LATE"
+    assert by_id["late-one"]["blocks_current_consumers"] is False
+    assert result["assessment_schema_version"] == 2
+    assert result["policy"]["stale_after_days"] == 5
+
+
+def test_freshness_reages_late_strategy_on_operational_date(tmp_path: Path) -> None:
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root)
+
+    result = freshness.build_health(root, generation_id, date(2026, 8, 2))
+
+    by_id = {row["subject_id"]: row for row in result["assessments"]}
+    assert result["as_of_date"] == "2026-08-02"
+    assert by_id["late-one"]["state"] == "STALE"
+    assert by_id["late-one"]["blocks_current_consumers"] is True
 
 
 def test_freshness_output_is_create_only_and_deterministic(tmp_path: Path) -> None:

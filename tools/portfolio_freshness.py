@@ -54,12 +54,19 @@ def _load_catalog(root: Path, generation_id: str) -> Mapping[str, Any]:
 
 
 def build_health(
-    provider_ledger_root: Path, provider_ledger_generation_id: str
+    provider_ledger_root: Path,
+    provider_ledger_generation_id: str,
+    evaluation_date: date | None = None,
 ) -> dict[str, object]:
     catalog = _load_catalog(
         provider_ledger_root.resolve(), provider_ledger_generation_id
     )
-    as_of = date.fromisoformat(_text(catalog.get("as_of_date"), "as_of_date"))
+    ledger_as_of = date.fromisoformat(_text(catalog.get("as_of_date"), "as_of_date"))
+    as_of = evaluation_date or ledger_as_of
+    if as_of < ledger_as_of:
+        raise PortfolioFreshnessError(
+            "freshness evaluation date precedes the provider ledger"
+        )
     evidence = catalog.get("strategy_evidence")
     if not isinstance(evidence, list) or not evidence:
         raise PortfolioFreshnessError("strategy evidence is unavailable")
@@ -102,12 +109,13 @@ def build_health(
             }
         )
     return {
-        "assessment_schema_version": 1,
+        "assessment_schema_version": 2,
         "as_of_date": as_of.isoformat(),
         "assessments": sorted(
             assessments,
             key=lambda item: (str(item["subject_id"]), str(item["provider_id"])),
         ),
+        "policy": policy.to_dict(),
     }
 
 
@@ -115,8 +123,11 @@ def write_health(
     provider_ledger_root: Path,
     provider_ledger_generation_id: str,
     output: Path,
+    evaluation_date: date | None = None,
 ) -> dict[str, object]:
-    payload = build_health(provider_ledger_root, provider_ledger_generation_id)
+    payload = build_health(
+        provider_ledger_root, provider_ledger_generation_id, evaluation_date
+    )
     content = canonical_json_bytes(payload)
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -147,6 +158,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider-ledger-root", type=Path, required=True)
     parser.add_argument("--provider-ledger-generation-id", required=True)
+    parser.add_argument("--evaluation-date", type=date.fromisoformat, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -158,6 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.provider_ledger_root,
             args.provider_ledger_generation_id,
             args.output,
+            args.evaluation_date,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-freshness: FAIL: {exc}", file=sys.stderr)

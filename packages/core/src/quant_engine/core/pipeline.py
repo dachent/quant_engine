@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 from typing import Any, Callable, Final, Mapping, Self
 
+from quant_engine.core.authority import FreshnessPolicy
 from quant_engine.core.contracts import (
     CoverageStatus,
     GenerationManifest,
@@ -953,12 +954,69 @@ def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
     }
 
 
-def _verify_gates(spec: PipelineSpec) -> tuple[GateEvidence, ...]:
+def _verify_freshness_gate(path: Path, evaluation_date: date) -> None:
+    try:
+        payload = _object(
+            json.loads(path.read_text(encoding="utf-8")), "freshness gate"
+        )
+        if (
+            set(payload)
+            != {
+                "assessment_schema_version",
+                "as_of_date",
+                "assessments",
+                "policy",
+            }
+            or payload.get("assessment_schema_version") != 2
+        ):
+            raise PipelineValidationError("freshness gate schema differs")
+        assessed_on = date.fromisoformat(str(payload.get("as_of_date")))
+        if assessed_on != evaluation_date:
+            raise PipelineValidationError(
+                "freshness gate was not evaluated on the operational date"
+            )
+        policy = FreshnessPolicy.from_dict(_object(payload.get("policy"), "policy"))
+        raw_assessments = payload.get("assessments")
+        if not isinstance(raw_assessments, list) or not raw_assessments:
+            raise PipelineValidationError("freshness gate assessments are unavailable")
+        for raw in raw_assessments:
+            item = _object(raw, "freshness assessment")
+            observed_text = item.get("last_accepted_date")
+            observed = (
+                None
+                if observed_text is None
+                else date.fromisoformat(str(observed_text))
+            )
+            expected = policy.assess(observed, evaluation_date).to_dict()
+            for field in (
+                "blocks_current_consumers",
+                "escalation_required",
+                "evaluated_on",
+                "next_expected_date",
+                "policy_id",
+                "reason",
+                "state",
+            ):
+                if item.get(field) != expected[field]:
+                    raise PipelineValidationError(
+                        f"freshness gate assessment is stale: {item.get('subject_id')}"
+                    )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        if isinstance(exc, PipelineValidationError):
+            raise
+        raise PipelineValidationError("freshness gate is invalid") from exc
+
+
+def _verify_gates(
+    spec: PipelineSpec, evaluation_date: date
+) -> tuple[GateEvidence, ...]:
     result = []
     for gate in spec.gates:
         digest, _ = _file_hash(gate.path)
         if digest != gate.sha256:
             raise PipelineValidationError(f"pipeline gate differs: {gate.gate_id}")
+        if gate.gate_id == "freshness-health":
+            _verify_freshness_gate(gate.path, evaluation_date)
         result.append(GateEvidence(gate.gate_id, gate.sha256))
     return tuple(result)
 
@@ -1014,6 +1072,7 @@ def execute_pipeline(
     allow_external_read: bool = False,
     command_runner: CommandRunner = _default_command_runner,
     fault_hook: Callable[[str, str], None] | None = None,
+    evaluation_date: date | None = None,
 ) -> dict[str, object]:
     """Build, verify, prepare, and optionally commit one explicit-ID DAG."""
 
@@ -1025,7 +1084,8 @@ def execute_pipeline(
             allow_external_read=allow_external_read,
             command_runner=command_runner,
         )
-    gate_evidence = _verify_gates(spec)
+    operational_date = evaluation_date or datetime.now().astimezone().date()
+    gate_evidence = _verify_gates(spec, operational_date)
     _evidence_path, evidence_hash = _pipeline_evidence(spec)
     if any(item.gate_id == "pipeline-evidence" for item in gate_evidence):
         raise PipelineValidationError("pipeline-evidence gate ID is reserved")

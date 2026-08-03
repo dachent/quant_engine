@@ -11,6 +11,8 @@ from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
     CoverageStatus,
+    FreshnessMode,
+    FreshnessPolicy,
     GenerationManifest,
     PipelineExecutionError,
     PipelineSpec,
@@ -25,6 +27,7 @@ from quant_engine.core import (
     read_current,
     stage_generation,
 )
+from quant_engine.core.contracts import canonical_json_bytes
 
 
 AS_OF = date(2026, 8, 2)
@@ -144,6 +147,35 @@ def _parse(value: dict[str, object]) -> PipelineSpec:
     return PipelineSpec.from_json_bytes(json.dumps(value).encode())
 
 
+def _freshness_gate(path: Path, evaluated_on: date) -> Path:
+    policy = FreshnessPolicy(
+        policy_id="daily-current-strategy",
+        mode=FreshnessMode.RECURRING,
+        expected_interval_days=1,
+        grace_days=2,
+        stale_after_days=5,
+    )
+    assessment = policy.assess(date(2026, 7, 28), evaluated_on).to_dict()
+    assessment.update(
+        {
+            "fact_type": "strategy-returns",
+            "provider_id": "synthetic-provider",
+            "subject_id": "synthetic-strategy",
+        }
+    )
+    path.write_bytes(
+        canonical_json_bytes(
+            {
+                "assessment_schema_version": 2,
+                "as_of_date": evaluated_on.isoformat(),
+                "assessments": [assessment],
+                "policy": policy.to_dict(),
+            }
+        )
+    )
+    return path
+
+
 def test_plan_is_exact_and_non_mutating(tmp_path: Path) -> None:
     raw, previous, proposed, target = _spec_dict(tmp_path)
     spec = _parse(raw)
@@ -191,6 +223,45 @@ def test_execute_prepares_without_pointer_change_then_commits_atomically(
 
     resumed = execute_pipeline(spec)
     assert resumed["release_state"] == "COMMITTED"
+
+
+def test_freshness_gate_is_reaged_on_prepare_and_commit(tmp_path: Path) -> None:
+    raw, previous, _, target = _spec_dict(tmp_path)
+    gate = _freshness_gate(tmp_path / "freshness.json", AS_OF)
+    raw["gates"].append(
+        {
+            "gate_id": "freshness-health",
+            "path": str(gate),
+            "sha256": hashlib.sha256(gate.read_bytes()).hexdigest(),
+        }
+    )
+    spec = _parse(raw)
+
+    prepared = execute_pipeline(spec, evaluation_date=AS_OF)
+
+    assert prepared["release_state"] == "PREPARED"
+    with pytest.raises(PipelineValidationError, match="operational date"):
+        execute_pipeline(spec, commit=True, evaluation_date=date(2026, 8, 3))
+    assert read_current(target).generation_id == previous.generation_id
+
+
+def test_freshness_gate_rejects_forged_current_state(tmp_path: Path) -> None:
+    raw, previous, _, target = _spec_dict(tmp_path)
+    gate = _freshness_gate(tmp_path / "freshness.json", AS_OF)
+    payload = json.loads(gate.read_text(encoding="utf-8"))
+    payload["assessments"][0]["state"] = "FRESH"
+    gate.write_bytes(canonical_json_bytes(payload))
+    raw["gates"].append(
+        {
+            "gate_id": "freshness-health",
+            "path": str(gate),
+            "sha256": hashlib.sha256(gate.read_bytes()).hexdigest(),
+        }
+    )
+
+    with pytest.raises(PipelineValidationError, match="assessment is stale"):
+        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+    assert read_current(target).generation_id == previous.generation_id
 
 
 def test_generation_inventory_is_exact(tmp_path: Path) -> None:

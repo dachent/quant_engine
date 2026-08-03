@@ -20,6 +20,7 @@ from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
     CoverageStatus,
+    FreshnessPolicy,
     GenerationConflictError,
     GenerationManifest,
     SourceArtifact,
@@ -295,15 +296,21 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
             "freshness health is mandatory for current portfolio claims"
         )
     payload = _load_json(path, "freshness health")
-    if set(payload) != {"assessment_schema_version", "as_of_date", "assessments"}:
+    if set(payload) != {
+        "assessment_schema_version",
+        "as_of_date",
+        "assessments",
+        "policy",
+    }:
         raise ControlPanelValidationError("freshness health keys differ")
-    if payload["assessment_schema_version"] != 1:
+    if payload["assessment_schema_version"] != 2:
         raise ControlPanelValidationError("freshness health schema is unsupported")
     as_of = _text(payload.get("as_of_date"), "freshness health as_of_date")
-    if as_of != portfolio_as_of:
-        raise ControlPanelValidationError(
-            "freshness health date differs from portfolio"
-        )
+    if date.fromisoformat(as_of) < date.fromisoformat(portfolio_as_of):
+        raise ControlPanelValidationError("freshness health predates the portfolio")
+    policy = FreshnessPolicy.from_dict(
+        _object(payload.get("policy"), "freshness health policy")
+    )
     rows = []
     accepted_states = {"FRESH", "LATE", "STALE", "FINITE_COMPLETE", "UNAVAILABLE"}
     expected = {
@@ -355,12 +362,30 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
             next_expected = _text(next_expected, "freshness next_expected_date")
             date.fromisoformat(next_expected)
         reason = _text(item.get("reason"), "freshness reason")
+        expected_assessment = policy.assess(
+            None if last is None else date.fromisoformat(last),
+            date.fromisoformat(as_of),
+        ).to_dict()
+        for field in (
+            "blocks_current_consumers",
+            "escalation_required",
+            "evaluated_on",
+            "next_expected_date",
+            "policy_id",
+            "reason",
+            "state",
+        ):
+            if item.get(field) != expected_assessment[field]:
+                raise ControlPanelValidationError(
+                    f"freshness assessment is stale: {subject_id}"
+                )
         rows.append(
             {
                 "acquired_at": acquired_at,
                 "blocks_current_consumers": item["blocks_current_consumers"],
                 "category": "DATA_FRESHNESS",
                 "escalation_required": item["escalation_required"],
+                "evaluated_on": as_of,
                 "fact_type": fact_type,
                 "item": f"{provider_id}:{subject_id}:{fact_type}",
                 "known_gap": (
@@ -504,7 +529,7 @@ def _number_text(value: float) -> str:
     return format(value, ".12g")
 
 
-def _hwm_policy() -> tuple[dict[str, Any], str]:
+def _hwm_policy(evaluation_date: date) -> tuple[dict[str, Any], str]:
     policy = _object(_load_json(HWM_POLICY, "HWM policy"), "HWM policy")
     if policy.get("schema_version") != 2 or policy.get("policy_id") != "PORT-HWM-2":
         raise ControlPanelValidationError("HWM policy identity is unsupported")
@@ -517,8 +542,23 @@ def _hwm_policy() -> tuple[dict[str, Any], str]:
             raise ControlPanelValidationError("HWM exclusion is duplicated")
         if item.get("classification") != "EXCLUDED_DE_MINIMIS":
             raise ControlPanelValidationError("HWM exclusion classification differs")
-        excluded_ids.add(strategy_id)
+        effective_date = date.fromisoformat(
+            _text(item.get("effective_date"), "HWM exclusion effective_date")
+        )
+        if effective_date <= evaluation_date:
+            excluded_ids.add(strategy_id)
+    accepted_evidence = policy.get("accepted_daily_nav_evidence")
+    if not isinstance(accepted_evidence, list) or not all(
+        isinstance(item, str) and item for item in accepted_evidence
+    ):
+        raise ControlPanelValidationError("HWM accepted evidence differs")
+    accepted_provider_live = policy.get("accepted_provider_live_strategy_ids")
+    if not isinstance(accepted_provider_live, list) or not all(
+        isinstance(item, str) and item for item in accepted_provider_live
+    ):
+        raise ControlPanelValidationError("HWM provider-live allowlist differs")
     policy["excluded_strategy_ids"] = sorted(excluded_ids)
+    policy["evaluation_date"] = evaluation_date.isoformat()
     policy_hash, _size = hash_file(HWM_POLICY)
     return policy, policy_hash
 
@@ -541,6 +581,8 @@ def _material_hwm_coverage(
     require_freshness: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     excluded = set(policy.get("excluded_strategy_ids", []))
+    accepted_evidence = set(policy.get("accepted_daily_nav_evidence", []))
+    accepted_provider_live = set(policy.get("accepted_provider_live_strategy_ids", []))
     accepted: list[dict[str, Any]] = []
     covered = Decimal(0)
     material = Decimal(0)
@@ -572,6 +614,14 @@ def _material_hwm_coverage(
         material += value
         row["hwm_scope"] = "INCLUDED"
         row["hwm_source"] = "PORTFOLIO_REPORT"
+        evidence_layer = row.get("nav_evidence_layer")
+        evidence_blocked = evidence_layer not in accepted_evidence or (
+            evidence_layer == "PROVIDER_LIVE"
+            and strategy_id not in accepted_provider_live
+        )
+        row["hwm_evidence_status"] = (
+            "ACCEPTED" if not evidence_blocked else "UNACCEPTED"
+        )
         strategy_freshness = freshness_by_strategy.get(strategy_id, [])
         freshness_blocked = any(
             item.get("blocks_current_consumers") is True for item in strategy_freshness
@@ -586,6 +636,7 @@ def _material_hwm_coverage(
         )
         if (
             row.get("nav_status") == "AVAILABLE"
+            and not evidence_blocked
             and not freshness_blocked
             and not freshness_missing
         ):
@@ -1334,6 +1385,8 @@ def _panel_data(
     weekly_returns: Mapping[str, Any] | None = None,
     freshness_health: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if freshness_health is None:
+        raise ControlPanelValidationError("freshness health is mandatory")
     summary = _summary(report)
     strategies = _objects(report.get("strategy_summary"), "strategy_summary")
     accounts = _objects(report.get("account_summary"), "account_summary")
@@ -1469,7 +1522,15 @@ def _panel_data(
             for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
         }
         dependence_analysis = dependence_modes[default_dependence_mode]
-    hwm_policy, hwm_policy_hash = _hwm_policy()
+    freshness_dates = {
+        _text(item.get("evaluated_on"), "freshness evaluated_on")
+        for item in freshness_health
+    }
+    if len(freshness_dates) != 1:
+        raise ControlPanelValidationError("freshness evaluation date is ambiguous")
+    hwm_policy, hwm_policy_hash = _hwm_policy(
+        date.fromisoformat(next(iter(freshness_dates)))
+    )
     strategies, hwm_summary = _material_hwm_coverage(
         strategies,
         hwm_policy,

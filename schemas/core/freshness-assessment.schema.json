@@ -4,10 +4,25 @@
   "title": "Consumer freshness health bundle",
   "type": "object",
   "additionalProperties": false,
-  "required": ["assessment_schema_version", "as_of_date", "assessments"],
+  "required": ["assessment_schema_version", "as_of_date", "assessments", "policy"],
   "properties": {
-    "assessment_schema_version": {"const": 1},
+    "assessment_schema_version": {"const": 2},
     "as_of_date": {"type": "string", "format": "date"},
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_interval_days", "grace_days", "mode", "policy_id",
+        "stale_after_days"
+      ],
+      "properties": {
+        "expected_interval_days": {"type": ["integer", "null"], "minimum": 1},
+        "grace_days": {"type": "integer", "minimum": 0},
+        "mode": {"enum": ["FINITE", "RECURRING"]},
+        "policy_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+        "stale_after_days": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
     "assessments": {
       "type": "array",
       "items": {

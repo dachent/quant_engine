@@ -61,7 +61,10 @@ reason, escalation flag, and whether current consumers must block. Local alert
 hooks return deterministic warning/error records without sending an external
 notification. A panel freshness bundle uses
 `schemas/core/freshness-assessment.schema.json`; its rows appear in the Data
-view with the accepted date, next due date, state, and reason.
+view with the accepted date, next due date, state, and reason. Schema version 2
+embeds the complete policy and uses the operational publication date. Both the
+panel build and coordinated publication recompute the assessment rather than
+trusting stored state labels.
 
 ## Failure and recovery
 
