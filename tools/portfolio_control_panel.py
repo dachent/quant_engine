@@ -2573,7 +2573,11 @@ def validate_stable_launcher_qa(
         target = str(manifest.get("target", ""))
         final_url = str(manifest.get("final_url", ""))
         targets[name] = target.split("#", 1)[0] == launcher_url
-        resolutions[name] = expected_final_fragment in final_url
+        target_fragment = target.split("#", 1)[1] if "#" in target else ""
+        final_fragment = final_url.split("#", 1)[1] if "#" in final_url else ""
+        resolutions[name] = (
+            expected_final_fragment in final_url and target_fragment == final_fragment
+        )
         console_counts[name] = len(
             _json_array(capture / "console-events.json", f"{name} console evidence")
         )
@@ -2696,7 +2700,9 @@ def _publish_current_launcher(output_root: Path, generation_id: str) -> str:
         + '.</p><p><a href="'
         + target
         + '">Open the accepted snapshot</a></p></main>'
-        '<script>location.replace("./' + target + '");</script></body></html>\n'
+        '<script>location.replace("./'
+        + target
+        + '"+location.hash);</script></body></html>\n'
     ).encode("utf-8")
     _replace_exact(launcher, content)
     return hashlib.sha256(content).hexdigest()
