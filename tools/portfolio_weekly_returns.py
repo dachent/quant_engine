@@ -403,7 +403,9 @@ def _wide_return_columns(
         columns = [column for column in reader.fieldnames if column not in excluded]
         if not columns:
             raise WeeklyReturnError(f"wide return source has no series: {path.name}")
-        values = {column: [] for column in columns}
+        values: dict[str, list[tuple[date, Decimal]]] = {
+            column: [] for column in columns
+        }
         observed_dates: set[date] = set()
         for row in reader:
             try:
