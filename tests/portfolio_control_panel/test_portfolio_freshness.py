@@ -29,7 +29,7 @@ sys.modules[SPEC.name] = freshness
 SPEC.loader.exec_module(freshness)
 
 
-def _provider_ledger(root: Path) -> None:
+def _provider_ledger(root: Path) -> str:
     catalog = {
         "as_of_date": "2026-07-31",
         "strategy_evidence": [
@@ -81,15 +81,16 @@ def _provider_ledger(root: Path) -> None:
     staged = stage_generation(root, manifest)
     (staged.parent / "provider-ledger.json").write_bytes(source.read_bytes())
     publish_generation(root, manifest.generation_id)
+    return manifest.generation_id
 
 
 def test_freshness_prefers_account_lane_and_blocks_stale_strategy(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "provider-ledger"
-    _provider_ledger(root)
+    generation_id = _provider_ledger(root)
 
-    result = freshness.build_health(root)
+    result = freshness.build_health(root, generation_id)
 
     by_id = {row["subject_id"]: row for row in result["assessments"]}
     assert by_id["current-one"]["provider_id"] == "ibkr"
@@ -101,11 +102,11 @@ def test_freshness_prefers_account_lane_and_blocks_stale_strategy(
 
 def test_freshness_output_is_create_only_and_deterministic(tmp_path: Path) -> None:
     root = tmp_path / "provider-ledger"
-    _provider_ledger(root)
+    generation_id = _provider_ledger(root)
     output = tmp_path / "freshness-health.json"
 
-    first = freshness.write_health(root, output)
-    second = freshness.write_health(root, output)
+    first = freshness.write_health(root, generation_id, output)
+    second = freshness.write_health(root, generation_id, output)
 
     assert first == second
     assert json.loads(output.read_text(encoding="utf-8"))["as_of_date"] == (

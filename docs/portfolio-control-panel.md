@@ -110,6 +110,7 @@ provider-ledger generation before panel construction:
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_freshness.py `
   --provider-ledger-root (Join-Path $engine "dataPortfolio\provider-ledger") `
+  --provider-ledger-generation-id '<exact-generation-id>' `
   --output $freshness
 ```
 
