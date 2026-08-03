@@ -34,8 +34,9 @@
     SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL: "Selected with training-only time-series CV",
     NO_DIVERSIFICATION_CREDIT_MISSING_OBSERVATION: "No diversification credit: observations missing",
     NOT_AUTOMATABLE_MISSING_COMPLETE_DAILY_NAV: "Not automatable: systematic daily NAV is incomplete",
-    NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV: "Not automatable: material daily NAV is incomplete",
-    AVAILABLE_MATERIAL_PERIMETER: "Available across the material perimeter",
+    NOT_AUTOMATABLE_MISSING_MATERIAL_DAILY_NAV: "Not automatable: governed HWM daily NAV is incomplete",
+    NOT_AUTOMATABLE_STALE_OR_MISSING_MATERIAL_DAILY_NAV: "Not automatable: governed HWM daily NAV is stale or incomplete",
+    AVAILABLE_MATERIAL_PERIMETER: "Available across the governed HWM perimeter",
     AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE: "Available: version-matched backtest prehistory plus live",
     AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY: "Available live; no version-matched backtest prehistory",
     AVAILABLE_LIVE_ONLY: "Available: live only",
@@ -99,7 +100,7 @@
       ["Total liquid", currency(data.capital.total_liquid), "Systematic plus reserve"],
       ["Systematic capital", currency(data.capital.systematic), "Subject to the accepted HWM policy"],
       ["Reserve", currency(data.capital.reserve), "Zero strategy risk budget", "reserve"],
-      ["Material NAV coverage", pct(data.advisory.nav_coverage), "Composer remains reported but is outside the HWM denominator", "warning"],
+      ["Governed NAV coverage", pct(data.advisory.nav_coverage), "Composer is the only explicit policy exclusion from the HWM denominator", "warning"],
     ]);
 
     const gateRows = data.gates.map((gate) => {
