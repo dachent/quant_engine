@@ -389,3 +389,88 @@ def test_receipt_path_is_bounded_for_windows_workspace(tmp_path: Path) -> None:
     assert result["release_state"] == "PREPARED"
     assert any(path.parent.name == "receipts" for path in receipts)
     assert max(len(str(path)) for path in receipts) < 240
+
+
+def test_command_receipt_retains_hashed_reproducibility_evidence_without_secrets(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "declared-input.txt"
+    output = tmp_path / "declared-output.txt"
+    source.write_bytes(b"input\n")
+    command = {
+        "argv": ["synthetic", "--token", "super-secret-value", "build"],
+        "cwd": str(tmp_path),
+        "declared_reads": [str(source)],
+        "declared_writes": [str(output)],
+        "depends_on": [],
+        "effect": "LOCAL_ONLY",
+        "kind": "COMMAND",
+        "node_id": "local-build",
+        "request_identity": None,
+        "retry_limit": 0,
+        "timeout_seconds": 10,
+    }
+    raw, _, _, _ = _spec_dict(tmp_path, command=command)
+    spec = _parse(raw)
+
+    def runner(_node: object) -> tuple[int, bytes, bytes]:
+        output.write_bytes(b"output\n")
+        return 0, b"stdout evidence", b"stderr evidence"
+
+    execute_pipeline(spec, command_runner=runner)
+
+    receipt_path = next(
+        path
+        for path in spec.state_root.rglob("local-build.json")
+        if path.parent.name == "receipts"
+    )
+    raw_receipt = receipt_path.read_text(encoding="utf-8")
+    receipt = json.loads(raw_receipt)
+    evidence = receipt["command_evidence"]
+    attempt = evidence["attempts"][-1]
+    assert "super-secret-value" not in raw_receipt
+    assert evidence["cwd"] == str(tmp_path.resolve())
+    assert (
+        evidence["argv_sha256"]
+        == hashlib.sha256(canonical_json_bytes({"argv": command["argv"]})).hexdigest()
+    )
+    assert attempt["return_code"] == 0
+    assert attempt["stdout_sha256"] == hashlib.sha256(b"stdout evidence").hexdigest()
+    assert attempt["stderr_sha256"] == hashlib.sha256(b"stderr evidence").hexdigest()
+    assert attempt["pre_io"]["declared_writes"][0]["state"] == "MISSING"
+    assert (
+        attempt["post_io"]["declared_writes"][0]["sha256"]
+        == hashlib.sha256(b"output\n").hexdigest()
+    )
+    assert evidence["tool_identity"]["executable_name"] == "synthetic"
+
+
+def test_completed_command_receipt_rejects_declared_output_drift(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "declared-output.txt"
+    command = {
+        "argv": ["synthetic", "build"],
+        "cwd": str(tmp_path),
+        "declared_reads": [],
+        "declared_writes": [str(output)],
+        "depends_on": [],
+        "effect": "LOCAL_ONLY",
+        "kind": "COMMAND",
+        "node_id": "local-build",
+        "request_identity": None,
+        "retry_limit": 0,
+        "timeout_seconds": 10,
+    }
+    raw, _, _, _ = _spec_dict(tmp_path, command=command)
+    spec = _parse(raw)
+
+    def runner(_node: object) -> tuple[int, bytes, bytes]:
+        output.write_bytes(b"accepted\n")
+        return 0, b"", b""
+
+    execute_pipeline(spec, command_runner=runner)
+    output.write_bytes(b"drifted\n")
+
+    with pytest.raises(PipelineValidationError, match="command outputs drifted"):
+        execute_pipeline(spec, command_runner=runner)

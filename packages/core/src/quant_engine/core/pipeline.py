@@ -8,10 +8,12 @@ from enum import StrEnum
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from typing import Any, Callable, Final, Mapping, Self
 
@@ -140,6 +142,19 @@ def _file_hash(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def _sync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_write(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink():
@@ -154,6 +169,7 @@ def _atomic_write(path: Path, content: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -168,6 +184,7 @@ def _create_exact(path: Path, content: bytes) -> None:
         handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())
+    _sync_directory(path.parent)
 
 
 @dataclass(frozen=True)
@@ -677,9 +694,13 @@ def _write_receipt(
     state: ReceiptState,
     attempts: int,
     detail_sha256: str | None,
+    command_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     receipt = {
         "attempts": attempts,
+        "command_evidence": (
+            dict(command_evidence) if command_evidence is not None else None
+        ),
         "detail_sha256": detail_sha256,
         "node_hash": _node_hash(node),
         "node_id": node.node_id,
@@ -691,6 +712,127 @@ def _write_receipt(
     }
     _atomic_write(_receipt_path(spec, node.node_id), canonical_json_bytes(receipt))
     return receipt
+
+
+def _path_evidence(path: Path) -> dict[str, object]:
+    """Hash one declared command boundary without retaining its content."""
+
+    resolved = path.resolve()
+    base: dict[str, object] = {"path": str(resolved)}
+    if path.is_symlink():
+        raise PipelineValidationError(f"declared command path is a link: {path}")
+    if not path.exists():
+        return {**base, "state": "MISSING"}
+    if path.is_file():
+        digest, size = _file_hash(path)
+        return {
+            **base,
+            "sha256": digest,
+            "size_bytes": size,
+            "state": "FILE",
+        }
+    if not path.is_dir():
+        raise PipelineValidationError(
+            f"declared command path is not a regular file or directory: {path}"
+        )
+    files: list[dict[str, object]] = []
+    total_size = 0
+    for item in sorted(path.rglob("*")):
+        if item.is_symlink():
+            raise PipelineValidationError(
+                f"declared command directory contains a link: {item}"
+            )
+        if item.is_file():
+            digest, size = _file_hash(item)
+            total_size += size
+            files.append(
+                {
+                    "relative_path": item.relative_to(path).as_posix(),
+                    "sha256": digest,
+                    "size_bytes": size,
+                }
+            )
+    inventory = canonical_json_bytes({"files": files})
+    return {
+        **base,
+        "file_count": len(files),
+        "sha256": hashlib.sha256(inventory).hexdigest(),
+        "size_bytes": total_size,
+        "state": "DIRECTORY",
+    }
+
+
+def _io_evidence(node: CommandNode) -> dict[str, object]:
+    return {
+        "declared_reads": [_path_evidence(path) for path in node.declared_reads],
+        "declared_writes": [_path_evidence(path) for path in node.declared_writes],
+    }
+
+
+def _argv_evidence(argv: tuple[str, ...]) -> dict[str, object]:
+    """Retain argv identity and ordering without copying possible credentials."""
+
+    tokens = []
+    for index, value in enumerate(argv):
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        tokens.append(
+            {
+                "index": index,
+                "sha256": digest,
+                "value": Path(value).name if index == 0 else f"<sha256:{digest}>",
+            }
+        )
+    return {
+        "argv": tokens,
+        "argv_sha256": hashlib.sha256(
+            canonical_json_bytes({"argv": list(argv)})
+        ).hexdigest(),
+    }
+
+
+def _tool_identity(node: CommandNode) -> dict[str, object]:
+    resolved_text = shutil.which(node.argv[0])
+    resolved = Path(resolved_text).resolve() if resolved_text is not None else None
+    result: dict[str, object] = {
+        "executable_name": Path(node.argv[0]).name,
+        "platform_machine": platform.machine(),
+        "platform_system": platform.system(),
+        "python_implementation": platform.python_implementation(),
+        "python_version": platform.python_version(),
+        "resolved_path": str(resolved) if resolved is not None else None,
+    }
+    if resolved is not None and resolved.is_file() and not resolved.is_symlink():
+        digest, size = _file_hash(resolved)
+        result.update({"executable_sha256": digest, "executable_size_bytes": size})
+    if resolved is not None and os.path.normcase(str(resolved)) == os.path.normcase(
+        str(Path(sys.executable).resolve())
+    ):
+        result["python_executable"] = True
+    return result
+
+
+def _command_evidence_base(node: CommandNode) -> dict[str, object]:
+    return {
+        **_argv_evidence(node.argv),
+        "cwd": str(node.cwd.resolve()),
+        "effect": node.effect.value,
+        "tool_identity": _tool_identity(node),
+    }
+
+
+def _completed_command_outputs_match(
+    node: CommandNode, receipt: Mapping[str, Any]
+) -> bool:
+    command = receipt.get("command_evidence")
+    if not isinstance(command, Mapping):
+        return False
+    attempts = command.get("attempts")
+    if not isinstance(attempts, list) or not attempts:
+        return False
+    final = attempts[-1]
+    if not isinstance(final, Mapping):
+        return False
+    return final.get("post_io") == _io_evidence(node)
 
 
 def _inventory(path: Path) -> tuple[FileExpectation, ...]:
@@ -771,6 +913,7 @@ def _verify_generation(
                         f"{node.node_id} staged inventory differs"
                     )
                 temporary.rename(destination)
+                _sync_directory(destination.parent)
             finally:
                 if (
                     temporary.exists()
@@ -822,6 +965,10 @@ def _execute_node(
                     raise PipelineValidationError(f"{node.node_id} artifact drifted")
             elif isinstance(node, GenerationNode):
                 _verify_generation(spec, node, materialize=True)
+            elif not _completed_command_outputs_match(node, existing):
+                raise PipelineValidationError(
+                    f"{node.node_id} declared command outputs drifted"
+                )
             return existing
     attempts = int(existing.get("attempts", 0)) if existing else 0
     if isinstance(node, ArtifactNode):
@@ -840,17 +987,48 @@ def _execute_node(
             f"{node.node_id} external request was already attempted"
         )
     allowed_attempts = node.retry_limit + 1
+    prior_command = existing.get("command_evidence") if existing else None
+    prior_attempts = (
+        list(prior_command.get("attempts", []))
+        if isinstance(prior_command, Mapping)
+        else []
+    )
     while attempts < allowed_attempts:
         attempts += 1
+        pre_io = _io_evidence(node)
         try:
             return_code, stdout, stderr = command_runner(node)
         except Exception as exc:
+            attempt_evidence = {
+                "attempt": attempts,
+                "exception_type": type(exc).__name__,
+                "outcome": "UNKNOWN"
+                if node.effect is CommandEffect.READ_ONLY_EXTERNAL
+                else "FAILED",
+                "post_io": _io_evidence(node),
+                "pre_io": pre_io,
+                "return_code": None,
+                "stderr_sha256": None,
+                "stdout_sha256": None,
+            }
+            prior_attempts.append(attempt_evidence)
+            command_evidence = {
+                **_command_evidence_base(node),
+                "attempts": prior_attempts,
+            }
             state = (
                 ReceiptState.UNKNOWN
                 if node.effect is CommandEffect.READ_ONLY_EXTERNAL
                 else ReceiptState.FAILED
             )
-            _write_receipt(spec, node, state, attempts, None)
+            _write_receipt(
+                spec,
+                node,
+                state,
+                attempts,
+                None,
+                command_evidence,
+            )
             if state is ReceiptState.UNKNOWN:
                 raise PipelineUnknownOutcomeError(
                     f"{node.node_id} external-read outcome is unknown"
@@ -867,14 +1045,43 @@ def _execute_node(
                 }
             )
         ).hexdigest()
+        attempt_evidence = {
+            "attempt": attempts,
+            "exception_type": None,
+            "outcome": "COMPLETED" if return_code == 0 else "FAILED",
+            "post_io": _io_evidence(node),
+            "pre_io": pre_io,
+            "return_code": return_code,
+            "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+            "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+        }
+        prior_attempts.append(attempt_evidence)
+        command_evidence = {
+            **_command_evidence_base(node),
+            "attempts": prior_attempts,
+        }
         if return_code == 0:
-            return _write_receipt(spec, node, ReceiptState.COMPLETED, attempts, detail)
+            return _write_receipt(
+                spec,
+                node,
+                ReceiptState.COMPLETED,
+                attempts,
+                detail,
+                command_evidence,
+            )
         state = (
             ReceiptState.UNKNOWN
             if node.effect is CommandEffect.READ_ONLY_EXTERNAL
             else ReceiptState.FAILED
         )
-        _write_receipt(spec, node, state, attempts, detail)
+        _write_receipt(
+            spec,
+            node,
+            state,
+            attempts,
+            detail,
+            command_evidence,
+        )
         if state is ReceiptState.UNKNOWN:
             raise PipelineUnknownOutcomeError(
                 f"{node.node_id} external-read outcome is unknown"

@@ -428,6 +428,11 @@ def test_live_and_backtest_modes_are_separate_and_live_wins_overlap(
     combined_composition = modes["LIVE_PLUS_BACKTEST"]["series_composition"]["a"]
     assert live_composition["live_observations"] == 9
     assert live_composition["backtest_observations_used"] == 0
+    assert len(live_composition["canonical_live_series_sha256"]) == 64
+    assert (
+        combined_composition["canonical_live_series_sha256"]
+        == live_composition["canonical_live_series_sha256"]
+    )
     assert combined_composition["backtest_observations_used"] == 10
     assert (
         combined_composition[
@@ -443,6 +448,18 @@ def test_live_and_backtest_modes_are_separate_and_live_wins_overlap(
         combined_cell["left_evidence_composition"]["status"]
         == "AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE"
     )
+
+
+def test_canonical_live_series_digest_detects_value_mutation() -> None:
+    original = [
+        correlation.ReturnRow(date(2026, 1, 2), 0.01, "ACCOUNT_LIVE", "v1", "0.01")
+    ]
+    mutated = [
+        correlation.ReturnRow(date(2026, 1, 2), 0.02, "ACCOUNT_LIVE", "v1", "0.02")
+    ]
+    assert correlation._canonical_series_sha256(
+        original
+    ) != correlation._canonical_series_sha256(mutated)
 
 
 def test_combined_mode_ignores_unmatched_backtest_and_rejects_duplicate_layer_date(

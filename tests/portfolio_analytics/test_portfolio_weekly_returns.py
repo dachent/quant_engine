@@ -298,6 +298,29 @@ def test_weekly_calendar_metadata_handles_year_weekend_and_leap_boundaries() -> 
     assert leap_metadata["2024-02-26"][3] == "COMPLETE_WITHIN_ACCEPTED_CALENDAR"
 
 
+def test_canonical_live_series_digest_is_ordered_and_value_sensitive() -> None:
+    first = weekly._canonical_series_sha256(
+        [
+            (date(2026, 1, 3), Decimal("0.020")),
+            (date(2026, 1, 2), Decimal("0.010")),
+        ]
+    )
+    reordered = weekly._canonical_series_sha256(
+        [
+            (date(2026, 1, 2), Decimal("0.010")),
+            (date(2026, 1, 3), Decimal("0.020")),
+        ]
+    )
+    mutated = weekly._canonical_series_sha256(
+        [
+            (date(2026, 1, 2), Decimal("0.010")),
+            (date(2026, 1, 3), Decimal("0.021")),
+        ]
+    )
+    assert first == reordered
+    assert first != mutated
+
+
 def test_weekly_metadata_marks_partial_boundaries_without_filling_missing_weeks() -> (
     None
 ):

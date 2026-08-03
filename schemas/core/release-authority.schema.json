@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-engine.local/schemas/core/release-authority.schema.json",
+  "title": "quant_engine coordinated release authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "authority_schema_version", "release_id", "release_manifest_sha256", "state"
+  ],
+  "properties": {
+    "authority_schema_version": {"const": 1},
+    "release_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "release_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "state": {"const": "COMMITTED"}
+  }
+}

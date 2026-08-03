@@ -6,6 +6,7 @@ import argparse
 import csv
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -33,7 +34,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 ANALYTICS_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.6.0"
+BUILDER_VERSION: Final = "1.7.0"
 METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-2"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
 ANALYSIS_LENSES: Final = {
@@ -103,6 +104,7 @@ class FactorDefinition:
 class TargetRow:
     day: date
     value: float
+    canonical_return: str
     evidence_layer: str
     return_basis: str
     return_type: str
@@ -539,7 +541,11 @@ def _read_targets(path: Path, as_of_date: date) -> dict[str, list[TargetRow]]:
             day = _day(raw["date"], f"target line {line_number} date")
             if day > as_of_date:
                 raise DecompositionError("target observation follows as_of_date")
-            value = _finite(raw["return"], f"target line {line_number} return")
+            raw_return = raw["return"].strip()
+            value = _finite(raw_return, f"target line {line_number} return")
+            canonical_return = _canonical_decimal_text(
+                raw_return, f"target line {line_number} return"
+            )
             layer = _text(
                 raw["evidence_layer"], f"target line {line_number} evidence_layer"
             )
@@ -568,7 +574,15 @@ def _read_targets(path: Path, as_of_date: date) -> dict[str, list[TargetRow]]:
                 None if not raw_cost else _finite(raw_cost, "target cost", minimum=0.0)
             )
             grouped.setdefault(series_id, []).append(
-                TargetRow(day, value, layer, basis, return_type, cost)
+                TargetRow(
+                    day,
+                    value,
+                    canonical_return,
+                    layer,
+                    basis,
+                    return_type,
+                    cost,
+                )
             )
     if not grouped:
         raise DecompositionError("target source contains no observations")
@@ -630,6 +644,83 @@ def _number(value: float | np.floating[Any] | None) -> str | None:
     if abs(accepted) < 5e-16:
         accepted = 0.0
     return format(accepted, ".12g")
+
+
+def _canonical_decimal_text(value: str, name: str) -> str:
+    try:
+        accepted = Decimal(value)
+    except InvalidOperation as error:
+        raise DecompositionError(f"{name} must be a decimal") from error
+    if not accepted.is_finite():
+        raise DecompositionError(f"{name} must be finite")
+    if accepted == 0:
+        return "0"
+    return format(accepted.normalize(), "f")
+
+
+def _canonical_live_series_sha256(rows: Sequence[TargetRow]) -> str:
+    ordered = [
+        {"date": row.day.isoformat(), "return": row.canonical_return}
+        for row in sorted(rows, key=lambda item: item.day)
+    ]
+    encoded = (
+        json.dumps(ordered, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _apply_model_quality_gate(
+    result: dict[str, object], holdout_predicted_r_squared: float | None
+) -> dict[str, object]:
+    """Separate a successful fit from a PM-usable model conclusion.
+
+    The sealed holdout is never used to fit or choose the computational model.
+    It is used only after training-only selection as a fail-closed decision gate.
+    Non-positive or unavailable predicted R-squared retains the reproducible
+    computational diagnostics, but removes alpha and exposures from the accepted
+    output surface.
+    """
+
+    result["computational_status"] = "AVAILABLE"
+    result["model_quality"] = {
+        "decision_rule": "SEALED_HOLDOUT_PREDICTED_R2_GT_ZERO",
+        "holdout_predicted_r_squared": _number(holdout_predicted_r_squared),
+    }
+    quality = cast(dict[str, object], result["model_quality"])
+    if holdout_predicted_r_squared is not None and holdout_predicted_r_squared > 0:
+        quality.update(
+            {
+                "decision_status": "PM_VALID",
+                "gate_reason": "POSITIVE_SEALED_HOLDOUT_PREDICTED_R2",
+            }
+        )
+        result["status"] = "AVAILABLE"
+        return result
+
+    reason = (
+        "NON_POSITIVE_SEALED_HOLDOUT_PREDICTED_R2"
+        if holdout_predicted_r_squared is not None
+        else "UNAVAILABLE_SEALED_HOLDOUT_PREDICTED_R2"
+    )
+    quality.update({"decision_status": "DIAGNOSTIC_ONLY", "gate_reason": reason})
+    result["diagnostic_outputs"] = {
+        "alpha": result["alpha"],
+        "exposures": result["exposures"],
+        "warning": ("COMPUTED_NOT_ACCEPTED_FOR_PM_ALPHA_OR_EXPOSURE_CONCLUSIONS"),
+    }
+    result["alpha"] = {
+        "annualized_standard_error": None,
+        "confidence_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "gross_annualized": None,
+        "gross_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "net_annualized": None,
+        "net_status": "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE",
+        "periodic_intercept": None,
+    }
+    result["exposures"] = []
+    result["status"] = "DIAGNOSTIC_ONLY"
+    return result
 
 
 def _project_simplex(values: FloatArray) -> FloatArray:
@@ -778,7 +869,7 @@ def _training_design_diagnostics(
     if maximum_vif is None or maximum_vif > UNREGULARIZED_VIF_LIMIT:
         blocking_reasons.append("VIF_ABOVE_LIMIT_OR_UNAVAILABLE")
 
-    return {
+    result: dict[str, object] = {
         "basis": "TRAIN_ONLY",
         "correlation_matrix": [
             {
@@ -832,6 +923,7 @@ def _training_design_diagnostics(
         ],
         "vif_status": vif_status,
     }
+    return result
 
 
 def _linear_solve(matrix: FloatArray, right: FloatArray) -> tuple[FloatArray, bool]:
@@ -1090,13 +1182,14 @@ def _metrics(
         if len(residual) < 2
         else float(np.std(residual, ddof=1)) * math.sqrt(periods_per_year)
     )
-    return {
+    result: dict[str, object] = {
         "adjusted_r_squared": _number(adjusted),
         "observation_count": len(actual),
         "r_squared": _number(r2),
         "rmse": _number(float(np.sqrt(np.mean(residual**2)))),
         "tracking_error_annualized": _number(tracking_error),
     }
+    return result
 
 
 def _annualize_coefficient_standard_error(
@@ -1361,7 +1454,7 @@ def _dynamic_model_result(
         {"date": day, "exposure_change_l2": _number(value)}
         for value, day in sorted(change_rows, key=lambda item: (-item[0], item[1]))[:5]
     ]
-    return {
+    result: dict[str, object] = {
         "alpha": {
             "annualized_standard_error": None,
             "confidence_status": "UNAVAILABLE_DYNAMIC_PATH_INFERENCE",
@@ -1442,6 +1535,7 @@ def _dynamic_model_result(
         "smoothness_sensitivity": sensitivity,
         "status": "AVAILABLE",
     }
+    return _apply_model_quality_gate(result, holdout_r_squared)
 
 
 def _unavailable_result(
@@ -1460,6 +1554,7 @@ def _unavailable_result(
             "periodic_intercept": None,
         },
         "constraint": model.constraint,
+        "computational_status": "UNAVAILABLE",
         "contributions": [],
         "cost_coverage": model.cost_coverage,
         "coverage": dict(coverage),
@@ -1470,6 +1565,12 @@ def _unavailable_result(
         "factor_ids": list(model.factor_ids),
         "method_label": METHOD_LABEL,
         "model_id": model.model_id,
+        "model_quality": {
+            "decision_rule": "SEALED_HOLDOUT_PREDICTED_R2_GT_ZERO",
+            "decision_status": "UNAVAILABLE",
+            "gate_reason": status,
+            "holdout_predicted_r_squared": None,
+        },
         "ridge_sensitivity": [],
         "selected_for_series": False,
         "selected_ridge": None,
@@ -1488,6 +1589,9 @@ def _model_result(
     empty_coverage: dict[str, object] = {
         "aligned_observations": 0,
         "alignment_ratio": "0",
+        "canonical_live_series_sha256": (
+            _canonical_live_series_sha256(target_rows) if target_rows else None
+        ),
         "factor_missing_target_dates": 0,
         "factor_missing_weekdays": 0,
         "factor_missing_weekends": 0,
@@ -1546,6 +1650,7 @@ def _model_result(
     coverage = {
         "aligned_observations": len(aligned),
         "alignment_ratio": _number(len(aligned) / len(target_rows)),
+        "canonical_live_series_sha256": _canonical_live_series_sha256(target_rows),
         "factor_missing_target_dates": len(missing_dates),
         "factor_missing_weekdays": sum(day.weekday() < 5 for day in missing_dates),
         "factor_missing_weekends": sum(day.weekday() >= 5 for day in missing_dates),
@@ -1774,7 +1879,7 @@ def _model_result(
         None if standard_errors is None else float(standard_errors[0]),
         model.periods_per_year,
     )
-    return {
+    result: dict[str, object] = {
         "alpha": {
             "annualized_standard_error": _number(alpha_standard_error),
             "confidence_status": confidence_status,
@@ -1823,6 +1928,7 @@ def _model_result(
         "series_id": model.series_id,
         "status": "AVAILABLE",
     }
+    return _apply_model_quality_gate(result, holdout_r2)
 
 
 def _select_models(
@@ -1831,9 +1937,12 @@ def _select_models(
     definitions = {item.model_id: item for item in models}
     selections: list[dict[str, object]] = []
     for series_id in sorted({item.series_id for item in models}):
-        available: list[tuple[dict[str, object], float]] = []
+        computable: list[tuple[dict[str, object], float]] = []
         for result in results:
-            if result["series_id"] != series_id or result["status"] != "AVAILABLE":
+            if (
+                result["series_id"] != series_id
+                or result.get("computational_status") != "AVAILABLE"
+            ):
                 continue
             selected_ridge = result["selected_ridge"]
             sensitivity = cast(list[dict[str, Any]], result["ridge_sensitivity"])
@@ -1846,8 +1955,8 @@ def _select_models(
                 None,
             )
             if selected_cv is not None:
-                available.append((result, float(selected_cv)))
-        if not available:
+                computable.append((result, float(selected_cv)))
+        if not computable:
             selections.append(
                 {
                     "model_id": None,
@@ -1856,10 +1965,10 @@ def _select_models(
                 }
             )
             continue
-        best_score = max(item[1] for item in available)
+        best_score = max(item[1] for item in computable)
         eligible = [
             item
-            for item in available
+            for item in computable
             if best_score - item[1]
             <= definitions[cast(str, item[0]["model_id"])].parsimony_tolerance
         ]
@@ -1873,6 +1982,9 @@ def _select_models(
         selected["selected_for_series"] = True
         diagnostics = cast(dict[str, Any], selected["diagnostics"])
         holdout = cast(dict[str, Any], diagnostics["holdout"])
+        decision_status = cast(dict[str, object], selected["model_quality"])[
+            "decision_status"
+        ]
         selections.append(
             {
                 "factor_count": len(cast(list[object], selected["factor_ids"])),
@@ -1880,7 +1992,11 @@ def _select_models(
                 "model_id": selected["model_id"],
                 "selection_cv_predicted_r_squared": _number(selection_score),
                 "series_id": series_id,
-                "status": "SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL",
+                "status": (
+                    "SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL"
+                    if decision_status == "PM_VALID"
+                    else "SELECTED_DIAGNOSTIC_ONLY_TRAIN_CV_MODEL"
+                ),
             }
         )
     return selections

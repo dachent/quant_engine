@@ -11,12 +11,14 @@ from quant_engine.core import (
     CompanionInput,
     CoverageClaim,
     CoverageStatus,
+    CurrentPointer,
     GateEvidence,
     GenerationManifest,
     ReleaseCommitError,
     ReleaseConflictError,
     ReleaseManifest,
     ReleaseState,
+    ReleaseValidationError,
     SourceArtifact,
     VerificationStatus,
     commit_release,
@@ -27,6 +29,7 @@ from quant_engine.core import (
     recover_release,
     stage_generation,
 )
+from quant_engine.core.release import read_current_release
 
 
 AS_OF = date(2026, 8, 2)
@@ -683,3 +686,196 @@ def test_recovery_failed_preserves_conflict_and_can_resume(
     assert recovered.state is ReleaseState.ROLLED_BACK
     assert read_current(root).generation_id == previous.generation_id
     assert launcher.read_bytes() == b"previous launcher\n"
+
+
+def test_committed_release_publishes_one_validated_graph_authority(
+    tmp_path: Path,
+) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    _, first_proposed = _stage_pair(first_root, "first-authority")
+    _, second_proposed = _stage_pair(second_root, "second-authority")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"first": first_root, "second": second_root},
+        proposed_generations={
+            "first": first_proposed.generation_id,
+            "second": second_proposed.generation_id,
+        },
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"first": first_root, "second": second_root},
+    )
+
+    assert (coordination / "CURRENT_RELEASE.json").is_file()
+    assert (
+        read_current_release(coordination, {"first": first_root, "second": second_root})
+        == manifest
+    )
+
+
+def test_release_reader_fails_closed_on_mixed_root_graph(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "accepted-authority")
+    unexpected = _manifest("mixed-unexpected")
+    stage_generation(root, unexpected)
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+    )
+    publish_generation(root, unexpected.generation_id)
+
+    with pytest.raises(ReleaseConflictError, match="committed pointer graph differs"):
+        read_current_release(coordination, {"root": root})
+
+
+def test_repeat_commit_revalidates_terminal_graph(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "repeat-validation")
+    coordination = tmp_path / "coordination"
+    launcher = root / "index.html"
+    launcher.write_bytes(b"previous\n")
+    accepted = b"accepted\n"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+        companions=(CompanionInput("launcher", "root", "index.html", accepted),),
+    )
+    commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+        companion_contents={"launcher": accepted},
+    )
+    launcher.write_bytes(b"tampered\n")
+
+    with pytest.raises(ReleaseConflictError, match="committed companion differs"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            companion_contents={"launcher": accepted},
+        )
+
+
+def test_release_rejects_root_aliases(tmp_path: Path) -> None:
+    root = tmp_path / "same-root"
+    _, proposed = _stage_pair(root, "alias")
+
+    with pytest.raises(ReleaseValidationError, match="alias the same location"):
+        prepare_release(
+            coordination_root=tmp_path / "coordination",
+            roots={"first": root, "second": root / "."},
+            proposed_generations={
+                "first": proposed.generation_id,
+                "second": proposed.generation_id,
+            },
+            code_commit=COMMIT,
+            created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+            gates=_gate(),
+        )
+
+
+def test_failure_after_authority_switch_restores_prior_release_authority(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    _, first_generation = _stage_pair(root, "first-release")
+    coordination = tmp_path / "coordination"
+    first = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": first_generation.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    commit_release(
+        coordination_root=coordination,
+        release_id=first.release_id,
+        roots={"root": root},
+    )
+    second_generation = _manifest("second-release")
+    stage_generation(root, second_generation)
+    second = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": second_generation.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 11, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    def fail(step: str, _item: str) -> None:
+        if step == "after-authority":
+            raise OSError("synthetic post-authority failure")
+
+    with pytest.raises(ReleaseCommitError):
+        commit_release(
+            coordination_root=coordination,
+            release_id=second.release_id,
+            roots={"root": root},
+            fault_hook=fail,
+        )
+
+    assert read_current(root).generation_id == first_generation.generation_id
+    assert read_current_release(coordination, {"root": root}) == first
+
+
+def test_rollback_restores_exact_legacy_pointer_bytes(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    previous = _manifest("legacy-previous")
+    proposed = _manifest("legacy-proposed")
+    stage_generation(root, previous)
+    stage_generation(root, proposed)
+    legacy = CurrentPointer(
+        generation_id=previous.generation_id,
+        manifest_sha256=hashlib.sha256(previous.to_json_bytes()).hexdigest(),
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "CURRENT.json").write_bytes(legacy.to_json_bytes())
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    def fail(step: str, _item: str) -> None:
+        if step == "after-target":
+            raise OSError("synthetic rollback")
+
+    with pytest.raises(ReleaseCommitError):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            fault_hook=fail,
+        )
+
+    assert (root / "CURRENT.json").read_bytes() == legacy.to_json_bytes()
+    assert read_current(root) == legacy

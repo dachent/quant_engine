@@ -720,3 +720,296 @@ def test_provider_live_nav_is_available_without_becoming_account_live() -> None:
     assert rows[0]["account_live_status"] == "UNAVAILABLE"
     assert rows[0]["account_live_cumulative_return"] is None
     assert rows[0]["hwm_max_drawdown"] == "-0.3"
+
+
+def test_account_live_summary_uses_one_hash_bound_canonical_return_path() -> None:
+    catalog = {
+        "allocations": [
+            {
+                "current_value": _amount("100"),
+                "scope": "SYSTEMATIC",
+                "strategy_id": "strategy-1",
+                "systematic_weight": "1",
+            }
+        ],
+        "costs": [],
+        "implementation_gaps": [],
+        "source_artifacts": [
+            {
+                "as_of_date": "2026-01-03",
+                "sha256": "f" * 64,
+                "source_key": "strategy-live-metrics",
+            }
+        ],
+        "strategies": [
+            {
+                "economic_family": "synthetic",
+                "name": "Synthetic Strategy",
+                "strategy_id": "strategy-1",
+                "version_ref": None,
+            }
+        ],
+        "strategy_live_metrics": [
+            {
+                "metrics": {
+                    "cagr": "9.9",
+                    "cumulative_return": "8.8",
+                    "first_date": "2024-01-01",
+                    "last_date": "2024-12-31",
+                    "max_drawdown": "-0.9",
+                    "return_observations": 99,
+                },
+                "strategy_id": "strategy-1",
+            }
+        ],
+        "strategy_nav_coverage": [],
+        "strategy_provider_evidence": [
+            {
+                "account": {
+                    "cumulative_return": "0.1000000000000000000000001",
+                    "current_drawdown": "0",
+                    "generation_as_of_date": "2026-01-02",
+                    "generation_id": "a" * 64,
+                    "maximum_drawdown": "0",
+                    "observed_end": "2026-01-01",
+                    "observed_start": "2025-01-01",
+                    "provider_id": "synthetic-broker",
+                    "return_observations": 2,
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_as_of_date": "2026-01-02",
+                "generation_id": "a" * 64,
+                "provider_id": "synthetic-broker",
+                "strategy_id": "strategy-1",
+            }
+        ],
+        "strategy_returns": [
+            {
+                "date": "2025-01-01",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic-broker",
+                "return": "0.000",
+                "strategy_id": "strategy-1",
+            },
+            {
+                "date": "2026-01-01",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic-broker",
+                "return": "0.1000",
+                "strategy_id": "strategy-1",
+            },
+        ],
+    }
+
+    rows = reporter._strategies(catalog, [])
+
+    expected_series = [
+        {"date": "2025-01-01", "return": "0"},
+        {"date": "2026-01-01", "return": "0.1"},
+    ]
+    row = rows[0]
+    assert row["account_live_return_authority"] == "CANONICAL_STRATEGY_RETURNS"
+    assert row["account_live_cumulative_return"] == "0.1"
+    assert row["account_live_cagr"] == "0.1"
+    assert row["account_live_cagr_status"] == ("AVAILABLE_DERIVED_SAME_CANONICAL_PATH")
+    assert row["account_live_max_drawdown"] == "0"
+    assert row["account_live_observed_start"] == "2025-01-01"
+    assert row["account_live_observed_end"] == "2026-01-01"
+    assert row["account_live_return_observations"] == 2
+    assert row["account_live_source_generation_as_of_date"] == "2026-01-02"
+    assert (
+        row["account_live_return_series_sha256"]
+        == hashlib.sha256(
+            reporter._canonical_json_array_bytes(expected_series)
+        ).hexdigest()
+    )
+    assert row["account_live_return_series_schema"] == "ordered-date-return/1"
+    assert row["account_live_source_sha256"] is None
+
+
+def test_account_live_evidence_rejects_return_series_vintage_mismatch() -> None:
+    catalog = {
+        "strategy_provider_evidence": [
+            {
+                "account": {
+                    "cumulative_return": "0.1",
+                    "current_drawdown": "0",
+                    "maximum_drawdown": "0",
+                    "observed_end": "2026-01-01",
+                    "observed_start": "2025-01-01",
+                    "provider_id": "synthetic",
+                    "return_observations": 3,
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "strategy_id": "strategy-1",
+            }
+        ],
+        "strategy_returns": [
+            {
+                "date": "2025-01-01",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0",
+                "strategy_id": "strategy-1",
+            },
+            {
+                "date": "2026-01-01",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.1",
+                "strategy_id": "strategy-1",
+            },
+        ],
+    }
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="return_observations differs from canonical return series",
+    ):
+        reporter._strategy_provider_evidence(catalog)
+
+
+def test_legacy_account_metrics_remain_one_explicit_audit_vintage() -> None:
+    catalog = {
+        "allocations": [
+            {
+                "current_value": _amount("100"),
+                "scope": "SYSTEMATIC",
+                "strategy_id": "strategy-1",
+                "systematic_weight": "1",
+            }
+        ],
+        "costs": [],
+        "implementation_gaps": [],
+        "source_artifacts": [
+            {
+                "as_of_date": "2025-12-31",
+                "sha256": "c" * 64,
+                "source_key": "strategy-live-metrics",
+            }
+        ],
+        "strategies": [
+            {
+                "economic_family": "synthetic",
+                "name": "Synthetic Strategy",
+                "strategy_id": "strategy-1",
+                "version_ref": None,
+            }
+        ],
+        "strategy_live_metrics": [
+            {
+                "metrics": {
+                    "cagr": "0.11",
+                    "cumulative_return": "0.1",
+                    "first_date": "2025-01-01",
+                    "last_date": "2025-12-31",
+                    "max_drawdown": "-0.2",
+                    "return_observations": 252,
+                },
+                "strategy_id": "strategy-1",
+            }
+        ],
+        "strategy_nav_coverage": [],
+        "strategy_provider_evidence": [],
+        "strategy_returns": [],
+    }
+
+    row = reporter._strategies(catalog, [])[0]
+
+    assert row["account_live_return_authority"] == "AUDIT_STRATEGY_LIVE_METRICS"
+    assert row["account_live_cagr"] == "0.11"
+    assert row["account_live_cumulative_return"] == "0.1"
+    assert row["account_live_max_drawdown"] == "-0.2"
+    assert row["account_live_observed_start"] == "2025-01-01"
+    assert row["account_live_observed_end"] == "2025-12-31"
+    assert row["account_live_source_generation_as_of_date"] == "2025-12-31"
+    assert row["account_live_source_sha256"] == "c" * 64
+    assert row["account_live_return_series_sha256"] is None
+
+
+def test_report_preserves_every_hash_bound_provider_reconciliation_exception(
+    tmp_path: Path,
+) -> None:
+    provider_generation = "e" * 64
+    provider_catalog = {
+        "reconciliation_checks": [
+            {"check_id": "provider-pass", "status": "PASS"},
+            {
+                "authority_effect": "ACCOUNT_PATH_RETAINED",
+                "check_id": "provider-exception-a",
+                "exception_date_count": 2,
+                "maximum_absolute_difference": "0.25",
+                "status": "EXCEPTION",
+                "strategy_id": "strategy-1",
+                "tolerance": "0.000001",
+            },
+            {
+                "authority_effect": "ACCOUNT_PATH_RETAINED",
+                "check_id": "provider-exception-b",
+                "exception_date_count": 1,
+                "maximum_absolute_difference": "0.5",
+                "status": "EXCEPTION",
+                "strategy_id": "strategy-2",
+                "tolerance": "0.000001",
+            },
+        ]
+    }
+    provider_bytes = canonical_json_bytes(provider_catalog)
+    provider_sha256 = hashlib.sha256(provider_bytes).hexdigest()
+    provider_dir = tmp_path / "provider-ledger" / "generations" / provider_generation
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "provider-ledger.json").write_bytes(provider_bytes)
+    catalog = _baseline_catalog()
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": "2026-01-03",
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "1",
+            "sha256": provider_sha256,
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(baseline_root)
+
+    rows = [
+        item
+        for item in report["reconciliation_checks"]
+        if item["source_layer"] == "PROVIDER_LEDGER"
+    ]
+    assert [item["check_id"] for item in rows] == [
+        "provider-exception-a",
+        "provider-exception-b",
+    ]
+    assert all(item["status"] == "EXCEPTION" for item in rows)
+    assert all(item["source_generation_id"] == provider_generation for item in rows)
+    assert all(item["source_catalog_sha256"] == provider_sha256 for item in rows)
+    assert (
+        json.loads(rows[0]["details_json"])
+        == provider_catalog["reconciliation_checks"][1]
+    )
+
+
+def test_report_fails_closed_when_provider_reconciliation_source_is_missing(
+    tmp_path: Path,
+) -> None:
+    catalog = _baseline_catalog()
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": "2026-01-03",
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "1",
+            "sha256": "d" * 64,
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="hash-bound provider-ledger catalog is missing or ambiguous",
+    ):
+        reporter.build_report_data(baseline_root)

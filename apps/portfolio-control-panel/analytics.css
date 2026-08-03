@@ -138,6 +138,11 @@ th {
   border-style: dashed;
 }
 
+.strategy-chip.is-diagnostic {
+  border-color: var(--warning);
+  border-style: dotted;
+}
+
 .analytics-detail-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
