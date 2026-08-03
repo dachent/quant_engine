@@ -9,7 +9,7 @@
   },
   "source": "strategy-allocation-audit/model_harness_baseline/control-panel-qa/portfolio_control_panel",
   "source_files": {
-    "app.js": "3f7fb9cceb76e7bcfd03afab0f5815711a67f8815921af2afad03b70f4b9ffb9",
+    "app.js": "15e406b2b9df40f5e8b2e6205eaf18669dfd5119a73f796353039ed7f3ab929c",
     "control_panel_validation.json": "a139d0dc0bba89b9eca36bc35b2ce3b5649241676ea7164822e10c635d5de6c2",
     "index.html": "09e5b09bbf87e61eb41ece47c2fa48c6ee563a15cb286e2c9f8bb6030d54feb6",
     "styles.css": "e56f6e072bd10b4e19ce98ce5e792a10bc5bcc7c8c0a54fbc8c9ded1e2edd8b2"
