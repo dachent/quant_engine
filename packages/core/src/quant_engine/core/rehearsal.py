@@ -280,17 +280,22 @@ def rehearse_release_boundaries(
                     target.previous_pointer.generation_id,
                     rehearsal_root,
                 )
-                # Preserve the predecessor pointer contract exactly.  Calling
-                # publish_generation here would silently upgrade a legacy v1
-                # predecessor to v2 and make a valid schema-transition release
-                # look unrecoverable even though release recovery restores the
-                # recorded predecessor bytes.
-                (rehearsal_root / "CURRENT.json").write_bytes(
-                    target.previous_pointer.to_json_bytes()
-                )
-                if read_current(rehearsal_root) != target.previous_pointer:
-                    raise RehearsalError(
-                        "rehearsal predecessor pointer could not be reproduced"
+                if target.previous_pointer.pointer_schema_version == 1:
+                    # Preserve a legacy predecessor contract exactly. Calling
+                    # publish_generation here would silently upgrade v1 to v2.
+                    (rehearsal_root / "CURRENT.json").write_bytes(
+                        target.previous_pointer.to_json_bytes()
+                    )
+                    if read_current(rehearsal_root) != target.previous_pointer:
+                        raise RehearsalError(
+                            "legacy rehearsal predecessor could not be reproduced"
+                        )
+                else:
+                    # Rehearsal roots intentionally contain only compact manifests.
+                    # Publish a locally valid v2 pointer and let prepare_release
+                    # record that exact scenario predecessor for rollback checks.
+                    publish_generation(
+                        rehearsal_root, target.previous_pointer.generation_id
                     )
         for companion in manifest.companions:
             if preserve_companion_predecessors:
@@ -406,7 +411,7 @@ def rehearse_release_boundaries(
         _, journal = read_release(scenario / "c", prepared.release_id)
         if journal.state is not ReleaseState.ROLLED_BACK:
             raise RehearsalError("failed release did not roll back")
-        for target in manifest.targets:
+        for target in prepared.targets:
             pointer_path = roots[target.root_id] / "CURRENT.json"
             if target.previous_pointer is None:
                 if pointer_path.exists():
