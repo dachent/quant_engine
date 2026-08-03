@@ -34,7 +34,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
 
-BUILDER_VERSION: Final = "1.2.1"
+BUILDER_VERSION: Final = "1.3.0"
 TRADING_OBSERVATION_HORIZONS: Final = (5, 21, 22, 63, 126, 130, 252, 260)
 RETURN_HEADERS: Final = ("series_id", "date", "return", "evidence_layer")
 RETURN_HEADERS_V2: Final = (*RETURN_HEADERS, "strategy_version")
