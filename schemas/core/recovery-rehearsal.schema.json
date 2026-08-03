@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-engine.local/schemas/core/recovery-rehearsal.schema.json",
+  "title": "quant_engine recovery rehearsal evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "boundary_rehearsal", "dated_rollforwards", "release_id",
+    "schema_version", "source_release_spec_sha256", "status"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "release_id": {"$ref": "#/$defs/sha256"},
+    "source_release_spec_sha256": {"$ref": "#/$defs/sha256"},
+    "status": {"const": "PASS"},
+    "boundary_rehearsal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boundaries", "boundary_count", "source_state_sha256",
+        "source_unchanged", "status"
+      ],
+      "properties": {
+        "boundaries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["failure_item", "failure_step", "journal_state", "restored"],
+            "properties": {
+              "failure_item": {"type": "string", "minLength": 1},
+              "failure_step": {
+                "enum": ["before-target", "after-target", "before-companion", "after-companion"]
+              },
+              "journal_state": {"const": "ROLLED_BACK"},
+              "restored": {"const": true}
+            }
+          }
+        },
+        "boundary_count": {"type": "integer", "minimum": 1},
+        "source_state_sha256": {"$ref": "#/$defs/sha256"},
+        "source_unchanged": {"const": true},
+        "status": {"const": "PASS"}
+      }
+    },
+    "dated_rollforwards": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "append_only_correction", "as_of_dates", "correction_release_id",
+        "predecessors_unchanged", "release_one_id", "release_two_id",
+        "restore_release_id", "restored_release_two", "status"
+      ],
+      "properties": {
+        "append_only_correction": {"const": true},
+        "as_of_dates": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["correction", "release_one", "release_two"],
+          "properties": {
+            "correction": {"type": "string", "format": "date"},
+            "release_one": {"type": "string", "format": "date"},
+            "release_two": {"type": "string", "format": "date"}
+          }
+        },
+        "correction_release_id": {"$ref": "#/$defs/sha256"},
+        "predecessors_unchanged": {"const": true},
+        "release_one_id": {"$ref": "#/$defs/sha256"},
+        "release_two_id": {"$ref": "#/$defs/sha256"},
+        "restore_release_id": {"$ref": "#/$defs/sha256"},
+        "restored_release_two": {"const": true},
+        "status": {"const": "PASS"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
