@@ -724,11 +724,15 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
         )
     for item in _objects(catalog.get("provider_coverage", []), "provider_coverage"):
         claim = _object(item.get("coverage"), "provider coverage")
+        limitations = [
+            *claim.get("known_gaps", []),
+            *claim.get("out_of_boundary", []),
+        ]
         rows.append(
             {
                 "category": "PROVIDER_COVERAGE",
                 "item": item.get("provider_id"),
-                "known_gap": "; ".join(str(gap) for gap in claim.get("known_gaps", [])),
+                "known_gap": "; ".join(str(gap) for gap in limitations),
                 "status": claim.get("status"),
                 "value": item.get("qualification"),
             }
