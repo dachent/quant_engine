@@ -38,6 +38,37 @@ sys.modules[SPEC.name] = reporter
 SPEC.loader.exec_module(reporter)
 
 
+def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> None:
+    rows = reporter._coverage(
+        {
+            "calendar_coverage": [],
+            "fact_coverage": [],
+            "provider_coverage": [
+                {
+                    "coverage": {
+                        "known_gaps": ["missing activity type"],
+                        "out_of_boundary": ["checking account excluded"],
+                        "status": "PARTIAL",
+                    },
+                    "provider_id": "synthetic",
+                    "qualification": "ACCOUNT_LIVE",
+                }
+            ],
+            "reconciliation_exceptions": [],
+        }
+    )
+
+    assert rows == [
+        {
+            "category": "PROVIDER_COVERAGE",
+            "item": "synthetic",
+            "known_gap": "missing activity type; checking account excluded",
+            "status": "PARTIAL",
+            "value": "ACCOUNT_LIVE",
+        }
+    ]
+
+
 def _amount(value: str) -> dict[str, str]:
     return {"currency": "USD", "status": "AVAILABLE", "value": value}
 
