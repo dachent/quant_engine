@@ -1492,6 +1492,7 @@ def _panel_data(
         for row in strategies
         if row.get("hwm_source") == "PORTFOLIO_REPORT"
         and row.get("nav_status") == "AVAILABLE"
+        and row.get("hwm_freshness_status") == "ACCEPTED"
         and row.get("nav_evidence_layer") in {"ACCOUNT_LIVE", "PROVIDER_LIVE"}
     )
     coverage = _reconcile_hwm_coverage(coverage, hwm_summary)
