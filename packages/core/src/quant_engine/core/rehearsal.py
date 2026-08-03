@@ -299,7 +299,10 @@ def rehearse_release_boundaries(
         )
 
     # Prove rollback can itself be interrupted after an effect and resumed.
-    rollback_scenario = output_root / "rollback-interruption"
+    # Keep the scenario directory deliberately short.  Generation identifiers are
+    # already 64 characters, and a descriptive directory name can push otherwise
+    # valid rehearsal paths beyond the legacy Windows MAX_PATH boundary.
+    rollback_scenario = output_root / "rb"
     index += 1
     roots, prepared = prepare_scenario(rollback_scenario)
     first_target = manifest.targets[0].root_id
