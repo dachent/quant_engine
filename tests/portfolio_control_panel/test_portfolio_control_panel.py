@@ -1677,7 +1677,7 @@ def test_hwm_coverage_names_freshness_block_without_denigrating_nav() -> None:
             {
                 "blocks_current_consumers": True,
                 "fact_type": "strategy-returns",
-                "state": "STALE",
+                "status": "STALE",
                 "subject_id": "echo-trade",
             }
         ],
