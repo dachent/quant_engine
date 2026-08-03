@@ -80,6 +80,12 @@ from quant_engine.core.release import (
     read_release,
     rollback_release,
 )
+from quant_engine.core.rehearsal import (
+    RehearsalError,
+    rehearse_dated_rollforwards,
+    rehearse_release_boundaries,
+    run_recovery_rehearsal,
+)
 
 __version__ = "0.1.0"
 
@@ -143,6 +149,7 @@ __all__ = [
     "PipelineUnknownOutcomeError",
     "PipelineValidationError",
     "ReceiptState",
+    "RehearsalError",
     "execute_pipeline",
     "inventory_generation",
     "load_pipeline_spec",
@@ -151,6 +158,9 @@ __all__ = [
     "read_current",
     "read_generation",
     "read_release",
+    "rehearse_dated_rollforwards",
+    "rehearse_release_boundaries",
     "rollback_release",
+    "run_recovery_rehearsal",
     "stage_generation",
 ]
