@@ -28,6 +28,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import decimal_text
 
 
 BUILDER_VERSION: Final = "0.1.0"
@@ -203,6 +204,18 @@ def _weekly_values(observations: Iterable[tuple[date, Decimal]]) -> dict[str, st
     return _weekly_series(rows, as_of=as_of)[0]
 
 
+def _canonical_series_sha256(observations: Iterable[tuple[date, Decimal]]) -> str:
+    payload = [
+        {"date": observed_date.isoformat(), "return": decimal_text(observed_return)}
+        for observed_date, observed_return in sorted(observations)
+    ]
+    encoded = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _coverage(values: Mapping[str, str]) -> dict[str, Any]:
     if not values:
         return {
@@ -354,6 +367,7 @@ def _strategy_rows(
                 "backtest_daily_observations": len(backtest)
                 if mode != "LIVE_ONLY"
                 else 0,
+                "canonical_live_series_sha256": _canonical_series_sha256(live),
                 "live_daily_observations": len(live),
                 "strategy_version": version,
             }

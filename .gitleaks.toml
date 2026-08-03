@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Vendored upstream dependency source and deterministic test vectors"
+paths = ['''^\.vendor/''']

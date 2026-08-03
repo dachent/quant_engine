@@ -23,7 +23,10 @@ The on-disk contract is:
 `publish_generation` atomically replaces `CURRENT.json` only for a verified
 generation whose coverage is `COMPLETE_WITHIN_DECLARED_BOUNDARY`. A partial,
 failed, pending, tampered, or missing generation fails closed and cannot change
-the prior pointer. `read_current` binds the pointer to the exact manifest hash.
+the prior pointer. Pointer schema v2 binds both the exact manifest and the full
+regular-file inventory (portable path, SHA-256, and byte count) of the accepted
+generation. `read_current` revalidates both before a consumer can use it;
+schema-v1 pointers remain readable as legacy manifest-only evidence.
 
 Schema-v1 generation manifests remain immutable. Authority, freshness, and
 revision metadata is attached through a hash-bound `GenerationEvidence`
@@ -47,4 +50,12 @@ boundary documented in [coordinated release publication](../../docs/release-publ
 Preparation records an immutable release identity and predecessor graph without
 changing authority. Commit advances every named pointer and companion under one
 lock; a failure restores the recorded predecessor graph and leaves a durable
-recovery journal.
+recovery journal. The final commit point is a single `CURRENT_RELEASE.json`
+authority pointer. `read_current_release` validates that pointer, its manifest,
+the committed journal, every generation inventory, and every companion before
+returning a coherent graph; it fails closed while roots are mixed.
+
+Pipeline command receipts retain credential-safe argv fingerprints, cwd,
+return code, stdout/stderr hashes, interpreter/tool identity, and pre/post hashes
+for every declared read and write. Completed commands are not silently reused
+when a declared output has drifted.

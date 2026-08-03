@@ -20,7 +20,7 @@
   function toneForStatus(status = "") {
     const text = String(status).toUpperCase();
     if (/FAIL|UNAVAILABLE|UNMAPPED|DO_NOT|BLOCK|NONE|NOT_AUTOMATABLE|INCOMPLETE/.test(text)) return "danger";
-    if (/PARTIAL|INFERRED|UNKNOWN|CONDITIONAL|FROZEN/.test(text)) return "warning";
+    if (/PARTIAL|INFERRED|UNKNOWN|CONDITIONAL|FROZEN|DIAGNOSTIC/.test(text)) return "warning";
     if (/PASS|AVAILABLE|COMPLETE|PUBLISHED|VERIFIED/.test(text)) return "positive";
     if (/RESERVE|ZERO RISK|EXCLUDED_DE_MINIMIS/.test(text)) return "reserve";
     return "neutral";
@@ -32,6 +32,10 @@
     UNAVAILABLE_MAPPING_MISSING: "Implementation mapping not recorded",
     UNAVAILABLE_INCOMPATIBLE_EVIDENCE_LAYERS: "Evidence layers are not comparable",
     SELECTED_PARSIMONIOUS_TRAIN_CV_MODEL: "Selected with training-only time-series CV",
+    SELECTED_DIAGNOSTIC_ONLY_TRAIN_CV_MODEL: "Computed with training-only CV; PM use blocked by sealed holdout",
+    DIAGNOSTIC_ONLY: "Diagnostic only",
+    NON_POSITIVE_SEALED_HOLDOUT_PREDICTED_R2: "Non-positive sealed-holdout predicted R²",
+    UNAVAILABLE_SEALED_HOLDOUT_PREDICTED_R2: "Sealed-holdout predicted R² unavailable",
     NO_DIVERSIFICATION_CREDIT_MISSING_OBSERVATION: "No diversification credit: observations missing",
     NOT_AUTOMATABLE_MISSING_COMPLETE_DAILY_NAV: "Not automatable: systematic daily NAV is incomplete",
     NOT_AUTOMATABLE_STALE_OR_MISSING_GOVERNED_HWM_DAILY_NAV: "Not automatable: governed HWM daily NAV is stale or incomplete",
@@ -267,6 +271,12 @@
     $$("[data-factor-strategy]").forEach((button) => button.classList.toggle("is-active", button.dataset.factorStrategy === selectedFactorSeries));
     if (row.status !== "AVAILABLE") {
       const aligned = row.coverage?.aligned_observations ?? 0;
+      if (row.status === "DIAGNOSTIC_ONLY") {
+        const holdout = row.diagnostics?.holdout;
+        const reason = row.model_quality?.gate_reason || row.unavailable_reasons.join(" · ");
+        $("#factor-detail").innerHTML = `<div class="callout callout-warning"><strong>${safe(row.series_id)} — COMPUTED, DIAGNOSTIC ONLY</strong><br>${safe(humanStatus(reason))}. Sealed-holdout predicted R²: ${pct(holdout?.predicted_r_squared)} across ${integer.format(holdout?.observation_count || 0)} observations. The fit and diagnostics are retained for forensic review, but no alpha or exposure is accepted for portfolio-manager conclusions.</div>`;
+        return;
+      }
       $("#factor-detail").innerHTML = `<div class="callout callout-danger"><strong>${safe(row.series_id)} — UNAVAILABLE FOR ${safe(analysis.lens_label || analysis.lens_id)}</strong><br>${safe(row.unavailable_reasons.join(" · "))}. Accepted aligned observations: ${integer.format(aligned)}. This is a decomposition-universe limitation; it does not imply that the strategy return series is unavailable. No exposure or alpha is inferred.</div>`;
       return;
     }
@@ -302,8 +312,8 @@
     const sourceSummary = sourceRows.map((item) => `${item.source_label || item.source_key} · through ${item.as_of_date}`).join(" · ") || "Single accepted historical proof generation";
     $("#factor-lens-boundary").innerHTML = `<strong>${safe(analysis.lens_label || analysis.lens_id)}</strong> · ${safe(analysis.return_basis || "CONFIGURED_RETURN_BASIS")}<br>${safe(sourceSummary)}. Lenses remain separate and are never concatenated.`;
     renderKpis("#factor-kpis", [
-      ["Pipeline-available models", `${analysis.available_count}/${analysis.series.length}`, "Accepted exact-date model evidence", "warning"],
-      ["Dynamic FLS models", String(analysis.dynamic_available_count), "Clean-room time-varying exposure paths"],
+      ["PM-usable models", `${analysis.available_count}/${analysis.series.length}`, "Positive sealed-holdout predicted R² required", analysis.available_count ? "positive" : "danger"],
+      ["Diagnostic only", String(analysis.diagnostic_count || 0), "Computed fits excluded from alpha and exposure conclusions", "warning"],
       ["Unavailable", String(analysis.unavailable_count), "No inferred exposures or alpha", "danger"],
       ["Methodology", analysis.methodology_version, `${analysis.method_label} · ${analysis.lens_label || analysis.lens_id}`, "warning"],
     ]);
@@ -312,10 +322,11 @@
       const holdout = row.diagnostics?.holdout;
       const strategy = strategyByName(row.series_id);
       const providerCoverage = strategy?.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(strategy))}</span>` : "";
-      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(row.status)}</td><td>${safe(row.source_label || "—")}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(row.exposures.map((item) => item.factor_id).join(" · ") || "—")}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")} · model input</span>${providerCoverage}</td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.unavailable_reasons.join(" · "))}</td></tr>`;
+      const decision = row.model_quality?.decision_status || row.status;
+      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(decision)}</td><td>${safe(row.source_label || "—")}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(row.exposures.map((item) => item.factor_id).join(" · ") || "—")}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")} · model input</span>${providerCoverage}</td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.model_quality?.gate_reason || row.unavailable_reasons.join(" · "))}</td></tr>`;
     });
-    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Status"], ["Source"], ["Estimator"], ["Factors"], ["Observed interval"], ["Aligned", "numeric"], ["Holdout R²", "numeric"], ["Net alpha", "numeric"], ["Gross / unavailable state"]], rows);
-    $("#factor-strategy-selector").innerHTML = analysis.series.map((row) => `<button type="button" class="strategy-chip ${row.status === "AVAILABLE" ? "" : "is-unavailable"}" data-factor-strategy="${safe(row.series_id)}">${safe(row.series_id)}</button>`).join("");
+    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Decision state"], ["Source"], ["Estimator"], ["Accepted factors"], ["Observed interval"], ["Aligned", "numeric"], ["Sealed holdout R²", "numeric"], ["Accepted net alpha", "numeric"], ["Alpha / gate state"]], rows);
+    $("#factor-strategy-selector").innerHTML = analysis.series.map((row) => `<button type="button" class="strategy-chip ${row.status === "AVAILABLE" ? "" : row.status === "DIAGNOSTIC_ONLY" ? "is-diagnostic" : "is-unavailable"}" data-factor-strategy="${safe(row.series_id)}">${safe(row.series_id)}</button>`).join("");
     $$("[data-factor-strategy]").forEach((button) => button.addEventListener("click", () => { selectedFactorSeries = button.dataset.factorStrategy; renderFactorDetail(); }));
     renderFactorDetail();
   }

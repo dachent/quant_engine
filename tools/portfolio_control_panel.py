@@ -805,6 +805,7 @@ def _factor_analysis(
 
     rows: list[dict[str, Any]] = []
     available_count = 0
+    diagnostic_count = 0
     dynamic_available_count = 0
     for selection in sorted(selections, key=lambda row: str(row.get("series_id"))):
         series_id = _text(selection.get("series_id"), "selection.series_id")
@@ -852,9 +853,82 @@ def _factor_analysis(
 
         model_id = _text(selected_model, "selection.model_id")
         model = model_index.get((series_id, model_id))
-        if model is None or model.get("status") != "AVAILABLE":
+        if model is None:
             raise ControlPanelValidationError(
-                f"selected factor model is not available: {series_id}"
+                f"selected factor model is absent: {series_id}"
+            )
+        computational_status = _text(
+            model.get("computational_status"), "model.computational_status"
+        )
+        model_quality = _object(model.get("model_quality"), "model.model_quality")
+        diagnostics = _object(model.get("diagnostics"), "model.diagnostics")
+        holdout = _object(diagnostics.get("holdout"), "model.diagnostics.holdout")
+        predicted_r_squared = holdout.get("predicted_r_squared")
+        predicted_value = (
+            None
+            if predicted_r_squared is None
+            else _finite_float(predicted_r_squared, "holdout.predicted_r_squared")
+        )
+        decision_status = _text(
+            model_quality.get("decision_status"), "model_quality.decision_status"
+        )
+        model_status = _text(model.get("status"), "model.status")
+        if computational_status != "AVAILABLE":
+            raise ControlPanelValidationError(
+                f"selected factor model was not computed: {series_id}"
+            )
+        if model_status == "DIAGNOSTIC_ONLY":
+            if decision_status != "DIAGNOSTIC_ONLY" or (
+                predicted_value is not None and predicted_value > 0
+            ):
+                raise ControlPanelValidationError(
+                    f"diagnostic model quality gate is inconsistent: {series_id}"
+                )
+            if selection.get("status") != "SELECTED_DIAGNOSTIC_ONLY_TRAIN_CV_MODEL":
+                raise ControlPanelValidationError(
+                    f"diagnostic selection state is inconsistent: {series_id}"
+                )
+            rows.append(
+                {
+                    "alpha": None,
+                    "contribution_summary": None,
+                    "cost_coverage": _text(
+                        model.get("cost_coverage"), "model.cost_coverage"
+                    ),
+                    "coverage": _object(model.get("coverage"), "model.coverage"),
+                    "diagnostics": diagnostics,
+                    "estimator": _text(
+                        model.get("estimator", "STATIC_RBSA"), "model.estimator"
+                    ),
+                    "evidence_layer": _text(
+                        model.get("evidence_layer"), "model.evidence_layer"
+                    ),
+                    "exposures": [],
+                    "model_id": model_id,
+                    "model_quality": model_quality,
+                    "selection_status": _text(
+                        selection.get("status"), "selection.status"
+                    ),
+                    "series_id": series_id,
+                    "status": "DIAGNOSTIC_ONLY",
+                    "unavailable_reasons": [
+                        _text(
+                            model_quality.get("gate_reason"),
+                            "model_quality.gate_reason",
+                        )
+                    ],
+                }
+            )
+            diagnostic_count += 1
+            continue
+        if (
+            model_status != "AVAILABLE"
+            or decision_status != "PM_VALID"
+            or predicted_value is None
+            or predicted_value <= 0
+        ):
+            raise ControlPanelValidationError(
+                f"selected factor model is not PM-valid: {series_id}"
             )
         contributions = _objects(model.get("contributions"), "model.contributions")
         if not contributions:
@@ -949,7 +1023,7 @@ def _factor_analysis(
                     model.get("cost_coverage"), "model.cost_coverage"
                 ),
                 "coverage": _object(model.get("coverage"), "model.coverage"),
-                "diagnostics": _object(model.get("diagnostics"), "model.diagnostics"),
+                "diagnostics": diagnostics,
                 "estimator": _text(
                     model.get("estimator", "STATIC_RBSA"), "model.estimator"
                 ),
@@ -958,6 +1032,7 @@ def _factor_analysis(
                 ),
                 "exposures": _objects(model.get("exposures"), "model.exposures"),
                 "model_id": model_id,
+                "model_quality": model_quality,
                 "selection_status": _text(selection.get("status"), "selection.status"),
                 "series_id": series_id,
                 "status": "AVAILABLE",
@@ -973,6 +1048,7 @@ def _factor_analysis(
         ),
         "as_of_date": _text(decomposition.get("as_of_date"), "factor.as_of_date"),
         "available_count": available_count,
+        "diagnostic_count": diagnostic_count,
         "dynamic_available_count": dynamic_available_count,
         "generation_id": identity["generation_id"],
         "method_label": method_label,
@@ -984,7 +1060,7 @@ def _factor_analysis(
         "series": rows,
         "source_sha256": identity["sha256"],
         "sources": _object(decomposition.get("sources"), "factor.sources"),
-        "unavailable_count": len(rows) - available_count,
+        "unavailable_count": sum(row["status"] == "UNAVAILABLE" for row in rows),
     }
 
 
@@ -1523,6 +1599,18 @@ def _canonical_strategy_series_contracts(
                 f"factor canonical-series coverage is absent: {series_id}"
             )
         factor_coverage = _object(factor["coverage"], f"factor coverage {series_id}")
+        factor_series_sha256 = _text(
+            factor_coverage.get("canonical_live_series_sha256"),
+            f"factor canonical series sha256 {series_id}",
+        )
+        dependence_series_sha256 = _text(
+            dependence.get("canonical_live_series_sha256"),
+            f"dependence canonical series sha256 {series_id}",
+        )
+        if factor_series_sha256 != dependence_series_sha256:
+            raise ControlPanelValidationError(
+                f"factor/dependence canonical-series value parity failed: {series_id}"
+            )
         factor_observed = {
             "observed_end": factor_coverage.get("target_observed_end"),
             "observed_start": factor_coverage.get("target_observed_start"),
@@ -1564,12 +1652,16 @@ def _canonical_strategy_series_contracts(
                 f"weekly canonical-series observations are absent: {series_id}"
             )
         weekly_observed = {
+            "canonical_live_series_sha256": mode_coverage.get(
+                "canonical_live_series_sha256"
+            ),
             "observed_end": max(str(value[2]) for value in weekly_bounds),
             "observed_start": min(str(value[1]) for value in weekly_bounds),
             "return_observations": mode_coverage.get("live_daily_observations"),
             "strategy_version": mode_coverage.get("strategy_version"),
         }
         if weekly_observed != {
+            "canonical_live_series_sha256": factor_series_sha256,
             "observed_end": expected["observed_end"],
             "observed_start": expected["observed_start"],
             "return_observations": expected["return_observations"],
@@ -1578,7 +1670,13 @@ def _canonical_strategy_series_contracts(
             raise ControlPanelValidationError(
                 f"weekly canonical-series parity failed: {series_id}"
             )
-        contracts.append({**expected, "strategy_version": strategy_version})
+        contracts.append(
+            {
+                **expected,
+                "canonical_live_series_sha256": factor_series_sha256,
+                "strategy_version": strategy_version,
+            }
+        )
     return contracts
 
 

@@ -6,6 +6,7 @@ import argparse
 import csv
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -30,6 +31,7 @@ from quant_engine.core import (
     publish_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import decimal_text
 
 
 BUILDER_VERSION: Final = "1.2.1"
@@ -69,6 +71,7 @@ class ReturnRow:
     value: float
     evidence_layer: str
     strategy_version: str | None = None
+    canonical_value: str | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +171,31 @@ def _finite(value: object, name: str) -> float:
     if not math.isfinite(accepted):
         raise CorrelationError(f"{name} must be finite")
     return accepted
+
+
+def _canonical_decimal(value: object, name: str) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise CorrelationError(f"{name} must be finite numeric text or a number")
+    try:
+        accepted = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise CorrelationError(f"{name} must be numeric") from exc
+    if not accepted.is_finite():
+        raise CorrelationError(f"{name} must be finite")
+    return decimal_text(accepted)
+
+
+def _canonical_series_sha256(rows: Sequence[ReturnRow]) -> str:
+    payload: list[dict[str, str]] = []
+    for row in sorted(rows, key=lambda item: item.day):
+        if row.canonical_value is None:
+            raise CorrelationError("canonical return value is unavailable")
+        payload.append({"date": row.day.isoformat(), "return": row.canonical_value})
+    encoded = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _bounded(
@@ -533,7 +561,9 @@ def _read_returns(
             day = _day(row["date"], f"return line {line_number} date")
             if day > as_of_date:
                 raise CorrelationError("return observation follows as_of_date")
-            value = _finite(row["return"], f"return line {line_number} return")
+            value_name = f"return line {line_number} return"
+            value = _finite(row["return"], value_name)
+            canonical_value = _canonical_decimal(row["return"], value_name)
             layer = _text(
                 row["evidence_layer"], f"return line {line_number} evidence_layer"
             )
@@ -561,7 +591,7 @@ def _read_returns(
                 )
             seen.add(key)
             grouped.setdefault(series_id, []).append(
-                ReturnRow(day, value, layer, strategy_version)
+                ReturnRow(day, value, layer, strategy_version, canonical_value)
             )
     if not grouped:
         raise CorrelationError("return source contains no observations")
@@ -589,6 +619,9 @@ def _mode_composition(
         "backtest_observations_used": len(backtest_rows_used),
         "evidence_mode": mode,
         "ignored_other_version_observations": ignored_version_observations,
+        "canonical_live_series_sha256": _canonical_series_sha256(live_rows)
+        if live_rows
+        else None,
         "live_evidence_layer": definition.live_evidence_layer,
         "live_inception": live_rows[0].day.isoformat() if live_rows else None,
         "live_observations": len(live_rows),
@@ -646,7 +679,13 @@ def _evidence_mode_returns(
             }
             continue
         live_derived = [
-            ReturnRow(item.day, item.value, "LIVE_ONLY", item.strategy_version)
+            ReturnRow(
+                item.day,
+                item.value,
+                "LIVE_ONLY",
+                item.strategy_version,
+                item.canonical_value,
+            )
             for item in live
         ]
         modes["LIVE_ONLY"][definition.series_id] = live_derived
@@ -674,6 +713,7 @@ def _evidence_mode_returns(
                     item.value,
                     "LIVE_PLUS_OPTIONAL_BACKTEST",
                     item.strategy_version,
+                    item.canonical_value,
                 )
                 for item in live
             ]
@@ -696,6 +736,7 @@ def _evidence_mode_returns(
                     item.value,
                     "LIVE_PLUS_OPTIONAL_BACKTEST",
                     item.strategy_version,
+                    item.canonical_value,
                 )
                 for item in eligible_backtest
             ),
@@ -705,6 +746,7 @@ def _evidence_mode_returns(
                     item.value,
                     "LIVE_PLUS_OPTIONAL_BACKTEST",
                     item.strategy_version,
+                    item.canonical_value,
                 )
                 for item in live
             ),

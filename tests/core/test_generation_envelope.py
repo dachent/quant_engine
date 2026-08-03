@@ -293,3 +293,34 @@ def test_current_pointer_rejects_manually_selected_partial_generation(
 
     with pytest.raises(PointerIntegrityError, match="not publication eligible"):
         read_current(tmp_path)
+
+
+def test_current_pointer_binds_complete_generation_file_inventory(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest()
+    manifest_path = stage_generation(tmp_path, manifest)
+    payload = manifest_path.parent / "normalized" / "portfolio.json"
+    payload.parent.mkdir()
+    payload.write_bytes(b'{"accepted":true}\n')
+
+    pointer = publish_generation(tmp_path, manifest.generation_id)
+
+    assert pointer.pointer_schema_version == 2
+    assert pointer.artifact_inventory_sha256 is not None
+    assert read_current(tmp_path) == pointer
+
+    payload.write_bytes(b'{"accepted":false}\n')
+    with pytest.raises(PointerIntegrityError, match="inventory hash differs"):
+        read_current(tmp_path)
+
+
+def test_current_pointer_detects_undeclared_file_addition(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest_path = stage_generation(tmp_path, manifest)
+    publish_generation(tmp_path, manifest.generation_id)
+
+    (manifest_path.parent / "late-file.txt").write_bytes(b"not accepted\n")
+
+    with pytest.raises(PointerIntegrityError, match="inventory hash differs"):
+        read_current(tmp_path)

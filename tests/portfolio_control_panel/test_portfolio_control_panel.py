@@ -233,6 +233,7 @@ def _decomposition() -> dict[str, object]:
         coverage = {
             "aligned_observations": 80 if model_id else 0,
             "alignment_ratio": "1" if model_id else "0",
+            "canonical_live_series_sha256": "9" * 64,
             "factor_missing_target_dates": 0,
             "factor_missing_weekdays": 0,
             "factor_missing_weekends": 0,
@@ -327,6 +328,7 @@ def _decomposition() -> dict[str, object]:
                         },
                     ],
                     "cost_coverage": "INCOMPLETE",
+                    "computational_status": "AVAILABLE",
                     "coverage": coverage,
                     "diagnostics": diagnostics,
                     "estimator": estimator,
@@ -342,6 +344,12 @@ def _decomposition() -> dict[str, object]:
                     ],
                     "factor_ids": ["SPY_XS"],
                     "model_id": model_id,
+                    "model_quality": {
+                        "decision_rule": "SEALED_HOLDOUT_PREDICTED_R2_GT_ZERO",
+                        "decision_status": "PM_VALID",
+                        "gate_reason": "POSITIVE_SEALED_HOLDOUT_PREDICTED_R2",
+                        "holdout_predicted_r_squared": "0.4",
+                    },
                     "series_id": series_id,
                     "status": "AVAILABLE",
                 }

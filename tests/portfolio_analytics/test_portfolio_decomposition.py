@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from datetime import date, timedelta
+from decimal import Decimal
 import hashlib
 import importlib.util
 import json
@@ -256,6 +257,13 @@ def _available(result: dict[str, object]) -> dict[str, Any]:
     return selected[0]
 
 
+def _selected(result: dict[str, object]) -> dict[str, Any]:
+    models = cast(list[dict[str, Any]], result["model_results"])
+    selected = [item for item in models if item["selected_for_series"]]
+    assert len(selected) == 1
+    return selected[0]
+
+
 def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -> None:
     source = tmp_path / "source"
     target_path, days = _write_sources(source)
@@ -406,7 +414,7 @@ def test_holdout_is_not_used_to_fit_or_select_model_or_ridge(tmp_path: Path) -> 
     changed, _manifest, _content = decomposition.build_decomposition(
         changed_spec, source
     )
-    changed_model = _available(changed)
+    changed_model = _selected(changed)
 
     assert changed_model["model_id"] == original_model["model_id"]
     assert changed_model["selected_ridge"] == original_model["selected_ridge"]
@@ -414,10 +422,27 @@ def test_holdout_is_not_used_to_fit_or_select_model_or_ridge(tmp_path: Path) -> 
         changed_model["diagnostics"]["training_design"]
         == (original_model["diagnostics"]["training_design"])
     )
-    assert [item["exposure"] for item in changed_model["exposures"]] == [
-        item["exposure"] for item in original_model["exposures"]
-    ]
+    assert changed_model["status"] == "DIAGNOSTIC_ONLY"
+    assert changed_model["computational_status"] == "AVAILABLE"
+    assert changed_model["model_quality"] == {
+        "decision_rule": "SEALED_HOLDOUT_PREDICTED_R2_GT_ZERO",
+        "decision_status": "DIAGNOSTIC_ONLY",
+        "gate_reason": "NON_POSITIVE_SEALED_HOLDOUT_PREDICTED_R2",
+        "holdout_predicted_r_squared": changed_model["diagnostics"]["holdout"][
+            "predicted_r_squared"
+        ],
+    }
+    assert changed_model["exposures"] == []
+    assert changed_model["alpha"]["net_annualized"] is None
+    assert changed_model["alpha"]["net_status"] == (
+        "DIAGNOSTIC_ONLY_MODEL_QUALITY_GATE"
+    )
+    assert [
+        item["exposure"] for item in changed_model["diagnostic_outputs"]["exposures"]
+    ] == [item["exposure"] for item in original_model["exposures"]]
     assert float(changed_model["diagnostics"]["holdout"]["predicted_r_squared"]) < 0
+    changed_selection = cast(list[dict[str, Any]], changed["model_selections"])[0]
+    assert changed_selection["status"] == ("SELECTED_DIAGNOSTIC_ONLY_TRAIN_CV_MODEL")
 
 
 def test_design_thresholds_match_the_governed_candidate_catalog() -> None:
@@ -677,10 +702,35 @@ def test_dynamic_selection_and_training_path_do_not_consume_holdout(
         models=[model_definition],
     )
     changed, _manifest, _bytes = decomposition.build_decomposition(changed_spec, source)
-    changed_model = _available(changed)
+    changed_model = _selected(changed)
 
     assert changed_model["selected_smoothness"] == original_model["selected_smoothness"]
     original_train = original_model["diagnostics"]["dynamic"]["exposure_path"][:105]
     changed_train = changed_model["diagnostics"]["dynamic"]["exposure_path"][:105]
     assert changed_train == original_train
     assert float(changed_model["diagnostics"]["holdout"]["predicted_r_squared"]) < 0
+    assert changed_model["status"] == "DIAGNOSTIC_ONLY"
+    assert changed_model["exposures"] == []
+    assert changed_model["model_quality"]["decision_status"] == "DIAGNOSTIC_ONLY"
+
+
+def test_canonical_live_series_digest_normalizes_decimal_spelling(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "canonical"
+    target_path, days = _write_sources(source)
+    first_spec = _spec(source, target_path, days)
+    first, _manifest, _content = decomposition.build_decomposition(first_spec, source)
+    first_digest = _selected(first)["coverage"]["canonical_live_series_sha256"]
+
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    for row in rows[1:]:
+        row[2] = f"{Decimal(row[2]):.20f}"
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    second_spec = _spec(source, target_path, days)
+    second, _manifest, _content = decomposition.build_decomposition(second_spec, source)
+
+    assert _selected(second)["coverage"]["canonical_live_series_sha256"] == (
+        first_digest
+    )

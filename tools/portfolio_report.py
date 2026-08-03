@@ -37,7 +37,7 @@ from quant_engine.portfolio_ledger import decimal_text
 
 
 REPORT_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.1.0"
+BUILDER_VERSION: Final = "1.2.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
@@ -124,6 +124,13 @@ def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ReportValidationError(f"{field_name} is not readable JSON") from exc
     return _object(decoded, field_name)
+
+
+def _canonical_json_array_bytes(value: Sequence[Mapping[str, Any]]) -> bytes:
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
 
 
 def _baseline(root: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
@@ -387,6 +394,133 @@ def _accounts(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: str(item["account_id"]))
 
 
+def _account_live_return_series(
+    catalog: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Hash and summarize each canonical account-live strategy return path."""
+
+    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+    providers: dict[str, set[str]] = defaultdict(set)
+    for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
+        if row.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(row.get("strategy_id"), "strategy return.strategy_id")
+        day = _date(row.get("date"), "strategy return.date").isoformat()
+        value = decimal_text(_decimal(row.get("return"), "strategy return.return"))
+        grouped[strategy_id].append({"date": day, "return": value})
+        providers[strategy_id].add(
+            _text(row.get("provider_id"), "strategy return.provider_id")
+        )
+
+    result: dict[str, dict[str, Any]] = {}
+    for strategy_id, rows in grouped.items():
+        rows.sort(key=lambda item: item["date"])
+        dates = [item["date"] for item in rows]
+        if len(dates) != len(set(dates)):
+            raise ReportValidationError(
+                f"account-live strategy returns repeat a date for {strategy_id}"
+            )
+        with localcontext() as context:
+            context.prec = 34
+            wealth = Decimal("1")
+            peak = wealth
+            maximum_drawdown = Decimal("0")
+            for item in rows:
+                wealth *= Decimal("1") + _decimal(
+                    item["return"], "canonical strategy return"
+                )
+                peak = max(peak, wealth)
+                drawdown = (wealth / peak) - Decimal("1")
+                maximum_drawdown = min(maximum_drawdown, drawdown)
+            cumulative_return = wealth - Decimal("1")
+            current_drawdown = (wealth / peak) - Decimal("1")
+        result[strategy_id] = {
+            "cumulative_return": decimal_text(cumulative_return),
+            "current_drawdown": decimal_text(current_drawdown),
+            "maximum_drawdown": decimal_text(maximum_drawdown),
+            "observed_end": dates[-1],
+            "observed_start": dates[0],
+            "provider_ids": sorted(providers[strategy_id]),
+            "return_observations": len(rows),
+            "return_series_schema": "ordered-date-return/1",
+            "return_series_sha256": hashlib.sha256(
+                _canonical_json_array_bytes(rows)
+            ).hexdigest(),
+        }
+    return result
+
+
+def _close_decimal(left: object, right: object, field_name: str) -> None:
+    difference = abs(_decimal(left, field_name) - _decimal(right, field_name))
+    if difference > Decimal("0.000000000000000000000001"):
+        raise ReportValidationError(
+            f"{field_name} differs from canonical return series"
+        )
+
+
+def _cagr(cumulative_return: str, observed_start: str, observed_end: str) -> str | None:
+    start = _date(observed_start, "account-live observed_start")
+    end = _date(observed_end, "account-live observed_end")
+    elapsed_days = (end - start).days
+    cumulative = _decimal(cumulative_return, "account-live cumulative_return")
+    if elapsed_days <= 0 or cumulative <= Decimal("-1"):
+        return None
+    with localcontext() as context:
+        context.prec = 34
+        annualized = context.power(
+            Decimal("1") + cumulative, Decimal("365") / Decimal(elapsed_days)
+        ) - Decimal("1")
+    return decimal_text(annualized)
+
+
+def _strategy_provider_evidence(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
+    series = _account_live_return_series(catalog)
+    rows: list[dict[str, Any]] = []
+    for original in _objects(
+        catalog.get("strategy_provider_evidence", []),
+        "strategy_provider_evidence",
+    ):
+        row = dict(original)
+        strategy_id = _text(row.get("strategy_id"), "provider evidence.strategy_id")
+        if row.get("evidence_layer") == "ACCOUNT_LIVE":
+            canonical = series.get(strategy_id)
+            if canonical is None:
+                raise ReportValidationError(
+                    f"account-live evidence has no canonical return series for {strategy_id}"
+                )
+            account = _object(row.get("account"), "provider evidence account")
+            for field_name in (
+                "cumulative_return",
+                "current_drawdown",
+                "maximum_drawdown",
+            ):
+                _close_decimal(
+                    account.get(field_name),
+                    canonical[field_name],
+                    f"{strategy_id}.{field_name}",
+                )
+            for field_name in ("observed_start", "observed_end", "return_observations"):
+                if account.get(field_name) != canonical[field_name]:
+                    raise ReportValidationError(
+                        f"{strategy_id}.{field_name} differs from canonical return series"
+                    )
+            provider_id = _text(account.get("provider_id"), "account.provider_id")
+            if provider_id not in canonical["provider_ids"]:
+                raise ReportValidationError(
+                    f"{strategy_id}.provider_id differs from canonical return series"
+                )
+            row["account"] = {
+                **account,
+                "cumulative_return": canonical["cumulative_return"],
+                "current_drawdown": canonical["current_drawdown"],
+                "maximum_drawdown": canonical["maximum_drawdown"],
+                "return_series_schema": canonical["return_series_schema"],
+                "return_series_sha256": canonical["return_series_sha256"],
+            }
+        rows.append(row)
+    return rows
+
+
 def _strategies(
     catalog: Mapping[str, Any], performance: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -417,12 +551,18 @@ def _strategies(
         if item.get("strategy_id") is not None
     }
     provider_evidence = {
-        str(item["strategy_id"]): item
-        for item in _objects(
-            catalog.get("strategy_provider_evidence", []),
-            "strategy_provider_evidence",
-        )
+        str(item["strategy_id"]): item for item in _strategy_provider_evidence(catalog)
     }
+    live_source = next(
+        (
+            item
+            for item in _objects(
+                catalog.get("source_artifacts", []), "source_artifacts"
+            )
+            if item.get("source_key") == "strategy-live-metrics"
+        ),
+        {},
+    )
     performance_count: dict[str, tuple[int, int]] = {}
     for strategy_id in allocations:
         items = [item for item in performance if item.get("strategy_id") == strategy_id]
@@ -465,7 +605,32 @@ def _strategies(
             and provider_path.get("observed_end") is not None
             and provider_path.get("return_observations") is not None
         )
-        strategy_path = account_path if admitted_account_nav else provider_path
+        canonical_account = account_path if admitted_account_nav else {}
+        legacy_account = metrics if provider_row is None and live_row else {}
+        account_authority = (
+            "CANONICAL_STRATEGY_RETURNS"
+            if canonical_account
+            else "AUDIT_STRATEGY_LIVE_METRICS"
+            if legacy_account
+            else None
+        )
+        account_metrics = canonical_account or legacy_account
+        strategy_path = canonical_account if canonical_account else provider_path
+        observed_start = account_metrics.get("observed_start") or account_metrics.get(
+            "first_date"
+        )
+        observed_end = account_metrics.get("observed_end") or account_metrics.get(
+            "last_date"
+        )
+        cumulative_return = account_metrics.get("cumulative_return")
+        account_cagr = (
+            _cagr(cumulative_return, observed_start, observed_end)
+            if canonical_account
+            and cumulative_return is not None
+            and observed_start is not None
+            and observed_end is not None
+            else account_metrics.get("cagr")
+        )
         cost_row = costs.get(strategy_id, {})
         gap_row = gaps.get(strategy_id, {})
         coverage_row = coverage.get(strategy_id, {})
@@ -480,25 +645,44 @@ def _strategies(
                 "available_twr_segments": available_segments,
                 "total_assignment_segments": total_segments,
                 "account_live_status": (
-                    "AVAILABLE" if live_row or admitted_account_nav else "UNAVAILABLE"
+                    "AVAILABLE" if account_metrics else "UNAVAILABLE"
                 ),
-                "account_live_cagr": metrics.get("cagr"),
-                "account_live_cumulative_return": account_path.get(
-                    "cumulative_return", metrics.get("cumulative_return")
+                "account_live_cagr": account_cagr,
+                "account_live_cagr_status": (
+                    "AVAILABLE_DERIVED_SAME_CANONICAL_PATH"
+                    if canonical_account and account_cagr is not None
+                    else "AVAILABLE_SOURCE_REPORTED_SAME_AUDIT_VINTAGE"
+                    if legacy_account and account_cagr is not None
+                    else "UNAVAILABLE"
                 ),
-                "account_live_max_drawdown": account_path.get(
-                    "maximum_drawdown", metrics.get("max_drawdown")
-                ),
-                "account_live_observed_end": account_path.get("observed_end"),
-                "account_live_observed_start": account_path.get("observed_start"),
-                "account_live_return_observations": account_path.get(
+                "account_live_cumulative_return": cumulative_return,
+                "account_live_max_drawdown": account_metrics.get("maximum_drawdown")
+                or account_metrics.get("max_drawdown"),
+                "account_live_observed_end": observed_end,
+                "account_live_observed_start": observed_start,
+                "account_live_return_authority": account_authority,
+                "account_live_return_observations": account_metrics.get(
                     "return_observations"
                 ),
+                "account_live_return_series_schema": account_metrics.get(
+                    "return_series_schema"
+                ),
+                "account_live_return_series_sha256": account_metrics.get(
+                    "return_series_sha256"
+                ),
                 "account_live_source_generation": (
-                    provider_row.get("generation_id") if provider_row else None
+                    account_path.get("generation_id") if canonical_account else None
+                ),
+                "account_live_source_generation_as_of_date": (
+                    account_path.get("generation_as_of_date")
+                    if canonical_account
+                    else live_source.get("as_of_date")
                 ),
                 "account_live_source_provider": (
-                    provider_row.get("provider_id") if provider_row else None
+                    account_path.get("provider_id") if canonical_account else None
+                ),
+                "account_live_source_sha256": (
+                    None if canonical_account else live_source.get("sha256")
                 ),
                 "nav_status": (
                     "AVAILABLE"
@@ -757,6 +941,103 @@ def _corrections(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: str(item["correction_id"]))
 
 
+def _provider_ledger_exceptions(
+    catalog: Mapping[str, Any], baseline_root: Path
+) -> list[dict[str, Any]]:
+    references = [
+        item
+        for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
+        if item.get("source_key") == "provider-ledger-generation"
+        and item.get("schema_name") == "provider-ledger-catalog"
+    ]
+    if not references:
+        return []
+    if len(references) != 1:
+        raise ReportValidationError(
+            "baseline provider-ledger catalog reference is ambiguous"
+        )
+    reference = references[0]
+    expected_sha256 = _text(reference.get("sha256"), "provider-ledger sha256")
+    candidates: list[tuple[Path, str]] = []
+    generations_root = baseline_root.parent / "provider-ledger" / "generations"
+    if generations_root.is_dir():
+        for path in sorted(generations_root.glob("*/provider-ledger.json")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            observed_sha256, _ = hash_file(path)
+            if observed_sha256 == expected_sha256:
+                candidates.append((path, observed_sha256))
+    if len(candidates) != 1:
+        raise ReportValidationError(
+            "hash-bound provider-ledger catalog is missing or ambiguous"
+        )
+    path, observed_sha256 = candidates[0]
+    generation_id = path.parent.name
+    if len(generation_id) != 64 or any(
+        character not in "0123456789abcdef" for character in generation_id
+    ):
+        raise ReportValidationError("provider-ledger generation identity is invalid")
+    provider_catalog = _load_json(path, "provider-ledger catalog")
+    exceptions = [
+        item
+        for item in _objects(
+            provider_catalog.get("reconciliation_checks"),
+            "provider-ledger reconciliation_checks",
+        )
+        if item.get("status") == "EXCEPTION"
+    ]
+    return [
+        {
+            "authority_effect": item.get("authority_effect"),
+            "check_id": _text(item.get("check_id"), "provider check.check_id"),
+            "details_json": canonical_json_bytes(item).decode("utf-8"),
+            "exception_date_count": item.get("exception_date_count"),
+            "maximum_absolute_difference": item.get("maximum_absolute_difference"),
+            "source_artifact_id": reference.get("artifact_id"),
+            "source_as_of_date": reference.get("as_of_date"),
+            "source_catalog_sha256": observed_sha256,
+            "source_generation_id": generation_id,
+            "source_layer": "PROVIDER_LEDGER",
+            "status": "EXCEPTION",
+            "strategy_id": item.get("strategy_id"),
+            "tolerance": item.get("tolerance"),
+        }
+        for item in exceptions
+    ]
+
+
+def _reconciliation_checks(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    baseline_ref: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    rows = [
+        {
+            "authority_effect": item.get("authority_effect"),
+            "check_id": _text(item.get("check_id"), "reconciliation check.check_id"),
+            "details_json": canonical_json_bytes(item).decode("utf-8"),
+            "exception_date_count": item.get("exception_date_count"),
+            "maximum_absolute_difference": item.get("maximum_absolute_difference"),
+            "source_artifact_id": "normalized/portfolio-baseline.json",
+            "source_as_of_date": catalog.get("as_of_date"),
+            "source_catalog_sha256": baseline_ref["catalog_sha256"],
+            "source_generation_id": baseline_ref["generation_id"],
+            "source_layer": "PORTFOLIO_BASELINE",
+            "status": item.get("status"),
+            "strategy_id": item.get("strategy_id"),
+            "tolerance": item.get("tolerance"),
+        }
+        for item in _objects(
+            catalog.get("reconciliation_checks"), "reconciliation_checks"
+        )
+    ]
+    rows.extend(_provider_ledger_exceptions(catalog, baseline_root))
+    check_ids = [str(item["check_id"]) for item in rows]
+    if len(check_ids) != len(set(check_ids)):
+        raise ReportValidationError("report reconciliation check identifiers repeat")
+    return rows
+
+
 def build_report_data(
     baseline_root: Path,
 ) -> tuple[dict[str, Any], bytes, Path]:
@@ -764,6 +1045,7 @@ def build_report_data(
 
     catalog, baseline_ref, baseline_catalog_path = _baseline(baseline_root)
     performance = _account_strategy_performance(catalog)
+    strategy_provider_evidence = _strategy_provider_evidence(catalog)
     report: dict[str, Any] = {
         "account_summary": _accounts(catalog),
         "allocation_history": _allocations(catalog),
@@ -785,6 +1067,10 @@ def build_report_data(
             {
                 "item": "Evidence layers",
                 "value": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate.",
+            },
+            {
+                "item": "Account-live return authority",
+                "value": "Canonical strategy-return rows govern cumulative return, drawdown, CAGR vintage, and the ordered date/return series hash; legacy audit metrics are used only as one internally consistent fallback when no provider-ledger evidence exists.",
             },
             {
                 "item": "Missing data",
@@ -829,10 +1115,12 @@ def build_report_data(
                 )
             ],
         ],
-        "reconciliation_checks": catalog.get("reconciliation_checks", []),
+        "reconciliation_checks": _reconciliation_checks(
+            catalog, baseline_root, baseline_ref
+        ),
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "strategy_summary": _strategies(catalog, performance),
-        "strategy_provider_evidence": catalog.get("strategy_provider_evidence", []),
+        "strategy_provider_evidence": strategy_provider_evidence,
         "strategy_returns": catalog.get("strategy_returns", []),
         "transactions_and_flows": _transactions_and_flows(catalog),
         "twr_mwr": performance,

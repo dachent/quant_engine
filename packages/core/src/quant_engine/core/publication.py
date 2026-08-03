@@ -23,7 +23,9 @@ from quant_engine.core.contracts import (
 
 
 _GENERATION_ID = re.compile(r"^[0-9a-f]{64}$")
-_POINTER_SCHEMA_VERSION = 1
+_LEGACY_POINTER_SCHEMA_VERSION = 1
+_POINTER_SCHEMA_VERSION = 2
+_INVENTORY_SCHEMA_VERSION = 1
 _STAGE_RENAME_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
 
 
@@ -48,8 +50,9 @@ class PublicationState(StrEnum):
 class CurrentPointer:
     generation_id: str
     manifest_sha256: str
+    artifact_inventory_sha256: str | None = None
     state: PublicationState = PublicationState.PUBLISHED
-    pointer_schema_version: int = _POINTER_SCHEMA_VERSION
+    pointer_schema_version: int = _LEGACY_POINTER_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         if _GENERATION_ID.fullmatch(self.generation_id) is None:
@@ -58,16 +61,34 @@ class CurrentPointer:
             raise PointerIntegrityError("pointer manifest_sha256 is invalid")
         if self.state is not PublicationState.PUBLISHED:
             raise PointerIntegrityError("current pointer state must be PUBLISHED")
-        if self.pointer_schema_version != _POINTER_SCHEMA_VERSION:
+        if self.pointer_schema_version not in {
+            _LEGACY_POINTER_SCHEMA_VERSION,
+            _POINTER_SCHEMA_VERSION,
+        }:
             raise PointerIntegrityError("pointer schema version is unsupported")
+        if self.pointer_schema_version == _LEGACY_POINTER_SCHEMA_VERSION:
+            if self.artifact_inventory_sha256 is not None:
+                raise PointerIntegrityError(
+                    "legacy pointer must not contain an artifact inventory hash"
+                )
+        elif (
+            self.artifact_inventory_sha256 is None
+            or _GENERATION_ID.fullmatch(self.artifact_inventory_sha256) is None
+        ):
+            raise PointerIntegrityError(
+                "current pointer artifact inventory hash is invalid"
+            )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "generation_id": self.generation_id,
             "manifest_sha256": self.manifest_sha256,
             "pointer_schema_version": self.pointer_schema_version,
             "state": self.state.value,
         }
+        if self.pointer_schema_version == _POINTER_SCHEMA_VERSION:
+            value["artifact_inventory_sha256"] = self.artifact_inventory_sha256
+        return value
 
     def to_json_bytes(self) -> bytes:
         return canonical_json_bytes(self.to_dict())
@@ -82,22 +103,24 @@ class CurrentPointer:
             ) from exc
         if not isinstance(decoded, dict):
             raise PointerIntegrityError("current pointer root must be an object")
+        schema_version = decoded.get("pointer_schema_version")
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise PointerIntegrityError("pointer_schema_version must be an integer")
         expected = {
             "generation_id",
             "manifest_sha256",
             "pointer_schema_version",
             "state",
         }
+        if schema_version == _POINTER_SCHEMA_VERSION:
+            expected.add("artifact_inventory_sha256")
         if set(decoded) != expected:
             raise PointerIntegrityError("current pointer keys differ from the contract")
         generation_id = decoded["generation_id"]
         manifest_sha256 = decoded["manifest_sha256"]
-        schema_version = decoded["pointer_schema_version"]
         state = decoded["state"]
         if not isinstance(generation_id, str) or not isinstance(manifest_sha256, str):
             raise PointerIntegrityError("current pointer hashes must be strings")
-        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
-            raise PointerIntegrityError("pointer_schema_version must be an integer")
         if not isinstance(state, str):
             raise PointerIntegrityError("current pointer state must be a string")
         try:
@@ -107,6 +130,11 @@ class CurrentPointer:
         return cls(
             generation_id=generation_id,
             manifest_sha256=manifest_sha256,
+            artifact_inventory_sha256=(
+                decoded.get("artifact_inventory_sha256")
+                if isinstance(decoded.get("artifact_inventory_sha256"), str)
+                else None
+            ),
             state=parsed_state,
             pointer_schema_version=schema_version,
         )
@@ -123,6 +151,83 @@ def _generation_path(root: Path, generation_id: str) -> Path:
     if _GENERATION_ID.fullmatch(generation_id) is None:
         raise ManifestValidationError("generation_id must be 64 lower-case hex")
     return root / "generations" / generation_id / "generation.json"
+
+
+def _sync_directory(path: Path) -> None:
+    """Best-effort directory durability after a rename or replace.
+
+    POSIX permits opening and fsyncing directories. Windows commonly rejects
+    that operation; in that case the file itself is still flushed and the
+    directory sync is skipped rather than weakening portability.
+    """
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def generation_inventory_sha256(root: Path, generation_id: str) -> str:
+    """Hash the complete regular-file inventory of a staged generation.
+
+    The inventory binds portable relative paths, content hashes, and byte
+    counts. Links and non-regular files fail closed so authority cannot escape
+    the generation directory or silently depend on mutable external content.
+    """
+
+    root = _validate_root(root)
+    manifest_path = _generation_path(root, generation_id)
+    generation_dir = manifest_path.parent
+    if not generation_dir.is_dir() or generation_dir.is_symlink():
+        raise GenerationConflictError("generation directory is missing or linked")
+    files: list[dict[str, object]] = []
+    for directory_name, directory_names, file_names in os.walk(
+        generation_dir, followlinks=False
+    ):
+        directory = Path(directory_name)
+        for name in directory_names:
+            child = directory / name
+            if child.is_symlink():
+                raise GenerationConflictError(
+                    "generation inventory contains a linked directory"
+                )
+        for name in file_names:
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                raise GenerationConflictError(
+                    "generation inventory contains a linked or irregular file"
+                )
+            relative = path.relative_to(generation_dir).as_posix()
+            digest = hashlib.sha256()
+            size = 0
+            with path.open("rb") as handle:
+                while block := handle.read(1024 * 1024):
+                    digest.update(block)
+                    size += len(block)
+            files.append(
+                {
+                    "relative_path": relative,
+                    "sha256": digest.hexdigest(),
+                    "size_bytes": size,
+                }
+            )
+    if "generation.json" not in {str(item["relative_path"]) for item in files}:
+        raise GenerationConflictError("generation inventory lacks generation.json")
+    files.sort(key=lambda item: str(item["relative_path"]))
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "files": files,
+                "inventory_schema_version": _INVENTORY_SCHEMA_VERSION,
+            }
+        )
+    ).hexdigest()
 
 
 def _write_and_sync(path: Path, content: bytes) -> None:
@@ -153,6 +258,7 @@ def stage_generation(root: Path, manifest: GenerationManifest) -> Path:
         for attempt in range(len(_STAGE_RENAME_RETRY_DELAYS) + 1):
             try:
                 temporary.rename(final_manifest.parent)
+                _sync_directory(generations)
                 break
             except FileExistsError:
                 if (
@@ -213,9 +319,12 @@ def publish_generation(root: Path, generation_id: str) -> CurrentPointer:
         raise PublicationRejectedError("generation coverage is not complete")
 
     manifest_bytes = manifest.to_json_bytes()
+    inventory_sha256 = generation_inventory_sha256(root, generation_id)
     pointer = CurrentPointer(
         generation_id=generation_id,
         manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        artifact_inventory_sha256=inventory_sha256,
+        pointer_schema_version=_POINTER_SCHEMA_VERSION,
     )
     content = pointer.to_json_bytes()
     root.mkdir(parents=True, exist_ok=True)
@@ -235,6 +344,7 @@ def publish_generation(root: Path, generation_id: str) -> CurrentPointer:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, current_path)
+        _sync_directory(root)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -270,4 +380,15 @@ def read_current(root: Path) -> CurrentPointer:
         is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
     ):
         raise PointerIntegrityError("current generation is not publication eligible")
+    if pointer.artifact_inventory_sha256 is not None:
+        try:
+            actual_inventory = generation_inventory_sha256(root, pointer.generation_id)
+        except GenerationConflictError as exc:
+            raise PointerIntegrityError(
+                "current generation artifact inventory is invalid"
+            ) from exc
+        if actual_inventory != pointer.artifact_inventory_sha256:
+            raise PointerIntegrityError(
+                "current generation artifact inventory hash differs"
+            )
     return pointer
