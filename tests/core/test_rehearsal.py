@@ -118,11 +118,12 @@ def _accepted_release(tmp_path: Path) -> tuple[PipelineSpec, str]:
 
 def test_complete_recovery_rehearsal_passes(tmp_path: Path) -> None:
     spec, release_id = _accepted_release(tmp_path)
+    output = tmp_path / "rehearsal"
 
     result = run_recovery_rehearsal(
         spec=spec,
         release_id=release_id,
-        output_root=tmp_path / "rehearsal",
+        output_root=output,
     )
 
     assert result["status"] == "PASS"
@@ -138,6 +139,8 @@ def test_complete_recovery_rehearsal_passes(tmp_path: Path) -> None:
     assert dated["append_only_correction"] is True
     assert dated["restored_release_two"] is True
     assert Path(str(result["evidence_path"])).is_file()
+    assert (output / "rb").is_dir()
+    assert not (output / "rollback-interruption").exists()
 
 
 def test_rehearsal_refuses_nonempty_output(tmp_path: Path) -> None:
