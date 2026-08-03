@@ -12,6 +12,7 @@ from quant_engine.core import (
     CompanionInput,
     CoverageClaim,
     CoverageStatus,
+    CurrentPointer,
     GenerationManifest,
     GateEvidence,
     PipelineCompanion,
@@ -21,6 +22,7 @@ from quant_engine.core import (
     commit_release,
     prepare_release,
     publish_generation,
+    read_current,
     stage_generation,
 )
 from quant_engine.core.rehearsal import RehearsalError, run_recovery_rehearsal
@@ -52,7 +54,9 @@ def _manifest(label: str, day: date) -> GenerationManifest:
     )
 
 
-def _accepted_release(tmp_path: Path) -> tuple[PipelineSpec, str]:
+def _accepted_release(
+    tmp_path: Path, *, legacy_predecessor_pointer: bool = False
+) -> tuple[PipelineSpec, str]:
     roots = {"excel": tmp_path / "excel", "panel": tmp_path / "panel"}
     previous = {
         root_id: _manifest(f"{root_id}-previous", date(2026, 7, 30))
@@ -65,6 +69,14 @@ def _accepted_release(tmp_path: Path) -> tuple[PipelineSpec, str]:
     for root_id in roots:
         stage_generation(roots[root_id], previous[root_id])
         publish_generation(roots[root_id], previous[root_id].generation_id)
+        if legacy_predecessor_pointer:
+            current = read_current(roots[root_id])
+            (roots[root_id] / "CURRENT.json").write_bytes(
+                CurrentPointer(
+                    generation_id=current.generation_id,
+                    manifest_sha256=current.manifest_sha256,
+                ).to_json_bytes()
+            )
         stage_generation(roots[root_id], proposed[root_id])
     (roots["panel"] / "index.html").write_bytes(b"previous launcher\n")
     proposed_launcher = tmp_path / "proposed-launcher.html"
@@ -208,3 +220,18 @@ def test_rehearsal_refuses_nonempty_output(tmp_path: Path) -> None:
             release_id=release_id,
             output_root=output,
         )
+
+
+def test_recovery_rehearsal_preserves_legacy_predecessor_pointer_contract(
+    tmp_path: Path,
+) -> None:
+    spec, release_id = _accepted_release(tmp_path, legacy_predecessor_pointer=True)
+
+    result = run_recovery_rehearsal(
+        spec=spec,
+        release_id=release_id,
+        output_root=tmp_path / "legacy-pointer-rehearsal",
+    )
+
+    assert result["status"] == "PASS"
+    assert result["boundary_rehearsal"]["source_unchanged"] is True
