@@ -127,12 +127,32 @@ def test_complete_recovery_rehearsal_passes(tmp_path: Path) -> None:
     )
 
     assert result["status"] == "PASS"
+    assert result["schema_version"] == 2
     boundary = result["boundary_rehearsal"]
     assert isinstance(boundary, dict)
     assert boundary["boundary_count"] == 15
     assert boundary["caught_boundary_count"] == 9
     assert boundary["crash_boundary_count"] == 6
     assert boundary["rollback_interruption"]["status"] == "PASS"
+    assert (
+        boundary["process_termination_method"]
+        == "OPERATING_SYSTEM_PROCESS_TERMINATION"
+    )
+    assert {
+        (item["stale_state"], item["recovered_state"])
+        for item in boundary["lock_lifecycle"]
+    } == {
+        ("PREPARED", "PREPARED"),
+        ("COMMITTED", "COMMITTED"),
+        ("ROLLED_BACK", "ROLLED_BACK"),
+    }
+    assert {
+        (item["conflict_kind"], item["failed_state"], item["resumed_state"])
+        for item in boundary["recovery_failed_conflicts"]
+    } == {
+        ("POINTER", "RECOVERY_FAILED", "ROLLED_BACK"),
+        ("COMPANION", "RECOVERY_FAILED", "ROLLED_BACK"),
+    }
     assert boundary["source_unchanged"] is True
     dated = result["dated_rollforwards"]
     assert isinstance(dated, dict)

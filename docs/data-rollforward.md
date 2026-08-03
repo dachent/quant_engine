@@ -54,9 +54,10 @@ A read-only external command requires `--allow-external-read`, has zero retry,
 and carries a stable request identity. A timeout or exception records
 `UNKNOWN`; resume fails closed and will not send that request again.
 
-If a process terminates after a release journal reaches `COMMITTING` or while
-it is `ROLLING_BACK`, use the explicit recovery path. It never retries the
-forward release:
+If a process terminates after acquiring the lock, after a terminal journal
+write, after a release journal reaches `COMMITTING`, or while it is
+`ROLLING_BACK`, use the explicit recovery path. It never retries the forward
+release:
 
 ```powershell
 uv run --frozen --no-sync python tools/data_pipeline.py recover `
@@ -67,7 +68,10 @@ uv run --frozen --no-sync python tools/data_pipeline.py recover `
 `--confirm-stale-lock` is needed only when an exact release-owned lock survived
 process termination. A missing, unreadable, linked, or different-release lock
 fails closed. Recovery is idempotent when a pointer or companion was already
-restored before a second interruption.
+restored before a second interruption. For `PREPARED`, confirmation removes
+the orphan lock and leaves the release prepared. For `COMMITTED` and
+`ROLLED_BACK`, confirmation first validates the corresponding terminal graph,
+then removes the orphan lock without changing the terminal state.
 
 ## Publication and recovery boundaries
 

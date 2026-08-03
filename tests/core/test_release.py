@@ -490,3 +490,196 @@ def test_recovery_refuses_stale_lock_for_another_release(tmp_path: Path) -> None
             roots={"root": root},
             clear_stale_lock=True,
         )
+
+
+def test_recovery_clears_exact_prepared_stale_lock(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "prepared-lock")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    lock = coordination / "release.lock"
+    lock.write_text(manifest.release_id + "\n", encoding="ascii")
+
+    with pytest.raises(ReleaseConflictError, match="explicit confirmation"):
+        recover_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+    recovered = recover_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+        clear_stale_lock=True,
+    )
+
+    assert recovered.state is ReleaseState.PREPARED
+    assert not lock.exists()
+    assert (
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        ).state
+        is ReleaseState.COMMITTED
+    )
+
+
+def test_recovery_clears_exact_committed_stale_lock(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "committed-lock")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+    )
+    lock = coordination / "release.lock"
+    lock.write_text(manifest.release_id + "\n", encoding="ascii")
+
+    with pytest.raises(ReleaseConflictError, match="explicit confirmation"):
+        recover_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+    recovered = recover_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+        clear_stale_lock=True,
+    )
+
+    assert recovered.state is ReleaseState.COMMITTED
+    assert not lock.exists()
+
+
+def test_recovery_clears_exact_rolled_back_stale_lock(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    previous, proposed = _stage_pair(root, "rolled-back-lock")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    def fail(step: str, item: str) -> None:
+        if step == "before-target" and item == "root":
+            raise OSError("synthetic caught failure")
+
+    with pytest.raises(ReleaseCommitError):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            fault_hook=fail,
+        )
+    lock = coordination / "release.lock"
+    lock.write_text(manifest.release_id + "\n", encoding="ascii")
+
+    with pytest.raises(ReleaseConflictError, match="explicit confirmation"):
+        recover_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+    recovered = recover_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+        clear_stale_lock=True,
+    )
+
+    assert recovered.state is ReleaseState.ROLLED_BACK
+    assert read_current(root).generation_id == previous.generation_id
+    assert not lock.exists()
+
+
+@pytest.mark.parametrize("conflict_kind", ("pointer", "companion"))
+def test_recovery_failed_preserves_conflict_and_can_resume(
+    tmp_path: Path, conflict_kind: str
+) -> None:
+    root = tmp_path / "root"
+    previous, proposed = _stage_pair(root, f"recovery-failed-{conflict_kind}")
+    unexpected = _manifest(f"recovery-failed-{conflict_kind}-unexpected")
+    stage_generation(root, unexpected)
+    launcher = root / "index.html"
+    launcher.write_bytes(b"previous launcher\n")
+    proposed_launcher = b"proposed launcher\n"
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+        companions=(
+            CompanionInput(
+                "panel-launcher", "root", "index.html", proposed_launcher
+            ),
+        ),
+    )
+
+    def crash(step: str, item: str) -> None:
+        expected_step = "after-target" if conflict_kind == "pointer" else "after-companion"
+        expected_item = "root" if conflict_kind == "pointer" else "panel-launcher"
+        if (step, item) == (expected_step, expected_item):
+            raise _HardCrash()
+
+    with pytest.raises(_HardCrash):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            companion_contents={"panel-launcher": proposed_launcher},
+            fault_hook=crash,
+        )
+    if conflict_kind == "pointer":
+        publish_generation(root, unexpected.generation_id)
+    else:
+        launcher.write_bytes(b"external conflicting launcher\n")
+
+    with pytest.raises(ReleaseCommitError, match="recovery failed"):
+        recover_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+    _, failed = read_release(coordination, manifest.release_id)
+    assert failed.state is ReleaseState.RECOVERY_FAILED
+    if conflict_kind == "pointer":
+        assert read_current(root).generation_id == unexpected.generation_id
+        publish_generation(root, proposed.generation_id)
+    else:
+        assert launcher.read_bytes() == b"external conflicting launcher\n"
+        launcher.write_bytes(proposed_launcher)
+
+    recovered = recover_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+    )
+
+    assert recovered.state is ReleaseState.ROLLED_BACK
+    assert read_current(root).generation_id == previous.generation_id
+    assert launcher.read_bytes() == b"previous launcher\n"
