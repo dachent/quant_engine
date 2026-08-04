@@ -2160,13 +2160,25 @@ def build_catalog(
         schema_name="portfolio-baseline-catalog",
         schema_version=str(CATALOG_SCHEMA_VERSION),
     )
-    spec_hash, spec_size = hash_file(spec_path)
+    # Physical root bindings are runtime locators, not financial evidence.  The
+    # same hash-identified inputs must therefore produce the same generation
+    # when a governed pipeline stages them under a different private root.
+    # Retain every semantic field while replacing machine-specific locators
+    # with their logical registry identities for the manifest artifact.
+    semantic_spec = json.loads(canonical_json_bytes(spec))
+    semantic_spec["roots"] = {
+        root_id: f"root-id:{root_id}" for root_id in sorted(roots)
+    }
+    semantic_provenance = semantic_spec.get("provenance")
+    if isinstance(semantic_provenance, dict) and "root" in semantic_provenance:
+        semantic_provenance["root"] = "root-id:provenance"
+    semantic_spec_bytes = canonical_json_bytes(semantic_spec)
     spec_artifact = SourceArtifact(
-        artifact_id="config/portfolio-baseline-spec.json",
-        sha256=spec_hash,
-        size_bytes=spec_size,
+        artifact_id="config/portfolio-baseline-semantic-spec.json",
+        sha256=hashlib.sha256(semantic_spec_bytes).hexdigest(),
+        size_bytes=len(semantic_spec_bytes),
         as_of_date=as_of,
-        schema_name="portfolio-baseline-spec",
+        schema_name="portfolio-baseline-semantic-spec",
         schema_version=str(spec["schema_version"]),
     )
     observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]

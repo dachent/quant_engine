@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import sys
 from typing import Any
 
@@ -690,6 +691,31 @@ def test_stage_is_deterministic_reconciled_and_coverage_aware(tmp_path: Path) ->
     )
     assert first["catalog_sha256"] == hashlib.sha256(catalog_bytes).hexdigest()
     assert not (output_root / "CURRENT.json").exists()
+
+
+def test_generation_identity_uses_logical_not_physical_root_bindings(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec(tmp_path)
+    first_catalog, first_manifest, first_bytes = baseline.build_catalog(spec_path)
+
+    relocated_source = tmp_path / "relocated-source"
+    relocated_provenance = tmp_path / "relocated-provenance"
+    shutil.copytree(Path(spec["roots"]["synthetic"]), relocated_source)
+    shutil.copytree(Path(spec["provenance"]["root"]), relocated_provenance)
+    relocated = json.loads(json.dumps(spec))
+    relocated["roots"]["synthetic"] = str(relocated_source)
+    relocated["provenance"]["root"] = str(relocated_provenance)
+    relocated_path = tmp_path / "relocated-spec.json"
+    relocated_path.write_text(json.dumps(relocated), encoding="utf-8")
+
+    second_catalog, second_manifest, second_bytes = baseline.build_catalog(
+        relocated_path
+    )
+    assert second_catalog == first_catalog
+    assert second_bytes == first_bytes
+    assert second_manifest.generation_id == first_manifest.generation_id
+    assert second_manifest.to_json_bytes() == first_manifest.to_json_bytes()
 
 
 def test_reserve_pool_intervals_are_not_strategy_attribution_gaps() -> None:
