@@ -144,6 +144,52 @@ def _recipe(path: Path) -> dict[str, Any]:
     return recipe
 
 
+def _file_definition(path: Path) -> dict[str, object]:
+    sha256, size = _sha(path)
+    return {
+        "path": str(path.resolve()),
+        "sha256": sha256,
+        "size_bytes": size,
+    }
+
+
+def create_recipe(
+    *,
+    provider_ledger_spec: Path,
+    baseline_spec: Path,
+    decomposition_plan_bundle: Path,
+    correlation_source_root: Path,
+    legacy_panel: Path,
+    as_of_date: str,
+    pipeline_id: str,
+    release_commit: str,
+    output: Path,
+) -> dict[str, Any]:
+    date.fromisoformat(as_of_date)
+    if len(release_commit) != 40:
+        raise VerticalBuildError("release commit differs")
+    payload = {
+        "as_of_date": as_of_date,
+        "baseline_spec": _file_definition(baseline_spec.resolve()),
+        "correlation_source_root": {
+            "path": str(correlation_source_root.resolve()),
+            **_directory_inventory(correlation_source_root.resolve()),
+        },
+        "decomposition_plan_bundle": {
+            "path": str(decomposition_plan_bundle.resolve()),
+            **_directory_inventory(decomposition_plan_bundle.resolve()),
+        },
+        "legacy_panel": _file_definition(legacy_panel.resolve()),
+        "pipeline_id": pipeline_id,
+        "provider_ledger_spec": _file_definition(provider_ledger_spec.resolve()),
+        "release_commit": release_commit,
+        "schema_version": 2,
+    }
+    _write_exact(output, canonical_json_bytes(payload))
+    _recipe(output)
+    return {"pipeline_id": pipeline_id, "recipe": str(output)}
+
+
 def _run(command: Sequence[str], *, timeout: int = 3600) -> dict[str, Any]:
     completed = subprocess.run(
         list(command),
@@ -776,6 +822,16 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--output-root", type=Path, required=True)
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--path", type=Path, required=True)
+    recipe = commands.add_parser("recipe")
+    recipe.add_argument("--provider-ledger-spec", type=Path, required=True)
+    recipe.add_argument("--baseline-spec", type=Path, required=True)
+    recipe.add_argument("--decomposition-plan-bundle", type=Path, required=True)
+    recipe.add_argument("--correlation-source-root", type=Path, required=True)
+    recipe.add_argument("--legacy-panel", type=Path, required=True)
+    recipe.add_argument("--as-of-date", required=True)
+    recipe.add_argument("--pipeline-id", required=True)
+    recipe.add_argument("--release-commit", required=True)
+    recipe.add_argument("--output", type=Path, required=True)
     stage = commands.add_parser("stage")
     stage.add_argument("--recipe", type=Path, required=True)
     stage.add_argument("--output-root", type=Path, required=True)
@@ -804,6 +860,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = build_all(args.recipe, args.output_root)
         elif args.command == "inventory":
             result = _directory_inventory(args.path.resolve())
+        elif args.command == "recipe":
+            result = create_recipe(
+                provider_ledger_spec=args.provider_ledger_spec,
+                baseline_spec=args.baseline_spec,
+                decomposition_plan_bundle=args.decomposition_plan_bundle,
+                correlation_source_root=args.correlation_source_root,
+                legacy_panel=args.legacy_panel,
+                as_of_date=args.as_of_date,
+                pipeline_id=args.pipeline_id,
+                release_commit=args.release_commit,
+                output=args.output,
+            )
         else:
             result = build_stage(
                 args.recipe,

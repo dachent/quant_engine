@@ -84,3 +84,33 @@ def test_directory_inventory_is_path_order_independent(tmp_path: Path) -> None:
         (root / "a.txt").write_text("a", encoding="utf-8")
 
     assert builder._directory_inventory(first) == builder._directory_inventory(second)
+
+
+def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
+    provider = tmp_path / "provider.json"
+    baseline = tmp_path / "baseline.json"
+    legacy = tmp_path / "legacy.json"
+    for path in (provider, baseline, legacy):
+        path.write_text("{}", encoding="utf-8")
+    plan = tmp_path / "plan"
+    correlation = tmp_path / "correlation"
+    plan.mkdir()
+    correlation.mkdir()
+    (plan / "plan.json").write_text("{}", encoding="utf-8")
+    (correlation / "returns.csv").write_text("date,value\n", encoding="utf-8")
+    output = tmp_path / "generated-recipe.json"
+
+    result = builder.create_recipe(
+        provider_ledger_spec=provider,
+        baseline_spec=baseline,
+        decomposition_plan_bundle=plan,
+        correlation_source_root=correlation,
+        legacy_panel=legacy,
+        as_of_date="2026-08-03",
+        pipeline_id="synthetic-vertical",
+        release_commit="a" * 40,
+        output=output,
+    )
+
+    assert result["recipe"] == str(output)
+    assert builder._recipe(output)["schema_version"] == 2
