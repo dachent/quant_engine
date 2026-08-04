@@ -212,10 +212,13 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     qa_dir = tmp_path / "qa"
     _write_json(qa_dir / "qa-validation.json", {"all_passed": True})
     source_files = []
-    for name in ("provider.json", "baseline.json", "legacy.json"):
+    for name in ("provider.json", "baseline.json"):
         path = tmp_path / name
         _write_json(path, {"synthetic": True})
         source_files.append(path)
+    legacy = tmp_path / "legacy"
+    _write_json(legacy / "data" / "dashboard_data.json", {"synthetic": True})
+    (legacy / "app.js").write_text("// synthetic shell", encoding="utf-8")
     plan = tmp_path / "plan"
     correlation = tmp_path / "correlation"
     _write_json(plan / "manifest.json", {"synthetic": True})
@@ -226,11 +229,11 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
         "baseline_spec": _definition(source_files[1]),
         "correlation_source_root": _dir_definition(correlation),
         "decomposition_plan_bundle": _dir_definition(plan),
-        "legacy_panel": _definition(source_files[2]),
+        "legacy_panel": _dir_definition(legacy),
         "pipeline_id": "synthetic-vertical",
         "provider_ledger_spec": _definition(source_files[0]),
         "release_commit": "a" * 40,
-        "schema_version": 2,
+        "schema_version": 3,
     }
     vertical_path = tmp_path / "vertical-recipe.json"
     _write_json(vertical_path, vertical)

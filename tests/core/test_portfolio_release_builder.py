@@ -29,9 +29,11 @@ def _recipe(tmp_path: Path) -> Path:
     provider = tmp_path / "provider.json"
     baseline = tmp_path / "baseline.json"
     base_factor = tmp_path / "factors.csv"
-    legacy = tmp_path / "legacy.json"
-    for path in (provider, baseline, legacy):
+    legacy = tmp_path / "legacy"
+    for path in (provider, baseline):
         path.write_text("{}", encoding="utf-8")
+    legacy.mkdir()
+    (legacy / "app.js").write_text("// legacy shell", encoding="utf-8")
     base_factor.write_text("date,RF\n", encoding="utf-8")
     plan = tmp_path / "plan"
     correlation = tmp_path / "correlation"
@@ -47,11 +49,11 @@ def _recipe(tmp_path: Path) -> Path:
         "baseline_spec": _file_definition(baseline),
         "correlation_source_root": {"path": str(correlation), **correlation_inventory},
         "decomposition_plan_bundle": {"path": str(plan), **plan_inventory},
-        "legacy_panel": _file_definition(legacy),
+        "legacy_panel": {"path": str(legacy), **builder._directory_inventory(legacy)},
         "pipeline_id": "synthetic-source-to-panel",
         "provider_ledger_spec": _file_definition(provider),
         "release_commit": "a" * 40,
-        "schema_version": 2,
+        "schema_version": 3,
     }
     recipe = tmp_path / "recipe.json"
     recipe.write_text(json.dumps(payload), encoding="utf-8")
@@ -76,6 +78,18 @@ def test_recipe_rejects_directory_drift(tmp_path: Path) -> None:
         builder._recipe(recipe)
 
 
+def test_recipe_rejects_legacy_panel_shell_drift(tmp_path: Path) -> None:
+    recipe = _recipe(tmp_path)
+    payload = json.loads(recipe.read_text(encoding="utf-8"))
+    legacy = Path(payload["legacy_panel"]["path"])
+    (legacy / "app.js").write_text("// changed", encoding="utf-8")
+
+    with pytest.raises(
+        builder.VerticalBuildError, match="legacy_panel inventory differs"
+    ):
+        builder._recipe(recipe)
+
+
 def test_directory_inventory_is_path_order_independent(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -92,9 +106,11 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     provider = tmp_path / "provider.json"
     baseline = tmp_path / "baseline.json"
     base_factor = tmp_path / "factors.csv"
-    legacy = tmp_path / "legacy.json"
-    for path in (provider, baseline, legacy):
+    legacy = tmp_path / "legacy"
+    for path in (provider, baseline):
         path.write_text("{}", encoding="utf-8")
+    legacy.mkdir()
+    (legacy / "app.js").write_text("// legacy shell", encoding="utf-8")
     base_factor.write_text("date,RF\n", encoding="utf-8")
     plan = tmp_path / "plan"
     correlation = tmp_path / "correlation"
@@ -118,4 +134,4 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     )
 
     assert result["recipe"] == str(output)
-    assert builder._recipe(output)["schema_version"] == 2
+    assert builder._recipe(output)["schema_version"] == 3

@@ -99,7 +99,7 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
 
 def _recipe(path: Path) -> dict[str, Any]:
     recipe = _load(path, "vertical-build recipe")
-    if recipe.get("schema_version") != 2:
+    if recipe.get("schema_version") != 3:
         raise VerticalBuildError("vertical-build recipe schema is unsupported")
     required = {
         "as_of_date",
@@ -120,7 +120,6 @@ def _recipe(path: Path) -> dict[str, Any]:
         "provider_ledger_spec",
         "baseline_spec",
         "base_factor_file",
-        "legacy_panel",
     ):
         definition = recipe[key]
         if not isinstance(definition, dict) or set(definition) != {
@@ -133,7 +132,11 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError(f"{key} identity differs")
-    for key in ("decomposition_plan_bundle", "correlation_source_root"):
+    for key in (
+        "decomposition_plan_bundle",
+        "correlation_source_root",
+        "legacy_panel",
+    ):
         definition = recipe[key]
         if not isinstance(definition, dict) or set(definition) != {
             "file_count",
@@ -187,11 +190,14 @@ def create_recipe(
             "path": str(decomposition_plan_bundle.resolve()),
             **_directory_inventory(decomposition_plan_bundle.resolve()),
         },
-        "legacy_panel": _file_definition(legacy_panel.resolve()),
+        "legacy_panel": {
+            "path": str(legacy_panel.resolve()),
+            **_directory_inventory(legacy_panel.resolve()),
+        },
         "pipeline_id": pipeline_id,
         "provider_ledger_spec": _file_definition(provider_ledger_spec.resolve()),
         "release_commit": release_commit,
-        "schema_version": 2,
+        "schema_version": 3,
     }
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
