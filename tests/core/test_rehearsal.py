@@ -28,6 +28,16 @@ from quant_engine.core import (
 from quant_engine.core.rehearsal import RehearsalError, run_recovery_rehearsal
 
 
+_HARNESS_IDENTITY = {
+    "code_commit": "c" * 40,
+    "core_module_sha256": "d" * 64,
+    "entrypoint_sha256": "e" * 64,
+    "python_executable_sha256": "f" * 64,
+    "python_version": "3.11.15",
+    "runtime_platform": "synthetic-test-runtime",
+}
+
+
 def _manifest(label: str, day: date) -> GenerationManifest:
     content = (label + "\n").encode()
     return GenerationManifest.build(
@@ -142,10 +152,12 @@ def test_complete_recovery_rehearsal_passes(tmp_path: Path) -> None:
         spec=spec,
         release_id=release_id,
         output_root=output,
+        harness_identity=_HARNESS_IDENTITY,
     )
 
     assert result["status"] == "PASS"
-    assert result["schema_version"] == 2
+    assert result["schema_version"] == 3
+    assert result["harness_identity"] == _HARNESS_IDENTITY
     boundary = result["boundary_rehearsal"]
     assert isinstance(boundary, dict)
     assert boundary["boundary_count"] == 15
@@ -224,6 +236,7 @@ def test_rehearsal_refuses_nonempty_output(tmp_path: Path) -> None:
             spec=spec,
             release_id=release_id,
             output_root=output,
+            harness_identity=_HARNESS_IDENTITY,
         )
 
 
@@ -236,6 +249,7 @@ def test_recovery_rehearsal_preserves_legacy_predecessor_pointer_contract(
         spec=spec,
         release_id=release_id,
         output_root=tmp_path / "legacy-pointer-rehearsal",
+        harness_identity=_HARNESS_IDENTITY,
     )
 
     assert result["status"] == "PASS"
@@ -251,8 +265,11 @@ def test_recovery_rehearsal_supports_release_without_predecessors(
         spec=spec,
         release_id=release_id,
         output_root=tmp_path / "no-predecessor-rehearsal",
+        harness_identity=_HARNESS_IDENTITY,
     )
 
     assert result["status"] == "PASS"
+    assert result["schema_version"] == 3
+    assert result["harness_identity"] == _HARNESS_IDENTITY
     assert result["boundary_rehearsal"]["source_unchanged"] is True
     assert result["boundary_rehearsal"]["rollback_interruption"]["status"] == "PASS"
