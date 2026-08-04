@@ -257,7 +257,31 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     }
     recipe_path = tmp_path / "recipe.json"
     _write_json(recipe_path, recipe)
+    for role, generation in zip(ROLES, (ledger, baseline, report, panel), strict=True):
+        _write_json(
+            output_root
+            / "stage-results"
+            / f"{materializer.GENERATION_STAGE[role]}.json",
+            {"generation_id": generation.name},
+        )
     return recipe_path, output_root
+
+
+def test_create_recipe_accepts_schema_v3_vertical_recipe(tmp_path: Path) -> None:
+    source_recipe, proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    output = tmp_path / "created-pipeline-recipe.json"
+
+    result = materializer.create_recipe(
+        vertical_recipe=Path(source["vertical_recipe"]["path"]),
+        proof_root=proof_root,
+        qa_dir=Path(source["qa_dir"]["path"]),
+        pipeline_id="schema-v3-release",
+        output=output,
+    )
+
+    assert result == {"pipeline_id": "schema-v3-release", "recipe": str(output)}
+    assert materializer._recipe(output)["release_commit"] == "a" * 40
 
 
 def test_semantic_reconciliation_calculates_all_six_bridges(tmp_path: Path) -> None:

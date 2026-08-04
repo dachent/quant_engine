@@ -274,7 +274,7 @@ def create_recipe(
     output: Path,
 ) -> dict[str, Any]:
     vertical = _load(vertical_recipe.resolve(), "vertical recipe")
-    if vertical.get("schema_version") != 2:
+    if vertical.get("schema_version") != 3:
         raise MaterializationError("vertical recipe schema differs")
     expected: dict[str, object] = {}
     for role in RELEASE_ROLES:
