@@ -692,6 +692,42 @@ def test_stage_is_deterministic_reconciled_and_coverage_aware(tmp_path: Path) ->
     assert not (output_root / "CURRENT.json").exists()
 
 
+def test_reserve_pool_intervals_are_not_strategy_attribution_gaps() -> None:
+    claims, exceptions = baseline._fact_coverage(
+        accounts=[{"account_id": "reserve-account", "role": "INVESTMENT"}],
+        assignments=[
+            {
+                "account_id": "reserve-account",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "mapping_status": "UNMAPPED",
+                "pool_id": "reserve-capital",
+                "strategy_id": None,
+                "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            }
+        ],
+        transactions=[],
+        flows=[],
+        positions=[],
+        schwab_known_gaps=[],
+        missing_strategy_nav_count=0,
+        as_of_date=date(2026, 8, 3),
+    )
+
+    current_claim = next(
+        row for row in claims if row["fact_type"] == "current_strategy_attribution"
+    )
+    current_exception = next(
+        row
+        for row in exceptions
+        if row["exception_id"] == "current-strategy-attribution-partial"
+    )
+    assert current_claim["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert current_claim["known_gaps"] == []
+    assert current_exception["record_count"] == 0
+    assert current_exception["status"] == "PASS"
+
+
 def test_publish_requires_exact_current_candidate(tmp_path: Path) -> None:
     spec_path, _ = _spec(tmp_path)
     output_root = tmp_path / "private-output"

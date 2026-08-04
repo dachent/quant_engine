@@ -1713,9 +1713,15 @@ def _fact_coverage(
     unmapped = [
         item for item in assignments if item.get("mapping_status") == "UNMAPPED"
     ]
+    attribution_unmapped = [
+        item
+        for item in unmapped
+        if item.get("pool_id") != "reserve-capital"
+        and item.get("strategy_mapping_disposition") != "RESERVE_NOT_APPLICABLE"
+    ]
     current_unmapped: list[Mapping[str, Any]] = []
     historical_unmapped: list[Mapping[str, Any]] = []
-    for item in unmapped:
+    for item in attribution_unmapped:
         start = item.get("effective_start")
         end = item.get("effective_end")
         active = (
@@ -1745,18 +1751,24 @@ def _fact_coverage(
         },
         {
             "fact_type": "current_strategy_attribution",
-            "known_gaps": [
-                f"{len(current_unmapped)} current intervals are mapped to the systematic pool but not a strategy"
-            ],
+            "known_gaps": (
+                [
+                    f"{len(current_unmapped)} current intervals are mapped to the systematic pool but not a strategy"
+                ]
+                if current_unmapped
+                else []
+            ),
             "status": "PARTIAL"
             if current_unmapped
             else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
         },
         {
             "fact_type": "historical_strategy_attribution",
-            "known_gaps": [
-                f"{len(historical_unmapped)} historical intervals remain pool-only"
-            ],
+            "known_gaps": (
+                [f"{len(historical_unmapped)} historical intervals remain pool-only"]
+                if historical_unmapped
+                else []
+            ),
             "status": "PARTIAL"
             if historical_unmapped
             else "COMPLETE_WITHIN_DECLARED_BOUNDARY",

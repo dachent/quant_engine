@@ -110,22 +110,28 @@ under `DATA-RECOVERY-001` before this workflow is accepted for perpetual use.
 
 ## Private portfolio source-to-panel materialization
 
-`tools/portfolio_pipeline_materialize.py` binds one private recipe to exact
-source artifacts, accepted generation inventories, the repository commit, the
-locked Python runtime, and the stable panel launcher. It creates the portfolio
-orchestration contract and core pipeline specification used by
+`tools/portfolio_release_builder.py` executes the real ledger, baseline,
+attribution, analytics, report, native-workbook, and panel builders from one
+hash-bound private vertical recipe. `tools/portfolio_pipeline_materialize.py`
+then binds those commands, their expected deterministic generation inventories,
+the browser-QA evidence, repository commit, locked Python runtime, and stable
+panel launcher into the core pipeline specification used by
 `tools/data_pipeline.py`.
 
-The materializer does not read ambient `CURRENT.json` pointers and does not
-publish on its own. Its semantic gate independently rechecks the authority
-snapshot, four copied generation inventories, freshness boundary,
-report/workbook validation, native Excel success evidence, browser QA,
-interaction QA, and launcher hash. A mismatch fails before the release can
-reach `PREPARED`; advancing production still requires the separate pipeline
-commit operation.
+No stage copies a prior release or substitutes a marker for computation. The
+semantic command calculates six bridges from the newly built artifacts:
+financial identities, current strategy mappings, ledger-to-baseline-to-report
+lineage, analytics/report/panel equality (including HWM), freshness, and exact
+generation/release evidence. Quantitative details are retained beside the
+strict gate. Any mismatch fails before the release can reach `PREPARED`;
+advancing production still requires the separate pipeline commit operation.
 
 ```powershell
 $env:QE_PIPELINE_PYTHON = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
+python tools/portfolio_release_builder.py build --recipe <private-vertical-recipe.json> --output-root <private-proof-root>
+<run browser and interaction QA against the emitted panel candidate>
+python tools/portfolio_release_builder.py stage --recipe <private-vertical-recipe.json> --output-root <private-proof-root> --role panel --qa-dir <private-proof-qa-dir>
+python tools/portfolio_pipeline_materialize.py recipe --vertical-recipe <private-vertical-recipe.json> --proof-root <private-proof-root> --qa-dir <private-proof-qa-dir> --pipeline-id <new-pipeline-id> --output <private-recipe.json>
 python tools/portfolio_pipeline_materialize.py spec --recipe <private-recipe.json> --output-root <private-run-root> --spec <private-run-root>\pipeline-spec.json
 python tools/data_pipeline.py plan --spec <private-run-root>\pipeline-spec.json
 python tools/data_pipeline.py execute --spec <private-run-root>\pipeline-spec.json

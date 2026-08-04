@@ -28,6 +28,12 @@ from quant_engine.portfolio_ledger.models import (
     ValueStatus,
     decimal_text,
 )
+from quant_engine.portfolio_ledger.hwm import (
+    HWM_STATUS_CODE_VERSION,
+    HWM_STATUS_SEMANTICS,
+    HwmCoverageError,
+    governed_hwm_coverage,
+)
 from quant_engine.portfolio_ledger.reconciliation import (
     AccountPositionReconciliation,
     ReconciliationException,
@@ -75,6 +81,9 @@ __all__ = [
     "EvidenceComparison",
     "EvidenceLayer",
     "GenerationQualification",
+    "HWM_STATUS_CODE_VERSION",
+    "HWM_STATUS_SEMANTICS",
+    "HwmCoverageError",
     "LedgerSlice",
     "LedgerValidationError",
     "MappingStatus",
@@ -100,6 +109,7 @@ __all__ = [
     "VersionMatchStatus",
     "compare_strategy_evidence",
     "decimal_text",
+    "governed_hwm_coverage",
     "reconcile_position_values",
     "reconcile_allocation_bridge",
     "validate_provider_authority",
