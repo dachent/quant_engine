@@ -30,6 +30,7 @@ from quant_engine.core import (
     SourceArtifact,
     VerificationStatus,
     hash_file,
+    rename_directory_with_retry,
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core.publication import CurrentPointer
@@ -1537,7 +1538,7 @@ def stage_candidate(spec_path: Path) -> dict[str, object]:
         try:
             (temporary / "provider-ledger.json").write_bytes(catalog_bytes)
             (temporary / "generation.json").write_bytes(manifest.to_json_bytes())
-            temporary.rename(final)
+            rename_directory_with_retry(temporary, final)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)

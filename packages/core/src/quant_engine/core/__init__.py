@@ -33,6 +33,7 @@ from quant_engine.core.contracts import (
     VerificationStatus,
     hash_file,
 )
+from quant_engine.core.filesystem import rename_directory_with_retry
 from quant_engine.core.publication import (
     CurrentPointer,
     GenerationConflictError,
@@ -173,6 +174,7 @@ __all__ = [
     "read_current_release",
     "read_generation",
     "read_release",
+    "rename_directory_with_retry",
     "recover_release",
     "rehearse_dated_rollforwards",
     "rehearse_release_boundaries",
