@@ -681,7 +681,7 @@ def _command(
     args: Sequence[str],
     reads: Sequence[Path],
     writes: Sequence[Path],
-    timeout_seconds: int = 7200,
+    timeout_seconds: int = 3600,
 ) -> dict[str, Any]:
     return {
         "argv": [str(runtime), str(entrypoint), *args],

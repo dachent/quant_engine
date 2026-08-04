@@ -414,3 +414,21 @@ def test_output_path_budget_rejects_an_overlong_release_root(tmp_path: Path) -> 
 
     with pytest.raises(materializer.MaterializationError, match="path budget"):
         materializer._validate_output_path_budget(tmp_path / ("x" * 200), recipe)
+
+
+def test_generated_command_timeout_satisfies_core_pipeline_contract(
+    tmp_path: Path,
+) -> None:
+    node = materializer._command(
+        node_id="bounded-command",
+        runtime=tmp_path / "python.exe",
+        entrypoint=tmp_path / "tool.py",
+        lock=tmp_path / "uv.lock",
+        recipe=tmp_path / "recipe.json",
+        depends_on=(),
+        args=("run",),
+        reads=(tmp_path / "input",),
+        writes=(tmp_path / "output",),
+    )
+
+    assert node["timeout_seconds"] == 3600
