@@ -163,7 +163,7 @@ def test_materialization_produces_exact_semantically_verified_outputs(
         (output_root / "evidence" / "post-build-semantic.json").read_text()
     )
     assert evidence["verdict"] == "PASS"
-    assert evidence["evidence"]["materialized_generation_count"] == 4
+    assert set(evidence["checks"].values()) == {"PASS"}
     panel_id = recipe["generations"]["panel"]["generation_id"]
     assert (output_root / "stages" / "panel" / "generations" / str(panel_id)).is_dir()
 

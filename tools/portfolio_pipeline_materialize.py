@@ -325,32 +325,6 @@ def marker(
     return {"role": role, "state": "VERIFIED"}
 
 
-def _semantic_evidence(recipe: Mapping[str, Any]) -> dict[str, Any]:
-    panel_generation = Path(str(recipe["generations"]["panel"]["source_dir"])).resolve()
-    report_generation = Path(
-        str(recipe["generations"]["report"]["source_dir"])
-    ).resolve()
-    panel_qa = _load(panel_generation / "qa" / "qa-validation.json")
-    interaction_qa = _load(panel_generation / "qa" / "interaction-results.json")
-    report_verification = _load(report_generation / "report-verification.json")
-    workbook_validation = _load(report_generation / "workbook-validation.json")
-    freshness = _load(Path(str(recipe["freshness_health"])).resolve())
-    assessments = freshness.get("assessments")
-    if not isinstance(assessments, list):
-        raise MaterializationError("freshness assessments are malformed")
-    return {
-        "authority_snapshot": "EXACT_MATCH",
-        "freshness_assessments": len(assessments),
-        "materialized_generation_count": len(RELEASE_ROLES),
-        "panel_browser_checks": panel_qa.get("checks_total"),
-        "panel_interaction_checks": len(interaction_qa.get("checks", [])),
-        "report_id": report_verification.get("report_id"),
-        "workbook_validation_invariants": len(
-            workbook_validation.get("invariants", [])
-        ),
-    }
-
-
 def _semantic_payload(recipe: Mapping[str, Any]) -> dict[str, Any]:
     release_generations = {
         ROOT_IDS[role]: recipe["generations"][role]["generation_id"]
@@ -369,7 +343,6 @@ def _semantic_payload(recipe: Mapping[str, Any]) -> dict[str, Any]:
         "release_commit": recipe["release_commit"],
         "release_generations": release_generations,
         "schema_version": 1,
-        "evidence": _semantic_evidence(recipe),
         "unwaived_blocking_exceptions": 0,
         "verdict": "PASS",
     }
