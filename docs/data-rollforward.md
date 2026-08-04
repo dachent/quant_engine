@@ -107,3 +107,27 @@ The private release evidence must include the pipeline specification, exact
 plan, receipts, pipeline-evidence hash, release manifest/journal, gate files,
 and post-commit pointer/companion verification. Recovery rehearsal is performed
 under `DATA-RECOVERY-001` before this workflow is accepted for perpetual use.
+
+## Private portfolio source-to-panel materialization
+
+`tools/portfolio_pipeline_materialize.py` binds one private recipe to exact
+source artifacts, accepted generation inventories, the repository commit, the
+locked Python runtime, and the stable panel launcher. It creates the portfolio
+orchestration contract and core pipeline specification used by
+`tools/data_pipeline.py`.
+
+The materializer does not read ambient `CURRENT.json` pointers and does not
+publish on its own. Its semantic gate independently rechecks the authority
+snapshot, four copied generation inventories, freshness boundary,
+report/workbook validation, native Excel success evidence, browser QA,
+interaction QA, and launcher hash. A mismatch fails before the release can
+reach `PREPARED`; advancing production still requires the separate pipeline
+commit operation.
+
+```powershell
+$env:QE_PIPELINE_PYTHON = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
+python tools/portfolio_pipeline_materialize.py spec --recipe <private-recipe.json> --output-root <private-run-root> --spec <private-run-root>\pipeline-spec.json
+python tools/data_pipeline.py plan --spec <private-run-root>\pipeline-spec.json
+python tools/data_pipeline.py execute --spec <private-run-root>\pipeline-spec.json
+python tools/data_pipeline.py status --spec <private-run-root>\pipeline-spec.json
+```
