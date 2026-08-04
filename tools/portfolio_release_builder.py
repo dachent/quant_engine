@@ -325,42 +325,64 @@ def build_attribution(recipe_path: Path, output_root: Path) -> dict[str, Any]:
     source = _path(
         recipe["decomposition_plan_bundle"]["path"], "decomposition plan bundle"
     )
-    governance = source / "inputs" / "governance"
-    market = source / "inputs" / "market"
-    result = _tool(
-        "portfolio_current_decomposition_plan.py",
-        "--plan",
-        str(governance / "current-strategy-decomposition-plan.json"),
-        "--catalog",
-        str(governance / "decomposition-source-catalog.json"),
-        "--base-spec",
-        str(governance / "base-decomposition-spec.json"),
-        "--base-source-root",
-        str(source / "inputs" / "base"),
-        "--us-factors",
-        str(market / "us_factors.csv"),
-        "--europe-factors",
-        str(market / "europe_factors.csv"),
-        "--style-returns",
-        str(market / "style_returns.csv"),
-        "--sector-returns",
-        str(market / "sector_returns.csv"),
-        "--us-industries",
-        str(market / "us_industries.csv"),
-        "--public-factor-manifest",
-        str(governance / "public-factor-source-manifest.json"),
-        "--style-manifest",
-        str(governance / "style-source-manifest.json"),
-        "--sector-manifest",
-        str(governance / "sector-source-manifest.json"),
-        "--output-root",
-        str(output_root),
-        timeout=7200,
+    manifest = _load(source / "plan-manifest.json", "attribution plan manifest")
+    if manifest.get("bundle_id") != source.name:
+        raise VerticalBuildError("attribution plan bundle identity differs")
+    rows = []
+    for section in ("inputs", "outputs"):
+        values = manifest.get(section)
+        if not isinstance(values, list) or not values:
+            raise VerticalBuildError(f"attribution plan {section} are invalid")
+        for row in values:
+            if not isinstance(row, dict):
+                raise VerticalBuildError(f"attribution plan {section} row is invalid")
+            relative = _text(row.get("path"), f"attribution {section} path")
+            artifact = source / relative
+            sha256, size = _sha(artifact)
+            passed = sha256 == row.get("sha256") and size == row.get("size_bytes")
+            rows.append(
+                {
+                    "path": relative,
+                    "sha256": sha256,
+                    "size_bytes": size,
+                    "status": "PASS" if passed else "FAIL",
+                }
+            )
+            if not passed:
+                raise VerticalBuildError(
+                    f"attribution plan artifact differs: {relative}"
+                )
+    ledger_id, ledger_generation = _published_generation(output_root.parent / "ledger")
+    ledger_manifest = ledger_generation / "generation.json"
+    ledger_catalog = ledger_generation / "provider-ledger.json"
+    bound_manifest = (
+        source / "inputs" / "base" / "provenance" / "00-provider-ledger-generation.json"
     )
-    destination = _path(result.get("destination"), "attribution destination")
+    bound_catalog = (
+        source / "inputs" / "base" / "provenance" / "01-provider-ledger.json"
+    )
+    if (
+        bound_manifest.read_bytes() != ledger_manifest.read_bytes()
+        or bound_catalog.read_bytes() != ledger_catalog.read_bytes()
+    ):
+        raise VerticalBuildError(
+            "attribution plan is not bound to the rebuilt provider ledger"
+        )
+    verification = {
+        "artifact_count": len(rows),
+        "bundle_id": source.name,
+        "ledger_catalog_sha256": _sha(ledger_catalog)[0],
+        "ledger_generation_id": ledger_id,
+        "plan_manifest_sha256": _sha(source / "plan-manifest.json")[0],
+        "schema_version": 1,
+        "status": "PASS",
+    }
+    verification_path = output_root / "attribution-verification.json"
+    _write_exact(verification_path, canonical_json_bytes(verification))
     return {
-        "bundle_id": result.get("bundle_id"),
-        "destination": str(destination),
+        "bundle_id": source.name,
+        "destination": str(source),
+        "verification": str(verification_path),
     }
 
 
