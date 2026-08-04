@@ -325,6 +325,32 @@ def marker(
     return {"role": role, "state": "VERIFIED"}
 
 
+def _semantic_evidence(recipe: Mapping[str, Any]) -> dict[str, Any]:
+    panel_generation = Path(str(recipe["generations"]["panel"]["source_dir"])).resolve()
+    report_generation = Path(
+        str(recipe["generations"]["report"]["source_dir"])
+    ).resolve()
+    panel_qa = _load(panel_generation / "qa" / "qa-validation.json")
+    interaction_qa = _load(panel_generation / "qa" / "interaction-results.json")
+    report_verification = _load(report_generation / "report-verification.json")
+    workbook_validation = _load(report_generation / "workbook-validation.json")
+    freshness = _load(Path(str(recipe["freshness_health"])).resolve())
+    assessments = freshness.get("assessments")
+    if not isinstance(assessments, list):
+        raise MaterializationError("freshness assessments are malformed")
+    return {
+        "authority_snapshot": "EXACT_MATCH",
+        "freshness_assessments": len(assessments),
+        "materialized_generation_count": len(RELEASE_ROLES),
+        "panel_browser_checks": panel_qa.get("checks_total"),
+        "panel_interaction_checks": len(interaction_qa.get("checks", [])),
+        "report_id": report_verification.get("report_id"),
+        "workbook_validation_invariants": len(
+            workbook_validation.get("invariants", [])
+        ),
+    }
+
+
 def _semantic_payload(recipe: Mapping[str, Any]) -> dict[str, Any]:
     release_generations = {
         ROOT_IDS[role]: recipe["generations"][role]["generation_id"]
@@ -343,6 +369,7 @@ def _semantic_payload(recipe: Mapping[str, Any]) -> dict[str, Any]:
         "release_commit": recipe["release_commit"],
         "release_generations": release_generations,
         "schema_version": 1,
+        "evidence": _semantic_evidence(recipe),
         "unwaived_blocking_exceptions": 0,
         "verdict": "PASS",
     }
@@ -411,9 +438,19 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
     xlsx_result = _load(report_generation / "xlsx-win-result.json")
     if workbook_validation.get("all_passed") is not True:
         raise MaterializationError("workbook validation is not complete")
-    xlsx_text = _character_map_text(xlsx_result)
-    if '"final_state":"SUCCEEDED"' not in xlsx_text or '"ok":true' not in xlsx_text:
-        raise MaterializationError("native Excel verification is not complete")
+    if (
+        xlsx_result.get("final_state") != "SUCCEEDED"
+        or xlsx_result.get("ok") is not True
+    ):
+        if all(key.isdigit() for key in xlsx_result):
+            xlsx_text = _character_map_text(xlsx_result)
+            if (
+                '"final_state":"SUCCEEDED"' not in xlsx_text
+                or '"ok":true' not in xlsx_text
+            ):
+                raise MaterializationError("native Excel verification is not complete")
+        else:
+            raise MaterializationError("native Excel verification is not complete")
     if (
         report_verification.get("workbook_sha256")
         != _sha(report_generation / "portfolio-report.xlsx")[0]
@@ -431,17 +468,6 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
         raise MaterializationError("freshness evidence has a blocking consumer gap")
 
     payload = _semantic_payload(recipe)
-    payload["evidence"] = {
-        "authority_snapshot": "EXACT_MATCH",
-        "freshness_assessments": len(assessments),
-        "materialized_generation_count": len(RELEASE_ROLES),
-        "panel_browser_checks": panel_qa["checks_total"],
-        "panel_interaction_checks": len(interaction_qa.get("checks", [])),
-        "report_id": report_verification.get("report_id"),
-        "workbook_validation_invariants": len(
-            workbook_validation.get("invariants", [])
-        ),
-    }
     _write_exact(output_path, canonical_json_bytes(payload))
     return {"state": "PASS"}
 

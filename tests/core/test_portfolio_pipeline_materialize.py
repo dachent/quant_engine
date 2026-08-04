@@ -81,10 +81,9 @@ def _generation(root: Path, role: str) -> GenerationManifest:
             generation / "workbook-validation.json",
             {"all_passed": True, "invariants": [{"passed": True}]},
         )
-        native_result = '{"final_state":"SUCCEEDED","ok":true}'
         _write_json(
             generation / "xlsx-win-result.json",
-            {str(index): character for index, character in enumerate(native_result)},
+            {"final_state": "SUCCEEDED", "ok": True, "schema_version": "2.0"},
         )
     if role == "panel":
         _write_json(
