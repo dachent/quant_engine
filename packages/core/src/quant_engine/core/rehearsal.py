@@ -533,11 +533,19 @@ def rehearse_release_boundaries(
             second_target,
         ),
     )
-    if read_current(roots[second_target]) != next(
+    second_pointer_path = roots[second_target] / "CURRENT.json"
+    second_actual = (
+        read_current(roots[second_target]) if second_pointer_path.exists() else None
+    )
+    first_pointer_path = roots[first_target] / "CURRENT.json"
+    first_actual = (
+        read_current(roots[first_target]) if first_pointer_path.exists() else None
+    )
+    if second_actual != next(
         item.previous_pointer
         for item in prepared.targets
         if item.root_id == second_target
-    ) or read_current(roots[first_target]).generation_id != next(
+    ) or first_actual is None or first_actual.generation_id != next(
         item.proposed_generation_id
         for item in prepared.targets
         if item.root_id == first_target

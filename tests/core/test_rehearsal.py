@@ -55,7 +55,10 @@ def _manifest(label: str, day: date) -> GenerationManifest:
 
 
 def _accepted_release(
-    tmp_path: Path, *, legacy_predecessor_pointer: bool = False
+    tmp_path: Path,
+    *,
+    legacy_predecessor_pointer: bool = False,
+    with_predecessors: bool = True,
 ) -> tuple[PipelineSpec, str]:
     roots = {"excel": tmp_path / "excel", "panel": tmp_path / "panel"}
     previous = {
@@ -67,18 +70,20 @@ def _accepted_release(
         for root_id in roots
     }
     for root_id in roots:
-        stage_generation(roots[root_id], previous[root_id])
-        publish_generation(roots[root_id], previous[root_id].generation_id)
-        if legacy_predecessor_pointer:
-            current = read_current(roots[root_id])
-            (roots[root_id] / "CURRENT.json").write_bytes(
-                CurrentPointer(
-                    generation_id=current.generation_id,
-                    manifest_sha256=current.manifest_sha256,
-                ).to_json_bytes()
-            )
+        if with_predecessors:
+            stage_generation(roots[root_id], previous[root_id])
+            publish_generation(roots[root_id], previous[root_id].generation_id)
+            if legacy_predecessor_pointer:
+                current = read_current(roots[root_id])
+                (roots[root_id] / "CURRENT.json").write_bytes(
+                    CurrentPointer(
+                        generation_id=current.generation_id,
+                        manifest_sha256=current.manifest_sha256,
+                    ).to_json_bytes()
+                )
         stage_generation(roots[root_id], proposed[root_id])
-    (roots["panel"] / "index.html").write_bytes(b"previous launcher\n")
+    if with_predecessors:
+        (roots["panel"] / "index.html").write_bytes(b"previous launcher\n")
     proposed_launcher = tmp_path / "proposed-launcher.html"
     proposed_launcher.write_bytes(b"proposed launcher\n")
     coordination = tmp_path / "coordination"
@@ -235,3 +240,19 @@ def test_recovery_rehearsal_preserves_legacy_predecessor_pointer_contract(
 
     assert result["status"] == "PASS"
     assert result["boundary_rehearsal"]["source_unchanged"] is True
+
+
+def test_recovery_rehearsal_supports_release_without_predecessors(
+    tmp_path: Path,
+) -> None:
+    spec, release_id = _accepted_release(tmp_path, with_predecessors=False)
+
+    result = run_recovery_rehearsal(
+        spec=spec,
+        release_id=release_id,
+        output_root=tmp_path / "no-predecessor-rehearsal",
+    )
+
+    assert result["status"] == "PASS"
+    assert result["boundary_rehearsal"]["source_unchanged"] is True
+    assert result["boundary_rehearsal"]["rollback_interruption"]["status"] == "PASS"
