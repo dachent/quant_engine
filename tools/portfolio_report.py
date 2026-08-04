@@ -7,9 +7,11 @@ from collections import defaultdict
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -77,6 +79,27 @@ TABLE_NAMES: Final = (
     "tblCorrections",
     "tblMethodology",
     "tblProvenance",
+)
+WORKBOOK_CANONICALIZATION_VERSION: Final = "1"
+_CANONICAL_ZIP_TIMESTAMP: Final = (1980, 1, 1, 0, 0, 0)
+_CORE_CREATED = re.compile(
+    rb"(<(?:[A-Za-z_][\w.-]*:)?created\b[^>]*>)([^<]+)"
+    rb"(</(?:[A-Za-z_][\w.-]*:)?created>)"
+)
+_CORE_MODIFIED = re.compile(
+    rb"(<(?:[A-Za-z_][\w.-]*:)?modified\b[^>]*>)([^<]+)"
+    rb"(</(?:[A-Za-z_][\w.-]*:)?modified>)"
+)
+_CHART_UNIQUE_ID = re.compile(
+    rb'(<(?:[A-Za-z_][\w.-]*:)?uniqueId\b[^>]*\bval=")'
+    rb'\{[0-9A-Fa-f-]{36}\}(?=")'
+)
+_WORKBOOK_ABS_PATH = re.compile(
+    rb'(<(?:[A-Za-z_][\w.-]*:)?absPath\b[^>]*\burl=")[^"]*(?=")'
+)
+_WORKBOOK_REVISION_ID = re.compile(
+    rb'(<(?:[A-Za-z_][\w.-]*:)?revisionPtr\b[^>]*\bdocumentId=")'
+    rb'8_\{[0-9A-Fa-f-]{36}\}(?=")'
 )
 
 
@@ -1862,6 +1885,180 @@ def verify_workbook(path: Path) -> dict[str, Any]:
     }
 
 
+def _canonical_guid(scope: str, index: int, *, zero_prefix: bool = False) -> bytes:
+    digest = hashlib.sha256(f"{scope}:{index}".encode("utf-8")).hexdigest().upper()
+    if zero_prefix:
+        value = f"00000000-{digest[:4]}-{digest[4:8]}-{digest[8:12]}-{digest[12:24]}"
+    else:
+        value = (
+            f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-"
+            f"{digest[16:20]}-{digest[20:32]}"
+        )
+    return value.encode("ascii")
+
+
+def _canonicalize_ooxml_part(
+    name: str, content: bytes, counts: dict[str, int]
+) -> bytes:
+    if name == "docProps/core.xml":
+        created = _CORE_CREATED.search(content)
+        if created is None:
+            raise ReportValidationError("workbook core created timestamp is missing")
+
+        def modified(match: re.Match[bytes]) -> bytes:
+            counts["modified_timestamp"] += 1
+            return match.group(1) + created.group(2) + match.group(3)
+
+        return _CORE_MODIFIED.sub(modified, content)
+    if name == "xl/workbook.xml":
+
+        def abs_path(match: re.Match[bytes]) -> bytes:
+            counts["absolute_path"] += 1
+            return match.group(1) + b"."
+
+        def revision_id(match: re.Match[bytes]) -> bytes:
+            counts["revision_document_id"] += 1
+            return (
+                match.group(1)
+                + b"8_{"
+                + _canonical_guid(name, counts["revision_document_id"])
+                + b"}"
+            )
+
+        content = _WORKBOOK_ABS_PATH.sub(abs_path, content)
+        return _WORKBOOK_REVISION_ID.sub(revision_id, content)
+    if name.startswith("xl/charts/chart") and name.endswith(".xml"):
+
+        def unique_id(match: re.Match[bytes]) -> bytes:
+            counts["chart_unique_id"] += 1
+            return (
+                match.group(1)
+                + b"{"
+                + _canonical_guid(name, counts["chart_unique_id"], zero_prefix=True)
+                + b"}"
+            )
+
+        return _CHART_UNIQUE_ID.sub(unique_id, content)
+    return content
+
+
+def _volatile_field_counts(name: str, content: bytes) -> dict[str, int]:
+    counts = {
+        "absolute_path": 0,
+        "chart_unique_id": 0,
+        "modified_timestamp": 0,
+        "revision_document_id": 0,
+    }
+    if not (
+        name == "docProps/core.xml"
+        or name == "xl/workbook.xml"
+        or (name.startswith("xl/charts/chart") and name.endswith(".xml"))
+    ):
+        return counts
+    root = ET.fromstring(content)
+    for item in root.iter():
+        local_name = _local_name(item.tag)
+        if name == "docProps/core.xml" and local_name == "modified":
+            counts["modified_timestamp"] += 1
+        elif name == "xl/workbook.xml" and local_name == "absPath":
+            counts["absolute_path"] += 1
+        elif name == "xl/workbook.xml" and local_name == "revisionPtr":
+            counts["revision_document_id"] += 1
+        elif name.startswith("xl/charts/chart") and local_name == "uniqueId":
+            counts["chart_unique_id"] += 1
+    return counts
+
+
+def canonicalize_workbook(
+    path: Path, evidence_path: Path | None = None
+) -> dict[str, Any]:
+    """Normalize only native-Excel package fields proven volatile across runs."""
+    if path.is_symlink() or not path.is_file():
+        raise ReportValidationError("Excel workbook is missing or linked")
+    counts = {
+        "absolute_path": 0,
+        "chart_unique_id": 0,
+        "modified_timestamp": 0,
+        "revision_document_id": 0,
+    }
+    discovered = {key: 0 for key in counts}
+    try:
+        with zipfile.ZipFile(path) as source:
+            entries = source.infolist()
+            names = [item.filename for item in entries]
+            if len(names) != len(set(names)):
+                raise ReportValidationError("workbook contains duplicate ZIP entries")
+            output = io.BytesIO()
+            with zipfile.ZipFile(
+                output,
+                mode="w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+                allowZip64=True,
+            ) as destination:
+                for item in entries:
+                    source_content = source.read(item.filename)
+                    for key, value in _volatile_field_counts(
+                        item.filename, source_content
+                    ).items():
+                        discovered[key] += value
+                    content = _canonicalize_ooxml_part(
+                        item.filename, source_content, counts
+                    )
+                    canonical = zipfile.ZipInfo(item.filename, _CANONICAL_ZIP_TIMESTAMP)
+                    canonical.compress_type = zipfile.ZIP_DEFLATED
+                    canonical.create_system = 0
+                    canonical.external_attr = 0
+                    destination.writestr(canonical, content, compresslevel=9)
+    except (zipfile.BadZipFile, ET.ParseError, KeyError, OSError) as exc:
+        raise ReportValidationError("workbook cannot be canonicalized") from exc
+    if discovered["modified_timestamp"] != 1:
+        raise ReportValidationError("workbook core modified timestamp count differs")
+    if counts != discovered:
+        raise ReportValidationError(
+            "workbook volatile-field canonicalization is incomplete: "
+            f"discovered={discovered!r}, normalized={counts!r}"
+        )
+    canonical_bytes = output.getvalue()
+    if path.read_bytes() != canonical_bytes:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".canonical-", suffix=".xlsx", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(canonical_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    result = {
+        "canonicalization_version": WORKBOOK_CANONICALIZATION_VERSION,
+        "normalized_fields": counts,
+        "workbook_sha256": hashlib.sha256(canonical_bytes).hexdigest(),
+        "zip_entry_count": len(entries),
+    }
+    if evidence_path is not None:
+        _write_exact(evidence_path, canonical_json_bytes(result))
+    return result
+
+
+def _validate_canonicalization_evidence(candidate_dir: Path, workbook: Path) -> None:
+    evidence = _load_json(
+        candidate_dir / "workbook-canonicalization.json",
+        "workbook canonicalization evidence",
+    )
+    if evidence.get("canonicalization_version") != WORKBOOK_CANONICALIZATION_VERSION:
+        raise ReportValidationError("workbook canonicalization version differs")
+    sha256, _ = hash_file(workbook)
+    if evidence.get("workbook_sha256") != sha256:
+        raise ReportValidationError("workbook canonicalization hash differs")
+    fields = evidence.get("normalized_fields")
+    if not isinstance(fields, dict) or fields.get("modified_timestamp") != 1:
+        raise ReportValidationError("workbook canonicalization evidence is incomplete")
+
+
 def verify_candidate(
     baseline_root: Path,
     candidate_dir: Path,
@@ -1929,6 +2126,7 @@ def publish_report(
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
 ) -> dict[str, Any]:
+    _validate_canonicalization_evidence(candidate_dir, excel_workbook)
     verification = verify_candidate(
         baseline_root,
         candidate_dir,
@@ -1974,6 +2172,12 @@ def publish_report(
             "evidence/workbook-validation.json",
             "xlsx-win-validation",
             "1",
+        ),
+        (
+            candidate_dir / "workbook-canonicalization.json",
+            "evidence/workbook-canonicalization.json",
+            "portfolio-report-workbook-canonicalization",
+            WORKBOOK_CANONICALIZATION_VERSION,
         ),
         (
             contract_path,
@@ -2043,6 +2247,10 @@ def publish_report(
     _copy_exact(excel_workbook, generation_dir / WORKBOOK_NAME)
     _copy_exact(xlsx_result, generation_dir / "xlsx-win-result.json")
     _copy_exact(validation_result, generation_dir / "workbook-validation.json")
+    _copy_exact(
+        candidate_dir / "workbook-canonicalization.json",
+        generation_dir / "workbook-canonicalization.json",
+    )
     _copy_exact(contract_path, generation_dir / "workbook-contract.json")
     _write_exact(generation_dir / "report-verification.json", verification_bytes)
     pointer = publish_generation(output_root, manifest.generation_id)
@@ -2071,6 +2279,9 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--excel-workbook", type=Path, required=True)
     verify.add_argument("--freshness-health", type=Path)
     verify.add_argument("--provider-ledger-root", type=Path)
+    canonicalize = commands.add_parser("canonicalize")
+    canonicalize.add_argument("--workbook", type=Path, required=True)
+    canonicalize.add_argument("--evidence", type=Path, required=True)
     publish = commands.add_parser("publish")
     publish.add_argument("--baseline-root", type=Path, required=True)
     publish.add_argument("--candidate-dir", type=Path, required=True)
@@ -2101,6 +2312,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.freshness_health,
                 args.provider_ledger_root,
             )
+        elif args.command == "canonicalize":
+            result = canonicalize_workbook(args.workbook, args.evidence)
         else:
             result = publish_report(
                 args.baseline_root,

@@ -38,6 +38,109 @@ sys.modules[SPEC.name] = reporter
 SPEC.loader.exec_module(reporter)
 
 
+def _excel_saved_package(
+    path: Path,
+    *,
+    modified: str,
+    chart_guid: str,
+    temporary_root: str,
+    revision_guid: str,
+    semantic_value: str = "same",
+    zip_second: int = 0,
+) -> None:
+    parts = {
+        "docProps/core.xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="urn:core" '
+            'xmlns:dcterms="urn:terms" xmlns:xsi="urn:xsi">'
+            '<dcterms:created xsi:type="dcterms:W3CDTF">'
+            "2026-08-03T00:00:00Z</dcterms:created>"
+            '<dcterms:modified xsi:type="dcterms:W3CDTF">'
+            f"{modified}</dcterms:modified></cp:coreProperties>"
+        ).encode(),
+        "xl/charts/chart1.xml": (
+            '<c:chartSpace xmlns:c="urn:chart" xmlns:c16="urn:chart16">'
+            "<c:extLst><c:ext><c16:uniqueId "
+            f'val="{{{chart_guid}}}"/></c:ext></c:extLst></c:chartSpace>'
+        ).encode(),
+        "xl/workbook.xml": (
+            '<workbook xmlns:x15ac="urn:abs" xmlns:xr="urn:revision">'
+            f'<x15ac:absPath url="{temporary_root}"/>'
+            f'<xr:revisionPtr documentId="8_{{{revision_guid}}}"/>'
+            "</workbook>"
+        ).encode(),
+        "xl/worksheets/sheet1.xml": f"<sheet>{semantic_value}</sheet>".encode(),
+    }
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, content in parts.items():
+            info = zipfile.ZipInfo(name, (2026, 8, 3, 0, 0, zip_second))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, content)
+
+
+def test_native_excel_workbook_canonicalization_is_deterministic_and_bounded(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.xlsx"
+    second = tmp_path / "second.xlsx"
+    changed = tmp_path / "changed.xlsx"
+    _excel_saved_package(
+        first,
+        modified="2026-08-04T05:23:48Z",
+        chart_guid="00000000-CC01-4263-A5C9-803DDF0C079C",
+        temporary_root="C:\\Temp\\xlsx-win-stage-first\\",
+        revision_guid="878E45FB-7799-4293-81FE-29F635965A3D",
+    )
+    _excel_saved_package(
+        second,
+        modified="2026-08-04T05:58:22Z",
+        chart_guid="00000000-DD23-47F6-8C5E-35307AE221C8",
+        temporary_root="C:\\Temp\\xlsx-win-stage-second\\",
+        revision_guid="90E8A27E-6EEF-4295-BB7E-DD3062E36063",
+        zip_second=2,
+    )
+    _excel_saved_package(
+        changed,
+        modified="2026-08-04T05:58:22Z",
+        chart_guid="00000000-DD23-47F6-8C5E-35307AE221C8",
+        temporary_root="C:\\Temp\\xlsx-win-stage-second\\",
+        revision_guid="90E8A27E-6EEF-4295-BB7E-DD3062E36063",
+        semantic_value="different financial content",
+        zip_second=2,
+    )
+
+    first_result = reporter.canonicalize_workbook(
+        first, tmp_path / "first-evidence.json"
+    )
+    second_result = reporter.canonicalize_workbook(
+        second, tmp_path / "second-evidence.json"
+    )
+    changed_result = reporter.canonicalize_workbook(changed)
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first_result == second_result
+    assert changed_result["workbook_sha256"] != first_result["workbook_sha256"]
+    assert reporter.canonicalize_workbook(first) == first_result
+
+
+def test_canonicalization_fails_closed_on_unrecognized_volatile_field(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "unrecognized.xlsx"
+    _excel_saved_package(
+        workbook,
+        modified="2026-08-04T05:23:48Z",
+        chart_guid="not-a-guid-xxxxxxxxxxxxxxxxxxxxxxxxx",
+        temporary_root="C:\\Temp\\xlsx-win-stage-first\\",
+        revision_guid="878E45FB-7799-4293-81FE-29F635965A3D",
+    )
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="canonicalization is incomplete"
+    ):
+        reporter.canonicalize_workbook(workbook)
+
+
 def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> None:
     rows = reporter._coverage(
         {
@@ -689,6 +792,9 @@ def test_candidate_drift_and_failed_excel_evidence_block_publication(
     validation = candidate / "validation.json"
     run_result.write_text(json.dumps({"ok": False}), encoding="utf-8")
     validation.write_text(json.dumps({"all_passed": True}), encoding="utf-8")
+    reporter.canonicalize_workbook(
+        workbook, candidate / "workbook-canonicalization.json"
+    )
     with pytest.raises(reporter.ReportValidationError, match="not ok"):
         reporter.publish_report(
             baseline_root,
@@ -710,6 +816,9 @@ def test_publish_creates_immutable_generation_and_pointer(tmp_path: Path) -> Non
     validation = candidate / "validation.json"
     run_result.write_text(json.dumps({"ok": True}), encoding="utf-8")
     validation.write_text(json.dumps({"all_passed": True}), encoding="utf-8")
+    reporter.canonicalize_workbook(
+        workbook, candidate / "workbook-canonicalization.json"
+    )
     published_root = tmp_path / "published"
 
     result = reporter.publish_report(

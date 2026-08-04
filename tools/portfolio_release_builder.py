@@ -725,6 +725,14 @@ def build_workbook(
             raise
         result_path = _run_xlsx_startup_extension(candidate)
     excel_workbook = candidate / "excel" / "portfolio-report.xlsx"
+    canonicalization = _tool(
+        "portfolio_report.py",
+        "canonicalize",
+        "--workbook",
+        str(excel_workbook),
+        "--evidence",
+        str(candidate / "workbook-canonicalization.json"),
+    )
     validation = _run(
         (
             str(XLSX_RUNTIME),
@@ -772,7 +780,12 @@ def build_workbook(
         str(freshness_health),
         timeout=7200,
     )
-    return {**published, "candidate_dir": str(candidate), "root": str(output_root)}
+    return {
+        **published,
+        "candidate_dir": str(candidate),
+        "root": str(output_root),
+        "workbook_canonicalization": canonicalization,
+    }
 
 
 def build_report(
