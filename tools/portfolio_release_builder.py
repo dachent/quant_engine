@@ -575,6 +575,7 @@ def build_analytics(
 
 def build_report_candidate(
     baseline_root: Path,
+    provider_ledger_root: Path,
     freshness_health: Path,
     output_root: Path,
 ) -> dict[str, Any]:
@@ -583,6 +584,8 @@ def build_report_candidate(
         "build",
         "--baseline-root",
         str(baseline_root),
+        "--provider-ledger-root",
+        str(provider_ledger_root),
         "--freshness-health",
         str(freshness_health),
         "--output-root",
@@ -595,6 +598,7 @@ def build_report_candidate(
 
 def build_workbook(
     baseline_root: Path,
+    provider_ledger_root: Path,
     freshness_health: Path,
     candidate: Path,
     output_root: Path,
@@ -636,6 +640,8 @@ def build_workbook(
         "verify",
         "--baseline-root",
         str(baseline_root),
+        "--provider-ledger-root",
+        str(provider_ledger_root),
         "--candidate-dir",
         str(candidate),
         "--excel-workbook",
@@ -648,6 +654,8 @@ def build_workbook(
         "publish",
         "--baseline-root",
         str(baseline_root),
+        "--provider-ledger-root",
+        str(provider_ledger_root),
         "--candidate-dir",
         str(candidate),
         "--excel-workbook",
@@ -667,12 +675,16 @@ def build_workbook(
 
 def build_report(
     baseline_root: Path,
+    provider_ledger_root: Path,
     freshness_health: Path,
     output_root: Path,
 ) -> dict[str, Any]:
-    candidate = build_report_candidate(baseline_root, freshness_health, output_root)
+    candidate = build_report_candidate(
+        baseline_root, provider_ledger_root, freshness_health, output_root
+    )
     return build_workbook(
         baseline_root,
+        provider_ledger_root,
         freshness_health,
         Path(_text(candidate.get("candidate_dir"), "report candidate")),
         output_root,
@@ -832,6 +844,7 @@ def build_stage(
         _stage_result(output_root, "analytics")
         result = build_report_candidate(
             stages / "baseline",
+            stages / "ledger",
             _path(ledger.get("freshness_health"), "freshness health"),
             stages / "report-candidate",
         )
@@ -840,6 +853,7 @@ def build_stage(
         report = _stage_result(output_root, "report")
         result = build_workbook(
             stages / "baseline",
+            stages / "ledger",
             _path(ledger.get("freshness_health"), "freshness health"),
             _path(report.get("candidate_dir"), "report candidate"),
             stages / "report",

@@ -1004,7 +1004,9 @@ def _corrections(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _provider_ledger_exceptions(
-    catalog: Mapping[str, Any], baseline_root: Path
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     references = [
         item
@@ -1021,7 +1023,11 @@ def _provider_ledger_exceptions(
     reference = references[0]
     expected_sha256 = _text(reference.get("sha256"), "provider-ledger sha256")
     candidates: list[tuple[Path, str]] = []
-    generations_root = baseline_root.parent / "provider-ledger" / "generations"
+    generations_root = (
+        provider_ledger_root
+        if provider_ledger_root is not None
+        else baseline_root.parent / "provider-ledger"
+    ) / "generations"
     if generations_root.is_dir():
         for path in sorted(generations_root.glob("*/provider-ledger.json")):
             if path.is_symlink() or not path.is_file():
@@ -1072,6 +1078,7 @@ def _reconciliation_checks(
     catalog: Mapping[str, Any],
     baseline_root: Path,
     baseline_ref: Mapping[str, Any],
+    provider_ledger_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     rows = [
         {
@@ -1093,7 +1100,9 @@ def _reconciliation_checks(
             catalog.get("reconciliation_checks"), "reconciliation_checks"
         )
     ]
-    rows.extend(_provider_ledger_exceptions(catalog, baseline_root))
+    rows.extend(
+        _provider_ledger_exceptions(catalog, baseline_root, provider_ledger_root)
+    )
     check_ids = [str(item["check_id"]) for item in rows]
     if len(check_ids) != len(set(check_ids)):
         raise ReportValidationError("report reconciliation check identifiers repeat")
@@ -1231,6 +1240,7 @@ def _reconcile_hwm_coverage(
 def build_report_data(
     baseline_root: Path,
     freshness_health_path: Path | None = None,
+    provider_ledger_root: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -1342,7 +1352,7 @@ def build_report_data(
             *hwm_provenance,
         ],
         "reconciliation_checks": _reconciliation_checks(
-            catalog, baseline_root, baseline_ref
+            catalog, baseline_root, baseline_ref, provider_ledger_root
         ),
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "strategy_summary": strategy_summary,
@@ -1724,8 +1734,11 @@ def build_candidate(
     baseline_root: Path,
     output_root: Path,
     freshness_health_path: Path | None = None,
+    provider_ledger_root: Path | None = None,
 ) -> dict[str, Any]:
-    report, report_bytes, _ = build_report_data(baseline_root, freshness_health_path)
+    report, report_bytes, _ = build_report_data(
+        baseline_root, freshness_health_path, provider_ledger_root
+    )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
     data_path = candidate / REPORT_DATA_NAME
@@ -1854,8 +1867,11 @@ def verify_candidate(
     candidate_dir: Path,
     excel_workbook: Path,
     freshness_health_path: Path | None = None,
+    provider_ledger_root: Path | None = None,
 ) -> dict[str, Any]:
-    report, report_bytes, _ = build_report_data(baseline_root, freshness_health_path)
+    report, report_bytes, _ = build_report_data(
+        baseline_root, freshness_health_path, provider_ledger_root
+    )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:
         raise ReportValidationError("candidate directory identity differs")
@@ -1911,12 +1927,14 @@ def publish_report(
     validation_result: Path,
     output_root: Path,
     freshness_health_path: Path | None = None,
+    provider_ledger_root: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         baseline_root,
         candidate_dir,
         excel_workbook,
         freshness_health_path,
+        provider_ledger_root,
     )
     run = _load_json(xlsx_result, "xlsx-win run result")
     validation = _load_json(validation_result, "xlsx-win validation result")
@@ -1925,7 +1943,7 @@ def publish_report(
     if validation.get("all_passed") is not True:
         raise ReportValidationError("xlsx-win workbook invariants did not all pass")
     report, report_bytes, baseline_catalog_path = build_report_data(
-        baseline_root, freshness_health_path
+        baseline_root, freshness_health_path, provider_ledger_root
     )
     as_of = _date(report.get("as_of_date"), "report.as_of_date")
     verification_bytes = canonical_json_bytes(verification)
@@ -2045,12 +2063,14 @@ def _parser() -> argparse.ArgumentParser:
     build = commands.add_parser("build")
     build.add_argument("--baseline-root", type=Path, required=True)
     build.add_argument("--freshness-health", type=Path)
+    build.add_argument("--provider-ledger-root", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
     verify.add_argument("--candidate-dir", type=Path, required=True)
     verify.add_argument("--excel-workbook", type=Path, required=True)
     verify.add_argument("--freshness-health", type=Path)
+    verify.add_argument("--provider-ledger-root", type=Path)
     publish = commands.add_parser("publish")
     publish.add_argument("--baseline-root", type=Path, required=True)
     publish.add_argument("--candidate-dir", type=Path, required=True)
@@ -2059,6 +2079,7 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--validation-result", type=Path, required=True)
     publish.add_argument("--output-root", type=Path, required=True)
     publish.add_argument("--freshness-health", type=Path)
+    publish.add_argument("--provider-ledger-root", type=Path)
     return parser
 
 
@@ -2067,7 +2088,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "build":
             result = build_candidate(
-                args.baseline_root, args.output_root, args.freshness_health
+                args.baseline_root,
+                args.output_root,
+                args.freshness_health,
+                args.provider_ledger_root,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -2075,6 +2099,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.candidate_dir,
                 args.excel_workbook,
                 args.freshness_health,
+                args.provider_ledger_root,
             )
         else:
             result = publish_report(
@@ -2085,6 +2110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.validation_result,
                 args.output_root,
                 args.freshness_health,
+                args.provider_ledger_root,
             )
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         print(f"portfolio-report: FAIL: {exc}", file=sys.stderr)

@@ -1107,6 +1107,52 @@ def test_report_preserves_every_hash_bound_provider_reconciliation_exception(
     )
 
 
+def test_report_accepts_explicit_non_sibling_provider_ledger_root(
+    tmp_path: Path,
+) -> None:
+    provider_generation = "f" * 64
+    provider_catalog = {
+        "reconciliation_checks": [
+            {
+                "authority_effect": "ACCOUNT_PATH_RETAINED",
+                "check_id": "provider-explicit-root",
+                "status": "EXCEPTION",
+                "strategy_id": "strategy-1",
+            }
+        ]
+    }
+    provider_bytes = canonical_json_bytes(provider_catalog)
+    provider_sha256 = hashlib.sha256(provider_bytes).hexdigest()
+    provider_root = tmp_path / "stages" / "ledger"
+    provider_dir = provider_root / "generations" / provider_generation
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "provider-ledger.json").write_bytes(provider_bytes)
+    catalog = _baseline_catalog()
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": "2026-01-03",
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "1",
+            "sha256": provider_sha256,
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    baseline_root = _published_baseline(tmp_path / "baseline-scope", catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, provider_ledger_root=provider_root
+    )
+
+    rows = [
+        item
+        for item in report["reconciliation_checks"]
+        if item["source_layer"] == "PROVIDER_LEDGER"
+    ]
+    assert [item["check_id"] for item in rows] == ["provider-explicit-root"]
+    assert rows[0]["source_generation_id"] == provider_generation
+
+
 def test_report_fails_closed_when_provider_reconciliation_source_is_missing(
     tmp_path: Path,
 ) -> None:
