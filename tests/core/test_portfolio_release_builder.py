@@ -135,3 +135,54 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
 
     assert result["recipe"] == str(output)
     assert builder._recipe(output)["schema_version"] == 3
+
+
+def test_xlsx_startup_deadline_is_the_only_extended_failure() -> None:
+    startup = {
+        "final_state": "TIMED_OUT",
+        "steps": [
+            {
+                "error": {
+                    "code": "PHASE_DEADLINE_EXCEEDED",
+                    "details": {"phase": "STARTING_EXCEL"},
+                }
+            }
+        ],
+    }
+    assert builder._is_xlsx_startup_deadline(startup) is True
+    startup["steps"][0]["error"]["details"]["phase"] = "CALCULATING"
+    assert builder._is_xlsx_startup_deadline(startup) is False
+    startup["steps"][0]["error"]["details"]["phase"] = "STARTING_EXCEL"
+    startup["steps"][0]["error"]["code"] = "WORKBOOK_OPEN_FAILED"
+    assert builder._is_xlsx_startup_deadline(startup) is False
+
+
+def test_xlsx_startup_extension_is_bounded_and_preserves_job() -> None:
+    job = {
+        "idempotency_key": "synthetic",
+        "schema_version": "2.0",
+        "steps": [{"type": "open", "workbook_path": "synthetic.xlsx"}],
+    }
+    extended = builder._xlsx_job_with_startup_extension(job)
+    assert extended["idempotency_key"] == "synthetic"
+    assert extended["steps"] == job["steps"]
+    assert extended["timeouts"] == {
+        "calculation_seconds": 180,
+        "close_seconds": 300,
+        "open_workbook_seconds": 60,
+        "refresh_total_seconds": 300,
+        "save_seconds": 60,
+        "start_excel_seconds": 120,
+    }
+
+
+def test_xlsx_startup_extension_rejects_unvalidated_job_shape() -> None:
+    with pytest.raises(builder.VerticalBuildError, match="keys differ"):
+        builder._xlsx_job_with_startup_extension(
+            {
+                "idempotency_key": "synthetic",
+                "schema_version": "2.0",
+                "steps": [],
+                "unknown": True,
+            }
+        )

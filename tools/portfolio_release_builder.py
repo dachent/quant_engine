@@ -204,7 +204,12 @@ def create_recipe(
     return {"pipeline_id": pipeline_id, "recipe": str(output)}
 
 
-def _run(command: Sequence[str], *, timeout: int = 3600) -> dict[str, Any]:
+def _run(
+    command: Sequence[str],
+    *,
+    timeout: int = 3600,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     completed = subprocess.run(
         list(command),
         cwd=REPOSITORY_ROOT,
@@ -212,6 +217,7 @@ def _run(command: Sequence[str], *, timeout: int = 3600) -> dict[str, Any]:
         text=True,
         timeout=timeout,
         check=False,
+        env=None if env is None else dict(env),
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
@@ -228,6 +234,90 @@ def _run(command: Sequence[str], *, timeout: int = 3600) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise VerticalBuildError("command JSON root is not an object")
     return value
+
+
+def _is_xlsx_startup_deadline(result: Mapping[str, Any]) -> bool:
+    steps = result.get("steps")
+    if result.get("final_state") != "TIMED_OUT" or not isinstance(steps, list):
+        return False
+    if len(steps) != 1 or not isinstance(steps[0], dict):
+        return False
+    error = steps[0].get("error")
+    if not isinstance(error, dict):
+        return False
+    details = error.get("details")
+    return (
+        error.get("code") == "PHASE_DEADLINE_EXCEEDED"
+        and isinstance(details, dict)
+        and details.get("phase") == "STARTING_EXCEL"
+    )
+
+
+def _xlsx_job_with_startup_extension(job: Mapping[str, Any]) -> dict[str, Any]:
+    if set(job) != {"idempotency_key", "schema_version", "steps"}:
+        raise VerticalBuildError("xlsx-win base job keys differ")
+    if job.get("schema_version") != "2.0" or not isinstance(job.get("steps"), list):
+        raise VerticalBuildError("xlsx-win base job contract differs")
+    return {
+        **job,
+        # The installed C# supervisor documents this tolerant extension even
+        # though the Python schema has not exposed it yet.  Only Excel COM
+        # activation receives a larger budget; all other phase limits remain
+        # explicit and bounded.
+        "timeouts": {
+            "calculation_seconds": 180,
+            "close_seconds": 300,
+            "open_workbook_seconds": 60,
+            "refresh_total_seconds": 300,
+            "save_seconds": 60,
+            "start_excel_seconds": 120,
+        },
+    }
+
+
+def _xlsx_executable(project: str) -> Path:
+    root = XLSX_SKILL_ROOT / "supervisor" / project / "bin"
+    matches = sorted(
+        (
+            path
+            for path in root.rglob(f"{project}.exe")
+            if path.is_file() and not path.is_symlink()
+        ),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+    if not matches:
+        raise VerticalBuildError(f"xlsx-win {project} executable is unavailable")
+    return matches[0]
+
+
+def _run_xlsx_startup_extension(candidate: Path) -> Path:
+    base_job = _load(candidate / "xlsx-job.json", "xlsx-win job")
+    extended_job = candidate / "xlsx-job-startup-extension.json"
+    _write_exact(
+        extended_job,
+        canonical_json_bytes(_xlsx_job_with_startup_extension(base_job)),
+    )
+    events_path = candidate / "xlsx-events-startup-extension.jsonl"
+    result_path = candidate / "xlsx-result-startup-extension.json"
+    supervisor = _xlsx_executable("XlsxWinSupervisor")
+    worker = _xlsx_executable("XlsxWinWorker")
+    environment = dict(os.environ)
+    environment["XLSXWIN_WORKER_EXE_PATH"] = str(worker)
+    _run(
+        (
+            str(supervisor),
+            str(extended_job),
+            str(events_path),
+            str(result_path),
+        ),
+        timeout=600,
+        env=environment,
+    )
+    result = _load(result_path, "xlsx-win startup-extension result")
+    if result.get("ok") is not True or result.get("final_state") != "SUCCEEDED":
+        raise VerticalBuildError("xlsx-win startup extension did not succeed")
+    return result_path
 
 
 def _tool(name: str, *args: str, timeout: int = 3600) -> dict[str, Any]:
@@ -613,21 +703,27 @@ def build_workbook(
         raise VerticalBuildError("xlsx-win durable runtime is unavailable")
     result_path = candidate / "xlsx-result.json"
     events_path = candidate / "xlsx-events.jsonl"
-    _run(
-        (
-            str(XLSX_RUNTIME),
-            str(XLSX_CLI),
-            "run",
-            str(candidate / "xlsx-job.json"),
-            "--events",
-            str(events_path),
-            "--result",
-            str(result_path),
-            "--hard-timeout-seconds",
-            "300",
-        ),
-        timeout=420,
-    )
+    try:
+        _run(
+            (
+                str(XLSX_RUNTIME),
+                str(XLSX_CLI),
+                "run",
+                str(candidate / "xlsx-job.json"),
+                "--events",
+                str(events_path),
+                "--result",
+                str(result_path),
+                "--hard-timeout-seconds",
+                "300",
+            ),
+            timeout=420,
+        )
+    except VerticalBuildError:
+        failed = _load(result_path, "xlsx-win failed result")
+        if not _is_xlsx_startup_deadline(failed):
+            raise
+        result_path = _run_xlsx_startup_extension(candidate)
     excel_workbook = candidate / "excel" / "portfolio-report.xlsx"
     validation = _run(
         (
