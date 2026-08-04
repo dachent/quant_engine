@@ -176,6 +176,47 @@ def _freshness_gate(path: Path, evaluated_on: date) -> Path:
     return path
 
 
+def _freshness_gate_with_optional_gap(path: Path, evaluated_on: date) -> Path:
+    policy = FreshnessPolicy(
+        policy_id="daily-current-strategy",
+        mode=FreshnessMode.RECURRING,
+        expected_interval_days=1,
+        grace_days=2,
+        stale_after_days=5,
+    )
+    required = policy.assess(date(2026, 7, 28), evaluated_on).to_dict()
+    required.update(
+        {
+            "fact_type": "strategy-returns",
+            "provider_id": "synthetic-provider",
+            "required_for_current": True,
+            "subject_id": "required-strategy",
+        }
+    )
+    optional = policy.assess(None, evaluated_on).to_dict()
+    optional.update(
+        {
+            "blocks_current_consumers": False,
+            "escalation_required": False,
+            "fact_type": "costs",
+            "provider_id": "synthetic-provider",
+            "required_for_current": False,
+            "subject_id": "optional-costs",
+        }
+    )
+    path.write_bytes(
+        canonical_json_bytes(
+            {
+                "assessment_schema_version": 3,
+                "as_of_date": evaluated_on.isoformat(),
+                "assessments": [required, optional],
+                "policies": [policy.to_dict()],
+            }
+        )
+    )
+    return path
+
+
 def test_plan_is_exact_and_non_mutating(tmp_path: Path) -> None:
     raw, previous, proposed, target = _spec_dict(tmp_path)
     spec = _parse(raw)
@@ -261,6 +302,23 @@ def test_freshness_gate_rejects_forged_current_state(tmp_path: Path) -> None:
 
     with pytest.raises(PipelineValidationError, match="assessment is stale"):
         execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+    assert read_current(target).generation_id == previous.generation_id
+
+
+def test_freshness_gate_preserves_optional_nonblocking_gaps(tmp_path: Path) -> None:
+    raw, previous, _, target = _spec_dict(tmp_path)
+    gate = _freshness_gate_with_optional_gap(tmp_path / "freshness.json", AS_OF)
+    raw["gates"].append(
+        {
+            "gate_id": "freshness-health",
+            "path": str(gate),
+            "sha256": hashlib.sha256(gate.read_bytes()).hexdigest(),
+        }
+    )
+
+    prepared = execute_pipeline(_parse(raw), evaluation_date=AS_OF)
+
+    assert prepared["release_state"] == "PREPARED"
     assert read_current(target).generation_id == previous.generation_id
 
 

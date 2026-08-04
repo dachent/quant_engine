@@ -1817,6 +1817,17 @@ def _verify_freshness_gate(path: Path, evaluation_date: date) -> None:
                 else date.fromisoformat(str(observed_text))
             )
             expected = policy.assess(observed, evaluation_date).to_dict()
+            required_for_current = item.get("required_for_current", True)
+            if not isinstance(required_for_current, bool):
+                raise PipelineValidationError(
+                    "freshness gate required-for-current flag is invalid"
+                )
+            if not required_for_current:
+                expected = {
+                    **expected,
+                    "blocks_current_consumers": False,
+                    "escalation_required": False,
+                }
             for field in (
                 "blocks_current_consumers",
                 "escalation_required",
