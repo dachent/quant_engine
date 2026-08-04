@@ -141,6 +141,68 @@ def test_canonicalization_fails_closed_on_unrecognized_volatile_field(
         reporter.canonicalize_workbook(workbook)
 
 
+def _xlsx_result(run_id: str, temporary_root: str) -> dict[str, Any]:
+    return {
+        "schema_version": "2.0",
+        "run_id": run_id,
+        "idempotency_key": "portfolio-report-synthetic",
+        "final_state": "SUCCEEDED",
+        "steps": [
+            {
+                "step_index": 0,
+                "type": "open",
+                "status": "succeeded",
+                "message": f"Opened '{temporary_root}\\portfolio-report.xlsx'.",
+            },
+            {
+                "step_index": 1,
+                "type": "recalc",
+                "status": "succeeded",
+                "message": "Calculation reached xlDone.",
+            },
+            {
+                "step_index": 2,
+                "type": "save_as",
+                "status": "succeeded",
+                "message": f"Saved to '{temporary_root}\\saved.xlsx'.",
+            },
+        ],
+        "invariants": [],
+        "ok": True,
+    }
+
+
+def test_xlsx_result_canonicalization_removes_only_random_telemetry(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first-result.json"
+    second = tmp_path / "second-result.json"
+    first.write_text(
+        json.dumps(_xlsx_result("a" * 32, r"C:\Temp\xlsx-first")), encoding="utf-8"
+    )
+    second.write_text(
+        json.dumps(_xlsx_result("b" * 32, r"C:\Temp\xlsx-second")),
+        encoding="utf-8",
+    )
+
+    first_result = reporter.canonicalize_xlsx_result(
+        first, tmp_path / "first-result-evidence.json"
+    )
+    second_result = reporter.canonicalize_xlsx_result(
+        second, tmp_path / "second-result-evidence.json"
+    )
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first_result == second_result
+    assert reporter.canonicalize_xlsx_result(first) == first_result
+    failed = tmp_path / "failed-result.json"
+    payload = _xlsx_result("c" * 32, r"C:\Temp\xlsx-failed")
+    payload["steps"][1]["status"] = "failed"
+    failed.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(reporter.ReportValidationError, match="outcome differs"):
+        reporter.canonicalize_xlsx_result(failed)
+
+
 def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> None:
     rows = reporter._coverage(
         {
@@ -814,10 +876,16 @@ def test_publish_creates_immutable_generation_and_pointer(tmp_path: Path) -> Non
     workbook = Path(built["workbook_path"])
     run_result = candidate / "xlsx-result.json"
     validation = candidate / "validation.json"
-    run_result.write_text(json.dumps({"ok": True}), encoding="utf-8")
+    run_result.write_text(
+        json.dumps(_xlsx_result("d" * 32, r"C:\Temp\xlsx-publish")),
+        encoding="utf-8",
+    )
     validation.write_text(json.dumps({"all_passed": True}), encoding="utf-8")
     reporter.canonicalize_workbook(
         workbook, candidate / "workbook-canonicalization.json"
+    )
+    reporter.canonicalize_xlsx_result(
+        run_result, candidate / "xlsx-result-canonicalization.json"
     )
     published_root = tmp_path / "published"
 

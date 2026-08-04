@@ -81,6 +81,7 @@ TABLE_NAMES: Final = (
     "tblProvenance",
 )
 WORKBOOK_CANONICALIZATION_VERSION: Final = "1"
+XLSX_RESULT_CANONICALIZATION_VERSION: Final = "1"
 _CANONICAL_ZIP_TIMESTAMP: Final = (1980, 1, 1, 0, 0, 0)
 _CORE_CREATED = re.compile(
     rb"(<(?:[A-Za-z_][\w.-]*:)?created\b[^>]*>)([^<]+)"
@@ -2044,6 +2045,68 @@ def canonicalize_workbook(
     return result
 
 
+def canonicalize_xlsx_result(
+    path: Path, evidence_path: Path | None = None
+) -> dict[str, Any]:
+    """Normalize random xlsx-win run telemetry while retaining every outcome."""
+    payload = _load_json(path, "xlsx-win result")
+    if payload.get("schema_version") != "2.0":
+        raise ReportValidationError("xlsx-win result schema differs")
+    idempotency_key = _text(
+        payload.get("idempotency_key"), "xlsx-win result idempotency_key"
+    )
+    run_id = _text(payload.get("run_id"), "xlsx-win result run_id")
+    if re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
+        raise ReportValidationError("xlsx-win result run_id is invalid")
+    steps = payload.get("steps")
+    if not isinstance(steps, list) or len(steps) != 3:
+        raise ReportValidationError("xlsx-win result steps differ")
+    expected = (
+        (0, "open", "Opened canonical staged workbook."),
+        (1, "recalc", "Calculation reached xlDone."),
+        (2, "save_as", "Saved canonical staged workbook."),
+    )
+    for step, (index, step_type, message) in zip(steps, expected, strict=True):
+        if not isinstance(step, dict):
+            raise ReportValidationError("xlsx-win result step is invalid")
+        if (
+            step.get("step_index") != index
+            or step.get("type") != step_type
+            or step.get("status") != "succeeded"
+        ):
+            raise ReportValidationError("xlsx-win result step outcome differs")
+        step["message"] = message
+    if payload.get("final_state") != "SUCCEEDED" or payload.get("ok") is not True:
+        raise ReportValidationError("xlsx-win result is not successful")
+    invariants = payload.get("invariants")
+    if not isinstance(invariants, list):
+        raise ReportValidationError("xlsx-win result invariants are invalid")
+    payload["run_id"] = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
+    content = canonical_json_bytes(payload)
+    if path.read_bytes() != content:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".canonical-xlsx-result-", suffix=".json", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    result = {
+        "canonicalization_version": XLSX_RESULT_CANONICALIZATION_VERSION,
+        "normalized_message_count": 2,
+        "normalized_run_id": True,
+        "xlsx_result_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    if evidence_path is not None:
+        _write_exact(evidence_path, canonical_json_bytes(result))
+    return result
+
+
 def _validate_canonicalization_evidence(candidate_dir: Path, workbook: Path) -> None:
     evidence = _load_json(
         candidate_dir / "workbook-canonicalization.json",
@@ -2180,6 +2243,12 @@ def publish_report(
             WORKBOOK_CANONICALIZATION_VERSION,
         ),
         (
+            candidate_dir / "xlsx-result-canonicalization.json",
+            "evidence/xlsx-result-canonicalization.json",
+            "xlsx-win-result-canonicalization",
+            XLSX_RESULT_CANONICALIZATION_VERSION,
+        ),
+        (
             contract_path,
             "evidence/workbook-contract.json",
             "xlsx-win-validation-contract",
@@ -2251,6 +2320,10 @@ def publish_report(
         candidate_dir / "workbook-canonicalization.json",
         generation_dir / "workbook-canonicalization.json",
     )
+    _copy_exact(
+        candidate_dir / "xlsx-result-canonicalization.json",
+        generation_dir / "xlsx-result-canonicalization.json",
+    )
     _copy_exact(contract_path, generation_dir / "workbook-contract.json")
     _write_exact(generation_dir / "report-verification.json", verification_bytes)
     pointer = publish_generation(output_root, manifest.generation_id)
@@ -2282,6 +2355,9 @@ def _parser() -> argparse.ArgumentParser:
     canonicalize = commands.add_parser("canonicalize")
     canonicalize.add_argument("--workbook", type=Path, required=True)
     canonicalize.add_argument("--evidence", type=Path, required=True)
+    canonicalize_result = commands.add_parser("canonicalize-xlsx-result")
+    canonicalize_result.add_argument("--result", type=Path, required=True)
+    canonicalize_result.add_argument("--evidence", type=Path, required=True)
     publish = commands.add_parser("publish")
     publish.add_argument("--baseline-root", type=Path, required=True)
     publish.add_argument("--candidate-dir", type=Path, required=True)
@@ -2314,6 +2390,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "canonicalize":
             result = canonicalize_workbook(args.workbook, args.evidence)
+        elif args.command == "canonicalize-xlsx-result":
+            result = canonicalize_xlsx_result(args.result, args.evidence)
         else:
             result = publish_report(
                 args.baseline_root,

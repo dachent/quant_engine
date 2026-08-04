@@ -724,6 +724,14 @@ def build_workbook(
         if not _is_xlsx_startup_deadline(failed):
             raise
         result_path = _run_xlsx_startup_extension(candidate)
+    result_canonicalization = _tool(
+        "portfolio_report.py",
+        "canonicalize-xlsx-result",
+        "--result",
+        str(result_path),
+        "--evidence",
+        str(candidate / "xlsx-result-canonicalization.json"),
+    )
     excel_workbook = candidate / "excel" / "portfolio-report.xlsx"
     canonicalization = _tool(
         "portfolio_report.py",
@@ -785,6 +793,7 @@ def build_workbook(
         "candidate_dir": str(candidate),
         "root": str(output_root),
         "workbook_canonicalization": canonicalization,
+        "xlsx_result_canonicalization": result_canonicalization,
     }
 
 
