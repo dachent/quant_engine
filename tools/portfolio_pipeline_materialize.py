@@ -56,6 +56,7 @@ GENERATION_ROOT = {
     "panel": "panel",
 }
 WINDOWS_SAFE_FILE_PATH = 240
+WEIGHT_SUM_TOLERANCE = Decimal("0.000000000001")
 
 
 def _load(path: Path, label: str = "JSON file") -> dict[str, Any]:
@@ -483,7 +484,7 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
     financial_ok = (
         total == systematic + reserve
         and systematic_allocations == systematic
-        and weights == Decimal(1)
+        and abs(weights - Decimal(1)) <= WEIGHT_SUM_TOLERANCE
     )
     _result(
         checks,
@@ -528,13 +529,32 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
 
     ledger_sha = _sha(ledger_generation / "provider-ledger.json")[0]
     baseline_sha = _sha(baseline_generation / "portfolio-baseline.json")[0]
-    provenance = baseline.get("provenance")
+    source_artifacts = baseline.get("source_artifacts")
     report_baseline = report.get("baseline")
+    provider_refs = (
+        [
+            row
+            for row in source_artifacts
+            if isinstance(row, dict)
+            and row.get("source_key") == "provider-ledger-generation"
+        ]
+        if isinstance(source_artifacts, list)
+        else []
+    )
+    manifest_refs = [
+        row for row in provider_refs if row.get("schema_name") == "generation-manifest"
+    ]
+    catalog_refs = [
+        row
+        for row in provider_refs
+        if row.get("schema_name") == "provider-ledger-catalog"
+    ]
+    ledger_manifest_sha = _sha(ledger_generation / "generation.json")[0]
     ledger_bridge_ok = (
-        isinstance(provenance, dict)
-        and provenance.get("generation_id")
-        == recipe["expected_generations"]["ledger"]["generation_id"]
-        and provenance.get("catalog_sha256") == ledger_sha
+        len(manifest_refs) == 1
+        and manifest_refs[0].get("sha256") == ledger_manifest_sha
+        and len(catalog_refs) == 1
+        and catalog_refs[0].get("sha256") == ledger_sha
         and isinstance(report_baseline, dict)
         and report_baseline.get("generation_id")
         == recipe["expected_generations"]["baseline"]["generation_id"]
@@ -545,13 +565,10 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
         "ledger_bridges",
         ledger_bridge_ok,
         baseline_catalog_sha256=baseline_sha,
-        baseline_source_catalog_sha256=(provenance or {}).get("catalog_sha256")
-        if isinstance(provenance, dict)
-        else None,
-        baseline_source_generation_id=(provenance or {}).get("generation_id")
-        if isinstance(provenance, dict)
-        else None,
+        baseline_provider_catalog_references=catalog_refs,
+        baseline_provider_manifest_references=manifest_refs,
         ledger_catalog_sha256=ledger_sha,
+        ledger_manifest_sha256=ledger_manifest_sha,
         report_baseline=report_baseline,
     )
 

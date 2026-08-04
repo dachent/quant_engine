@@ -102,12 +102,15 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     ledger_sha = hashlib.sha256(
         (ledger / "provider-ledger.json").read_bytes()
     ).hexdigest()
+    ledger_manifest_sha = hashlib.sha256(
+        (ledger / "generation.json").read_bytes()
+    ).hexdigest()
     allocations = [
         {
             "current_value": {"value": "410272.39"},
             "pool_id": "systematic-capital",
             "strategy_id": "strategy-1",
-            "systematic_weight": "1",
+            "systematic_weight": "1.00000000000000003060016",
         },
         {
             "current_value": {"value": "100043.62"},
@@ -134,14 +137,26 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
         "allocations": allocations,
         "assignments": assignments,
         "provenance": {
-            "catalog_sha256": ledger_sha,
-            "generation_id": ledger.name,
+            "catalog_sha256": "e" * 64,
+            "generation_id": "f" * 64,
         },
         "replay": {
             "reserve_total_usd": "100043.62",
             "systematic_total_usd": "410272.39",
             "total_liquid_usd": "510316.01",
         },
+        "source_artifacts": [
+            {
+                "schema_name": "generation-manifest",
+                "sha256": ledger_manifest_sha,
+                "source_key": "provider-ledger-generation",
+            },
+            {
+                "schema_name": "provider-ledger-catalog",
+                "sha256": ledger_sha,
+                "source_key": "provider-ledger-generation",
+            },
+        ],
     }
     baseline = _generation(
         stages / "baseline",
@@ -342,9 +357,21 @@ def _mapping_failure(root: Path) -> None:
 
 def _ledger_failure(root: Path) -> None:
     baseline = next((root / "stages" / "baseline" / "generations").iterdir())
+
+    def corrupt_provider_catalog(payload: dict[str, object]) -> None:
+        artifacts = payload["source_artifacts"]
+        assert isinstance(artifacts, list)
+        catalog = next(
+            row
+            for row in artifacts
+            if isinstance(row, dict)
+            and row.get("schema_name") == "provider-ledger-catalog"
+        )
+        catalog["sha256"] = "0" * 64
+
     _mutate_json(
         baseline / "portfolio-baseline.json",
-        lambda payload: payload["provenance"].update({"catalog_sha256": "0" * 64}),
+        corrupt_provider_catalog,
     )
 
 
