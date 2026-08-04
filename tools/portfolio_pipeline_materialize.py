@@ -844,6 +844,7 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
             output_root / "stage-results" / "report.json",
         ],
         "workbook": [
+            output_root / "stages" / "report-candidate",
             output_root / "stages" / "report",
             output_root / "stage-results" / "workbook.json",
         ],
@@ -855,6 +856,14 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
     previous_node = "authority-snapshot"
     previous_outputs: list[Path] = [authority_path]
     generation_nodes: dict[str, str] = {}
+    stage_read_dependencies = {
+        "baseline": ("ledger",),
+        "attribution": ("baseline", "ledger"),
+        "analytics": ("attribution",),
+        "report": ("baseline", "ledger", "analytics"),
+        "workbook": ("baseline", "ledger", "report"),
+        "panel": ("ledger", "attribution", "analytics", "workbook"),
+    }
     for role in STAGES:
         command_id = f"build-{role}"
         args = [
@@ -868,15 +877,12 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
         ]
         if role == "panel":
             args.extend(("--qa-dir", str(qa_dir)))
-        reads = [*previous_outputs, vertical_path]
-        if role in {"analytics", "panel"}:
-            reads.extend(stage_writes["attribution"])
-        if role in {"report", "panel"}:
-            reads.extend(stage_writes["analytics"])
-        if role in {"report", "workbook", "panel"}:
-            reads.extend(stage_writes["ledger"])
+        reads = [*previous_outputs, *source_paths]
+        for dependency in stage_read_dependencies.get(role, ()):
+            reads.extend(stage_writes[dependency])
         if role == "panel":
             reads.append(qa_dir)
+        reads = list(dict.fromkeys(reads))
         nodes.append(
             _command(
                 node_id=command_id,
@@ -940,7 +946,7 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
                 output_root / "stages" / "analytics",
                 *stage_writes["panel"],
             ],
-            writes=[semantic_dir],
+            writes=[semantic_path, semantic_dir / "semantic-details.json"],
         )
     )
 

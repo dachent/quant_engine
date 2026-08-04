@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import sys
 from typing import Callable
 
 import pytest
@@ -432,3 +433,82 @@ def test_generated_command_timeout_satisfies_core_pipeline_contract(
     )
 
     assert node["timeout_seconds"] == 3600
+
+
+def test_generated_semantic_command_declares_exact_gate_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe_path, _ = _fixture(tmp_path)
+    release_commit = "a" * 40
+    monkeypatch.setenv("QE_PIPELINE_PYTHON", sys.executable)
+    monkeypatch.setattr(
+        materializer,
+        "_git",
+        lambda _repo, *args: release_commit if args == ("rev-parse", "HEAD") else "",
+    )
+    monkeypatch.setattr(
+        materializer, "_validate_output_path_budget", lambda _root, _recipe: None
+    )
+    output_root = tmp_path / "dag"
+    spec_path = output_root / "pipeline-spec.json"
+
+    materializer.build_spec(recipe_path, output_root, spec_path)
+
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    semantic = next(
+        node
+        for node in spec["nodes"]
+        if node.get("node_id") == "post-build-semantic-reconciliation"
+    )
+    gate = next(
+        item for item in spec["gates"] if item["gate_id"] == "post-build-semantic"
+    )
+    assert gate["path"] in semantic["declared_writes"]
+    assert (
+        str(output_root / "evidence" / "semantic-details.json")
+        in semantic["declared_writes"]
+    )
+
+    nodes = {node["node_id"]: node for node in spec["nodes"]}
+    vertical = json.loads(
+        Path(json.loads(recipe_path.read_text())["vertical_recipe"]["path"]).read_text()
+    )
+    vertical_sources = {
+        str(Path(definition["path"]))
+        for key, definition in vertical.items()
+        if key
+        in {
+            "base_factor_file",
+            "baseline_spec",
+            "correlation_source_root",
+            "decomposition_plan_bundle",
+            "legacy_panel",
+            "provider_ledger_spec",
+        }
+    }
+    vertical_sources.add(
+        str(Path(json.loads(recipe_path.read_text())["vertical_recipe"]["path"]))
+    )
+    for role in materializer.STAGES:
+        assert vertical_sources <= set(nodes[f"build-{role}"]["declared_reads"])
+
+    assert (
+        str(output_root / "stages" / "ledger")
+        in nodes["build-attribution"]["declared_reads"]
+    )
+    for role in ("report", "workbook"):
+        assert (
+            str(output_root / "stages" / "baseline")
+            in nodes[f"build-{role}"]["declared_reads"]
+        )
+    assert (
+        str(output_root / "stages" / "report") in nodes["build-panel"]["declared_reads"]
+    )
+    assert (
+        str(output_root / "stage-results" / "workbook.json")
+        in nodes["build-panel"]["declared_reads"]
+    )
+    assert (
+        str(output_root / "stages" / "report-candidate")
+        in nodes["build-workbook"]["declared_writes"]
+    )
