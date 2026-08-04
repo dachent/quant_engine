@@ -28,10 +28,11 @@ def _file_definition(path: Path) -> dict[str, object]:
 def _recipe(tmp_path: Path) -> Path:
     provider = tmp_path / "provider.json"
     baseline = tmp_path / "baseline.json"
+    base_factor = tmp_path / "factors.csv"
     legacy = tmp_path / "legacy.json"
-    provider.write_text("{}", encoding="utf-8")
-    baseline.write_text("{}", encoding="utf-8")
-    legacy.write_text("{}", encoding="utf-8")
+    for path in (provider, baseline, legacy):
+        path.write_text("{}", encoding="utf-8")
+    base_factor.write_text("date,RF\n", encoding="utf-8")
     plan = tmp_path / "plan"
     correlation = tmp_path / "correlation"
     (plan / "inputs").mkdir(parents=True)
@@ -42,6 +43,7 @@ def _recipe(tmp_path: Path) -> Path:
     correlation_inventory = builder._directory_inventory(correlation)
     payload = {
         "as_of_date": "2026-08-03",
+        "base_factor_file": _file_definition(base_factor),
         "baseline_spec": _file_definition(baseline),
         "correlation_source_root": {"path": str(correlation), **correlation_inventory},
         "decomposition_plan_bundle": {"path": str(plan), **plan_inventory},
@@ -89,9 +91,11 @@ def test_directory_inventory_is_path_order_independent(tmp_path: Path) -> None:
 def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     provider = tmp_path / "provider.json"
     baseline = tmp_path / "baseline.json"
+    base_factor = tmp_path / "factors.csv"
     legacy = tmp_path / "legacy.json"
     for path in (provider, baseline, legacy):
         path.write_text("{}", encoding="utf-8")
+    base_factor.write_text("date,RF\n", encoding="utf-8")
     plan = tmp_path / "plan"
     correlation = tmp_path / "correlation"
     plan.mkdir()
@@ -103,6 +107,7 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     result = builder.create_recipe(
         provider_ledger_spec=provider,
         baseline_spec=baseline,
+        base_factor_file=base_factor,
         decomposition_plan_bundle=plan,
         correlation_source_root=correlation,
         legacy_panel=legacy,

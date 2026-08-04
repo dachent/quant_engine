@@ -241,7 +241,12 @@ def _recipe(path: Path) -> dict[str, Any]:
 def _vertical_source_paths(vertical_path: Path) -> list[Path]:
     vertical = _load(vertical_path, "vertical recipe")
     paths = [vertical_path]
-    for key in ("provider_ledger_spec", "baseline_spec", "legacy_panel"):
+    for key in (
+        "provider_ledger_spec",
+        "baseline_spec",
+        "base_factor_file",
+        "legacy_panel",
+    ):
         value = vertical.get(key)
         if not isinstance(value, dict):
             raise MaterializationError(f"vertical recipe {key} differs")

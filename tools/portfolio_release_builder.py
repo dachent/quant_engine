@@ -103,6 +103,7 @@ def _recipe(path: Path) -> dict[str, Any]:
         raise VerticalBuildError("vertical-build recipe schema is unsupported")
     required = {
         "as_of_date",
+        "base_factor_file",
         "baseline_spec",
         "correlation_source_root",
         "decomposition_plan_bundle",
@@ -115,7 +116,12 @@ def _recipe(path: Path) -> dict[str, Any]:
     if set(recipe) != required:
         raise VerticalBuildError("vertical-build recipe keys differ")
     date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
-    for key in ("provider_ledger_spec", "baseline_spec", "legacy_panel"):
+    for key in (
+        "provider_ledger_spec",
+        "baseline_spec",
+        "base_factor_file",
+        "legacy_panel",
+    ):
         definition = recipe[key]
         if not isinstance(definition, dict) or set(definition) != {
             "path",
@@ -157,6 +163,7 @@ def create_recipe(
     *,
     provider_ledger_spec: Path,
     baseline_spec: Path,
+    base_factor_file: Path,
     decomposition_plan_bundle: Path,
     correlation_source_root: Path,
     legacy_panel: Path,
@@ -170,6 +177,7 @@ def create_recipe(
         raise VerticalBuildError("release commit differs")
     payload = {
         "as_of_date": as_of_date,
+        "base_factor_file": _file_definition(base_factor_file.resolve()),
         "baseline_spec": _file_definition(baseline_spec.resolve()),
         "correlation_source_root": {
             "path": str(correlation_source_root.resolve()),
@@ -395,7 +403,12 @@ def build_analytics(
     base_spec = (
         attribution_bundle / "inputs" / "governance" / "base-decomposition-spec.json"
     )
-    base_source = attribution_bundle / "inputs" / "base"
+    base_source = output_root / "base-input"
+    frozen_base = attribution_bundle / "inputs" / "base"
+    for source in sorted(path for path in frozen_base.rglob("*") if path.is_file()):
+        _write_exact(base_source / source.relative_to(frozen_base), source.read_bytes())
+    base_factor = _path(recipe["base_factor_file"]["path"], "base factor file")
+    _write_exact(base_source / "factors.csv", base_factor.read_bytes())
     decomposition_root = output_root / "decomposition"
     decomposition = _tool(
         "portfolio_decomposition.py",
@@ -847,6 +860,7 @@ def _parser() -> argparse.ArgumentParser:
     recipe = commands.add_parser("recipe")
     recipe.add_argument("--provider-ledger-spec", type=Path, required=True)
     recipe.add_argument("--baseline-spec", type=Path, required=True)
+    recipe.add_argument("--base-factor-file", type=Path, required=True)
     recipe.add_argument("--decomposition-plan-bundle", type=Path, required=True)
     recipe.add_argument("--correlation-source-root", type=Path, required=True)
     recipe.add_argument("--legacy-panel", type=Path, required=True)
@@ -886,6 +900,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = create_recipe(
                 provider_ledger_spec=args.provider_ledger_spec,
                 baseline_spec=args.baseline_spec,
+                base_factor_file=args.base_factor_file,
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 correlation_source_root=args.correlation_source_root,
                 legacy_panel=args.legacy_panel,

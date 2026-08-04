@@ -222,6 +222,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     _write_json(correlation / "spec.json", {"synthetic": True})
     vertical = {
         "as_of_date": AS_OF.isoformat(),
+        "base_factor_file": _definition(source_files[0]),
         "baseline_spec": _definition(source_files[1]),
         "correlation_source_root": _dir_definition(correlation),
         "decomposition_plan_bundle": _dir_definition(plan),
