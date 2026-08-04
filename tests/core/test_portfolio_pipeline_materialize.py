@@ -180,6 +180,14 @@ def test_source_drift_fails_closed_before_acquisition(tmp_path: Path) -> None:
         materializer.acquire(recipe_path, tmp_path / "candidate" / "runs" / "run")
 
 
+def test_output_path_budget_rejects_an_overlong_release_root(tmp_path: Path) -> None:
+    _, recipe = _fixture(tmp_path)
+    long_root = tmp_path / ("x" * 200)
+
+    with pytest.raises(materializer.MaterializationError, match="path budget"):
+        materializer._validate_output_path_budget(long_root, recipe)
+
+
 def test_semantic_gate_rejects_failed_panel_qa(tmp_path: Path) -> None:
     recipe_path, recipe = _fixture(tmp_path)
     output_root = tmp_path / "candidate"

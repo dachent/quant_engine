@@ -43,6 +43,7 @@ ROOT_IDS = {
     "report": "reporting",
     "panel": "control-panel",
 }
+WINDOWS_SAFE_FILE_PATH = 240
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -135,6 +136,44 @@ def _inventory_identity(inventory: Mapping[str, object]) -> dict[str, object]:
         "generation_id": inventory["generation_id"],
         "manifest_sha256": inventory["manifest_sha256"],
     }
+
+
+def _validate_output_path_budget(output_root: Path, recipe: Mapping[str, Any]) -> None:
+    longest: Path | None = None
+    for role in RELEASE_ROLES:
+        source = Path(str(recipe["generations"][role]["source_dir"])).resolve()
+        manifest, inventory = _generation(source)
+        files = inventory["files"]
+        if not isinstance(files, list):
+            raise MaterializationError(f"{role} generation inventory is malformed")
+        for item in files:
+            if not isinstance(item, dict) or not isinstance(
+                item.get("relative_path"), str
+            ):
+                raise MaterializationError(f"{role} generation inventory is malformed")
+            relative = Path(item["relative_path"])
+            candidates = (
+                output_root
+                / "stages"
+                / role
+                / "generations"
+                / manifest.generation_id
+                / relative,
+                output_root
+                / "release-roots"
+                / ROOT_IDS[role]
+                / "generations"
+                / manifest.generation_id
+                / relative,
+            )
+            candidate = max(candidates, key=lambda path: len(str(path)))
+            if longest is None or len(str(candidate)) > len(str(longest)):
+                longest = candidate
+    if longest is not None and len(str(longest)) > WINDOWS_SAFE_FILE_PATH:
+        raise MaterializationError(
+            "private output root exceeds the portable Windows path budget: "
+            f"{len(str(longest))} characters; use a shorter output root"
+        )
 
 
 def _recipe(path: Path) -> dict[str, Any]:
@@ -451,6 +490,7 @@ def _git(repo: Path, *args: str) -> str:
 
 def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
+    _validate_output_path_budget(output_root.resolve(), recipe)
     repo = Path(__file__).resolve().parents[1]
     release_commit = _git(repo, "rev-parse", "HEAD")
     if release_commit != recipe["release_commit"] or _git(
