@@ -359,6 +359,9 @@ await page.locator('[data-nav="data"]').click();
 const remediationButton = page.locator("#remediation-table [data-focus-coverage]").first();
 const remediationItem = await remediationButton.getAttribute("data-focus-coverage");
 await remediationButton.click();
+await page.waitForFunction((item) => (
+  document.activeElement?.getAttribute("data-coverage-item") === item
+), remediationItem);
 const remediationFocus = await page.evaluate(() => ({
   active_item: document.activeElement?.getAttribute("data-coverage-item"),
   active_view: document.querySelector('[data-view="data"]')?.classList.contains("is-active"),
@@ -423,6 +426,13 @@ await page.locator('[data-nav="data"]').click();
 const mobileRemediation = page.locator("#remediation-table [data-focus-coverage]").first();
 const mobileRemediationItem = await mobileRemediation.getAttribute("data-focus-coverage");
 await mobileRemediation.click();
+await page.waitForFunction((item) => {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)
+      || active.getAttribute("data-coverage-item") !== item) return false;
+  const bounds = active.getBoundingClientRect();
+  return bounds.top >= 0 && bounds.bottom <= window.innerHeight;
+}, mobileRemediationItem);
 const mobileRemediationEvidence = await page.evaluate(() => ({
   active_item: document.activeElement?.getAttribute("data-coverage-item"),
   in_view: document.activeElement instanceof HTMLElement
