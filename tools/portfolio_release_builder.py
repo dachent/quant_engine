@@ -409,7 +409,43 @@ def build_analytics(
         _write_exact(base_source / source.relative_to(frozen_base), source.read_bytes())
     base_factor = _path(recipe["base_factor_file"]["path"], "base factor file")
     _write_exact(base_source / "factors.csv", base_factor.read_bytes())
+    base_spec_value = _load(base_spec, "base decomposition specification")
+    provenance_sources = base_spec_value.get("provenance_sources")
+    if not isinstance(provenance_sources, list) or not provenance_sources:
+        raise VerticalBuildError("base decomposition provenance sources are invalid")
+    frozen_files = [path for path in frozen_base.rglob("*") if path.is_file()]
+    for definition in provenance_sources:
+        if not isinstance(definition, dict):
+            raise VerticalBuildError("base decomposition provenance source is invalid")
+        relative = _text(
+            definition.get("relative_path"), "base provenance relative_path"
+        )
+        expected_sha256 = _text(
+            definition.get("expected_sha256"), "base provenance expected_sha256"
+        )
+        expected_size = definition.get("expected_size_bytes")
+        matches = [
+            path
+            for path in frozen_files
+            if _sha(path) == (expected_sha256, expected_size)
+        ]
+        if len(matches) != 1:
+            raise VerticalBuildError(
+                f"base provenance source is missing or ambiguous: {relative}"
+            )
+        _write_exact(base_source / relative, matches[0].read_bytes())
     decomposition_root = output_root / "decomposition"
+    _tool(
+        "portfolio_decomposition.py",
+        "stage",
+        "--spec",
+        str(base_spec),
+        "--source-root",
+        str(base_source),
+        "--output-root",
+        str(decomposition_root),
+        timeout=7200,
+    )
     decomposition = _tool(
         "portfolio_decomposition.py",
         "publish",
@@ -432,11 +468,23 @@ def build_analytics(
             raise VerticalBuildError("attribution lens definition is invalid")
         source_key = _text(row.get("source_key"), "lens source_key")
         lens_root = lenses_root / source_key
+        lens_spec = attribution_bundle / _text(row.get("path"), "lens spec path")
+        _tool(
+            "portfolio_decomposition.py",
+            "stage",
+            "--spec",
+            str(lens_spec),
+            "--source-root",
+            str(attribution_bundle),
+            "--output-root",
+            str(lens_root),
+            timeout=7200,
+        )
         result = _tool(
             "portfolio_decomposition.py",
             "publish",
             "--spec",
-            str(attribution_bundle / _text(row.get("path"), "lens spec path")),
+            str(lens_spec),
             "--source-root",
             str(attribution_bundle),
             "--output-root",
@@ -448,6 +496,17 @@ def build_analytics(
         recipe["correlation_source_root"]["path"], "correlation source root"
     )
     correlation_root = output_root / "correlation"
+    _tool(
+        "portfolio_correlation.py",
+        "stage",
+        "--spec",
+        str(correlation_source / "spec.json"),
+        "--source-root",
+        str(correlation_source),
+        "--output-root",
+        str(correlation_root),
+        timeout=7200,
+    )
     correlation = _tool(
         "portfolio_correlation.py",
         "publish",
