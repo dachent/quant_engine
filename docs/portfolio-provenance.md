@@ -7,7 +7,7 @@ strategy-intelligence package.
 ## Boundaries
 
 - The private specification and generated catalog stay outside Git under the
-  configured `dataPortfolio` boundary.
+  configured portfolio-data boundary (`C:\Tools\quant-engine\data` on this workstation).
 - Source roots exist only in the private input specification. Generated output
   keeps root IDs and relative paths, never absolute workstation paths.
 - Every source file is listed explicitly. The builder never walks a directory,
@@ -31,7 +31,7 @@ The local output follows
 
 The initial tracker and allocation evidence has completed the governed
 single-authority cutover. The configured roots now resolve only to the exact,
-hash-identified source-run copy under the private `dataPortfolio` boundary.
+hash-identified source-run copy under the private portfolio-data boundary.
 The former external working roots are absent. Read-only recovery copies and
 cutover parity manifests are retained outside Git, but they are not writable
 authority and must never be configured as live inputs.
@@ -48,7 +48,7 @@ Run from the repository with the frozen workspace:
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_provenance.py stage `
   --spec <private-spec.json> `
-  --output-root <dataPortfolio-provenance-root>
+  --output-root <portfolio-root>\provenance
 ```
 
 The command hashes each exact source, checks optional expected hashes, imports
@@ -75,7 +75,7 @@ candidate:
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_provenance.py publish `
   --spec <private-spec.json> `
-  --output-root <dataPortfolio-provenance-root> `
+  --output-root <portfolio-root>\provenance `
   --generation-id <accepted-generation-id>
 ```
 

@@ -24,6 +24,28 @@ declarative commit field from standing in for the code that actually ran.
 
 ## Operator commands
 
+The canonical portfolio root on the governed Windows workstation is
+`C:\Tools\quant-engine\data`. It must not resolve below OneDrive or the Git
+worktree. Set it once and derive every current-cycle proof, QA, recipe, state,
+coordination, generation, and release root from it:
+
+```powershell
+$portfolioRoot = [IO.Path]::GetFullPath('C:\Tools\quant-engine\data')
+if ($portfolioRoot -like '*\OneDrive -*' -or $portfolioRoot -like '*\repo\*') {
+  throw 'Portfolio authority must remain outside synced storage and Git.'
+}
+$cycleRoot = Join-Path $portfolioRoot 'rollforward\<yyyy-mm-dd-cycle-id>'
+$proofRoot = Join-Path $cycleRoot 'proof'
+$qaRoot = Join-Path $proofRoot 'panel-qa'
+$runRoot = Join-Path $cycleRoot 'run'
+```
+
+Historical recipes, specifications, receipts, manifests, and generations stay
+byte-identical after a storage move even when they contain the former absolute
+path. They are evidence, not operational defaults. Never run a copied historical
+specification to prove a cutover: generate a fresh pipeline identity and path-bound
+recipe/specification below `$cycleRoot`.
+
 Inventory each immutable generation before authoring the private specification:
 
 ```powershell
@@ -128,14 +150,31 @@ generation/release evidence. Quantitative details are retained beside the
 strict gate. Any mismatch fails before the release can reach `PREPARED`;
 advancing production still requires the separate pipeline commit operation.
 
+The retained 2026-08-03 p28 recipe is archival: its pipeline recipe names a
+deleted p27 QA directory. Do not edit that evidence or manufacture a
+hash-equivalent replacement. A runnable cycle must rebuild every stage, run
+fresh browser and interaction QA, and generate both recipes and the pipeline
+specification from the new root.
+
 ```powershell
 $env:QE_PIPELINE_PYTHON = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
-python tools/portfolio_release_builder.py build --recipe <private-vertical-recipe.json> --output-root <private-proof-root>
+python tools/portfolio_release_builder.py recipe --provider-ledger-spec <new-root-provider-ledger-spec.json> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
+python tools/portfolio_release_builder.py build --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot
 <run browser and interaction QA against the emitted panel candidate>
-python tools/portfolio_release_builder.py stage --recipe <private-vertical-recipe.json> --output-root <private-proof-root> --role panel --qa-dir <private-proof-qa-dir>
-python tools/portfolio_pipeline_materialize.py recipe --vertical-recipe <private-vertical-recipe.json> --proof-root <private-proof-root> --qa-dir <private-proof-qa-dir> --pipeline-id <new-pipeline-id> --output <private-recipe.json>
-python tools/portfolio_pipeline_materialize.py spec --recipe <private-recipe.json> --output-root <private-run-root> --spec <private-run-root>\pipeline-spec.json
-python tools/data_pipeline.py plan --spec <private-run-root>\pipeline-spec.json
-python tools/data_pipeline.py execute --spec <private-run-root>\pipeline-spec.json
-python tools/data_pipeline.py status --spec <private-run-root>\pipeline-spec.json
+python tools/portfolio_release_builder.py stage --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot --role panel --qa-dir $qaRoot
+python tools/portfolio_pipeline_materialize.py recipe --vertical-recipe (Join-Path $cycleRoot 'vertical-recipe.json') --proof-root $proofRoot --qa-dir $qaRoot --pipeline-id <new-pipeline-id> --output (Join-Path $cycleRoot 'pipeline-recipe.json')
+python tools/portfolio_pipeline_materialize.py spec --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') --output-root $runRoot --spec (Join-Path $runRoot 'pipeline-spec.json')
+python tools/data_pipeline.py plan --spec (Join-Path $runRoot 'pipeline-spec.json')
+python tools/data_pipeline.py execute --spec (Join-Path $runRoot 'pipeline-spec.json')
+python tools/data_pipeline.py status --spec (Join-Path $runRoot 'pipeline-spec.json')
 ```
+
+Before removing an old storage root, require exact source/destination inventories,
+then validate every release target with the merged `read_current` runtime and the
+complete graph with `read_current_release`. Comparing only `CURRENT.json` and
+`generation.json` hashes is insufficient because it does not detect artifact-byte
+drift within an otherwise unchanged immutable generation. A mismatch stops the
+cutover; publish a new immutable generation and coordinated release instead of
+editing history. The stable launcher must then resolve the new root and pass the
+same direct-file and interaction QA. Recovery retains the old root until these
+checks and the repository change are accepted.

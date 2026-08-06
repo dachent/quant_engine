@@ -23,6 +23,14 @@ def test_supported_python_and_installed_ci_controls() -> None:
     assert distribution.metadata["Requires-Python"].replace(" ", "") == ">=3.11,<3.14"
 
 
+def test_example_config_keeps_portfolio_authority_off_synced_storage() -> None:
+    config = _toml(REPOSITORY_ROOT / "config.example.toml")
+    paths = config["paths"]
+    assert isinstance(paths, dict)
+    assert paths["portfolio"] == "C:/Tools/quant-engine/data"
+    assert paths["portfolio123"] == "../data_Portfolio123"
+
+
 def test_virtual_root_has_only_accepted_workspace_members() -> None:
     root = _toml(REPOSITORY_ROOT / "pyproject.toml")
     tool = root["tool"]
