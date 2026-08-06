@@ -30,6 +30,7 @@ from quant_engine.core import (
     SourceArtifact,
     VerificationStatus,
     hash_file,
+    rename_directory_with_retry,
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core.publication import CurrentPointer
@@ -49,7 +50,7 @@ _PROVIDER_CATALOGS: Final = {
     "alpaca": ("alpaca-generation.json", frozenset({1})),
     "fidelity": ("fidelity-generation.json", frozenset({1})),
     "ibkr": ("ibkr-catalog.json", frozenset({3})),
-    "matrixport": ("catalog.json", frozenset({1})),
+    "matrixport": ("catalog.json", frozenset({1, 2})),
     "portfolio123": ("portfolio123-generation.json", frozenset({1})),
     "quantbase": ("quantbase-generation.json", frozenset({1})),
     "schwab": ("schwab-generation.json", frozenset({1})),
@@ -332,7 +333,6 @@ def _provider(
 def _assignment_index(
     provenance: Mapping[str, Any],
 ) -> tuple[set[str], set[str], dict[str, list[dict[str, Any]]]]:
-    current_start = _day(provenance.get("as_of_date"), "provenance.as_of_date")
     accounts = {
         _text(item.get("account_id"), "account_id")
         for item in _objects(provenance.get("accounts"), "accounts")
@@ -344,7 +344,12 @@ def _assignment_index(
     assignments: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for item in _objects(provenance.get("assignments"), "assignments"):
         normalized = dict(item)
-        normalized["_default_effective_start"] = current_start.isoformat()
+        if normalized.get("mapping_status") == "MAPPED" and normalized.get(
+            "effective_start"
+        ) in {None, ""}:
+            raise ProviderLedgerError(
+                "mapped assignment requires an explicit effective_start"
+            )
         assignments[_text(item.get("account_id"), "assignment.account_id")].append(
             normalized
         )
@@ -368,19 +373,14 @@ def _mapped_strategy(
     day = _row_day(row)
     if account_id not in accounts or day is None:
         return None, "UNMAPPED"
-    existing_strategy = row.get("strategy_id")
-    if (
-        row.get("mapping_status") == "MAPPED"
-        and isinstance(existing_strategy, str)
-        and existing_strategy in strategies
-    ):
-        return existing_strategy, "MAPPED"
     active: list[str] = []
     for item in assignments.get(account_id, ()):
         strategy_id = item.get("strategy_id")
         if not isinstance(strategy_id, str) or strategy_id not in strategies:
             continue
-        raw_start = item.get("effective_start") or item.get("_default_effective_start")
+        raw_start = item.get("effective_start")
+        if raw_start in {None, ""}:
+            continue
         start = _day(raw_start, "assignment.effective_start")
         raw_end = item.get("effective_end")
         end = (
@@ -599,8 +599,51 @@ def _strategy_inputs(
                 "provider_id": provider_id,
                 "strategy_id": strategy_id,
                 "strategy_name": row["series_id"],
+                **(
+                    {
+                        "component_account_ids": sorted(
+                            {
+                                _text(
+                                    assignment.get("account_id"),
+                                    "assignment.account_id",
+                                )
+                                for assignment in _objects(
+                                    provenance.get("assignments"), "assignments"
+                                )
+                                if assignment.get("mapping_status") == "MAPPED"
+                                and assignment.get("strategy_id") == strategy_id
+                                and (
+                                    assignment.get("effective_start") in {None, ""}
+                                    or _day(
+                                        assignment.get("effective_start"),
+                                        "assignment.effective_start",
+                                    )
+                                    <= day
+                                )
+                                and (
+                                    assignment.get("effective_end") in {None, ""}
+                                    or day
+                                    <= _day(
+                                        assignment.get("effective_end"),
+                                        "assignment.effective_end",
+                                    )
+                                )
+                            }
+                        )
+                    }
+                    if layer is EvidenceLayer.ACCOUNT_LIVE
+                    else {}
+                ),
             }
         )
+        if layer is EvidenceLayer.ACCOUNT_LIVE and not normalized[-1].get(
+            "component_account_ids"
+        ):
+            raise ProviderLedgerError(
+                "ACCOUNT_LIVE strategy return lacks an effective account assignment: "
+                f"strategy={normalized[-1]['strategy_id']} "
+                f"date={normalized[-1]['date']}"
+            )
     evidence_ids = {
         _text(item.get("strategy_id"), "strategy evidence strategy_id")
         for item in evidence_rows
@@ -654,9 +697,9 @@ def _broker_strategy_returns(
         if row.get("mapping_status") == "MAPPED":
             by_account[(str(row["provider_id"]), str(row["account_id"]))].append(row)
 
-    contributions: dict[tuple[str, str], list[tuple[Decimal, Decimal, str, str]]] = (
-        defaultdict(list)
-    )
+    contributions: dict[
+        tuple[str, str], list[tuple[Decimal, Decimal, str, str, str]]
+    ] = defaultdict(list)
     for (provider_id, account_id), rows in by_account.items():
         ordered = sorted(rows, key=lambda item: str(item["as_of_date"]))
         for previous, current in zip(ordered, ordered[1:]):
@@ -679,6 +722,7 @@ def _broker_strategy_returns(
                     prior_nav,
                     period_return,
                     provider_id,
+                    account_id,
                     str(current["record_id"]),
                 )
             )
@@ -689,13 +733,27 @@ def _broker_strategy_returns(
         if denominator <= 0:
             continue
         composite = (
-            sum((capital * value for capital, value, _, _ in items), Decimal(0))
+            sum((capital * value for capital, value, _, _, _ in items), Decimal(0))
             / denominator
         )
         providers = sorted({item[2] for item in items})
+        account_ids = sorted({item[3] for item in items})
+        source_record_ids = sorted(item[4] for item in items)
         result.append(
             {
+                "account_reconciliation_sha256": hashlib.sha256(
+                    canonical_json_bytes(
+                        {
+                            "account_ids": account_ids,
+                            "date": day,
+                            "source_record_ids": source_record_ids,
+                            "strategy_id": strategy_id,
+                        }
+                    )
+                ).hexdigest(),
                 "component_account_count": len(items),
+                "component_account_ids": account_ids,
+                "beginning_capital": format(denominator, "f"),
                 "date": day,
                 "evidence_layer": "ACCOUNT_LIVE",
                 "flow_timing": "DATE_ONLY_END_OF_DAY",
@@ -705,7 +763,7 @@ def _broker_strategy_returns(
                 "return": format(composite, "f"),
                 "return_basis": "NET",
                 "return_type": "TOTAL",
-                "source_record_ids": sorted(item[3] for item in items),
+                "source_record_ids": source_record_ids,
                 "strategy_id": strategy_id,
             }
         )
@@ -760,7 +818,7 @@ def _strategy_return_overlap_checks(
         for row in source_rows
         if row.get("evidence_layer") == "ACCOUNT_LIVE"
     }
-    comparisons: dict[str, list[Decimal]] = defaultdict(list)
+    comparisons: dict[str, list[tuple[Decimal, Decimal]]] = defaultdict(list)
     for broker in broker_rows:
         identity = (str(broker["strategy_id"]), str(broker["date"]))
         inherited = source.get(identity)
@@ -770,20 +828,40 @@ def _strategy_return_overlap_checks(
             _decimal(inherited["return"], "inherited strategy return")
             - _decimal(broker["return"], "broker strategy return")
         )
-        comparisons[identity[0]].append(difference)
+        beginning_capital = _decimal(
+            broker.get("beginning_capital") or "0", "broker beginning capital"
+        )
+        comparisons[identity[0]].append((difference, beginning_capital))
     rows: list[dict[str, object]] = []
-    for strategy_id, differences in sorted(comparisons.items()):
+    for strategy_id, comparisons_for_strategy in sorted(comparisons.items()):
+        differences = [item[0] for item in comparisons_for_strategy]
         exception_count = sum(item > tolerance for item in differences)
+        dollar_impacts = [
+            difference * capital
+            for difference, capital in comparisons_for_strategy
+            if difference > tolerance
+        ]
         rows.append(
             {
+                "adjudication": (
+                    "METHOD_AND_FLOW_BOUNDARY_VARIANCE; accepted tracker account "
+                    "path retains its correction set; broker NAV path is retained "
+                    "as reconciliation evidence and rollforward input only"
+                ),
                 "authority_effect": (
                     "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
                 ),
+                "blocking": False,
                 "check_id": f"strategy-return-overlap-{strategy_id}",
                 "compared_date_count": len(differences),
                 "exception_date_count": exception_count,
                 "maximum_absolute_difference": format(max(differences), "f"),
-                "status": "EXCEPTION" if exception_count else "PASS",
+                "maximum_estimated_dollar_impact": (
+                    format(max(dollar_impacts), "f") if dollar_impacts else "0"
+                ),
+                "status": (
+                    "PASS_WITH_ADJUDICATED_VARIANCE" if exception_count else "PASS"
+                ),
                 "strategy_id": strategy_id,
                 "tolerance": format(tolerance, "f"),
             }
@@ -899,8 +977,59 @@ def _refresh_strategy_evidence(
         }
         if account_rows:
             account_generation = provider_generations.get(account_provider_id)
+            account_scopes = []
+            account_ids = sorted(
+                {
+                    str(account_id)
+                    for row in account_rows
+                    for account_id in row.get("component_account_ids", [])
+                }
+            )
+            if not account_ids:
+                raise ProviderLedgerError(
+                    f"ACCOUNT_LIVE strategy evidence lacks account scope: {strategy_id}"
+                )
+            for account_id in account_ids:
+                scoped_rows = [
+                    row
+                    for row in account_rows
+                    if account_id in row.get("component_account_ids", [])
+                ]
+                account_scopes.append(
+                    {
+                        "account_id": account_id,
+                        "observed_end": max(str(row["date"]) for row in scoped_rows),
+                        "observed_start": min(str(row["date"]) for row in scoped_rows),
+                        "reconciliation_sha256": hashlib.sha256(
+                            canonical_json_bytes(
+                                {
+                                    "account_id": account_id,
+                                    "rows": [
+                                        {
+                                            "date": str(row["date"]),
+                                            "provider_id": str(row["provider_id"]),
+                                            "return": str(row["return"]),
+                                            "source_record_ids": sorted(
+                                                str(value)
+                                                for value in row.get(
+                                                    "source_record_ids", []
+                                                )
+                                            ),
+                                        }
+                                        for row in sorted(
+                                            scoped_rows,
+                                            key=lambda item: str(item["date"]),
+                                        )
+                                    ],
+                                    "strategy_id": strategy_id,
+                                }
+                            )
+                        ).hexdigest(),
+                    }
+                )
             refreshed_row["account"] = {
                 **_path_statistics(account_rows),
+                "account_scopes": account_scopes,
                 "generation_as_of_date": (
                     provider_as_of_dates[account_provider_id].isoformat()
                     if account_generation is not None
@@ -945,13 +1074,18 @@ def _portfolio123_provider_returns(
     manifest: GenerationManifest,
     evidence_rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    p123 = next(
-        (item for item in evidence_rows if item.get("provider_id") == "portfolio123"),
-        None,
-    )
-    if p123 is None or not isinstance(p123.get("provider"), dict):
+    p123_rows = [
+        item
+        for item in evidence_rows
+        if isinstance(item.get("provider"), dict)
+        and (
+            item["provider"].get("provider_id") == "portfolio123"
+            or item.get("provider_id") == "portfolio123"
+        )
+        and item["provider"].get("entity_id") not in {None, ""}
+    ]
+    if not p123_rows:
         return []
-    entity_id = _text(p123["provider"].get("entity_id"), "Portfolio123 entity_id")
     root = Path(_text(provider_ref["root"], "portfolio123.root")).resolve()
     generation_root = root / "generations" / manifest.generation_id
     equity_path = _exact_file(
@@ -981,39 +1115,48 @@ def _portfolio123_provider_returns(
         )
     except Exception as exc:
         raise ProviderLedgerError("Portfolio123 equity curve is unreadable") from exc
-    selected: dict[date, tuple[Decimal, Decimal]] = {}
+    selected: dict[str, dict[date, tuple[Decimal, Decimal]]] = {
+        _text(item["provider"].get("entity_id"), "Portfolio123 entity_id"): {}
+        for item in p123_rows
+    }
     for row in table.to_pylist():
-        if str(row.get("_entity_id") or "") != entity_id:
+        entity_id = str(row.get("_entity_id") or "")
+        if entity_id not in selected:
             continue
         day = _day(str(row.get("Date") or ""), "Portfolio123 equity date")
-        selected[day] = (
+        selected[entity_id][day] = (
             _decimal(row.get("Total Equity"), "Portfolio123 equity"),
             _decimal(row.get("Cash Added") or "0", "Portfolio123 cash added"),
         )
-    ordered = sorted(selected.items())
-    if len(ordered) < 2:
-        raise ProviderLedgerError("Portfolio123 provider path is unavailable")
     result: list[dict[str, Any]] = []
-    previous = ordered[0][1][0]
-    for day, (equity, cash_added) in ordered[1:]:
-        period_return = (equity - cash_added) / previous - Decimal(1)
-        if period_return <= -1:
-            raise ProviderLedgerError("Portfolio123 provider return is invalid")
-        result.append(
-            {
-                "cost": None,
-                "date": day.isoformat(),
-                "evidence_layer": "PROVIDER_LIVE",
-                "generation_id": manifest.generation_id,
-                "provider_id": "portfolio123",
-                "return": format(period_return, "f"),
-                "return_basis": "OBSERVED",
-                "return_type": "TOTAL",
-                "strategy_id": str(p123["strategy_id"]),
-                "strategy_name": str(p123["strategy_name"]),
-            }
-        )
-        previous = equity
+    for p123 in p123_rows:
+        entity_id = _text(p123["provider"].get("entity_id"), "Portfolio123 entity_id")
+        ordered = sorted(selected[entity_id].items())
+        if len(ordered) < 2:
+            raise ProviderLedgerError(
+                f"Portfolio123 provider path is unavailable: {entity_id}"
+            )
+        previous = ordered[0][1][0]
+        for day, (equity, cash_added) in ordered[1:]:
+            period_return = (equity - cash_added) / previous - Decimal(1)
+            if period_return <= -1:
+                raise ProviderLedgerError("Portfolio123 provider return is invalid")
+            result.append(
+                {
+                    "cost": None,
+                    "date": day.isoformat(),
+                    "evidence_layer": "PROVIDER_LIVE",
+                    "generation_id": manifest.generation_id,
+                    "provider_id": "portfolio123",
+                    "return": format(period_return, "f"),
+                    "return_basis": "OBSERVED",
+                    "return_type": "TOTAL",
+                    "strategy_id": str(p123["strategy_id"]),
+                    "strategy_name": str(p123["strategy_name"]),
+                }
+            )
+            previous = equity
+    result.sort(key=lambda item: (str(item["strategy_id"]), str(item["date"])))
     return result
 
 
@@ -1055,6 +1198,26 @@ def _admissions(
                 effective_start=start,
                 effective_end=end,
                 account_id=account_id,
+                account_reconciliation_sha256=hashlib.sha256(
+                    canonical_json_bytes(
+                        {
+                            "account_id": account_id,
+                            "fact_type": fact_type,
+                            "provider_id": provider_id,
+                            "records": [
+                                {
+                                    "record_id": str(item["record_id"]),
+                                    "source_record_id": str(
+                                        item.get("source_record_id") or ""
+                                    ),
+                                }
+                                for item in sorted(
+                                    rows, key=lambda row: str(row["record_id"])
+                                )
+                            ],
+                        }
+                    )
+                ).hexdigest(),
             )
         )
     for item in evidence_rows:
@@ -1065,21 +1228,29 @@ def _admissions(
                 account.get("provider_id") or item.get("provider_id"),
                 "strategy evidence account provider_id",
             )
-            admissions.append(
-                ProviderFactAdmission(
-                    provider_id=account_provider_id,
-                    fact_type="strategy_returns",
-                    evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
-                    disposition=AdmissionDisposition.AUTHORITATIVE,
-                    effective_start=_day(
-                        account.get("observed_start"), "account observed_start"
-                    ),
-                    effective_end=_day(
-                        account.get("observed_end"), "account observed_end"
-                    ),
-                    strategy_id=strategy_id,
+            for scope in _objects(
+                account.get("account_scopes"), "strategy evidence account_scopes"
+            ):
+                admissions.append(
+                    ProviderFactAdmission(
+                        provider_id=account_provider_id,
+                        fact_type="strategy_returns",
+                        evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
+                        disposition=AdmissionDisposition.AUTHORITATIVE,
+                        effective_start=_day(
+                            scope.get("observed_start"), "account observed_start"
+                        ),
+                        effective_end=_day(
+                            scope.get("observed_end"), "account observed_end"
+                        ),
+                        account_id=_text(scope.get("account_id"), "account_id"),
+                        strategy_id=strategy_id,
+                        account_reconciliation_sha256=_text(
+                            scope.get("reconciliation_sha256"),
+                            "account reconciliation sha256",
+                        ),
+                    )
                 )
-            )
         if item.get("provider") is not None:
             provider = _object(item["provider"], "strategy evidence provider")
             provider_provider_id = _text(
@@ -1172,6 +1343,7 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
                 "coverage": _provider_coverage(
                     provider_id, manifest.coverage, provider_catalog
                 ),
+                "generation_as_of_date": manifest.as_of_date.isoformat(),
                 "generation_id": manifest.generation_id,
                 "provider_id": provider_id,
                 "qualification": identity.qualification.value,
@@ -1254,7 +1426,15 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
         "nav_observations": combined.get("nav_observations", []),
         "positions": combined.get("positions", []),
         "provider_coverage": provider_coverage,
-        "provider_generations": [item.to_dict() for item in identities],
+        "provider_generations": [
+            {
+                **item.to_dict(),
+                "generation_as_of_date": manifests[
+                    item.provider_id
+                ].as_of_date.isoformat(),
+            }
+            for item in identities
+        ],
         "provider_strategy_returns": provider_strategy_returns,
         "quality_findings": sorted(
             exceptions,
@@ -1358,7 +1538,7 @@ def stage_candidate(spec_path: Path) -> dict[str, object]:
         try:
             (temporary / "provider-ledger.json").write_bytes(catalog_bytes)
             (temporary / "generation.json").write_bytes(manifest.to_json_bytes())
-            temporary.rename(final)
+            rename_directory_with_retry(temporary, final)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)

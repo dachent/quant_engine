@@ -28,6 +28,16 @@ from quant_engine.core import (
 from quant_engine.core.rehearsal import RehearsalError, run_recovery_rehearsal
 
 
+_HARNESS_IDENTITY = {
+    "code_commit": "c" * 40,
+    "core_module_sha256": "d" * 64,
+    "entrypoint_sha256": "e" * 64,
+    "python_executable_sha256": "f" * 64,
+    "python_version": "3.11.15",
+    "runtime_platform": "synthetic-test-runtime",
+}
+
+
 def _manifest(label: str, day: date) -> GenerationManifest:
     content = (label + "\n").encode()
     return GenerationManifest.build(
@@ -55,7 +65,10 @@ def _manifest(label: str, day: date) -> GenerationManifest:
 
 
 def _accepted_release(
-    tmp_path: Path, *, legacy_predecessor_pointer: bool = False
+    tmp_path: Path,
+    *,
+    legacy_predecessor_pointer: bool = False,
+    with_predecessors: bool = True,
 ) -> tuple[PipelineSpec, str]:
     roots = {"excel": tmp_path / "excel", "panel": tmp_path / "panel"}
     previous = {
@@ -67,18 +80,20 @@ def _accepted_release(
         for root_id in roots
     }
     for root_id in roots:
-        stage_generation(roots[root_id], previous[root_id])
-        publish_generation(roots[root_id], previous[root_id].generation_id)
-        if legacy_predecessor_pointer:
-            current = read_current(roots[root_id])
-            (roots[root_id] / "CURRENT.json").write_bytes(
-                CurrentPointer(
-                    generation_id=current.generation_id,
-                    manifest_sha256=current.manifest_sha256,
-                ).to_json_bytes()
-            )
+        if with_predecessors:
+            stage_generation(roots[root_id], previous[root_id])
+            publish_generation(roots[root_id], previous[root_id].generation_id)
+            if legacy_predecessor_pointer:
+                current = read_current(roots[root_id])
+                (roots[root_id] / "CURRENT.json").write_bytes(
+                    CurrentPointer(
+                        generation_id=current.generation_id,
+                        manifest_sha256=current.manifest_sha256,
+                    ).to_json_bytes()
+                )
         stage_generation(roots[root_id], proposed[root_id])
-    (roots["panel"] / "index.html").write_bytes(b"previous launcher\n")
+    if with_predecessors:
+        (roots["panel"] / "index.html").write_bytes(b"previous launcher\n")
     proposed_launcher = tmp_path / "proposed-launcher.html"
     proposed_launcher.write_bytes(b"proposed launcher\n")
     coordination = tmp_path / "coordination"
@@ -137,10 +152,12 @@ def test_complete_recovery_rehearsal_passes(tmp_path: Path) -> None:
         spec=spec,
         release_id=release_id,
         output_root=output,
+        harness_identity=_HARNESS_IDENTITY,
     )
 
     assert result["status"] == "PASS"
-    assert result["schema_version"] == 2
+    assert result["schema_version"] == 3
+    assert result["harness_identity"] == _HARNESS_IDENTITY
     boundary = result["boundary_rehearsal"]
     assert isinstance(boundary, dict)
     assert boundary["boundary_count"] == 15
@@ -219,6 +236,7 @@ def test_rehearsal_refuses_nonempty_output(tmp_path: Path) -> None:
             spec=spec,
             release_id=release_id,
             output_root=output,
+            harness_identity=_HARNESS_IDENTITY,
         )
 
 
@@ -231,7 +249,27 @@ def test_recovery_rehearsal_preserves_legacy_predecessor_pointer_contract(
         spec=spec,
         release_id=release_id,
         output_root=tmp_path / "legacy-pointer-rehearsal",
+        harness_identity=_HARNESS_IDENTITY,
     )
 
     assert result["status"] == "PASS"
     assert result["boundary_rehearsal"]["source_unchanged"] is True
+
+
+def test_recovery_rehearsal_supports_release_without_predecessors(
+    tmp_path: Path,
+) -> None:
+    spec, release_id = _accepted_release(tmp_path, with_predecessors=False)
+
+    result = run_recovery_rehearsal(
+        spec=spec,
+        release_id=release_id,
+        output_root=tmp_path / "no-predecessor-rehearsal",
+        harness_identity=_HARNESS_IDENTITY,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["schema_version"] == 3
+    assert result["harness_identity"] == _HARNESS_IDENTITY
+    assert result["boundary_rehearsal"]["source_unchanged"] is True
+    assert result["boundary_rehearsal"]["rollback_interruption"]["status"] == "PASS"

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -31,12 +30,16 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import (
+    HWM_STATUS_CODE_VERSION,
+    HWM_STATUS_SEMANTICS,
+    HwmCoverageError,
+    governed_hwm_coverage,
+)
 
 
 PANEL_SCHEMA_VERSION: Final = 9
 BUILDER_VERSION: Final = "2.1.0"
-HWM_STATUS_CODE_VERSION: Final = 2
-HWM_STATUS_SEMANTICS: Final = "EXPLICIT_GOVERNED_HWM_PERIMETER"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -61,6 +64,7 @@ PANEL_FILES: Final = (
     "app.js",
     "data/dashboard_data.json",
     "data/dashboard_data.js",
+    "data/freshness-health.json",
 )
 VIEWS: Final = (
     "command",
@@ -298,21 +302,35 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
             "freshness health is mandatory for current portfolio claims"
         )
     payload = _load_json(path, "freshness health")
-    if set(payload) != {
-        "assessment_schema_version",
-        "as_of_date",
-        "assessments",
-        "policy",
-    }:
+    schema_version = payload.get("assessment_schema_version")
+    expected_bundle_keys = (
+        {"assessment_schema_version", "as_of_date", "assessments", "policy"}
+        if schema_version == 2
+        else {"assessment_schema_version", "as_of_date", "assessments", "policies"}
+    )
+    if set(payload) != expected_bundle_keys:
         raise ControlPanelValidationError("freshness health keys differ")
-    if payload["assessment_schema_version"] != 2:
+    if schema_version not in {2, 3}:
         raise ControlPanelValidationError("freshness health schema is unsupported")
     as_of = _text(payload.get("as_of_date"), "freshness health as_of_date")
     if date.fromisoformat(as_of) < date.fromisoformat(portfolio_as_of):
         raise ControlPanelValidationError("freshness health predates the portfolio")
-    policy = FreshnessPolicy.from_dict(
-        _object(payload.get("policy"), "freshness health policy")
-    )
+    if schema_version == 2:
+        policy = FreshnessPolicy.from_dict(
+            _object(payload.get("policy"), "freshness health policy")
+        )
+        policies = {policy.policy_id: policy}
+    else:
+        policies = {}
+        for raw_policy in _objects(payload.get("policies"), "freshness policies"):
+            policy = FreshnessPolicy.from_dict(raw_policy)
+            if policy.policy_id in policies:
+                raise ControlPanelValidationError(
+                    "freshness policy identity is duplicated"
+                )
+            policies[policy.policy_id] = policy
+        if not policies:
+            raise ControlPanelValidationError("freshness policies are unavailable")
     rows = []
     accepted_states = {"FRESH", "LATE", "STALE", "FINITE_COMPLETE", "UNAVAILABLE"}
     expected = {
@@ -330,6 +348,13 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
         "state",
         "subject_id",
     }
+    if schema_version == 3:
+        expected |= {
+            "coverage_status",
+            "lane",
+            "required_for_current",
+            "subject_type",
+        }
     for item in _objects(payload.get("assessments"), "freshness assessments"):
         if set(item) != expected:
             raise ControlPanelValidationError("freshness assessment keys differ")
@@ -355,6 +380,35 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
         provider_id = _text(item.get("provider_id"), "freshness provider_id")
         subject_id = _text(item.get("subject_id"), "freshness subject_id")
         fact_type = _text(item.get("fact_type"), "freshness fact_type")
+        policy_id = _text(item.get("policy_id"), "freshness policy_id")
+        try:
+            policy = policies[policy_id]
+        except KeyError as exc:
+            raise ControlPanelValidationError(
+                "freshness assessment references an unknown policy"
+            ) from exc
+        lane = (
+            "LEGACY"
+            if schema_version == 2
+            else _text(item.get("lane"), "freshness lane")
+        )
+        subject_type = (
+            "STRATEGY"
+            if schema_version == 2
+            else _text(item.get("subject_type"), "freshness subject_type")
+        )
+        required_for_current = (
+            True if schema_version == 2 else item.get("required_for_current")
+        )
+        if not isinstance(required_for_current, bool):
+            raise ControlPanelValidationError(
+                "freshness required_for_current must be boolean"
+            )
+        coverage_status = (
+            "LEGACY_UNSPECIFIED"
+            if schema_version == 2
+            else _text(item.get("coverage_status"), "freshness coverage_status")
+        )
         last = item.get("last_accepted_date")
         next_expected = item.get("next_expected_date")
         if last is not None:
@@ -368,6 +422,9 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
             None if last is None else date.fromisoformat(last),
             date.fromisoformat(as_of),
         ).to_dict()
+        if schema_version == 3 and not required_for_current:
+            expected_assessment["blocks_current_consumers"] = False
+            expected_assessment["escalation_required"] = False
         for field in (
             "blocks_current_consumers",
             "escalation_required",
@@ -389,18 +446,32 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
                 "escalation_required": item["escalation_required"],
                 "evaluated_on": as_of,
                 "fact_type": fact_type,
-                "item": f"{provider_id}:{subject_id}:{fact_type}",
+                "item": (
+                    f"{provider_id}:{subject_id}:{fact_type}"
+                    if schema_version == 2
+                    else f"{provider_id}:{subject_id}:{lane}:{fact_type}"
+                ),
                 "known_gap": (
                     f"next expected {next_expected or 'not recurring'}; {reason}"
                 ),
                 "next_expected_date": next_expected,
-                "policy_id": _text(item.get("policy_id"), "freshness policy_id"),
+                "policy_id": policy_id,
                 "provider_id": provider_id,
                 "reason": reason,
                 "revision_state": revision_state,
                 "status": state,
                 "subject_id": subject_id,
                 "value": last,
+                **(
+                    {
+                        "coverage_status": coverage_status,
+                        "lane": lane,
+                        "required_for_current": required_for_current,
+                        "subject_type": subject_type,
+                    }
+                    if schema_version == 3
+                    else {}
+                ),
             }
         )
     return sorted(rows, key=lambda item: str(item["item"]))
@@ -565,16 +636,6 @@ def _hwm_policy(evaluation_date: date) -> tuple[dict[str, Any], str]:
     return policy, policy_hash
 
 
-def _decimal_value(value: object, field_name: str) -> Decimal:
-    try:
-        accepted = Decimal(str(value))
-    except (InvalidOperation, ValueError) as exc:
-        raise ControlPanelValidationError(f"{field_name} must be decimal") from exc
-    if not accepted.is_finite():
-        raise ControlPanelValidationError(f"{field_name} must be finite")
-    return accepted
-
-
 def _governed_hwm_coverage(
     strategies: Sequence[Mapping[str, Any]],
     policy: Mapping[str, Any],
@@ -582,123 +643,15 @@ def _governed_hwm_coverage(
     *,
     require_freshness: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    excluded = set(policy.get("excluded_strategy_ids", []))
-    accepted_evidence = set(policy.get("accepted_daily_nav_evidence", []))
-    accepted_provider_live = set(policy.get("accepted_provider_live_strategy_ids", []))
-    accepted: list[dict[str, Any]] = []
-    covered = Decimal(0)
-    governed_perimeter = Decimal(0)
-    excluded_value = Decimal(0)
-    excluded_names: list[str] = []
-    uncovered: list[str] = []
-    uncovered_details: list[dict[str, Any]] = []
-    freshness_by_strategy: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    for freshness in freshness_health or []:
-        if freshness.get("fact_type") in {"nav", "strategy-returns"}:
-            freshness_by_strategy[str(freshness.get("subject_id"))].append(freshness)
-    for original in strategies:
-        row = dict(original)
-        strategy_id = _text(row.get("strategy_id"), "strategy.strategy_id")
-        strategy_name = _text(row.get("strategy_name"), "strategy.strategy_name")
-        value = _decimal_value(row.get("current_value_usd"), "strategy.current_value")
-        if strategy_id in excluded:
-            row.update(
-                {
-                    "hwm_scope": "EXCLUDED_DE_MINIMIS",
-                    "hwm_source": "PORT-HWM-2",
-                    "nav_status": "EXCLUDED_DE_MINIMIS",
-                }
-            )
-            excluded_value += value
-            excluded_names.append(strategy_name)
-            accepted.append(row)
-            continue
-
-        governed_perimeter += value
-        row["hwm_scope"] = "INCLUDED"
-        row["hwm_source"] = "PORTFOLIO_REPORT"
-        evidence_layer = row.get("nav_evidence_layer")
-        evidence_blocked = evidence_layer not in accepted_evidence or (
-            evidence_layer == "PROVIDER_LIVE"
-            and strategy_id not in accepted_provider_live
+    try:
+        return governed_hwm_coverage(
+            strategies,
+            policy,
+            freshness_health,
+            require_freshness=require_freshness,
         )
-        row["hwm_evidence_status"] = (
-            "ACCEPTED" if not evidence_blocked else "UNACCEPTED"
-        )
-        strategy_freshness = freshness_by_strategy.get(strategy_id, [])
-        freshness_blocked = any(
-            item.get("blocks_current_consumers") is True for item in strategy_freshness
-        )
-        freshness_missing = require_freshness and not strategy_freshness
-        freshness_state = next(
-            (
-                str(item.get("state") or item.get("status"))
-                for item in strategy_freshness
-                if isinstance(item.get("state") or item.get("status"), str)
-                and (item.get("state") or item.get("status"))
-            ),
-            None,
-        )
-        row["hwm_freshness_status"] = (
-            "UNAVAILABLE"
-            if freshness_missing
-            else "BLOCKED"
-            if freshness_blocked
-            else "ACCEPTED"
-        )
-        row["hwm_freshness_state"] = freshness_state
-        if (
-            row.get("nav_status") == "AVAILABLE"
-            and not evidence_blocked
-            and not freshness_blocked
-            and not freshness_missing
-        ):
-            covered += value
-        else:
-            uncovered.append(strategy_name)
-            if row.get("nav_status") != "AVAILABLE":
-                qualification_gap = "MISSING_DAILY_NAV"
-            elif evidence_blocked:
-                qualification_gap = "UNACCEPTED_EVIDENCE"
-            elif freshness_missing:
-                qualification_gap = "FRESHNESS_UNAVAILABLE"
-            elif freshness_blocked:
-                qualification_gap = f"FRESHNESS_{freshness_state or 'BLOCKED'}"
-            else:
-                qualification_gap = "UNQUALIFIED"
-            uncovered_details.append(
-                {
-                    "current_value_usd": format(value, "f"),
-                    "qualification_gap": qualification_gap,
-                    "strategy_id": strategy_id,
-                    "strategy_name": strategy_name,
-                    "systematic_weight": row.get("systematic_weight"),
-                }
-            )
-        accepted.append(row)
-
-    if governed_perimeter <= 0:
-        raise ControlPanelValidationError("governed HWM perimeter is empty")
-    ratio = covered / governed_perimeter
-    status = (
-        "AVAILABLE_GOVERNED_HWM_PERIMETER"
-        if not uncovered
-        else "NOT_AUTOMATABLE_STALE_OR_MISSING_GOVERNED_HWM_DAILY_NAV"
-    )
-    return accepted, {
-        "covered_value_usd": format(covered, "f"),
-        "excluded_value_usd": format(excluded_value, "f"),
-        "excluded_strategies": sorted(excluded_names),
-        "governed_perimeter_value_usd": format(governed_perimeter, "f"),
-        "nav_coverage": format(ratio, "f"),
-        "status": status,
-        "status_code_version": HWM_STATUS_CODE_VERSION,
-        "status_semantics": HWM_STATUS_SEMANTICS,
-        "uncovered_details": sorted(
-            uncovered_details, key=lambda item: str(item["strategy_name"])
-        ),
-        "uncovered_strategies": sorted(uncovered),
-    }
+    except HwmCoverageError as exc:
+        raise ControlPanelValidationError(str(exc)) from exc
 
 
 def _reconcile_hwm_coverage(
@@ -833,11 +786,7 @@ def _factor_analysis(
                     "cost_coverage": "INCOMPLETE",
                     "coverage": best_coverage,
                     "diagnostics": None,
-                    "estimator": _text(
-                        best.get("estimator", "STATIC_RBSA"), "model.estimator"
-                    )
-                    if series_attempts
-                    else None,
+                    "estimator": None,
                     "evidence_layer": None,
                     "exposures": [],
                     "model_id": None,
@@ -857,6 +806,7 @@ def _factor_analysis(
             raise ControlPanelValidationError(
                 f"selected factor model is absent: {series_id}"
             )
+        estimator = _text(model.get("estimator", "STATIC_RBSA"), "model.estimator")
         computational_status = _text(
             model.get("computational_status"), "model.computational_status"
         )
@@ -897,9 +847,7 @@ def _factor_analysis(
                     ),
                     "coverage": _object(model.get("coverage"), "model.coverage"),
                     "diagnostics": diagnostics,
-                    "estimator": _text(
-                        model.get("estimator", "STATIC_RBSA"), "model.estimator"
-                    ),
+                    "estimator": estimator,
                     "evidence_layer": _text(
                         model.get("evidence_layer"), "model.evidence_layer"
                     ),
@@ -1024,9 +972,7 @@ def _factor_analysis(
                 ),
                 "coverage": _object(model.get("coverage"), "model.coverage"),
                 "diagnostics": diagnostics,
-                "estimator": _text(
-                    model.get("estimator", "STATIC_RBSA"), "model.estimator"
-                ),
+                "estimator": estimator,
                 "evidence_layer": _text(
                     model.get("evidence_layer"), "model.evidence_layer"
                 ),
@@ -1040,8 +986,7 @@ def _factor_analysis(
             }
         )
         available_count += 1
-        if model.get("estimator", "STATIC_RBSA") == "DYNAMIC_FLS":
-            dynamic_available_count += 1
+        dynamic_available_count += estimator == "DYNAMIC_FLS"
     return {
         "analytics_hash": _text(
             decomposition.get("analytics_hash"), "factor.analytics_hash"
@@ -1727,6 +1672,35 @@ def _panel_data(
         )
     if len(accounts) != 19:
         raise ControlPanelValidationError("current account boundary differs")
+    account_ids = [
+        _text(row.get("account_id"), "account_summary.account_id") for row in accounts
+    ]
+    if len(set(account_ids)) != len(account_ids):
+        raise ControlPanelValidationError("current account identities are not unique")
+    for row in accounts:
+        provider = row.get("provider_id", row.get("provider"))
+        _text(provider, "account_summary.provider")
+        if any(
+            field in row
+            for field in (
+                "account_number",
+                "external_account_id",
+                "masked_account_number",
+            )
+        ):
+            raise ControlPanelValidationError(
+                "external account identifiers cannot enter panel data"
+            )
+    referenced_account_ids = {
+        _text(row.get("account_id"), "account reference")
+        for row in (*performance, *positions)
+    }
+    missing_account_ids = referenced_account_ids - set(account_ids)
+    if missing_account_ids:
+        raise ControlPanelValidationError(
+            "panel facts reference accounts outside account_summary: "
+            + ", ".join(sorted(missing_account_ids))
+        )
 
     strategy_names = {
         _text(row.get("strategy_id"), "strategy.strategy_id"): _text(
@@ -1741,17 +1715,19 @@ def _panel_data(
     factor_analysis = _factor_analysis(
         decomposition, decomposition_identity, current_strategy_names
     )
-    historical_factor_analysis = {
+    dynamic_factor_analysis = {
         **factor_analysis,
-        "as_of_policy": "SINGLE_ACCEPTED_HISTORICAL_PROOF",
-        "lens_id": "HISTORICAL_MINIMUM_PROOF",
-        "lens_label": "Historical proof",
+        "as_of_policy": "SINGLE_ACCEPTED_GENERATION",
+        "evidence_classification": "MPI_INFORMED_NON_EQUIVALENT",
+        "lens_id": "DYNAMIC_STYLE",
+        "lens_label": "Dynamic style path (clean-room FLS)",
+        "release_scope": "SEALED_HOLDOUT_GATED_DYNAMIC_ANALYSIS",
         "return_basis": "CONFIGURED_EXCESS_RETURN",
     }
     if decomposition_lenses is None:
         accepted_decomposition_lenses = {
-            "default_lens": "HISTORICAL_MINIMUM_PROOF",
-            "lenses": [historical_factor_analysis],
+            "default_lens": "DYNAMIC_STYLE",
+            "lenses": [dynamic_factor_analysis],
             "plan_bundle_id": None,
             "plan_manifest_sha256": None,
         }
@@ -1771,8 +1747,8 @@ def _panel_data(
         }:
             raise ControlPanelValidationError("decomposition lens set differs")
         accepted_decomposition_lenses["lenses"] = [
-            *lens_rows,
-            historical_factor_analysis,
+            *list(lens_rows),
+            dynamic_factor_analysis,
         ]
     accepted_weekly_returns = (
         dict(weekly_returns)
@@ -1865,6 +1841,19 @@ def _panel_data(
         freshness_health,
         require_freshness=True,
     )
+    report_hwm = report.get("hwm_summary")
+    if (
+        report_hwm is not None
+        and _object(report_hwm, "report.hwm_summary") != hwm_summary
+    ):
+        raise ControlPanelValidationError(
+            "governed HWM summary differs from the accepted portfolio report"
+        )
+    reported_hwm = _summary_value(summary, "Full-systematic HWM")
+    if report_hwm is not None and reported_hwm != hwm_summary["status"]:
+        raise ControlPanelValidationError(
+            "portfolio summary HWM status differs from governed HWM evidence"
+        )
     strategies = [
         {
             **row,
@@ -2022,7 +2011,7 @@ def _panel_data(
                 accepted_decomposition_lenses.get("lenses"),
                 "accepted decomposition lenses",
             )
-            if lens.get("lens_id") != "HISTORICAL_MINIMUM_PROOF"
+            if lens.get("lens_id") != "DYNAMIC_STYLE"
             for source_row in _objects(lens.get("sources"), "lens sources")
         ],
         *(
@@ -2127,7 +2116,7 @@ def _panel_data(
                     )
                     + "."
                     if hwm_summary["uncovered_strategies"]
-                    else "Every included HWM-perimeter sleeve has qualified daily NAV."
+                    else "Every included HWM-perimeter sleeve has qualified governed account-live or provider-live return evidence."
                 )
             ),
         },
@@ -2247,6 +2236,8 @@ def _rendered_files(
     report, report_identity, report_path = _current_report(report_root)
     portfolio_as_of = _text(report.get("as_of_date"), "report.as_of_date")
     freshness_health = _freshness_health(freshness_health_path, portfolio_as_of)
+    if freshness_health_path is None:
+        raise ControlPanelValidationError("freshness health artifact is mandatory")
     resolved_decomposition, resolved_correlation = _analytics_roots(
         report_root, decomposition_root, correlation_root
     )
@@ -2314,6 +2305,7 @@ def _rendered_files(
         "app.js": _template_bytes(template_root / "app.js"),
         "data/dashboard_data.json": data_bytes,
         "data/dashboard_data.js": b"window.PORTFOLIO_DATA = " + data_bytes + b";\n",
+        "data/freshness-health.json": freshness_health_path.read_bytes(),
     }
     legacy_data = legacy_panel / "data" / "dashboard_data.json"
     return (
@@ -2469,14 +2461,17 @@ def verify_candidate(
     )
     lens_payload = _object(data.get("decomposition_lenses"), "decomposition lenses")
     lens_rows = _objects(lens_payload.get("lenses"), "decomposition lenses")
-    expected_lens_ids = {"HISTORICAL_MINIMUM_PROOF"}
-    if decomposition_lenses_root is not None:
-        expected_lens_ids |= {
+    expected_lens_ids = (
+        {"DYNAMIC_STYLE"}
+        if decomposition_lenses_root is None
+        else {
+            "DYNAMIC_STYLE",
             "ECONOMIC_FACTOR",
             "ETF_STYLE",
             "RETURN_INDUSTRY",
             "RETURN_SECTOR",
         }
+    )
     checks.append(
         _check(
             "Decomposition lenses remain separate and complete",
@@ -2599,6 +2594,45 @@ def verify_candidate(
             and len(data["allocations"]) == 10
             and data["counts"]["accounts"] == 19,
             data["counts"],
+        )
+    )
+    account_rows = _objects(data.get("account_summary"), "account_summary")
+    account_ids = [
+        _text(row.get("account_id"), "account_summary.account_id")
+        for row in account_rows
+    ]
+    account_reference_ids = {
+        _text(row.get("account_id"), "account reference")
+        for row in (
+            *_objects(data.get("performance"), "performance"),
+            *_objects(data.get("positions"), "positions"),
+        )
+    }
+    checks.append(
+        _check(
+            "Privacy-safe account dimension is complete",
+            len(account_rows) == 19
+            and len(set(account_ids)) == 19
+            and account_reference_ids <= set(account_ids)
+            and all(
+                row.get("provider_id") or row.get("provider") for row in account_rows
+            )
+            and not any(
+                field in row
+                for row in account_rows
+                for field in (
+                    "account_number",
+                    "external_account_id",
+                    "masked_account_number",
+                )
+            ),
+            {
+                "accounts": len(account_rows),
+                "referenced_accounts": len(account_reference_ids),
+                "unresolved_references": sorted(
+                    account_reference_ids - set(account_ids)
+                ),
+            },
         )
     )
     report, _, _ = _current_report(report_root)
@@ -3263,7 +3297,7 @@ def publish_panel(
                 artifact_id="input/freshness-health.json",
                 as_of_date=freshness_as_of,
                 schema_name="freshness-assessment",
-                schema_version="2",
+                schema_version=str(freshness_artifact["assessment_schema_version"]),
             )
         )
     for relative in (*PANEL_FILES, "candidate.json"):

@@ -931,6 +931,9 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         freshness_health_path=inputs["freshness"],
     )
     assert first["panel_id"] == second["panel_id"]
+    assert (
+        Path(first["candidate_dir"]) / "data" / "freshness-health.json"
+    ).read_bytes() == inputs["freshness"].read_bytes()
     result = panel.verify_candidate(
         inputs["report"],
         inputs["legacy"],
@@ -945,6 +948,11 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         )
     )
     assert data["panel_schema_version"] == 9
+    assert len(data["account_summary"]) == 19
+    assert len({row["account_id"] for row in data["account_summary"]}) == 19
+    assert {
+        row["account_id"] for row in [*data["performance"], *data["positions"]]
+    } <= {row["account_id"] for row in data["account_summary"]}
     assert data["meta"]["freshness_evaluated_on"] == "2026-07-30"
     assert data["meta"]["hwm_status_code_version"] == 2
     assert data["meta"]["hwm_status_semantics"] == "EXPLICIT_GOVERNED_HWM_PERIMETER"
@@ -1001,9 +1009,9 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
     )
     lenses = {row["lens_id"]: row for row in data["decomposition_lenses"]["lenses"]}
     assert set(lenses) == {
+        "DYNAMIC_STYLE",
         "ECONOMIC_FACTOR",
         "ETF_STYLE",
-        "HISTORICAL_MINIMUM_PROOF",
         "RETURN_INDUSTRY",
         "RETURN_SECTOR",
     }
@@ -1020,6 +1028,10 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
         "EXCESS_AND_LONG_SHORT_FACTOR_RETURN"
     )
     assert lenses["ETF_STYLE"]["return_basis"] == "TOTAL_RETURN_ETF_PROXY"
+    assert lenses["DYNAMIC_STYLE"]["evidence_classification"] == (
+        "MPI_INFORMED_NON_EQUIVALENT"
+    )
+    assert lenses["DYNAMIC_STYLE"]["dynamic_available_count"] == 1
 
 
 def test_layered_dependence_modes_are_preserved_without_changing_default_authority(
@@ -1256,6 +1268,56 @@ def test_freshness_health_is_visible_with_dates_and_reason(
             "value": "2026-07-28",
         }
     ]
+
+
+def test_schema_v3_nonrequired_stale_lane_does_not_block_panel(
+    tmp_path: Path,
+) -> None:
+    policy = {
+        "calendar": "CALENDAR_DAY",
+        "expected_interval_days": 1,
+        "grace_days": 2,
+        "mode": "RECURRING",
+        "policy_id": "daily-calendar-24x7",
+        "stale_after_days": 5,
+    }
+    computed = (
+        panel.FreshnessPolicy.from_dict(policy)
+        .assess(date(2026, 7, 20), date(2026, 8, 3))
+        .to_dict()
+    )
+    computed["blocks_current_consumers"] = False
+    computed["escalation_required"] = False
+    health = tmp_path / "freshness-v3.json"
+    _write_json(
+        health,
+        {
+            "assessment_schema_version": 3,
+            "as_of_date": "2026-08-03",
+            "assessments": [
+                {
+                    **computed,
+                    "acquired_at": None,
+                    "coverage_status": "AVAILABLE",
+                    "fact_type": "strategy-returns",
+                    "lane": "PROVIDER",
+                    "last_accepted_date": "2026-07-20",
+                    "provider_id": "synthetic",
+                    "required_for_current": False,
+                    "revision_state": "ORIGINAL",
+                    "subject_id": "strategy-provider-only",
+                    "subject_type": "STRATEGY",
+                }
+            ],
+            "policies": [policy],
+        },
+    )
+
+    rows = panel._freshness_health(health, "2026-08-03")
+
+    assert rows[0]["status"] == "STALE"
+    assert rows[0]["blocks_current_consumers"] is False
+    assert rows[0]["escalation_required"] is False
 
 
 def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -> None:
@@ -1817,7 +1879,7 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     )
 
     for lens in (
-        "HISTORICAL_MINIMUM_PROOF",
+        "DYNAMIC_STYLE",
         "ECONOMIC_FACTOR",
         "ETF_STYLE",
         "RETURN_INDUSTRY",
@@ -1841,11 +1903,28 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
         "CORE_BENCHMARK",
     ):
         assert f'  "{group}",' in qa
-    assert "All five decomposition lenses are rendered and exercised" in qa
+    assert "All five production decomposition lenses are rendered and exercised" in qa
+    assert "Clean-room dynamic FLS path and same-factor validation are rendered" in qa
     assert "All observed windows and both true drawdown regimes are exercised" in qa
     assert "Every weekly display group is rendered and exercised" in qa
     assert "Dependence live and hybrid evidence disclosures are exercised" in qa
     assert "Weekly returns disclose live and hybrid strategy evidence" in qa
+    assert (
+        "Privacy-safe account context filters lifecycle, positions, and performance"
+        in qa
+    )
+
+
+def test_control_panel_schema_version_matches_renderer_contract() -> None:
+    schema = json.loads(
+        (Path("schemas/portfolio/control-panel-data.schema.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert schema["properties"]["panel_schema_version"]["const"] == (
+        panel.PANEL_SCHEMA_VERSION
+    )
 
 
 def test_hwm_prose_uses_qualified_evidence_instead_of_legacy_source_label() -> None:
@@ -1913,3 +1992,62 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
     )
     assert exception["status"] == "UNAVAILABLE"
     assert "Missing Strategy (UNQUALIFIED)" in exception["known_gap"]
+
+
+def test_mvp_exposes_seven_primary_surfaces_and_keeps_appendices_separate() -> None:
+    template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
+
+    assert template.count('class="nav-item') == 7
+    for view in (
+        "command",
+        "capital",
+        "risk",
+        "attribution",
+        "dependence",
+        "weekly",
+        "data",
+    ):
+        assert f'data-nav="{view}"' in template
+    assert 'data-nav="signals"' not in template
+    assert 'data-nav="candidates"' not in template
+    assert 'data-view="signals"' in template
+    assert 'data-view="candidates"' in template
+    assert 'id="candidate-appendix-button"' in template
+
+
+def test_allocation_target_and_drift_fail_closed_without_admitted_target() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
+
+    assert "TARGET_UNAVAILABLE_NOT_ADMITTED" in renderer
+    assert "row.accepted_target_weight ?? row.target_weight" in renderer
+    assert "Actual allocation is not treated as its own target" in template
+    assert "target = actual" not in renderer.lower()
+
+
+def test_factor_surface_separates_source_availability_from_model_acceptance() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
+
+    assert "SOURCE_DATA_AVAILABLE" in renderer
+    assert "MODEL_COMPUTED_NOT_VALIDATED" in renderer
+    assert "It does not relabel accepted Volatis, Robuxio" in renderer
+    assert "${dynamicAnalysisMarkup(row)}" in renderer
+    assert "MPI-informed and non-equivalent" in renderer
+    assert "clean-room dynamic FLS path" in template
+
+
+def test_context_and_material_exceptions_have_operator_routes() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
+
+    assert 'id="context-account"' in template
+    assert 'id="context-strategy"' in template
+    assert "function applyContext()" in renderer
+    assert 'data-open-view="${safe(route.view)}"' in renderer
+    assert 'data-focus-coverage="${safe(item.item)}"' in renderer
+    assert 'data-coverage-item="${safe(row.item)}"' in renderer
+    assert "target.scrollIntoView" in renderer
+    assert 'row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE"' in renderer
+    assert "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH" in renderer
+    assert 'id="remediation-table"' in template

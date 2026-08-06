@@ -32,6 +32,54 @@ SPEC.loader.exec_module(freshness)
 def _provider_ledger(root: Path) -> str:
     catalog = {
         "as_of_date": "2026-07-31",
+        "provider_coverage": [
+            {
+                "coverage": {
+                    "fact_types": ["nav", "positions", "transactions", "cash_flows"],
+                    "observed_end": "2026-07-31",
+                    "observed_start": "2026-07-31",
+                    "status": "PARTIAL",
+                },
+                "generation_as_of_date": "2026-07-31",
+                "provider_id": "ibkr",
+            },
+            {
+                "coverage": {
+                    "fact_types": ["equity_curve", "holdings", "transactions"],
+                    "observed_end": "2026-07-31",
+                    "observed_start": "2026-07-31",
+                    "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                },
+                "generation_as_of_date": "2026-07-31",
+                "provider_id": "portfolio123",
+            },
+            {
+                "coverage": {
+                    "fact_types": ["strategy_returns"],
+                    "observed_end": "2026-07-17",
+                    "observed_start": "2026-07-17",
+                    "status": "PARTIAL",
+                },
+                "generation_as_of_date": "2026-07-17",
+                "provider_id": "tracker",
+            },
+            {
+                "coverage": {
+                    "fact_types": [
+                        "nav_daily",
+                        "daily_holdings",
+                        "strategy_trades",
+                        "wallet_deposits",
+                        "product_fee_tiers",
+                    ],
+                    "observed_end": "2026-07-26",
+                    "observed_start": "2026-07-26",
+                    "status": "PARTIAL",
+                },
+                "generation_as_of_date": "2026-07-31",
+                "provider_id": "matrixport",
+            },
+        ],
         "strategy_evidence": [
             {
                 "account": {
@@ -100,28 +148,73 @@ def test_freshness_prefers_account_lane_and_blocks_stale_strategy(
 
     result = freshness.build_health(root, generation_id)
 
-    by_id = {row["subject_id"]: row for row in result["assessments"]}
-    assert by_id["current-one"]["provider_id"] == "ibkr"
-    assert by_id["current-one"]["state"] == "FRESH"
-    assert by_id["current-one"]["blocks_current_consumers"] is False
-    assert by_id["stale-one"]["state"] == "STALE"
-    assert by_id["stale-one"]["blocks_current_consumers"] is True
-    assert by_id["late-one"]["state"] == "LATE"
-    assert by_id["late-one"]["blocks_current_consumers"] is False
-    assert result["assessment_schema_version"] == 2
-    assert result["policy"]["stale_after_days"] == 5
+    by_lane = {
+        (row["subject_id"], row["lane"], row["fact_type"]): row
+        for row in result["assessments"]
+    }
+    assert (
+        by_lane[("current-one", "ACCOUNT", "strategy-returns")]["provider_id"] == "ibkr"
+    )
+    assert by_lane[("current-one", "ACCOUNT", "strategy-returns")]["state"] == ("FRESH")
+    assert (
+        by_lane[("current-one", "PROVIDER", "strategy-returns")]["provider_id"]
+        == "portfolio123"
+    )
+    assert by_lane[("stale-one", "PROVIDER", "strategy-returns")]["state"] == ("STALE")
+    assert by_lane[("late-one", "PROVIDER", "strategy-returns")]["state"] == ("LATE")
+    assert (
+        by_lane[("matrixport", "PROVIDER_CAPTURE", "positions")]["policy_id"]
+        == "daily-calendar-24x7"
+    )
+    assert (
+        by_lane[("matrixport", "PROVIDER_CAPTURE", "positions")]["last_accepted_date"]
+        == "2026-07-26"
+    )
+    assert by_lane[("matrixport", "PROVIDER_CAPTURE", "positions")]["state"] == ("LATE")
+    assert result["assessment_schema_version"] == 3
+    assert {row["policy_id"] for row in result["policies"]} == {
+        "daily-calendar-24x7",
+        "daily-weekday-session",
+        "finite-history",
+    }
 
 
-def test_freshness_reages_late_strategy_on_operational_date(tmp_path: Path) -> None:
+def test_freshness_distinguishes_weekend_from_missing_session(tmp_path: Path) -> None:
     root = tmp_path / "provider-ledger"
     generation_id = _provider_ledger(root)
 
     result = freshness.build_health(root, generation_id, date(2026, 8, 2))
 
-    by_id = {row["subject_id"]: row for row in result["assessments"]}
+    by_id = {
+        (row["subject_id"], row["lane"]): row
+        for row in result["assessments"]
+        if row["fact_type"] == "strategy-returns"
+    }
     assert result["as_of_date"] == "2026-08-02"
-    assert by_id["late-one"]["state"] == "STALE"
-    assert by_id["late-one"]["blocks_current_consumers"] is True
+    assert by_id[("current-one", "ACCOUNT")]["state"] == "FRESH"
+    assert by_id[("late-one", "PROVIDER")]["state"] == "STALE"
+    assert by_id[("late-one", "PROVIDER")]["blocks_current_consumers"] is False
+
+
+def test_non_required_unavailable_facts_do_not_block_current_consumers(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "provider-ledger"
+    generation_id = _provider_ledger(root)
+
+    result = freshness.build_health(root, generation_id, date(2026, 8, 2))
+
+    unsupported = next(
+        row
+        for row in result["assessments"]
+        if row["subject_id"] == "matrixport"
+        and row["lane"] == "PROVIDER_CAPTURE"
+        and row["fact_type"] == "fx"
+    )
+    assert unsupported["state"] == "UNAVAILABLE"
+    assert unsupported["required_for_current"] is False
+    assert unsupported["blocks_current_consumers"] is False
+    assert unsupported["escalation_required"] is False
 
 
 def test_freshness_output_is_create_only_and_deterministic(tmp_path: Path) -> None:

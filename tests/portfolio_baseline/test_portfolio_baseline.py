@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import sys
 from typing import Any
 
@@ -692,6 +693,67 @@ def test_stage_is_deterministic_reconciled_and_coverage_aware(tmp_path: Path) ->
     assert not (output_root / "CURRENT.json").exists()
 
 
+def test_generation_identity_uses_logical_not_physical_root_bindings(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec(tmp_path)
+    first_catalog, first_manifest, first_bytes = baseline.build_catalog(spec_path)
+
+    relocated_source = tmp_path / "relocated-source"
+    relocated_provenance = tmp_path / "relocated-provenance"
+    shutil.copytree(Path(spec["roots"]["synthetic"]), relocated_source)
+    shutil.copytree(Path(spec["provenance"]["root"]), relocated_provenance)
+    relocated = json.loads(json.dumps(spec))
+    relocated["roots"]["synthetic"] = str(relocated_source)
+    relocated["provenance"]["root"] = str(relocated_provenance)
+    relocated_path = tmp_path / "relocated-spec.json"
+    relocated_path.write_text(json.dumps(relocated), encoding="utf-8")
+
+    second_catalog, second_manifest, second_bytes = baseline.build_catalog(
+        relocated_path
+    )
+    assert second_catalog == first_catalog
+    assert second_bytes == first_bytes
+    assert second_manifest.generation_id == first_manifest.generation_id
+    assert second_manifest.to_json_bytes() == first_manifest.to_json_bytes()
+
+
+def test_reserve_pool_intervals_are_not_strategy_attribution_gaps() -> None:
+    claims, exceptions = baseline._fact_coverage(
+        accounts=[{"account_id": "reserve-account", "role": "INVESTMENT"}],
+        assignments=[
+            {
+                "account_id": "reserve-account",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "mapping_status": "UNMAPPED",
+                "pool_id": "reserve-capital",
+                "strategy_id": None,
+                "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            }
+        ],
+        transactions=[],
+        flows=[],
+        positions=[],
+        schwab_known_gaps=[],
+        missing_strategy_nav_count=0,
+        as_of_date=date(2026, 8, 3),
+    )
+
+    current_claim = next(
+        row for row in claims if row["fact_type"] == "current_strategy_attribution"
+    )
+    current_exception = next(
+        row
+        for row in exceptions
+        if row["exception_id"] == "current-strategy-attribution-partial"
+    )
+    assert current_claim["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert current_claim["known_gaps"] == []
+    assert current_exception["record_count"] == 0
+    assert current_exception["status"] == "PASS"
+
+
 def test_publish_requires_exact_current_candidate(tmp_path: Path) -> None:
     spec_path, _ = _spec(tmp_path)
     output_root = tmp_path / "private-output"
@@ -751,7 +813,7 @@ def test_strategy_for_date_is_effective_dated_and_fails_on_overlap() -> None:
         {
             "account_id": "account-a",
             "effective_end": "2026-01-31",
-            "effective_start": None,
+            "effective_start": "2026-01-01",
             "mapping_status": "MAPPED",
             "strategy_id": "strategy-old",
         },
@@ -791,6 +853,24 @@ def test_strategy_for_date_is_effective_dated_and_fails_on_overlap() -> None:
         match="multiple mapped strategies overlap",
     ):
         baseline._strategy_for_date(overlapping, "account-a", date(2026, 2, 1))
+
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="explicit effective_start",
+    ):
+        baseline._strategy_for_date(
+            [
+                {
+                    "account_id": "account-a",
+                    "effective_end": None,
+                    "effective_start": None,
+                    "mapping_status": "MAPPED",
+                    "strategy_id": "strategy-unknown-start",
+                }
+            ],
+            "account-a",
+            date(2026, 2, 1),
+        )
 
 
 def test_source_drift_nav_divergence_and_replay_difference_fail_closed(

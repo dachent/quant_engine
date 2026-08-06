@@ -9,6 +9,7 @@ from quant_engine.core.authority import (
     FactSlice,
     FinalizationState,
     FreshnessAlert,
+    FreshnessCalendar,
     FreshnessAssessment,
     FreshnessMode,
     FreshnessPolicy,
@@ -32,6 +33,7 @@ from quant_engine.core.contracts import (
     VerificationStatus,
     hash_file,
 )
+from quant_engine.core.filesystem import rename_directory_with_retry
 from quant_engine.core.publication import (
     CurrentPointer,
     GenerationConflictError,
@@ -65,6 +67,7 @@ from quant_engine.core.pipeline import (
     pipeline_status,
     plan_pipeline,
     recover_pipeline,
+    runtime_environment_sha256,
 )
 from quant_engine.core.release import (
     CompanionInput,
@@ -110,6 +113,7 @@ __all__ = [
     "FactSlice",
     "FinalizationState",
     "FreshnessAlert",
+    "FreshnessCalendar",
     "FreshnessAssessment",
     "FreshnessMode",
     "FreshnessPolicy",
@@ -165,10 +169,12 @@ __all__ = [
     "pipeline_status",
     "plan_pipeline",
     "recover_pipeline",
+    "runtime_environment_sha256",
     "read_current",
     "read_current_release",
     "read_generation",
     "read_release",
+    "rename_directory_with_retry",
     "recover_release",
     "rehearse_dated_rollforwards",
     "rehearse_release_boundaries",

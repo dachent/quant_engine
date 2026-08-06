@@ -29,6 +29,7 @@ from quant_engine.core import (
     VerificationStatus,
     hash_file,
     publish_generation,
+    rename_directory_with_retry,
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
@@ -1573,7 +1574,7 @@ def stage_candidate(
         try:
             _write_new(temporary / "correlation.json", result_bytes)
             _write_new(temporary / "generation.json", manifest.to_json_bytes())
-            temporary.rename(candidate)
+            rename_directory_with_retry(temporary, candidate)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
@@ -1603,7 +1604,7 @@ def _publish_candidate(
         try:
             _write_new(temporary / "correlation.json", result_bytes)
             _write_new(temporary / "generation.json", manifest.to_json_bytes())
-            temporary.rename(destination)
+            rename_directory_with_retry(temporary, destination)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)

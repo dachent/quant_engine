@@ -7,12 +7,15 @@ from collections import defaultdict
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
+import time as time_module
 from typing import Any, Final, Mapping, Sequence
 from xml.etree import ElementTree as ET
 import zipfile
@@ -33,14 +36,22 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.portfolio_ledger import decimal_text
+from quant_engine.portfolio_ledger import (
+    HwmCoverageError,
+    decimal_text,
+    governed_hwm_coverage,
+)
 
 
 REPORT_SCHEMA_VERSION: Final = 1
+_CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
 BUILDER_VERSION: Final = "1.2.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
+HWM_POLICY: Final = (
+    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v2.json"
+)
 SHEET_NAMES: Final = (
     "Portfolio Summary",
     "Account Summary",
@@ -70,6 +81,28 @@ TABLE_NAMES: Final = (
     "tblCorrections",
     "tblMethodology",
     "tblProvenance",
+)
+WORKBOOK_CANONICALIZATION_VERSION: Final = "1"
+XLSX_RESULT_CANONICALIZATION_VERSION: Final = "1"
+_CANONICAL_ZIP_TIMESTAMP: Final = (1980, 1, 1, 0, 0, 0)
+_CORE_CREATED = re.compile(
+    rb"(<(?:[A-Za-z_][\w.-]*:)?created\b[^>]*>)([^<]+)"
+    rb"(</(?:[A-Za-z_][\w.-]*:)?created>)"
+)
+_CORE_MODIFIED = re.compile(
+    rb"(<(?:[A-Za-z_][\w.-]*:)?modified\b[^>]*>)([^<]+)"
+    rb"(</(?:[A-Za-z_][\w.-]*:)?modified>)"
+)
+_CHART_UNIQUE_ID = re.compile(
+    rb'(<(?:[A-Za-z_][\w.-]*:)?uniqueId\b[^>]*\bval=")'
+    rb'\{[0-9A-Fa-f-]{36}\}(?=")'
+)
+_WORKBOOK_ABS_PATH = re.compile(
+    rb'(<(?:[A-Za-z_][\w.-]*:)?absPath\b[^>]*\burl=")[^"]*(?=")'
+)
+_WORKBOOK_REVISION_ID = re.compile(
+    rb'(<(?:[A-Za-z_][\w.-]*:)?revisionPtr\b[^>]*\bdocumentId=")'
+    rb'8_\{[0-9A-Fa-f-]{36}\}(?=")'
 )
 
 
@@ -134,10 +167,16 @@ def _canonical_json_array_bytes(value: Sequence[Mapping[str, Any]]) -> bytes:
 
 
 def _baseline(root: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
-    try:
-        pointer = read_current(root)
-    except (OSError, ValueError, RuntimeError) as exc:
-        raise ReportValidationError("baseline pointer is not accepted") from exc
+    for attempt in range(len(_CURRENT_READ_RETRY_DELAYS) + 1):
+        try:
+            pointer = read_current(root)
+            break
+        except OSError as exc:
+            if attempt == len(_CURRENT_READ_RETRY_DELAYS):
+                raise ReportValidationError("baseline pointer is not accepted") from exc
+            time_module.sleep(_CURRENT_READ_RETRY_DELAYS[attempt])
+        except (ValueError, RuntimeError) as exc:
+            raise ReportValidationError("baseline pointer is not accepted") from exc
     catalog_path = (
         root / "generations" / pointer.generation_id / "portfolio-baseline.json"
     )
@@ -184,6 +223,32 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             ].add(_date(record.get("date"), "calendar.date"))
 
     rows: list[dict[str, Any]] = []
+    account_live_paths: dict[tuple[str, str], dict[str, Any]] = {}
+    canonical_live = _account_live_return_series(catalog)
+    for evidence in _objects(
+        catalog.get("strategy_provider_evidence", []),
+        "strategy_provider_evidence",
+    ):
+        if evidence.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(evidence.get("strategy_id"), "evidence.strategy_id")
+        canonical = canonical_live.get(strategy_id)
+        if canonical is None:
+            continue
+        account = _object(evidence.get("account"), "evidence.account")
+        for scope in _objects(account.get("account_scopes", []), "account_scopes"):
+            account_id = _text(scope.get("account_id"), "account_scope.account_id")
+            account_live_paths[(account_id, strategy_id)] = {
+                "return_path_authority": "CANONICAL_ACCOUNT_LIVE_STRATEGY_RETURNS",
+                "return_path_cumulative_return": canonical["cumulative_return"],
+                "return_path_evidence_layer": "ACCOUNT_LIVE",
+                "return_path_generation_id": evidence.get("generation_id"),
+                "return_path_observations": canonical["return_observations"],
+                "return_path_observed_end": canonical["observed_end"],
+                "return_path_observed_start": canonical["observed_start"],
+                "return_path_series_sha256": canonical["return_series_sha256"],
+                "return_path_status": "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH",
+            }
     assignments = _objects(catalog.get("assignments"), "assignments")
     for assignment in assignments:
         account_id = _text(assignment.get("account_id"), "assignment.account_id")
@@ -212,6 +277,11 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             "mwr_status": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
             "mwr_xirr": None,
             "nav_observations": 0,
+            "pool_id": assignment.get("pool_id"),
+            "pool_mapping_status": assignment.get("pool_mapping_status"),
+            "strategy_mapping_disposition": assignment.get(
+                "strategy_mapping_disposition"
+            ),
             "strategy_id": assignment.get("strategy_id"),
             "twr": None,
             "twr_status": "UNAVAILABLE",
@@ -221,6 +291,7 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             rows.append(base)
             continue
         strategy_id = _text(assignment.get("strategy_id"), "assignment.strategy_id")
+        base.update(account_live_paths.get((account_id, strategy_id), {}))
         nav = [
             item
             for item in nav_by_account.get(account_id, [])
@@ -306,7 +377,9 @@ def _latest_nav(catalog: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
     return latest
 
 
-def _portfolio_summary(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _portfolio_summary(
+    catalog: Mapping[str, Any], hwm_summary: Mapping[str, Any] | None = None
+) -> list[dict[str, Any]]:
     replay = _object(catalog.get("replay"), "replay")
     return [
         {
@@ -347,9 +420,15 @@ def _portfolio_summary(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
         },
         {
             "metric": "Full-systematic HWM",
-            "status": "UNAVAILABLE",
+            "status": (
+                hwm_summary.get("status") if hwm_summary is not None else "UNAVAILABLE"
+            ),
             "unit": "status",
-            "value": replay.get("full_systematic_hwm_status"),
+            "value": (
+                hwm_summary.get("status")
+                if hwm_summary is not None
+                else replay.get("full_systematic_hwm_status")
+            ),
         },
         {
             "metric": "Advisory readiness",
@@ -779,8 +858,22 @@ def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "symbol": None,
             }
         ]
-    accepted: list[dict[str, Any]] = []
+    latest_by_account: dict[str, str] = {}
     for item in rows:
+        account_id = _text(item.get("account_id"), "position.account_id")
+        as_of_date = _text(item.get("as_of_date"), "position.as_of_date")
+        if (
+            account_id not in latest_by_account
+            or as_of_date > latest_by_account[account_id]
+        ):
+            latest_by_account[account_id] = as_of_date
+    current_rows = [
+        item
+        for item in rows
+        if item.get("as_of_date") == latest_by_account[str(item.get("account_id"))]
+    ]
+    accepted: list[dict[str, Any]] = []
+    for item in current_rows:
         amount = _object(item.get("market_value"), "position.market_value")
         status = _text(amount.get("status"), "position.market_value.status")
         accepted.append(
@@ -795,6 +888,7 @@ def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 ),
                 "quantity": item.get("quantity"),
                 "security_id": item.get("security_id"),
+                "snapshot_status": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT",
                 "status": (
                     "AVAILABLE_UNMAPPED"
                     if item.get("mapping_status") == "UNMAPPED"
@@ -942,7 +1036,9 @@ def _corrections(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _provider_ledger_exceptions(
-    catalog: Mapping[str, Any], baseline_root: Path
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     references = [
         item
@@ -959,7 +1055,11 @@ def _provider_ledger_exceptions(
     reference = references[0]
     expected_sha256 = _text(reference.get("sha256"), "provider-ledger sha256")
     candidates: list[tuple[Path, str]] = []
-    generations_root = baseline_root.parent / "provider-ledger" / "generations"
+    generations_root = (
+        provider_ledger_root
+        if provider_ledger_root is not None
+        else baseline_root.parent / "provider-ledger"
+    ) / "generations"
     if generations_root.is_dir():
         for path in sorted(generations_root.glob("*/provider-ledger.json")):
             if path.is_symlink() or not path.is_file():
@@ -1010,6 +1110,7 @@ def _reconciliation_checks(
     catalog: Mapping[str, Any],
     baseline_root: Path,
     baseline_ref: Mapping[str, Any],
+    provider_ledger_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     rows = [
         {
@@ -1031,28 +1132,194 @@ def _reconciliation_checks(
             catalog.get("reconciliation_checks"), "reconciliation_checks"
         )
     ]
-    rows.extend(_provider_ledger_exceptions(catalog, baseline_root))
+    rows.extend(
+        _provider_ledger_exceptions(catalog, baseline_root, provider_ledger_root)
+    )
     check_ids = [str(item["check_id"]) for item in rows]
     if len(check_ids) != len(set(check_ids)):
         raise ReportValidationError("report reconciliation check identifiers repeat")
     return rows
 
 
+def _freshness_assessments(
+    path: Path, portfolio_as_of: date
+) -> tuple[list[dict[str, Any]], date, str]:
+    payload = _load_json(path, "freshness health")
+    schema_version = payload.get("assessment_schema_version")
+    expected = (
+        {"assessment_schema_version", "as_of_date", "assessments", "policy"}
+        if schema_version == 2
+        else {"assessment_schema_version", "as_of_date", "assessments", "policies"}
+    )
+    if schema_version not in {2, 3} or set(payload) != expected:
+        raise ReportValidationError("freshness health contract differs")
+    as_of = _date(payload.get("as_of_date"), "freshness health as_of_date")
+    if as_of < portfolio_as_of:
+        raise ReportValidationError("freshness health predates the portfolio")
+    assessments = _objects(payload.get("assessments"), "freshness assessments")
+    if not assessments:
+        raise ReportValidationError("freshness assessments are empty")
+    evaluated = {
+        _date(item.get("evaluated_on"), "freshness evaluated_on")
+        for item in assessments
+    }
+    if evaluated != {as_of}:
+        raise ReportValidationError("freshness evaluation date is inconsistent")
+    sha256, _size = hash_file(path)
+    return assessments, as_of, sha256
+
+
+def _hwm_policy(evaluation_date: date) -> tuple[dict[str, Any], str]:
+    policy = _load_json(HWM_POLICY, "HWM policy")
+    if policy.get("schema_version") != 2 or policy.get("policy_id") != "PORT-HWM-2":
+        raise ReportValidationError("HWM policy identity is unsupported")
+    perimeter = _object(policy.get("material_perimeter"), "material_perimeter")
+    exclusions = _objects(perimeter.get("exclusions"), "material_perimeter.exclusions")
+    excluded_ids: set[str] = set()
+    for item in exclusions:
+        strategy_id = _text(item.get("strategy_id"), "HWM exclusion strategy_id")
+        if strategy_id in excluded_ids:
+            raise ReportValidationError("HWM exclusion is duplicated")
+        if item.get("classification") != "EXCLUDED_DE_MINIMIS":
+            raise ReportValidationError("HWM exclusion classification differs")
+        effective_date = _date(item.get("effective_date"), "HWM exclusion date")
+        if effective_date <= evaluation_date:
+            excluded_ids.add(strategy_id)
+    accepted_evidence = policy.get("accepted_daily_nav_evidence")
+    accepted_provider_live = policy.get("accepted_provider_live_strategy_ids")
+    if not isinstance(accepted_evidence, list) or not all(
+        isinstance(item, str) and item for item in accepted_evidence
+    ):
+        raise ReportValidationError("HWM accepted evidence differs")
+    if not isinstance(accepted_provider_live, list) or not all(
+        isinstance(item, str) and item for item in accepted_provider_live
+    ):
+        raise ReportValidationError("HWM provider-live allowlist differs")
+    policy["excluded_strategy_ids"] = sorted(excluded_ids)
+    policy["evaluation_date"] = evaluation_date.isoformat()
+    sha256, _size = hash_file(HWM_POLICY)
+    return policy, sha256
+
+
+def _reconcile_hwm_coverage(
+    coverage: Sequence[Mapping[str, Any]], hwm_summary: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    normalized = [dict(row) for row in coverage]
+    missing = [str(name) for name in hwm_summary["uncovered_strategies"]]
+    details = [
+        dict(item)
+        for item in hwm_summary.get("uncovered_details", [])
+        if isinstance(item, Mapping)
+    ]
+    detail_by_name = {
+        str(item.get("strategy_name")): str(
+            item.get("qualification_gap", "UNQUALIFIED")
+        )
+        for item in details
+    }
+    gap_details = ", ".join(
+        f"{name} ({detail_by_name.get(name, 'UNQUALIFIED')})" for name in missing
+    )
+    excluded_count = len(hwm_summary["excluded_strategies"])
+    exclusion_text = (
+        f"{excluded_count} strateg{'y is' if excluded_count == 1 else 'ies are'} "
+        "explicitly excluded de minimis by policy"
+    )
+    for row in normalized:
+        if row.get("category") == "FACT_COVERAGE" and row.get("item") == "nav":
+            row["known_gap"] = (
+                (
+                    f"{len(missing)} included HWM-perimeter strateg"
+                    f"{'y is' if len(missing) == 1 else 'ies are'} not HWM-qualified"
+                    + (f": {gap_details}" if gap_details else "")
+                )
+                if missing
+                else "Every included HWM-perimeter strategy is qualified"
+            )
+            row["known_gap"] += f"; {exclusion_text}"
+            row["status"] = (
+                "PARTIAL" if missing else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+            )
+    hwm_rows = [
+        row
+        for row in normalized
+        if row.get("category") == "RECONCILIATION_EXCEPTION"
+        and row.get("item") == "full-systematic-hwm-unavailable"
+    ]
+    if not missing:
+        return [row for row in normalized if row not in hwm_rows]
+    gap = (
+        "BLOCKING_FOR_AUTOMATED_HWM: included HWM-perimeter strategies are not "
+        "qualified: " + gap_details
+    )
+    if hwm_rows:
+        for row in hwm_rows:
+            row["known_gap"] = gap
+            row["status"] = "UNAVAILABLE"
+    else:
+        normalized.append(
+            {
+                "category": "RECONCILIATION_EXCEPTION",
+                "item": "full-systematic-hwm-unavailable",
+                "known_gap": gap,
+                "status": "UNAVAILABLE",
+                "value": None,
+            }
+        )
+    return normalized
+
+
 def build_report_data(
     baseline_root: Path,
+    freshness_health_path: Path | None = None,
+    provider_ledger_root: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
     catalog, baseline_ref, baseline_catalog_path = _baseline(baseline_root)
     performance = _account_strategy_performance(catalog)
     strategy_provider_evidence = _strategy_provider_evidence(catalog)
+    strategy_summary = _strategies(catalog, performance)
+    coverage = _coverage(catalog)
+    hwm_summary: dict[str, Any] | None = None
+    hwm_provenance: list[dict[str, Any]] = []
+    if freshness_health_path is not None:
+        portfolio_as_of = _date(catalog.get("as_of_date"), "portfolio as_of_date")
+        freshness, evaluation_date, freshness_sha256 = _freshness_assessments(
+            freshness_health_path, portfolio_as_of
+        )
+        hwm_policy, hwm_policy_sha256 = _hwm_policy(evaluation_date)
+        try:
+            strategy_summary, hwm_summary = governed_hwm_coverage(
+                strategy_summary,
+                hwm_policy,
+                freshness,
+                require_freshness=True,
+            )
+        except HwmCoverageError as exc:
+            raise ReportValidationError(str(exc)) from exc
+        coverage = _reconcile_hwm_coverage(coverage, hwm_summary)
+        hwm_provenance = [
+            {
+                "artifact": "portfolio-hwm-policy",
+                "as_of_date": evaluation_date.isoformat(),
+                "schema": "portfolio-hwm-policy/2",
+                "sha256": hwm_policy_sha256,
+            },
+            {
+                "artifact": "freshness-health",
+                "as_of_date": evaluation_date.isoformat(),
+                "schema": "freshness-assessment",
+                "sha256": freshness_sha256,
+            },
+        ]
     report: dict[str, Any] = {
         "account_summary": _accounts(catalog),
         "allocation_history": _allocations(catalog),
         "as_of_date": catalog.get("as_of_date"),
         "baseline": baseline_ref,
         "corrections": _corrections(catalog),
-        "coverage_data_quality": _coverage(catalog),
+        "coverage_data_quality": coverage,
         "flow_reconciliation": _flow_reconciliation(catalog),
         "methodology": [
             {"item": "Policy", "value": POLICY_VERSION},
@@ -1085,7 +1352,7 @@ def build_report_data(
                 "value": "Workbook formulas are display/reconciliation checks. Canonical JSON and tested code are calculation authority.",
             },
         ],
-        "portfolio_summary": _portfolio_summary(catalog),
+        "portfolio_summary": _portfolio_summary(catalog, hwm_summary),
         "positions": _positions(catalog),
         "provider_admissions": catalog.get("provider_admissions", []),
         "provider_coverage": catalog.get("provider_coverage", []),
@@ -1114,17 +1381,20 @@ def build_report_data(
                     catalog.get("source_artifacts"), "source_artifacts"
                 )
             ],
+            *hwm_provenance,
         ],
         "reconciliation_checks": _reconciliation_checks(
-            catalog, baseline_root, baseline_ref
+            catalog, baseline_root, baseline_ref, provider_ledger_root
         ),
         "report_schema_version": REPORT_SCHEMA_VERSION,
-        "strategy_summary": _strategies(catalog, performance),
+        "strategy_summary": strategy_summary,
         "strategy_provider_evidence": strategy_provider_evidence,
         "strategy_returns": catalog.get("strategy_returns", []),
         "transactions_and_flows": _transactions_and_flows(catalog),
         "twr_mwr": performance,
     }
+    if hwm_summary is not None:
+        report["hwm_summary"] = hwm_summary
     return report, canonical_json_bytes(report), baseline_catalog_path
 
 
@@ -1492,8 +1762,15 @@ def _build_workbook_exact(report: Mapping[str, Any], path: Path) -> dict[str, An
         temporary.unlink(missing_ok=True)
 
 
-def build_candidate(baseline_root: Path, output_root: Path) -> dict[str, Any]:
-    report, report_bytes, _ = build_report_data(baseline_root)
+def build_candidate(
+    baseline_root: Path,
+    output_root: Path,
+    freshness_health_path: Path | None = None,
+    provider_ledger_root: Path | None = None,
+) -> dict[str, Any]:
+    report, report_bytes, _ = build_report_data(
+        baseline_root, freshness_health_path, provider_ledger_root
+    )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
     data_path = candidate / REPORT_DATA_NAME
@@ -1617,10 +1894,252 @@ def verify_workbook(path: Path) -> dict[str, Any]:
     }
 
 
-def verify_candidate(
-    baseline_root: Path, candidate_dir: Path, excel_workbook: Path
+def _canonical_guid(scope: str, index: int, *, zero_prefix: bool = False) -> bytes:
+    digest = hashlib.sha256(f"{scope}:{index}".encode("utf-8")).hexdigest().upper()
+    if zero_prefix:
+        value = f"00000000-{digest[:4]}-{digest[4:8]}-{digest[8:12]}-{digest[12:24]}"
+    else:
+        value = (
+            f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-"
+            f"{digest[16:20]}-{digest[20:32]}"
+        )
+    return value.encode("ascii")
+
+
+def _canonicalize_ooxml_part(
+    name: str, content: bytes, counts: dict[str, int]
+) -> bytes:
+    if name == "docProps/core.xml":
+        created = _CORE_CREATED.search(content)
+        if created is None:
+            raise ReportValidationError("workbook core created timestamp is missing")
+
+        def modified(match: re.Match[bytes]) -> bytes:
+            counts["modified_timestamp"] += 1
+            return match.group(1) + created.group(2) + match.group(3)
+
+        return _CORE_MODIFIED.sub(modified, content)
+    if name == "xl/workbook.xml":
+
+        def abs_path(match: re.Match[bytes]) -> bytes:
+            counts["absolute_path"] += 1
+            return match.group(1) + b"."
+
+        def revision_id(match: re.Match[bytes]) -> bytes:
+            counts["revision_document_id"] += 1
+            return (
+                match.group(1)
+                + b"8_{"
+                + _canonical_guid(name, counts["revision_document_id"])
+                + b"}"
+            )
+
+        content = _WORKBOOK_ABS_PATH.sub(abs_path, content)
+        return _WORKBOOK_REVISION_ID.sub(revision_id, content)
+    if name.startswith("xl/charts/chart") and name.endswith(".xml"):
+
+        def unique_id(match: re.Match[bytes]) -> bytes:
+            counts["chart_unique_id"] += 1
+            return (
+                match.group(1)
+                + b"{"
+                + _canonical_guid(name, counts["chart_unique_id"], zero_prefix=True)
+                + b"}"
+            )
+
+        return _CHART_UNIQUE_ID.sub(unique_id, content)
+    return content
+
+
+def _volatile_field_counts(name: str, content: bytes) -> dict[str, int]:
+    counts = {
+        "absolute_path": 0,
+        "chart_unique_id": 0,
+        "modified_timestamp": 0,
+        "revision_document_id": 0,
+    }
+    if not (
+        name == "docProps/core.xml"
+        or name == "xl/workbook.xml"
+        or (name.startswith("xl/charts/chart") and name.endswith(".xml"))
+    ):
+        return counts
+    root = ET.fromstring(content)
+    for item in root.iter():
+        local_name = _local_name(item.tag)
+        if name == "docProps/core.xml" and local_name == "modified":
+            counts["modified_timestamp"] += 1
+        elif name == "xl/workbook.xml" and local_name == "absPath":
+            counts["absolute_path"] += 1
+        elif name == "xl/workbook.xml" and local_name == "revisionPtr":
+            counts["revision_document_id"] += 1
+        elif name.startswith("xl/charts/chart") and local_name == "uniqueId":
+            counts["chart_unique_id"] += 1
+    return counts
+
+
+def canonicalize_workbook(
+    path: Path, evidence_path: Path | None = None
 ) -> dict[str, Any]:
-    report, report_bytes, _ = build_report_data(baseline_root)
+    """Normalize only native-Excel package fields proven volatile across runs."""
+    if path.is_symlink() or not path.is_file():
+        raise ReportValidationError("Excel workbook is missing or linked")
+    counts = {
+        "absolute_path": 0,
+        "chart_unique_id": 0,
+        "modified_timestamp": 0,
+        "revision_document_id": 0,
+    }
+    discovered = {key: 0 for key in counts}
+    try:
+        with zipfile.ZipFile(path) as source:
+            entries = source.infolist()
+            names = [item.filename for item in entries]
+            if len(names) != len(set(names)):
+                raise ReportValidationError("workbook contains duplicate ZIP entries")
+            output = io.BytesIO()
+            with zipfile.ZipFile(
+                output,
+                mode="w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+                allowZip64=True,
+            ) as destination:
+                for item in entries:
+                    source_content = source.read(item.filename)
+                    for key, value in _volatile_field_counts(
+                        item.filename, source_content
+                    ).items():
+                        discovered[key] += value
+                    content = _canonicalize_ooxml_part(
+                        item.filename, source_content, counts
+                    )
+                    canonical = zipfile.ZipInfo(item.filename, _CANONICAL_ZIP_TIMESTAMP)
+                    canonical.compress_type = zipfile.ZIP_DEFLATED
+                    canonical.create_system = 0
+                    canonical.external_attr = 0
+                    destination.writestr(canonical, content, compresslevel=9)
+    except (zipfile.BadZipFile, ET.ParseError, KeyError, OSError) as exc:
+        raise ReportValidationError("workbook cannot be canonicalized") from exc
+    if discovered["modified_timestamp"] != 1:
+        raise ReportValidationError("workbook core modified timestamp count differs")
+    if counts != discovered:
+        raise ReportValidationError(
+            "workbook volatile-field canonicalization is incomplete: "
+            f"discovered={discovered!r}, normalized={counts!r}"
+        )
+    canonical_bytes = output.getvalue()
+    if path.read_bytes() != canonical_bytes:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".canonical-", suffix=".xlsx", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(canonical_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    result = {
+        "canonicalization_version": WORKBOOK_CANONICALIZATION_VERSION,
+        "normalized_fields": counts,
+        "workbook_sha256": hashlib.sha256(canonical_bytes).hexdigest(),
+        "zip_entry_count": len(entries),
+    }
+    if evidence_path is not None:
+        _write_exact(evidence_path, canonical_json_bytes(result))
+    return result
+
+
+def canonicalize_xlsx_result(
+    path: Path, evidence_path: Path | None = None
+) -> dict[str, Any]:
+    """Normalize random xlsx-win run telemetry while retaining every outcome."""
+    payload = _load_json(path, "xlsx-win result")
+    if payload.get("schema_version") != "2.0":
+        raise ReportValidationError("xlsx-win result schema differs")
+    idempotency_key = _text(
+        payload.get("idempotency_key"), "xlsx-win result idempotency_key"
+    )
+    run_id = _text(payload.get("run_id"), "xlsx-win result run_id")
+    if re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
+        raise ReportValidationError("xlsx-win result run_id is invalid")
+    steps = payload.get("steps")
+    if not isinstance(steps, list) or len(steps) != 3:
+        raise ReportValidationError("xlsx-win result steps differ")
+    expected = (
+        (0, "open", "Opened canonical staged workbook."),
+        (1, "recalc", "Calculation reached xlDone."),
+        (2, "save_as", "Saved canonical staged workbook."),
+    )
+    for step, (index, step_type, message) in zip(steps, expected, strict=True):
+        if not isinstance(step, dict):
+            raise ReportValidationError("xlsx-win result step is invalid")
+        if (
+            step.get("step_index") != index
+            or step.get("type") != step_type
+            or step.get("status") != "succeeded"
+        ):
+            raise ReportValidationError("xlsx-win result step outcome differs")
+        step["message"] = message
+    if payload.get("final_state") != "SUCCEEDED" or payload.get("ok") is not True:
+        raise ReportValidationError("xlsx-win result is not successful")
+    invariants = payload.get("invariants")
+    if not isinstance(invariants, list):
+        raise ReportValidationError("xlsx-win result invariants are invalid")
+    payload["run_id"] = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
+    content = canonical_json_bytes(payload)
+    if path.read_bytes() != content:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".canonical-xlsx-result-", suffix=".json", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    result = {
+        "canonicalization_version": XLSX_RESULT_CANONICALIZATION_VERSION,
+        "normalized_message_count": 2,
+        "normalized_run_id": True,
+        "xlsx_result_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    if evidence_path is not None:
+        _write_exact(evidence_path, canonical_json_bytes(result))
+    return result
+
+
+def _validate_canonicalization_evidence(candidate_dir: Path, workbook: Path) -> None:
+    evidence = _load_json(
+        candidate_dir / "workbook-canonicalization.json",
+        "workbook canonicalization evidence",
+    )
+    if evidence.get("canonicalization_version") != WORKBOOK_CANONICALIZATION_VERSION:
+        raise ReportValidationError("workbook canonicalization version differs")
+    sha256, _ = hash_file(workbook)
+    if evidence.get("workbook_sha256") != sha256:
+        raise ReportValidationError("workbook canonicalization hash differs")
+    fields = evidence.get("normalized_fields")
+    if not isinstance(fields, dict) or fields.get("modified_timestamp") != 1:
+        raise ReportValidationError("workbook canonicalization evidence is incomplete")
+
+
+def verify_candidate(
+    baseline_root: Path,
+    candidate_dir: Path,
+    excel_workbook: Path,
+    freshness_health_path: Path | None = None,
+    provider_ledger_root: Path | None = None,
+) -> dict[str, Any]:
+    report, report_bytes, _ = build_report_data(
+        baseline_root, freshness_health_path, provider_ledger_root
+    )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:
         raise ReportValidationError("candidate directory identity differs")
@@ -1675,20 +2194,31 @@ def publish_report(
     xlsx_result: Path,
     validation_result: Path,
     output_root: Path,
+    freshness_health_path: Path | None = None,
+    provider_ledger_root: Path | None = None,
 ) -> dict[str, Any]:
-    verification = verify_candidate(baseline_root, candidate_dir, excel_workbook)
+    _validate_canonicalization_evidence(candidate_dir, excel_workbook)
+    verification = verify_candidate(
+        baseline_root,
+        candidate_dir,
+        excel_workbook,
+        freshness_health_path,
+        provider_ledger_root,
+    )
     run = _load_json(xlsx_result, "xlsx-win run result")
     validation = _load_json(validation_result, "xlsx-win validation result")
     if run.get("ok") is not True:
         raise ReportValidationError("xlsx-win top-level result is not ok")
     if validation.get("all_passed") is not True:
         raise ReportValidationError("xlsx-win workbook invariants did not all pass")
-    report, report_bytes, baseline_catalog_path = build_report_data(baseline_root)
+    report, report_bytes, baseline_catalog_path = build_report_data(
+        baseline_root, freshness_health_path, provider_ledger_root
+    )
     as_of = _date(report.get("as_of_date"), "report.as_of_date")
     verification_bytes = canonical_json_bytes(verification)
     contract_path = candidate_dir / "workbook-contract.json"
     artifacts = []
-    artifact_specs = (
+    artifact_specs = [
         (
             baseline_catalog_path,
             "input/portfolio-baseline.json",
@@ -1715,12 +2245,41 @@ def publish_report(
             "1",
         ),
         (
+            candidate_dir / "workbook-canonicalization.json",
+            "evidence/workbook-canonicalization.json",
+            "portfolio-report-workbook-canonicalization",
+            WORKBOOK_CANONICALIZATION_VERSION,
+        ),
+        (
+            candidate_dir / "xlsx-result-canonicalization.json",
+            "evidence/xlsx-result-canonicalization.json",
+            "xlsx-win-result-canonicalization",
+            XLSX_RESULT_CANONICALIZATION_VERSION,
+        ),
+        (
             contract_path,
             "evidence/workbook-contract.json",
             "xlsx-win-validation-contract",
             "1",
         ),
-    )
+    ]
+    if freshness_health_path is not None:
+        artifact_specs.extend(
+            [
+                (
+                    freshness_health_path,
+                    "input/freshness-health.json",
+                    "freshness-assessment",
+                    "3",
+                ),
+                (
+                    HWM_POLICY,
+                    "input/portfolio-hwm-policy.json",
+                    "portfolio-hwm-policy",
+                    "2",
+                ),
+            ]
+        )
     for path, artifact_id, schema_name, schema_version in artifact_specs:
         artifacts.append(
             SourceArtifact.from_path(
@@ -1765,6 +2324,14 @@ def publish_report(
     _copy_exact(excel_workbook, generation_dir / WORKBOOK_NAME)
     _copy_exact(xlsx_result, generation_dir / "xlsx-win-result.json")
     _copy_exact(validation_result, generation_dir / "workbook-validation.json")
+    _copy_exact(
+        candidate_dir / "workbook-canonicalization.json",
+        generation_dir / "workbook-canonicalization.json",
+    )
+    _copy_exact(
+        candidate_dir / "xlsx-result-canonicalization.json",
+        generation_dir / "xlsx-result-canonicalization.json",
+    )
     _copy_exact(contract_path, generation_dir / "workbook-contract.json")
     _write_exact(generation_dir / "report-verification.json", verification_bytes)
     pointer = publish_generation(output_root, manifest.generation_id)
@@ -1784,11 +2351,21 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
     build.add_argument("--baseline-root", type=Path, required=True)
+    build.add_argument("--freshness-health", type=Path)
+    build.add_argument("--provider-ledger-root", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
     verify.add_argument("--candidate-dir", type=Path, required=True)
     verify.add_argument("--excel-workbook", type=Path, required=True)
+    verify.add_argument("--freshness-health", type=Path)
+    verify.add_argument("--provider-ledger-root", type=Path)
+    canonicalize = commands.add_parser("canonicalize")
+    canonicalize.add_argument("--workbook", type=Path, required=True)
+    canonicalize.add_argument("--evidence", type=Path, required=True)
+    canonicalize_result = commands.add_parser("canonicalize-xlsx-result")
+    canonicalize_result.add_argument("--result", type=Path, required=True)
+    canonicalize_result.add_argument("--evidence", type=Path, required=True)
     publish = commands.add_parser("publish")
     publish.add_argument("--baseline-root", type=Path, required=True)
     publish.add_argument("--candidate-dir", type=Path, required=True)
@@ -1796,6 +2373,8 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--xlsx-result", type=Path, required=True)
     publish.add_argument("--validation-result", type=Path, required=True)
     publish.add_argument("--output-root", type=Path, required=True)
+    publish.add_argument("--freshness-health", type=Path)
+    publish.add_argument("--provider-ledger-root", type=Path)
     return parser
 
 
@@ -1803,11 +2382,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "build":
-            result = build_candidate(args.baseline_root, args.output_root)
+            result = build_candidate(
+                args.baseline_root,
+                args.output_root,
+                args.freshness_health,
+                args.provider_ledger_root,
+            )
         elif args.command == "verify":
             result = verify_candidate(
-                args.baseline_root, args.candidate_dir, args.excel_workbook
+                args.baseline_root,
+                args.candidate_dir,
+                args.excel_workbook,
+                args.freshness_health,
+                args.provider_ledger_root,
             )
+        elif args.command == "canonicalize":
+            result = canonicalize_workbook(args.workbook, args.evidence)
+        elif args.command == "canonicalize-xlsx-result":
+            result = canonicalize_xlsx_result(args.result, args.evidence)
         else:
             result = publish_report(
                 args.baseline_root,
@@ -1816,6 +2408,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.xlsx_result,
                 args.validation_result,
                 args.output_root,
+                args.freshness_health,
+                args.provider_ledger_root,
             )
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         print(f"portfolio-report: FAIL: {exc}", file=sys.stderr)

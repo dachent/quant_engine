@@ -38,6 +38,171 @@ sys.modules[SPEC.name] = reporter
 SPEC.loader.exec_module(reporter)
 
 
+def _excel_saved_package(
+    path: Path,
+    *,
+    modified: str,
+    chart_guid: str,
+    temporary_root: str,
+    revision_guid: str,
+    semantic_value: str = "same",
+    zip_second: int = 0,
+) -> None:
+    parts = {
+        "docProps/core.xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="urn:core" '
+            'xmlns:dcterms="urn:terms" xmlns:xsi="urn:xsi">'
+            '<dcterms:created xsi:type="dcterms:W3CDTF">'
+            "2026-08-03T00:00:00Z</dcterms:created>"
+            '<dcterms:modified xsi:type="dcterms:W3CDTF">'
+            f"{modified}</dcterms:modified></cp:coreProperties>"
+        ).encode(),
+        "xl/charts/chart1.xml": (
+            '<c:chartSpace xmlns:c="urn:chart" xmlns:c16="urn:chart16">'
+            "<c:extLst><c:ext><c16:uniqueId "
+            f'val="{{{chart_guid}}}"/></c:ext></c:extLst></c:chartSpace>'
+        ).encode(),
+        "xl/workbook.xml": (
+            '<workbook xmlns:x15ac="urn:abs" xmlns:xr="urn:revision">'
+            f'<x15ac:absPath url="{temporary_root}"/>'
+            f'<xr:revisionPtr documentId="8_{{{revision_guid}}}"/>'
+            "</workbook>"
+        ).encode(),
+        "xl/worksheets/sheet1.xml": f"<sheet>{semantic_value}</sheet>".encode(),
+    }
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, content in parts.items():
+            info = zipfile.ZipInfo(name, (2026, 8, 3, 0, 0, zip_second))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, content)
+
+
+def test_native_excel_workbook_canonicalization_is_deterministic_and_bounded(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.xlsx"
+    second = tmp_path / "second.xlsx"
+    changed = tmp_path / "changed.xlsx"
+    _excel_saved_package(
+        first,
+        modified="2026-08-04T05:23:48Z",
+        chart_guid="00000000-CC01-4263-A5C9-803DDF0C079C",
+        temporary_root="C:\\Temp\\xlsx-win-stage-first\\",
+        revision_guid="878E45FB-7799-4293-81FE-29F635965A3D",
+    )
+    _excel_saved_package(
+        second,
+        modified="2026-08-04T05:58:22Z",
+        chart_guid="00000000-DD23-47F6-8C5E-35307AE221C8",
+        temporary_root="C:\\Temp\\xlsx-win-stage-second\\",
+        revision_guid="90E8A27E-6EEF-4295-BB7E-DD3062E36063",
+        zip_second=2,
+    )
+    _excel_saved_package(
+        changed,
+        modified="2026-08-04T05:58:22Z",
+        chart_guid="00000000-DD23-47F6-8C5E-35307AE221C8",
+        temporary_root="C:\\Temp\\xlsx-win-stage-second\\",
+        revision_guid="90E8A27E-6EEF-4295-BB7E-DD3062E36063",
+        semantic_value="different financial content",
+        zip_second=2,
+    )
+
+    first_result = reporter.canonicalize_workbook(
+        first, tmp_path / "first-evidence.json"
+    )
+    second_result = reporter.canonicalize_workbook(
+        second, tmp_path / "second-evidence.json"
+    )
+    changed_result = reporter.canonicalize_workbook(changed)
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first_result == second_result
+    assert changed_result["workbook_sha256"] != first_result["workbook_sha256"]
+    assert reporter.canonicalize_workbook(first) == first_result
+
+
+def test_canonicalization_fails_closed_on_unrecognized_volatile_field(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "unrecognized.xlsx"
+    _excel_saved_package(
+        workbook,
+        modified="2026-08-04T05:23:48Z",
+        chart_guid="not-a-guid-xxxxxxxxxxxxxxxxxxxxxxxxx",
+        temporary_root="C:\\Temp\\xlsx-win-stage-first\\",
+        revision_guid="878E45FB-7799-4293-81FE-29F635965A3D",
+    )
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="canonicalization is incomplete"
+    ):
+        reporter.canonicalize_workbook(workbook)
+
+
+def _xlsx_result(run_id: str, temporary_root: str) -> dict[str, Any]:
+    return {
+        "schema_version": "2.0",
+        "run_id": run_id,
+        "idempotency_key": "portfolio-report-synthetic",
+        "final_state": "SUCCEEDED",
+        "steps": [
+            {
+                "step_index": 0,
+                "type": "open",
+                "status": "succeeded",
+                "message": f"Opened '{temporary_root}\\portfolio-report.xlsx'.",
+            },
+            {
+                "step_index": 1,
+                "type": "recalc",
+                "status": "succeeded",
+                "message": "Calculation reached xlDone.",
+            },
+            {
+                "step_index": 2,
+                "type": "save_as",
+                "status": "succeeded",
+                "message": f"Saved to '{temporary_root}\\saved.xlsx'.",
+            },
+        ],
+        "invariants": [],
+        "ok": True,
+    }
+
+
+def test_xlsx_result_canonicalization_removes_only_random_telemetry(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first-result.json"
+    second = tmp_path / "second-result.json"
+    first.write_text(
+        json.dumps(_xlsx_result("a" * 32, r"C:\Temp\xlsx-first")), encoding="utf-8"
+    )
+    second.write_text(
+        json.dumps(_xlsx_result("b" * 32, r"C:\Temp\xlsx-second")),
+        encoding="utf-8",
+    )
+
+    first_result = reporter.canonicalize_xlsx_result(
+        first, tmp_path / "first-result-evidence.json"
+    )
+    second_result = reporter.canonicalize_xlsx_result(
+        second, tmp_path / "second-result-evidence.json"
+    )
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first_result == second_result
+    assert reporter.canonicalize_xlsx_result(first) == first_result
+    failed = tmp_path / "failed-result.json"
+    payload = _xlsx_result("c" * 32, r"C:\Temp\xlsx-failed")
+    payload["steps"][1]["status"] = "failed"
+    failed.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(reporter.ReportValidationError, match="outcome differs"):
+        reporter.canonicalize_xlsx_result(failed)
+
+
 def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> None:
     rows = reporter._coverage(
         {
@@ -67,6 +232,121 @@ def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> Non
             "value": "ACCOUNT_LIVE",
         }
     ]
+
+
+def test_positions_select_latest_authoritative_snapshot_per_account() -> None:
+    catalog = {
+        "positions": [
+            {
+                "account_id": "account-a",
+                "as_of_date": "2026-07-01",
+                "mapping_status": "MAPPED",
+                "market_value": _amount("100"),
+                "quantity": "1",
+                "security_id": "security-old",
+                "strategy_id": "strategy-1",
+            },
+            {
+                "account_id": "account-a",
+                "as_of_date": "2026-08-01",
+                "mapping_status": "MAPPED",
+                "market_value": _amount("110"),
+                "quantity": "1",
+                "security_id": "security-new",
+                "strategy_id": "strategy-1",
+            },
+            {
+                "account_id": "account-b",
+                "as_of_date": "2026-07-15",
+                "mapping_status": "MAPPED",
+                "market_value": _amount("25"),
+                "quantity": "2",
+                "security_id": "security-b",
+                "strategy_id": "strategy-2",
+            },
+        ]
+    }
+
+    rows = reporter._positions(catalog)
+
+    assert {(row["account_id"], row["as_of_date"]) for row in rows} == {
+        ("account-a", "2026-08-01"),
+        ("account-b", "2026-07-15"),
+    }
+    assert {row["security_id"] for row in rows} == {"security-new", "security-b"}
+    assert {row["snapshot_status"] for row in rows} == {
+        "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
+    }
+
+
+def test_performance_preserves_pool_disposition_and_account_live_return_path() -> None:
+    catalog = {
+        "assignments": [
+            {
+                "account_id": "account-live",
+                "assignment_id": "assignment-live",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "pool_id": "systematic-capital",
+                "pool_mapping_status": "MAPPED",
+                "strategy_id": "strategy-live",
+                "strategy_mapping_disposition": "STRATEGY_MAPPED",
+            },
+            {
+                "account_id": "account-reserve",
+                "assignment_id": "assignment-reserve",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "mapping_status": "UNMAPPED",
+                "pool_id": "reserve-capital",
+                "pool_mapping_status": "MAPPED",
+                "strategy_id": None,
+                "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            },
+        ],
+        "calendar_coverage": [],
+        "flows": [],
+        "nav_observations": [],
+        "strategy_provider_evidence": [
+            {
+                "account": {
+                    "account_scopes": [{"account_id": "account-live"}],
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": "a" * 64,
+                "strategy_id": "strategy-live",
+            }
+        ],
+        "strategy_returns": [
+            {
+                "date": "2026-01-01",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.01",
+                "strategy_id": "strategy-live",
+            },
+            {
+                "date": "2026-01-02",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.02",
+                "strategy_id": "strategy-live",
+            },
+        ],
+    }
+
+    rows = reporter._account_strategy_performance(catalog)
+    live = next(row for row in rows if row["assignment_id"] == "assignment-live")
+    reserve = next(row for row in rows if row["assignment_id"] == "assignment-reserve")
+
+    assert live["twr_status"] == "UNAVAILABLE_INSUFFICIENT_NAV"
+    assert live["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
+    assert live["return_path_observations"] == 2
+    assert live["return_path_cumulative_return"] == "0.0302"
+    assert reserve["pool_id"] == "reserve-capital"
+    assert reserve["pool_mapping_status"] == "MAPPED"
+    assert reserve["strategy_mapping_disposition"] == "RESERVE_NOT_APPLICABLE"
 
 
 def _amount(value: str) -> dict[str, str]:
@@ -405,6 +685,29 @@ def _published_baseline(tmp_path: Path, catalog: dict[str, Any] | None = None) -
     return root
 
 
+def test_baseline_retries_transient_pointer_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _published_baseline(tmp_path)
+    attempts = 0
+
+    def flaky_read_current(path: Path) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("transient provider lock")
+        return read_current(path)
+
+    monkeypatch.setattr(reporter, "read_current", flaky_read_current)
+    monkeypatch.setattr(reporter.time_module, "sleep", lambda _seconds: None)
+
+    catalog, identity, _path = reporter._baseline(root)
+
+    assert attempts == 3
+    assert identity["generation_id"] == read_current(root).generation_id
+    assert catalog["baseline_schema_version"] == 1
+
+
 def test_report_data_has_hand_checked_twr_and_coverage_failures(tmp_path: Path) -> None:
     baseline_root = _published_baseline(tmp_path)
     report, first_bytes, _ = reporter.build_report_data(baseline_root)
@@ -574,6 +877,9 @@ def test_candidate_drift_and_failed_excel_evidence_block_publication(
     validation = candidate / "validation.json"
     run_result.write_text(json.dumps({"ok": False}), encoding="utf-8")
     validation.write_text(json.dumps({"all_passed": True}), encoding="utf-8")
+    reporter.canonicalize_workbook(
+        workbook, candidate / "workbook-canonicalization.json"
+    )
     with pytest.raises(reporter.ReportValidationError, match="not ok"):
         reporter.publish_report(
             baseline_root,
@@ -593,8 +899,17 @@ def test_publish_creates_immutable_generation_and_pointer(tmp_path: Path) -> Non
     workbook = Path(built["workbook_path"])
     run_result = candidate / "xlsx-result.json"
     validation = candidate / "validation.json"
-    run_result.write_text(json.dumps({"ok": True}), encoding="utf-8")
+    run_result.write_text(
+        json.dumps(_xlsx_result("d" * 32, r"C:\Temp\xlsx-publish")),
+        encoding="utf-8",
+    )
     validation.write_text(json.dumps({"all_passed": True}), encoding="utf-8")
+    reporter.canonicalize_workbook(
+        workbook, candidate / "workbook-canonicalization.json"
+    )
+    reporter.canonicalize_xlsx_result(
+        run_result, candidate / "xlsx-result-canonicalization.json"
+    )
     published_root = tmp_path / "published"
 
     result = reporter.publish_report(
@@ -990,6 +1305,52 @@ def test_report_preserves_every_hash_bound_provider_reconciliation_exception(
         json.loads(rows[0]["details_json"])
         == provider_catalog["reconciliation_checks"][1]
     )
+
+
+def test_report_accepts_explicit_non_sibling_provider_ledger_root(
+    tmp_path: Path,
+) -> None:
+    provider_generation = "f" * 64
+    provider_catalog = {
+        "reconciliation_checks": [
+            {
+                "authority_effect": "ACCOUNT_PATH_RETAINED",
+                "check_id": "provider-explicit-root",
+                "status": "EXCEPTION",
+                "strategy_id": "strategy-1",
+            }
+        ]
+    }
+    provider_bytes = canonical_json_bytes(provider_catalog)
+    provider_sha256 = hashlib.sha256(provider_bytes).hexdigest()
+    provider_root = tmp_path / "stages" / "ledger"
+    provider_dir = provider_root / "generations" / provider_generation
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "provider-ledger.json").write_bytes(provider_bytes)
+    catalog = _baseline_catalog()
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": "2026-01-03",
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "1",
+            "sha256": provider_sha256,
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    baseline_root = _published_baseline(tmp_path / "baseline-scope", catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, provider_ledger_root=provider_root
+    )
+
+    rows = [
+        item
+        for item in report["reconciliation_checks"]
+        if item["source_layer"] == "PROVIDER_LEDGER"
+    ]
+    assert [item["check_id"] for item in rows] == ["provider-explicit-root"]
+    assert rows[0]["source_generation_id"] == provider_generation
 
 
 def test_report_fails_closed_when_provider_reconciliation_source_is_missing(

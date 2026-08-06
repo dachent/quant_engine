@@ -75,6 +75,13 @@ class FreshnessMode(StrEnum):
     FINITE = "FINITE"
 
 
+class FreshnessCalendar(StrEnum):
+    """Elapsed-time basis used by a recurring freshness policy."""
+
+    CALENDAR_DAY = "CALENDAR_DAY"
+    WEEKDAY_SESSION = "WEEKDAY_SESSION"
+
+
 class FreshnessState(StrEnum):
     """Consumer-visible freshness conclusion."""
 
@@ -402,6 +409,7 @@ class FreshnessPolicy:
     expected_interval_days: int | None = None
     grace_days: int = 0
     stale_after_days: int | None = None
+    calendar: FreshnessCalendar = FreshnessCalendar.CALENDAR_DAY
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "policy_id", _identifier(self.policy_id, "policy_id"))
@@ -440,15 +448,36 @@ class FreshnessPolicy:
             return FreshnessState.FINITE_COMPLETE
         assert self.expected_interval_days is not None
         assert self.stale_after_days is not None
-        due = observed_end + timedelta(
-            days=self.expected_interval_days + self.grace_days
-        )
-        stale = observed_end + timedelta(days=self.stale_after_days)
-        if as_of_date <= due:
+        elapsed = self.elapsed_intervals(observed_end, as_of_date)
+        if elapsed <= self.expected_interval_days + self.grace_days:
             return FreshnessState.FRESH
-        if as_of_date <= stale:
+        if elapsed <= self.stale_after_days:
             return FreshnessState.LATE
         return FreshnessState.STALE
+
+    def elapsed_intervals(self, observed_end: date, as_of_date: date) -> int:
+        """Count policy intervals after an observation through evaluation."""
+
+        if as_of_date <= observed_end:
+            return 0
+        if self.calendar is FreshnessCalendar.CALENDAR_DAY:
+            return (as_of_date - observed_end).days
+        return sum(
+            1
+            for offset in range(1, (as_of_date - observed_end).days + 1)
+            if (observed_end + timedelta(days=offset)).weekday() < 5
+        )
+
+    def _add_intervals(self, observed_end: date, intervals: int) -> date:
+        if self.calendar is FreshnessCalendar.CALENDAR_DAY:
+            return observed_end + timedelta(days=intervals)
+        current = observed_end
+        remaining = intervals
+        while remaining:
+            current += timedelta(days=1)
+            if current.weekday() < 5:
+                remaining -= 1
+        return current
 
     def assess(
         self,
@@ -457,10 +486,21 @@ class FreshnessPolicy:
         evidence: GenerationEvidence | None = None,
     ) -> FreshnessAssessment:
         state = self.evaluate(observed_end, as_of_date)
+        calendar_suffix = (
+            ""
+            if self.calendar is FreshnessCalendar.CALENDAR_DAY
+            else f" under {self.calendar.value}"
+        )
         reasons = {
-            FreshnessState.FRESH: "accepted observation is within cadence and grace",
-            FreshnessState.LATE: "expected refresh is late but not yet stale",
-            FreshnessState.STALE: "accepted observation exceeded the stale boundary",
+            FreshnessState.FRESH: (
+                f"accepted observation is within cadence and grace{calendar_suffix}"
+            ),
+            FreshnessState.LATE: (
+                f"expected refresh is late but not yet stale{calendar_suffix}"
+            ),
+            FreshnessState.STALE: (
+                f"accepted observation exceeded the stale boundary{calendar_suffix}"
+            ),
             FreshnessState.FINITE_COMPLETE: (
                 "finite historical boundary is complete and has no recurring due date"
             ),
@@ -490,10 +530,11 @@ class FreshnessPolicy:
         if observed_end is None or self.mode is FreshnessMode.FINITE:
             return None
         assert self.expected_interval_days is not None
-        return observed_end + timedelta(days=self.expected_interval_days)
+        return self._add_intervals(observed_end, self.expected_interval_days)
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "calendar": self.calendar.value,
             "expected_interval_days": self.expected_interval_days,
             "grace_days": self.grace_days,
             "mode": self.mode.value,
@@ -503,17 +544,16 @@ class FreshnessPolicy:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> Self:
-        _strict_keys(
-            value,
-            {
-                "expected_interval_days",
-                "grace_days",
-                "mode",
-                "policy_id",
-                "stale_after_days",
-            },
-            "freshness_policy",
-        )
+        required = {
+            "expected_interval_days",
+            "grace_days",
+            "mode",
+            "policy_id",
+            "stale_after_days",
+        }
+        actual = set(value)
+        if actual != required and actual != required | {"calendar"}:
+            raise ManifestValidationError("freshness_policy keys differ")
         policy_id = value["policy_id"]
         if not isinstance(policy_id, str):
             raise ManifestValidationError("freshness policy ID must be a string")
@@ -529,6 +569,11 @@ class FreshnessPolicy:
             expected_interval_days=value["expected_interval_days"],
             grace_days=value["grace_days"],
             stale_after_days=value["stale_after_days"],
+            calendar=_enum(
+                FreshnessCalendar,
+                value.get("calendar", FreshnessCalendar.CALENDAR_DAY.value),
+                "calendar",
+            ),
         )
 
 

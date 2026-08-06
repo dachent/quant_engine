@@ -163,13 +163,24 @@ def _utc_day(value: str) -> date:
     return parsed.date()
 
 
-def _base_rows(path: Path, series_id: str) -> list[dict[str, str]]:
+def _base_rows(
+    path: Path, series_id: str, *, replace_existing: bool = False
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     rows = _csv_rows(path, frozenset(TARGET_FIELDS), "base targets")
     if tuple(rows[0].keys()) != TARGET_FIELDS if rows else False:
         raise TargetSeriesError("base target header differs")
-    if any(row["series_id"] == series_id for row in rows):
+    existing = [row for row in rows if row["series_id"] == series_id]
+    if existing and not replace_existing:
         raise TargetSeriesError("base targets already contain the requested series")
-    return [{field: row[field] for field in TARGET_FIELDS} for row in rows]
+    if replace_existing and not existing:
+        raise TargetSeriesError(
+            "base targets lack the series requested for replacement"
+        )
+    retained = [row for row in rows if row["series_id"] != series_id]
+    return (
+        [{field: row[field] for field in TARGET_FIELDS} for row in retained],
+        [{field: row[field] for field in TARGET_FIELDS} for row in existing],
+    )
 
 
 def _matrixport_returns(
@@ -437,7 +448,7 @@ def build_quantbase_targets(
     activity_artifact = _verify_artifact(
         activity_path, artifacts, "source/csv/account_activity.csv"
     )
-    base = _base_rows(base_targets, series_id)
+    base, _existing = _base_rows(base_targets, series_id)
     provider_rows, evidence = _quantbase_returns(
         history_path, activity_path, fund_id, series_id
     )
@@ -482,6 +493,8 @@ def build_matrixport_targets(
     holdings_path: Path,
     product_id: str,
     series_id: str,
+    *,
+    replace_existing: bool = False,
 ) -> tuple[bytes, bytes]:
     manifest = _load_json(manifest_path, "Matrixport generation manifest")
     if manifest.get("verification") != "VERIFIED":
@@ -493,7 +506,9 @@ def build_matrixport_targets(
     nav_artifact = _verify_artifact(nav_path, artifacts, "csv/nav_daily.csv")
     holding_artifact = _verify_artifact(holdings_path, artifacts, "csv/holdings.csv")
 
-    base = _base_rows(base_targets, series_id)
+    base, existing = _base_rows(
+        base_targets, series_id, replace_existing=replace_existing
+    )
     provider_rows, coverage = _matrixport_returns(
         nav_path, holdings_path, product_id, series_id
     )
@@ -505,6 +520,7 @@ def build_matrixport_targets(
     proof: dict[str, object] = {
         "builder": "portfolio-target-series/matrixport-1",
         "generation_id": generation_id,
+        "generation_as_of_date": str(manifest.get("as_of_date", "")),
         "series_id": series_id,
         "evidence_layer": "ACCOUNT_LIVE",
         "return_basis": "NET",
@@ -522,10 +538,73 @@ def build_matrixport_targets(
                 "size_bytes": holding_artifact.size_bytes,
             },
         },
+        "replacement": {
+            "enabled": replace_existing,
+            "prior_observed_end": existing[-1]["date"] if existing else None,
+            "prior_observed_start": existing[0]["date"] if existing else None,
+            "removed_observations": len(existing),
+        },
         "target_sha256": hashlib.sha256(target_content).hexdigest(),
         "target_size_bytes": len(target_content),
     }
     return target_content, canonical_json_bytes(proof)
+
+
+def build_matrixport_strategy_evidence(
+    base_evidence_path: Path,
+    matrixport_proof_content: bytes,
+    strategy_id: str,
+) -> bytes:
+    """Replace one strategy-evidence row with generation-bound Matrixport proof."""
+
+    evidence = _load_json(base_evidence_path, "base strategy evidence")
+    if evidence.get("schema_version") != 1:
+        raise TargetSeriesError("base strategy evidence schema differs")
+    strategies = evidence.get("strategies")
+    if not isinstance(strategies, list):
+        raise TargetSeriesError("base strategy evidence strategies are invalid")
+    try:
+        proof = json.loads(matrixport_proof_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError("Matrixport source proof is invalid") from exc
+    if not isinstance(proof, dict) or proof.get("builder") != (
+        "portfolio-target-series/matrixport-1"
+    ):
+        raise TargetSeriesError("Matrixport source proof contract differs")
+    generation_as_of = str(proof.get("generation_as_of_date", ""))
+    try:
+        date.fromisoformat(generation_as_of)
+    except ValueError as exc:
+        raise TargetSeriesError("Matrixport generation as-of date is invalid") from exc
+    coverage = proof.get("coverage")
+    sources = proof.get("sources")
+    if not isinstance(coverage, dict) or not isinstance(sources, dict):
+        raise TargetSeriesError("Matrixport source proof is incomplete")
+    replacement = {
+        "account": coverage,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_as_of_date": generation_as_of,
+        "generation_id": str(proof.get("generation_id", "")),
+        "provider_id": "matrixport",
+        "sources": sources,
+        "strategy_id": strategy_id,
+        "strategy_name": str(proof.get("series_id", "")),
+    }
+    if len(replacement["generation_id"]) != 64 or not replacement["strategy_name"]:
+        raise TargetSeriesError("Matrixport strategy identity is invalid")
+    retained = [
+        item
+        for item in strategies
+        if isinstance(item, dict) and item.get("strategy_id") != strategy_id
+    ]
+    result = {
+        "as_of_date": max(str(evidence.get("as_of_date", "")), generation_as_of),
+        "schema_version": 1,
+        "strategies": sorted(
+            [*retained, replacement], key=lambda item: str(item.get("strategy_id", ""))
+        ),
+    }
+    return canonical_json_bytes(result)
 
 
 def _parquet_rows(
@@ -1604,6 +1683,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--holdings", type=Path)
     parser.add_argument("--product-id")
     parser.add_argument("--series-id")
+    parser.add_argument("--replace-series", action="store_true")
+    parser.add_argument("--base-strategy-evidence", type=Path)
+    parser.add_argument("--strategy-id")
     parser.add_argument("--base-decomposition-spec", type=Path)
     parser.add_argument("--factors", type=Path)
     parser.add_argument("--base-correlation-spec", type=Path)
@@ -1915,9 +1997,21 @@ def main() -> int:
                 args.holdings,
                 args.product_id,
                 args.series_id,
+                replace_existing=args.replace_series,
             )
             _write_exact(args.output_root / "targets.csv", targets)
             _write_exact(args.output_root / "source-proof.json", proof)
+            if (args.base_strategy_evidence is None) != (args.strategy_id is None):
+                raise TargetSeriesError(
+                    "base strategy evidence and strategy ID must be supplied together"
+                )
+            if args.base_strategy_evidence is not None and args.strategy_id is not None:
+                _write_exact(
+                    args.output_root / "strategy-evidence.json",
+                    build_matrixport_strategy_evidence(
+                        args.base_strategy_evidence, proof, args.strategy_id
+                    ),
+                )
             if (args.base_decomposition_spec is None) != (args.factors is None):
                 raise TargetSeriesError(
                     "base decomposition spec and factors must be supplied together"

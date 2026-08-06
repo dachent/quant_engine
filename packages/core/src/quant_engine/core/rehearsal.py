@@ -38,7 +38,17 @@ from quant_engine.core.release import (
 )
 
 
-_SCHEMA_VERSION: Final = 2
+_SCHEMA_VERSION: Final = 3
+_HARNESS_IDENTITY_KEYS: Final = frozenset(
+    {
+        "code_commit",
+        "core_module_sha256",
+        "entrypoint_sha256",
+        "python_executable_sha256",
+        "python_version",
+        "runtime_platform",
+    }
+)
 
 
 class RehearsalError(RuntimeError):
@@ -533,14 +543,28 @@ def rehearse_release_boundaries(
             second_target,
         ),
     )
-    if read_current(roots[second_target]) != next(
-        item.previous_pointer
-        for item in prepared.targets
-        if item.root_id == second_target
-    ) or read_current(roots[first_target]).generation_id != next(
-        item.proposed_generation_id
-        for item in prepared.targets
-        if item.root_id == first_target
+    second_pointer_path = roots[second_target] / "CURRENT.json"
+    second_actual = (
+        read_current(roots[second_target]) if second_pointer_path.exists() else None
+    )
+    first_pointer_path = roots[first_target] / "CURRENT.json"
+    first_actual = (
+        read_current(roots[first_target]) if first_pointer_path.exists() else None
+    )
+    if (
+        second_actual
+        != next(
+            item.previous_pointer
+            for item in prepared.targets
+            if item.root_id == second_target
+        )
+        or first_actual is None
+        or first_actual.generation_id
+        != next(
+            item.proposed_generation_id
+            for item in prepared.targets
+            if item.root_id == first_target
+        )
     ):
         raise RehearsalError(
             "target rollback interruption left the wrong partial graph"
@@ -1083,8 +1107,45 @@ def rehearse_dated_rollforwards(output_root: Path) -> dict[str, object]:
 
 
 def run_recovery_rehearsal(
-    *, spec: PipelineSpec, release_id: str, output_root: Path
+    *,
+    spec: PipelineSpec,
+    release_id: str,
+    output_root: Path,
+    harness_identity: Mapping[str, str],
 ) -> dict[str, object]:
+    if set(harness_identity) != _HARNESS_IDENTITY_KEYS:
+        raise RehearsalError("recovery harness identity fields differ")
+    code_commit = harness_identity["code_commit"].lower()
+    if len(code_commit) != 40:
+        raise RehearsalError("recovery harness code commit must be a full Git SHA")
+    try:
+        int(code_commit, 16)
+    except ValueError as exc:
+        raise RehearsalError(
+            "recovery harness code commit must be hexadecimal"
+        ) from exc
+    normalized_identity = {
+        key: harness_identity[key] for key in sorted(harness_identity)
+    }
+    normalized_identity["code_commit"] = code_commit
+    for key in (
+        "core_module_sha256",
+        "entrypoint_sha256",
+        "python_executable_sha256",
+    ):
+        value = normalized_identity[key].lower()
+        if len(value) != 64:
+            raise RehearsalError(f"recovery harness {key} must be a SHA-256")
+        try:
+            int(value, 16)
+        except ValueError as exc:
+            raise RehearsalError(f"recovery harness {key} must be hexadecimal") from exc
+        normalized_identity[key] = value
+    if (
+        not normalized_identity["python_version"]
+        or not normalized_identity["runtime_platform"]
+    ):
+        raise RehearsalError("recovery harness runtime identity is incomplete")
     resolved = output_root.expanduser().resolve()
     if resolved.exists() and any(resolved.iterdir()):
         raise RehearsalError("rehearsal output root must be absent or empty")
@@ -1096,6 +1157,7 @@ def run_recovery_rehearsal(
     result = {
         "boundary_rehearsal": boundary,
         "dated_rollforwards": dated,
+        "harness_identity": normalized_identity,
         "release_id": release_id,
         "schema_version": _SCHEMA_VERSION,
         "source_release_spec_sha256": spec.spec_sha256,

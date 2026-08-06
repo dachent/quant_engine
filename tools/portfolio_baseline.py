@@ -785,6 +785,10 @@ def _strategy_for_date(
             continue
         start_value = assignment.get("effective_start")
         end_value = assignment.get("effective_end")
+        if assignment.get("mapping_status") == "MAPPED" and start_value is None:
+            raise BaselineValidationError(
+                "mapped assignment requires an explicit effective_start"
+            )
         if start_value is not None and event_date < _date(
             start_value, "assignment.start"
         ):
@@ -1709,9 +1713,15 @@ def _fact_coverage(
     unmapped = [
         item for item in assignments if item.get("mapping_status") == "UNMAPPED"
     ]
+    attribution_unmapped = [
+        item
+        for item in unmapped
+        if item.get("pool_id") != "reserve-capital"
+        and item.get("strategy_mapping_disposition") != "RESERVE_NOT_APPLICABLE"
+    ]
     current_unmapped: list[Mapping[str, Any]] = []
     historical_unmapped: list[Mapping[str, Any]] = []
-    for item in unmapped:
+    for item in attribution_unmapped:
         start = item.get("effective_start")
         end = item.get("effective_end")
         active = (
@@ -1741,18 +1751,24 @@ def _fact_coverage(
         },
         {
             "fact_type": "current_strategy_attribution",
-            "known_gaps": [
-                f"{len(current_unmapped)} current intervals are mapped to the systematic pool but not a strategy"
-            ],
+            "known_gaps": (
+                [
+                    f"{len(current_unmapped)} current intervals are mapped to the systematic pool but not a strategy"
+                ]
+                if current_unmapped
+                else []
+            ),
             "status": "PARTIAL"
             if current_unmapped
             else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
         },
         {
             "fact_type": "historical_strategy_attribution",
-            "known_gaps": [
-                f"{len(historical_unmapped)} historical intervals remain pool-only"
-            ],
+            "known_gaps": (
+                [f"{len(historical_unmapped)} historical intervals remain pool-only"]
+                if historical_unmapped
+                else []
+            ),
             "status": "PARTIAL"
             if historical_unmapped
             else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
@@ -2144,13 +2160,25 @@ def build_catalog(
         schema_name="portfolio-baseline-catalog",
         schema_version=str(CATALOG_SCHEMA_VERSION),
     )
-    spec_hash, spec_size = hash_file(spec_path)
+    # Physical root bindings are runtime locators, not financial evidence.  The
+    # same hash-identified inputs must therefore produce the same generation
+    # when a governed pipeline stages them under a different private root.
+    # Retain every semantic field while replacing machine-specific locators
+    # with their logical registry identities for the manifest artifact.
+    semantic_spec = json.loads(canonical_json_bytes(spec))
+    semantic_spec["roots"] = {
+        root_id: f"root-id:{root_id}" for root_id in sorted(roots)
+    }
+    semantic_provenance = semantic_spec.get("provenance")
+    if isinstance(semantic_provenance, dict) and "root" in semantic_provenance:
+        semantic_provenance["root"] = "root-id:provenance"
+    semantic_spec_bytes = canonical_json_bytes(semantic_spec)
     spec_artifact = SourceArtifact(
-        artifact_id="config/portfolio-baseline-spec.json",
-        sha256=spec_hash,
-        size_bytes=spec_size,
+        artifact_id="config/portfolio-baseline-semantic-spec.json",
+        sha256=hashlib.sha256(semantic_spec_bytes).hexdigest(),
+        size_bytes=len(semantic_spec_bytes),
         as_of_date=as_of,
-        schema_name="portfolio-baseline-spec",
+        schema_name="portfolio-baseline-semantic-spec",
         schema_version=str(spec["schema_version"]),
     )
     observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]

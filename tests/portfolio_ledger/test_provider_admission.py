@@ -6,11 +6,14 @@ import pytest
 
 from quant_engine.portfolio_ledger.provider_admission import (
     AdmissionDisposition,
+    AnalyticalModelStatus,
     EvidenceLayer,
     GenerationQualification,
     ProviderAdmissionError,
     ProviderFactAdmission,
     ProviderGenerationIdentity,
+    SourceAnalyticalStatus,
+    SourceAvailability,
     validate_provider_authority,
 )
 
@@ -42,6 +45,50 @@ def test_account_authority_requires_account_live_evidence() -> None:
         )
 
 
+def test_account_live_requires_identity_and_reconciliation_proof() -> None:
+    with pytest.raises(ProviderAdmissionError, match="account_id"):
+        ProviderFactAdmission(
+            provider_id="matrixport",
+            fact_type="strategy_returns",
+            evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
+            disposition=AdmissionDisposition.AUTHORITATIVE,
+            effective_start=DAY,
+            effective_end=DAY,
+            strategy_id="robuxio-crypto",
+        )
+
+    with pytest.raises(ProviderAdmissionError, match="reconciliation"):
+        ProviderFactAdmission(
+            provider_id="matrixport",
+            fact_type="strategy_returns",
+            evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
+            disposition=AdmissionDisposition.AUTHORITATIVE,
+            effective_start=DAY,
+            effective_end=DAY,
+            account_id="account-1",
+            strategy_id="robuxio-crypto",
+        )
+
+
+def test_source_availability_is_independent_of_model_status() -> None:
+    status = SourceAnalyticalStatus(
+        source_availability=SourceAvailability.AVAILABLE,
+        analytical_model_status=AnalyticalModelStatus.DIAGNOSTIC_ONLY,
+        analytical_reason="non-positive sealed holdout predicted R-squared",
+    )
+    assert status.to_dict() == {
+        "analytical_model_status": "DIAGNOSTIC_ONLY",
+        "analytical_reason": "non-positive sealed holdout predicted R-squared",
+        "source_availability": "AVAILABLE",
+    }
+
+    with pytest.raises(ProviderAdmissionError, match="source is unavailable"):
+        SourceAnalyticalStatus(
+            source_availability=SourceAvailability.UNAVAILABLE,
+            analytical_model_status=AnalyticalModelStatus.VALIDATED,
+        )
+
+
 def test_overlapping_account_authorities_fail_closed() -> None:
     first = ProviderFactAdmission(
         provider_id="schwab",
@@ -51,6 +98,7 @@ def test_overlapping_account_authorities_fail_closed() -> None:
         effective_start=date(2026, 1, 1),
         effective_end=DAY,
         account_id="account-1",
+        account_reconciliation_sha256="d" * 64,
     )
     second = ProviderFactAdmission(
         provider_id="ibkr",
@@ -60,6 +108,7 @@ def test_overlapping_account_authorities_fail_closed() -> None:
         effective_start=date(2026, 7, 1),
         effective_end=DAY,
         account_id="account-1",
+        account_reconciliation_sha256="e" * 64,
     )
     with pytest.raises(ProviderAdmissionError, match="overlap"):
         validate_provider_authority((first, second))
@@ -73,7 +122,9 @@ def test_reference_evidence_may_overlap_authority() -> None:
         disposition=AdmissionDisposition.AUTHORITATIVE,
         effective_start=date(2026, 1, 1),
         effective_end=DAY,
+        account_id="account-1",
         strategy_id="p123-ai-factor",
+        account_reconciliation_sha256="d" * 64,
     )
     provider = ProviderFactAdmission(
         provider_id="portfolio123",

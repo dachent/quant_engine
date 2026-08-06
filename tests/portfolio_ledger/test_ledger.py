@@ -355,6 +355,133 @@ def test_references_mapping_and_assignment_invariants_fail_closed() -> None:
         )
 
 
+def test_fact_mapping_is_reconciled_to_effective_assignment() -> None:
+    accounts, strategies, securities = _identities()
+    assignment = AccountStrategyAssignment(
+        "assignment-history",
+        "acct-invest",
+        "strategy-a",
+        date(2020, 1, 1),
+        date(2026, 6, 30),
+        Decimal("1"),
+    )
+
+    ledger = LedgerSlice.build(
+        as_of_date=AS_OF,
+        source_generations=(_generation(),),
+        accounts=accounts,
+        strategies=strategies,
+        securities=securities,
+        assignments=(assignment,),
+        positions=(
+            PositionSnapshot(
+                "historical-position",
+                "acct-invest",
+                "security-a",
+                date(2020, 1, 2),
+                Decimal("1"),
+                ObservedAmount.available(Decimal("1"), "USD"),
+                MappingStatus.UNMAPPED,
+            ),
+        ),
+    )
+
+    assert ledger.positions[0].mapping_status is MappingStatus.MAPPED
+    assert ledger.positions[0].strategy_id == "strategy-a"
+    assert ledger.assignments[0].to_dict()["effective_start"] == "2020-01-01"
+
+    with pytest.raises(LedgerValidationError, match="effective assignment"):
+        LedgerSlice.build(
+            as_of_date=AS_OF,
+            source_generations=(_generation(),),
+            accounts=accounts,
+            strategies=strategies,
+            securities=securities,
+            assignments=(assignment,),
+            positions=(
+                PositionSnapshot(
+                    "false-mapped-position",
+                    "acct-invest",
+                    "security-a",
+                    date(2020, 1, 2),
+                    Decimal("1"),
+                    ObservedAmount.available(Decimal("1"), "USD"),
+                    MappingStatus.MAPPED,
+                    "strategy-b",
+                ),
+            ),
+        )
+
+
+def test_assignment_timeline_rejects_internal_gap() -> None:
+    accounts, strategies, securities = _identities()
+    with pytest.raises(LedgerValidationError, match="gap"):
+        LedgerSlice.build(
+            as_of_date=AS_OF,
+            source_generations=(_generation(),),
+            accounts=accounts,
+            strategies=strategies,
+            securities=securities,
+            assignments=(
+                AccountStrategyAssignment(
+                    "assignment-past",
+                    "acct-invest",
+                    "strategy-a",
+                    date(2026, 1, 1),
+                    date(2026, 1, 31),
+                    Decimal("1"),
+                ),
+                AccountStrategyAssignment(
+                    "assignment-current",
+                    "acct-invest",
+                    "strategy-b",
+                    date(2026, 3, 1),
+                    None,
+                    Decimal("1"),
+                ),
+            ),
+        )
+
+    with pytest.raises(LedgerValidationError, match="overlapping assignment"):
+        LedgerSlice.build(
+            as_of_date=AS_OF,
+            source_generations=(_generation(),),
+            accounts=accounts,
+            strategies=strategies,
+            securities=securities,
+            assignments=(
+                AccountStrategyAssignment(
+                    "assignment-unbounded",
+                    "acct-invest",
+                    "strategy-a",
+                    date(2026, 1, 1),
+                    date(2026, 3, 31),
+                    Decimal("1"),
+                ),
+                AccountStrategyAssignment(
+                    "assignment-overlap",
+                    "acct-invest",
+                    "strategy-a",
+                    date(2026, 3, 1),
+                    None,
+                    Decimal("1"),
+                ),
+            ),
+        )
+
+
+def test_assignment_requires_explicit_effective_start() -> None:
+    with pytest.raises(LedgerValidationError, match="explicit date"):
+        AccountStrategyAssignment(
+            "assignment-unknown-start",
+            "acct-invest",
+            "strategy-a",
+            None,  # type: ignore[arg-type]
+            None,
+            Decimal("1"),
+        )
+
+
 def test_corporate_action_preserves_quantity_amount_and_mapping() -> None:
     action = _complete_ledger().corporate_actions[0]
     assert action.to_dict() == {

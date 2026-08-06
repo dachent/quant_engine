@@ -1,6 +1,6 @@
 [project]
 name = "quant-engine-matrixport"
-version = "0.2.0"
+version = "0.2.1"
 description = "Governed, semantically read-only Matrixport/BIT adapter and generation verifier."
 requires-python = ">=3.11,<3.14"
 dependencies = [

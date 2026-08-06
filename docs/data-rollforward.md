@@ -15,6 +15,13 @@ validates the complete specification hash. Receipts contain
 only identities, attempts, states, and output hashes—not provider payloads or
 credentials.
 
+For the portfolio source-to-panel profile, planning and execution additionally
+fail closed unless the named repository has a clean worktree at the exact
+release commit, the Python executable and `uv.lock` hashes match, the live
+installed-distribution inventory matches, and each command executes a
+hash-bound repository entrypoint declared as an input. These checks prevent a
+declarative commit field from standing in for the code that actually ran.
+
 ## Operator commands
 
 Inventory each immutable generation before authoring the private specification:
@@ -49,7 +56,9 @@ uv run --frozen --no-sync python tools/data_pipeline.py execute `
 
 `status` reports node receipts and release state. Re-running the same exact
 specification resumes completed local work after re-verifying artifacts,
-generations, gates, and companions. A local command may retry at most twice.
+generations, gates, and companions. A local command may retry at most twice,
+but each `execute` invocation performs only one attempt; an explicit resume
+consumes the next declared attempt after the failure has been inspected.
 A read-only external command requires `--allow-external-read`, has zero retry,
 and carries a stable request identity. A timeout or exception records
 `UNKNOWN`; resume fails closed and will not send that request again.
@@ -100,3 +109,33 @@ The private release evidence must include the pipeline specification, exact
 plan, receipts, pipeline-evidence hash, release manifest/journal, gate files,
 and post-commit pointer/companion verification. Recovery rehearsal is performed
 under `DATA-RECOVERY-001` before this workflow is accepted for perpetual use.
+
+## Private portfolio source-to-panel materialization
+
+`tools/portfolio_release_builder.py` executes the real ledger, baseline,
+attribution, analytics, report, native-workbook, and panel builders from one
+hash-bound private vertical recipe. `tools/portfolio_pipeline_materialize.py`
+then binds those commands, their expected deterministic generation inventories,
+the browser-QA evidence, repository commit, locked Python runtime, and stable
+panel launcher into the core pipeline specification used by
+`tools/data_pipeline.py`.
+
+No stage copies a prior release or substitutes a marker for computation. The
+semantic command calculates six bridges from the newly built artifacts:
+financial identities, current strategy mappings, ledger-to-baseline-to-report
+lineage, analytics/report/panel equality (including HWM), freshness, and exact
+generation/release evidence. Quantitative details are retained beside the
+strict gate. Any mismatch fails before the release can reach `PREPARED`;
+advancing production still requires the separate pipeline commit operation.
+
+```powershell
+$env:QE_PIPELINE_PYTHON = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
+python tools/portfolio_release_builder.py build --recipe <private-vertical-recipe.json> --output-root <private-proof-root>
+<run browser and interaction QA against the emitted panel candidate>
+python tools/portfolio_release_builder.py stage --recipe <private-vertical-recipe.json> --output-root <private-proof-root> --role panel --qa-dir <private-proof-qa-dir>
+python tools/portfolio_pipeline_materialize.py recipe --vertical-recipe <private-vertical-recipe.json> --proof-root <private-proof-root> --qa-dir <private-proof-qa-dir> --pipeline-id <new-pipeline-id> --output <private-recipe.json>
+python tools/portfolio_pipeline_materialize.py spec --recipe <private-recipe.json> --output-root <private-run-root> --spec <private-run-root>\pipeline-spec.json
+python tools/data_pipeline.py plan --spec <private-run-root>\pipeline-spec.json
+python tools/data_pipeline.py execute --spec <private-run-root>\pipeline-spec.json
+python tools/data_pipeline.py status --spec <private-run-root>\pipeline-spec.json
+```
