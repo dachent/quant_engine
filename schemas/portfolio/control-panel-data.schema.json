@@ -37,7 +37,7 @@
     "weekly_returns"
   ],
   "properties": {
-    "panel_schema_version": { "const": 10 },
+    "panel_schema_version": { "const": 11 },
     "meta": {
       "type": "object",
       "additionalProperties": false,
@@ -149,13 +149,14 @@
     "default_dependence_mode": { "const": "LIVE_ONLY" },
     "dependence_analysis": {
       "type": "object",
-      "required": ["analytics_hash", "as_of_date", "available_pair_count", "cells", "correlation_one", "generation_id", "matrices", "pair_count", "series_ids", "source_sha256"],
+      "required": ["analytics_hash", "as_of_date", "available_pair_count", "cells", "correlation_one", "economic_driver_cluster_budget", "generation_id", "matrices", "pair_count", "series_ids", "source_sha256"],
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
         "as_of_date": { "type": "string", "format": "date" },
         "available_pair_count": { "type": "integer", "minimum": 0 },
         "cells": { "type": "array", "minItems": 36, "maxItems": 36, "items": { "type": "object" } },
         "correlation_one": { "type": "object" },
+        "economic_driver_cluster_budget": { "type": "object" },
         "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
         "generation_id": { "$ref": "#/$defs/hash" },
         "matrices": { "type": "object", "minProperties": 6, "maxProperties": 6 },
@@ -176,16 +177,19 @@
     },
     "factor_analysis": {
       "type": "object",
-      "required": ["analytics_hash", "as_of_date", "available_count", "dynamic_available_count", "generation_id", "method_label", "methodology_manifest_sha256", "methodology_version", "series", "source_sha256", "sources", "unavailable_count"],
+      "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "diagnostic_count", "dynamic_available_count", "generation_id", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "series", "source_sha256", "sources", "unavailable_count"],
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
+        "analytics_schema_version": { "enum": [1, 2] },
         "as_of_date": { "type": "string", "format": "date" },
         "available_count": { "type": "integer", "minimum": 0 },
+        "diagnostic_count": { "type": "integer", "minimum": 0 },
         "dynamic_available_count": { "type": "integer", "minimum": 0 },
         "generation_id": { "$ref": "#/$defs/hash" },
         "method_label": { "const": "MPI_INFORMED_NON_EQUIVALENT" },
         "methodology_manifest_sha256": { "$ref": "#/$defs/hash" },
         "methodology_version": { "type": "string" },
+        "proxy_governance": { "type": "object" },
         "series": { "type": "array", "minItems": 9, "maxItems": 9, "items": { "type": "object" } },
         "source_sha256": { "$ref": "#/$defs/hash" },
         "sources": {
