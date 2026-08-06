@@ -234,7 +234,7 @@ def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> Non
     ]
 
 
-def test_positions_select_latest_authoritative_snapshot_per_account() -> None:
+def test_positions_preserve_history_and_mark_latest_snapshot_per_account() -> None:
     catalog = {
         "positions": [
             {
@@ -270,12 +270,19 @@ def test_positions_select_latest_authoritative_snapshot_per_account() -> None:
     rows = reporter._positions(catalog)
 
     assert {(row["account_id"], row["as_of_date"]) for row in rows} == {
+        ("account-a", "2026-07-01"),
         ("account-a", "2026-08-01"),
         ("account-b", "2026-07-15"),
     }
-    assert {row["security_id"] for row in rows} == {"security-new", "security-b"}
-    assert {row["snapshot_status"] for row in rows} == {
-        "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
+    assert {row["security_id"] for row in rows} == {
+        "security-old",
+        "security-new",
+        "security-b",
+    }
+    assert {row["security_id"]: row["snapshot_status"] for row in rows} == {
+        "security-old": "HISTORICAL_ACCEPTED_ACCOUNT_SNAPSHOT",
+        "security-new": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT",
+        "security-b": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT",
     }
 
 
