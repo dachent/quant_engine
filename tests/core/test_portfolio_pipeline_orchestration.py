@@ -80,6 +80,7 @@ def _command(
     depends_on: list[str],
     reads: list[Path] | None = None,
     writes: list[Path],
+    retry_limit: int = 0,
 ) -> dict[str, object]:
     return {
         "argv": [str(runtime), str(entrypoint), node_id],
@@ -95,7 +96,7 @@ def _command(
         "kind": "COMMAND",
         "node_id": node_id,
         "request_identity": None,
-        "retry_limit": 0,
+        "retry_limit": retry_limit,
         "timeout_seconds": 30,
     }
 
@@ -218,6 +219,7 @@ def _portfolio_spec(
                 depends_on=[previous_node],
                 reads=[previous_output],
                 writes=[output],
+                retry_limit=1 if role == "workbook" else 0,
             )
         )
         previous_node = command_id
@@ -379,6 +381,33 @@ def test_portfolio_pipeline_builds_and_resumes_from_command_receipts(
     assert second["release_id"] == first["release_id"]
     assert len(calls) == 10
     assert (Path(outputs["target"]) / "generations" / proposed.generation_id).is_dir()
+
+
+def test_portfolio_pipeline_allows_one_workbook_resume_attempt(
+    tmp_path: Path,
+) -> None:
+    raw, outputs, _ = _portfolio_spec(tmp_path)
+    spec = PipelineSpec.from_json_bytes(json.dumps(raw).encode())
+    calls: list[str] = []
+    successful_runner = _runner(outputs, calls)
+    workbook_attempts = 0
+
+    def fail_workbook_once(node: object) -> tuple[int, bytes, bytes]:
+        nonlocal workbook_attempts
+        if str(getattr(node, "node_id")) == "build-workbook":
+            workbook_attempts += 1
+            if workbook_attempts == 1:
+                calls.append("build-workbook")
+                return 1, b"", b"desktop handoff required"
+        return successful_runner(node)
+
+    with pytest.raises(PipelineExecutionError, match="build-workbook"):
+        execute_pipeline(spec, command_runner=fail_workbook_once)
+    resumed = execute_pipeline(spec, command_runner=fail_workbook_once)
+
+    assert resumed["release_state"] == "PREPARED"
+    assert workbook_attempts == 2
+    assert calls.count("build-workbook") == 2
 
 
 def test_portfolio_pipeline_rejects_a_prebuilt_generation(tmp_path: Path) -> None:

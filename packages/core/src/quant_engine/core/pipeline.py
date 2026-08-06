@@ -976,8 +976,11 @@ def _validate_portfolio_orchestration(
             raise PipelineValidationError(f"{name} must identify a command node")
         if local_only and node.effect is not CommandEffect.LOCAL_ONLY:
             raise PipelineValidationError(f"{name} must be local-only")
-        if node.retry_limit != 0:
-            raise PipelineValidationError(f"{name} must use a zero retry limit")
+        expected_retry_limit = 1 if node_id == "build-workbook" else 0
+        if node.retry_limit != expected_retry_limit:
+            raise PipelineValidationError(
+                f"{name} must use retry limit {expected_retry_limit}"
+            )
         if not node.declared_writes:
             raise PipelineValidationError(f"{name} must declare create-only outputs")
         if not _same_path(Path(node.argv[0]), executable):
@@ -1627,9 +1630,7 @@ def _execute_node(
                 raise PipelineUnknownOutcomeError(
                     f"{node.node_id} external-read outcome is unknown"
                 ) from exc
-            if attempts >= allowed_attempts:
-                raise PipelineExecutionError(f"{node.node_id} command failed") from exc
-            continue
+            raise PipelineExecutionError(f"{node.node_id} command failed") from exc
         detail = hashlib.sha256(
             canonical_json_bytes(
                 {
@@ -1680,10 +1681,9 @@ def _execute_node(
             raise PipelineUnknownOutcomeError(
                 f"{node.node_id} external-read outcome is unknown"
             )
-        if attempts >= allowed_attempts:
-            raise PipelineExecutionError(
-                f"{node.node_id} command exited with {return_code}"
-            )
+        raise PipelineExecutionError(
+            f"{node.node_id} command exited with {return_code}"
+        )
     raise AssertionError("bounded command loop did not terminate")
 
 

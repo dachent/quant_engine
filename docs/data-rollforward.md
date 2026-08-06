@@ -56,7 +56,9 @@ uv run --frozen --no-sync python tools/data_pipeline.py execute `
 
 `status` reports node receipts and release state. Re-running the same exact
 specification resumes completed local work after re-verifying artifacts,
-generations, gates, and companions. A local command may retry at most twice.
+generations, gates, and companions. A local command may retry at most twice,
+but each `execute` invocation performs only one attempt; an explicit resume
+consumes the next declared attempt after the failure has been inspected.
 A read-only external command requires `--allow-external-read`, has zero retry,
 and carries a stable request identity. A timeout or exception records
 `UNKNOWN`; resume fails closed and will not send that request again.

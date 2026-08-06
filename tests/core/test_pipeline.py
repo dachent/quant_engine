@@ -362,6 +362,39 @@ def test_resume_does_not_repeat_completed_command(tmp_path: Path) -> None:
     assert calls == 1
 
 
+def test_local_retry_requires_an_explicit_resume(tmp_path: Path) -> None:
+    command = {
+        "argv": ["synthetic", "build"],
+        "cwd": str(tmp_path),
+        "declared_reads": [],
+        "declared_writes": [],
+        "depends_on": [],
+        "effect": "LOCAL_ONLY",
+        "kind": "COMMAND",
+        "node_id": "local-build",
+        "request_identity": None,
+        "retry_limit": 1,
+        "timeout_seconds": 10,
+    }
+    raw, _, _, _ = _spec_dict(tmp_path, command=command)
+    spec = _parse(raw)
+    calls = 0
+
+    def fail_once(_node: object) -> tuple[int, bytes, bytes]:
+        nonlocal calls
+        calls += 1
+        return (1, b"", b"failed") if calls == 1 else (0, b"ok", b"")
+
+    with pytest.raises(PipelineExecutionError, match="local-build"):
+        execute_pipeline(spec, command_runner=fail_once)
+    assert calls == 1
+
+    resumed = execute_pipeline(spec, command_runner=fail_once)
+
+    assert resumed["release_state"] == "PREPARED"
+    assert calls == 2
+
+
 def test_unknown_external_read_is_never_retried(tmp_path: Path) -> None:
     command = {
         "argv": ["synthetic", "external-read"],
