@@ -947,7 +947,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             encoding="utf-8"
         )
     )
-    assert data["panel_schema_version"] == 9
+    assert data["panel_schema_version"] == panel.PANEL_SCHEMA_VERSION
     assert len(data["account_summary"]) == 19
     assert len({row["account_id"] for row in data["account_summary"]}) == 19
     assert {
@@ -1258,6 +1258,7 @@ def test_freshness_health_is_visible_with_dates_and_reason(
             "known_gap": (
                 "next expected 2026-07-29; expected refresh is late but not yet stale"
             ),
+            "last_accepted_date": "2026-07-28",
             "next_expected_date": "2026-07-29",
             "policy_id": "daily-current",
             "provider_id": "synthetic",
@@ -1697,24 +1698,41 @@ def test_governed_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
     assert by_id["volatis-strategy"]["nav_return_observations"] == 650
     assert summary == {
         "covered_value_usd": "100",
+        "excluded_details": [
+            {
+                "classification": "EXCLUDED_DE_MINIMIS",
+                "current_value_usd": "1",
+                "effective_date": None,
+                "reason": "Policy exclusion retained without a supplied reason.",
+                "strategy_id": "composer-holy-grail",
+                "strategy_name": "[Composer] - The Holy Grail (Buy Copy)",
+            }
+        ],
         "excluded_value_usd": "1",
         "excluded_strategies": ["[Composer] - The Holy Grail (Buy Copy)"],
         "governed_perimeter_value_usd": "100",
         "nav_coverage": "1",
+        "policy_id": "PORT-HWM-2",
         "status": "AVAILABLE_GOVERNED_HWM_PERIMETER",
         "status_code_version": 2,
         "status_semantics": "EXPLICIT_GOVERNED_HWM_PERIMETER",
         "uncovered_details": [],
         "uncovered_strategies": [],
+        "uncovered_value_usd": "0",
     }
 
 
 def test_hwm_policy_enforces_exclusion_effective_date() -> None:
     before, _ = panel._hwm_policy(date(2026, 7, 31))
     effective, _ = panel._hwm_policy(date(2026, 8, 1))
+    echo_effective, _ = panel._hwm_policy(date(2026, 8, 6))
 
     assert before["excluded_strategy_ids"] == []
     assert effective["excluded_strategy_ids"] == ["composer-holy-grail"]
+    assert echo_effective["excluded_strategy_ids"] == [
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    ]
 
 
 def test_hwm_coverage_rejects_unaccepted_nav_evidence_class() -> None:
@@ -1791,7 +1809,7 @@ def test_hwm_coverage_names_freshness_block_without_denigrating_nav() -> None:
     )
     nav = next(row for row in reconciled if row["item"] == "nav")
     assert "not HWM-qualified" in nav["known_gap"]
-    assert "EchoTrade (FRESHNESS_STALE)" in nav["known_gap"]
+    assert "EchoTrade ($0.19; FRESHNESS_STALE" in nav["known_gap"]
     assert "lacks accepted daily NAV" not in nav["known_gap"]
 
 
@@ -1839,6 +1857,18 @@ def test_renderer_distinguishes_nav_presence_from_hwm_qualification() -> None:
     assert "lacks accepted daily NAV" not in renderer
     assert '["Material NAV coverage"' not in renderer
     assert "governed HWM daily NAV is stale or incomplete" in renderer
+
+
+def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "const moneyExact = new Intl.NumberFormat" in renderer
+    assert "currencyExact(data.hwm_summary.uncovered_value_usd)" in renderer
+    assert "no numeric HWM is calculated while unavailable" in renderer
+    assert '<th scope="col"' in renderer
+    assert '<th scope="row"' in renderer
+    assert "0.00x" not in renderer
+    assert "data.panel_schema_version !== 10" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -1925,6 +1955,20 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     assert schema["properties"]["panel_schema_version"]["const"] == (
         panel.PANEL_SCHEMA_VERSION
     )
+    assert "canonical_strategy_series" in schema["required"]
+    canonical = schema["properties"]["canonical_strategy_series"]["items"]
+    assert canonical["additionalProperties"] is False
+    assert set(canonical["required"]) == {
+        "canonical_live_series_sha256",
+        "evidence_layer",
+        "generation_id",
+        "observed_end",
+        "observed_start",
+        "return_observations",
+        "series_id",
+        "strategy_id",
+        "strategy_version",
+    }
 
 
 def test_hwm_prose_uses_qualified_evidence_instead_of_legacy_source_label() -> None:
@@ -1991,7 +2035,7 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
         row for row in accepted if row["item"] == "full-systematic-hwm-unavailable"
     )
     assert exception["status"] == "UNAVAILABLE"
-    assert "Missing Strategy (UNQUALIFIED)" in exception["known_gap"]
+    assert "Missing Strategy ($UNKNOWN; UNQUALIFIED" in exception["known_gap"]
 
 
 def test_mvp_exposes_seven_primary_surfaces_and_keeps_appendices_separate() -> None:

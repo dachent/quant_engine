@@ -40,6 +40,7 @@ def governed_hwm_coverage(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Qualify the material strategy perimeter for an automated systematic HWM."""
 
+    policy_id = _text(policy.get("policy_id", "PORT-HWM-2"), "policy.policy_id")
     excluded = set(policy.get("excluded_strategy_ids", []))
     accepted_evidence = set(policy.get("accepted_daily_nav_evidence", []))
     accepted_provider_live = set(policy.get("accepted_provider_live_strategy_ids", []))
@@ -51,15 +52,23 @@ def governed_hwm_coverage(
     governed_perimeter = Decimal(0)
     excluded_value = Decimal(0)
     excluded_names: list[str] = []
+    excluded_details: list[dict[str, Any]] = []
     uncovered: list[str] = []
+    uncovered_value = Decimal(0)
     uncovered_details: list[dict[str, Any]] = []
+    exclusion_by_strategy: dict[str, Mapping[str, Any]] = {}
+    material_perimeter = policy.get("material_perimeter")
+    if isinstance(material_perimeter, Mapping):
+        exclusions = material_perimeter.get("exclusions", [])
+        if isinstance(exclusions, Sequence) and not isinstance(exclusions, str | bytes):
+            for item in exclusions:
+                if isinstance(item, Mapping) and item.get("strategy_id") in excluded:
+                    exclusion_by_strategy[str(item["strategy_id"])] = item
     freshness_by_strategy: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for freshness in freshness_health or []:
         if (
             freshness.get("fact_type") in {"nav", "strategy-returns"}
             and freshness.get("subject_type", "STRATEGY") == "STRATEGY"
-            and freshness.get("lane", "LEGACY") in {"ACCOUNT", "LEGACY"}
-            and freshness.get("required_for_current", True) is True
         ):
             freshness_by_strategy[str(freshness.get("subject_id"))].append(freshness)
 
@@ -75,15 +84,36 @@ def governed_hwm_coverage(
         if value < 0:
             raise HwmCoverageError("strategy current value cannot be negative")
         if strategy_id in excluded:
+            exclusion = exclusion_by_strategy.get(strategy_id, {})
+            classification = str(exclusion.get("classification", "EXCLUDED_DE_MINIMIS"))
+            effective_date = exclusion.get("effective_date")
+            reason = str(
+                exclusion.get(
+                    "reason", "Policy exclusion retained without a supplied reason."
+                )
+            )
             row.update(
                 {
                     "hwm_scope": "EXCLUDED_DE_MINIMIS",
-                    "hwm_source": "PORT-HWM-2",
+                    "hwm_source": policy_id,
+                    "hwm_exclusion_classification": classification,
+                    "hwm_exclusion_effective_date": effective_date,
+                    "hwm_exclusion_reason": reason,
                     "nav_status": "EXCLUDED_DE_MINIMIS",
                 }
             )
             excluded_value += value
             excluded_names.append(strategy_name)
+            excluded_details.append(
+                {
+                    "classification": classification,
+                    "current_value_usd": format(value, "f"),
+                    "effective_date": effective_date,
+                    "reason": reason,
+                    "strategy_id": strategy_id,
+                    "strategy_name": strategy_name,
+                }
+            )
             accepted.append(row)
             continue
 
@@ -98,20 +128,56 @@ def governed_hwm_coverage(
         row["hwm_evidence_status"] = (
             "ACCEPTED" if not evidence_blocked else "UNACCEPTED"
         )
-        strategy_freshness = freshness_by_strategy.get(strategy_id, [])
+        eligible_lanes = (
+            {"PROVIDER"}
+            if evidence_layer == "PROVIDER_LIVE"
+            else {"ACCOUNT", "LEGACY"}
+            if evidence_layer == "ACCOUNT_LIVE"
+            else {"ACCOUNT", "LEGACY", "PROVIDER"}
+        )
+        strategy_freshness = [
+            item
+            for item in freshness_by_strategy.get(strategy_id, [])
+            if str(item.get("lane", "LEGACY")) in eligible_lanes
+        ]
+        state_rank = {
+            "UNAVAILABLE": 5,
+            "STALE": 4,
+            "LATE": 3,
+            "FRESH": 2,
+            "FINITE_COMPLETE": 1,
+        }
+        selected_freshness = max(
+            strategy_freshness,
+            key=lambda item: (
+                state_rank.get(str(item.get("state") or item.get("status")), 6),
+                str(item.get("lane", "LEGACY")),
+            ),
+            default=None,
+        )
         freshness_blocked = any(
-            item.get("blocks_current_consumers") is True for item in strategy_freshness
+            item.get("blocks_current_consumers") is True
+            or str(item.get("state") or item.get("status")) in {"STALE", "UNAVAILABLE"}
+            for item in strategy_freshness
         )
         freshness_missing = require_freshness and not strategy_freshness
-        freshness_state = next(
-            (
-                str(item.get("state") or item.get("status"))
-                for item in strategy_freshness
-                if isinstance(item.get("state") or item.get("status"), str)
-                and (item.get("state") or item.get("status"))
-            ),
-            None,
+        freshness_state = (
+            str(selected_freshness.get("state") or selected_freshness.get("status"))
+            if selected_freshness is not None
+            else None
         )
+        evidence_observed_end = row.get("nav_observed_end")
+        freshness_observed_end = (
+            selected_freshness.get("last_accepted_date")
+            if selected_freshness is not None
+            else None
+        )
+        freshness_boundary_mismatch = (
+            evidence_observed_end is not None
+            and freshness_observed_end is not None
+            and str(evidence_observed_end) != str(freshness_observed_end)
+        )
+        freshness_blocked = freshness_blocked or freshness_boundary_mismatch
         row["hwm_freshness_status"] = (
             "UNAVAILABLE"
             if freshness_missing
@@ -120,6 +186,12 @@ def governed_hwm_coverage(
             else "ACCEPTED"
         )
         row["hwm_freshness_state"] = freshness_state
+        row["hwm_freshness_observed_end"] = freshness_observed_end
+        row["hwm_freshness_boundary_matches_evidence"] = (
+            None
+            if evidence_observed_end is None or freshness_observed_end is None
+            else not freshness_boundary_mismatch
+        )
         if (
             row.get("nav_status") == "AVAILABLE"
             and not evidence_blocked
@@ -129,12 +201,15 @@ def governed_hwm_coverage(
             covered += value
         else:
             uncovered.append(strategy_name)
+            uncovered_value += value
             if row.get("nav_status") != "AVAILABLE":
                 qualification_gap = "MISSING_DAILY_NAV"
             elif evidence_blocked:
                 qualification_gap = "UNACCEPTED_EVIDENCE"
             elif freshness_missing:
                 qualification_gap = "FRESHNESS_UNAVAILABLE"
+            elif freshness_boundary_mismatch:
+                qualification_gap = "FRESHNESS_EVIDENCE_BOUNDARY_MISMATCH"
             elif freshness_blocked:
                 qualification_gap = f"FRESHNESS_{freshness_state or 'BLOCKED'}"
             else:
@@ -142,6 +217,30 @@ def governed_hwm_coverage(
             uncovered_details.append(
                 {
                     "current_value_usd": format(value, "f"),
+                    "disposition": "RETAINED_UNCOVERED_PENDING_FRESH_DAILY_NAV",
+                    "freshness_lane": (
+                        selected_freshness.get("lane")
+                        if selected_freshness is not None
+                        else None
+                    ),
+                    "freshness_reason": (
+                        selected_freshness.get("reason")
+                        if selected_freshness is not None
+                        else "No accepted freshness assessment exists for the admitted evidence lane."
+                    ),
+                    "freshness_state": freshness_state,
+                    "hwm_evidence_observed_end": evidence_observed_end,
+                    "last_accepted_date": (
+                        selected_freshness.get("last_accepted_date")
+                        if selected_freshness is not None
+                        else None
+                    ),
+                    "next_expected_date": (
+                        selected_freshness.get("next_expected_date")
+                        if selected_freshness is not None
+                        else None
+                    ),
+                    "policy_id": policy_id,
                     "qualification_gap": qualification_gap,
                     "strategy_id": strategy_id,
                     "strategy_name": strategy_name,
@@ -156,6 +255,8 @@ def governed_hwm_coverage(
     if governed_perimeter <= 0:
         raise HwmCoverageError("governed HWM perimeter is empty")
     ratio = covered / governed_perimeter
+    if covered + uncovered_value != governed_perimeter:
+        raise HwmCoverageError("governed HWM coverage arithmetic differs")
     status = (
         "AVAILABLE_GOVERNED_HWM_PERIMETER"
         if not uncovered
@@ -165,8 +266,12 @@ def governed_hwm_coverage(
         "covered_value_usd": format(covered, "f"),
         "excluded_value_usd": format(excluded_value, "f"),
         "excluded_strategies": sorted(excluded_names),
+        "excluded_details": sorted(
+            excluded_details, key=lambda item: str(item["strategy_name"])
+        ),
         "governed_perimeter_value_usd": format(governed_perimeter, "f"),
         "nav_coverage": format(ratio, "f"),
+        "policy_id": policy_id,
         "status": status,
         "status_code_version": HWM_STATUS_CODE_VERSION,
         "status_semantics": HWM_STATUS_SEMANTICS,
@@ -174,4 +279,5 @@ def governed_hwm_coverage(
             uncovered_details, key=lambda item: str(item["strategy_name"])
         ),
         "uncovered_strategies": sorted(uncovered),
+        "uncovered_value_usd": format(uncovered_value, "f"),
     }

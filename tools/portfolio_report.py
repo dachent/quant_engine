@@ -50,7 +50,7 @@ POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
 HWM_POLICY: Final = (
-    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v2.json"
+    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
 )
 SHEET_NAMES: Final = (
     "Portfolio Summary",
@@ -408,9 +408,17 @@ def _portfolio_summary(
         },
         {
             "metric": "NAV coverage",
-            "status": "PARTIAL",
+            "status": (
+                "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+                if hwm_summary is not None and hwm_summary.get("nav_coverage") == "1"
+                else "PARTIAL"
+            ),
             "unit": "ratio",
-            "value": replay.get("nav_coverage"),
+            "value": (
+                hwm_summary.get("nav_coverage")
+                if hwm_summary is not None
+                else replay.get("nav_coverage")
+            ),
         },
         {
             "metric": "Correlation-one stress",
@@ -977,7 +985,30 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                     str(item) for item in claim.get("known_gaps", [])
                 ),
                 "status": claim.get("status"),
-                "value": None,
+                "value": claim.get("record_count"),
+                **(
+                    {
+                        "disposition": claim.get("disposition"),
+                        "evidence_authority": claim.get("disposition", {}).get(
+                            "authority"
+                        ),
+                    }
+                    if isinstance(claim.get("disposition"), Mapping)
+                    else {}
+                ),
+            }
+        )
+    for detail in _objects(
+        catalog.get("fact_coverage_matrix", []), "fact_coverage_matrix"
+    ):
+        rows.append(
+            {
+                **detail,
+                "category": "FACT_COVERAGE_DETAIL",
+                "evidence_authority": detail.get("authority"),
+                "item": (f"{detail.get('fact_type')}:{detail.get('account_id')}"),
+                "known_gap": detail.get("missing_interval_reason"),
+                "value": detail.get("record_count"),
             }
         )
     counts: dict[str, int] = defaultdict(int)
@@ -1003,6 +1034,15 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "known_gap": item.get("severity"),
                 "status": item.get("status"),
                 "value": item.get("record_count"),
+                **(
+                    {
+                        "disposition": item.get("disposition"),
+                        "resolution_authority": item.get("authority"),
+                    }
+                    if item.get("disposition") is not None
+                    or item.get("authority") is not None
+                    else {}
+                ),
             }
         )
     for item in _objects(catalog.get("provider_coverage", []), "provider_coverage"):
@@ -1018,6 +1058,14 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "known_gap": "; ".join(str(gap) for gap in limitations),
                 "status": claim.get("status"),
                 "value": item.get("qualification"),
+                **(
+                    {
+                        "observed_end": claim.get("observed_end"),
+                        "observed_start": claim.get("observed_start"),
+                    }
+                    if "observed_end" in claim or "observed_start" in claim
+                    else {}
+                ),
             }
         )
     return rows
@@ -1176,7 +1224,7 @@ def _freshness_assessments(
 
 def _hwm_policy(evaluation_date: date) -> tuple[dict[str, Any], str]:
     policy = _load_json(HWM_POLICY, "HWM policy")
-    if policy.get("schema_version") != 2 or policy.get("policy_id") != "PORT-HWM-2":
+    if policy.get("schema_version") != 2 or policy.get("policy_id") != "PORT-HWM-3":
         raise ReportValidationError("HWM policy identity is unsupported")
     perimeter = _object(policy.get("material_perimeter"), "material_perimeter")
     exclusions = _objects(perimeter.get("exclusions"), "material_perimeter.exclusions")
@@ -1216,19 +1264,31 @@ def _reconcile_hwm_coverage(
         for item in hwm_summary.get("uncovered_details", [])
         if isinstance(item, Mapping)
     ]
-    detail_by_name = {
-        str(item.get("strategy_name")): str(
-            item.get("qualification_gap", "UNQUALIFIED")
-        )
-        for item in details
-    }
+    detail_by_name = {str(item.get("strategy_name")): item for item in details}
     gap_details = ", ".join(
-        f"{name} ({detail_by_name.get(name, 'UNQUALIFIED')})" for name in missing
+        f"{name} (${detail_by_name.get(name, {}).get('current_value_usd', 'UNKNOWN')}; "
+        f"{detail_by_name.get(name, {}).get('qualification_gap', 'UNQUALIFIED')}; "
+        f"last accepted {detail_by_name.get(name, {}).get('last_accepted_date') or 'unavailable'}; "
+        f"{detail_by_name.get(name, {}).get('freshness_reason') or 'no freshness reason'})"
+        for name in missing
     )
-    excluded_count = len(hwm_summary["excluded_strategies"])
+    excluded = [
+        dict(item)
+        for item in hwm_summary.get("excluded_details", [])
+        if isinstance(item, Mapping)
+    ]
     exclusion_text = (
-        f"{excluded_count} strateg{'y is' if excluded_count == 1 else 'ies are'} "
-        "explicitly excluded de minimis by policy"
+        "explicit policy exclusions: "
+        + ", ".join(
+            f"{item.get('strategy_name')} (${item.get('current_value_usd')}; {item.get('reason')})"
+            for item in excluded
+        )
+        if excluded
+        else (
+            f"{len(hwm_summary['excluded_strategies'])} strateg"
+            f"{'y is' if len(hwm_summary['excluded_strategies']) == 1 else 'ies are'} "
+            "explicitly excluded de minimis by policy"
+        )
     )
     for row in normalized:
         if row.get("category") == "FACT_COVERAGE" and row.get("item") == "nav":
@@ -1242,6 +1302,9 @@ def _reconcile_hwm_coverage(
                 else "Every included HWM-perimeter strategy is qualified"
             )
             row["known_gap"] += f"; {exclusion_text}"
+            row["disposition"] = (
+                "RETAINED_UNCOVERED_PENDING_FRESH_DAILY_NAV" if missing else "COMPLETE"
+            )
             row["status"] = (
                 "PARTIAL" if missing else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
             )
@@ -1255,20 +1318,32 @@ def _reconcile_hwm_coverage(
         return [row for row in normalized if row not in hwm_rows]
     gap = (
         "BLOCKING_FOR_AUTOMATED_HWM: included HWM-perimeter strategies are not "
-        "qualified: " + gap_details
+        f"qualified; exact uncovered value ${hwm_summary.get('uncovered_value_usd', 'UNKNOWN')}: "
+        + gap_details
     )
     if hwm_rows:
         for row in hwm_rows:
             row["known_gap"] = gap
+            row["disposition"] = "RETAINED_UNCOVERED_PENDING_FRESH_DAILY_NAV"
+            row["resolution_authority"] = (
+                "PORT-HWM-3 policy and admitted-lane daily NAV freshness evidence"
+            )
             row["status"] = "UNAVAILABLE"
+            row["uncovered_details"] = details
+            row["value"] = hwm_summary.get("uncovered_value_usd")
     else:
         normalized.append(
             {
                 "category": "RECONCILIATION_EXCEPTION",
                 "item": "full-systematic-hwm-unavailable",
                 "known_gap": gap,
+                "disposition": "RETAINED_UNCOVERED_PENDING_FRESH_DAILY_NAV",
+                "resolution_authority": (
+                    "PORT-HWM-3 policy and admitted-lane daily NAV freshness evidence"
+                ),
                 "status": "UNAVAILABLE",
-                "value": None,
+                "uncovered_details": details,
+                "value": hwm_summary.get("uncovered_value_usd"),
             }
         )
     return normalized
@@ -1325,6 +1400,7 @@ def build_report_data(
         "baseline": baseline_ref,
         "corrections": _corrections(catalog),
         "coverage_data_quality": coverage,
+        "fact_coverage_matrix": catalog.get("fact_coverage_matrix", []),
         "flow_reconciliation": _flow_reconciliation(catalog),
         "methodology": [
             {"item": "Policy", "value": POLICY_VERSION},
@@ -1358,6 +1434,7 @@ def build_report_data(
             },
         ],
         "portfolio_summary": _portfolio_summary(catalog, hwm_summary),
+        "observation_windows": catalog.get("observation_windows", []),
         "positions": _positions(catalog),
         "provider_admissions": catalog.get("provider_admissions", []),
         "provider_coverage": catalog.get("provider_coverage", []),
@@ -1393,6 +1470,7 @@ def build_report_data(
         ),
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "strategy_summary": strategy_summary,
+        "attribution_dispositions": catalog.get("attribution_dispositions", []),
         "strategy_provider_evidence": strategy_provider_evidence,
         "strategy_returns": catalog.get("strategy_returns", []),
         "transactions_and_flows": _transactions_and_flows(catalog),

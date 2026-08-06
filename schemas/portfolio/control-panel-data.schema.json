@@ -8,19 +8,25 @@
     "account_summary",
     "advisory",
     "allocations",
+    "attribution_dispositions",
     "blocking_items",
     "candidate_appendix",
+    "canonical_strategy_series",
     "capital",
     "counts",
     "coverage",
     "decomposition_lenses",
+    "default_dependence_mode",
     "dependence_analysis",
+    "dependence_modes",
     "factor_analysis",
+    "fact_coverage_matrix",
     "fact_status",
     "gates",
     "hwm_summary",
     "limitations",
     "meta",
+    "observation_windows",
     "panel_schema_version",
     "performance",
     "positions",
@@ -31,11 +37,11 @@
     "weekly_returns"
   ],
   "properties": {
-    "panel_schema_version": { "const": 9 },
+    "panel_schema_version": { "const": 10 },
     "meta": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["baseline_generation_id", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "hwm_policy_sha256", "panel_mode", "portfolio_as_of", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "template_hashes", "weekly_returns_generation_id", "weekly_returns_sha256"],
+      "required": ["baseline_generation_id", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "freshness_evaluated_on", "hwm_policy_sha256", "hwm_status_code_version", "hwm_status_semantics", "panel_mode", "portfolio_as_of", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "strategy_evidence_source", "template_hashes", "weekly_returns_generation_id", "weekly_returns_sha256"],
       "properties": {
         "baseline_generation_id": { "$ref": "#/$defs/hash" },
         "correlation_generation_id": { "$ref": "#/$defs/hash" },
@@ -44,7 +50,10 @@
         "decomposition_plan_bundle_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "decomposition_plan_manifest_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "decomposition_sha256": { "$ref": "#/$defs/hash" },
+        "freshness_evaluated_on": { "type": "string", "format": "date" },
         "hwm_policy_sha256": { "$ref": "#/$defs/hash" },
+        "hwm_status_code_version": { "const": 2 },
+        "hwm_status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
         "panel_mode": { "const": "LOCAL_DIRECT_FILE_READ_ONLY" },
         "portfolio_as_of": { "type": "string", "format": "date" },
         "report_generation_id": { "$ref": "#/$defs/hash" },
@@ -52,6 +61,7 @@
         "source_shell_hashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/hash" } },
         "strategy_evidence_as_of": { "type": ["string", "null"], "format": "date" },
         "strategy_evidence_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "strategy_evidence_source": { "const": "CANONICAL_PORTFOLIO_REPORT" },
         "template_hashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/hash" } },
         "weekly_returns_generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "weekly_returns_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] }
@@ -70,11 +80,13 @@
     "advisory": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["correlation_one_stress", "hwm_limit", "hwm_status", "nav_coverage", "readiness", "reason"],
+      "required": ["correlation_one_stress", "hwm_limit", "hwm_status", "hwm_status_code_version", "hwm_status_semantics", "nav_coverage", "readiness", "reason"],
       "properties": {
         "correlation_one_stress": { "$ref": "#/$defs/decimal" },
         "hwm_limit": { "$ref": "#/$defs/decimal" },
         "hwm_status": { "type": "string" },
+        "hwm_status_code_version": { "const": 2 },
+        "hwm_status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
         "nav_coverage": { "$ref": "#/$defs/decimal" },
         "readiness": { "type": "string" },
         "reason": { "type": "string" }
@@ -97,6 +109,28 @@
     "blocking_items": { "$ref": "#/$defs/rows" },
     "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
     "coverage": { "$ref": "#/$defs/rows" },
+    "fact_coverage_matrix": { "$ref": "#/$defs/rows" },
+    "observation_windows": { "$ref": "#/$defs/rows" },
+    "attribution_dispositions": { "$ref": "#/$defs/rows" },
+    "canonical_strategy_series": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["canonical_live_series_sha256", "evidence_layer", "generation_id", "observed_end", "observed_start", "return_observations", "series_id", "strategy_id", "strategy_version"],
+        "properties": {
+          "canonical_live_series_sha256": { "$ref": "#/$defs/hash" },
+          "evidence_layer": { "enum": ["ACCOUNT_LIVE", "PROVIDER_LIVE"] },
+          "generation_id": { "$ref": "#/$defs/hash" },
+          "observed_end": { "type": "string", "format": "date" },
+          "observed_start": { "type": "string", "format": "date" },
+          "return_observations": { "type": "integer", "minimum": 1 },
+          "series_id": { "type": "string", "minLength": 1 },
+          "strategy_id": { "type": "string", "minLength": 1 },
+          "strategy_version": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "decomposition_lenses": {
       "type": "object",
       "additionalProperties": false,
@@ -168,15 +202,21 @@
     "hwm_summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["covered_value_usd", "excluded_strategies", "excluded_value_usd", "material_value_usd", "nav_coverage", "status", "uncovered_strategies"],
+      "required": ["covered_value_usd", "excluded_details", "excluded_strategies", "excluded_value_usd", "governed_perimeter_value_usd", "nav_coverage", "policy_id", "status", "status_code_version", "status_semantics", "uncovered_details", "uncovered_strategies", "uncovered_value_usd"],
       "properties": {
         "covered_value_usd": { "$ref": "#/$defs/decimal" },
+        "excluded_details": { "type": "array", "items": { "type": "object" } },
         "excluded_value_usd": { "$ref": "#/$defs/decimal" },
         "excluded_strategies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "material_value_usd": { "$ref": "#/$defs/decimal" },
+        "governed_perimeter_value_usd": { "$ref": "#/$defs/decimal" },
         "nav_coverage": { "$ref": "#/$defs/decimal" },
+        "policy_id": { "const": "PORT-HWM-3" },
         "status": { "type": "string" },
-        "uncovered_strategies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+        "status_code_version": { "const": 2 },
+        "status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
+        "uncovered_details": { "type": "array", "items": { "type": "object" } },
+        "uncovered_strategies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "uncovered_value_usd": { "$ref": "#/$defs/decimal" }
       }
     },
     "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
