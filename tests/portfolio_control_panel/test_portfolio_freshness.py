@@ -36,6 +36,8 @@ def _provider_ledger(root: Path) -> str:
             {
                 "coverage": {
                     "fact_types": ["nav", "positions", "transactions", "cash_flows"],
+                    "observed_end": "2026-07-31",
+                    "observed_start": "2026-07-31",
                     "status": "PARTIAL",
                 },
                 "generation_as_of_date": "2026-07-31",
@@ -44,6 +46,8 @@ def _provider_ledger(root: Path) -> str:
             {
                 "coverage": {
                     "fact_types": ["equity_curve", "holdings", "transactions"],
+                    "observed_end": "2026-07-31",
+                    "observed_start": "2026-07-31",
                     "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
                 },
                 "generation_as_of_date": "2026-07-31",
@@ -52,6 +56,8 @@ def _provider_ledger(root: Path) -> str:
             {
                 "coverage": {
                     "fact_types": ["strategy_returns"],
+                    "observed_end": "2026-07-17",
+                    "observed_start": "2026-07-17",
                     "status": "PARTIAL",
                 },
                 "generation_as_of_date": "2026-07-17",
@@ -66,9 +72,11 @@ def _provider_ledger(root: Path) -> str:
                         "wallet_deposits",
                         "product_fee_tiers",
                     ],
+                    "observed_end": "2026-07-26",
+                    "observed_start": "2026-07-26",
                     "status": "PARTIAL",
                 },
-                "generation_as_of_date": "2026-07-26",
+                "generation_as_of_date": "2026-07-31",
                 "provider_id": "matrixport",
             },
         ],
@@ -158,6 +166,11 @@ def test_freshness_prefers_account_lane_and_blocks_stale_strategy(
         by_lane[("matrixport", "PROVIDER_CAPTURE", "positions")]["policy_id"]
         == "daily-calendar-24x7"
     )
+    assert (
+        by_lane[("matrixport", "PROVIDER_CAPTURE", "positions")]["last_accepted_date"]
+        == "2026-07-26"
+    )
+    assert by_lane[("matrixport", "PROVIDER_CAPTURE", "positions")]["state"] == ("LATE")
     assert result["assessment_schema_version"] == 3
     assert {row["policy_id"] for row in result["policies"]} == {
         "daily-calendar-24x7",

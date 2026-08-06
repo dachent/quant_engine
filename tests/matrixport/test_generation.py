@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import UTC, date, datetime
 import hashlib
 import json
 from pathlib import Path
@@ -69,7 +69,9 @@ def _spec(tmp_path: Path) -> Path:
             "dataset_counts": dataset_rows,
             "mode": "full",
             "request_count": 2,
-            "run_end_ms": 1,
+            "run_end_ms": int(
+                datetime(2026, 7, 26, 23, 59, tzinfo=UTC).timestamp() * 1000
+            ),
             "run_id": run.name,
             "status": "COMPLETED",
         },
@@ -175,9 +177,13 @@ def test_partial_generation_is_deterministic_and_never_published(
     assert first_bytes == second_bytes
     assert first_manifest.generation_id == second_manifest.generation_id
     assert first_manifest.coverage.status.value == "PARTIAL"
+    assert first_manifest.coverage.observed_start == date(2026, 7, 26)
+    assert first_manifest.coverage.observed_end == date(2026, 7, 26)
     assert first_manifest.verification.value == "VERIFIED"
     assert first["provider_id"] == "matrixport"
     assert first["aliases"] == ["BIT", "BIT.com"]
+    assert first["catalog_schema_version"] == 2
+    assert first["observed_boundary_date"] == "2026-07-26"
 
     root = tmp_path / "dataMatrixport"
     staged = stage_generation_candidate(spec, root)
@@ -214,3 +220,16 @@ def test_verified_export_can_draft_its_hash_bound_spec(tmp_path: Path) -> None:
     assert catalog["request_count"] == 2
     assert len(catalog["datasets"]) == 2
     assert manifest.as_of_date == date(2026, 7, 26)
+
+
+def test_as_of_date_must_match_extraction_boundary(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    document["as_of_date"] = "2026-07-27"
+    spec.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(
+        MatrixportGenerationError,
+        match="as_of_date must equal the extraction run_end_ms UTC date",
+    ):
+        build_generation(spec)

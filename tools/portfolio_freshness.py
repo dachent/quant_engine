@@ -225,12 +225,12 @@ def build_health(
             raise PortfolioFreshnessError(
                 f"{provider_id}.coverage.fact_types must be text"
             )
-        generation_as_of = row.get("generation_as_of_date")
-        generation_day = (
+        observed_end = coverage.get("observed_end")
+        observed_day = (
             None
-            if generation_as_of is None
+            if observed_end is None
             else date.fromisoformat(
-                _text(generation_as_of, f"{provider_id}.generation_as_of_date")
+                _text(observed_end, f"{provider_id}.coverage.observed_end")
             )
         )
         policy = _provider_policy(provider_id, policies)
@@ -239,7 +239,7 @@ def build_health(
             assessments.append(
                 _assessment(
                     policy=policy,
-                    observed_end=generation_day if supported else None,
+                    observed_end=observed_day if supported else None,
                     as_of=as_of,
                     provider_id=provider_id,
                     subject_id=provider_id,
