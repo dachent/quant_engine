@@ -14,7 +14,7 @@ import shutil
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.1.0"
+BUILDER_VERSION = "0.2.0"
 LENSES = ("ECONOMIC_FACTOR", "ETF_STYLE", "RETURN_INDUSTRY")
 INPUT_KEYS = (
     "us_factors",
@@ -176,13 +176,35 @@ def _catalog_universes(catalog: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _candidates(universe: Mapping[str, Any], name: str) -> tuple[str, ...]:
-    values = tuple(
-        _text(item.get("candidate_id"), f"{name}.candidate_id")
-        for item in _objects(universe.get("candidates"), f"{name}.candidates")
-    )
+    values = tuple(_candidate_records(universe, name))
     if not values or len(values) != len(set(values)):
         raise CurrentPlanError(f"{name} candidate IDs must be unique and non-empty")
     return values
+
+
+def _candidate_records(
+    universe: Mapping[str, Any], name: str
+) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for item in _objects(universe.get("candidates"), f"{name}.candidates"):
+        candidate_id = _text(item.get("candidate_id"), f"{name}.candidate_id")
+        if candidate_id in records:
+            raise CurrentPlanError(f"{name} candidate IDs must be unique")
+        records[candidate_id] = item
+    if not records:
+        raise CurrentPlanError(f"{name} candidates must be non-empty")
+    return records
+
+
+def _proxy_rationale(candidate_id: str, candidate: Mapping[str, Any], lens: str) -> str:
+    family = str(candidate.get("economic_family") or "UNCLASSIFIED").strip()
+    source_id = str(candidate.get("source_id") or "UNAVAILABLE_NOT_DECLARED").strip()
+    return (
+        f"{candidate_id} represents the declared {family} family for the {lens} "
+        f"candidate universe using {source_id}; raw orthogonality is not assumed, "
+        "and final inclusion is determined only by training-period validation, "
+        "collinearity diagnostics, and the declared parsimony rule."
+    )
 
 
 def _column(candidate: str, policy: str) -> str:
@@ -537,7 +559,9 @@ def build_bundle(
         if input_key not in INPUT_KEYS:
             raise CurrentPlanError("source input_key is unsupported")
         universe_id = _text(source_plan.get("universe_id"), "source.universe_id")
-        candidates = _candidates(universes[universe_id], universe_id)
+        universe = universes[universe_id]
+        candidate_records = _candidate_records(universe, universe_id)
+        candidates = tuple(candidate_records)
         policy = _text(source_plan.get("column_policy"), "source.column_policy")
         columns = {candidate: _column(candidate, policy) for candidate in candidates}
         risk_free = _text(source_plan.get("risk_free_column"), "source.risk_free")
@@ -626,14 +650,42 @@ def build_bundle(
                         "train_end": train_end.isoformat(),
                     }
                 )
-        factor_definitions = [
-            {
-                "column": columns[candidate],
-                "factor_id": candidate,
-                "return_type": _text(source_plan.get("return_type"), "return_type"),
-            }
-            for candidate in candidates
-        ]
+        factor_definitions: list[dict[str, object]] = []
+        for candidate_id in candidates:
+            candidate = candidate_records[candidate_id]
+            source_id = str(
+                candidate.get("source_id") or "UNAVAILABLE_NOT_DECLARED"
+            ).strip()
+            return_source_id = str(
+                candidate.get("return_source_id") or source_id
+            ).strip()
+            raw_orthogonal = candidate.get("raw_orthogonal", False)
+            if not isinstance(raw_orthogonal, bool):
+                raise CurrentPlanError(
+                    f"{universe_id}.{candidate_id}.raw_orthogonal must be boolean"
+                )
+            factor_definitions.append(
+                {
+                    "column": columns[candidate_id],
+                    "economic_family": str(
+                        candidate.get("economic_family") or "UNCLASSIFIED"
+                    ).strip(),
+                    "effective_end": str(projected_factor_rows[-1][0]),
+                    "effective_start": str(projected_factor_rows[0][0]),
+                    "factor_id": candidate_id,
+                    "raw_orthogonal": raw_orthogonal,
+                    "redundancy_policy": (
+                        "TRAIN_ONLY_NEAR_DUPLICATE_VIF_CONDITION_NUMBER_AND_"
+                        "PARSIMONY_GATES"
+                    ),
+                    "return_source_id": return_source_id,
+                    "return_type": _text(source_plan.get("return_type"), "return_type"),
+                    "selection_rationale": _proxy_rationale(
+                        candidate_id, candidate, lens
+                    ),
+                    "source_id": source_id,
+                }
+            )
         spec = {
             "analysis_lens": lens,
             "as_of_date": as_of.isoformat(),

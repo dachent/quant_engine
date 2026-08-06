@@ -66,7 +66,10 @@ collinearity and non-classical confidence limitation retained in the output.
 The output includes factor exposures, arithmetic periodic contributions,
 intercept/alpha, residuals, tracking error, in-sample R-squared and adjusted
 R-squared, holdout Predicted R-squared, sensitivity across ridge candidates,
-coverage counts, exact evidence layer, and confidence availability. Daily
+coverage counts, exact evidence layer, and inference availability. Training and
+sealed-holdout residual diagnostics report Durbin-Watson, residual and
+squared-residual autocorrelation at lags 1/5/10, mean, dispersion, skewness,
+excess kurtosis, and maximum absolute residual. Daily
 factor contributions plus intercept and residual reconcile to the observed
 excess return. Negative Predicted R-squared remains negative. Dynamic models
 also emit the full dated exposure path, exposure-change diagnostics, exact
@@ -92,8 +95,13 @@ Gross and net alpha are not silently interchanged. The observed return basis is
 always available when the model is available. Conversion to the other basis is
 reported only when every aligned observation has an accepted cost value.
 Annualized coefficient standard errors receive the same linear annualization
-transform as the reported periodic coefficient. Classical coefficient standard errors are reported only for a full-rank,
-unconstrained, unregularized fit; otherwise confidence is explicitly
+transform as the reported periodic coefficient. For a full-rank,
+unconstrained, unregularized OLS fit, the engine reports descriptive Newey-West
+HAC standard errors using the disclosed automatic lag and lag sensitivity at
+zero, the automatic lag, and twice that lag when distinct. Because factor sets
+and ridge candidates are selected on training data, these are explicitly not
+selection-adjusted confidence claims; no p-values or confidence intervals are
+reported. Ridge, constrained, singular, and dynamic estimators remain
 `UNAVAILABLE_METHOD_NOT_CLASSICAL_OLS`.
 
 ## Data contract
@@ -111,6 +119,13 @@ excess return or must have the supplied risk-free return subtracted. Dates are
 joined exactly. No forward fill, interpolation, calendar coercion, or evidence
 layer concatenation occurs. Target-only weekdays are reported as missing
 factor observations; dates absent from both inputs are not invented.
+
+Current-plan factor definitions also bind each candidate's economic family,
+source and return-source identities, observed effective interval, raw
+orthogonality flag, selection rationale, and redundancy policy. Raw ETF and
+industry candidates are never represented as orthogonal. The generation lists
+every candidate and whether it was selected by the training-only model rule,
+requested but not selected, or outside the requested model sets.
 
 Each new specification also declares one closed `analysis_lens`:
 `ECONOMIC_FACTOR`, `ETF_STYLE`, or `RETURN_INDUSTRY`. Legacy specifications

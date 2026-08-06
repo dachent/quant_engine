@@ -7,6 +7,9 @@
       "long-only sum-to-one returns-based style analysis",
       "time-ordered cross-validation and holdout testing",
       "transparent factor contribution and residual reconciliation",
+      "per-proxy economic rationale, source identity, effective interval, and train-only redundancy disposition",
+      "Newey-West HAC descriptive standard errors with automatic-lag sensitivity for eligible full-rank unregularized unconstrained OLS models",
+      "training and sealed-holdout residual autocorrelation, squared-residual autocorrelation, shape, and Durbin-Watson diagnostics",
       "clean-room unconstrained flexible least squares with identity state transitions",
       "training-only exact leave-one-out selection of a disclosed smoothness grid",
       "causal walk-forward holdout forecasts and filtered dynamic exposure paths"
@@ -29,7 +32,7 @@
     "source": "https://patents.google.com/patent/US7617142B2/en",
     "source_caveat": "Google Patents states that its legal status is an assumption, is not a legal conclusion, and has not been independently analyzed by Google."
   },
-  "methodology_version": "ANL-DECOMP-CLEANROOM-2",
+  "methodology_version": "ANL-DECOMP-CLEANROOM-3",
   "reading_list_artifact": {
     "artifact_id": "xBin/mpi_methodology_reading_list.md",
     "sha256": "a467290f2398ced4d19189a580314679699ef347308157c40627152ce7f00e00",
@@ -265,9 +268,18 @@
   "static_equations": {
     "adjusted_r_squared": "1 - (1 - R2) * (n - 1) / (n - p - 1)",
     "excess_return_model": "y_t - rf_t = alpha + sum_j beta_j * f_j,t + epsilon_t",
+    "hac_automatic_lag": "floor(4 * (n / 100)^(2 / 9)), bounded to [0, n - 1]",
+    "hac_bartlett_weight": "1 - lag / (maximum_lag + 1)",
+    "hac_finite_sample_scaling": "n / (n - k)",
     "holdout_predicted_r_squared": "1 - SSE_holdout / sum_t (y_t - mean(y_train))^2",
     "ridge_objective": "min ||y - alpha - X beta||^2 + lambda ||beta||^2",
     "style_constraint": "beta_j >= 0 and sum_j beta_j = 1"
+  },
+  "inference_boundary": {
+    "eligible": "full-rank unregularized unconstrained OLS fitted on training data",
+    "reported": "descriptive Newey-West HAC standard errors at lag zero, the automatic lag, and twice the automatic lag when distinct",
+    "withheld": "p-values, confidence intervals, and classical confidence claims after factor-set or ridge selection",
+    "ineligible": "ridge, constrained, singular, dynamic, and other post-selection estimators retain an explicit unavailable inference status"
   },
   "dynamic_cleanroom_equations": {
     "observation": "y_t = alpha + x_t^T beta_t + epsilon_t",

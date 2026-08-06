@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 from typing import Any, cast
 
+import numpy as np
 import pytest
 
 from quant_engine.core import read_current
@@ -302,6 +303,14 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
         "RAW_CONFIGURED_FACTOR_RETURNS"
     )
     assert model["method_label"] == "MPI_INFORMED_NON_EQUIVALENT"
+    inference = model["diagnostics"]["inference"]
+    assert inference["status"] == (
+        "AVAILABLE_HAC_DESCRIPTIVE_POST_SELECTION_NO_CLASSICAL_CONFIDENCE"
+    )
+    assert inference["default_lag"] == decomposition._newey_west_lag(90)
+    assert {row["lag"] for row in inference["lag_sensitivity"]} >= {0}
+    assert model["alpha"]["confidence_status"] == inference["status"]
+    assert model["diagnostics"]["residuals"]["train"]["observation_count"] == 90
     assert model["coverage"]["target_observed_start"] == days[0].isoformat()
     assert model["coverage"]["target_cumulative_return"] is not None
     assert model["coverage"]["target_observed_end"] == days[-1].isoformat()
@@ -318,6 +327,41 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
         assert reconstructed == pytest.approx(
             float(row["actual_excess_return"]), abs=5e-11
         )
+
+
+def test_hac_and_residual_diagnostics_capture_serial_and_scale_dependence() -> None:
+    count = 240
+    index = np.arange(count, dtype=np.float64)
+    matrix = np.column_stack((np.sin(index / 9.0), np.cos(index / 17.0))).astype(
+        np.float64
+    )
+    innovations = 0.0002 * (1.0 + np.abs(matrix[:, 0])) * np.sin(index / 2.7)
+    residual = np.zeros(count, dtype=np.float64)
+    for position in range(1, count):
+        residual[position] = 0.75 * residual[position - 1] + innovations[position]
+    target = 0.0001 + matrix @ np.asarray([0.5, -0.25]) + residual
+    fit = decomposition._fit(matrix, target, constraint="UNCONSTRAINED", ridge=0.0)
+
+    inference, standard_errors = decomposition._hac_inference(
+        matrix, target, fit, 0.0, "UNCONSTRAINED"
+    )
+    diagnostics = decomposition._residual_diagnostics(
+        target, decomposition._predict(fit, matrix)
+    )
+
+    assert inference["status"] == (
+        "AVAILABLE_HAC_DESCRIPTIVE_POST_SELECTION_NO_CLASSICAL_CONFIDENCE"
+    )
+    assert standard_errors is not None
+    assert len(inference["lag_sensitivity"]) >= 2
+    assert abs(float(diagnostics["autocorrelation"]["1"])) > 0.5
+    assert diagnostics["durbin_watson"] is not None
+
+    unavailable, absent = decomposition._hac_inference(
+        matrix, target, fit, 0.0001, "UNCONSTRAINED"
+    )
+    assert unavailable["status"] == "UNAVAILABLE_METHOD_NOT_CLASSICAL_OLS"
+    assert absent is None
 
 
 def test_explicit_analysis_lens_is_hash_bound_and_validated(tmp_path: Path) -> None:

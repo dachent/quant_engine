@@ -156,7 +156,20 @@ catalog, target evidence, provider provenance, and market-source manifests. It
 then copies every input into a content-addressed local planning bundle and
 emits separate `ECONOMIC_FACTOR`, `ETF_STYLE`, and `RETURN_INDUSTRY`
 specifications. Every strategy/candidate pair receives an explicit disposition.
+Every emitted factor definition also carries its economic family, source and
+return-source identities, observed effective interval, raw-orthogonality flag,
+selection rationale, and training-only redundancy policy. The analytics
+generation preserves all candidates and records which were selected, requested
+but not selected, or not requested by the closed model sets.
 Eligible candidates must be covered by the declared model sets, calendar joins
 use complete exact-date observations with no fill, and the final 20 percent
 (at least 20 observations) remains a sealed holdout. The planning bundle is not
 an accepted analytics publication and cannot change `CURRENT.json`.
+
+For eligible full-rank, unregularized, unconstrained OLS fits, the engine
+reports descriptive Newey-West HAC standard errors with disclosed lag
+sensitivity. Ridge, constrained, singular, and dynamic fits retain an explicit
+inference-unavailable state. Every computed fit reports train and sealed-
+holdout residual diagnostics, including autocorrelation, squared-residual
+autocorrelation, Durbin-Watson, skewness, and excess kurtosis. These diagnostics
+never convert post-selection estimates into p-values or confidence intervals.

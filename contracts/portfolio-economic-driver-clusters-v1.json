@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "as_of_date": "2026-08-06",
+  "systematic_loss_limit": "0.15",
+  "budget_rule": "ONE_AGGREGATE_ADVERSE_LOSS_BUDGET_PER_ECONOMIC_DRIVER_CLUSTER_NO_STRATEGY_LABEL_DIVERSIFICATION_CREDIT",
+  "historical_audit_reference": {
+    "classification": "FROZEN_AUDIT_REFERENCE_NOT_CURRENT_RECOMPUTATION",
+    "full_systematic_loss": "0.3725",
+    "after_rejected_sleeves_loss": "0.2715",
+    "note": "The current governed portfolio retains the strategies; the operative control is recomputed from the accepted correlation-one components."
+  },
+  "clusters": [
+    {
+      "cluster_id": "TACTICAL_TIMING_MULTI_ASSET",
+      "label": "Tactical timing and multi-asset regime response",
+      "members": ["TT Portfolio", "Volatis Strategy", "QSI", "GrizzlyBears VTMA"],
+      "rationale": "The sleeves share tactical timing, trend, volatility, and multi-asset regime drivers. They receive one aggregate stress budget even when provider labels and implementations differ."
+    },
+    {
+      "cluster_id": "US_SYSTEMATIC_EQUITY",
+      "label": "U.S. systematic equity factor",
+      "members": ["AI Factor [P123]"],
+      "rationale": "The accepted account-live sleeve is governed as a U.S. systematic equity factor exposure."
+    },
+    {
+      "cluster_id": "EUROPE_SYSTEMATIC_EQUITY",
+      "label": "European systematic equity",
+      "members": ["EU [P123]"],
+      "rationale": "The accepted account-live sleeve is governed as a European systematic equity exposure."
+    },
+    {
+      "cluster_id": "CRYPTO_DIRECTIONAL",
+      "label": "Directional crypto",
+      "members": ["Robuxio Crypto (High Sharpe High Vol)"],
+      "rationale": "The accepted provider-live sleeve is governed as a distinct directional crypto risk driver."
+    },
+    {
+      "cluster_id": "DE_MINIMIS_OPERATIONAL",
+      "label": "De-minimis operational remnants",
+      "members": ["[Composer] - The Holy Grail (Buy Copy)", "Growth at Market Pivot Points [EchoTrade]"],
+      "rationale": "The sleeves remain visible and receive one explicit aggregate budget; no missing-history diversification credit is inferred."
+    }
+  ]
+}
