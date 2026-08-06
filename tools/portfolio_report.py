@@ -611,6 +611,28 @@ def _strategy_provider_evidence(catalog: Mapping[str, Any]) -> list[dict[str, An
 def _strategies(
     catalog: Mapping[str, Any], performance: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
+    raw_version_catalog = catalog.get("strategy_version_catalog")
+    strategy_versions: dict[str, dict[str, Any]] = {}
+    if raw_version_catalog is not None:
+        version_catalog = _object(raw_version_catalog, "strategy_version_catalog")
+        if version_catalog.get("catalog_schema_version") != 2:
+            raise ReportValidationError(
+                "strategy version catalog schema is unsupported"
+            )
+        if version_catalog.get("as_of_date") != catalog.get("as_of_date"):
+            raise ReportValidationError(
+                "strategy version catalog as_of_date differs from baseline"
+            )
+        strategy_versions = {
+            _text(item.get("strategy_id"), "strategy version strategy_id"): item
+            for item in _objects(
+                version_catalog.get("strategies"), "strategy version catalog"
+            )
+        }
+        if len(strategy_versions) != 9:
+            raise ReportValidationError(
+                "strategy version catalog must contain exactly 9 strategies"
+            )
     allocations = {
         str(item["strategy_id"]): item
         for item in _objects(catalog.get("allocations"), "allocations")
@@ -721,6 +743,62 @@ def _strategies(
         cost_row = costs.get(strategy_id, {})
         gap_row = gaps.get(strategy_id, {})
         coverage_row = coverage.get(strategy_id, {})
+        version = strategy_versions.get(strategy_id, {})
+        if strategy_versions and not version:
+            raise ReportValidationError(
+                f"strategy version catalog is missing {strategy_id}"
+            )
+        design = (
+            _object(version.get("design"), "strategy version design") if version else {}
+        )
+        configuration = (
+            _object(version.get("configuration"), "strategy version configuration")
+            if version
+            else {}
+        )
+        backtest = (
+            _object(version.get("backtest"), "strategy version backtest")
+            if version
+            else {}
+        )
+        live_boundary = (
+            _object(version.get("live_boundary"), "strategy version live boundary")
+            if version
+            else {}
+        )
+        version_costs = (
+            _object(version.get("costs"), "strategy version costs") if version else {}
+        )
+        benchmark = (
+            _object(version.get("benchmark"), "strategy version benchmark")
+            if version
+            else {}
+        )
+        source_route = (
+            _object(version.get("source_route"), "strategy version source route")
+            if version
+            else {}
+        )
+        layer_inventory = (
+            [
+                {
+                    "artifact_sha256": item.get("artifact_sha256"),
+                    "disposition": item.get("disposition"),
+                    "evidence_layer": item.get("evidence_layer"),
+                    "observed_end": item.get("observed_end"),
+                    "observed_start": item.get("observed_start"),
+                    "source_id": item.get("source_id"),
+                    "status": item.get("status"),
+                    "version_ref": item.get("version_ref"),
+                }
+                for item in _objects(
+                    version.get("evidence_layers"),
+                    "strategy version evidence layers",
+                )
+            ]
+            if version
+            else []
+        )
         available_segments, total_segments = performance_count[strategy_id]
         rows.append(
             {
@@ -786,7 +864,38 @@ def _strategies(
                 ),
                 "cost_status": cost_row.get("cost_status", "UNAVAILABLE"),
                 "implementation_gap_status": gap_row.get("status", "UNAVAILABLE"),
-                "version_ref": strategy.get("version_ref"),
+                "version_ref": version.get("version_ref", strategy.get("version_ref")),
+                "version_disposition": version.get(
+                    "disposition", strategy.get("version_disposition", "UNRESOLVED")
+                ),
+                "version_disposition_reason": version.get(
+                    "disposition_reason",
+                    "Legacy provenance has no effective-dated strategy version row.",
+                ),
+                "version_effective_start": version.get("effective_start"),
+                "version_effective_end": version.get("effective_end"),
+                "version_compatibility_status": version.get(
+                    "compatibility_status", "UNRESOLVED"
+                ),
+                "version_compatibility_reason": version.get(
+                    "compatibility_reason",
+                    "Compatibility is unavailable without an effective-dated registry row.",
+                ),
+                "design_status": design.get("status", "UNAVAILABLE"),
+                "design_version_ref": design.get("version_ref"),
+                "configuration_status": configuration.get("status", "UNAVAILABLE"),
+                "configuration_version_ref": configuration.get("version_ref"),
+                "backtest_status": backtest.get("status", "UNAVAILABLE"),
+                "backtest_version_ref": backtest.get("version_ref"),
+                "live_boundary_status": live_boundary.get("status", "UNAVAILABLE"),
+                "live_boundary_observed_start": live_boundary.get("observed_start"),
+                "live_boundary_observed_end": live_boundary.get("observed_end"),
+                "cost_evidence_status": version_costs.get("status", "UNAVAILABLE"),
+                "benchmark_evidence_status": benchmark.get("status", "UNAVAILABLE"),
+                "source_route_status": source_route.get("status", "UNAVAILABLE"),
+                "source_route_ids": source_route.get("source_ids", []),
+                "strategy_evidence_layers": layer_inventory,
+                "version_gaps": version.get("gaps", strategy.get("gaps", [])),
             }
         )
     return sorted(rows, key=lambda item: str(item["strategy_id"]))

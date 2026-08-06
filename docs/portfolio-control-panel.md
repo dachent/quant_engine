@@ -13,6 +13,13 @@ without preserving stale calculations or hard-coded operator conclusions.
   HWM freshness is evaluated on the lane admitted for that strategy. A
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
+- Every strategy row also projects the effective-dated v2 strategy-version
+  registry: overall disposition, design/configuration/backtest/live-boundary
+  status, cost and benchmark evidence, source route, compatibility, and named
+  gaps. QSI and EchoTrade remain unresolved where no authoritative producing
+  artifact is admitted; the GrizzlyBears and TuringTrader rejected-provider
+  dispositions remain visible. Return evidence does not manufacture a design
+  or backtest version.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
   contribution reconciliation, and each dated dynamic exposure path come only
   from accepted analytics generations. The clean-room dynamic FLS lens remains

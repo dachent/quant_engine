@@ -14,6 +14,15 @@ strategy-intelligence package.
   expands a glob, calls a provider, or copies source content.
 - Exactly nine current strategies are required. Candidate/provider research may
   be hash-anchored as evidence but cannot become a strategy record.
+- The v2 specification also requires exactly one current, effective-dated
+  strategy-version row for each of those nine strategies. Design,
+  configuration, backtest, live-boundary, cost, benchmark, and source-route
+  evidence are separate slots; an admitted return-series hash is not silently
+  relabeled as a design or backtest version.
+- `EVIDENCED` version slots must bind an admitted source hash or explicit
+  version reference. `REFERENCE_ONLY` retains its source route, while
+  `UNAVAILABLE` and `UNRESOLVED` remain explicit. Compatibility is never
+  inferred across evidence layers or provider vintages.
 - Evidence routes retain one `PORT-PERF-1` layer each. The catalog does not join
   or concatenate layers.
 - Tracker label `General` or another deliberately named legacy label may be
@@ -64,7 +73,8 @@ internal account IDs, validates the strategy catalog, and stages:
 
 Repeated staging is idempotent only for identical bytes. A missing source,
 hash mismatch, unknown tracker label, invalid interval, ambiguous strategy
-alias, missing reserve, or non-nine strategy set fails before publication.
+alias, missing reserve, non-nine strategy set, missing version row, or
+unadmitted version-evidence hash fails before publication.
 
 ## Publish
 
