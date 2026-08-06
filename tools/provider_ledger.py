@@ -50,7 +50,7 @@ _PROVIDER_CATALOGS: Final = {
     "alpaca": ("alpaca-generation.json", frozenset({1})),
     "fidelity": ("fidelity-generation.json", frozenset({1})),
     "ibkr": ("ibkr-catalog.json", frozenset({3})),
-    "matrixport": ("catalog.json", frozenset({1})),
+    "matrixport": ("catalog.json", frozenset({1, 2})),
     "portfolio123": ("portfolio123-generation.json", frozenset({1})),
     "quantbase": ("quantbase-generation.json", frozenset({1})),
     "schwab": ("schwab-generation.json", frozenset({1})),

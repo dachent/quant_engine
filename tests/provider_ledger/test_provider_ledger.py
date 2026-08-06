@@ -24,6 +24,13 @@ sys.modules[SPEC.name] = ledger
 SPEC.loader.exec_module(ledger)
 
 
+def test_matrixport_catalog_contract_accepts_observation_boundary_schema() -> None:
+    assert ledger._PROVIDER_CATALOGS["matrixport"] == (
+        "catalog.json",
+        frozenset({1, 2}),
+    )
+
+
 def _nav(account: str, day: str, value: str, record: str) -> dict[str, object]:
     return {
         "account_id": account,
