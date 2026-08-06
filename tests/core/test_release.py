@@ -14,6 +14,7 @@ from quant_engine.core import (
     CurrentPointer,
     GateEvidence,
     GenerationManifest,
+    PointerIntegrityError,
     ReleaseCommitError,
     ReleaseConflictError,
     ReleaseManifest,
@@ -743,6 +744,34 @@ def test_release_reader_fails_closed_on_mixed_root_graph(tmp_path: Path) -> None
     publish_generation(root, unexpected.generation_id)
 
     with pytest.raises(ReleaseConflictError, match="committed pointer graph differs"):
+        read_current_release(coordination, {"root": root})
+
+
+def test_release_reader_fails_closed_on_generation_artifact_drift(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "accepted-artifact-inventory")
+    workbook = root / "generations" / proposed.generation_id / "portfolio-report.xlsx"
+    workbook.write_bytes(b"accepted workbook\n")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"root": root},
+    )
+
+    workbook.write_bytes(b"drifted workbook\n")
+
+    with pytest.raises(PointerIntegrityError, match="inventory hash differs"):
         read_current_release(coordination, {"root": root})
 
 
