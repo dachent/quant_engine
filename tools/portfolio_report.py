@@ -1516,7 +1516,7 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
             "subject": "Read-only coverage-aware portfolio baseline",
             "author": "quant_engine",
             "company": "quant_engine",
-            "comments": "Generated from an accepted private dataPortfolio baseline.",
+            "comments": "Generated from an accepted configured portfolio-data baseline.",
             "created": datetime.combine(
                 date.fromisoformat(str(report["as_of_date"])), time.min
             ),

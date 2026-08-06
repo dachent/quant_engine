@@ -1,13 +1,14 @@
 # Portfolio baseline runbook
 
-`tools/portfolio_baseline.py` builds the first dated, private `dataPortfolio`
-generation. It is a narrow intake and normalization tool, not a provider
+`tools/portfolio_baseline.py` builds a dated generation under the configured
+private portfolio-data root (`C:\Tools\quant-engine\data` on this workstation).
+It is a narrow intake and normalization tool, not a provider
 adapter, performance engine, strategy service, or broker surface.
 
 ## Authority and boundaries
 
 - The private specification, real source records, normalized catalog, and
-  `CURRENT.json` stay outside Git under the configured `dataPortfolio` root.
+  `CURRENT.json` stay outside Git under the configured portfolio-data root.
 - The current published portfolio-provenance catalog supplies internal account
   IDs, exactly nine current strategies, assignments, corrections, assumptions,
   and evidence routes. The baseline spec pins its generation and catalog hash.
@@ -36,7 +37,7 @@ valuation, and publication dates; a later build date never relabels an older
 source value.
 
 The accepted tracker and allocation inputs now come from their immutable,
-hash-identified source-run copy inside the private `dataPortfolio` boundary.
+hash-identified source-run copy inside the private portfolio-data boundary.
 The former external working roots were removed only after provenance,
 baseline, workbook, and control-panel consumers rebuilt successfully from the
 governed copy. Recovery copies are read-only and non-authoritative.
@@ -53,7 +54,7 @@ Run from the repository with the frozen workspace:
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_baseline.py stage `
   --spec <private-baseline-spec.json> `
-  --output-root <dataPortfolio-baseline-root>
+  --output-root <portfolio-root>\baseline
 ```
 
 The command:
@@ -91,7 +92,7 @@ rebuild and publish only that exact generation:
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_baseline.py publish `
   --spec <private-baseline-spec.json> `
-  --output-root <dataPortfolio-baseline-root> `
+  --output-root <portfolio-root>\baseline `
   --generation-id <accepted-generation-id>
 ```
 

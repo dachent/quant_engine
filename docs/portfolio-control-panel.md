@@ -8,16 +8,16 @@ without preserving stale calculations or hard-coded operator conclusions.
 
 - Current accounts, allocations, strategies, positions, performance, costs,
   gaps, coverage, reconciliation, stress, and readiness come from the current
-  accepted `dataPortfolio/reporting` generation. Material HWM coverage may also
+  accepted `<portfolio-root>/reporting` generation. Material HWM coverage may also
   consume a hash-verified `ACCOUNT_LIVE` provider overlay under `PORT-HWM-2`. A
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
   contribution reconciliation, and each dated dynamic exposure path come only
   from accepted analytics generations. The clean-room dynamic FLS lens remains
-  under `dataPortfolio/analytics/decomposition`; the current strategy views bind six
+  under `<portfolio-root>/analytics/decomposition`; the current strategy views bind six
   independently published generations under
-  `dataPortfolio/analytics/decomposition-lenses` for U.S./European economic
+  `<portfolio-root>/analytics/decomposition-lenses` for U.S./European economic
   factors, U.S./multi-asset ETF style, U.S. sector returns, and U.S. 49-industry
   returns. These lenses are selectable but never concatenated. Static
   RBSA and clean-room dynamic FLS results are both labeled
@@ -38,7 +38,7 @@ without preserving stale calculations or hard-coded operator conclusions.
 - Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
   matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come
-  only from the accepted `dataPortfolio/analytics/correlation` generation and
+  only from the accepted `<portfolio-root>/analytics/correlation` generation and
   remain separately labeled.
 - Dependence defaults to `LIVE_ONLY`. When the accepted correlation generation
   also contains `LIVE_PLUS_BACKTEST`, the operator may switch to an explicitly
@@ -49,7 +49,7 @@ without preserving stale calculations or hard-coded operator conclusions.
   live-only inside the hybrid view and report zero backtest rows. A schema-v1
   generation without the evidence-mode contract disables the hybrid selector.
 - Weekly returns come only from the accepted
-  `dataPortfolio/analytics/weekly-returns` generation. Every row uses an ISO
+  `<portfolio-root>/analytics/weekly-returns` generation. Every row uses an ISO
   Monday-through-Sunday week and compounds accepted daily returns as
   `product(1 + r) - 1`. The current partial week is hidden by default; a missing
   week remains unavailable rather than becoming zero. Strategy rows default to
@@ -81,13 +81,14 @@ locked legacy stylesheet without modifying it or adding a framework.
 From the repository root, set local paths without committing them:
 
 ```powershell
+$portfolioRoot = 'C:\Tools\quant-engine\data'
 $engine = Split-Path -Parent $PWD
-$report = Join-Path $engine "dataPortfolio\reporting"
-$output = Join-Path $engine "dataPortfolio\control-panel"
+$report = Join-Path $portfolioRoot 'reporting'
+$output = Join-Path $portfolioRoot 'control-panel'
 $legacy = Join-Path $engine "_strategy_allocation_audit\model_harness_baseline\control-panel-qa\portfolio_control_panel"
-$lensRoot = Join-Path $engine "dataPortfolio\analytics\decomposition-lenses"
+$lensRoot = Join-Path $portfolioRoot 'analytics\decomposition-lenses'
 $planBundle = "<hash-bound decomposition planning bundle>"
-$weekly = Join-Path $engine "dataPortfolio\analytics\weekly-returns"
+$weekly = Join-Path $portfolioRoot 'analytics\weekly-returns'
 $freshness = "<exact hash-bound release freshness-health.json>"
 
 uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
@@ -99,8 +100,8 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
 ```
 
 The command resolves the accepted analytics roots as siblings of `reporting`:
-`dataPortfolio\analytics\decomposition` and
-`dataPortfolio\analytics\correlation`. `--decomposition-root` and
+`<portfolio-root>\analytics\decomposition` and
+`<portfolio-root>\analytics\correlation`. `--decomposition-root` and
 `--correlation-root` may override those paths for isolated tests. The panel is
 not built if any lens pointer, plan hash, schema, nine-strategy boundary,
 36-pair boundary, factor contribution identity, or correlation-one
@@ -111,7 +112,7 @@ provider-ledger generation before panel construction:
 
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_freshness.py `
-  --provider-ledger-root (Join-Path $engine "dataPortfolio\provider-ledger") `
+  --provider-ledger-root (Join-Path $portfolioRoot 'provider-ledger') `
   --provider-ledger-generation-id '<exact-generation-id>' `
   --evaluation-date (Get-Date -Format 'yyyy-MM-dd') `
   --output $freshness
@@ -291,7 +292,7 @@ the launcher browser capture against the production launcher after coordinated
 commit so acceptance proves the actual released `file://` entry point as well
 as the byte-identical staged companion.
 QA evidence,
-and advances `dataPortfolio/control-panel/CURRENT.json` only after all checks
+and advances `<portfolio-root>/control-panel/CURRENT.json` only after all checks
 pass. A failed build or QA run remains a non-authoritative candidate; a failed
 publication leaves the prior pointer unchanged. The strategy-allocation audit
 source is never edited, moved, or deleted by this workflow.

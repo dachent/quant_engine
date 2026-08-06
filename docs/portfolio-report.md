@@ -4,7 +4,8 @@
 baseline into a coverage-aware report dataset and an independent unified Excel
 workbook. It does not edit or refresh any legacy workbook. Real financial data,
 account identifiers, generated workbooks, and validation evidence remain under
-the sibling `dataPortfolio` boundary and outside Git.
+the configured portfolio-data boundary and outside Git. The current durable
+root is `C:\Tools\quant-engine\data`.
 
 ## What the report proves
 
@@ -41,9 +42,11 @@ or broker credential.
 From the repository root, with the private roots supplied explicitly:
 
 ```powershell
+$portfolioRoot = 'C:\Tools\quant-engine\data'
+
 uv run --frozen --no-sync python tools/portfolio_report.py build `
-  --baseline-root "..\dataPortfolio\baseline" `
-  --output-root "..\dataPortfolio\reporting"
+  --baseline-root (Join-Path $portfolioRoot 'baseline') `
+  --output-root (Join-Path $portfolioRoot 'reporting')
 ```
 
 The build writes a content-addressed candidate containing the canonical report
@@ -58,7 +61,7 @@ Before publication:
 
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_report.py verify `
-  --baseline-root "..\dataPortfolio\baseline" `
+  --baseline-root (Join-Path $portfolioRoot 'baseline') `
   --candidate-dir "<candidate>" `
   --excel-workbook "<candidate>\excel\portfolio-report.xlsx"
 ```
@@ -73,12 +76,12 @@ Publish only after the governing code commit and exact-SHA CI are accepted:
 
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_report.py publish `
-  --baseline-root "..\dataPortfolio\baseline" `
+  --baseline-root (Join-Path $portfolioRoot 'baseline') `
   --candidate-dir "<candidate>" `
   --excel-workbook "<candidate>\excel\portfolio-report.xlsx" `
   --xlsx-result "<candidate>\xlsx-result.json" `
   --validation-result "<candidate>\workbook-validation.json" `
-  --output-root "..\dataPortfolio\reporting"
+  --output-root (Join-Path $portfolioRoot 'reporting')
 ```
 
 Publication is immutable and advances `CURRENT.json` only after all checks

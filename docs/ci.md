@@ -94,11 +94,10 @@ product tests.
 ## Failure and recovery
 
 A failing job blocks acceptance under the project operating canon;
-`continue-on-error` is forbidden. On the current private personal GitHub Free
-plan, GitHub does not enforce that block. Pull-request results are pre-merge
-evidence only when the operator verifies all four workflows against the exact
-unchanged head SHA. A workflow triggered by a push to `main` runs after the
-mutation and is detective evidence, not prevention.
+`continue-on-error` is forbidden. Protected `main` requires the configured
+strict status checks on the exact unchanged pull-request head SHA. A workflow
+triggered by a push to `main` remains detective evidence after the mutation,
+not prevention.
 
 Keep a failed candidate on its feature branch, preserve the last accepted
 `main`, and retry only after the diagnosed input, code, lock, dependency, or
@@ -106,11 +105,10 @@ environment changes. A merged CI defect is recovered through a governed revert
 or corrective pull request. Do not rewrite history, weaken a check, expose a
 matched secret, or use a provider credential to make CI pass.
 
-`GOV-002` records the accepted Free-plan residual risk. Actions are restricted
-to selected full-SHA-pinned dependencies, default workflow permission is read,
-and workflows cannot approve pull requests. CODEOWNERS, the PR template, issue
-reopening, and the local pre-push hook are procedural or defense-in-depth—not
-protected `main` or GitHub-required checks.
+Actions are restricted to selected full-SHA-pinned dependencies, default
+workflow permission is read, and workflows cannot approve pull requests.
+CODEOWNERS, the PR template, issue reconciliation, and the local pre-push hook
+remain procedural or defense-in-depth around the server-enforced branch rule.
 
 ## Primary references
 
