@@ -1,6 +1,7 @@
 # Credential-free example only. Copy to an ignored local configuration and
-# keep all real identifiers, provider values, and absolute workstation paths out
-# of Git. Relative roots resolve from the repository worktree.
+# keep all real identifiers, provider values, and user-specific absolute paths
+# out of Git. Relative roots resolve from the repository worktree. The portfolio
+# root below is the approved non-user-specific durable workstation boundary.
 schema_version = 1
 environment = "offline"
 
@@ -18,7 +19,7 @@ schwab = "../dataSchwab"
 ibkr = "../dataIBKR"
 fidelity = "../dataFidelity"
 alpaca = "../dataAlpaca"
-portfolio = "../dataPortfolio"
+portfolio = "C:/Tools/quant-engine/data"
 restricted_identity_crosswalk = ""
 
 [credentials]

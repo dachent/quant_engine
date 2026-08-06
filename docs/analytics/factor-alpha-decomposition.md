@@ -210,16 +210,18 @@ partial set fails closed.
 With private inputs and the specification outside Git:
 
 ```powershell
+$portfolioRoot = 'C:\Tools\quant-engine\data'
+
 uv run --frozen --no-sync python tools/portfolio_decomposition.py build `
   --spec "<spec.json>" --source-root "<input-root>"
 
 uv run --frozen --no-sync python tools/portfolio_decomposition.py stage `
   --spec "<spec.json>" --source-root "<input-root>" `
-  --output-root "..\dataPortfolio\analytics"
+  --output-root (Join-Path $portfolioRoot 'analytics')
 
 uv run --frozen --no-sync python tools/portfolio_decomposition.py publish `
   --spec "<spec.json>" --source-root "<input-root>" `
-  --output-root "..\dataPortfolio\analytics"
+  --output-root (Join-Path $portfolioRoot 'analytics')
 ```
 
 `stage` creates a content-addressed candidate. `publish` re-runs the full build,

@@ -25,8 +25,10 @@ adapters, not as a collection of unrelated scripts.
 
 ## Target layout
 
-The Git worktree is `repo`. Real provider data and source specifications live in
-sibling folders outside the repository:
+The Git worktree is `repo`. Real provider data and source specifications remain
+in governed folders outside the repository. Provider roots stay beside the
+workspace; the coordinated portfolio authority uses the durable local tools
+boundary so high-churn generations are not stored in OneDrive:
 
 ```text
 _quant_engine/
@@ -39,7 +41,9 @@ _quant_engine/
   dataIBKR/
   dataFidelity/
   dataAlpaca/
-  dataPortfolio/
+
+C:\Tools\quant-engine\
+  data\
 ```
 
 The target Python workspace contains shared domain packages, provider packages,
@@ -70,11 +74,10 @@ Read these before contributing:
 
 ## Foundation status
 
-The repository uses a private personal GitHub Free account. Its pull-request,
-exact-SHA CI, CODEOWNERS, and local push controls are procedural and
-defense-in-depth; GitHub does not server-enforce protected `main` or required
-checks for this private repository. The accepted residual risk and mandatory
-reapproval triggers are recorded in the
+The repository uses protected `main`: changes require a pull request and the
+configured required checks must pass at the exact head SHA. CODEOWNERS and
+local push controls remain defense-in-depth. Historical plan limitations and
+their reapproval triggers remain recorded in the
 [Free-plan governance decision](docs/decisions/0001-github-free-main-governance.md).
 
 Interfaces described in the architecture document remain target contracts until
@@ -103,8 +106,8 @@ readiness behavior without creating an automated risk or execution subsystem.
 Private tracker and current-strategy provenance is built with the
 [portfolio provenance runbook](docs/portfolio-provenance.md). Only the generic
 validator, schemas, and synthetic tests live in Git; real specifications,
-account aliases, strategy details, hashes, and catalogs remain under the local
-`dataPortfolio` boundary.
+account aliases, strategy details, hashes, and catalogs remain under the
+configured portfolio-data boundary.
 
 The dated, read-only portfolio baseline is built with the
 [portfolio baseline runbook](docs/portfolio-baseline.md). It normalizes the

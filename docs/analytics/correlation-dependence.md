@@ -113,16 +113,18 @@ called calendar days.
 ## Build, stage, publish, and recover
 
 ```powershell
+$portfolioRoot = 'C:\Tools\quant-engine\data'
+
 uv run --frozen --no-sync python tools/portfolio_correlation.py build `
   --spec "<spec.json>" --source-root "<input-root>"
 
 uv run --frozen --no-sync python tools/portfolio_correlation.py stage `
   --spec "<spec.json>" --source-root "<input-root>" `
-  --output-root "..\dataPortfolio\analytics\correlation"
+  --output-root (Join-Path $portfolioRoot 'analytics\correlation')
 
 uv run --frozen --no-sync python tools/portfolio_correlation.py publish `
   --spec "<spec.json>" --source-root "<input-root>" `
-  --output-root "..\dataPortfolio\analytics\correlation"
+  --output-root (Join-Path $portfolioRoot 'analytics\correlation')
 ```
 
 `stage` creates a content-addressed candidate without moving authority.

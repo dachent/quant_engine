@@ -29,7 +29,9 @@ meaning and provenance.
 
 The repository worktree contains code, contracts, schemas, runbooks, and
 synthetic/redacted test fixtures. Source specifications and real provider data
-remain sibling folders outside Git:
+remain governed folders outside Git. Provider roots remain siblings of the
+worktree; the coordinated portfolio authority lives at the durable local path
+`C:\Tools\quant-engine\data`:
 
 ```text
 _quant_engine/
@@ -42,12 +44,16 @@ _quant_engine/
   dataIBKR/
   dataFidelity/
   dataAlpaca/
-  dataPortfolio/
+
+C:\Tools\quant-engine\
+  data\
 ```
 
 Packages receive these locations through configuration. They must not embed
-absolute workstation paths. External account identifiers are resolved through
-a restricted local crosswalk; canonical records use stable internal keys.
+user-specific or provider-specific absolute paths; an approved non-user-specific
+durable root may be declared by operator configuration. External account
+identifiers are resolved through a restricted local crosswalk; canonical
+records use stable internal keys.
 
 ## Target workspace
 
