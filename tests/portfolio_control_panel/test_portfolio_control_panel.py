@@ -1897,6 +1897,17 @@ def test_renderer_distinguishes_nav_presence_from_hwm_qualification() -> None:
     assert "governed HWM daily NAV is stale or incomplete" in renderer
 
 
+def test_renderer_exposes_effective_dated_strategy_version_dispositions() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "row.version_disposition" in renderer
+    assert "row.version_effective_start" in renderer
+    assert "row.design_status" in renderer
+    assert "row.backtest_status" in renderer
+    assert "row.live_boundary_status" in renderer
+    assert "row.version_compatibility_status" in renderer
+
+
 def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None:
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
 

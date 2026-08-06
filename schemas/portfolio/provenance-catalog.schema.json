@@ -13,13 +13,14 @@
     "accounts",
     "capital_pools",
     "strategies",
+    "strategy_version_catalog",
     "assignments",
     "corrections",
     "open_gaps",
     "assumptions"
   ],
   "properties": {
-    "catalog_schema_version": {"const": 1},
+    "catalog_schema_version": {"const": 2},
     "policy_version": {"const": "PORT-PERF-1"},
     "as_of_date": {"type": "string", "format": "date"},
     "acquisition_date": {"type": "string", "format": "date"},
@@ -45,6 +46,9 @@
       "minItems": 9,
       "maxItems": 9,
       "items": {"$ref": "#/$defs/strategy"}
+    },
+    "strategy_version_catalog": {
+      "$ref": "strategy-version-catalog.schema.json"
     },
     "assignments": {"type": "array"},
     "corrections": {"type": "array"},
