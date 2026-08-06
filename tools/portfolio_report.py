@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time as time_module
 from typing import Any, Final, Mapping, Sequence
 from xml.etree import ElementTree as ET
 import zipfile
@@ -43,6 +44,7 @@ from quant_engine.portfolio_ledger import (
 
 
 REPORT_SCHEMA_VERSION: Final = 1
+_CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
 BUILDER_VERSION: Final = "1.2.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
@@ -165,10 +167,16 @@ def _canonical_json_array_bytes(value: Sequence[Mapping[str, Any]]) -> bytes:
 
 
 def _baseline(root: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
-    try:
-        pointer = read_current(root)
-    except (OSError, ValueError, RuntimeError) as exc:
-        raise ReportValidationError("baseline pointer is not accepted") from exc
+    for attempt in range(len(_CURRENT_READ_RETRY_DELAYS) + 1):
+        try:
+            pointer = read_current(root)
+            break
+        except OSError as exc:
+            if attempt == len(_CURRENT_READ_RETRY_DELAYS):
+                raise ReportValidationError("baseline pointer is not accepted") from exc
+            time_module.sleep(_CURRENT_READ_RETRY_DELAYS[attempt])
+        except (ValueError, RuntimeError) as exc:
+            raise ReportValidationError("baseline pointer is not accepted") from exc
     catalog_path = (
         root / "generations" / pointer.generation_id / "portfolio-baseline.json"
     )

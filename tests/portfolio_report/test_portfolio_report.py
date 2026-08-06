@@ -685,6 +685,29 @@ def _published_baseline(tmp_path: Path, catalog: dict[str, Any] | None = None) -
     return root
 
 
+def test_baseline_retries_transient_pointer_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _published_baseline(tmp_path)
+    attempts = 0
+
+    def flaky_read_current(path: Path) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("transient provider lock")
+        return read_current(path)
+
+    monkeypatch.setattr(reporter, "read_current", flaky_read_current)
+    monkeypatch.setattr(reporter.time_module, "sleep", lambda _seconds: None)
+
+    catalog, identity, _path = reporter._baseline(root)
+
+    assert attempts == 3
+    assert identity["generation_id"] == read_current(root).generation_id
+    assert catalog["baseline_schema_version"] == 1
+
+
 def test_report_data_has_hand_checked_twr_and_coverage_failures(tmp_path: Path) -> None:
     baseline_root = _published_baseline(tmp_path)
     report, first_bytes, _ = reporter.build_report_data(baseline_root)
