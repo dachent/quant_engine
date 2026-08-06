@@ -5,8 +5,8 @@ into interchangeable evidence:
 
 - the Developer API is the preferred recurring source for current balances and
   positions when an authenticated local client is available;
-- reviewed Web Contract Harvester responses provide the contract evidence for
-  historical daily balances, all-time transactions, and a bounded
+- reviewed Web Contract Harvester capture outputs are the historical fact
+  authority for daily balances and all-time transactions, and provide a bounded
   current-position snapshot;
 - frozen manual exports and the legacy workbook are reconciliation and semantic
   references only.
