@@ -867,13 +867,10 @@ def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
             or as_of_date > latest_by_account[account_id]
         ):
             latest_by_account[account_id] = as_of_date
-    current_rows = [
-        item
-        for item in rows
-        if item.get("as_of_date") == latest_by_account[str(item.get("account_id"))]
-    ]
     accepted: list[dict[str, Any]] = []
-    for item in current_rows:
+    for item in rows:
+        account_id = _text(item.get("account_id"), "position.account_id")
+        as_of_date = _text(item.get("as_of_date"), "position.as_of_date")
         amount = _object(item.get("market_value"), "position.market_value")
         status = _text(amount.get("status"), "position.market_value.status")
         accepted.append(
@@ -888,7 +885,11 @@ def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 ),
                 "quantity": item.get("quantity"),
                 "security_id": item.get("security_id"),
-                "snapshot_status": "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT",
+                "snapshot_status": (
+                    "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
+                    if as_of_date == latest_by_account[account_id]
+                    else "HISTORICAL_ACCEPTED_ACCOUNT_SNAPSHOT"
+                ),
                 "status": (
                     "AVAILABLE_UNMAPPED"
                     if item.get("mapping_status") == "UNMAPPED"
@@ -900,7 +901,11 @@ def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
         )
     return sorted(
         accepted,
-        key=lambda item: (str(item["account_id"]), str(item["security_id"])),
+        key=lambda item: (
+            str(item["account_id"]),
+            str(item["as_of_date"]),
+            str(item["security_id"]),
+        ),
     )
 
 
