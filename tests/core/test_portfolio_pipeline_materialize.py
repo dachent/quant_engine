@@ -497,6 +497,12 @@ def test_generated_semantic_command_declares_exact_gate_file(
     )
 
     nodes = {node["node_id"]: node for node in spec["nodes"]}
+    assert nodes["build-workbook"]["retry_limit"] == 1
+    assert all(
+        node["retry_limit"] == 0
+        for node_id, node in nodes.items()
+        if node.get("kind") == "COMMAND" and node_id != "build-workbook"
+    )
     vertical = json.loads(
         Path(json.loads(recipe_path.read_text())["vertical_recipe"]["path"]).read_text()
     )

@@ -216,10 +216,12 @@ new pipeline identity, every declared command output must be absent until its
 receipt-producing command runs. Release generations must be under the declared
 output of their assigned stage command, and every release target must be
 assigned to exactly one stage. Source commands write beneath an explicit
-immutable `runs/<run-id>` boundary. All contract commands use zero automatic
-retries; an external-read exception or nonzero result therefore cannot become
-an unobserved retry. Completed receipts provide resumability for an unchanged
-specification.
+immutable `runs/<run-id>` boundary. Provider reads and all non-workbook
+commands use zero automatic retries. The local, idempotent workbook stage
+permits one declared resume attempt so an accepted desktop-Excel result can be
+validated after a sandbox-to-desktop handoff. A failed attempt remains
+immutable evidence; no provider request is repeated. Completed receipts
+provide resumability for an unchanged specification.
 
 The graph is strictly source acquisitions → AuthoritySnapshot → ledger →
 baseline → attribution → analytics → report → workbook → panel → post-build

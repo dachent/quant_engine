@@ -698,6 +698,7 @@ def _command(
     args: Sequence[str],
     reads: Sequence[Path],
     writes: Sequence[Path],
+    retry_limit: int = 0,
     timeout_seconds: int = 3600,
 ) -> dict[str, Any]:
     return {
@@ -715,7 +716,7 @@ def _command(
         "kind": "COMMAND",
         "node_id": node_id,
         "request_identity": None,
-        "retry_limit": 0,
+        "retry_limit": retry_limit,
         "timeout_seconds": timeout_seconds,
     }
 
@@ -911,6 +912,7 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
                 args=args,
                 reads=reads,
                 writes=stage_writes[role],
+                retry_limit=1 if role == "workbook" else 0,
             )
         )
         release_role = next(
