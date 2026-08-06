@@ -1371,6 +1371,10 @@ def test_freshness_health_is_visible_with_dates_and_reason(
             "escalation_required": True,
             "evaluated_on": "2026-07-30",
             "fact_type": "nav",
+            "expected_interval_days": 1,
+            "freshness_calendar": "CALENDAR_DAY",
+            "freshness_mode": "RECURRING",
+            "grace_days": 0,
             "item": "synthetic:account-internal-1:nav",
             "known_gap": (
                 "next expected 2026-07-29; expected refresh is late but not yet stale"
@@ -1379,13 +1383,16 @@ def test_freshness_health_is_visible_with_dates_and_reason(
             "next_expected_date": "2026-07-29",
             "policy_id": "daily-current",
             "provider_id": "synthetic",
+            "reconciled_on": "2026-07-30",
             "reason": "expected refresh is late but not yet stale",
             "revision_state": "REVISED",
+            "stale_after_days": 5,
             "status": "LATE",
             "subject_id": "account-internal-1",
             "value": "2026-07-28",
         }
     ]
+    assert freshness[0] in data["blocking_items"]
 
 
 def test_schema_v3_nonrequired_stale_lane_does_not_block_panel(
@@ -1436,6 +1443,12 @@ def test_schema_v3_nonrequired_stale_lane_does_not_block_panel(
     assert rows[0]["status"] == "STALE"
     assert rows[0]["blocks_current_consumers"] is False
     assert rows[0]["escalation_required"] is False
+    assert rows[0]["freshness_mode"] == "RECURRING"
+    assert rows[0]["freshness_calendar"] == "CALENDAR_DAY"
+    assert rows[0]["expected_interval_days"] == 1
+    assert rows[0]["grace_days"] == 2
+    assert rows[0]["stale_after_days"] == 5
+    assert rows[0]["reconciled_on"] == "2026-08-03"
 
 
 def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -> None:
@@ -2047,7 +2060,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 12" in renderer
+    assert "data.panel_schema_version !== 13" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -2293,3 +2306,6 @@ def test_context_and_material_exceptions_have_operator_routes() -> None:
     assert 'row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE"' in renderer
     assert "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH" in renderer
     assert 'id="remediation-table"' in template
+    assert "TTL / reconciled" in renderer
+    assert "Escalation required" in renderer
+    assert 'item.category === "DATA_FRESHNESS"' in renderer
