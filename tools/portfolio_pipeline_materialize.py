@@ -840,6 +840,18 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
         }
     )
 
+    report_data_file = next(
+        row
+        for row in recipe["expected_generations"]["report"]["files"]
+        if row["relative_path"] == "portfolio-report-data.json"
+    )
+    report_candidate = (
+        output_root
+        / "stages"
+        / "report-candidate"
+        / "candidates"
+        / report_data_file["sha256"]
+    )
     stage_writes = {
         "ledger": [
             output_root / "stages" / "ledger",
@@ -858,7 +870,10 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
             output_root / "stage-results" / "analytics.json",
         ],
         "report": [
-            output_root / "stages" / "report-candidate",
+            report_candidate / "portfolio-report-data.json",
+            report_candidate / "portfolio-report.xlsx",
+            report_candidate / "workbook-contract.json",
+            report_candidate / "xlsx-job.json",
             output_root / "stage-results" / "report.json",
         ],
         "workbook": [

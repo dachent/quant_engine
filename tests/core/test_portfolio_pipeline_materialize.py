@@ -534,6 +534,23 @@ def test_generated_semantic_command_declares_exact_gate_file(
             str(output_root / "stages" / "baseline")
             in nodes[f"build-{role}"]["declared_reads"]
         )
+    report_id = next(
+        row["sha256"]
+        for row in nodes["report-generation"]["files"]
+        if row["relative_path"] == "portfolio-report-data.json"
+    )
+    report_candidate = (
+        output_root / "stages" / "report-candidate" / "candidates" / report_id
+    )
+    assert str(output_root / "stages" / "report-candidate") not in nodes[
+        "build-report"
+    ]["declared_writes"]
+    assert {
+        str(report_candidate / "portfolio-report-data.json"),
+        str(report_candidate / "portfolio-report.xlsx"),
+        str(report_candidate / "workbook-contract.json"),
+        str(report_candidate / "xlsx-job.json"),
+    } <= set(nodes["build-report"]["declared_writes"])
     assert (
         str(output_root / "stages" / "report") in nodes["build-panel"]["declared_reads"]
     )
