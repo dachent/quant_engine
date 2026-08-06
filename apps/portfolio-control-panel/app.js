@@ -789,14 +789,19 @@
     const cleanFacts = factRows.filter((row) => row.status === "COMPLETE_WITHIN_DECLARED_BOUNDARY").length;
     const dispositionText = (value) => value && typeof value === "object" ? [value.code, value.effect].filter(Boolean).join(": ") : String(value || "Disposition not recorded");
     const observedWindow = (row) => row.observed_start || row.observed_end ? `${formatDate(row.observed_start)}–${formatDate(row.observed_end)}` : "Boundary not declared / no accepted observation";
+    const freshnessPolicy = (row) => {
+      if (row.category !== "DATA_FRESHNESS") return "Not a recurring freshness assessment";
+      if (row.freshness_mode === "FINITE") return `${row.policy_id} · finite history · reconciled ${formatDate(row.reconciled_on)}`;
+      return `${row.policy_id} · ${humanStatus(row.freshness_calendar)} · every ${integer.format(row.expected_interval_days)} day(s) · grace ${integer.format(row.grace_days)} · stale after ${integer.format(row.stale_after_days)} · reconciled ${formatDate(row.reconciled_on)}`;
+    };
     renderKpis("#data-kpis", [
       ["Report generation", data.meta.report_generation_id.slice(0, 12), "Accepted local authority"],
       ["Baseline generation", data.meta.baseline_generation_id.slice(0, 12), "Hash-linked input"],
       ["Fact status", `${cleanFacts}/${factRows.length} clean`, `${factRows.length - cleanFacts} carry an explicit retained disposition`, cleanFacts === factRows.length ? "positive" : "warning"],
       ["External connections", "0", "Direct-file local operation", "reserve"],
     ]);
-    const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${statusText(row.status)}</td><td>${safe(observedWindow(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(row.item === "full-systematic-hwm-unavailable" ? currencyExact(row.value) : row.value ?? "No accepted value")}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap || "No known gap within the declared boundary")}</td></tr>`);
-    $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status"], ["Observation window / Freshness evaluated"], ["Evidence / resolution authority"], ["Value"], ["Disposition"], ["Known gap / missing interval"]], coverageRows);
+    const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${statusText(row.status)}${row.escalation_required ? '<span class="cell-secondary">Escalation required</span>' : ""}</td><td>${safe(observedWindow(row))}</td><td>${safe(freshnessPolicy(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(row.item === "full-systematic-hwm-unavailable" ? currencyExact(row.value) : row.value ?? "No accepted value")}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap || "No known gap within the declared boundary")}</td></tr>`);
+    $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status / escalation"], ["Observation window / Freshness evaluated"], ["TTL / reconciled"], ["Evidence / resolution authority"], ["Value"], ["Disposition"], ["Known gap / missing interval"]], coverageRows);
     $("#validation-cards").innerHTML = `<div class="validation-card"><div><strong>Portfolio report</strong><span>${safe(data.meta.report_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Factor / alpha</strong><span>${safe(data.meta.decomposition_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Dependence</strong><span>${safe(data.meta.correlation_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Frozen candidate appendix</strong><span>${safe(data.candidate_appendix.as_of_date)} · hash locked</span></div><div class="validation-score">FROZEN</div></div><div class="callout callout-neutral">Portfolio, analytics, and appendix generations retain separate authority. Candidate rows never enter current strategy totals.</div>`;
     const sourceRows = data.provenance.map((row) => `<tr><td><span class="cell-primary">${safe(row.artifact)}</span><span class="cell-secondary">${safe(row.schema)}</span></td><td>${formatDate(row.as_of_date)}</td><td><code>${safe(row.sha256.slice(0, 16))}…</code></td></tr>`);
     $("#source-table").innerHTML = tableMarkup([["Artifact / schema"], ["As of"], ["SHA-256"]], sourceRows);
@@ -807,7 +812,9 @@
       "historical-strategy-attribution-unresolved": ["risk", "Adjudicate historical General intervals before complete account-by-strategy performance"],
     };
     const remediationRows = data.blocking_items.map((item) => {
-      const [view, action] = routes[item.item] || ["data", "Resolve the declared coverage exception in its producing generation"];
+      const [view, action] = item.category === "DATA_FRESHNESS"
+        ? ["data", `Refresh or formally disposition the required ${humanStatus(item.fact_type)} evidence under ${item.policy_id}; reconciled ${formatDate(item.reconciled_on)}`]
+        : routes[item.item] || ["data", "Resolve the declared coverage exception in its producing generation"];
       const focus = view === "data" ? ` data-focus-coverage="${safe(item.item)}"` : "";
       return `<tr><td><span class="cell-primary">${safe(humanStatus(item.item))}</span><span class="cell-secondary">${safe(item.known_gap || "No further detail recorded")}</span></td><td>${statusText(item.status)}</td><td>${safe(action)}</td><td><button type="button" class="text-action" data-open-view="${safe(view)}"${focus} aria-label="Open ${safe(VIEW_TITLES[view])} evidence for ${safe(humanStatus(item.item))}">Open ${safe(VIEW_TITLES[view])} →</button></td></tr>`;
     });
@@ -937,7 +944,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 12) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 13) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
