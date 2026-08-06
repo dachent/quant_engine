@@ -5,11 +5,13 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+  const moneyExact = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const integer = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
   const safe = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
   const domToken = (value) => String(value || "item").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "item";
   const number = (value) => value == null || value === "" || Number.isNaN(Number(value)) ? null : Number(value);
   const currency = (value) => number(value) == null ? "—" : money.format(Number(value));
+  const currencyExact = (value) => number(value) == null ? "Not available" : moneyExact.format(Number(value));
   const pct = (value, digits = 1) => number(value) == null ? "—" : `${(Number(value) * 100).toFixed(digits)}%`;
   const decimal = (value, digits = 3) => number(value) == null ? "—" : Number(value).toFixed(digits);
   const formatDate = (value) => {
@@ -69,7 +71,7 @@
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
   const emptyRow = (columns, message = "No matching rows") => `<tr><td colspan="${columns}" class="cell-secondary">${safe(message)}</td></tr>`;
-  const tableMarkup = (headers, rows) => `<thead><tr>${headers.map(([label, cls = ""]) => `<th class="${cls}">${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
+  const tableMarkup = (headers, rows) => `<thead><tr>${headers.map(([label, cls = ""]) => `<th scope="col" class="${cls}">${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
   const strategyByName = (name) => data.strategies.find((row) => row.strategy_name === name);
   const providerName = (providerId) => ({
     alpaca: "Alpaca",
@@ -106,7 +108,7 @@
     return `${primary}${accountQualification}${lineage}`;
   };
   const hwmQualification = (row) => {
-    if (row.hwm_scope === "EXCLUDED_DE_MINIMIS") return { status: "EXCLUDED_DE_MINIMIS", note: "Explicit policy exclusion; not a computed size threshold" };
+    if (row.hwm_scope === "EXCLUDED_DE_MINIMIS") return { status: "EXCLUDED_DE_MINIMIS", note: row.hwm_exclusion_reason || "Explicit policy exclusion; not a computed size threshold" };
     if (row.nav_status !== "AVAILABLE") return { status: "UNAVAILABLE_MISSING_DAILY_NAV", note: "No daily NAV evidence is present" };
     if (row.hwm_evidence_status !== "ACCEPTED") return { status: "UNAVAILABLE_UNACCEPTED_EVIDENCE", note: "Daily NAV evidence is present but its evidence layer is not admitted for HWM" };
     if (row.hwm_freshness_status === "BLOCKED") return { status: "UNAVAILABLE_STALE_FOR_HWM", note: `Daily NAV evidence is accepted but ${String(row.hwm_freshness_state || "stale").toLowerCase()} for HWM` };
@@ -121,6 +123,7 @@
     const layer = row.nav_evidence_layer === "PROVIDER_LIVE" ? "provider-live" : "account-live";
     return `${providerName(sourceProvider)} ${layer}`;
   };
+  const hwmExclusionNote = () => (data.hwm_summary.excluded_details || []).map((item) => `${item.strategy_name}: ${currencyExact(item.current_value_usd)} · ${item.reason}`).join(" · ") || "No policy exclusions";
   const VIEW_TITLES = {
     command: "Portfolio",
     capital: "Allocation & lifecycle",
@@ -169,7 +172,7 @@
       ["Total liquid", currency(data.capital.total_liquid), "Systematic plus reserve"],
       ["Systematic capital", currency(data.capital.systematic), "Subject to the accepted HWM policy"],
       ["Reserve", currency(data.capital.reserve), "Zero strategy risk budget", "reserve"],
-      ["Governed NAV coverage", pct(data.advisory.nav_coverage), "Composer is the only explicit policy exclusion from the HWM denominator", "warning"],
+      ["Governed NAV coverage", pct(data.advisory.nav_coverage), `${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}; ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered. ${hwmExclusionNote()}`, "warning"],
     ]);
 
     const gateRows = data.gates.map((gate) => {
@@ -315,16 +318,16 @@
     const acceptedHwmEvidence = includedHwm.filter(({ qualification }) => qualification.status === "AVAILABLE_HWM_QUALIFIED").map(({ row }) => row);
     renderKpis("#risk-kpis", [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Accepted adverse scenario", "danger"],
-      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${unavailableHwm.length} included perimeter sleeve${unavailableHwm.length === 1 ? " is" : "s are"} not HWM-qualified`, unavailableHwm.length ? "danger" : "positive"],
+      ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${currencyExact(data.hwm_summary.uncovered_value_usd)} across ${unavailableHwm.length} unqualified included sleeve${unavailableHwm.length === 1 ? "" : "s"}; no numeric HWM is calculated while unavailable`, unavailableHwm.length ? "danger" : "positive"],
       ["TWR available", `${data.counts.twr_available}/${data.counts.twr_rows}`, "Account-strategy segments", "warning"],
       ["MWR available", `${data.counts.mwr_available}/${data.counts.twr_rows}`, "Complete flows required", data.counts.mwr_available ? "positive" : "danger"],
     ]);
     const stress = Number(data.advisory.correlation_one_stress);
     const passes = stress <= Number(data.advisory.hwm_limit);
     $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">Current portfolio</div><div class="scenario-track"><span class="scenario-limit" aria-hidden="true"></span><span class="scenario-fill ${passes ? "pass" : ""}" style="width:${Math.min(100, stress / 0.4 * 100)}%"></span></div><div class="scenario-value ${passes ? "" : "status-text danger"}">${pct(stress)}</div></div><div class="callout callout-danger">Stress exceeds the 15% HWM boundary. This is advisory evidence, not a liquidation instruction.</div>`;
-    const unavailableHwmSummary = unavailableHwm.map(({ row, qualification }) => `${row.strategy_name}: ${qualification.note}`).join(" · ");
+    const unavailableHwmSummary = (data.hwm_summary.uncovered_details || []).map((item) => `${item.strategy_name}: ${currencyExact(item.current_value_usd)} · ${humanStatus(item.qualification_gap)} · last accepted ${formatDate(item.last_accepted_date)} · ${item.freshness_reason || "No freshness reason recorded"}`).join(" · ");
     const acceptedHwmSummary = acceptedHwmEvidence.map((row) => `${row.strategy_name}: ${integer.format(row.nav_return_observations)} ${hwmEvidenceLabel(row)} return observations from ${formatDate(row.nav_observed_start)} through ${formatDate(row.nav_observed_end)}`).join(" · ");
-    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Governed systematic return / NAV evidence</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has a qualified account-live or provider-live return path."} ${excludedNav.length ? `${safe(excludedNav.join(" · "))} remain reported but are excluded by explicit de-minimis policy.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)} of the governed HWM perimeter. ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No governed return/NAV evidence currently qualifies for HWM."} Account NAV observations and canonical account-live return paths remain separately labeled; missing NAV and FX are not interpolated.</div>`;
+    $("#hwm-status").innerHTML = `<div class="validation-card"><div><strong>Governed systematic return / NAV evidence</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has a qualified account-live or provider-live return path."} ${excludedNav.length ? `${safe(hwmExclusionNote())}.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)}: ${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}, with ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered and ${currencyExact(data.hwm_summary.excluded_value_usd)} visibly excluded. ${unavailableHwm.length ? "The numerical full-systematic HWM is not calculated while any included sleeve is unqualified." : "The governed perimeter is fully qualified."} ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No governed return/NAV evidence currently qualifies for HWM."} Account NAV observations and canonical account-live return paths remain separately labeled; missing NAV and FX are not interpolated.</div>`;
     renderPerformanceComparison();
     const contextualPerformance = data.performance.filter(matchesContext);
     const mappedPerformance = contextualPerformance.filter((row) => row.strategy_name);
@@ -744,14 +747,18 @@
   }
 
   function renderData() {
+    const factRows = data.coverage.filter((row) => row.category === "FACT_COVERAGE");
+    const cleanFacts = factRows.filter((row) => row.status === "COMPLETE_WITHIN_DECLARED_BOUNDARY").length;
+    const dispositionText = (value) => value && typeof value === "object" ? [value.code, value.effect].filter(Boolean).join(": ") : String(value || "Disposition not recorded");
+    const observedWindow = (row) => row.observed_start || row.observed_end ? `${formatDate(row.observed_start)}–${formatDate(row.observed_end)}` : "Boundary not declared / no accepted observation";
     renderKpis("#data-kpis", [
       ["Report generation", data.meta.report_generation_id.slice(0, 12), "Accepted local authority"],
       ["Baseline generation", data.meta.baseline_generation_id.slice(0, 12), "Hash-linked input"],
-      ["Coverage exceptions", String(data.blocking_items.length), "Visible and blocking where declared", "warning"],
+      ["Fact status", `${cleanFacts}/${factRows.length} clean`, `${factRows.length - cleanFacts} carry an explicit retained disposition`, cleanFacts === factRows.length ? "positive" : "warning"],
       ["External connections", "0", "Direct-file local operation", "reserve"],
     ]);
-    const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><td><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></td><td>${statusText(row.status)}</td><td>${safe(row.value ?? "—")}</td><td>${formatDate(row.evaluated_on)}</td><td>${safe(row.known_gap || "—")}</td></tr>`);
-    $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status"], ["Value"], ["Freshness evaluated"], ["Known gap"]], coverageRows);
+    const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${statusText(row.status)}</td><td>${safe(observedWindow(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(row.item === "full-systematic-hwm-unavailable" ? currencyExact(row.value) : row.value ?? "No accepted value")}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap || "No known gap within the declared boundary")}</td></tr>`);
+    $("#coverage-table").innerHTML = tableMarkup([["Fact / category"], ["Status"], ["Observation window / Freshness evaluated"], ["Evidence / resolution authority"], ["Value"], ["Disposition"], ["Known gap / missing interval"]], coverageRows);
     $("#validation-cards").innerHTML = `<div class="validation-card"><div><strong>Portfolio report</strong><span>${safe(data.meta.report_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Factor / alpha</strong><span>${safe(data.meta.decomposition_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Dependence</strong><span>${safe(data.meta.correlation_generation_id.slice(0, 12))}…</span></div><div class="validation-score">PUBLISHED</div></div><div class="validation-card"><div><strong>Frozen candidate appendix</strong><span>${safe(data.candidate_appendix.as_of_date)} · hash locked</span></div><div class="validation-score">FROZEN</div></div><div class="callout callout-neutral">Portfolio, analytics, and appendix generations retain separate authority. Candidate rows never enter current strategy totals.</div>`;
     const sourceRows = data.provenance.map((row) => `<tr><td><span class="cell-primary">${safe(row.artifact)}</span><span class="cell-secondary">${safe(row.schema)}</span></td><td>${formatDate(row.as_of_date)}</td><td><code>${safe(row.sha256.slice(0, 16))}…</code></td></tr>`);
     $("#source-table").innerHTML = tableMarkup([["Artifact / schema"], ["As of"], ["SHA-256"]], sourceRows);
@@ -892,7 +899,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 9) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 10) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;

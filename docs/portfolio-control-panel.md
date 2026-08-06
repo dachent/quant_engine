@@ -9,7 +9,8 @@ without preserving stale calculations or hard-coded operator conclusions.
 - Current accounts, allocations, strategies, positions, performance, costs,
   gaps, coverage, reconciliation, stress, and readiness come from the current
   accepted `<portfolio-root>/reporting` generation. Material HWM coverage may also
-  consume a hash-verified `ACCOUNT_LIVE` provider overlay under `PORT-HWM-2`. A
+  consume a hash-verified account- or provider-live overlay under `PORT-HWM-3`.
+  HWM freshness is evaluated on the lane admitted for that strategy. A
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
@@ -25,8 +26,9 @@ without preserving stale calculations or hard-coded operator conclusions.
   to undisclosed MPI production behavior. Dynamic smoothness selection uses
   training evidence only, reports a sealed holdout, and displays the same-factor
   static benchmark beside the effective-dated exposure path.
-- The material HWM perimeter is explicit: Composer remains visible in capital
-  reporting but is excluded de minimis; Robuxio uses accepted Matrixport
+- The material HWM perimeter is explicit: Composer and the $0.19 EchoTrade
+  sleeve remain visible in capital reporting but are separately excluded de
+  minimis with effective dates and reasons; Robuxio uses accepted Matrixport
   account NAV and Volatis uses accepted Quantbase account value reconciled to
   cash additions. Every other current systematic strategy remains included.
 - The provider-custodied account paths supply sleeve TWR, cumulative return,
@@ -62,8 +64,11 @@ without preserving stale calculations or hard-coded operator conclusions.
   candidate, authorize diligence, or allocate capital.
 - The application uses embedded local data and relative assets. It contains no
   network, provider, broker, order, deployment, or live-refresh path.
-- Missing or unmapped positions, FX, flows, NAV, mappings, costs, or performance remain
-  `FAILED`, `PARTIAL`, `UNAVAILABLE`, or `UNMAPPED`.
+- Missing or unmapped positions, FX, flows, NAV, mappings, costs, or performance
+  remain `FAILED`, `PARTIAL`, `UNAVAILABLE`, or `UNMAPPED`. A provider package
+  date or the first/last observed event never substitutes for a fact-specific
+  completeness boundary; where that boundary is absent, Data health says so
+  and retains the named authority and disposition.
 - The accepted portfolio inputs resolve to governed private source runs. The
   original external tracker and allocation roots have completed verified
   cutover and are not runtime dependencies.
