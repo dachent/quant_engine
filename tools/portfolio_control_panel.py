@@ -38,8 +38,8 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-PANEL_SCHEMA_VERSION: Final = 12
-BUILDER_VERSION: Final = "2.3.0"
+PANEL_SCHEMA_VERSION: Final = 13
+BUILDER_VERSION: Final = "2.4.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -451,6 +451,10 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
                 "escalation_required": item["escalation_required"],
                 "evaluated_on": as_of,
                 "fact_type": fact_type,
+                "freshness_calendar": policy.calendar.value,
+                "freshness_mode": policy.mode.value,
+                "expected_interval_days": policy.expected_interval_days,
+                "grace_days": policy.grace_days,
                 "item": (
                     f"{provider_id}:{subject_id}:{fact_type}"
                     if schema_version == 2
@@ -463,9 +467,11 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
                 "next_expected_date": next_expected,
                 "policy_id": policy_id,
                 "provider_id": provider_id,
+                "reconciled_on": as_of,
                 "reason": reason,
                 "revision_state": revision_state,
                 "status": state,
+                "stale_after_days": policy.stale_after_days,
                 "subject_id": subject_id,
                 "value": last,
                 **(
@@ -2319,8 +2325,14 @@ def _panel_data(
     blocking_items = [
         dict(row)
         for row in coverage
-        if row.get("category") == "RECONCILIATION_EXCEPTION"
-        and row.get("status") != "PASS"
+        if (
+            row.get("category") == "RECONCILIATION_EXCEPTION"
+            and row.get("status") != "PASS"
+        )
+        or (
+            row.get("category") == "DATA_FRESHNESS"
+            and row.get("escalation_required") is True
+        )
     ]
     providers = _objects(legacy.get("providers"), "legacy.providers")
     allowed_candidate_fields = (

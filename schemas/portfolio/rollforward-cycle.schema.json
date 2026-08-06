@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/rollforward-cycle.schema.json",
+  "title": "Bounded manual portfolio rollforward cycle receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["attempt_policy", "cycle_id", "cycle_schema_version", "dated_cycle_evidence", "evaluation_date", "freshness", "notification_receipt", "pointer_effects", "provider_ledger", "provider_read_plan", "recomputation", "status"],
+  "properties": {
+    "attempt_policy": {"type": "object"},
+    "cycle_id": {"$ref": "#/$defs/hash"},
+    "cycle_schema_version": {"const": 1},
+    "dated_cycle_evidence": {"type": "object", "properties": {"status": {"const": "SECOND_DATED_MANUAL_CYCLE_RECORDED"}}},
+    "evaluation_date": {"type": "string", "format": "date"},
+    "freshness": {"type": "object"},
+    "notification_receipt": {"type": "object", "properties": {"external_notification_sent": {"const": false}, "status": {"const": "RECORDED_FOR_NEXT_PANEL_GENERATION"}}},
+    "pointer_effects": {"type": "object", "properties": {"advanced": {"const": false}}},
+    "provider_ledger": {"type": "object"},
+    "provider_read_plan": {"type": "array", "items": {"type": "object", "properties": {"retry_limit": {"const": 0}, "status": {"const": "NOT_AUTHORIZED_NOT_EXECUTED"}}}},
+    "recomputation": {"type": "object"},
+    "status": {"const": "PASS_WITH_RETAINED_ESCALATIONS"}
+  },
+  "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}
