@@ -34,9 +34,9 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-ANALYTICS_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.7.0"
-METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-2"
+ANALYTICS_SCHEMA_VERSION: Final = 2
+BUILDER_VERSION: Final = "1.8.0"
+METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-3"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
 ANALYSIS_LENSES: Final = {
     "ECONOMIC_FACTOR",
@@ -99,6 +99,14 @@ class FactorDefinition:
     factor_id: str
     column: str
     return_type: str
+    economic_family: str | None = None
+    effective_start: date | None = None
+    effective_end: date | None = None
+    raw_orthogonal: bool | None = None
+    redundancy_policy: str | None = None
+    return_source_id: str | None = None
+    selection_rationale: str | None = None
+    source_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -273,14 +281,73 @@ def _source_definition(value: object, name: str) -> SourceDefinition:
 
 def _factor_definition(value: Mapping[str, Any], index: int) -> FactorDefinition:
     name = f"factor_source.factors[{index}]"
-    _strict_keys(value, {"column", "factor_id", "return_type"}, name)
+    base_keys = {"column", "factor_id", "return_type"}
+    governance_keys = {
+        "economic_family",
+        "effective_end",
+        "effective_start",
+        "raw_orthogonal",
+        "redundancy_policy",
+        "return_source_id",
+        "selection_rationale",
+        "source_id",
+    }
+    if set(value) != base_keys:
+        _strict_keys(value, base_keys | governance_keys, name)
     return_type = _text(value["return_type"], f"{name}.return_type")
     if return_type not in RETURN_TYPES:
         raise DecompositionError(f"{name}.return_type is unsupported")
+    raw_orthogonal = value.get("raw_orthogonal")
+    if raw_orthogonal is not None and not isinstance(raw_orthogonal, bool):
+        raise DecompositionError(f"{name}.raw_orthogonal must be boolean")
+    effective_start = (
+        None
+        if value.get("effective_start") is None
+        else _day(value["effective_start"], f"{name}.effective_start")
+    )
+    effective_end = (
+        None
+        if value.get("effective_end") is None
+        else _day(value["effective_end"], f"{name}.effective_end")
+    )
+    if (
+        effective_start is not None
+        and effective_end is not None
+        and effective_start > effective_end
+    ):
+        raise DecompositionError(f"{name} effective interval is reversed")
     return FactorDefinition(
         factor_id=_text(value["factor_id"], f"{name}.factor_id"),
         column=_text(value["column"], f"{name}.column"),
         return_type=return_type,
+        economic_family=(
+            None
+            if value.get("economic_family") is None
+            else _text(value["economic_family"], f"{name}.economic_family")
+        ),
+        effective_start=effective_start,
+        effective_end=effective_end,
+        raw_orthogonal=raw_orthogonal,
+        redundancy_policy=(
+            None
+            if value.get("redundancy_policy") is None
+            else _text(value["redundancy_policy"], f"{name}.redundancy_policy")
+        ),
+        return_source_id=(
+            None
+            if value.get("return_source_id") is None
+            else _text(value["return_source_id"], f"{name}.return_source_id")
+        ),
+        selection_rationale=(
+            None
+            if value.get("selection_rationale") is None
+            else _text(value["selection_rationale"], f"{name}.selection_rationale")
+        ),
+        source_id=(
+            None
+            if value.get("source_id") is None
+            else _text(value["source_id"], f"{name}.source_id")
+        ),
     )
 
 
@@ -1147,20 +1214,144 @@ def _cv_score(
     )
 
 
-def _classical_confidence(
+def _newey_west_lag(observation_count: int) -> int:
+    """Return the disclosed Newey-West automatic lag, bounded to observed data."""
+    if observation_count <= 1:
+        return 0
+    proposed = int(math.floor(4.0 * (observation_count / 100.0) ** (2.0 / 9.0)))
+    return min(max(proposed, 0), observation_count - 1)
+
+
+def _newey_west_standard_errors(
+    design: FloatArray, residual: FloatArray, lag: int
+) -> FloatArray:
+    observation_count, parameter_count = design.shape
+    if lag < 0 or lag >= observation_count:
+        raise DecompositionError("Newey-West lag is outside the observed sample")
+    bread = np.linalg.inv(design.T @ design)
+    meat = np.zeros((parameter_count, parameter_count), dtype=np.float64)
+    for index in range(observation_count):
+        vector = design[index]
+        meat += residual[index] ** 2 * np.outer(vector, vector)
+    for offset in range(1, lag + 1):
+        weight = 1.0 - offset / (lag + 1.0)
+        cross = np.zeros_like(meat)
+        for index in range(offset, observation_count):
+            cross += (
+                residual[index]
+                * residual[index - offset]
+                * np.outer(design[index], design[index - offset])
+            )
+        meat += weight * (cross + cross.T)
+    finite_sample_scale = observation_count / (observation_count - parameter_count)
+    covariance = finite_sample_scale * bread @ meat @ bread
+    covariance = 0.5 * (covariance + covariance.T)
+    return np.sqrt(np.maximum(np.diag(covariance), 0.0)).astype(np.float64)
+
+
+def _hac_inference(
     matrix: FloatArray, target: FloatArray, fit: Fit, ridge: float, constraint: str
-) -> tuple[str, FloatArray | None]:
+) -> tuple[dict[str, object], FloatArray | None]:
+    policy = "DESCRIPTIVE_HAC_ONLY_NO_P_VALUES_OR_CONFIDENCE_INTERVALS"
+    unavailable: dict[str, object] = {
+        "default_lag": None,
+        "finite_sample_scaling": "N_OVER_N_MINUS_K",
+        "lag_rule": "FLOOR_4_TIMES_N_OVER_100_POWER_2_OVER_9",
+        "lag_sensitivity": [],
+        "policy": policy,
+        "post_selection_caveat": (
+            "FACTOR_SET_AND_RIDGE_WERE_SELECTED_ON_TRAINING_DATA; "
+            "STANDARD_ERRORS_ARE_DESCRIPTIVE_NOT_SELECTION_ADJUSTED"
+        ),
+        "status": "UNAVAILABLE_METHOD_NOT_CLASSICAL_OLS",
+    }
     if constraint != "UNCONSTRAINED" or ridge != 0.0 or fit.rank != matrix.shape[1] + 1:
-        return "UNAVAILABLE_METHOD_NOT_CLASSICAL_OLS", None
+        return unavailable, None
     design = np.column_stack((np.ones(len(target), dtype=np.float64), matrix))
     degrees = len(target) - design.shape[1]
     if degrees <= 0:
-        return "UNAVAILABLE_INSUFFICIENT_DEGREES_OF_FREEDOM", None
+        unavailable["status"] = "UNAVAILABLE_INSUFFICIENT_DEGREES_OF_FREEDOM"
+        return unavailable, None
     residual = target - _predict(fit, matrix)
-    variance = float(residual.T @ residual) / degrees
-    covariance = variance * np.linalg.inv(design.T @ design)
-    standard_errors = np.sqrt(np.maximum(np.diag(covariance), 0.0)).astype(np.float64)
-    return "AVAILABLE_CLASSICAL_OLS", standard_errors
+    default_lag = _newey_west_lag(len(target))
+    lags = sorted({0, default_lag, min(default_lag * 2, len(target) - 1)})
+    sensitivity: list[dict[str, object]] = []
+    default_standard_errors: FloatArray | None = None
+    for lag in lags:
+        standard_errors = _newey_west_standard_errors(design, residual, lag)
+        if lag == default_lag:
+            default_standard_errors = standard_errors
+        sensitivity.append(
+            {
+                "lag": lag,
+                "standard_errors": [_number(float(value)) for value in standard_errors],
+            }
+        )
+    if default_standard_errors is None:
+        raise DecompositionError("Newey-West default lag was not evaluated")
+    return (
+        {
+            **unavailable,
+            "default_lag": default_lag,
+            "lag_sensitivity": sensitivity,
+            "status": "AVAILABLE_HAC_DESCRIPTIVE_POST_SELECTION_NO_CLASSICAL_CONFIDENCE",
+        },
+        default_standard_errors,
+    )
+
+
+def _serial_correlation(values: FloatArray, lag: int) -> float | None:
+    if lag <= 0 or len(values) <= lag:
+        return None
+    centered = values - float(np.mean(values))
+    denominator = float(centered @ centered)
+    if denominator <= 1e-24:
+        return None
+    return float(centered[lag:] @ centered[:-lag]) / denominator
+
+
+def _residual_diagnostics(
+    actual: FloatArray, predicted: FloatArray
+) -> dict[str, object]:
+    residual = actual - predicted
+    count = len(residual)
+    centered = residual - float(np.mean(residual))
+    second_moment = float(np.mean(centered**2))
+    standard_deviation = math.sqrt(max(second_moment, 0.0))
+    skewness = None
+    excess_kurtosis = None
+    if standard_deviation > 1e-12:
+        scaled = centered / standard_deviation
+        skewness = float(np.mean(scaled**3))
+        excess_kurtosis = float(np.mean(scaled**4)) - 3.0
+    squared = residual**2
+    denominator = float(residual @ residual)
+    durbin_watson = (
+        None
+        if denominator <= 1e-24 or count < 2
+        else float(np.sum(np.diff(residual) ** 2)) / denominator
+    )
+    lags = (1, 5, 10)
+    return {
+        "autocorrelation": {
+            str(lag): _number(_serial_correlation(residual, lag)) for lag in lags
+        },
+        "durbin_watson": _number(durbin_watson),
+        "excess_kurtosis": _number(excess_kurtosis),
+        "maximum_absolute_residual": _number(float(np.max(np.abs(residual)))),
+        "mean": _number(float(np.mean(residual))),
+        "observation_count": count,
+        "skewness": _number(skewness),
+        "squared_residual_autocorrelation": {
+            str(lag): _number(_serial_correlation(squared, lag)) for lag in lags
+        },
+        "standard_deviation": _number(standard_deviation),
+        "status": (
+            "AVAILABLE"
+            if standard_deviation > 1e-12
+            else "AVAILABLE_CONSTANT_RESIDUAL_LIMITED"
+        ),
+    }
 
 
 def _metrics(
@@ -1505,6 +1696,22 @@ def _dynamic_model_result(
             },
             "rank": None,
             "rank_status": train_fit.rank_status,
+            "inference": {
+                "default_lag": None,
+                "finite_sample_scaling": "N_OVER_N_MINUS_K",
+                "lag_rule": "FLOOR_4_TIMES_N_OVER_100_POWER_2_OVER_9",
+                "lag_sensitivity": [],
+                "policy": "DESCRIPTIVE_HAC_ONLY_NO_P_VALUES_OR_CONFIDENCE_INTERVALS",
+                "post_selection_caveat": (
+                    "DYNAMIC_PATH_AND_SMOOTHNESS_SELECTION_REQUIRE "
+                    "METHOD_SPECIFIC_INFERENCE_NOT_CLAIMED_HERE"
+                ),
+                "status": "UNAVAILABLE_METHOD_NOT_CLASSICAL_OLS",
+            },
+            "residuals": {
+                "holdout": _residual_diagnostics(test_target, test_predicted),
+                "train": _residual_diagnostics(train_target, train_fit.fitted),
+            },
             "training_design": dict(training_design),
             "train": _metrics(
                 train_target,
@@ -1794,9 +2001,10 @@ def _model_result(
     train_predicted = _predict(fit, train_matrix)
     test_predicted = _predict(fit, test_matrix)
     holdout_r2 = _r_squared(test_target, test_predicted, float(np.mean(train_target)))
-    confidence_status, standard_errors = _classical_confidence(
+    inference, standard_errors = _hac_inference(
         train_matrix, train_target, fit, selected_ridge, model.constraint
     )
+    confidence_status = cast(str, inference["status"])
 
     aligned_predicted = _predict(fit, aligned_matrix)
     contributions: list[dict[str, object]] = []
@@ -1907,6 +2115,11 @@ def _model_result(
             },
             "rank": fit.rank,
             "rank_status": fit.rank_status,
+            "inference": inference,
+            "residuals": {
+                "holdout": _residual_diagnostics(test_target, test_predicted),
+                "train": _residual_diagnostics(train_target, train_predicted),
+            },
             "training_design": training_design,
             "train": _metrics(
                 train_target,
@@ -2003,6 +2216,83 @@ def _select_models(
     return selections
 
 
+def _proxy_governance(
+    spec: Specification, results: Sequence[Mapping[str, object]]
+) -> dict[str, object]:
+    selected = [item for item in results if item.get("selected_for_series") is True]
+    proxies: list[dict[str, object]] = []
+    for factor in sorted(spec.factors, key=lambda item: item.factor_id):
+        requested_models = sorted(
+            model.model_id
+            for model in spec.models
+            if factor.factor_id in model.factor_ids
+        )
+        selected_models = sorted(
+            cast(str, item["model_id"])
+            for item in selected
+            if factor.factor_id in cast(list[str], item["factor_ids"])
+        )
+        selected_series = sorted(
+            cast(str, item["series_id"])
+            for item in selected
+            if factor.factor_id in cast(list[str], item["factor_ids"])
+        )
+        governed = all(
+            value is not None
+            for value in (
+                factor.economic_family,
+                factor.effective_start,
+                factor.effective_end,
+                factor.raw_orthogonal,
+                factor.redundancy_policy,
+                factor.return_source_id,
+                factor.selection_rationale,
+                factor.source_id,
+            )
+        )
+        if not governed:
+            disposition = "UNAVAILABLE_LEGACY_SPEC_NO_PROXY_GOVERNANCE"
+        elif selected_models:
+            disposition = "SELECTED_BY_TRAIN_ONLY_MODEL_SELECTION"
+        elif requested_models:
+            disposition = "NOT_SELECTED_BY_TRAIN_ONLY_MODEL_SELECTION"
+        else:
+            disposition = "CANDIDATE_NOT_REQUESTED_BY_SPEC"
+        proxies.append(
+            {
+                "candidate_disposition": disposition,
+                "economic_family": factor.economic_family,
+                "effective_end": (
+                    None
+                    if factor.effective_end is None
+                    else factor.effective_end.isoformat()
+                ),
+                "effective_start": (
+                    None
+                    if factor.effective_start is None
+                    else factor.effective_start.isoformat()
+                ),
+                "factor_id": factor.factor_id,
+                "raw_orthogonal": factor.raw_orthogonal,
+                "redundancy_policy": factor.redundancy_policy,
+                "requested_model_ids": requested_models,
+                "return_source_id": factor.return_source_id,
+                "selected_model_ids": selected_models,
+                "selected_series_ids": selected_series,
+                "selection_rationale": factor.selection_rationale,
+                "source_id": factor.source_id,
+            }
+        )
+    return {
+        "candidate_count": len(proxies),
+        "orthogonality_claim": "RAW_CANDIDATES_NOT_ASSUMED_ORTHOGONAL",
+        "proxies": proxies,
+        "selection_boundary": (
+            "TRAIN_ONLY_TIME_ORDERED_VALIDATION_WITH_COLLINEARITY_AND_PARSIMONY_GATES"
+        ),
+    }
+
+
 def build_decomposition(
     spec_path: Path, source_root: Path
 ) -> tuple[dict[str, object], GenerationManifest, bytes]:
@@ -2058,6 +2348,7 @@ def build_decomposition(
         "methodology_version": METHODOLOGY_VERSION,
         "model_results": results,
         "model_selections": selections,
+        "proxy_governance": _proxy_governance(spec, results),
         "sources": source_summary,
     }
     analytics_hash = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()

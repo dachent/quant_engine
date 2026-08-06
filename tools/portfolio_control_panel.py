@@ -39,7 +39,7 @@ from quant_engine.portfolio_ledger import (
 
 
 PANEL_SCHEMA_VERSION: Final = 11
-BUILDER_VERSION: Final = "2.1.0"
+BUILDER_VERSION: Final = "2.2.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -53,6 +53,11 @@ SOURCE_CONTRACT = (
 )
 HWM_POLICY = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
+)
+ECONOMIC_DRIVER_CLUSTERS = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-economic-driver-clusters-v1.json"
 )
 DEFAULT_TEMPLATE_ROOT = (
     Path(__file__).resolve().parents[1] / "apps" / "portfolio-control-panel"
@@ -759,6 +764,9 @@ def _factor_analysis(
     identity: Mapping[str, str],
     strategy_names: set[str],
 ) -> dict[str, Any]:
+    analytics_schema_version = decomposition.get("analytics_schema_version")
+    if analytics_schema_version not in {1, 2}:
+        raise ControlPanelValidationError("factor analytics schema is unsupported")
     method_label = _text(decomposition.get("method_label"), "factor.method_label")
     methodology_version = _text(
         decomposition.get("methodology_version"), "factor.methodology_version"
@@ -818,6 +826,14 @@ def _factor_analysis(
                     "evidence_layer": None,
                     "exposures": [],
                     "model_id": None,
+                    "model_quality": {
+                        "decision_rule": "SEALED_HOLDOUT_PREDICTED_R2_GT_ZERO",
+                        "decision_status": "UNAVAILABLE",
+                        "gate_reason": (
+                            reasons[0] if reasons else "UNAVAILABLE_NO_MODEL_EVIDENCE"
+                        ),
+                        "holdout_predicted_r_squared": None,
+                    },
                     "selection_status": _text(
                         selection.get("status"), "selection.status"
                     ),
@@ -1015,7 +1031,26 @@ def _factor_analysis(
         )
         available_count += 1
         dynamic_available_count += estimator == "DYNAMIC_FLS"
+    proxy_governance = decomposition.get("proxy_governance")
+    if proxy_governance is None:
+        accepted_proxy_governance: dict[str, Any] = {
+            "candidate_count": 0,
+            "orthogonality_claim": "UNAVAILABLE_LEGACY_ANALYTICS_SCHEMA",
+            "proxies": [],
+            "selection_boundary": "UNAVAILABLE_LEGACY_ANALYTICS_SCHEMA",
+        }
+    else:
+        accepted_proxy_governance = _object(proxy_governance, "factor.proxy_governance")
+        proxies = _objects(
+            accepted_proxy_governance.get("proxies"),
+            "factor.proxy_governance.proxies",
+        )
+        if accepted_proxy_governance.get("candidate_count") != len(proxies):
+            raise ControlPanelValidationError("factor proxy candidate count differs")
+    if analytics_schema_version == 2 and not accepted_proxy_governance["proxies"]:
+        raise ControlPanelValidationError("schema-v2 factor proxy governance is absent")
     return {
+        "analytics_schema_version": analytics_schema_version,
         "analytics_hash": _text(
             decomposition.get("analytics_hash"), "factor.analytics_hash"
         ),
@@ -1030,6 +1065,7 @@ def _factor_analysis(
             "factor.methodology_manifest_sha256",
         ),
         "methodology_version": methodology_version,
+        "proxy_governance": accepted_proxy_governance,
         "series": rows,
         "source_sha256": identity["sha256"],
         "sources": _object(decomposition.get("sources"), "factor.sources"),
@@ -1048,6 +1084,12 @@ def _unavailable_factor_row(series_id: str, reason: str) -> dict[str, Any]:
         "evidence_layer": None,
         "exposures": [],
         "model_id": None,
+        "model_quality": {
+            "decision_rule": "SEALED_HOLDOUT_PREDICTED_R2_GT_ZERO",
+            "decision_status": "UNAVAILABLE",
+            "gate_reason": reason,
+            "holdout_predicted_r_squared": None,
+        },
         "selection_status": reason,
         "series_id": series_id,
         "source_key": None,
@@ -1124,7 +1166,7 @@ def _decomposition_lenses(
             root / source_key,
             filename="decomposition.json",
             field_name=f"{source_label} decomposition",
-            expected_schema_version=1,
+            expected_schema_version=(1, 2),
         )
         if decomposition.get("analysis_lens") != expected_lens:
             raise ControlPanelValidationError(
@@ -1193,12 +1235,32 @@ def _decomposition_lenses(
             canonical_json_bytes(identity_payload)
         ).hexdigest()
         available_count = sum(row["status"] == "AVAILABLE" for row in rows)
+        governed_proxies = [
+            {
+                **proxy,
+                "source_key": analysis["source_key"],
+                "source_label": analysis["source_label"],
+            }
+            for analysis in analyses
+            for proxy in _objects(
+                _object(
+                    analysis.get("proxy_governance"), "analysis.proxy_governance"
+                ).get("proxies"),
+                "analysis.proxy_governance.proxies",
+            )
+        ]
         grouped.append(
             {
                 "analytics_hash": composite_hash,
+                "analytics_schema_version": max(
+                    int(item["analytics_schema_version"]) for item in analyses
+                ),
                 "as_of_date": min(item["as_of_date"] for item in analyses),
                 "as_of_policy": "MINIMUM_ACCEPTED_SOURCE_DATE",
                 "available_count": available_count,
+                "diagnostic_count": sum(
+                    row["status"] == "DIAGNOSTIC_ONLY" for row in rows
+                ),
                 "dynamic_available_count": sum(
                     row.get("estimator") == "DYNAMIC_FLS"
                     and row.get("status") == "AVAILABLE"
@@ -1213,6 +1275,15 @@ def _decomposition_lenses(
                 ],
                 "methodology_version": analyses[0]["methodology_version"],
                 "plan_bundle_id": plan_bundle.name,
+                "proxy_governance": {
+                    "candidate_count": len(governed_proxies),
+                    "orthogonality_claim": "RAW_CANDIDATES_NOT_ASSUMED_ORTHOGONAL",
+                    "proxies": governed_proxies,
+                    "selection_boundary": (
+                        "TRAIN_ONLY_TIME_ORDERED_VALIDATION_WITH_"
+                        "COLLINEARITY_AND_PARSIMONY_GATES"
+                    ),
+                },
                 "return_basis": return_basis,
                 "series": rows,
                 "source_sha256": composite_hash,
@@ -1535,6 +1606,122 @@ def _dependence_analysis(
         )
     )
     correlation_one = _object(dependence.get("correlation_one"), "correlation_one")
+    cluster_contract = _load_json(
+        ECONOMIC_DRIVER_CLUSTERS, "economic driver cluster contract"
+    )
+    if cluster_contract.get("schema_version") != 1:
+        raise ControlPanelValidationError("economic driver cluster schema differs")
+    cluster_definitions = _objects(
+        cluster_contract.get("clusters"), "economic driver clusters"
+    )
+    declared_members: list[str] = []
+    for cluster in cluster_definitions:
+        members = cluster.get("members")
+        if not isinstance(members, list) or not members:
+            raise ControlPanelValidationError("economic driver cluster members differ")
+        declared_members.extend(
+            _text(member, "economic driver cluster member") for member in members
+        )
+    if len(declared_members) != len(set(declared_members)) or set(
+        declared_members
+    ) != set(series_ids):
+        raise ControlPanelValidationError(
+            "economic driver clusters differ from the current strategy boundary"
+        )
+    component_index = {
+        _text(
+            component.get("series_id"), "correlation-one component series_id"
+        ): component
+        for component in _objects(
+            correlation_one.get("components"), "correlation_one.components"
+        )
+    }
+    if set(component_index) != set(series_ids):
+        raise ControlPanelValidationError(
+            "correlation-one components differ from economic driver clusters"
+        )
+    systematic_limit = _finite_float(
+        cluster_contract.get("systematic_loss_limit"), "systematic_loss_limit"
+    )
+    correlation_one_loss = _finite_float(
+        correlation_one.get("loss"), "correlation_one.loss"
+    )
+    economic_driver_clusters: list[dict[str, Any]] = []
+    for cluster in cluster_definitions:
+        members = [
+            _text(member, "economic driver cluster member")
+            for member in cluster["members"]
+        ]
+        pair_evidence = [
+            {
+                "decision_correlation": pair.get("decision_correlation"),
+                "decision_status": pair.get("decision_status"),
+                "left": pair.get("left"),
+                "observations": pair.get("observations"),
+                "observed_correlation": pair.get("observed_correlation"),
+                "right": pair.get("right"),
+            }
+            for pair in blends
+            if pair.get("left") in members and pair.get("right") in members
+        ]
+        observed_values = [
+            _finite_float(pair["observed_correlation"], "observed_correlation")
+            for pair in pair_evidence
+            if pair.get("observed_correlation") is not None
+        ]
+        allocation_weight = sum(
+            _finite_float(
+                component_index[member].get("allocation_weight"),
+                "component.allocation_weight",
+            )
+            for member in members
+        )
+        loss_contribution = sum(
+            _finite_float(
+                component_index[member].get("loss_contribution"),
+                "component.loss_contribution",
+            )
+            for member in members
+        )
+        economic_driver_clusters.append(
+            {
+                "allocation_weight": _number_text(allocation_weight),
+                "budget_status": (
+                    "BREACHES_FULL_SYSTEMATIC_15_PERCENT_LOSS_LIMIT"
+                    if loss_contribution > systematic_limit
+                    else "WITHIN_FULL_SYSTEMATIC_15_PERCENT_LOSS_LIMIT"
+                ),
+                "cluster_id": _text(cluster.get("cluster_id"), "cluster_id"),
+                "label": _text(cluster.get("label"), "cluster.label"),
+                "loss_contribution": _number_text(loss_contribution),
+                "members": members,
+                "observed_pair_correlation_maximum": (
+                    None if not observed_values else _number_text(max(observed_values))
+                ),
+                "observed_pair_correlation_minimum": (
+                    None if not observed_values else _number_text(min(observed_values))
+                ),
+                "pair_evidence": pair_evidence,
+                "rationale": _text(cluster.get("rationale"), "cluster.rationale"),
+            }
+        )
+    cluster_budget = {
+        "budget_rule": _text(cluster_contract.get("budget_rule"), "budget_rule"),
+        "clusters": economic_driver_clusters,
+        "contract_sha256": _hash(ECONOMIC_DRIVER_CLUSTERS),
+        "correlation_one_loss": _number_text(correlation_one_loss),
+        "historical_audit_reference": _object(
+            cluster_contract.get("historical_audit_reference"),
+            "historical_audit_reference",
+        ),
+        "limit_breach": _number_text(correlation_one_loss - systematic_limit),
+        "status": (
+            "BREACHES_SYSTEMATIC_LOSS_LIMIT"
+            if correlation_one_loss > systematic_limit
+            else "WITHIN_SYSTEMATIC_LOSS_LIMIT"
+        ),
+        "systematic_loss_limit": _number_text(systematic_limit),
+    }
     raw_composition = dependence.get("series_composition")
     if raw_composition is None:
         series_composition: dict[str, dict[str, Any]] = {}
@@ -1561,6 +1748,7 @@ def _dependence_analysis(
         ),
         "cells": cells,
         "correlation_one": correlation_one,
+        "economic_driver_cluster_budget": cluster_budget,
         "evidence_mode": evidence_mode,
         "generation_id": identity["generation_id"],
         "drawdown_matrices": drawdown_matrices,
@@ -2168,6 +2356,18 @@ def _panel_data(
             "sha256": correlation_identity["sha256"],
         },
         {
+            "artifact": "portfolio-economic-driver-clusters",
+            "as_of_date": _text(
+                _load_json(
+                    ECONOMIC_DRIVER_CLUSTERS,
+                    "economic driver cluster contract",
+                ).get("as_of_date"),
+                "economic driver cluster as_of_date",
+            ),
+            "schema": "portfolio-economic-driver-clusters/1",
+            "sha256": _hash(ECONOMIC_DRIVER_CLUSTERS),
+        },
+        {
             "artifact": "portfolio-hwm-policy",
             "as_of_date": hwm_policy["material_perimeter"]["exclusions"][0][
                 "effective_date"
@@ -2392,7 +2592,7 @@ def _rendered_files(
         resolved_decomposition,
         filename="decomposition.json",
         field_name="portfolio factor decomposition",
-        expected_schema_version=1,
+        expected_schema_version=(1, 2),
     )
     correlation, correlation_identity, correlation_path = _current_analytics(
         resolved_correlation,
@@ -3453,6 +3653,13 @@ def publish_panel(
             as_of_date=publication_as_of,
             schema_name="portfolio-hwm-policy",
             schema_version="2",
+        ),
+        SourceArtifact.from_path(
+            ECONOMIC_DRIVER_CLUSTERS,
+            artifact_id="input/portfolio-economic-driver-clusters.json",
+            as_of_date=publication_as_of,
+            schema_name="portfolio-economic-driver-clusters",
+            schema_version="1",
         ),
     ]
     if (

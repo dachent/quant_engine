@@ -292,6 +292,12 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         "MKT_RF",
         "SMB",
     }
+    for factor in economic["factor_source"]["factors"]:
+        assert factor["effective_start"] <= factor["effective_end"]
+        assert factor["raw_orthogonal"] is False
+        assert factor["selection_rationale"]
+        assert factor["redundancy_policy"].startswith("TRAIN_ONLY")
+        assert factor["source_id"] == "UNAVAILABLE_NOT_DECLARED"
 
 
 def test_write_is_content_addressed_and_idempotent(tmp_path: Path) -> None:
