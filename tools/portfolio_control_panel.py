@@ -38,8 +38,8 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-PANEL_SCHEMA_VERSION: Final = 11
-BUILDER_VERSION: Final = "2.2.0"
+PANEL_SCHEMA_VERSION: Final = 12
+BUILDER_VERSION: Final = "2.3.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -533,6 +533,22 @@ def _current_analytics(
     )
     if value.get("analytics_schema_version") not in accepted_versions:
         raise ControlPanelValidationError(f"{field_name} schema is unsupported")
+    return value, {"generation_id": pointer.generation_id, "sha256": _hash(path)}, path
+
+
+def _current_replication(
+    root: Path,
+) -> tuple[dict[str, Any], dict[str, str], Path]:
+    try:
+        pointer = read_current(root)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ControlPanelValidationError(
+            "dynamic replication pointer is not accepted"
+        ) from exc
+    path = root / "generations" / pointer.generation_id / "replication.json"
+    value = _load_json(path, "dynamic replication")
+    if value.get("replication_schema_version") != 1:
+        raise ControlPanelValidationError("dynamic replication schema is unsupported")
     return value, {"generation_id": pointer.generation_id, "sha256": _hash(path)}, path
 
 
@@ -1481,6 +1497,121 @@ def _govern_weekly_hybrid_modes(
     return accepted
 
 
+def _replication_analysis(
+    replication: Mapping[str, Any],
+    identity: Mapping[str, str],
+    strategy_names: set[str],
+    decomposition_identity: Mapping[str, str],
+) -> dict[str, Any]:
+    if replication.get("replication_schema_version") != 1:
+        raise ControlPanelValidationError("replication schema is unsupported")
+    if (
+        replication.get("method_label")
+        != "MPI_INFORMED_NON_EQUIVALENT_RESEARCH_REPLICATION"
+    ):
+        raise ControlPanelValidationError("replication method label differs")
+    authority = _object(replication.get("authority_boundary"), "replication authority")
+    if authority != {
+        "allocation_authority": "NONE",
+        "execution_authority": "NONE",
+        "hwm_authority": "NONE",
+        "readiness_gate_effect": "NONE",
+        "use": "RESEARCH_DIAGNOSTIC_ONLY",
+    }:
+        raise ControlPanelValidationError("replication authority boundary differs")
+    sources = _object(replication.get("sources"), "replication sources")
+    if sources.get("decomposition_generation_id") != decomposition_identity.get(
+        "generation_id"
+    ) or sources.get("decomposition_sha256") != decomposition_identity.get("sha256"):
+        raise ControlPanelValidationError(
+            "replication source differs from accepted dynamic decomposition"
+        )
+    rows = _objects(replication.get("replication_results"), "replication results")
+    by_series = {
+        _text(row.get("series_id"), "replication series_id"): row for row in rows
+    }
+    if set(by_series) != strategy_names or len(by_series) != len(rows):
+        raise ControlPanelValidationError("replication strategy boundary differs")
+    available = 0
+    diagnostic = 0
+    unavailable = 0
+    for series_id, row in by_series.items():
+        status = _text(row.get("availability_status"), "replication status")
+        if status == "UNAVAILABLE_NO_SELECTED_DYNAMIC_MODEL":
+            blockers = row.get("blocking_reasons")
+            if (
+                row.get("model_id") is not None
+                or not isinstance(blockers, list)
+                or not blockers
+                or not all(isinstance(item, str) and item.strip() for item in blockers)
+            ):
+                raise ControlPanelValidationError(
+                    f"unavailable replication is not dispositioned: {series_id}"
+                )
+            unavailable += 1
+            continue
+        if status not in {
+            "AVAILABLE_RESEARCH_REPLICATION",
+            "DIAGNOSTIC_ONLY_SOURCE_MODEL",
+        }:
+            raise ControlPanelValidationError(
+                f"replication status is unsupported: {series_id}"
+            )
+        metrics = _object(row.get("metrics"), f"{series_id} replication metrics")
+        observation_count = metrics.get("observation_count")
+        if (
+            isinstance(observation_count, bool)
+            or not isinstance(observation_count, int)
+            or observation_count <= 0
+        ):
+            raise ControlPanelValidationError(
+                f"replication observation boundary is empty: {series_id}"
+            )
+        parameter_selection = _object(
+            row.get("parameter_selection"), f"{series_id} parameter selection"
+        )
+        if (
+            parameter_selection.get("holdout_recalibration") != "NONE"
+            or parameter_selection.get("nested_evaluation")
+            != "TRAIN_SELECT_THEN_CAUSAL_HOLDOUT_REPLAY"
+        ):
+            raise ControlPanelValidationError(
+                f"replication is not forward-only: {series_id}"
+            )
+        tracker_rows = _objects(
+            row.get("tracker_rows"), f"{series_id} replication tracker"
+        )
+        if len(tracker_rows) != observation_count or any(
+            item.get("information_set")
+            != "MODEL_STATE_ESTIMATED_THROUGH_PRIOR_OBSERVATION"
+            for item in tracker_rows
+        ):
+            raise ControlPanelValidationError(
+                f"replication tracker is not causal or complete: {series_id}"
+            )
+        if status == "AVAILABLE_RESEARCH_REPLICATION":
+            available += 1
+        else:
+            diagnostic += 1
+    return {
+        "analytics_hash": _text(
+            replication.get("analytics_hash"), "replication analytics_hash"
+        ),
+        "as_of_date": _text(replication.get("as_of_date"), "replication as_of_date"),
+        "authority_boundary": authority,
+        "available_count": available,
+        "clean_room_boundary": _text(
+            replication.get("clean_room_boundary"), "replication clean_room_boundary"
+        ),
+        "diagnostic_count": diagnostic,
+        "generation_id": identity["generation_id"],
+        "method_label": replication["method_label"],
+        "series": [by_series[name] for name in sorted(by_series)],
+        "source_sha256": identity["sha256"],
+        "unavailable_count": unavailable,
+    }
+
+
 def _dependence_analysis(
     correlation: Mapping[str, Any],
     identity: Mapping[str, str],
@@ -1948,6 +2079,7 @@ def _panel_data(
     decomposition_lenses: Mapping[str, Any] | None = None,
     weekly_returns: Mapping[str, Any] | None = None,
     freshness_health: list[dict[str, Any]] | None = None,
+    replication_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -2027,6 +2159,39 @@ def _panel_data(
         report, report_identity, strategy_evidence_path, set(strategy_names)
     )
     current_strategy_names = set(strategy_names.values())
+    accepted_replication = (
+        dict(replication_payload)
+        if replication_payload is not None
+        else {
+            "analytics_hash": None,
+            "as_of_date": _text(report.get("as_of_date"), "report.as_of_date"),
+            "authority_boundary": {
+                "allocation_authority": "NONE",
+                "execution_authority": "NONE",
+                "hwm_authority": "NONE",
+                "readiness_gate_effect": "NONE",
+                "use": "RESEARCH_DIAGNOSTIC_ONLY",
+            },
+            "available_count": 0,
+            "clean_room_boundary": (
+                "Dynamic research replication was not configured for this build."
+            ),
+            "diagnostic_count": 0,
+            "generation_id": None,
+            "method_label": "MPI_INFORMED_NON_EQUIVALENT_RESEARCH_REPLICATION",
+            "series": [
+                {
+                    "availability_status": "UNAVAILABLE_NOT_CONFIGURED",
+                    "blocking_reasons": ["REPLICATION_ROOT_NOT_SUPPLIED"],
+                    "model_id": None,
+                    "series_id": name,
+                }
+                for name in sorted(current_strategy_names)
+            ],
+            "source_sha256": None,
+            "unavailable_count": len(current_strategy_names),
+        }
+    )
     factor_analysis = _factor_analysis(
         decomposition, decomposition_identity, current_strategy_names
     )
@@ -2349,6 +2514,18 @@ def _panel_data(
             if weekly_returns is not None
             else []
         ),
+        *(
+            [
+                {
+                    "artifact": "portfolio-dynamic-research-replication",
+                    "as_of_date": accepted_replication["as_of_date"],
+                    "schema": "portfolio-dynamic-replication/1",
+                    "sha256": accepted_replication["source_sha256"],
+                }
+            ]
+            if replication_payload is not None
+            else []
+        ),
         {
             "artifact": "portfolio-correlation-generation",
             "as_of_date": dependence_analysis["as_of_date"],
@@ -2535,6 +2712,8 @@ def _panel_data(
             ),
             "report_generation_id": report_identity["generation_id"],
             "report_sha256": report_identity["sha256"],
+            "replication_generation_id": accepted_replication.get("generation_id"),
+            "replication_sha256": accepted_replication.get("source_sha256"),
             "source_shell_hashes": source.get("observed_hashes"),
             "template_hashes": template_hashes,
             "weekly_returns_generation_id": accepted_weekly_returns.get(
@@ -2548,6 +2727,7 @@ def _panel_data(
         "provenance": provenance,
         "provider_counts": dict(sorted(provider_counts.items())),
         "reconciliation_checks": reconciliations,
+        "replication_analysis": accepted_replication,
         "strategies": strategies,
         "hwm_summary": hwm_summary,
         "hybrid_mode_gate": hybrid_mode_gate,
@@ -2566,6 +2746,7 @@ def _rendered_files(
     decomposition_plan_bundle: Path | None = None,
     weekly_returns_root: Path | None = None,
     freshness_health_path: Path | None = None,
+    replication_root: Path | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -2576,6 +2757,7 @@ def _rendered_files(
         Path,
         Path | None,
         tuple[Path, ...],
+        Path | None,
         Path | None,
         Path | None,
     ],
@@ -2607,7 +2789,7 @@ def _rendered_files(
     lens_payload: dict[str, Any] | None = None
     lens_paths: tuple[Path, ...] = ()
     if decomposition_lenses_root is not None and decomposition_plan_bundle is not None:
-        current_strategy_names = {
+        strategy_names_by_id = {
             _text(row.get("strategy_id"), "strategy.strategy_id"): _text(
                 row.get("strategy_name"), "strategy.strategy_name"
             )
@@ -2616,7 +2798,7 @@ def _rendered_files(
         lens_payload, lens_paths = _decomposition_lenses(
             decomposition_lenses_root,
             decomposition_plan_bundle,
-            current_strategy_names,
+            strategy_names_by_id,
         )
     weekly_payload: dict[str, Any] | None = None
     weekly_path: Path | None = None
@@ -2628,6 +2810,22 @@ def _rendered_files(
             expected_schema_version=1,
         )
         weekly_payload = _weekly_return_analysis(weekly, weekly_identity)
+    replication_payload: dict[str, Any] | None = None
+    replication_path: Path | None = None
+    if replication_root is not None:
+        replication, replication_identity, replication_path = _current_replication(
+            replication_root
+        )
+        strategy_name_set = {
+            _text(row.get("strategy_name"), "strategy.strategy_name")
+            for row in _objects(report.get("strategy_summary"), "strategy_summary")
+        }
+        replication_payload = _replication_analysis(
+            replication,
+            replication_identity,
+            strategy_name_set,
+            decomposition_identity,
+        )
     legacy, source = _source_inputs(legacy_panel)
     data = _panel_data(
         report,
@@ -2643,6 +2841,7 @@ def _rendered_files(
         lens_payload,
         weekly_payload,
         freshness_health,
+        replication_payload,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -2667,6 +2866,7 @@ def _rendered_files(
             lens_paths,
             weekly_path,
             freshness_health_path,
+            replication_path,
         ),
     )
 
@@ -2708,6 +2908,7 @@ def build_candidate(
     decomposition_plan_bundle: Path | None = None,
     weekly_returns_root: Path | None = None,
     freshness_health_path: Path | None = None,
+    replication_root: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -2720,6 +2921,7 @@ def build_candidate(
         decomposition_plan_bundle,
         weekly_returns_root,
         freshness_health_path,
+        replication_root,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -2759,6 +2961,28 @@ def _check(name: str, condition: bool, evidence: object) -> dict[str, Any]:
     }
 
 
+def _replication_disposition_counts(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, int] | None:
+    statuses = Counter(str(row.get("availability_status")) for row in rows)
+    supported = {
+        "AVAILABLE_RESEARCH_REPLICATION",
+        "DIAGNOSTIC_ONLY_SOURCE_MODEL",
+        "UNAVAILABLE_NO_SELECTED_DYNAMIC_MODEL",
+        "UNAVAILABLE_NOT_CONFIGURED",
+    }
+    if set(statuses) - supported:
+        return None
+    return {
+        "available_count": statuses["AVAILABLE_RESEARCH_REPLICATION"],
+        "diagnostic_count": statuses["DIAGNOSTIC_ONLY_SOURCE_MODEL"],
+        "unavailable_count": (
+            statuses["UNAVAILABLE_NO_SELECTED_DYNAMIC_MODEL"]
+            + statuses["UNAVAILABLE_NOT_CONFIGURED"]
+        ),
+    }
+
+
 def verify_candidate(
     report_root: Path,
     legacy_panel: Path,
@@ -2771,6 +2995,7 @@ def verify_candidate(
     decomposition_plan_bundle: Path | None = None,
     weekly_returns_root: Path | None = None,
     freshness_health_path: Path | None = None,
+    replication_root: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -2783,6 +3008,7 @@ def verify_candidate(
         decomposition_plan_bundle,
         weekly_returns_root,
         freshness_health_path,
+        replication_root,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -2833,6 +3059,49 @@ def verify_candidate(
                     _text(row.get("lens_id"), "lens_id") for row in lens_rows
                 ),
                 "plan_bundle_id": lens_payload.get("plan_bundle_id"),
+            },
+        )
+    )
+    replication_analysis = _object(
+        data.get("replication_analysis"), "replication analysis"
+    )
+    replication_rows = _objects(
+        replication_analysis.get("series"), "replication analysis series"
+    )
+    replication_counts = _replication_disposition_counts(replication_rows)
+    counts_match_rows = replication_counts is not None and all(
+        replication_analysis.get(field) == count
+        for field, count in replication_counts.items()
+    )
+    checks.append(
+        _check(
+            "Dynamic replication is governed or explicitly unavailable",
+            len(replication_rows) == 9
+            and (
+                (
+                    replication_root is not None
+                    and replication_analysis.get("generation_id") is not None
+                    and counts_match_rows
+                    and all(
+                        row.get("availability_status") != "UNAVAILABLE_NOT_CONFIGURED"
+                        for row in replication_rows
+                    )
+                )
+                or (
+                    replication_root is None
+                    and replication_analysis.get("generation_id") is None
+                    and counts_match_rows
+                    and all(
+                        row.get("availability_status") == "UNAVAILABLE_NOT_CONFIGURED"
+                        for row in replication_rows
+                    )
+                )
+            ),
+            {
+                "available": replication_analysis.get("available_count"),
+                "diagnostic": replication_analysis.get("diagnostic_count"),
+                "generation": replication_analysis.get("generation_id"),
+                "unavailable": replication_analysis.get("unavailable_count"),
             },
         )
     )
@@ -3563,6 +3832,7 @@ def publish_panel(
     decomposition_plan_bundle: Path | None = None,
     weekly_returns_root: Path | None = None,
     freshness_health_path: Path | None = None,
+    replication_root: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         report_root,
@@ -3576,6 +3846,7 @@ def publish_panel(
         decomposition_plan_bundle,
         weekly_returns_root,
         freshness_health_path,
+        replication_root,
     )
     qa = validate_qa(candidate_dir, qa_dir)
     _write_exact(
@@ -3592,6 +3863,7 @@ def publish_panel(
         decomposition_plan_bundle,
         weekly_returns_root,
         freshness_health_path,
+        replication_root,
     )
     (
         report_path,
@@ -3602,6 +3874,7 @@ def publish_panel(
         decomposition_lens_sources,
         weekly_returns_source,
         freshness_health_source,
+        replication_source,
     ) = input_paths
     portfolio_as_of = date.fromisoformat(
         _text(data["meta"]["portfolio_as_of"], "as_of")
@@ -3697,6 +3970,18 @@ def publish_panel(
                 schema_version="1",
             )
         )
+    if replication_source is not None:
+        artifacts.append(
+            SourceArtifact.from_path(
+                replication_source,
+                artifact_id="input/portfolio-dynamic-replication.json",
+                as_of_date=date.fromisoformat(
+                    data["replication_analysis"]["as_of_date"]
+                ),
+                schema_name="portfolio-dynamic-replication",
+                schema_version="1",
+            )
+        )
     if freshness_health_source is not None:
         artifacts.append(
             SourceArtifact.from_path(
@@ -3734,10 +4019,11 @@ def publish_panel(
         adapter=AdapterIdentity("portfolio-control-panel-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="accepted portfolio, factor/alpha, dependence, weekly-return, and governed-HWM evidence rendered read-only with explicit gaps and a separate frozen candidate appendix",
+            boundary="accepted portfolio, factor/alpha, dynamic replication, dependence, weekly-return, and governed-HWM evidence rendered read-only with explicit gaps and a separate frozen candidate appendix",
             fact_types=(
                 "portfolio control panel",
                 "factor and alpha attribution",
+                "dynamic style research replication",
                 "correlation and dependence",
                 "weekly returns by strategy, factor, style, sector, industry, and benchmark",
                 "governed HWM coverage",
@@ -3804,6 +4090,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--decomposition-plan-bundle", type=Path)
         command.add_argument("--correlation-root", type=Path)
         command.add_argument("--weekly-returns-root", type=Path)
+        command.add_argument("--replication-root", type=Path)
         command.add_argument("--strategy-evidence", type=Path)
         command.add_argument("--freshness-health", type=Path, required=True)
         command.add_argument("--output-root", type=Path, required=name != "verify")
@@ -3837,6 +4124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.decomposition_plan_bundle,
                 args.weekly_returns_root,
                 args.freshness_health,
+                args.replication_root,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -3851,6 +4139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.decomposition_plan_bundle,
                 args.weekly_returns_root,
                 args.freshness_health,
+                args.replication_root,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -3873,6 +4162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.decomposition_plan_bundle,
                 args.weekly_returns_root,
                 args.freshness_health,
+                args.replication_root,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)

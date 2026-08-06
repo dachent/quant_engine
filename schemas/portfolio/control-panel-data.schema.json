@@ -34,15 +34,16 @@
     "provenance",
     "provider_counts",
     "reconciliation_checks",
+    "replication_analysis",
     "strategies",
     "weekly_returns"
   ],
   "properties": {
-    "panel_schema_version": { "const": 11 },
+    "panel_schema_version": { "const": 12 },
     "meta": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["baseline_generation_id", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "freshness_evaluated_on", "hwm_policy_sha256", "hwm_status_code_version", "hwm_status_semantics", "panel_mode", "portfolio_as_of", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "strategy_evidence_source", "template_hashes", "weekly_returns_generation_id", "weekly_returns_sha256"],
+      "required": ["baseline_generation_id", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "freshness_evaluated_on", "hwm_policy_sha256", "hwm_status_code_version", "hwm_status_semantics", "panel_mode", "portfolio_as_of", "replication_generation_id", "replication_sha256", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "strategy_evidence_source", "template_hashes", "weekly_returns_generation_id", "weekly_returns_sha256"],
       "properties": {
         "baseline_generation_id": { "$ref": "#/$defs/hash" },
         "correlation_generation_id": { "$ref": "#/$defs/hash" },
@@ -59,6 +60,8 @@
         "portfolio_as_of": { "type": "string", "format": "date" },
         "report_generation_id": { "$ref": "#/$defs/hash" },
         "report_sha256": { "$ref": "#/$defs/hash" },
+        "replication_generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "replication_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "source_shell_hashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/hash" } },
         "strategy_evidence_as_of": { "type": ["string", "null"], "format": "date" },
         "strategy_evidence_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
@@ -253,6 +256,43 @@
     "provenance": { "$ref": "#/$defs/rows" },
     "provider_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
     "reconciliation_checks": { "$ref": "#/$defs/rows" },
+    "replication_analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analytics_hash", "as_of_date", "authority_boundary", "available_count", "clean_room_boundary", "diagnostic_count", "generation_id", "method_label", "series", "source_sha256", "unavailable_count"],
+      "properties": {
+        "analytics_hash": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "as_of_date": { "type": "string", "format": "date" },
+        "authority_boundary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allocation_authority", "execution_authority", "hwm_authority", "readiness_gate_effect", "use"],
+          "properties": {
+            "allocation_authority": { "const": "NONE" },
+            "execution_authority": { "const": "NONE" },
+            "hwm_authority": { "const": "NONE" },
+            "readiness_gate_effect": { "const": "NONE" },
+            "use": { "const": "RESEARCH_DIAGNOSTIC_ONLY" }
+          }
+        },
+        "available_count": { "type": "integer", "minimum": 0 },
+        "clean_room_boundary": { "type": "string", "minLength": 1 },
+        "diagnostic_count": { "type": "integer", "minimum": 0 },
+        "generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "method_label": { "const": "MPI_INFORMED_NON_EQUIVALENT_RESEARCH_REPLICATION" },
+        "series": {
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "items": {
+            "type": "object",
+            "required": ["availability_status", "model_id", "series_id"]
+          }
+        },
+        "source_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "unavailable_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "strategies": { "type": "array", "minItems": 9, "maxItems": 9, "items": { "type": "object" } },
     "weekly_returns": {
       "type": "object",
