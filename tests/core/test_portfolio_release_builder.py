@@ -186,3 +186,57 @@ def test_xlsx_startup_extension_rejects_unvalidated_job_shape() -> None:
                 "unknown": True,
             }
         )
+
+
+def test_successful_xlsx_evidence_is_resumable_and_identity_bound(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate"
+    (candidate / "excel").mkdir(parents=True)
+    job = {
+        "idempotency_key": "synthetic",
+        "schema_version": "2.0",
+        "steps": [{"type": "open"}, {"type": "save_as"}],
+    }
+    result = {
+        "final_state": "SUCCEEDED",
+        "idempotency_key": "synthetic",
+        "ok": True,
+        "schema_version": "2.0",
+        "steps": [{"status": "succeeded"}, {"status": "succeeded"}],
+    }
+    (candidate / "xlsx-job.json").write_text(json.dumps(job), encoding="utf-8")
+    (candidate / "xlsx-result.json").write_text(json.dumps(result), encoding="utf-8")
+    (candidate / "excel" / "portfolio-report.xlsx").write_bytes(b"xlsx")
+
+    assert builder._accepted_xlsx_evidence(candidate) is True
+
+    result["idempotency_key"] = "different"
+    (candidate / "xlsx-result.json").write_text(json.dumps(result), encoding="utf-8")
+    assert builder._accepted_xlsx_evidence(candidate) is False
+
+
+def test_workbook_validation_resume_requires_all_invariants(tmp_path: Path) -> None:
+    path = tmp_path / "validation.json"
+    path.write_text(
+        json.dumps(
+            {
+                "all_passed": True,
+                "invariants": [{"name": "sheet", "passed": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert builder._accepted_workbook_validation(path) is not None
+
+    path.write_text(
+        json.dumps(
+            {
+                "all_passed": True,
+                "invariants": [{"name": "sheet", "passed": False}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert builder._accepted_workbook_validation(path) is None

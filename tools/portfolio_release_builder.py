@@ -275,6 +275,50 @@ def _xlsx_job_with_startup_extension(job: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _accepted_xlsx_evidence(candidate: Path) -> bool:
+    job_path = candidate / "xlsx-job.json"
+    result_path = candidate / "xlsx-result.json"
+    workbook_path = candidate / "excel" / "portfolio-report.xlsx"
+    if any(
+        path.is_symlink() or not path.is_file()
+        for path in (job_path, result_path, workbook_path)
+    ):
+        return False
+    job = _load(job_path, "xlsx-win job")
+    result = _load(result_path, "xlsx-win result")
+    steps = result.get("steps")
+    return (
+        result.get("schema_version") == "2.0"
+        and result.get("idempotency_key") == job.get("idempotency_key")
+        and result.get("final_state") == "SUCCEEDED"
+        and result.get("ok") is True
+        and isinstance(steps, list)
+        and len(steps) == len(job.get("steps", []))
+        and all(
+            isinstance(step, dict) and step.get("status") == "succeeded"
+            for step in steps
+        )
+    )
+
+
+def _accepted_workbook_validation(path: Path) -> dict[str, Any] | None:
+    if path.is_symlink() or not path.is_file():
+        return None
+    result = _load(path, "workbook validation")
+    invariants = result.get("invariants")
+    if (
+        result.get("all_passed") is not True
+        or not isinstance(invariants, list)
+        or not invariants
+        or not all(
+            isinstance(invariant, dict) and invariant.get("passed") is True
+            for invariant in invariants
+        )
+    ):
+        return None
+    return result
+
+
 def _xlsx_executable(project: str) -> Path:
     root = XLSX_SKILL_ROOT / "supervisor" / project / "bin"
     matches = sorted(
@@ -703,27 +747,28 @@ def build_workbook(
         raise VerticalBuildError("xlsx-win durable runtime is unavailable")
     result_path = candidate / "xlsx-result.json"
     events_path = candidate / "xlsx-events.jsonl"
-    try:
-        _run(
-            (
-                str(XLSX_RUNTIME),
-                str(XLSX_CLI),
-                "run",
-                str(candidate / "xlsx-job.json"),
-                "--events",
-                str(events_path),
-                "--result",
-                str(result_path),
-                "--hard-timeout-seconds",
-                "300",
-            ),
-            timeout=420,
-        )
-    except VerticalBuildError:
-        failed = _load(result_path, "xlsx-win failed result")
-        if not _is_xlsx_startup_deadline(failed):
-            raise
-        result_path = _run_xlsx_startup_extension(candidate)
+    if not _accepted_xlsx_evidence(candidate):
+        try:
+            _run(
+                (
+                    str(XLSX_RUNTIME),
+                    str(XLSX_CLI),
+                    "run",
+                    str(candidate / "xlsx-job.json"),
+                    "--events",
+                    str(events_path),
+                    "--result",
+                    str(result_path),
+                    "--hard-timeout-seconds",
+                    "300",
+                ),
+                timeout=420,
+            )
+        except VerticalBuildError:
+            failed = _load(result_path, "xlsx-win failed result")
+            if not _is_xlsx_startup_deadline(failed):
+                raise
+            result_path = _run_xlsx_startup_extension(candidate)
     result_canonicalization = _tool(
         "portfolio_report.py",
         "canonicalize-xlsx-result",
@@ -741,18 +786,20 @@ def build_workbook(
         "--evidence",
         str(candidate / "workbook-canonicalization.json"),
     )
-    validation = _run(
-        (
-            str(XLSX_RUNTIME),
-            str(XLSX_CLI),
-            "validate-contract",
-            str(excel_workbook),
-            str(candidate / "workbook-contract.json"),
-        ),
-        timeout=180,
-    )
     validation_path = candidate / "workbook-validation.json"
-    _write_exact(validation_path, canonical_json_bytes(validation))
+    validation = _accepted_workbook_validation(validation_path)
+    if validation is None:
+        validation = _run(
+            (
+                str(XLSX_RUNTIME),
+                str(XLSX_CLI),
+                "validate-contract",
+                str(excel_workbook),
+                str(candidate / "workbook-contract.json"),
+            ),
+            timeout=180,
+        )
+        _write_exact(validation_path, canonical_json_bytes(validation))
     _tool(
         "portfolio_report.py",
         "verify",
