@@ -95,6 +95,17 @@
     "methodology": {"type": "array", "minItems": 7, "items": {"type": "object"}},
     "observation_windows": {"type": "array", "items": {"type": "object"}},
     "attribution_dispositions": {"type": "array", "items": {"type": "object"}},
+    "strategy_attribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["benchmark_assignments", "comparisons", "costs", "generation_id"],
+      "properties": {
+        "benchmark_assignments": {"type": "array", "minItems": 9, "maxItems": 9},
+        "comparisons": {"type": "array", "minItems": 9, "maxItems": 9},
+        "costs": {"type": "array", "minItems": 9, "maxItems": 9},
+        "generation_id": {"$ref": "#/$defs/sha256"}
+      }
+    },
     "provenance": {"type": "array", "minItems": 2, "items": {"type": "object"}}
   },
   "$defs": {

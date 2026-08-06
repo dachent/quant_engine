@@ -1870,6 +1870,32 @@ def test_renderer_exposes_effective_dated_strategy_version_dispositions() -> Non
     assert "row.version_compatibility_status" in renderer
 
 
+def test_renderer_exposes_exact_date_attribution_cost_and_benchmark_dispositions() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    for field in (
+        "provider_comparison_observations",
+        "provider_cumulative_gap",
+        "provider_active_return_annualized",
+        "provider_tracking_error_annualized",
+        "provider_information_ratio",
+        "provider_beta",
+        "provider_upside_capture",
+        "provider_downside_capture",
+        "provider_relative_drawdown",
+        "cash_drag_status",
+        "fees_status",
+        "annual_external_cost_rate_pre_tax",
+        "after_tax_status",
+        "benchmark_assignment_status",
+        "benchmark_effective_start",
+        "benchmark_rationale",
+    ):
+        assert f"row.{field}" in renderer
+    assert "Exact common dates" in renderer
+    assert "No admitted benchmark" in renderer
+
+
 def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None:
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
 
