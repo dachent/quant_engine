@@ -542,9 +542,10 @@ def test_generated_semantic_command_declares_exact_gate_file(
     report_candidate = (
         output_root / "stages" / "report-candidate" / "candidates" / report_id
     )
-    assert str(output_root / "stages" / "report-candidate") not in nodes[
-        "build-report"
-    ]["declared_writes"]
+    assert (
+        str(output_root / "stages" / "report-candidate")
+        not in nodes["build-report"]["declared_writes"]
+    )
     assert {
         str(report_candidate / "portfolio-report-data.json"),
         str(report_candidate / "portfolio-report.xlsx"),
