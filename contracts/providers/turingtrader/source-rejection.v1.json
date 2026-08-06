@@ -1,0 +1,97 @@
+{
+  "schema_version": "1.0",
+  "provider_id": "turingtrader",
+  "audit_date": "2026-08-06",
+  "governing_issue": 197,
+  "decision": "REJECTED_NO_ACCEPTED_PROVIDER_ROUTE",
+  "privacy": {
+    "source_filenames_committed": false,
+    "absolute_paths_committed": false,
+    "provider_payloads_committed": false,
+    "profile_or_session_material_committed": false,
+    "real_evidence_location": "outside_git",
+    "artifact_id_rule": "Use allowlisted metadata identifiers; never hydrate or serialize private captures for this disposition."
+  },
+  "verified_source_metadata": [
+    {
+      "artifact_id": "metadata-001",
+      "format": ".md",
+      "bytes": 3345,
+      "sha256": "ed4f599d94276a7fb9ff18bf0fa4aa0a1371ea642e38299ec78631fdebd4299a",
+      "role": "LOCAL_CAPTURE_RUNBOOK",
+      "disposition": "REFERENCE_ONLY_CONFLICTS_WITH_REJECTED_BRANCH_NARRATIVE"
+    },
+    {
+      "artifact_id": "metadata-002",
+      "format": ".md",
+      "bytes": 5435,
+      "sha256": "93cf414da23b5c49b4326478d69b02a9ec4bd668911523d9d74c58ccfb3db973",
+      "role": "LOCAL_CAPTURE_SUMMARY",
+      "disposition": "REFERENCE_ONLY_CONFLICTS_WITH_REJECTED_BRANCH_NARRATIVE"
+    }
+  ],
+  "unhydrated_capture_set": {
+    "artifact_count": 5,
+    "total_bytes": 687784294,
+    "principal_navigation_artifact_count": 3,
+    "principal_navigation_total_bytes": 687176414,
+    "availability": "ONEDRIVE_OFFLINE_UNPINNED_PLACEHOLDER",
+    "sha256_state": "UNAVAILABLE_HYDRATION_NOT_AUTHORIZED",
+    "content_inspected": false,
+    "hydration_attempted": false,
+    "disposition": "REJECTED_UNVERIFIED_CAPTURE_SET"
+  },
+  "rejected_branch": {
+    "merge_base": "d32f68256eb373490a5db28620c36d2fe6439932",
+    "head_commit": "ccf1b5626006f93cd27df9890da6c4a5aa6510f8",
+    "head_tree": "f57633721a0005211bb7967e77b947f5ef8eeb57",
+    "unique_commits": [
+      "ccf1b5626006f93cd27df9890da6c4a5aa6510f8"
+    ],
+    "changed_file_count": 6,
+    "tracked_provider_module_sha256": "4fb51ae996119e0b3cb354b5cd45617cffe63fbdb92eb9b55f853cde67efcb79",
+    "opaque_provenance_anchor": "714d5609d380382d72e44c2cb983bcec63644babc8362317c9e17fa5fa6636f3",
+    "self_contained": false,
+    "unrelated_untracked_overlap": "PRESERVED_UNCHANGED_OUT_OF_SCOPE_ISSUE_196",
+    "disposition": "PRESERVE_UNMERGED_AS_REJECTED_EVIDENCE"
+  },
+  "accepted_routes": [],
+  "accepted_outputs": [],
+  "explicit_route_rejections": [
+    {
+      "route_class": "AUTHENTICATED_PROFILE",
+      "disposition": "REJECTED_PRIVATE_PROFILE_AND_SESSION_BOUNDARY"
+    },
+    {
+      "route_class": "PUBLIC_FIREBASE_CANDIDATES",
+      "disposition": "REJECTED_UNVERIFIED_CAPTURE_SCHEMA_IDENTITY_AND_TERMS"
+    }
+  ],
+  "blocking_findings": [
+    "BRANCH_NOT_SELF_CONTAINED_DUE_UNRELATED_UNTRACKED_IMPORT",
+    "AUTHENTICATED_PROFILE_ROUTE_OUT_OF_SCOPE",
+    "CAPTURE_HASHES_UNAVAILABLE_HYDRATION_NOT_AUTHORIZED",
+    "CAPTURE_DOCUMENTATION_CONFLICT",
+    "OPAQUE_PROVENANCE_ANCHOR_NOT_BOUND_TO_SOURCE_OR_CODE",
+    "NO_AUTHORIZED_TERMS_EVIDENCE",
+    "RESPONSE_SCHEMAS_NOT_VALIDATED",
+    "PUBLIC_SLUG_AND_STRATEGY_IDENTITY_NOT_PRESERVED",
+    "PLAIN_TEXT_ENDPOINTS_PARSED_AS_JSON",
+    "NO_PER_CAPABILITY_COVERAGE_OR_OBSERVED_FRESHNESS",
+    "NO_AUTHORITATIVE_STRATEGY_MAPPING"
+  ],
+  "strategy_handoff": {
+    "strategy_id": "tt-portfolio",
+    "provider_evidence_state": "UNAVAILABLE",
+    "version_ref": null,
+    "version_disposition": "UNRESOLVED_NO_AUTHORITATIVE_MAPPING",
+    "account_live_authority_unchanged": true,
+    "provider_series_may_replace_account_live": false
+  },
+  "restricted_output_control": {
+    "finding_issue": 214,
+    "broad_local_serialization_rejected": true,
+    "future_local_inspection": "SCHEMA_FIRST_ALLOWLIST_AGGREGATE_OR_HASH_ONLY"
+  },
+  "recovery": "Keep the rejected branch, unhydrated capture placeholders, and unrelated untracked files unchanged. No provider, portfolio, or publication pointer is advanced."
+}
