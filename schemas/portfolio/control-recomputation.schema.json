@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/control-recomputation.schema.json",
+  "title": "Independent portfolio control recomputation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["as_of_date", "component_count", "declared_values", "differences", "generation_checks", "inputs", "method", "recomputed_correlation_one_stress", "receipt_schema_version", "status", "tolerance"],
+  "properties": {
+    "as_of_date": {"type": "string", "format": "date"},
+    "component_count": {"type": "integer", "minimum": 1},
+    "declared_values": {"type": "object", "required": ["correlation_stress", "panel_headline", "report_headline"], "additionalProperties": {"$ref": "#/$defs/decimal"}},
+    "differences": {"type": "object", "required": ["correlation_declared", "declared_contribution_sum", "maximum_component", "panel_headline", "report_headline"], "additionalProperties": {"$ref": "#/$defs/decimal"}},
+    "generation_checks": {"type": "object", "required": ["panel_correlation_matches_current", "panel_report_matches_current"], "additionalProperties": {"const": true}},
+    "inputs": {"type": "object", "required": ["correlation", "panel", "report"], "additionalProperties": {"type": "object"}},
+    "method": {"const": "DECIMAL_SUM_ALLOCATION_WEIGHT_TIMES_ADVERSE_LOSS_FRACTION"},
+    "recomputed_correlation_one_stress": {"$ref": "#/$defs/decimal"},
+    "receipt_schema_version": {"const": 1},
+    "status": {"const": "PASS"},
+    "tolerance": {"$ref": "#/$defs/decimal"}
+  },
+  "$defs": {"decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"}}
+}
