@@ -1950,7 +1950,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 11" in renderer
+    assert "data.panel_schema_version !== 12" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -2038,6 +2038,7 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
         panel.PANEL_SCHEMA_VERSION
     )
     assert "canonical_strategy_series" in schema["required"]
+    assert "replication_analysis" in schema["required"]
     canonical = schema["properties"]["canonical_strategy_series"]["items"]
     assert canonical["additionalProperties"] is False
     assert set(canonical["required"]) == {
@@ -2051,6 +2052,10 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
         "strategy_id",
         "strategy_version",
     }
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    assert "Forward-only research tracker" in renderer
+    assert "holdout recalibration is NONE" in renderer
+    assert "no readiness, allocation, HWM, execution, or order authority" in renderer
 
 
 def test_hwm_prose_uses_qualified_evidence_instead_of_legacy_source_label() -> None:
