@@ -772,6 +772,79 @@ def test_missing_strategy_evidence_is_unavailable_not_inferred(tmp_path: Path) -
     assert strategy["nav_status"] == "UNAVAILABLE"
 
 
+def test_effective_dated_strategy_version_registry_projects_into_report(
+    tmp_path: Path,
+) -> None:
+    catalog = _baseline_catalog()
+    unavailable = {
+        "source_ids": ["synthetic-source"],
+        "status": "UNAVAILABLE",
+        "version_ref": None,
+    }
+    catalog["strategy_version_catalog"] = {
+        "as_of_date": catalog["as_of_date"],
+        "catalog_schema_version": 2,
+        "strategies": [
+            {
+                "backtest": dict(unavailable),
+                "benchmark": dict(unavailable),
+                "compatibility_reason": "SYNTHETIC compatibility is unresolved.",
+                "compatibility_status": "UNRESOLVED",
+                "configuration": dict(unavailable),
+                "costs": dict(unavailable),
+                "design": dict(unavailable),
+                "disposition": "UNRESOLVED",
+                "disposition_reason": "SYNTHETIC authoritative version is absent.",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "evidence_layers": [
+                    {
+                        "artifact_sha256": None,
+                        "disposition": "SYNTHETIC account-live route.",
+                        "evidence_layer": "ACCOUNT_LIVE",
+                        "observed_end": None,
+                        "observed_start": None,
+                        "source_id": "synthetic-source",
+                        "status": "REFERENCE_ONLY",
+                        "version_ref": None,
+                    }
+                ],
+                "gaps": ["SYNTHETIC authoritative version is absent."],
+                "live_boundary": {
+                    "source_ids": ["synthetic-source"],
+                    "status": "EVIDENCED" if index == 1 else "UNAVAILABLE",
+                    "version_ref": f"live-v{index}" if index == 1 else None,
+                    "observed_start": "2026-01-01" if index == 1 else None,
+                    "observed_end": "2026-01-03" if index == 1 else None,
+                },
+                "source_route": {
+                    "source_ids": ["synthetic-source"],
+                    "status": "REFERENCE_ONLY",
+                    "version_ref": None,
+                },
+                "strategy_id": f"strategy-{index}",
+                "version_ref": None,
+            }
+            for index in range(1, 10)
+        ],
+    }
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(baseline_root)
+    first = next(
+        item
+        for item in report["strategy_summary"]
+        if item["strategy_id"] == "strategy-1"
+    )
+
+    assert first["version_disposition"] == "UNRESOLVED"
+    assert first["version_effective_start"] == "2026-01-01"
+    assert first["live_boundary_status"] == "EVIDENCED"
+    assert first["live_boundary_observed_end"] == "2026-01-03"
+    assert first["version_compatibility_status"] == "UNRESOLVED"
+    assert first["strategy_evidence_layers"][0]["evidence_layer"] == "ACCOUNT_LIVE"
+
+
 def test_transaction_without_amount_remains_explicitly_unavailable(
     tmp_path: Path,
 ) -> None:
