@@ -15,8 +15,10 @@
   "source_inventory": {
     "artifact_count": 6,
     "total_bytes": 30951279,
-    "inventory_sha256": "3e5cc15df4f0a2ffed69259307f8915123c8aa2f7ab4562aa2c5b0a43076fecf",
-    "inventory_rule": "artifact-relative-locator TAB bytes TAB lowercase-sha256 LF, sorted by locator, final LF",
+    "inventory_sha256": "fa9220c31d8de9856d7e9b3774c6bd2aa30f3f467ec3401252aa2b1bcb47b680",
+    "inventory_rule": "artifact_id TAB bytes TAB lowercase-sha256 LF, sorted by artifact_id, final LF",
+    "private_source_inventory_sha256": "3e5cc15df4f0a2ffed69259307f8915123c8aa2f7ab4562aa2c5b0a43076fecf",
+    "private_source_inventory_rule": "artifact-relative-locator TAB bytes TAB lowercase-sha256 LF, sorted by locator, final LF; retained as an outside-Git evidence anchor and not reproducible without the private locators",
     "artifacts": [
       {
         "artifact_id": "source-001",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -34,7 +35,12 @@ def test_source_inventory_is_exact_and_hash_bound() -> None:
     assert inventory["artifact_count"] == len(artifacts) == 6
     assert inventory["total_bytes"] == sum(item["bytes"] for item in artifacts)
     assert inventory["total_bytes"] == 30951279
-    assert SHA256.fullmatch(inventory["inventory_sha256"])
+    digest_input = "".join(
+        f"{item['artifact_id']}\t{item['bytes']}\t{item['sha256']}\n"
+        for item in sorted(artifacts, key=lambda item: item["artifact_id"])
+    ).encode()
+    assert hashlib.sha256(digest_input).hexdigest() == inventory["inventory_sha256"]
+    assert SHA256.fullmatch(inventory["private_source_inventory_sha256"])
     assert [item["artifact_id"] for item in artifacts] == [
         f"source-{index:03d}" for index in range(1, 7)
     ]
