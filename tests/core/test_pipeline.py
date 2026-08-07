@@ -21,6 +21,7 @@ from quant_engine.core import (
     SourceArtifact,
     VerificationStatus,
     execute_pipeline,
+    generation_inventory_sha256,
     inventory_generation,
     plan_pipeline,
     publish_generation,
@@ -264,6 +265,119 @@ def test_execute_prepares_without_pointer_change_then_commits_atomically(
 
     resumed = execute_pipeline(spec)
     assert resumed["release_state"] == "COMMITTED"
+
+
+def test_pipeline_repairs_only_the_exact_bound_predecessor_inventory_drift(
+    tmp_path: Path,
+) -> None:
+    raw, _, accepted, target = _spec_dict(tmp_path)
+    first = _parse(raw)
+    execute_pipeline(first, commit=True)
+    drift = target / "generations" / accepted.generation_id / "drift.bin"
+    drift.write_bytes(b"known predecessor drift\n")
+
+    replacement_source = tmp_path / "replacement-source"
+    replacement = _manifest("replacement")
+    replacement_manifest = stage_generation(replacement_source, replacement)
+    replacement_raw = json.loads(json.dumps(raw))
+    replacement_raw["pipeline_id"] = "test-repair-rollforward"
+    replacement_raw["created_at"] = datetime(2026, 8, 2, 13, tzinfo=UTC).isoformat()
+    replacement_raw["state_root"] = str(tmp_path / "repair-state")
+    generation_node = replacement_raw["nodes"][-1]
+    generation_node.update(
+        {
+            "files": [_file(replacement_manifest)],
+            "generation_id": replacement.generation_id,
+            "manifest_sha256": hashlib.sha256(replacement.to_json_bytes()).hexdigest(),
+            "source_dir": str(replacement_manifest.parent),
+        }
+    )
+    authority_path = Path(replacement_raw["coordination_root"]) / (
+        "CURRENT_RELEASE.json"
+    )
+    authority_bytes = authority_path.read_bytes()
+    authority = json.loads(authority_bytes)
+    release_path = (
+        authority_path.parent / "releases" / authority["release_id"] / "release.json"
+    )
+    predecessor = json.loads(release_path.read_bytes())
+    predecessor_target = predecessor["targets"][0]
+    repair_gate = tmp_path / "predecessor-repair.json"
+    repair_gate.write_bytes(
+        canonical_json_bytes(
+            {
+                "authority_sha256": hashlib.sha256(authority_bytes).hexdigest(),
+                "disposition": "SUPERSEDE_WITH_VERIFIED_GENERATIONS",
+                "expected_inventory_drifts": [
+                    {
+                        "generation_id": accepted.generation_id,
+                        "observed_inventory_sha256": generation_inventory_sha256(
+                            target, accepted.generation_id
+                        ),
+                        "recorded_inventory_sha256": predecessor_target[
+                            "proposed_inventory_sha256"
+                        ],
+                        "root_id": "reporting",
+                    }
+                ],
+                "release_id": authority["release_id"],
+                "release_manifest_sha256": authority["release_manifest_sha256"],
+                "schema_version": 1,
+            }
+        )
+    )
+    replacement_raw["gates"].append(
+        {
+            "gate_id": "predecessor-authority-repair",
+            "path": str(repair_gate),
+            "sha256": hashlib.sha256(repair_gate.read_bytes()).hexdigest(),
+        }
+    )
+    wrong_gate = tmp_path / "wrong-predecessor-repair.json"
+    wrong_payload = json.loads(repair_gate.read_bytes())
+    wrong_payload["expected_inventory_drifts"][0]["observed_inventory_sha256"] = (
+        "f" * 64
+    )
+    wrong_gate.write_bytes(canonical_json_bytes(wrong_payload))
+    wrong_raw = json.loads(json.dumps(replacement_raw))
+    wrong_raw["pipeline_id"] = "test-wrong-repair-rollforward"
+    wrong_raw["state_root"] = str(tmp_path / "wrong-repair-state")
+    wrong_raw["gates"][-1].update(
+        {
+            "path": str(wrong_gate),
+            "sha256": hashlib.sha256(wrong_gate.read_bytes()).hexdigest(),
+        }
+    )
+    with pytest.raises(PipelineValidationError, match="drift set differs"):
+        execute_pipeline(_parse(wrong_raw))
+    reuse_raw = json.loads(json.dumps(replacement_raw))
+    reuse_raw["pipeline_id"] = "test-reused-repair-rollforward"
+    reuse_raw["state_root"] = str(tmp_path / "reused-repair-state")
+    reused_inventory = inventory_generation(
+        target / "generations" / accepted.generation_id
+    )
+    reuse_raw["nodes"][-1].update(
+        {
+            "files": reused_inventory["files"],
+            "generation_id": accepted.generation_id,
+            "manifest_sha256": reused_inventory["manifest_sha256"],
+            "source_dir": None,
+        }
+    )
+    with pytest.raises(PipelineValidationError, match="reuses drifted generation"):
+        execute_pipeline(_parse(reuse_raw))
+    repair = _parse(replacement_raw)
+
+    prepared = execute_pipeline(repair)
+
+    assert prepared["release_state"] == "PREPARED"
+    assert json.loads((target / "CURRENT.json").read_bytes())["generation_id"] == (
+        accepted.generation_id
+    )
+    committed = execute_pipeline(repair, commit=True)
+    assert committed["release_state"] == "COMMITTED"
+    assert read_current(target).generation_id == replacement.generation_id
+    assert execute_pipeline(repair)["release_state"] == "COMMITTED"
 
 
 def test_freshness_gate_is_reaged_on_prepare_and_commit(tmp_path: Path) -> None:

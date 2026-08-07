@@ -20,6 +20,7 @@ from quant_engine.core.contracts import (
 )
 from quant_engine.core.publication import (
     CurrentPointer,
+    PointerIntegrityError,
     PublicationRejectedError,
     generation_inventory_sha256,
     publish_generation,
@@ -34,6 +35,7 @@ _AUTHORITY_SCHEMA_VERSION: Final = 1
 _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_PREDECESSOR_REPAIR_GATE_ID: Final = "predecessor-authority-repair"
 
 
 class ReleaseValidationError(ValueError):
@@ -695,6 +697,78 @@ def _read_optional_current(root: Path) -> CurrentPointer | None:
         return None
 
 
+def _read_recorded_current(root: Path) -> CurrentPointer | None:
+    """Read pointer bytes without accepting the referenced generation inventory."""
+
+    path = root.resolve() / "CURRENT.json"
+    if path.is_symlink():
+        raise ReleaseConflictError("CURRENT.json must not be a symlink")
+    try:
+        content = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    return CurrentPointer.from_json_bytes(content)
+
+
+def _validate_invalid_previous_artifact_inventory(
+    manifest: ReleaseManifest,
+    roots: Mapping[str, Path],
+    *,
+    coordination_root: Path,
+) -> None:
+    """Accept only a committed predecessor whose pointer graph is still exact.
+
+    This deliberately ignores generation *artifact inventory* equality and no
+    other part of the predecessor contract.  The caller must separately bind
+    the exact expected inventory drift as governed evidence.
+    """
+
+    if set(roots) != {item.root_id for item in manifest.targets}:
+        raise ReleaseValidationError("runtime roots differ from release roots")
+    drifted = False
+    for target in manifest.targets:
+        root = roots[target.root_id].resolve()
+        pointer = _read_recorded_current(root)
+        if pointer is None or (
+            pointer.generation_id != target.proposed_generation_id
+            or pointer.manifest_sha256 != target.proposed_manifest_sha256
+            or pointer.artifact_inventory_sha256 != target.proposed_inventory_sha256
+        ):
+            raise ReleaseConflictError(
+                f"recorded predecessor pointer graph differs: {target.root_id}"
+            )
+        generation = read_generation(root, target.proposed_generation_id)
+        if (
+            hashlib.sha256(generation.to_json_bytes()).hexdigest()
+            != target.proposed_manifest_sha256
+        ):
+            raise ReleaseConflictError(
+                f"recorded predecessor manifest differs: {target.root_id}"
+            )
+        if (
+            target.proposed_inventory_sha256 is not None
+            and generation_inventory_sha256(root, target.proposed_generation_id)
+            != target.proposed_inventory_sha256
+        ):
+            drifted = True
+    if not drifted:
+        raise ReleaseConflictError(
+            "predecessor repair requires an artifact inventory mismatch"
+        )
+    for companion in manifest.companions:
+        path = roots[companion.root_id].resolve() / companion.relative_path
+        if _companion_hash(path) != companion.proposed_sha256:
+            raise ReleaseConflictError(
+                f"recorded predecessor companion differs: {companion.companion_id}"
+            )
+    if _read_optional_authority(coordination_root) != _expected_authority(manifest):
+        raise ReleaseConflictError("recorded predecessor authority differs")
+
+
+def _repairs_invalid_previous_inventory(manifest: ReleaseManifest) -> bool:
+    return any(item.gate_id == _PREDECESSOR_REPAIR_GATE_ID for item in manifest.gates)
+
+
 def prepare_release(
     *,
     coordination_root: Path,
@@ -704,9 +778,16 @@ def prepare_release(
     created_at: datetime,
     gates: tuple[GateEvidence, ...],
     companions: tuple[CompanionInput, ...] = (),
+    allow_invalid_previous_artifact_inventory: bool = False,
 ) -> ReleaseManifest:
     """Create a hash-bound release and recovery state without changing pointers."""
 
+    if allow_invalid_previous_artifact_inventory and not any(
+        item.gate_id == _PREDECESSOR_REPAIR_GATE_ID for item in gates
+    ):
+        raise ReleaseValidationError(
+            "predecessor inventory repair requires its governed gate"
+        )
     normalized_roots = _normalize_roots(roots)
     coordination_root = coordination_root.resolve()
     _reject_coordination_alias(coordination_root, normalized_roots)
@@ -731,6 +812,12 @@ def prepare_release(
             is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
         ):
             raise PublicationRejectedError("release target coverage is not complete")
+        try:
+            previous_pointer = _read_optional_current(root)
+        except PointerIntegrityError:
+            if not allow_invalid_previous_artifact_inventory:
+                raise
+            previous_pointer = _read_recorded_current(root)
         targets.append(
             ReleaseTarget(
                 root_id=root_id,
@@ -741,7 +828,7 @@ def prepare_release(
                 proposed_inventory_sha256=generation_inventory_sha256(
                     root, generation_manifest.generation_id
                 ),
-                previous_pointer=_read_optional_current(root),
+                previous_pointer=previous_pointer,
             )
         )
     plans: list[CompanionPlan] = []
@@ -766,8 +853,28 @@ def prepare_release(
             )
         )
     previous_authority = _read_optional_authority(coordination_root)
+    if allow_invalid_previous_artifact_inventory and previous_authority is None:
+        raise ReleaseConflictError(
+            "predecessor inventory repair requires coordinated authority"
+        )
     if previous_authority is not None:
-        read_current_release(coordination_root, normalized_roots)
+        try:
+            read_current_release(coordination_root, normalized_roots)
+        except PointerIntegrityError:
+            if not allow_invalid_previous_artifact_inventory:
+                raise
+            previous_manifest, previous_journal = read_release(
+                coordination_root, previous_authority.release_id
+            )
+            if previous_journal.state is not ReleaseState.COMMITTED:
+                raise ReleaseConflictError(
+                    "authoritative release journal is not COMMITTED"
+                )
+            _validate_invalid_previous_artifact_inventory(
+                previous_manifest,
+                normalized_roots,
+                coordination_root=coordination_root,
+            )
     release_manifest = ReleaseManifest.build(
         code_commit=code_commit,
         created_at=created_at,
@@ -824,7 +931,12 @@ def _validate_prepared_state(
         raise ReleaseValidationError("runtime roots differ from release roots")
     for target in manifest.targets:
         root = roots[target.root_id].resolve()
-        if _read_optional_current(root) != target.previous_pointer:
+        current = (
+            _read_recorded_current(root)
+            if _repairs_invalid_previous_inventory(manifest)
+            else _read_optional_current(root)
+        )
+        if current != target.previous_pointer:
             raise ReleaseConflictError(
                 f"current pointer changed after prepare: {target.root_id}"
             )
@@ -903,10 +1015,13 @@ def _validate_rolled_back_state(
     if set(roots) != {item.root_id for item in manifest.targets}:
         raise ReleaseValidationError("runtime roots differ from release roots")
     for target in manifest.targets:
-        if (
-            _read_optional_current(roots[target.root_id].resolve())
-            != target.previous_pointer
-        ):
+        root = roots[target.root_id].resolve()
+        current = (
+            _read_recorded_current(root)
+            if _repairs_invalid_previous_inventory(manifest)
+            else _read_optional_current(root)
+        )
+        if current != target.previous_pointer:
             raise ReleaseConflictError(
                 f"rolled-back pointer graph differs: {target.root_id}"
             )
@@ -1025,7 +1140,11 @@ def rollback_release(
         for root_id in reversed(rolling.applied_targets):
             release_target = targets[root_id]
             root = roots[root_id].resolve()
-            current = _read_optional_current(root)
+            current = (
+                _read_recorded_current(root)
+                if _repairs_invalid_previous_inventory(manifest)
+                else _read_optional_current(root)
+            )
             if current == release_target.previous_pointer:
                 pass
             elif (
@@ -1041,7 +1160,12 @@ def rollback_release(
                         root / "CURRENT.json",
                         release_target.previous_pointer.to_json_bytes(),
                     )
-                    if read_current(root) != release_target.previous_pointer:
+                    restored = (
+                        _read_recorded_current(root)
+                        if _repairs_invalid_previous_inventory(manifest)
+                        else read_current(root)
+                    )
+                    if restored != release_target.previous_pointer:
                         raise ReleaseConflictError(
                             f"restored pointer differs: {root_id}"
                         )
