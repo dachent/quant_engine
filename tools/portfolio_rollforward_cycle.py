@@ -42,7 +42,9 @@ def _text(value: object, label: str) -> str:
 
 
 def _objects(value: object, label: str) -> list[Mapping[str, Any]]:
-    if not isinstance(value, list) or not all(isinstance(item, Mapping) for item in value):
+    if not isinstance(value, list) or not all(
+        isinstance(item, Mapping) for item in value
+    ):
         raise RollforwardCycleError(f"{label} must contain objects")
     return list(value)
 

@@ -43,7 +43,9 @@ def _object(value: object, label: str) -> Mapping[str, Any]:
 
 
 def _objects(value: object, label: str) -> list[Mapping[str, Any]]:
-    if not isinstance(value, list) or not all(isinstance(item, Mapping) for item in value):
+    if not isinstance(value, list) or not all(
+        isinstance(item, Mapping) for item in value
+    ):
         raise ControlRecomputeError(f"{label} must contain objects")
     return list(value)
 
@@ -72,7 +74,9 @@ def _decimal_text(value: Decimal) -> str:
     return format(value, "f").rstrip("0").rstrip(".")
 
 
-def _current_payload(root: Path, filename: str, label: str) -> tuple[dict[str, Any], dict[str, object]]:
+def _current_payload(
+    root: Path, filename: str, label: str
+) -> tuple[dict[str, Any], dict[str, object]]:
     accepted_root = root.resolve()
     pointer = read_current(accepted_root)
     manifest = read_generation(accepted_root, pointer.generation_id)
@@ -95,14 +99,20 @@ def _panel_payload(candidate: Path) -> tuple[dict[str, Any], dict[str, object]]:
     dashboard_path = accepted / "data" / "dashboard_data.json"
     dashboard = _load(dashboard_path, "panel dashboard data")
     dashboard_hash, dashboard_size = hash_file(dashboard_path)
-    artifact_hashes = _object(manifest.get("artifact_sha256"), "candidate artifact_sha256")
+    artifact_hashes = _object(
+        manifest.get("artifact_sha256"), "candidate artifact_sha256"
+    )
     if artifact_hashes.get("data/dashboard_data.json") != dashboard_hash:
-        raise ControlRecomputeError("panel dashboard hash differs from candidate manifest")
+        raise ControlRecomputeError(
+            "panel dashboard hash differs from candidate manifest"
+        )
     panel_id = _text(manifest.get("panel_id"), "panel_id")
     if dashboard.get("meta", {}).get("report_generation_id") != manifest.get(
         "report_generation_id"
     ):
-        raise ControlRecomputeError("panel report identity differs from candidate manifest")
+        raise ControlRecomputeError(
+            "panel report identity differs from candidate manifest"
+        )
     return dashboard, {
         "panel_id": panel_id,
         "path": str(dashboard_path),
@@ -141,7 +151,9 @@ def build_receipt(
     declared_contribution_sum = Decimal(0)
     maximum_component_difference = Decimal(0)
     for index, component in enumerate(components):
-        weight = _decimal(component.get("allocation_weight"), f"component {index} weight")
+        weight = _decimal(
+            component.get("allocation_weight"), f"component {index} weight"
+        )
         adverse_loss = _decimal(
             component.get("adverse_loss_fraction"), f"component {index} adverse loss"
         )
@@ -158,14 +170,14 @@ def build_receipt(
 
     declared_correlation = _decimal(correlation_one.get("loss"), "correlation loss")
     summary = _objects(report.get("portfolio_summary"), "portfolio summary")
-    headline_rows = [row for row in summary if row.get("metric") == "Correlation-one stress"]
+    headline_rows = [
+        row for row in summary if row.get("metric") == "Correlation-one stress"
+    ]
     if len(headline_rows) != 1:
         raise ControlRecomputeError("report correlation-one headline is not unique")
     report_headline = _decimal(headline_rows[0].get("value"), "report headline")
     advisory = _object(panel.get("advisory"), "panel advisory")
-    panel_headline = _decimal(
-        advisory.get("correlation_one_stress"), "panel headline"
-    )
+    panel_headline = _decimal(advisory.get("correlation_one_stress"), "panel headline")
     panel_meta = _object(panel.get("meta"), "panel meta")
     generation_checks = {
         "panel_correlation_matches_current": panel_meta.get("correlation_generation_id")
@@ -219,7 +231,9 @@ def write_receipt(path: Path, receipt: Mapping[str, object]) -> dict[str, object
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         if path.is_symlink() or path.read_bytes() != content:
-            raise ControlRecomputeError("create-only receipt already exists and differs")
+            raise ControlRecomputeError(
+                "create-only receipt already exists and differs"
+            )
     else:
         descriptor = os.open(
             path,
@@ -230,7 +244,10 @@ def write_receipt(path: Path, receipt: Mapping[str, object]) -> dict[str, object
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-    return {"output": str(path.resolve()), "sha256": hashlib.sha256(content).hexdigest()}
+    return {
+        "output": str(path.resolve()),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
 
 
 def _parser() -> argparse.ArgumentParser:
