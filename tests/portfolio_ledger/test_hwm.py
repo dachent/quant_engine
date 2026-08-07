@@ -176,7 +176,7 @@ def test_freshness_cannot_advance_beyond_the_accepted_hwm_series() -> None:
     policy = _policy()
     policy["excluded_strategy_ids"] = []
     policy["material_perimeter"] = {"default": "INCLUDED", "exclusions": []}
-    _rows, summary = governed_hwm_coverage(
+    rows, summary = governed_hwm_coverage(
         strategies,
         policy,
         [
@@ -203,6 +203,8 @@ def test_freshness_cannot_advance_beyond_the_accepted_hwm_series() -> None:
     assert summary["uncovered_details"][0]["hwm_evidence_observed_end"] == (
         "2026-07-17"
     )
+    assert rows[0]["hwm_freshness_status"] == "BOUNDARY_MISMATCH"
+    assert rows[0]["hwm_freshness_state"] == "FRESH"
 
 
 def test_governed_hwm_rejects_unknown_policy_exclusion() -> None:

@@ -145,12 +145,25 @@ def _report() -> dict[str, object]:
             "value": None,
         },
     ]
+    for row in coverage:
+        row["disposition"] = "RETAINED_SYNTHETIC_TEST_GAP"
+        if row["category"] == "FACT_COVERAGE":
+            row["evidence_authority"] = "synthetic test fixture"
+        else:
+            row["resolution_authority"] = "synthetic test fixture"
     return {
         "account_summary": accounts,
         "allocation_history": allocations,
         "as_of_date": "2026-07-30",
         "baseline": {"generation_id": "b" * 64},
         "coverage_data_quality": coverage,
+        "fact_coverage_matrix": [
+            {
+                "account_id": "account-00",
+                "fact_type": "nav",
+                "status": "AVAILABLE",
+            }
+        ],
         "portfolio_summary": [
             {"metric": "Total liquid", "value": "510316.01"},
             {"metric": "Systematic capital", "value": "410272.39"},
@@ -680,6 +693,36 @@ def _publish_analytics(root: Path, filename: str, value: object, adapter: str) -
     publish_generation(root, manifest.generation_id)
 
 
+def _publish_report(root: Path, source: Path, value: object) -> None:
+    _write_json(source, value)
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 7, 30),
+        adapter=AdapterIdentity("synthetic-report-builder", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic control-panel test report",
+            fact_types=("synthetic report",),
+            observed_start=date(2026, 7, 30),
+            observed_end=date(2026, 7, 30),
+        ),
+        artifacts=(
+            SourceArtifact.from_path(
+                source,
+                artifact_id="synthetic/portfolio-report-data.json",
+                as_of_date=date(2026, 7, 30),
+                schema_name="synthetic-portfolio-report",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    (manifest_path.parent / "portfolio-report-data.json").write_bytes(
+        source.read_bytes()
+    )
+    publish_generation(root, manifest.generation_id)
+
+
 def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
     lens_root = tmp_path / "analytics" / "decomposition-lenses"
     assignments = {
@@ -763,33 +806,7 @@ def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
 def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     report_root = tmp_path / "reporting"
     source_report = tmp_path / "synthetic-portfolio-report-data.json"
-    _write_json(source_report, _report())
-    manifest = GenerationManifest.build(
-        as_of_date=date(2026, 7, 30),
-        adapter=AdapterIdentity("synthetic-report-builder", "1.0.0"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="synthetic control-panel test report",
-            fact_types=("synthetic report",),
-            observed_start=date(2026, 7, 30),
-            observed_end=date(2026, 7, 30),
-        ),
-        artifacts=(
-            SourceArtifact.from_path(
-                source_report,
-                artifact_id="synthetic/portfolio-report-data.json",
-                as_of_date=date(2026, 7, 30),
-                schema_name="synthetic-portfolio-report",
-                schema_version="1",
-            ),
-        ),
-        verification=VerificationStatus.VERIFIED,
-    )
-    manifest_path = stage_generation(report_root, manifest)
-    (manifest_path.parent / "portfolio-report-data.json").write_bytes(
-        source_report.read_bytes()
-    )
-    publish_generation(report_root, manifest.generation_id)
+    _publish_report(report_root, source_report, _report())
     decomposition_root = tmp_path / "analytics" / "decomposition"
     correlation_root = tmp_path / "analytics" / "correlation"
     _publish_analytics(
@@ -1328,6 +1345,25 @@ def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -
         panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
 
 
+def test_current_panel_fails_closed_without_fact_coverage_matrix(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    report = _report()
+    report["fact_coverage_matrix"] = []
+    report_root = tmp_path / "reporting-without-fact-matrix"
+    _publish_report(report_root, tmp_path / "report-without-fact-matrix.json", report)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="fact coverage matrix is unavailable"
+    ):
+        panel.build_candidate(
+            report_root,
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+        )
+
+
 def test_stale_governed_strategy_blocks_hwm_claim(inputs: dict[str, Path]) -> None:
     payload = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
     payload["assessments"][0].update(
@@ -1850,6 +1886,8 @@ def test_renderer_distinguishes_nav_presence_from_hwm_qualification() -> None:
     assert 'row.nav_status !== "AVAILABLE"' in renderer
     assert 'row.hwm_evidence_status !== "ACCEPTED"' in renderer
     assert 'row.hwm_freshness_status === "BLOCKED"' in renderer
+    assert 'row.hwm_freshness_status === "BOUNDARY_MISMATCH"' in renderer
+    assert "UNAVAILABLE_EVIDENCE_BOUNDARY_MISMATCH" in renderer
     assert "row.hwm_freshness_state" in renderer
     assert "Evidence ${statusText(row.nav_status)}" in renderer
     assert "HWM ${statusText(qualification.status)}" in renderer
@@ -1878,6 +1916,9 @@ def test_renderer_discloses_operational_freshness_and_provider_authority() -> No
     assert 'id="freshness-as-of"' in template
     assert "data.meta.freshness_evaluated_on" in renderer
     assert "Freshness evaluated" in renderer
+    assert 'row.category === "DATA_FRESHNESS"' in renderer
+    assert "Last accepted" in renderer
+    assert "evaluated ${formatDate(row.evaluated_on)}" in renderer
     assert "governed provider-ledger classification" in renderer
     assert "not brokerage-account authority" in renderer
 

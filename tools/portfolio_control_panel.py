@@ -1694,6 +1694,11 @@ def _panel_data(
     reconciliations = _objects(
         report.get("reconciliation_checks"), "reconciliation_checks"
     )
+    fact_coverage_matrix = _objects(
+        report.get("fact_coverage_matrix"), "fact_coverage_matrix"
+    )
+    if not fact_coverage_matrix:
+        raise ControlPanelValidationError("fact coverage matrix is unavailable")
     if len(strategies) != 9 or len(allocations) != 10:
         raise ControlPanelValidationError(
             "current strategy/allocation boundary differs"
@@ -2181,7 +2186,7 @@ def _panel_data(
             "twr_rows": len(performance),
         },
         "coverage": coverage,
-        "fact_coverage_matrix": report.get("fact_coverage_matrix", []),
+        "fact_coverage_matrix": fact_coverage_matrix,
         "observation_windows": report.get("observation_windows", []),
         "attribution_dispositions": report.get("attribution_dispositions", []),
         "canonical_strategy_series": canonical_strategy_series,
@@ -2786,8 +2791,8 @@ def verify_candidate(
     checks.append(
         _check(
             "Incomplete facts remain explicit",
-            not data.get("fact_coverage_matrix")
-            or (
+            bool(data.get("fact_coverage_matrix"))
+            and (
                 all(
                     row.get("status") == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
                     or (

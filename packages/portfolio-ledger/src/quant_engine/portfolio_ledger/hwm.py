@@ -181,6 +181,8 @@ def governed_hwm_coverage(
         row["hwm_freshness_status"] = (
             "UNAVAILABLE"
             if freshness_missing
+            else "BOUNDARY_MISMATCH"
+            if freshness_boundary_mismatch
             else "BLOCKED"
             if freshness_blocked
             else "ACCEPTED"

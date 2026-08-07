@@ -53,6 +53,7 @@
     EXCLUDED_DE_MINIMIS: "Excluded de minimis",
     UNAVAILABLE_MISSING_DAILY_NAV: "Daily NAV evidence missing",
     UNAVAILABLE_STALE_FOR_HWM: "Daily NAV present but stale for HWM",
+    UNAVAILABLE_EVIDENCE_BOUNDARY_MISMATCH: "Daily NAV and freshness boundaries differ",
     UNAVAILABLE_UNACCEPTED_EVIDENCE: "Daily NAV layer not admitted for HWM",
     UNAVAILABLE_MISSING_FRESHNESS: "Daily NAV freshness unavailable",
     UNAVAILABLE_MISSING_VERSION_MATCHED_LIVE: "No version-matched live series",
@@ -111,6 +112,7 @@
     if (row.hwm_scope === "EXCLUDED_DE_MINIMIS") return { status: "EXCLUDED_DE_MINIMIS", note: row.hwm_exclusion_reason || "Explicit policy exclusion; not a computed size threshold" };
     if (row.nav_status !== "AVAILABLE") return { status: "UNAVAILABLE_MISSING_DAILY_NAV", note: "No daily NAV evidence is present" };
     if (row.hwm_evidence_status !== "ACCEPTED") return { status: "UNAVAILABLE_UNACCEPTED_EVIDENCE", note: "Daily NAV evidence is present but its evidence layer is not admitted for HWM" };
+    if (row.hwm_freshness_status === "BOUNDARY_MISMATCH") return { status: "UNAVAILABLE_EVIDENCE_BOUNDARY_MISMATCH", note: `Daily NAV ends ${formatDate(row.nav_observed_end)} but freshness evidence ends ${formatDate(row.hwm_freshness_observed_end)}; HWM remains blocked until the boundaries agree` };
     if (row.hwm_freshness_status === "BLOCKED") return { status: "UNAVAILABLE_STALE_FOR_HWM", note: `Daily NAV evidence is accepted but ${String(row.hwm_freshness_state || "stale").toLowerCase()} for HWM` };
     if (row.hwm_freshness_status !== "ACCEPTED") return { status: "UNAVAILABLE_MISSING_FRESHNESS", note: "Daily NAV evidence is present but its freshness assessment is unavailable" };
     return { status: "AVAILABLE_HWM_QUALIFIED", note: "Daily NAV evidence is present and HWM-qualified" };
@@ -750,7 +752,11 @@
     const factRows = data.coverage.filter((row) => row.category === "FACT_COVERAGE");
     const cleanFacts = factRows.filter((row) => row.status === "COMPLETE_WITHIN_DECLARED_BOUNDARY").length;
     const dispositionText = (value) => value && typeof value === "object" ? [value.code, value.effect].filter(Boolean).join(": ") : String(value || "Disposition not recorded");
-    const observedWindow = (row) => row.observed_start || row.observed_end ? `${formatDate(row.observed_start)}–${formatDate(row.observed_end)}` : "Boundary not declared / no accepted observation";
+    const observedWindow = (row) => {
+      if (row.observed_start || row.observed_end) return `${formatDate(row.observed_start)}–${formatDate(row.observed_end)}`;
+      if (row.category === "DATA_FRESHNESS") return `${row.last_accepted_date ? `Last accepted ${formatDate(row.last_accepted_date)}` : "No accepted observation"} · evaluated ${formatDate(row.evaluated_on)}`;
+      return "Boundary not declared / no accepted observation";
+    };
     renderKpis("#data-kpis", [
       ["Report generation", data.meta.report_generation_id.slice(0, 12), "Accepted local authority"],
       ["Baseline generation", data.meta.baseline_generation_id.slice(0, 12), "Hash-linked input"],

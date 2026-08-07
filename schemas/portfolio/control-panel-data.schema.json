@@ -109,7 +109,7 @@
     "blocking_items": { "$ref": "#/$defs/rows" },
     "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
     "coverage": { "$ref": "#/$defs/rows" },
-    "fact_coverage_matrix": { "$ref": "#/$defs/rows" },
+    "fact_coverage_matrix": { "type": "array", "minItems": 1, "items": { "type": "object" } },
     "observation_windows": { "$ref": "#/$defs/rows" },
     "attribution_dispositions": { "$ref": "#/$defs/rows" },
     "canonical_strategy_series": {
