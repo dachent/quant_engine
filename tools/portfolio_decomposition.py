@@ -2422,16 +2422,16 @@ def build_decomposition(
         )
         for model in spec.models
     ]
-    for result in results:
-        result["evidence_mode"] = spec.evidence_mode
-        result["evidence_layers"] = sorted(
+    for model_result in results:
+        model_result["evidence_mode"] = spec.evidence_mode
+        model_result["evidence_layers"] = sorted(
             {
                 row.evidence_layer
-                for row in targets.get(str(result.get("series_id")), [])
+                for row in targets.get(str(model_result.get("series_id")), [])
             }
         )
-        result["series_composition"] = dict(
-            spec.series_composition.get(str(result.get("series_id")), {})
+        model_result["series_composition"] = dict(
+            spec.series_composition.get(str(model_result.get("series_id")), {})
         )
     selections = _select_models(results, spec.models)
     methodology_hash, methodology_size = hash_file(METHODOLOGY_PATH)
