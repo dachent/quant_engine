@@ -39,7 +39,7 @@
     "weekly_returns"
   ],
   "properties": {
-    "panel_schema_version": { "const": 12 },
+    "panel_schema_version": { "const": 13 },
     "meta": {
       "type": "object",
       "additionalProperties": false,
