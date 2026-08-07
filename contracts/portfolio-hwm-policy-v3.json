@@ -1,0 +1,31 @@
+{
+  "policy_id": "PORT-HWM-3",
+  "schema_version": 2,
+  "drawdown_limit": "0.15",
+  "material_perimeter": {
+    "default": "INCLUDED",
+    "exclusions": [
+      {
+        "strategy_id": "composer-holy-grail",
+        "classification": "EXCLUDED_DE_MINIMIS",
+        "effective_date": "2026-08-01",
+        "reason": "User-directed de minimis exclusion: retain in capital reporting but do not let this immaterial sleeve block the systematic HWM governor."
+      },
+      {
+        "strategy_id": "echotrade-growth-pivots",
+        "classification": "EXCLUDED_DE_MINIMIS",
+        "effective_date": "2026-08-06",
+        "reason": "User-directed de minimis disposition: retain the $0.19 sleeve in capital reporting without spending an operating cycle refreshing it or allowing it to block the systematic HWM governor."
+      }
+    ]
+  },
+  "accepted_daily_nav_evidence": [
+    "ACCOUNT_LIVE",
+    "PROVIDER_LIVE"
+  ],
+  "accepted_provider_live_strategy_ids": [
+    "robuxio-crypto"
+  ],
+  "availability_rule": "Every included current strategy must have an accepted daily NAV or return series through its declared observed boundary. Excluded strategies remain reported but do not enter the HWM coverage denominator.",
+  "missing_data_rule": "Do not interpolate missing NAV, FX, or returns. Name every uncovered included strategy and its exact current value."
+}

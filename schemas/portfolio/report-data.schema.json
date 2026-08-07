@@ -70,11 +70,35 @@
     "flow_reconciliation": {"type": "array", "items": {"type": "object"}},
     "reconciliation_checks": {"type": "array", "minItems": 3, "items": {"type": "object"}},
     "coverage_data_quality": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "fact_coverage_matrix": {"type": "array", "items": {"type": "object"}},
+    "hwm_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["covered_value_usd", "excluded_details", "excluded_strategies", "excluded_value_usd", "governed_perimeter_value_usd", "nav_coverage", "policy_id", "status", "status_code_version", "status_semantics", "uncovered_details", "uncovered_strategies", "uncovered_value_usd"],
+      "properties": {
+        "covered_value_usd": {"$ref": "#/$defs/decimal"},
+        "excluded_details": {"type": "array", "items": {"type": "object"}},
+        "excluded_strategies": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "excluded_value_usd": {"$ref": "#/$defs/decimal"},
+        "governed_perimeter_value_usd": {"$ref": "#/$defs/decimal"},
+        "nav_coverage": {"$ref": "#/$defs/decimal"},
+        "policy_id": {"const": "PORT-HWM-3"},
+        "status": {"type": "string"},
+        "status_code_version": {"const": 2},
+        "status_semantics": {"const": "EXPLICIT_GOVERNED_HWM_PERIMETER"},
+        "uncovered_details": {"type": "array", "items": {"type": "object"}},
+        "uncovered_strategies": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "uncovered_value_usd": {"$ref": "#/$defs/decimal"}
+      }
+    },
     "corrections": {"type": "array", "items": {"type": "object"}},
     "methodology": {"type": "array", "minItems": 7, "items": {"type": "object"}},
+    "observation_windows": {"type": "array", "items": {"type": "object"}},
+    "attribution_dispositions": {"type": "array", "items": {"type": "object"}},
     "provenance": {"type": "array", "minItems": 2, "items": {"type": "object"}}
   },
   "$defs": {
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "performance": {
       "type": "object",

@@ -80,6 +80,9 @@
     "assumptions": {"type": "array", "items": {"type": "object"}},
     "unmapped_records": {"type": "array", "items": {"type": "object"}},
     "fact_coverage": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/coverage"}},
+    "fact_coverage_matrix": {"type": "array", "items": {"$ref": "#/$defs/fact_coverage_detail"}},
+    "observation_windows": {"type": "array", "items": {"type": "object"}},
+    "attribution_dispositions": {"type": "array", "items": {"type": "object"}},
     "reconciliation_checks": {"type": "array", "minItems": 3, "items": {"type": "object"}},
     "reconciliation_exceptions": {"type": "array", "minItems": 1, "items": {"type": "object"}},
     "replay": {
@@ -127,7 +130,36 @@
       "properties": {
         "fact_type": {"type": "string", "minLength": 1},
         "status": {"enum": ["COMPLETE_WITHIN_DECLARED_BOUNDARY", "PARTIAL", "FAILED"]},
-        "known_gaps": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        "known_gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "disposition": {"type": "object"},
+        "record_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "fact_coverage_detail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "admission_effective_end", "admission_effective_start", "authority", "boundary_basis", "cadence", "declared_end", "declared_start", "disposition", "fact_type", "missing_interval_end", "missing_interval_reason", "missing_interval_start", "missing_intervals", "observed_end", "observed_start", "provider_id", "record_count", "status", "unavailable_amount_count"],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1},
+        "admission_effective_end": {"type": ["string", "null"], "format": "date"},
+        "admission_effective_start": {"type": ["string", "null"], "format": "date"},
+        "authority": {"type": "string", "minLength": 1},
+        "boundary_basis": {"enum": ["OBSERVED_RECORDS_ONLY", "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS", "NO_ACCEPTED_SOURCE"]},
+        "cadence": {"enum": ["DAILY", "EVENT_STREAM", "SNAPSHOT"]},
+        "declared_end": {"type": ["string", "null"], "format": "date"},
+        "declared_start": {"type": ["string", "null"], "format": "date"},
+        "disposition": {"type": "string", "minLength": 1},
+        "fact_type": {"enum": ["flows", "nav", "positions", "transactions"]},
+        "missing_interval_end": {"type": ["string", "null"], "format": "date"},
+        "missing_interval_reason": {"type": "string", "minLength": 1},
+        "missing_interval_start": {"type": ["string", "null"], "format": "date"},
+        "missing_intervals": {"type": "array", "items": {"type": "object"}},
+        "observed_end": {"type": ["string", "null"], "format": "date"},
+        "observed_start": {"type": ["string", "null"], "format": "date"},
+        "provider_id": {"type": "string", "minLength": 1},
+        "record_count": {"type": "integer", "minimum": 0},
+        "status": {"enum": ["OBSERVED_NOT_COMPLETENESS_PROOF", "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF", "NO_ACCEPTED_FACT_PATH"]},
+        "unavailable_amount_count": {"type": "integer", "minimum": 0}
       }
     }
   }

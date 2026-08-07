@@ -9,6 +9,7 @@ walks a directory or calls a provider.
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import csv
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -1708,6 +1709,9 @@ def _fact_coverage(
     schwab_known_gaps: Sequence[str],
     missing_strategy_nav_count: int,
     as_of_date: date,
+    *,
+    nav: Sequence[Mapping[str, Any]] = (),
+    costs: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     investment_count = sum(1 for item in accounts if item["role"] == "INVESTMENT")
     unmapped = [
@@ -1761,6 +1765,18 @@ def _fact_coverage(
             "status": "PARTIAL"
             if current_unmapped
             else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+            "disposition": {
+                "authority": "effective-dated account assignment registry",
+                "code": (
+                    "POOL_ONLY_UNALLOCATED_RETAINED" if current_unmapped else "COMPLETE"
+                ),
+                "effect": (
+                    "Current pool-only intervals remain unassigned; no holding-based strategy inference is permitted."
+                    if current_unmapped
+                    else "Every current systematic interval has an accepted strategy assignment."
+                ),
+            },
+            "record_count": len(current_unmapped),
         },
         {
             "fact_type": "historical_strategy_attribution",
@@ -1772,27 +1788,75 @@ def _fact_coverage(
             "status": "PARTIAL"
             if historical_unmapped
             else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+            "disposition": {
+                "authority": "effective-dated account assignment registry",
+                "code": (
+                    "POOL_ONLY_UNALLOCATED_RETAINED"
+                    if historical_unmapped
+                    else "COMPLETE"
+                ),
+                "effect": (
+                    "Historical pool-only intervals remain visible and are excluded from strategy attribution."
+                    if historical_unmapped
+                    else "Every historical systematic interval has an accepted strategy assignment."
+                ),
+            },
+            "record_count": len(historical_unmapped),
         },
         {
             "fact_type": "nav",
-            "known_gaps": [
-                f"{missing_strategy_nav_count} current strategies lack account-specific daily series"
-            ],
-            "status": "PARTIAL",
+            "known_gaps": (
+                [
+                    f"{missing_strategy_nav_count} current strategies lack account-specific daily series"
+                ]
+                if missing_strategy_nav_count
+                else []
+            ),
+            "status": (
+                "PARTIAL"
+                if missing_strategy_nav_count
+                else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+            ),
+            "disposition": {
+                "authority": "accepted account NAV plus governed HWM qualification",
+                "code": "RETAINED_UNQUALIFIED_HWM_NAV",
+                "effect": "Automated HWM remains unavailable for every included sleeve without qualified fresh daily NAV evidence.",
+            },
+            "record_count": len(nav),
         },
         {
             "fact_type": "flows",
             "known_gaps": [
-                "coverage is limited to accepted Schwab, IBKR, and Alpaca evidence"
+                (
+                    f"{len(flows)} accepted flow records across "
+                    f"{', '.join(sorted({str(item['provider']) for item in flows if item.get('provider')})) or 'no providers'}; "
+                    "providers without an admitted flow path remain explicit in the account fact matrix"
+                )
             ],
             "status": "PARTIAL",
+            "disposition": {
+                "authority": "accepted provider-ledger and legacy flow evidence",
+                "code": "RETAINED_PROVIDER_INTERVAL_BOUNDARY",
+                "effect": "MWR remains unavailable outside accounts and intervals with complete admitted external-flow evidence.",
+            },
+            "record_count": len(flows),
         },
         {
             "fact_type": "transactions",
             "known_gaps": [
-                "coverage is limited to accepted Alpaca fills and Schwab history"
+                (
+                    f"{len(transactions)} accepted transaction records across "
+                    f"{', '.join(sorted({str(item['provider']) for item in transactions if item.get('provider')})) or 'no providers'}; "
+                    "providers without an admitted transaction path remain explicit in the account fact matrix"
+                )
             ],
             "status": "PARTIAL",
+            "disposition": {
+                "authority": "accepted provider-ledger and legacy transaction evidence",
+                "code": "RETAINED_PROVIDER_INTERVAL_BOUNDARY",
+                "effect": "Transaction analysis is limited to the named account/provider intervals; absence is never converted to zero activity.",
+            },
+            "record_count": len(transactions),
         },
         {
             "fact_type": "positions",
@@ -1802,13 +1866,22 @@ def _fact_coverage(
                 else ["no accepted position source exists for this baseline"]
             ),
             "status": "PARTIAL" if positions else "FAILED",
+            "disposition": {
+                "authority": "accepted current provider position snapshots",
+                "code": (
+                    "RETAINED_PROVIDER_SNAPSHOT_BOUNDARY"
+                    if positions
+                    else "RETAINED_NO_ACCEPTED_POSITION_SOURCE"
+                ),
+                "effect": "Only accepted current position rows are reported; accounts without reported rows remain unavailable.",
+            },
+            "record_count": len(positions),
         },
         {
             "fact_type": "fx",
-            "known_gaps": [
-                "no accepted FX observation source exists for this baseline"
-            ],
+            "known_gaps": [],
             "status": "FAILED",
+            "disposition": {},
         },
         {
             "fact_type": "costs",
@@ -1816,8 +1889,50 @@ def _fact_coverage(
                 "several current strategy costs remain unknown or conditional"
             ],
             "status": "PARTIAL",
+            "disposition": {
+                "authority": "strategy cost-economics register",
+                "code": "RETAINED_UNKNOWN_OR_CONDITIONAL_COSTS",
+                "effect": "Gross-to-net and after-tax conclusions remain unavailable where a sleeve cost is unknown or conditional.",
+            },
+            "record_count": len(costs),
         },
     ]
+    non_usd_records = [
+        item
+        for item in (*transactions, *flows)
+        if isinstance(item.get("amount"), Mapping)
+        and item["amount"].get("currency") not in {None, "USD"}
+    ]
+    unavailable_non_usd = [
+        item
+        for item in non_usd_records
+        if isinstance(item.get("amount"), Mapping)
+        and item["amount"].get("status") != "AVAILABLE"
+    ]
+    non_usd_currencies = sorted(
+        {
+            str(item["amount"]["currency"])
+            for item in non_usd_records
+            if isinstance(item.get("amount"), Mapping)
+        }
+    )
+    fx_claim = next(item for item in claims if item["fact_type"] == "fx")
+    fx_claim["known_gaps"] = [
+        "no accepted independent FX observation source exists; "
+        f"{len(non_usd_records)} non-USD transaction/flow records "
+        f"({', '.join(non_usd_currencies) or 'no currencies'}) are FX-affected, "
+        f"including {len(unavailable_non_usd)} with unavailable accepted USD amounts; "
+        "account NAV, current positions, allocations, and HWM current values remain provider-reported USD authority"
+    ]
+    fx_claim["disposition"] = {
+        "authority": "provider-reported USD account facts; no independent FX series",
+        "code": "RETAINED_NO_ACCEPTED_FX_SOURCE",
+        "effect": "Independent non-USD transaction/flow recomputation is unavailable; provider-reported USD current values are not retranslated.",
+        "fx_affected_record_count": len(non_usd_records),
+        "unavailable_usd_amount_count": len(unavailable_non_usd),
+        "currencies": non_usd_currencies,
+    }
+    fx_claim["record_count"] = 0
     exceptions: list[dict[str, Any]] = [
         {
             "exception_id": (
@@ -1828,51 +1943,310 @@ def _fact_coverage(
             "severity": (
                 "DISCLOSED_GAP" if positions else "BLOCKING_FOR_POSITION_ANALYSIS"
             ),
-            "status": "PARTIAL" if positions else "UNAVAILABLE",
+            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
+            "authority": "accepted current provider position snapshots",
+            "disposition": "REPORT_ACCEPTED_ROWS_ONLY_NO_INFERENCE",
         },
         {
             "exception_id": "full-systematic-hwm-unavailable",
             "fact_type": "nav",
             "severity": "BLOCKING_FOR_AUTOMATED_HWM",
             "status": "UNAVAILABLE",
+            "authority": "governed HWM policy and qualified daily NAV evidence",
+            "disposition": "FAIL_CLOSED_UNTIL_EVERY_INCLUDED_SLEEVE_IS_QUALIFIED",
         },
         {
             "exception_id": "current-strategy-attribution-partial",
             "fact_type": "current_strategy_attribution",
             "record_count": len(current_unmapped),
             "severity": "BLOCKING_FOR_FULL_ATTRIBUTION",
-            "status": "PARTIAL" if current_unmapped else "PASS",
+            "status": (
+                "RETAINED_WITH_EXPLICIT_DISPOSITION" if current_unmapped else "PASS"
+            ),
+            "authority": "effective-dated account assignment registry",
+            "disposition": "POOL_ONLY_UNALLOCATED",
         },
         {
             "exception_id": "historical-strategy-attribution-unresolved",
             "fact_type": "historical_strategy_attribution",
             "record_count": len(historical_unmapped),
             "severity": "DISCLOSED_HISTORICAL_GAP",
-            "status": "PARTIAL" if historical_unmapped else "PASS",
+            "status": (
+                "RETAINED_WITH_EXPLICIT_DISPOSITION" if historical_unmapped else "PASS"
+            ),
+            "authority": "effective-dated account assignment registry",
+            "disposition": "POOL_ONLY_UNALLOCATED",
         },
         {
             "exception_id": "account-nav-coverage-partial",
             "fact_type": "nav",
             "investment_account_count": investment_count,
             "severity": "BLOCKING_FOR_FULL_ATTRIBUTION",
-            "status": "PARTIAL",
+            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
+            "authority": "governed HWM qualification and account NAV coverage",
+            "disposition": "HWM_REMAINS_FAIL_CLOSED_FOR_UNQUALIFIED_SLEEVES",
         },
         {
             "exception_id": "transaction-coverage-partial",
             "fact_type": "transactions",
             "record_count": len(transactions),
             "severity": "DISCLOSED_GAP",
-            "status": "PARTIAL",
+            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
+            "authority": "account fact coverage matrix",
+            "disposition": "ACCEPT_ONLY_NAMED_PROVIDER_ACCOUNT_INTERVALS",
         },
         {
             "exception_id": "flow-coverage-partial",
             "fact_type": "flows",
             "record_count": len(flows),
             "severity": "DISCLOSED_GAP",
-            "status": "PARTIAL",
+            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
+            "authority": "account fact coverage matrix",
+            "disposition": "MWR_UNAVAILABLE_OUTSIDE_COMPLETE_FLOW_INTERVALS",
         },
     ]
     return claims, exceptions
+
+
+def _coverage_evidence(
+    accounts: Sequence[Mapping[str, Any]],
+    assignments: Sequence[Mapping[str, Any]],
+    provider_admissions: Sequence[Mapping[str, Any]],
+    provider_coverage: Sequence[Mapping[str, Any]],
+    nav: Sequence[Mapping[str, Any]],
+    positions: Sequence[Mapping[str, Any]],
+    transactions: Sequence[Mapping[str, Any]],
+    flows: Sequence[Mapping[str, Any]],
+    as_of_date: date,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build value-free account/fact evidence without inventing completeness."""
+
+    fact_specs = {
+        "nav": (nav, "as_of_date", "nav_observations", "nav", "DAILY"),
+        "positions": (
+            positions,
+            "as_of_date",
+            "positions",
+            "market_value",
+            "SNAPSHOT",
+        ),
+        "transactions": (
+            transactions,
+            "event_date",
+            "transactions",
+            "amount",
+            "EVENT_STREAM",
+        ),
+        "flows": (flows, "event_date", "flows", "amount", "EVENT_STREAM"),
+    }
+    coverage_by_provider = {
+        str(item.get("provider_id", "")).upper(): _object(
+            item.get("coverage"), "provider coverage"
+        )
+        for item in provider_coverage
+    }
+    admissions: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for item in provider_admissions:
+        account_id = item.get("account_id")
+        fact_type = item.get("fact_type")
+        if account_id is not None and fact_type is not None:
+            admissions[(str(account_id), str(fact_type))].append(item)
+
+    matrix: list[dict[str, Any]] = []
+    observation_windows: list[dict[str, Any]] = []
+    for provider_id, coverage in sorted(coverage_by_provider.items()):
+        observation_windows.append(
+            {
+                "boundary": coverage.get("boundary"),
+                "observed_end": coverage.get("observed_end"),
+                "observed_start": coverage.get("observed_start"),
+                "provider_id": provider_id,
+                "status": coverage.get("status"),
+                "window_type": "PROVIDER_SOURCE",
+            }
+        )
+
+    for fact_type, (
+        records,
+        date_field,
+        admission_type,
+        amount_field,
+        cadence,
+    ) in fact_specs.items():
+        fact_dates = sorted(
+            str(item[date_field]) for item in records if item.get(date_field)
+        )
+        observation_windows.append(
+            {
+                "fact_type": fact_type,
+                "boundary_basis": "OBSERVED_RECORDS_ONLY",
+                "cadence": cadence,
+                "declared_end": None,
+                "declared_start": None,
+                "observed_end": fact_dates[-1] if fact_dates else None,
+                "observed_start": fact_dates[0] if fact_dates else None,
+                "record_count": len(records),
+                "status": (
+                    "OBSERVED_NOT_COMPLETENESS_PROOF"
+                    if fact_dates
+                    else "NO_ACCEPTED_OBSERVATION"
+                ),
+                "window_type": "ACCEPTED_FACT",
+            }
+        )
+        records_by_account: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+        for item in records:
+            records_by_account[str(item.get("account_id"))].append(item)
+        for account in sorted(accounts, key=lambda item: str(item.get("account_id"))):
+            if account.get("role") != "INVESTMENT":
+                continue
+            account_id = _text(account.get("account_id"), "account.account_id")
+            provider_id = _text(account.get("provider"), "account.provider").upper()
+            accepted = records_by_account.get(account_id, [])
+            accepted_dates = sorted(
+                str(item[date_field]) for item in accepted if item.get(date_field)
+            )
+            admitted = admissions.get((account_id, admission_type), [])
+            authoritative = [
+                item for item in admitted if item.get("disposition") == "AUTHORITATIVE"
+            ]
+            authority_rows = authoritative or admitted
+            authority_starts = sorted(
+                str(item["effective_start"])
+                for item in authority_rows
+                if item.get("effective_start")
+            )
+            authority_ends = sorted(
+                str(item["effective_end"])
+                for item in authority_rows
+                if item.get("effective_end")
+            )
+            unavailable_amount_count = sum(
+                1
+                for item in accepted
+                if isinstance(item.get(amount_field), Mapping)
+                and item[amount_field].get("status") != "AVAILABLE"
+            )
+            if accepted:
+                status = (
+                    "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF"
+                    if unavailable_amount_count
+                    else "OBSERVED_NOT_COMPLETENESS_PROOF"
+                )
+                disposition = "RETAINED_ACCEPTED_REPORTED_FACTS_ONLY"
+                missing_reason = (
+                    "fact-specific completeness boundary is not declared; "
+                    "observed records establish observations, not complete intervals"
+                )
+                authority = (
+                    "PROVIDER_ADMISSION_AND_ACCEPTED_FACTS"
+                    if admitted
+                    else "LEGACY_ACCEPTED_FACTS"
+                )
+                boundary_basis = "OBSERVED_RECORDS_ONLY"
+            elif admitted:
+                status = (
+                    "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+                    if cadence == "EVENT_STREAM"
+                    else "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF"
+                )
+                disposition = (
+                    "RETAINED_UNATTESTED_EVENT_INTERVAL"
+                    if cadence == "EVENT_STREAM"
+                    else "RETAINED_NO_REPORTED_FACT"
+                )
+                missing_reason = (
+                    "an effective-dated provider admission exists, but it is not a "
+                    "fact completeness declaration"
+                )
+                authority = "PROVIDER_ADMISSION"
+                boundary_basis = "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS"
+            else:
+                status = "NO_ACCEPTED_FACT_PATH"
+                disposition = "RETAINED_NO_ACCEPTED_PROVIDER_PATH"
+                missing_reason = (
+                    "no admitted provider/account path or fact-specific completeness "
+                    "declaration exists for this fact"
+                )
+                authority = "ACCOUNT_REGISTRY_NO_PROVIDER_SOURCE"
+                boundary_basis = "NO_ACCEPTED_SOURCE"
+            matrix.append(
+                {
+                    "account_id": account_id,
+                    "admission_effective_end": (
+                        authority_ends[-1] if authority_ends else None
+                    ),
+                    "admission_effective_start": (
+                        authority_starts[0] if authority_starts else None
+                    ),
+                    "authority": authority,
+                    "boundary_basis": boundary_basis,
+                    "cadence": cadence,
+                    "declared_end": None,
+                    "declared_start": None,
+                    "disposition": disposition,
+                    "fact_type": fact_type,
+                    "missing_interval_end": None,
+                    "missing_interval_reason": missing_reason,
+                    "missing_interval_start": None,
+                    "missing_intervals": [],
+                    "observed_end": accepted_dates[-1] if accepted_dates else None,
+                    "observed_start": accepted_dates[0] if accepted_dates else None,
+                    "provider_id": provider_id,
+                    "record_count": len(accepted),
+                    "status": status,
+                    "unavailable_amount_count": unavailable_amount_count,
+                }
+            )
+
+    attribution: list[dict[str, Any]] = []
+    provider_by_account = {
+        str(item.get("account_id")): str(item.get("provider")) for item in accounts
+    }
+    for item in assignments:
+        if (
+            item.get("mapping_status") != "UNMAPPED"
+            or item.get("pool_id") == "reserve-capital"
+            or item.get("strategy_mapping_disposition") == "RESERVE_NOT_APPLICABLE"
+        ):
+            continue
+        start = item.get("effective_start")
+        end = item.get("effective_end")
+        current = (
+            start is None or _date(start, "assignment.effective_start") <= as_of_date
+        ) and (end is None or _date(end, "assignment.effective_end") >= as_of_date)
+        account_id = _text(item.get("account_id"), "assignment.account_id")
+        attribution.append(
+            {
+                "account_id": account_id,
+                "authority": item.get("source_id") or item.get("source_classification"),
+                "disposition": "POOL_ONLY_UNALLOCATED",
+                "effective_end": end,
+                "effective_start": start,
+                "period": "CURRENT" if current else "HISTORICAL",
+                "provider_id": provider_by_account.get(account_id),
+            }
+        )
+    return (
+        sorted(
+            matrix, key=lambda item: (str(item["fact_type"]), str(item["account_id"]))
+        ),
+        sorted(
+            observation_windows,
+            key=lambda item: (
+                str(item["window_type"]),
+                str(item.get("fact_type") or item.get("provider_id")),
+            ),
+        ),
+        sorted(
+            attribution,
+            key=lambda item: (
+                str(item["period"]),
+                str(item.get("effective_start")),
+                str(item["account_id"]),
+            ),
+        ),
+    )
 
 
 def build_catalog(
@@ -2058,6 +2432,21 @@ def build_catalog(
         provider_known_gaps,
         missing_strategy_nav_count,
         as_of,
+        nav=nav,
+        costs=costs,
+    )
+    fact_coverage_matrix, observation_windows, attribution_dispositions = (
+        _coverage_evidence(
+            accounts,
+            assignments,
+            provider_admissions,
+            provider_coverage,
+            nav,
+            positions,
+            transactions,
+            flows,
+            as_of,
+        )
     )
     unmapped = [
         *sorted(
@@ -2115,9 +2504,11 @@ def build_catalog(
             ),
         ),
         "fact_coverage": fact_coverage,
+        "fact_coverage_matrix": fact_coverage_matrix,
         "flows": flows,
         "implementation_gaps": implementation_gaps,
         "nav_observations": nav,
+        "observation_windows": observation_windows,
         "policy_version": POLICY_VERSION,
         "positions": positions,
         "provider_admissions": provider_admissions,
@@ -2150,6 +2541,7 @@ def build_catalog(
         "strategy_returns": strategy_returns,
         "transactions": transactions,
         "unmapped_records": unmapped,
+        "attribution_dispositions": attribution_dispositions,
     }
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(

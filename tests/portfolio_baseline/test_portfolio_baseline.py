@@ -754,6 +754,85 @@ def test_reserve_pool_intervals_are_not_strategy_attribution_gaps() -> None:
     assert current_exception["status"] == "PASS"
 
 
+def test_coverage_evidence_never_invents_fact_missing_intervals() -> None:
+    matrix, windows, attribution = baseline._coverage_evidence(
+        accounts=[
+            {
+                "account_id": "account-a",
+                "base_currency": "USD",
+                "provider": "provider-a",
+                "role": "INVESTMENT",
+            }
+        ],
+        assignments=[
+            {
+                "account_id": "account-a",
+                "effective_end": "2026-07-31",
+                "effective_start": "2026-01-01",
+                "mapping_status": "UNMAPPED",
+                "pool_id": "systematic-capital",
+                "source_id": "assignment-authority",
+                "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+            }
+        ],
+        provider_admissions=[
+            {
+                "account_id": "account-a",
+                "disposition": "AUTHORITATIVE",
+                "effective_end": "2026-08-03",
+                "effective_start": "2026-07-31",
+                "fact_type": "transactions",
+            }
+        ],
+        provider_coverage=[
+            {
+                "coverage": {
+                    "boundary": "provider package only",
+                    "observed_end": "2026-08-03",
+                    "observed_start": "2026-07-31",
+                    "status": "PARTIAL",
+                },
+                "provider_id": "provider-a",
+            }
+        ],
+        nav=[],
+        positions=[],
+        transactions=[],
+        flows=[],
+        as_of_date=date(2026, 8, 3),
+    )
+
+    transaction = next(row for row in matrix if row["fact_type"] == "transactions")
+    assert transaction["boundary_basis"] == (
+        "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS"
+    )
+    assert transaction["status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
+    assert transaction["admission_effective_start"] == "2026-07-31"
+    assert transaction["admission_effective_end"] == "2026-08-03"
+    assert transaction["declared_start"] is None
+    assert transaction["declared_end"] is None
+    assert transaction["missing_interval_start"] is None
+    assert transaction["missing_interval_end"] is None
+    assert transaction["missing_intervals"] == []
+    assert (
+        next(row for row in windows if row["window_type"] == "PROVIDER_SOURCE")[
+            "observed_start"
+        ]
+        == "2026-07-31"
+    )
+    assert attribution == [
+        {
+            "account_id": "account-a",
+            "authority": "assignment-authority",
+            "disposition": "POOL_ONLY_UNALLOCATED",
+            "effective_end": "2026-07-31",
+            "effective_start": "2026-01-01",
+            "period": "HISTORICAL",
+            "provider_id": "provider-a",
+        }
+    ]
+
+
 def test_publish_requires_exact_current_candidate(tmp_path: Path) -> None:
     spec_path, _ = _spec(tmp_path)
     output_root = tmp_path / "private-output"

@@ -38,7 +38,7 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-PANEL_SCHEMA_VERSION: Final = 9
+PANEL_SCHEMA_VERSION: Final = 10
 BUILDER_VERSION: Final = "2.1.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
@@ -52,7 +52,7 @@ SOURCE_CONTRACT = (
     / "portfolio-control-panel-source-v1.json"
 )
 HWM_POLICY = (
-    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v2.json"
+    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
 )
 DEFAULT_TEMPLATE_ROOT = (
     Path(__file__).resolve().parents[1] / "apps" / "portfolio-control-panel"
@@ -454,6 +454,7 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
                 "known_gap": (
                     f"next expected {next_expected or 'not recurring'}; {reason}"
                 ),
+                "last_accepted_date": last,
                 "next_expected_date": next_expected,
                 "policy_id": policy_id,
                 "provider_id": provider_id,
@@ -604,7 +605,7 @@ def _number_text(value: float) -> str:
 
 def _hwm_policy(evaluation_date: date) -> tuple[dict[str, Any], str]:
     policy = _object(_load_json(HWM_POLICY, "HWM policy"), "HWM policy")
-    if policy.get("schema_version") != 2 or policy.get("policy_id") != "PORT-HWM-2":
+    if policy.get("schema_version") != 2 or policy.get("policy_id") != "PORT-HWM-3":
         raise ControlPanelValidationError("HWM policy identity is unsupported")
     perimeter = _object(policy.get("material_perimeter"), "material_perimeter")
     exclusions = _objects(perimeter.get("exclusions"), "material_perimeter.exclusions")
@@ -666,19 +667,31 @@ def _reconcile_hwm_coverage(
         for item in hwm_summary.get("uncovered_details", [])
         if isinstance(item, Mapping)
     ]
-    detail_by_name = {
-        str(item.get("strategy_name")): str(
-            item.get("qualification_gap", "UNQUALIFIED")
-        )
-        for item in details
-    }
+    detail_by_name = {str(item.get("strategy_name")): item for item in details}
     gap_details = ", ".join(
-        f"{name} ({detail_by_name.get(name, 'UNQUALIFIED')})" for name in missing
+        f"{name} (${detail_by_name.get(name, {}).get('current_value_usd', 'UNKNOWN')}; "
+        f"{detail_by_name.get(name, {}).get('qualification_gap', 'UNQUALIFIED')}; "
+        f"last accepted {detail_by_name.get(name, {}).get('last_accepted_date') or 'unavailable'}; "
+        f"{detail_by_name.get(name, {}).get('freshness_reason') or 'no freshness reason'})"
+        for name in missing
     )
-    excluded_count = len(hwm_summary["excluded_strategies"])
+    excluded = [
+        dict(item)
+        for item in hwm_summary.get("excluded_details", [])
+        if isinstance(item, Mapping)
+    ]
     exclusion_text = (
-        f"{excluded_count} strateg{'y is' if excluded_count == 1 else 'ies are'} "
-        "explicitly excluded de minimis by policy"
+        "explicit policy exclusions: "
+        + ", ".join(
+            f"{item.get('strategy_name')} (${item.get('current_value_usd')}; {item.get('reason')})"
+            for item in excluded
+        )
+        if excluded
+        else (
+            f"{len(hwm_summary['excluded_strategies'])} strateg"
+            f"{'y is' if len(hwm_summary['excluded_strategies']) == 1 else 'ies are'} "
+            "explicitly excluded de minimis by policy"
+        )
     )
     for row in normalized:
         if row.get("category") == "FACT_COVERAGE" and row.get("item") == "nav":
@@ -692,6 +705,9 @@ def _reconcile_hwm_coverage(
                 else "Every included HWM-perimeter strategy is qualified"
             )
             row["known_gap"] += f"; {exclusion_text}"
+            row["disposition"] = (
+                "RETAINED_UNCOVERED_PENDING_FRESH_DAILY_NAV" if missing else "COMPLETE"
+            )
             row["status"] = (
                 "PARTIAL" if missing else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
             )
@@ -707,20 +723,32 @@ def _reconcile_hwm_coverage(
 
     gap = (
         "BLOCKING_FOR_AUTOMATED_HWM: included HWM-perimeter strategies are not "
-        "qualified: " + gap_details
+        f"qualified; exact uncovered value ${hwm_summary.get('uncovered_value_usd', 'UNKNOWN')}: "
+        + gap_details
     )
     if hwm_rows:
         for row in hwm_rows:
             row["known_gap"] = gap
+            row["disposition"] = "RETAINED_UNCOVERED_PENDING_FRESH_DAILY_NAV"
+            row["resolution_authority"] = (
+                "PORT-HWM-3 policy and admitted-lane daily NAV freshness evidence"
+            )
             row["status"] = "UNAVAILABLE"
+            row["uncovered_details"] = details
+            row["value"] = hwm_summary.get("uncovered_value_usd")
     else:
         normalized.append(
             {
                 "category": "RECONCILIATION_EXCEPTION",
                 "item": "full-systematic-hwm-unavailable",
                 "known_gap": gap,
+                "disposition": "RETAINED_UNCOVERED_PENDING_FRESH_DAILY_NAV",
+                "resolution_authority": (
+                    "PORT-HWM-3 policy and admitted-lane daily NAV freshness evidence"
+                ),
                 "status": "UNAVAILABLE",
-                "value": None,
+                "uncovered_details": details,
+                "value": hwm_summary.get("uncovered_value_usd"),
             }
         )
     return normalized
@@ -1666,6 +1694,11 @@ def _panel_data(
     reconciliations = _objects(
         report.get("reconciliation_checks"), "reconciliation_checks"
     )
+    fact_coverage_matrix = _objects(
+        report.get("fact_coverage_matrix"), "fact_coverage_matrix"
+    )
+    if not fact_coverage_matrix:
+        raise ControlPanelValidationError("fact coverage matrix is unavailable")
     if len(strategies) != 9 or len(allocations) != 10:
         raise ControlPanelValidationError(
             "current strategy/allocation boundary differs"
@@ -2107,7 +2140,15 @@ def _panel_data(
             "reason": (
                 "Canonical report admitted NAV now covers "
                 + (", ".join(admitted_nav_names) or "no included-perimeter sleeves")
-                + "; Composer is reported but excluded by explicit de-minimis policy. "
+                + "; explicit de-minimis exclusions remain reported: "
+                + (
+                    ", ".join(
+                        f"{item['strategy_name']} (${item['current_value_usd']}; {item['reason']})"
+                        for item in hwm_summary["excluded_details"]
+                    )
+                    or "none"
+                )
+                + ". "
                 + (
                     "Remaining HWM qualification gap: "
                     + ", ".join(
@@ -2145,6 +2186,9 @@ def _panel_data(
             "twr_rows": len(performance),
         },
         "coverage": coverage,
+        "fact_coverage_matrix": fact_coverage_matrix,
+        "observation_windows": report.get("observation_windows", []),
+        "attribution_dispositions": report.get("attribution_dispositions", []),
         "canonical_strategy_series": canonical_strategy_series,
         "default_dependence_mode": default_dependence_mode,
         "dependence_analysis": dependence_analysis,
@@ -2747,11 +2791,32 @@ def verify_candidate(
     checks.append(
         _check(
             "Incomplete facts remain explicit",
-            data["fact_status"].get("positions") in {"PARTIAL", "FAILED"}
-            and data["fact_status"].get("fx") == "FAILED",
+            bool(data.get("fact_coverage_matrix"))
+            and (
+                all(
+                    row.get("status") == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+                    or (
+                        bool(row.get("known_gap"))
+                        and bool(row.get("disposition"))
+                        and bool(row.get("evidence_authority"))
+                    )
+                    for row in _objects(data.get("coverage"), "coverage")
+                    if row.get("category") == "FACT_COVERAGE"
+                )
+                and all(
+                    str(row.get("status", "")).startswith("PASS")
+                    or (
+                        bool(row.get("known_gap"))
+                        and bool(row.get("disposition"))
+                        and bool(row.get("resolution_authority"))
+                    )
+                    for row in _objects(data.get("coverage"), "coverage")
+                    if row.get("category") == "RECONCILIATION_EXCEPTION"
+                )
+            ),
             {
-                "fx": data["fact_status"].get("fx"),
-                "positions": data["fact_status"].get("positions"),
+                "fact_status": data["fact_status"],
+                "retained_exceptions": len(data["blocking_items"]),
             },
         )
     )
@@ -2831,7 +2896,10 @@ def verify_candidate(
         "report_generation_id": data["meta"]["report_generation_id"],
     }
     if not result["all_passed"]:
-        raise ControlPanelValidationError("candidate verification failed")
+        failed = ", ".join(
+            str(row["check"]) for row in checks if row["status"] != "PASS"
+        )
+        raise ControlPanelValidationError(f"candidate verification failed: {failed}")
     return result
 
 

@@ -145,12 +145,25 @@ def _report() -> dict[str, object]:
             "value": None,
         },
     ]
+    for row in coverage:
+        row["disposition"] = "RETAINED_SYNTHETIC_TEST_GAP"
+        if row["category"] == "FACT_COVERAGE":
+            row["evidence_authority"] = "synthetic test fixture"
+        else:
+            row["resolution_authority"] = "synthetic test fixture"
     return {
         "account_summary": accounts,
         "allocation_history": allocations,
         "as_of_date": "2026-07-30",
         "baseline": {"generation_id": "b" * 64},
         "coverage_data_quality": coverage,
+        "fact_coverage_matrix": [
+            {
+                "account_id": "account-00",
+                "fact_type": "nav",
+                "status": "AVAILABLE",
+            }
+        ],
         "portfolio_summary": [
             {"metric": "Total liquid", "value": "510316.01"},
             {"metric": "Systematic capital", "value": "410272.39"},
@@ -680,6 +693,36 @@ def _publish_analytics(root: Path, filename: str, value: object, adapter: str) -
     publish_generation(root, manifest.generation_id)
 
 
+def _publish_report(root: Path, source: Path, value: object) -> None:
+    _write_json(source, value)
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 7, 30),
+        adapter=AdapterIdentity("synthetic-report-builder", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic control-panel test report",
+            fact_types=("synthetic report",),
+            observed_start=date(2026, 7, 30),
+            observed_end=date(2026, 7, 30),
+        ),
+        artifacts=(
+            SourceArtifact.from_path(
+                source,
+                artifact_id="synthetic/portfolio-report-data.json",
+                as_of_date=date(2026, 7, 30),
+                schema_name="synthetic-portfolio-report",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    (manifest_path.parent / "portfolio-report-data.json").write_bytes(
+        source.read_bytes()
+    )
+    publish_generation(root, manifest.generation_id)
+
+
 def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
     lens_root = tmp_path / "analytics" / "decomposition-lenses"
     assignments = {
@@ -763,33 +806,7 @@ def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
 def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     report_root = tmp_path / "reporting"
     source_report = tmp_path / "synthetic-portfolio-report-data.json"
-    _write_json(source_report, _report())
-    manifest = GenerationManifest.build(
-        as_of_date=date(2026, 7, 30),
-        adapter=AdapterIdentity("synthetic-report-builder", "1.0.0"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="synthetic control-panel test report",
-            fact_types=("synthetic report",),
-            observed_start=date(2026, 7, 30),
-            observed_end=date(2026, 7, 30),
-        ),
-        artifacts=(
-            SourceArtifact.from_path(
-                source_report,
-                artifact_id="synthetic/portfolio-report-data.json",
-                as_of_date=date(2026, 7, 30),
-                schema_name="synthetic-portfolio-report",
-                schema_version="1",
-            ),
-        ),
-        verification=VerificationStatus.VERIFIED,
-    )
-    manifest_path = stage_generation(report_root, manifest)
-    (manifest_path.parent / "portfolio-report-data.json").write_bytes(
-        source_report.read_bytes()
-    )
-    publish_generation(report_root, manifest.generation_id)
+    _publish_report(report_root, source_report, _report())
     decomposition_root = tmp_path / "analytics" / "decomposition"
     correlation_root = tmp_path / "analytics" / "correlation"
     _publish_analytics(
@@ -947,7 +964,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             encoding="utf-8"
         )
     )
-    assert data["panel_schema_version"] == 9
+    assert data["panel_schema_version"] == panel.PANEL_SCHEMA_VERSION
     assert len(data["account_summary"]) == 19
     assert len({row["account_id"] for row in data["account_summary"]}) == 19
     assert {
@@ -1258,6 +1275,7 @@ def test_freshness_health_is_visible_with_dates_and_reason(
             "known_gap": (
                 "next expected 2026-07-29; expected refresh is late but not yet stale"
             ),
+            "last_accepted_date": "2026-07-28",
             "next_expected_date": "2026-07-29",
             "policy_id": "daily-current",
             "provider_id": "synthetic",
@@ -1325,6 +1343,25 @@ def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -
         panel.ControlPanelValidationError, match="freshness health is mandatory"
     ):
         panel.build_candidate(inputs["report"], inputs["legacy"], inputs["output"])
+
+
+def test_current_panel_fails_closed_without_fact_coverage_matrix(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    report = _report()
+    report["fact_coverage_matrix"] = []
+    report_root = tmp_path / "reporting-without-fact-matrix"
+    _publish_report(report_root, tmp_path / "report-without-fact-matrix.json", report)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="fact coverage matrix is unavailable"
+    ):
+        panel.build_candidate(
+            report_root,
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+        )
 
 
 def test_stale_governed_strategy_blocks_hwm_claim(inputs: dict[str, Path]) -> None:
@@ -1697,24 +1734,41 @@ def test_governed_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
     assert by_id["volatis-strategy"]["nav_return_observations"] == 650
     assert summary == {
         "covered_value_usd": "100",
+        "excluded_details": [
+            {
+                "classification": "EXCLUDED_DE_MINIMIS",
+                "current_value_usd": "1",
+                "effective_date": None,
+                "reason": "Policy exclusion retained without a supplied reason.",
+                "strategy_id": "composer-holy-grail",
+                "strategy_name": "[Composer] - The Holy Grail (Buy Copy)",
+            }
+        ],
         "excluded_value_usd": "1",
         "excluded_strategies": ["[Composer] - The Holy Grail (Buy Copy)"],
         "governed_perimeter_value_usd": "100",
         "nav_coverage": "1",
+        "policy_id": "PORT-HWM-2",
         "status": "AVAILABLE_GOVERNED_HWM_PERIMETER",
         "status_code_version": 2,
         "status_semantics": "EXPLICIT_GOVERNED_HWM_PERIMETER",
         "uncovered_details": [],
         "uncovered_strategies": [],
+        "uncovered_value_usd": "0",
     }
 
 
 def test_hwm_policy_enforces_exclusion_effective_date() -> None:
     before, _ = panel._hwm_policy(date(2026, 7, 31))
     effective, _ = panel._hwm_policy(date(2026, 8, 1))
+    echo_effective, _ = panel._hwm_policy(date(2026, 8, 6))
 
     assert before["excluded_strategy_ids"] == []
     assert effective["excluded_strategy_ids"] == ["composer-holy-grail"]
+    assert echo_effective["excluded_strategy_ids"] == [
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    ]
 
 
 def test_hwm_coverage_rejects_unaccepted_nav_evidence_class() -> None:
@@ -1791,7 +1845,7 @@ def test_hwm_coverage_names_freshness_block_without_denigrating_nav() -> None:
     )
     nav = next(row for row in reconciled if row["item"] == "nav")
     assert "not HWM-qualified" in nav["known_gap"]
-    assert "EchoTrade (FRESHNESS_STALE)" in nav["known_gap"]
+    assert "EchoTrade ($0.19; FRESHNESS_STALE" in nav["known_gap"]
     assert "lacks accepted daily NAV" not in nav["known_gap"]
 
 
@@ -1832,6 +1886,8 @@ def test_renderer_distinguishes_nav_presence_from_hwm_qualification() -> None:
     assert 'row.nav_status !== "AVAILABLE"' in renderer
     assert 'row.hwm_evidence_status !== "ACCEPTED"' in renderer
     assert 'row.hwm_freshness_status === "BLOCKED"' in renderer
+    assert 'row.hwm_freshness_status === "BOUNDARY_MISMATCH"' in renderer
+    assert "UNAVAILABLE_EVIDENCE_BOUNDARY_MISMATCH" in renderer
     assert "row.hwm_freshness_state" in renderer
     assert "Evidence ${statusText(row.nav_status)}" in renderer
     assert "HWM ${statusText(qualification.status)}" in renderer
@@ -1841,6 +1897,18 @@ def test_renderer_distinguishes_nav_presence_from_hwm_qualification() -> None:
     assert "governed HWM daily NAV is stale or incomplete" in renderer
 
 
+def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "const moneyExact = new Intl.NumberFormat" in renderer
+    assert "currencyExact(data.hwm_summary.uncovered_value_usd)" in renderer
+    assert "no numeric HWM is calculated while unavailable" in renderer
+    assert '<th scope="col"' in renderer
+    assert '<th scope="row"' in renderer
+    assert "0.00x" not in renderer
+    assert "data.panel_schema_version !== 10" in renderer
+
+
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
@@ -1848,6 +1916,9 @@ def test_renderer_discloses_operational_freshness_and_provider_authority() -> No
     assert 'id="freshness-as-of"' in template
     assert "data.meta.freshness_evaluated_on" in renderer
     assert "Freshness evaluated" in renderer
+    assert 'row.category === "DATA_FRESHNESS"' in renderer
+    assert "Last accepted" in renderer
+    assert "evaluated ${formatDate(row.evaluated_on)}" in renderer
     assert "governed provider-ledger classification" in renderer
     assert "not brokerage-account authority" in renderer
 
@@ -1925,6 +1996,20 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     assert schema["properties"]["panel_schema_version"]["const"] == (
         panel.PANEL_SCHEMA_VERSION
     )
+    assert "canonical_strategy_series" in schema["required"]
+    canonical = schema["properties"]["canonical_strategy_series"]["items"]
+    assert canonical["additionalProperties"] is False
+    assert set(canonical["required"]) == {
+        "canonical_live_series_sha256",
+        "evidence_layer",
+        "generation_id",
+        "observed_end",
+        "observed_start",
+        "return_observations",
+        "series_id",
+        "strategy_id",
+        "strategy_version",
+    }
 
 
 def test_hwm_prose_uses_qualified_evidence_instead_of_legacy_source_label() -> None:
@@ -1991,7 +2076,7 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
         row for row in accepted if row["item"] == "full-systematic-hwm-unavailable"
     )
     assert exception["status"] == "UNAVAILABLE"
-    assert "Missing Strategy (UNQUALIFIED)" in exception["known_gap"]
+    assert "Missing Strategy ($UNKNOWN; UNQUALIFIED" in exception["known_gap"]
 
 
 def test_mvp_exposes_seven_primary_surfaces_and_keeps_appendices_separate() -> None:
