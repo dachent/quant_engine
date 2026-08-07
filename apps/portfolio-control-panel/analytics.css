@@ -484,7 +484,7 @@ section[data-view="capital"] .callout-neutral {
 
 .weekly-toggle {
   display: flex;
-  min-height: 38px;
+  min-height: 44px;
   align-items: center;
   gap: 8px;
   color: var(--text-soft);
@@ -537,7 +537,7 @@ section[data-view="capital"] .callout-neutral {
 
 .weekly-cell {
   width: 100%;
-  min-height: 42px;
+  min-height: 44px;
   border: 1px solid rgb(255 255 255 / 8%);
   border-radius: 5px;
   color: var(--text);
@@ -813,6 +813,8 @@ section[data-view="capital"] .callout-neutral {
 .ghost-button,
 .strategy-chip,
 .text-action,
+.weekly-cell,
+.weekly-toggle,
 .disclosure-panel summary,
 .search-control input,
 .context-bar select {

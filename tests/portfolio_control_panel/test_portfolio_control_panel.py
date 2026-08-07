@@ -2334,6 +2334,8 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
         assert term in template
     assert 'id="operator-glossary"' in template
     assert "min-height: 44px" in styles
+    assert ".weekly-cell" in styles
+    assert ".weekly-toggle" in styles
     assert "#factor-model-table" in styles
     assert "#performance-table" in styles
     assert "#coverage-table" in styles
@@ -2346,3 +2348,6 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
     assert 'scope: excludeCandidates ? "NON_CANDIDATE" : "FULL"' in browser_qa
     assert 'options["exclude-candidates"] !== "true"' in interaction_qa
     assert 'scope: includeCandidates ? "FULL" : "NON_CANDIDATE"' in interaction_qa
+    assert (
+        "All eight non-Candidate mobile surfaces meet the 44px target" in interaction_qa
+    )

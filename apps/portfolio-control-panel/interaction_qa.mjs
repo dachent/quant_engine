@@ -429,7 +429,26 @@ checks.push(check(
   mobileFacts.length === 3 && mobileFacts.every((item) => item.visible && item.text && item.text !== "Loading…"),
   mobileFacts,
 ));
-const undersizedTouchTargets = await page.locator('.nav-item, .segment, .ghost-button, .strategy-chip, .text-action').evaluateAll((nodes) => nodes.filter((node) => {
+const touchSelector = '.nav-item, .segment, .ghost-button, .strategy-chip, .text-action, .weekly-cell, .weekly-toggle, .disclosure-panel summary, .search-control input, .context-bar select';
+const mobileTouchEvidence = [];
+for (const view of views) {
+  await page.locator(`[data-nav="${view}"]`).click();
+  const undersized = await page.locator(touchSelector).evaluateAll((nodes) => nodes.filter((node) => {
+    const style = getComputedStyle(node);
+    const bounds = node.getBoundingClientRect();
+    const visible = style.display !== "none" && style.visibility !== "hidden" && bounds.width > 0 && bounds.height > 0;
+    return visible && (bounds.height < 44 || bounds.width < 44);
+  }).map((node) => ({
+    class_name: node.className,
+    height: node.getBoundingClientRect().height,
+    text: node.textContent?.trim(),
+    width: node.getBoundingClientRect().width,
+  })));
+  mobileTouchEvidence.push({ undersized, view });
+}
+await page.locator('[data-nav="command"]').click();
+await page.locator('[data-open-view="signals"]').first().click();
+const undersizedSignals = await page.locator(touchSelector).evaluateAll((nodes) => nodes.filter((node) => {
   const style = getComputedStyle(node);
   const bounds = node.getBoundingClientRect();
   const visible = style.display !== "none" && style.visibility !== "hidden" && bounds.width > 0 && bounds.height > 0;
@@ -440,7 +459,12 @@ const undersizedTouchTargets = await page.locator('.nav-item, .segment, .ghost-b
   text: node.textContent?.trim(),
   width: node.getBoundingClientRect().width,
 })));
-checks.push(check("Visible mobile navigation and segmented controls meet the 44px target", undersizedTouchTargets.length === 0, undersizedTouchTargets));
+mobileTouchEvidence.push({ undersized: undersizedSignals, view: "signals" });
+checks.push(check(
+  "All eight non-Candidate mobile surfaces meet the 44px target",
+  mobileTouchEvidence.every((item) => item.undersized.length === 0),
+  mobileTouchEvidence,
+));
 await page.locator('[data-nav="data"]').click();
 await page.locator("#operator-glossary summary").click();
 const glossaryText = await page.locator("#operator-glossary").textContent();
