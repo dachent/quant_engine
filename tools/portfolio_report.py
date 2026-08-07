@@ -33,6 +33,7 @@ from quant_engine.core import (
     hash_file,
     publish_generation,
     read_current,
+    read_generation,
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -1472,8 +1473,74 @@ def _reconciliation_checks(
     return rows
 
 
+def _provider_ledger_identity(root: Path, generation_id: str) -> dict[str, object]:
+    try:
+        manifest = read_generation(root, generation_id)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ReportValidationError(
+            "freshness provider ledger generation is not accepted"
+        ) from exc
+    expected = next(
+        (
+            artifact
+            for artifact in manifest.artifacts
+            if artifact.artifact_id == "normalized/provider-ledger.json"
+        ),
+        None,
+    )
+    if expected is None:
+        raise ReportValidationError("freshness provider ledger catalog is absent")
+    generation = root / "generations" / manifest.generation_id
+    catalog_path = generation / "provider-ledger.json"
+    if catalog_path.is_symlink() or not catalog_path.is_file():
+        raise ReportValidationError("freshness provider ledger catalog is unavailable")
+    catalog_sha256, catalog_size = hash_file(catalog_path)
+    if (catalog_sha256, catalog_size) != (expected.sha256, expected.size_bytes):
+        raise ReportValidationError(
+            "freshness provider ledger catalog differs from its manifest"
+        )
+    manifest_sha256, manifest_size = hash_file(generation / "generation.json")
+    return {
+        "as_of_date": manifest.as_of_date.isoformat(),
+        "catalog_sha256": catalog_sha256,
+        "catalog_size_bytes": catalog_size,
+        "generation_id": manifest.generation_id,
+        "manifest_sha256": manifest_sha256,
+        "manifest_size_bytes": manifest_size,
+    }
+
+
+def _baseline_provider_ledger_identity(
+    catalog: Mapping[str, Any],
+) -> dict[str, str]:
+    references = [
+        item
+        for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
+        if item.get("source_key") == "provider-ledger-generation"
+        and item.get("schema_name")
+        in {"generation-manifest", "provider-ledger-catalog"}
+    ]
+    by_schema = {
+        _text(item.get("schema_name"), "provider-ledger schema_name"): _text(
+            item.get("sha256"), "provider-ledger sha256"
+        )
+        for item in references
+    }
+    if len(references) != 2 or set(by_schema) != {
+        "generation-manifest",
+        "provider-ledger-catalog",
+    }:
+        raise ReportValidationError(
+            "baseline provider-ledger identity is missing or ambiguous"
+        )
+    return by_schema
+
+
 def _freshness_assessments(
-    path: Path, portfolio_as_of: date
+    path: Path,
+    portfolio_as_of: date,
+    provider_ledger_root: Path | None = None,
+    baseline_catalog: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], date, str]:
     payload = _load_json(path, "freshness health")
     schema_version = payload.get("assessment_schema_version")
@@ -1522,6 +1589,26 @@ def _freshness_assessments(
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ReportValidationError(
                     f"freshness provider ledger {field} differs"
+                )
+        if provider_ledger_root is None:
+            raise ReportValidationError(
+                "freshness provider ledger root is required for identity binding"
+            )
+        observed_identity = _provider_ledger_identity(
+            provider_ledger_root.resolve(), str(ledger["generation_id"])
+        )
+        if dict(ledger) != observed_identity:
+            raise ReportValidationError(
+                "freshness provider ledger identity differs from the selected ledger"
+            )
+        if baseline_catalog is not None:
+            baseline_identity = _baseline_provider_ledger_identity(baseline_catalog)
+            if (
+                ledger["catalog_sha256"] != baseline_identity["provider-ledger-catalog"]
+                or ledger["manifest_sha256"] != baseline_identity["generation-manifest"]
+            ):
+                raise ReportValidationError(
+                    "freshness provider ledger identity differs from the baseline"
                 )
     assessments = _objects(payload.get("assessments"), "freshness assessments")
     if not assessments:
@@ -1688,7 +1775,10 @@ def build_report_data(
     if freshness_health_path is not None:
         portfolio_as_of = _date(catalog.get("as_of_date"), "portfolio as_of_date")
         freshness, evaluation_date, freshness_sha256 = _freshness_assessments(
-            freshness_health_path, portfolio_as_of
+            freshness_health_path,
+            portfolio_as_of,
+            provider_ledger_root,
+            catalog,
         )
         hwm_policy, hwm_policy_sha256 = _hwm_policy(evaluation_date)
         try:
