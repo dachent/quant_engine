@@ -45,7 +45,7 @@ from quant_engine.portfolio_ledger import (
 
 REPORT_SCHEMA_VERSION: Final = 1
 _CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
-BUILDER_VERSION: Final = "1.2.0"
+BUILDER_VERSION: Final = "1.2.1"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
@@ -1477,16 +1477,52 @@ def _freshness_assessments(
 ) -> tuple[list[dict[str, Any]], date, str]:
     payload = _load_json(path, "freshness health")
     schema_version = payload.get("assessment_schema_version")
-    expected = (
-        {"assessment_schema_version", "as_of_date", "assessments", "policy"}
-        if schema_version == 2
-        else {"assessment_schema_version", "as_of_date", "assessments", "policies"}
-    )
-    if schema_version not in {2, 3} or set(payload) != expected:
+    expected = {
+        "assessment_schema_version",
+        "as_of_date",
+        "assessments",
+        "policy" if schema_version == 2 else "policies",
+    }
+    accepted = {frozenset(expected)}
+    if schema_version == 3:
+        accepted.add(frozenset(expected | {"provider_ledger"}))
+    if schema_version not in {2, 3} or frozenset(payload) not in accepted:
         raise ReportValidationError("freshness health contract differs")
     as_of = _date(payload.get("as_of_date"), "freshness health as_of_date")
     if as_of < portfolio_as_of:
         raise ReportValidationError("freshness health predates the portfolio")
+    if "provider_ledger" in payload:
+        ledger = _object(payload.get("provider_ledger"), "freshness provider ledger")
+        if set(ledger) != {
+            "as_of_date",
+            "catalog_sha256",
+            "catalog_size_bytes",
+            "generation_id",
+            "manifest_sha256",
+            "manifest_size_bytes",
+        }:
+            raise ReportValidationError("freshness provider ledger keys differ")
+        ledger_as_of = _date(
+            ledger.get("as_of_date"), "freshness provider ledger as_of_date"
+        )
+        if ledger_as_of > as_of:
+            raise ReportValidationError(
+                "freshness provider ledger postdates the evaluation"
+            )
+        for field in ("catalog_sha256", "generation_id", "manifest_sha256"):
+            if not re.fullmatch(
+                r"[0-9a-f]{64}",
+                _text(ledger.get(field), f"freshness provider ledger {field}"),
+            ):
+                raise ReportValidationError(
+                    f"freshness provider ledger {field} differs"
+                )
+        for field in ("catalog_size_bytes", "manifest_size_bytes"):
+            value = ledger.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ReportValidationError(
+                    f"freshness provider ledger {field} differs"
+                )
     assessments = _objects(payload.get("assessments"), "freshness assessments")
     if not assessments:
         raise ReportValidationError("freshness assessments are empty")

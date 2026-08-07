@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 from typing import Any
@@ -1095,6 +1096,51 @@ def test_report_schema_is_closed_and_keeps_mwr_unavailable() -> None:
         schema["$defs"]["performance"]["properties"]["mwr_status"]["const"]
         == "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE"
     )
+
+
+def _bound_freshness_payload() -> dict[str, object]:
+    return {
+        "assessment_schema_version": 3,
+        "as_of_date": "2026-08-07",
+        "assessments": [{"evaluated_on": "2026-08-07"}],
+        "policies": [],
+        "provider_ledger": {
+            "as_of_date": "2026-08-03",
+            "catalog_sha256": "a" * 64,
+            "catalog_size_bytes": 123,
+            "generation_id": "b" * 64,
+            "manifest_sha256": "c" * 64,
+            "manifest_size_bytes": 456,
+        },
+    }
+
+
+def test_freshness_assessments_accept_bound_provider_ledger(tmp_path: Path) -> None:
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(json.dumps(_bound_freshness_payload()), encoding="utf-8")
+
+    assessments, as_of, sha256 = reporter._freshness_assessments(
+        freshness, date(2026, 8, 3)
+    )
+
+    assert assessments == [{"evaluated_on": "2026-08-07"}]
+    assert as_of == date(2026, 8, 7)
+    assert re.fullmatch(r"[0-9a-f]{64}", sha256)
+
+
+def test_freshness_assessments_reject_future_provider_ledger(tmp_path: Path) -> None:
+    payload = _bound_freshness_payload()
+    ledger = payload["provider_ledger"]
+    assert isinstance(ledger, dict)
+    ledger["as_of_date"] = "2026-08-08"
+    freshness = tmp_path / "freshness-health.json"
+    freshness.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="provider ledger postdates the evaluation",
+    ):
+        reporter._freshness_assessments(freshness, date(2026, 8, 3))
 
 
 def test_cli_output_contains_only_sanitized_counts(
