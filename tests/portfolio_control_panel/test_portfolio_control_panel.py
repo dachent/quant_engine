@@ -2347,6 +2347,12 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
     assert 'button.setAttribute("aria-controls", view.id)' in renderer
     assert "$$('[data-open-view]').forEach" in renderer
     assert 'group.setAttribute("role", "group")' in renderer
+    assert "function prepareScrollableTableRegions()" in renderer
+    assert '$$(".table-wrap, .matrix-shell, .weekly-table-shell")' in renderer
+    assert 'region.setAttribute("role", "region")' in renderer
+    assert 'region.setAttribute("aria-label", caption' in renderer
+    assert 'class="exposure-track" aria-hidden="true"' in renderer
+    assert renderer.count("prepareScrollableTableRegions();") >= 4
     assert 'options["exclude-candidates"] === "true"' in browser_qa
     assert 'scope: excludeCandidates ? "NON_CANDIDATE" : "FULL"' in browser_qa
     assert 'options["exclude-candidates"] !== "true"' in interaction_qa
