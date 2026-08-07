@@ -1435,6 +1435,14 @@ def test_schema_v3_nonrequired_stale_lane_does_not_block_panel(
                 }
             ],
             "policies": [policy],
+            "provider_ledger": {
+                "as_of_date": "2026-08-03",
+                "catalog_sha256": "a" * 64,
+                "catalog_size_bytes": 100,
+                "generation_id": "b" * 64,
+                "manifest_sha256": "c" * 64,
+                "manifest_size_bytes": 200,
+            },
         },
     )
 
