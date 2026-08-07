@@ -799,6 +799,16 @@ def _strategies(
             if version
             else []
         )
+        compatibility_status = version.get("compatibility_status", "UNRESOLVED")
+        compatibility_reason = version.get(
+            "compatibility_reason",
+            "Compatibility is unavailable without an effective-dated registry row.",
+        )
+        live_plus_backtest_status = (
+            "ELIGIBLE_PROVEN_COMPATIBLE"
+            if compatibility_status == "PROVEN_COMPATIBLE"
+            else "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
+        )
         available_segments, total_segments = performance_count[strategy_id]
         rows.append(
             {
@@ -874,12 +884,13 @@ def _strategies(
                 ),
                 "version_effective_start": version.get("effective_start"),
                 "version_effective_end": version.get("effective_end"),
-                "version_compatibility_status": version.get(
-                    "compatibility_status", "UNRESOLVED"
-                ),
-                "version_compatibility_reason": version.get(
-                    "compatibility_reason",
-                    "Compatibility is unavailable without an effective-dated registry row.",
+                "version_compatibility_status": compatibility_status,
+                "version_compatibility_reason": compatibility_reason,
+                "live_plus_backtest_status": live_plus_backtest_status,
+                "live_plus_backtest_reason": (
+                    "Effective-dated registry marks the current strategy version PROVEN_COMPATIBLE."
+                    if compatibility_status == "PROVEN_COMPATIBLE"
+                    else f"{compatibility_status}: {compatibility_reason}"
                 ),
                 "design_status": design.get("status", "UNAVAILABLE"),
                 "design_version_ref": design.get("version_ref"),

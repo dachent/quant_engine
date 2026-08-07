@@ -583,7 +583,7 @@
       const active = button.dataset.evidenceMode === selectedEvidenceMode;
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-pressed", String(active));
-      if (!available) button.title = "This accepted correlation generation has no backtest mode";
+      if (!available) button.title = button.dataset.evidenceMode === "LIVE_PLUS_BACKTEST" && data.hybrid_mode_gate.status !== "ELIGIBLE_PROVEN_COMPATIBLE" ? data.hybrid_mode_gate.reason : "This accepted correlation generation has no backtest mode";
     });
     renderKpis("#dependence-kpis", [
       ["Measured pairs", `${dependence.available_pair_count}/${dependence.pair_count}`, combined ? "Version-matched pre-live backtest plus authoritative live" : "Exact-date live observations", "positive"],
@@ -713,9 +713,12 @@
       renderWeekly();
     }));
     $$('[data-weekly-mode]').forEach((button) => {
+      const available = (weekly?.strategy_evidence_modes || []).includes(button.dataset.weeklyMode);
+      button.disabled = !available;
       const active = button.dataset.weeklyMode === selectedWeeklyMode;
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-pressed", String(active));
+      if (!available) button.title = button.dataset.weeklyMode === "LIVE_PLUS_BACKTEST" ? weekly.hybrid_mode_reason : "This accepted weekly generation has no requested mode";
     });
     $$('[data-weekly-window]').forEach((button) => {
       const active = button.dataset.weeklyWindow === selectedWeeklyWindow;
@@ -905,7 +908,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 10) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 11) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;

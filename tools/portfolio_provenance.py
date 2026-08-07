@@ -767,6 +767,10 @@ def _validate_strategy_version_catalog(
             layer_version = _optional_text(
                 layer["version_ref"], "strategy evidence layer.version_ref"
             )
+            if status == "EVIDENCED" and layer_hash is None and layer_version is None:
+                raise ProvenanceValidationError(
+                    "EVIDENCED strategy evidence layer requires an artifact hash or version"
+                )
             observed_start = _optional_date(
                 layer["observed_start"], "strategy evidence layer.observed_start"
             )

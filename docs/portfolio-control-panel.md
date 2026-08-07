@@ -50,13 +50,13 @@ without preserving stale calculations or hard-coded operator conclusions.
   only from the accepted `<portfolio-root>/analytics/correlation` generation and
   remain separately labeled.
 - Dependence defaults to `LIVE_ONLY`. When the accepted correlation generation
-  also contains `LIVE_PLUS_BACKTEST`, the operator may switch to an explicitly
-  labeled hybrid view. It uses only version-matched backtest observations before
-  live inception; live observations remain authoritative from inception onward,
-  and the hybrid view cannot change readiness, allocation, or risk-control
-  conclusions. Individual series without eligible backtest prehistory remain
-  live-only inside the hybrid view and report zero backtest rows. A schema-v1
-  generation without the evidence-mode contract disables the hybrid selector.
+  also contains `LIVE_PLUS_BACKTEST`, the operator may switch to the explicitly
+  labeled hybrid view only when every current effective-dated strategy registry
+  row is `PROVEN_COMPATIBLE`. Otherwise the hybrid payload is suppressed and the
+  selector remains visible but disabled with the named compatibility blockers.
+  An admitted hybrid uses only version-matched backtest observations before live
+  inception; live observations remain authoritative from inception onward, and
+  the hybrid view cannot change readiness, allocation, or risk-control conclusions.
 - Weekly returns come only from the accepted
   `<portfolio-root>/analytics/weekly-returns` generation. Every row uses an ISO
   Monday-through-Sunday week and compounds accepted daily returns as

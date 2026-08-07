@@ -842,6 +842,10 @@ def test_effective_dated_strategy_version_registry_projects_into_report(
     assert first["live_boundary_status"] == "EVIDENCED"
     assert first["live_boundary_observed_end"] == "2026-01-03"
     assert first["version_compatibility_status"] == "UNRESOLVED"
+    assert first["live_plus_backtest_status"] == (
+        "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
+    )
+    assert first["live_plus_backtest_reason"].startswith("UNRESOLVED:")
     assert first["strategy_evidence_layers"][0]["evidence_layer"] == "ACCOUNT_LIVE"
 
 

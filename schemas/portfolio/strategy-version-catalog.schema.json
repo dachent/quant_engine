@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://quant-engine.local/schemas/portfolio/strategy-version-catalog.schema.json",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/strategy-version-catalog.schema.json",
   "title": "Effective-dated strategy version catalog",
   "type": "object",
   "additionalProperties": false,
@@ -67,6 +67,28 @@
     "layer_record": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "EVIDENCED"}},
+            "required": ["status"]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "required": ["artifact_sha256"]
+              },
+              {
+                "properties": {"version_ref": {"type": "string", "minLength": 1}},
+                "required": ["version_ref"]
+              }
+            ]
+          }
+        }
+      ],
       "required": [
         "artifact_sha256",
         "disposition",
