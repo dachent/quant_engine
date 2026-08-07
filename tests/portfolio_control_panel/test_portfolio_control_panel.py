@@ -2047,7 +2047,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 11" in renderer
+    assert "data.panel_schema_version !== 12" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -2149,6 +2149,7 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
         {"const": ["LIVE_ONLY"]},
         {"const": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]},
     ]
+    assert "replication_analysis" in schema["required"]
     canonical = schema["properties"]["canonical_strategy_series"]["items"]
     assert canonical["additionalProperties"] is False
     assert set(canonical["required"]) == {
@@ -2161,6 +2162,27 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
         "series_id",
         "strategy_id",
         "strategy_version",
+    }
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    assert "Forward-only research tracker" in renderer
+    assert "holdout recalibration is NONE" in renderer
+    assert "no readiness, allocation, HWM, execution, or order authority" in renderer
+
+
+def test_replication_disposition_counts_derive_from_accepted_rows() -> None:
+    rows = [
+        *[{"availability_status": "AVAILABLE_RESEARCH_REPLICATION"} for _ in range(4)],
+        *[{"availability_status": "DIAGNOSTIC_ONLY_SOURCE_MODEL"} for _ in range(3)],
+        *[
+            {"availability_status": "UNAVAILABLE_NO_SELECTED_DYNAMIC_MODEL"}
+            for _ in range(2)
+        ],
+    ]
+
+    assert panel._replication_disposition_counts(rows) == {
+        "available_count": 4,
+        "diagnostic_count": 3,
+        "unavailable_count": 2,
     }
 
 
