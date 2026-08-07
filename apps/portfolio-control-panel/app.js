@@ -233,7 +233,7 @@
       return `<li><div><strong>${safe(operatorLabels[item.item] || humanStatus(item.item))}</strong><span>${safe(note)}</span><button type="button" class="text-action" data-open-view="${safe(route.view)}"${focus} aria-label="${safe(route.label)} for ${safe(humanStatus(item.item))}">${safe(route.label)} →</button></div></li>`;
     }).join("");
     const implementationRows = data.strategies.map((row) => {
-      const factorRow = factorLenses.flatMap((lens) => lens.series || []).find((item) => item.series_id === row.strategy_name);
+      const factorRow = (factorLensModes.LIVE_ONLY || activeFactorLenses()).flatMap((lens) => lens.series || []).find((item) => item.series_id === row.strategy_name);
       const factorState = factorRow ? modelState(factorRow) : "MODEL_UNAVAILABLE";
       return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(row.cost_status)}</td><td>${statusText(factorState)}</td></tr>`;
     });
@@ -378,11 +378,45 @@
     $("#reconciliation-table").innerHTML = tableMarkup([["Check / exception"], ["Status"], ["Evidence / gap"]], reconciliationRows);
   }
 
-  const factorLenses = data.decomposition_lenses?.lenses || [data.factor_analysis];
+  const factorLensModes = data.decomposition_lenses?.modes || { LIVE_ONLY: data.decomposition_lenses?.lenses || [data.factor_analysis] };
+  let selectedFactorEvidenceMode = factorLensModes[data.decomposition_lenses?.default_evidence_mode] ? data.decomposition_lenses.default_evidence_mode : "LIVE_ONLY";
+  const activeFactorLenses = () => factorLensModes[selectedFactorEvidenceMode] || factorLensModes.LIVE_ONLY || [];
   const replicationRows = data.replication_analysis?.series || [];
-  let selectedFactorLens = data.decomposition_lenses?.default_lens || factorLenses[0]?.lens_id;
+  let selectedFactorLens = data.decomposition_lenses?.default_lens || activeFactorLenses()[0]?.lens_id;
   let selectedFactorSeries = null;
-  const currentFactorAnalysis = () => factorLenses.find((item) => item.lens_id === selectedFactorLens) || factorLenses[0];
+  const currentFactorAnalysis = () => activeFactorLenses().find((item) => item.lens_id === selectedFactorLens) || activeFactorLenses()[0];
+  const lensSemantics = {
+    ECONOMIC_FACTOR: {
+      question: "Which systematic economic return drivers explain the strategy?",
+      method: "Joint excess-return regression against a predeclared market, size, value, profitability, investment, and momentum candidate hierarchy.",
+      beta: "Beta is return sensitivity to each factor, holding the other selected factors constant.",
+      caveat: "A loading is not a holdings weight. Alpha is the residual intercept after the selected factor betas."
+    },
+    ETF_STYLE: {
+      question: "Which investable equity-style proxies best reproduce the strategy return path?",
+      method: "Joint constrained returns-based style analysis using predeclared ETF cells; raw ETF candidates are not assumed orthogonal.",
+      beta: "Beta is the fitted proxy loading. Under the simplex model the loadings behave like non-negative replicating weights and sum to one.",
+      caveat: "This is a return-mimicking portfolio, not a claim about actual holdings."
+    },
+    RETURN_SECTOR: {
+      question: "Which sector return combinations explain the strategy?",
+      method: "Joint regularized return decomposition is the primary lens; single-sector similarity, when shown, is a separate diagnostic and not the decomposition.",
+      beta: "Sector beta is marginal return sensitivity conditional on the other selected sector proxies.",
+      caveat: "Return-based sector beta can differ from point-in-time holdings exposure because timing, cash, leverage, and trading alter realized returns."
+    },
+    RETURN_INDUSTRY: {
+      question: "Which industry return combinations explain the strategy at a finer resolution?",
+      method: "Train-only dimension-controlled joint return decomposition; any one-industry match is labeled similarity rather than attribution.",
+      beta: "Industry beta is conditional return sensitivity to a selected industry portfolio, not an ownership percentage.",
+      caveat: "The 49 industry portfolios are collinear, so sample length, regularization, and stability gates are part of the result."
+    },
+    DYNAMIC_STYLE: {
+      question: "How do factor and style sensitivities change through time?",
+      method: "Clean-room filtered least squares with train-only smoothness selection and causal walk-forward holdout updates.",
+      beta: "Each dated path value is the beta available in that estimation state; the latest beta is the final dated value.",
+      caveat: "MPI-informed and non-equivalent; the sealed holdout is evaluation evidence, never refit input."
+    }
+  };
 
   function replicationAnalysisMarkup(seriesId) {
     if (selectedFactorLens !== "DYNAMIC_STYLE") return "";
@@ -394,11 +428,28 @@
     return `<div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Forward-only research tracker</div><h3>Sealed-holdout replication</h3></div><span class="badge ${row.availability_status === "AVAILABLE_RESEARCH_REPLICATION" ? "badge-positive" : "badge-warning"}">${statusText(row.availability_status)}</span></div><div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Actual cumulative</div><div class="metric-value">${pct(metrics.cumulative_actual_excess_return)}</div><div class="metric-note">${safe(row.holdout_start)}–${safe(row.holdout_end)}</div></div><div class="metric-block"><div class="metric-label">Net tracker cumulative</div><div class="metric-value">${pct(metrics.cumulative_net_tracker_excess_return)}</div><div class="metric-note">Gross ${pct(metrics.cumulative_gross_tracker_excess_return)}</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(metrics.annualized_tracking_error)}</div><div class="metric-note">${integer.format(metrics.observation_count)} causal holdout observations</div></div><div class="metric-block"><div class="metric-label">Residual alpha</div><div class="metric-value">${pct(metrics.annualized_descriptive_residual_alpha)}</div><div class="metric-note">Descriptive; no confidence claim</div></div><div class="metric-block"><div class="metric-label">Relative drawdown</div><div class="metric-value">${pct(metrics.max_relative_wealth_ratio_drawdown_loss)}</div><div class="metric-note">Actual versus net tracker wealth ratio</div></div><div class="metric-block"><div class="metric-label">Turnover / cost</div><div class="metric-value">${decimal(metrics.total_turnover)}×</div><div class="metric-note">${safe(policy.selected_cost_bps_per_one_way_turnover)} bps · ${pct(metrics.cumulative_cost_drag)} drag</div></div></div><div class="callout callout-neutral"><strong>Authority boundary:</strong> Research diagnostic only. Parameters are selected on training evidence, holdout recalibration is NONE, and the tracker has no readiness, allocation, HWM, execution, or order authority.</div></div>`;
   }
 
+  function factorEvidenceComposition(row) {
+    const composition = row.series_composition || {};
+    if (!composition.status) {
+      return `<div class="callout callout-warning"><strong>Evidence composition:</strong> This legacy analysis does not declare live-versus-backtest row composition. No backtest-history claim is made.</div>`;
+    }
+    const liveCount = Number(composition.live_observations || 0);
+    const backtestCount = Number(composition.backtest_observations_used || 0);
+    const rejectedOverlap = Number(composition.overlapping_backtest_observations_rejected || 0);
+    const noMatchedPrehistory = selectedFactorEvidenceMode === "LIVE_PLUS_BACKTEST" && backtestCount === 0;
+    const detail = noMatchedPrehistory
+      ? "No accepted version-matched backtest observations exist before live inception; this result therefore equals the live-only history and is not described as a long-history result."
+      : selectedFactorEvidenceMode === "LIVE_PLUS_BACKTEST"
+        ? "Accepted version-matched backtest observations end before live inception; live observations remain authoritative from inception forward."
+        : "Only accepted live observations enter this result; backtest observations are excluded.";
+    return `<div class="callout ${noMatchedPrehistory ? "callout-warning" : "callout-neutral"}"><strong>Evidence composition:</strong> ${integer.format(liveCount)} live + ${integer.format(backtestCount)} backtest observations · live inception ${formatDate(composition.live_inception)} · ${statusText(composition.status)}. ${safe(detail)}${rejectedOverlap ? ` ${integer.format(rejectedOverlap)} overlapping backtest observations were rejected because live evidence has precedence.` : ""}</div>`;
+  }
+
   function dynamicAnalysisMarkup(row) {
     const dynamic = row.diagnostics?.dynamic;
     const path = dynamic?.exposure_path || [];
     if (row.estimator !== "DYNAMIC_FLS" || path.length < 2) return replicationAnalysisMarkup(row.series_id);
-    const factorIds = [...new Set(path.flatMap((item) => Object.keys(item.exposures || {})))];
+    const factorIds = [...new Set(path.flatMap((item) => Object.keys(item.betas || item.exposures || {})))];
     if (!factorIds.length) return replicationAnalysisMarkup(row.series_id);
     const colors = ["#56d6c9", "#7aa2f7", "#f4b860", "#d98cff", "#71d68d", "#ff7b8b"];
     const width = 920;
@@ -407,21 +458,23 @@
     const right = 18;
     const top = 18;
     const bottom = 34;
-    const values = path.flatMap((item) => factorIds.map((factor) => Number(item.exposures?.[factor])).filter(Number.isFinite));
+    const values = path.flatMap((item) => factorIds.map((factor) => Number((item.betas || item.exposures || {})[factor])).filter(Number.isFinite));
     const minimum = Math.min(0, ...values);
     const maximum = Math.max(0, ...values);
     const span = Math.max(maximum - minimum, 1e-9);
     const x = (index) => left + index / Math.max(path.length - 1, 1) * (width - left - right);
     const y = (value) => top + (maximum - value) / span * (height - top - bottom);
     const lines = factorIds.map((factor, index) => {
-      const points = path.map((item, pointIndex) => `${x(pointIndex).toFixed(2)},${y(Number(item.exposures?.[factor] || 0)).toFixed(2)}`).join(" ");
+      const points = path.map((item, pointIndex) => `${x(pointIndex).toFixed(2)},${y(Number((item.betas || item.exposures || {})[factor] || 0)).toFixed(2)}`).join(" ");
       return `<polyline fill="none" stroke="${colors[index % colors.length]}" stroke-width="2" vector-effect="non-scaling-stroke" points="${points}"></polyline>`;
     }).join("");
     const holdoutIndex = path.findIndex((item) => String(item.estimation_state).startsWith("HOLDOUT"));
     const holdout = holdoutIndex >= 0 ? `<line class="holdout-marker" x1="${x(holdoutIndex)}" x2="${x(holdoutIndex)}" y1="${top}" y2="${height - bottom}"></line><text class="chart-label" x="${Math.min(x(holdoutIndex) + 6, width - 110)}" y="${top + 14}">sealed holdout</text>` : "";
     const legend = factorIds.map((factor, index) => `<span><i style="background:${colors[index % colors.length]}"></i>${safe(factor)}</span>`).join("");
+    const latest = path[path.length - 1];
+    const latestBetas = factorIds.map((factor) => `<div><span>${safe(factor)} beta</span><strong>${decimal((latest.betas || latest.exposures || {})[factor])}</strong></div>`).join("");
     const comparison = dynamic.holdout_comparison || {};
-    return `<div class="callout callout-neutral"><strong>Method boundary:</strong> Clean-room dynamic FLS is MPI-informed and non-equivalent. It implements only the openly described methodology and does not claim proprietary MPI production output.</div><div class="grid grid-12 dynamic-analysis-grid"><div class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Effective-dated factor exposures</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(dynamic.validation || "TRAIN_ONLY_SELECTION")}</span></div><svg class="dynamic-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Dynamic factor exposure path for ${safe(row.series_id)}"><line class="zero-line" x1="${left}" x2="${width - right}" y1="${y(0)}" y2="${y(0)}"></line>${holdout}${lines}<text class="chart-label" x="${left}" y="${height - 10}">${safe(path[0].date)}</text><text class="chart-label" text-anchor="end" x="${width - right}" y="${height - 10}">${safe(path[path.length - 1].date)}</text><text class="chart-label" x="6" y="${top + 10}">${decimal(maximum)}</text><text class="chart-label" x="6" y="${height - bottom}">${decimal(minimum)}</text></svg><div class="chart-legend">${legend}<span><i style="background:var(--warning)"></i>Holdout boundary</span></div></div><div class="panel span-4"><div class="panel-heading"><div><div class="eyebrow">Dynamic validation</div><h3>Same-factor static benchmark</h3></div></div><div class="metric-list"><div><span>Selected smoothness</span><strong>${safe(dynamic.selected_smoothness || "—")}</strong></div><div><span>Train-only selection R²</span><strong>${pct(dynamic.selection_predicted_r_squared)}</strong></div><div><span>Dynamic holdout R²</span><strong>${pct(comparison.dynamic_predicted_r_squared)}</strong></div><div><span>Static holdout R²</span><strong>${pct(comparison.static_predicted_r_squared)}</strong></div><div><span>Dynamic minus static</span><strong>${pct(comparison.dynamic_minus_static_predicted_r_squared)}</strong></div><div><span>Comparison state</span><strong>${safe(humanStatus(comparison.status || "UNAVAILABLE"))}</strong></div></div></div>${replicationAnalysisMarkup(row.series_id)}</div>`;
+    return `<div class="callout callout-neutral"><strong>Method boundary:</strong> Clean-room dynamic FLS is MPI-informed and non-equivalent. It implements only the openly described methodology and does not claim proprietary MPI production output.</div><div class="grid grid-12 dynamic-analysis-grid"><div class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Effective-dated factor betas</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(dynamic.validation || "TRAIN_ONLY_SELECTION")}</span></div><svg class="dynamic-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Dynamic factor beta path for ${safe(row.series_id)}"><line class="zero-line" x1="${left}" x2="${width - right}" y1="${y(0)}" y2="${y(0)}"></line>${holdout}${lines}<text class="chart-label" x="${left}" y="${height - 10}">${safe(path[0].date)}</text><text class="chart-label" text-anchor="end" x="${width - right}" y="${height - 10}">${safe(path[path.length - 1].date)}</text><text class="chart-label" x="6" y="${top + 10}">${decimal(maximum)}</text><text class="chart-label" x="6" y="${height - bottom}">${decimal(minimum)}</text></svg><div class="chart-legend">${legend}<span><i style="background:var(--warning)"></i>Holdout boundary</span></div><div class="metric-list">${latestBetas}</div></div><div class="panel span-4"><div class="panel-heading"><div><div class="eyebrow">Dynamic validation</div><h3>Same-factor static benchmark</h3></div></div><div class="metric-list"><div><span>Latest beta date</span><strong>${safe(latest.date)}</strong></div><div><span>Selected smoothness</span><strong>${safe(dynamic.selected_smoothness || "—")}</strong></div><div><span>Train-only selection R²</span><strong>${pct(dynamic.selection_predicted_r_squared)}</strong></div><div><span>Dynamic holdout R²</span><strong>${pct(comparison.dynamic_predicted_r_squared)}</strong></div><div><span>Static holdout R²</span><strong>${pct(comparison.static_predicted_r_squared)}</strong></div><div><span>Dynamic minus static</span><strong>${pct(comparison.dynamic_minus_static_predicted_r_squared)}</strong></div><div><span>Comparison state</span><strong>${safe(humanStatus(comparison.status || "UNAVAILABLE"))}</strong></div></div></div>${replicationAnalysisMarkup(row.series_id)}</div>`;
   }
 
   function renderFactorDetail() {
@@ -429,6 +482,7 @@
     const row = analysis.series.find((item) => item.series_id === selectedFactorSeries) || analysis.series[0];
     if (!row) return;
     selectedFactorSeries = row.series_id;
+    const compositionMarkup = factorEvidenceComposition(row);
     $$("[data-factor-strategy]").forEach((button) => button.classList.toggle("is-active", button.dataset.factorStrategy === selectedFactorSeries));
     if (row.status !== "AVAILABLE") {
       const aligned = row.coverage?.aligned_observations ?? 0;
@@ -438,11 +492,13 @@
         const maximumVif = Math.max(...(design.vif || []).map((item) => Number(item.value)).filter(Number.isFinite), 0);
         const inference = row.diagnostics?.inference || {};
         const reason = row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · ");
-        $("#factor-detail").innerHTML = `<div class="state-separation"><div><span class="eyebrow">Source state</span><strong>${safe(humanStatus(sourceState(row)))}</strong><p>${integer.format(aligned)} aligned observations are retained.</p></div><div><span class="eyebrow">Model state</span><strong>${safe(humanStatus(modelState(row)))}</strong><p>${safe(humanStatus(reason))}. Sealed-holdout predicted R²: ${pct(holdout?.predicted_r_squared)} across ${integer.format(holdout?.observation_count || 0)} observations.</p></div></div><div class="callout callout-warning">The fit and dynamic path remain available for forensic review, but no alpha or exposure is accepted for portfolio-manager conclusions.</div><div class="callout callout-neutral"><strong>Training design:</strong> n=${integer.format(design.design_observations || 0)} · rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${statusText(design.unregularized_status || "UNAVAILABLE")}. <strong>Inference:</strong> ${statusText(inference.status || "UNAVAILABLE")}.</div>${dynamicAnalysisMarkup(row)}`;
+        const diagnosticBetaRows = (row.exposures || []).map((item) => `<tr><td>${safe(item.factor_id)}</td><td class="numeric">${decimal(item.beta ?? item.exposure)}</td><td>${safe(item.standard_error == null ? "Coefficient SE unavailable" : `SE ${decimal(item.standard_error)}`)}</td></tr>`);
+        const diagnosticBetas = diagnosticBetaRows.length ? `<div class="panel"><div class="panel-heading"><div><div class="eyebrow">Forensic diagnostic</div><h3>Computed beta / loading</h3></div><span class="badge badge-warning">NOT PM-ACCEPTED</span></div><div class="table-wrap"><table><caption>Diagnostic factor betas</caption>${tableMarkup([["Factor"], ["Beta", "numeric"], ["Uncertainty"]], diagnosticBetaRows)}</table></div></div>` : "";
+        $("#factor-detail").innerHTML = `${compositionMarkup}<div class="state-separation"><div><span class="eyebrow">Source state</span><strong>${safe(humanStatus(sourceState(row)))}</strong><p>${integer.format(aligned)} aligned observations are retained.</p></div><div><span class="eyebrow">Model state</span><strong>${safe(humanStatus(modelState(row)))}</strong><p>${safe(humanStatus(reason))}. Sealed-holdout predicted R²: ${pct(holdout?.predicted_r_squared)} across ${integer.format(holdout?.observation_count || 0)} observations.</p></div></div><div class="callout callout-warning">The computed alpha and betas remain visible for forensic review, but the sealed-holdout gate excludes them from portfolio-manager conclusions.</div>${diagnosticBetas}<div class="callout callout-neutral"><strong>Training design:</strong> n=${integer.format(design.design_observations || 0)} · rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${statusText(design.unregularized_status || "UNAVAILABLE")}. <strong>Inference:</strong> ${statusText(inference.status || "UNAVAILABLE")}.</div>${dynamicAnalysisMarkup(row)}`;
         prepareScrollableTableRegions();
         return;
       }
-      $("#factor-detail").innerHTML = `<div class="state-separation"><div><span class="eyebrow">Source state</span><strong>${safe(humanStatus(sourceState(row)))}</strong><p>Provider or account return evidence is assessed independently of this factor universe.</p></div><div><span class="eyebrow">Model state</span><strong>${safe(humanStatus(modelState(row)))}</strong><p>${safe((row.unavailable_reasons || []).map(humanStatus).join(" · ") || "No accepted model")}. Aligned model observations: ${integer.format(aligned)}.</p></div></div><div class="callout callout-danger">This is a model or decomposition-universe limitation. It does not relabel accepted Volatis, Robuxio, or other provider/account source data as missing. No exposure or alpha is inferred.</div>${replicationAnalysisMarkup(row.series_id)}`;
+      $("#factor-detail").innerHTML = `${compositionMarkup}<div class="state-separation"><div><span class="eyebrow">Source state</span><strong>${safe(humanStatus(sourceState(row)))}</strong><p>Provider or account return evidence is assessed independently of this factor universe.</p></div><div><span class="eyebrow">Model state</span><strong>${safe(humanStatus(modelState(row)))}</strong><p>${safe((row.unavailable_reasons || []).map(humanStatus).join(" · ") || "No accepted model")}. Aligned model observations: ${integer.format(aligned)}.</p></div></div><div class="callout callout-danger">This is a model or decomposition-universe limitation. It does not relabel accepted Volatis, Robuxio, or other provider/account source data as missing. No beta or alpha is inferred.</div>${replicationAnalysisMarkup(row.series_id)}`;
       prepareScrollableTableRegions();
       return;
     }
@@ -453,13 +509,13 @@
     const design = row.diagnostics.training_design || {};
     const maximumVif = Math.max(...(design.vif || []).map((item) => Number(item.value)).filter(Number.isFinite), 0);
     const summary = row.contribution_summary;
-    const maximumExposure = Math.max(...row.exposures.map((item) => Math.abs(Number(item.exposure))), 1);
+    const maximumExposure = Math.max(...row.exposures.map((item) => Math.abs(Number(item.beta ?? item.exposure))), 1);
     const exposures = row.exposures.map((item) => {
-      const exposure = Number(item.exposure);
+      const exposure = Number(item.beta ?? item.exposure);
       const width = Math.min(48, Math.abs(exposure) / maximumExposure * 48);
       const left = exposure < 0 ? 50 - width : 50;
       const uncertainty = item.standard_error == null ? "Coefficient SE unavailable for fitted method" : `SE ${decimal(item.standard_error)}`;
-      return `<div class="exposure-row"><div class="exposure-name"><strong>${safe(item.factor_id)}</strong><span>${safe(uncertainty)}</span></div><div class="exposure-track" aria-hidden="true"><span class="exposure-fill ${exposure < 0 ? "is-negative" : ""}" style="left:${left}%;width:${width}%"></span></div><div class="exposure-value">${decimal(item.exposure)}×</div></div>`;
+      return `<div class="exposure-row"><div class="exposure-name"><strong>${safe(item.factor_id)}</strong><span>${safe(uncertainty)}</span></div><div class="exposure-track" aria-hidden="true"><span class="exposure-fill ${exposure < 0 ? "is-negative" : ""}" style="left:${left}%;width:${width}%"></span></div><div class="exposure-value">β ${decimal(exposure)}</div></div>`;
     }).join("");
     const contributionRows = [
       ...Object.entries(summary.factor_means).map(([factor, value]) => `<tr><td>${safe(factor)}</td><td>Factor contribution</td><td class="numeric">${pct(value, 3)}</td></tr>`),
@@ -475,22 +531,38 @@
     const proxyTable = proxyRows.length
       ? `<div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Governed candidate universe</div><h3>Economic rationale and train-only disposition</h3></div><span class="badge">${integer.format(proxyRows.length)} proxies</span></div><div class="table-wrap wide"><table><caption>Factor proxy governance</caption>${tableMarkup([["Proxy / family"], ["Source"], ["Effective interval"], ["Disposition"], ["Selection rationale"]], proxyRows)}</table></div></div>`
       : "";
-    $("#factor-detail").innerHTML = `<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Estimator</div><div class="metric-value metric-value-compact">${statusText(row.estimator)}</div><div class="metric-note">${safe(analysis.method_label)}</div></div><div class="metric-block"><div class="metric-label">Net alpha</div><div class="metric-value">${pct(alpha.net_annualized)}</div><div class="metric-note">${safe(alpha.net_status)} · observed basis</div></div><div class="metric-block"><div class="metric-label">Gross alpha</div><div class="metric-value">${pct(alpha.gross_annualized)}</div><div class="metric-note">${safe(alpha.gross_status)}</div></div><div class="metric-block"><div class="metric-label">Holdout predicted R²</div><div class="metric-value">${pct(holdout.predicted_r_squared)}</div><div class="metric-note">${integer.format(holdout.observation_count)} out-of-sample observations</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(holdout.tracking_error_annualized)}</div><div class="metric-note">Annualized holdout residual volatility</div></div><div class="metric-block"><div class="metric-label">Exact-date coverage</div><div class="metric-value">${integer.format(row.coverage.aligned_observations)}</div><div class="metric-note">${formatDate(row.coverage.observed_start)}–${formatDate(row.coverage.observed_end)}</div></div><div class="metric-block"><div class="metric-label">Training design</div><div class="metric-value">${integer.format(design.design_observations || 0)} obs.</div><div class="metric-note">Rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${safe(humanStatus(design.unregularized_status || "UNAVAILABLE"))}</div></div><div class="metric-block"><div class="metric-label">HAC inference state</div><div class="metric-value metric-value-compact">${statusText(inference.status || "UNAVAILABLE")}</div><div class="metric-note">Default lag ${safe(inference.default_lag ?? "—")} · no p-values or confidence intervals</div></div><div class="metric-block"><div class="metric-label">Train residual diagnostics</div><div class="metric-value">DW ${decimal(trainResiduals.durbin_watson)}</div><div class="metric-note">Lag-1 residual autocorrelation ${decimal(trainResiduals.autocorrelation?.["1"])}</div></div><div class="metric-block"><div class="metric-label">Reconciliation error</div><div class="metric-value">${safe(summary.maximum_reconciliation_error)}</div><div class="metric-note">Maximum absolute return identity error</div></div></div><div class="callout callout-neutral"><strong>Model boundary:</strong> ${safe(methodBoundary)} ${safe(inference.post_selection_caveat || "")}</div><div class="grid grid-12" style="margin-top:16px"><div class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Latest accepted exposures</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(row.evidence_layer)}</span></div><div class="exposure-list">${exposures}</div></div><div class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge">n=${integer.format(summary.observations)}</span></div><div class="table-wrap"><table><caption>Holdout factor contribution reconciliation</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], contributionRows)}</table></div></div>${proxyTable}</div>${dynamicAnalysisMarkup(row)}`;
+    $("#factor-detail").innerHTML = `${compositionMarkup}<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Estimator</div><div class="metric-value metric-value-compact">${statusText(row.estimator)}</div><div class="metric-note">${safe(analysis.method_label)}</div></div><div class="metric-block"><div class="metric-label">Net alpha</div><div class="metric-value">${pct(alpha.net_annualized)}</div><div class="metric-note">${safe(alpha.net_status)} · observed basis</div></div><div class="metric-block"><div class="metric-label">Gross alpha</div><div class="metric-value">${pct(alpha.gross_annualized)}</div><div class="metric-note">${safe(alpha.gross_status)}</div></div><div class="metric-block"><div class="metric-label">Holdout predicted R²</div><div class="metric-value">${pct(holdout.predicted_r_squared)}</div><div class="metric-note">${integer.format(holdout.observation_count)} sealed out-of-sample observations; above zero beats the training-mean baseline</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(holdout.tracking_error_annualized)}</div><div class="metric-note">Annualized holdout residual volatility</div></div><div class="metric-block"><div class="metric-label">Exact-date coverage</div><div class="metric-value">${integer.format(row.coverage.aligned_observations)}</div><div class="metric-note">${formatDate(row.coverage.observed_start)}–${formatDate(row.coverage.observed_end)}</div></div><div class="metric-block"><div class="metric-label">Training design</div><div class="metric-value">${integer.format(design.design_observations || 0)} obs.</div><div class="metric-note">Rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${safe(humanStatus(design.unregularized_status || "UNAVAILABLE"))}</div></div><div class="metric-block"><div class="metric-label">HAC inference state</div><div class="metric-value metric-value-compact">${statusText(inference.status || "UNAVAILABLE")}</div><div class="metric-note">Default lag ${safe(inference.default_lag ?? "—")} · no p-values or confidence intervals</div></div><div class="metric-block"><div class="metric-label">Train residual diagnostics</div><div class="metric-value">DW ${decimal(trainResiduals.durbin_watson)}</div><div class="metric-note">Lag-1 residual autocorrelation ${decimal(trainResiduals.autocorrelation?.["1"])}</div></div><div class="metric-block"><div class="metric-label">Reconciliation error</div><div class="metric-value">${safe(summary.maximum_reconciliation_error)}</div><div class="metric-note">Maximum absolute return identity error</div></div></div><div class="callout callout-neutral"><strong>Model boundary:</strong> ${safe(methodBoundary)} ${safe(inference.post_selection_caveat || "")}</div><div class="grid grid-12" style="margin-top:16px"><div class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Latest accepted betas / loadings</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(row.evidence_layer)}</span></div><div class="exposure-list">${exposures}</div></div><div class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge">n=${integer.format(summary.observations)}</span></div><div class="table-wrap"><table><caption>Holdout factor contribution reconciliation</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], contributionRows)}</table></div></div>${proxyTable}</div>${dynamicAnalysisMarkup(row)}`;
     prepareScrollableTableRegions();
   }
 
   function renderAttribution() {
     const analysis = currentFactorAnalysis();
+    $$('[data-factor-evidence-mode]').forEach((button) => {
+      const available = Boolean(factorLensModes[button.dataset.factorEvidenceMode]);
+      const active = button.dataset.factorEvidenceMode === selectedFactorEvidenceMode;
+      button.disabled = !available;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.title = available ? "" : "No accepted version-compatible backtest decomposition is published for this mode.";
+      button.onclick = () => {
+        if (!available) return;
+        selectedFactorEvidenceMode = button.dataset.factorEvidenceMode;
+        selectedFactorSeries = null;
+        if (!activeFactorLenses().some((item) => item.lens_id === selectedFactorLens)) selectedFactorLens = activeFactorLenses()[0]?.lens_id;
+        renderAttribution();
+      };
+    });
     const firstAvailable = analysis.series.find((row) => row.status === "AVAILABLE");
     if (selectedContextStrategy !== "ALL" && analysis.series.some((row) => row.series_id === selectedContextStrategy)) selectedFactorSeries = selectedContextStrategy;
     if (!analysis.series.some((row) => row.series_id === selectedFactorSeries)) selectedFactorSeries = null;
     selectedFactorSeries ||= firstAvailable?.series_id || analysis.series[0]?.series_id;
-    $("#factor-lens-selector").innerHTML = factorLenses.map((item) => `<button type="button" class="segment ${item.lens_id === selectedFactorLens ? "is-active" : ""}" data-factor-lens="${safe(item.lens_id)}" aria-pressed="${item.lens_id === selectedFactorLens}">${safe(item.lens_label || item.lens_id)}</button>`).join("");
+    $("#factor-lens-selector").innerHTML = activeFactorLenses().map((item) => `<button type="button" class="segment ${item.lens_id === selectedFactorLens ? "is-active" : ""}" data-factor-lens="${safe(item.lens_id)}" aria-pressed="${item.lens_id === selectedFactorLens}">${safe(item.lens_label || item.lens_id)}</button>`).join("");
     $$('[data-factor-lens]').forEach((button) => button.addEventListener("click", () => { selectedFactorLens = button.dataset.factorLens; selectedFactorSeries = null; renderAttribution(); }));
     const sourceRows = Array.isArray(analysis.sources) ? analysis.sources : [];
     const sourceSummary = sourceRows.map((item) => `${item.source_label || item.source_key} · through ${item.as_of_date}`).join(" · ") || "Single accepted historical proof generation";
     const proxyGovernance = analysis.proxy_governance || {};
-    $("#factor-lens-boundary").innerHTML = `<strong>${safe(analysis.lens_label || analysis.lens_id)}</strong> · ${safe(analysis.return_basis || "CONFIGURED_RETURN_BASIS")}<br>${safe(sourceSummary)}. ${integer.format(proxyGovernance.candidate_count || 0)} governed candidates; ${safe(humanStatus(proxyGovernance.orthogonality_claim || "UNAVAILABLE"))}. Lenses remain separate and are never concatenated.`;
+    const semantics = lensSemantics[analysis.lens_id] || { question: "What return drivers explain the strategy?", method: "Returns-based decomposition.", beta: "Beta is fitted return sensitivity.", caveat: "No holdings inference is made." };
+    $("#factor-lens-boundary").innerHTML = `<strong>${safe(analysis.lens_label || analysis.lens_id)}</strong> · ${safe(analysis.return_basis || "CONFIGURED_RETURN_BASIS")} · ${safe(selectedFactorEvidenceMode)}<br><strong>Question:</strong> ${safe(semantics.question)} <strong>Method:</strong> ${safe(semantics.method)} <strong>Beta:</strong> ${safe(semantics.beta)} <strong>Boundary:</strong> ${safe(semantics.caveat)}<br>${safe(sourceSummary)}. ${integer.format(proxyGovernance.candidate_count || 0)} governed candidates; ${safe(humanStatus(proxyGovernance.orthogonality_claim || "UNAVAILABLE"))}. Live only is authoritative; live + backtest uses only compatible pre-live history. Lenses remain separate and are never concatenated.`;
     renderKpis("#factor-kpis", [
       ["PM-usable models", `${analysis.available_count}/${analysis.series.length}`, "Positive sealed-holdout predicted R² required", analysis.available_count ? "positive" : "danger"],
       ["Diagnostic only", String(analysis.diagnostic_count || 0), "Computed fits excluded from alpha and exposure conclusions", "warning"],
@@ -503,9 +575,14 @@
       const strategy = strategyByName(row.series_id);
       const decision = row.model_quality?.decision_status || row.status;
       const providerCoverage = strategy?.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(strategy))}</span>` : "";
-      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(sourceState(row))}${providerCoverage}</td><td>${statusText(modelState(row))}<span class="cell-secondary">${statusText(decision)}</span></td><td>${safe(row.source_label || "—")}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(row.exposures.map((item) => item.factor_id).join(" · ") || "—")}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")} · model input</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · "))}</td></tr>`;
+      const betas = row.exposures.map((item) => `${item.factor_id} β ${decimal(item.beta ?? item.exposure)}`).join(" · ") || "—";
+      const composition = row.series_composition || {};
+      const compositionText = composition.status
+        ? `${integer.format(composition.live_observations || 0)} live + ${integer.format(composition.backtest_observations_used || 0)} backtest<span class="cell-secondary">${safe(humanStatus(composition.status))} · inception ${formatDate(composition.live_inception)}</span>`
+        : `Undeclared legacy composition<span class="cell-secondary">No backtest-history claim</span>`;
+      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(sourceState(row))}${providerCoverage}</td><td>${statusText(modelState(row))}<span class="cell-secondary">${statusText(decision)}</span></td><td>${safe(row.source_label || "—")}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(betas)}</td><td>${compositionText}</td><td>${safe(row.coverage?.observed_start || "—")}<span class="cell-secondary">${safe(row.coverage?.observed_end || "—")} · model input</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · "))}</td></tr>`;
     });
-    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Source returns"], ["Model state"], ["Model input source"], ["Estimator"], ["Accepted factors"], ["Observed interval"], ["Aligned", "numeric"], ["Sealed holdout R²", "numeric"], ["Accepted net alpha", "numeric"], ["Alpha / gate state"]], rows);
+    $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Source returns"], ["Model state"], ["Model input source"], ["Estimator"], ["Beta / loading"], ["Evidence composition"], ["Observed interval"], ["Aligned", "numeric"], ["Sealed holdout R²", "numeric"], ["Accepted net alpha", "numeric"], ["Alpha / gate state"]], rows);
     $("#factor-strategy-selector").innerHTML = analysis.series.map((row) => `<button type="button" class="strategy-chip ${row.status === "AVAILABLE" ? "" : row.status === "DIAGNOSTIC_ONLY" ? "is-diagnostic" : "is-unavailable"}" data-factor-strategy="${safe(row.series_id)}">${safe(row.series_id)}</button>`).join("");
     $$("[data-factor-strategy]").forEach((button) => button.addEventListener("click", () => { selectedFactorSeries = button.dataset.factorStrategy; renderFactorDetail(); }));
     renderFactorDetail();
@@ -981,7 +1058,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 13) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 14) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;

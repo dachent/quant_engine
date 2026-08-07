@@ -265,6 +265,36 @@ def _selected(result: dict[str, object]) -> dict[str, Any]:
     return selected[0]
 
 
+def test_dynamic_press_predictions_equal_direct_leave_one_out() -> None:
+    matrix = np.asarray(
+        [[math.sin(index / 2), math.cos(index / 3)] for index in range(12)],
+        dtype=np.float64,
+    )
+    target = np.asarray(
+        [0.001 + 0.4 * row[0] - 0.2 * row[1] for row in matrix],
+        dtype=np.float64,
+    )
+    _score, optimized = decomposition._dynamic_loo_score(
+        matrix,
+        target,
+        smoothness=0.01,
+        ridge=0.0001,
+    )
+    direct = []
+    for omitted in range(len(target)):
+        weights = np.ones(len(target), dtype=np.float64)
+        weights[omitted] = 0.0
+        fit = decomposition._dynamic_fit(
+            matrix,
+            target,
+            smoothness=0.01,
+            ridge=0.0001,
+            weights=weights,
+        )
+        direct.append(fit.intercept + matrix[omitted] @ fit.exposures[omitted])
+    assert optimized == pytest.approx(direct, abs=1e-10)
+
+
 def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -> None:
     source = tmp_path / "source"
     target_path, days = _write_sources(source)
@@ -283,6 +313,9 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
         item["factor_id"]: float(item["exposure"]) for item in model["exposures"]
     }
     assert exposures == pytest.approx({"factor-one": 0.6, "factor-two": -0.2}, abs=1e-9)
+    assert {
+        item["factor_id"]: float(item["beta"]) for item in model["exposures"]
+    } == pytest.approx(exposures, abs=1e-12)
     assert float(model["alpha"]["periodic_intercept"]) == pytest.approx(
         0.0001, abs=1e-10
     )
@@ -684,6 +717,7 @@ def test_dynamic_fls_recovers_time_varying_path_and_walks_forward(
         0.001,
     }
     path = dynamic["exposure_path"]
+    assert all(row["betas"] == row["exposures"] for row in path)
     recovered = [
         (
             float(row["exposures"]["factor-one"]),

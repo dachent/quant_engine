@@ -68,6 +68,14 @@ const requiredFactorLenses = [
   "RETURN_SECTOR",
   "DYNAMIC_STYLE",
 ];
+const requiredFactorEvidenceModes = ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"];
+const requiredAttributedStrategies = [
+  "AI Factor [P123]",
+  "GrizzlyBears VTMA",
+  "QSI",
+  "TT Portfolio",
+  "Volatis Strategy",
+];
 const requiredCorrelationWindows = ["5", "21", "22", "63", "126", "130", "252", "260"];
 const requiredDrawdownRegimes = ["either_drawdown", "both_drawdown"];
 const requiredWeeklyGroups = [
@@ -94,16 +102,58 @@ const signalsActive = await page.locator('[data-view="signals"]').evaluate((node
 checks.push(check("Signals appendix activates from the governed operator route", signalsActive, { active: signalsActive }));
 
 await page.locator('[data-nav="attribution"]').click();
+const factorModeEvidence = [];
+for (const mode of requiredFactorEvidenceModes) {
+  const button = page.locator(`[data-factor-evidence-mode="${mode}"]`);
+  await button.click();
+  const strategyRows = await page.locator("#factor-model-table tbody tr").evaluateAll(
+    (nodes, strategies) => strategies.map((strategy) => ({
+      beta_visible: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("β") ?? false,
+      evidence: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.trim() ?? null,
+      strategy,
+    })),
+    requiredAttributedStrategies,
+  );
+  factorModeEvidence.push({
+    active: await button.getAttribute("aria-pressed"),
+    boundary: (await page.locator("#factor-lens-boundary").textContent())?.trim(),
+    mode,
+    strategy_rows: strategyRows,
+    table: (await page.locator("#factor-model-table").textContent())?.trim(),
+  });
+}
+const hybridFactorEvidence = factorModeEvidence.find((item) => item.mode === "LIVE_PLUS_BACKTEST");
+checks.push(check(
+  "Factor analyses expose live-only and compatible-history modes without inventing prehistory",
+  factorModeEvidence.length === requiredFactorEvidenceModes.length
+    && factorModeEvidence.every((item) => item.active === "true"
+      && item.boundary?.includes(item.mode)
+      && item.table?.includes("Beta / loading")
+      && item.table.includes("Evidence composition")
+      && item.strategy_rows.every((row) => row.evidence && row.beta_visible))
+    && hybridFactorEvidence?.strategy_rows.find((row) => row.strategy === "AI Factor [P123]")?.evidence?.includes("1,486 backtest")
+    && hybridFactorEvidence.strategy_rows.filter((row) => row.strategy !== "AI Factor [P123]").every((row) => row.evidence?.includes("0 backtest") && row.evidence.includes("no version-matched backtest prehistory")),
+  factorModeEvidence,
+));
+await page.locator('[data-factor-evidence-mode="LIVE_ONLY"]').click();
 const factorLensButtons = await page.locator("[data-factor-lens]").count();
 const factorLensEvidence = [];
 for (const lens of requiredFactorLenses) {
   const button = page.locator(`[data-factor-lens="${lens}"]`);
   await button.click();
+  const requestedBetaRows = await page.locator("#factor-model-table tbody tr").evaluateAll(
+    (nodes, strategies) => strategies.map((strategy) => ({
+      beta_visible: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("β") ?? false,
+      strategy,
+    })),
+    requiredAttributedStrategies,
+  );
   factorLensEvidence.push({
     active: await page.locator(`[data-factor-lens="${lens}"]`).getAttribute("aria-pressed"),
     boundary: (await page.locator("#factor-lens-boundary").textContent())?.trim(),
     chips: await page.locator("[data-factor-strategy]").count(),
     lens,
+    requested_beta_rows: requestedBetaRows,
     rows: await page.locator("#factor-model-table tbody tr").count(),
   });
 }
@@ -111,7 +161,12 @@ checks.push(check(
   "All five production decomposition lenses are rendered and exercised",
   factorLensButtons === requiredFactorLenses.length
     && factorLensEvidence.length === requiredFactorLenses.length
-    && factorLensEvidence.every((item) => item.active === "true" && item.boundary?.includes("never concatenated") && item.chips === 9 && item.rows === 9),
+    && factorLensEvidence.every((item) => item.active === "true"
+      && item.boundary?.includes("Beta:")
+      && item.boundary.includes("never concatenated")
+      && item.chips === 9
+      && item.rows === 9
+      && item.requested_beta_rows.every((row) => row.beta_visible)),
   factorLensEvidence,
 ));
 await page.locator('[data-factor-lens="DYNAMIC_STYLE"]').click();

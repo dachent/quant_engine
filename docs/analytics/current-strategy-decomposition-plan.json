@@ -43,7 +43,7 @@
       "column_policy": "CANDIDATE_ID"
     },
     "us-sector": {
-      "lens": "RETURN_INDUSTRY",
+      "lens": "RETURN_SECTOR",
       "universe_id": "us-sector-return",
       "input_key": "sector_returns",
       "risk_free_column": "BIL",
@@ -90,12 +90,21 @@
         {
           "source_key": "us-sector",
           "constraint": "UNCONSTRAINED",
-          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
+          "factor_sets": [
+            ["XLY", "XLF", "XLK"],
+            ["XLC", "XLY", "XLP", "XLE", "XLF", "XLV"],
+            ["XLC", "XLY", "XLP", "XLE", "XLF", "XLV", "XLI", "XLB", "XLRE", "XLK", "XLU"]
+          ]
         },
         {
           "source_key": "us-industry",
           "constraint": "UNCONSTRAINED",
-          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
+          "factor_sets": [
+            ["Softw", "Chips", "Hardw"],
+            ["Softw", "Chips", "Hardw", "Drugs", "Banks", "Rtail"],
+            ["Softw", "Chips", "Hardw", "Drugs", "Hlth", "Banks", "Insur", "Fin", "Rtail", "Mach"]
+          ],
+          "screened_out_candidates": ["Agric", "Food", "Soda", "Beer", "Smoke", "Toys", "Fun", "Books", "Hshld", "Clths", "MedEq", "Chems", "Rubbr", "Txtls", "BldMt", "Cnstr", "Steel", "FabPr", "ElcEq", "Autos", "Aero", "Ships", "Guns", "Gold", "Mines", "Coal", "Oil", "Util", "Telcm", "PerSv", "BusSv", "LabEq", "Paper", "Boxes", "Trans", "Whlsl", "Meals", "RlEst", "Other"]
         }
       ]
     },
@@ -123,17 +132,44 @@
       "default_disposition": "OUT_OF_SCOPE_ARCHETYPE_MISMATCH",
       "assignments": [
         {
-          "source_key": "multi-asset-style",
+          "source_key": "us-economic",
+          "constraint": "UNCONSTRAINED",
+          "factor_sets": [
+            ["MKT_RF"],
+            ["MKT_RF", "SMB", "HML"],
+            ["MKT_RF", "SMB", "HML", "RMW", "CMA", "MOM"]
+          ]
+        },
+        {
+          "source_key": "us-equity-style",
           "constraint": "LONG_ONLY_SUM_TO_ONE",
           "factor_sets": [
-            ["ITOT"],
-            ["ITOT", "IEFA", "IEMG"],
-            ["ITOT", "IEF", "TLT"],
-            ["ITOT", "HYG", "GLD"],
-            ["ITOT", "TLT", "LQD", "HYG", "VNQ", "GLD"],
-            ["ITOT", "IEFA", "IEMG", "IEF", "HYG", "GLD"],
-            ["ITOT", "TLT", "HYG", "GLD", "DBC", "UUP"]
+            ["IWX", "IWY"],
+            ["IWS", "IWP"],
+            ["IWN", "IWO"],
+            ["IWX", "IWY", "IWN", "IWO"],
+            ["IWS", "IWP", "IWN", "IWO"],
+            ["IWX", "IWY", "IWS", "IWP", "IWN", "IWO"]
           ]
+        },
+        {
+          "source_key": "us-sector",
+          "constraint": "UNCONSTRAINED",
+          "factor_sets": [
+            ["XLY", "XLF", "XLK"],
+            ["XLC", "XLY", "XLP", "XLE", "XLF", "XLV"],
+            ["XLC", "XLY", "XLP", "XLE", "XLF", "XLV", "XLI", "XLB", "XLRE", "XLK", "XLU"]
+          ]
+        },
+        {
+          "source_key": "us-industry",
+          "constraint": "UNCONSTRAINED",
+          "factor_sets": [
+            ["Softw", "Chips", "Hardw"],
+            ["Softw", "Chips", "Hardw", "Drugs", "Banks", "Rtail"],
+            ["Softw", "Chips", "Hardw", "Drugs", "Hlth", "Banks", "Insur", "Fin", "Rtail", "Mach"]
+          ],
+          "screened_out_candidates": ["Agric", "Food", "Soda", "Beer", "Smoke", "Toys", "Fun", "Books", "Hshld", "Clths", "MedEq", "Chems", "Rubbr", "Txtls", "BldMt", "Cnstr", "Steel", "FabPr", "ElcEq", "Autos", "Aero", "Ships", "Guns", "Gold", "Mines", "Coal", "Oil", "Util", "Telcm", "PerSv", "BusSv", "LabEq", "Paper", "Boxes", "Trans", "Whlsl", "Meals", "RlEst", "Other"]
         }
       ]
     },

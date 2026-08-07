@@ -14,8 +14,13 @@ import shutil
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.2.0"
-LENSES = ("ECONOMIC_FACTOR", "ETF_STYLE", "RETURN_INDUSTRY")
+BUILDER_VERSION = "0.3.0"
+LENSES = (
+    "ECONOMIC_FACTOR",
+    "ETF_STYLE",
+    "RETURN_INDUSTRY",
+    "RETURN_SECTOR",
+)
 INPUT_KEYS = (
     "us_factors",
     "europe_factors",
@@ -297,7 +302,16 @@ def _factor_sets(
         raise CurrentPlanError(f"{name} factor sets must be unique and non-empty")
     if any(set(item) - set(candidates) for item in sets):
         raise CurrentPlanError(f"{name} factor set references an ineligible candidate")
-    if set().union(*(set(item) for item in sets)) != set(candidates):
+    modeled = set().union(*(set(item) for item in sets))
+    raw_screened = assignment.get("screened_out_candidates", [])
+    if not isinstance(raw_screened, list):
+        raise CurrentPlanError(f"{name}.screened_out_candidates must be an array")
+    screened = {
+        _text(item, f"{name}.screened_out_candidates[]") for item in raw_screened
+    }
+    if len(screened) != len(raw_screened) or modeled & screened:
+        raise CurrentPlanError(f"{name} modeled and screened candidates must differ")
+    if modeled | screened != set(candidates):
         raise CurrentPlanError(
             f"{name} must disposition every candidate in its universe"
         )
@@ -371,6 +385,7 @@ def build_bundle(
     public_factor_manifest_path: Path,
     style_manifest_path: Path,
     sector_manifest_path: Path,
+    evidence_mode: str = "LIVE_ONLY",
 ) -> tuple[dict[str, bytes], dict[str, object]]:
     """Build a deterministic current-strategy planning bundle without writing."""
 
@@ -379,6 +394,8 @@ def build_bundle(
     base_spec, base_spec_content = _load_json(base_spec_path, "base specification")
     if plan.get("schema_version") != 1:
         raise CurrentPlanError("current strategy plan schema is unsupported")
+    if evidence_mode not in {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}:
+        raise CurrentPlanError("evidence_mode is unsupported")
     if set(market_paths) != set(INPUT_KEYS):
         raise CurrentPlanError("market input keys differ from the closed contract")
     for path in market_paths.values():
@@ -542,7 +559,13 @@ def build_bundle(
                 candidate_dispositions.append(
                     {
                         "candidate_id": candidate,
-                        "disposition": disposition,
+                        "disposition": (
+                            "SCREENED_OUT_PREDECLARED_DIMENSION_CONTROL"
+                            if assignment is not None
+                            and candidate
+                            in set(assignment.get("screened_out_candidates", []))
+                            else disposition
+                        ),
                         "lens": _text(source_plan.get("lens"), "source.lens"),
                         "source_key": source_key,
                         "strategy_id": strategy_id,
@@ -601,6 +624,40 @@ def build_bundle(
         projected_target_content = _csv_bytes(TARGET_HEADERS, projected_target_rows)
         target_relative = f"inputs/lenses/{source_key}-targets.csv"
         outputs[target_relative] = projected_target_content
+        base_composition = base_spec.get("series_composition", {})
+        if not isinstance(base_composition, dict):
+            raise CurrentPlanError("base series_composition must be an object")
+        series_composition: dict[str, object] = {}
+        for series_id in sorted(assigned_series):
+            accepted_rows = [
+                row
+                for row in target_rows
+                if row["series_id"] == series_id
+                and _day(row["date"], "target date") <= as_of
+            ]
+            if evidence_mode == "LIVE_PLUS_BACKTEST":
+                value = base_composition.get(series_id)
+                if not isinstance(value, dict):
+                    raise CurrentPlanError(
+                        f"hybrid composition is absent for {series_id}"
+                    )
+                series_composition[series_id] = dict(value)
+            else:
+                live_rows = [
+                    row for row in accepted_rows if row["evidence_layer"] != "BACKTEST"
+                ]
+                series_composition[series_id] = {
+                    "backtest_observations_used": 0,
+                    "evidence_mode": "LIVE_ONLY",
+                    "live_evidence_layer": (
+                        live_rows[0]["evidence_layer"] if live_rows else None
+                    ),
+                    "live_inception": live_rows[0]["date"] if live_rows else None,
+                    "live_observations": len(live_rows),
+                    "series_id": series_id,
+                    "status": "AVAILABLE_LIVE_ONLY" if live_rows else "UNAVAILABLE",
+                    "strategy_version": None,
+                }
         generated_target = _provenance_definition(
             f"target/{source_key}.csv",
             target_relative,
@@ -689,6 +746,7 @@ def build_bundle(
         spec = {
             "analysis_lens": lens,
             "as_of_date": as_of.isoformat(),
+            "evidence_mode": evidence_mode,
             "factor_source": {
                 "artifact_id": f"market/{source_key}.csv",
                 "date_column": "date",
@@ -704,6 +762,7 @@ def build_bundle(
             "models": models,
             "provenance_sources": generated_provenance,
             "schema_version": 1,
+            "series_composition": series_composition,
             "target_source": generated_target,
         }
         relative = f"specs/{source_key}.json"
@@ -763,6 +822,7 @@ def build_bundle(
             "holdout": "LAST_20_PERCENT_MINIMUM_20_OBSERVATIONS",
             "model_dimension": "MINIMUM_20_TRAINING_OBSERVATIONS_PER_FACTOR",
             "publication": "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE",
+            "strategy_evidence_mode": evidence_mode,
         },
     }
     manifest["bundle_id"] = _sha256(_canonical_json(manifest))
@@ -818,6 +878,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--style-manifest", type=Path, required=True)
     parser.add_argument("--sector-manifest", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument(
+        "--evidence-mode",
+        choices=("LIVE_ONLY", "LIVE_PLUS_BACKTEST"),
+        default="LIVE_ONLY",
+    )
     return parser
 
 
@@ -839,6 +904,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         public_factor_manifest_path=args.public_factor_manifest,
         style_manifest_path=args.style_manifest,
         sector_manifest_path=args.sector_manifest,
+        evidence_mode=args.evidence_mode,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
