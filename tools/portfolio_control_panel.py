@@ -333,9 +333,16 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
             "manifest_size_bytes",
         }:
             raise ControlPanelValidationError("freshness provider ledger keys differ")
-        date.fromisoformat(
+        ledger_as_of = date.fromisoformat(
             _text(ledger_identity.get("as_of_date"), "freshness ledger as_of_date")
         )
+        freshness_as_of = date.fromisoformat(
+            _text(payload.get("as_of_date"), "freshness health as_of_date")
+        )
+        if ledger_as_of > freshness_as_of:
+            raise ControlPanelValidationError(
+                "freshness provider ledger postdates the evaluation"
+            )
         for field in ("catalog_sha256", "generation_id", "manifest_sha256"):
             if not re.fullmatch(
                 r"[0-9a-f]{64}",
