@@ -317,9 +317,7 @@ def test_performance_preserves_pool_disposition_and_account_live_return_path() -
         "nav_observations": [],
         "strategy_provider_evidence": [
             {
-                "account": {
-                    "account_scopes": [{"account_id": "account-live"}],
-                },
+                "account": {"observed_start": "2026-01-01"},
                 "evidence_layer": "ACCOUNT_LIVE",
                 "generation_id": "a" * 64,
                 "strategy_id": "strategy-live",
@@ -351,9 +349,65 @@ def test_performance_preserves_pool_disposition_and_account_live_return_path() -
     assert live["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
     assert live["return_path_observations"] == 2
     assert live["return_path_cumulative_return"] == "0.0302"
+    assert (
+        live["return_path_account_binding"]
+        == "UNIQUE_CURRENT_EFFECTIVE_DATED_ASSIGNMENT"
+    )
+    assert live["return_path_assignment_id"] == "assignment-live"
     assert reserve["pool_id"] == "reserve-capital"
     assert reserve["pool_mapping_status"] == "MAPPED"
     assert reserve["strategy_mapping_disposition"] == "RESERVE_NOT_APPLICABLE"
+
+
+def test_performance_rejects_ambiguous_account_live_path() -> None:
+    catalog = {
+        "assignments": [
+            {
+                "account_id": f"account-{suffix}",
+                "assignment_id": f"assignment-{suffix}",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "pool_id": "systematic-capital",
+                "pool_mapping_status": "MAPPED",
+                "strategy_id": "strategy-live",
+                "strategy_mapping_disposition": "STRATEGY_MAPPED",
+            }
+            for suffix in ("a", "b")
+        ],
+        "calendar_coverage": [],
+        "flows": [],
+        "nav_observations": [],
+        "strategy_provider_evidence": [
+            {
+                "account": {"observed_start": "2026-01-01"},
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": "a" * 64,
+                "strategy_id": "strategy-live",
+            }
+        ],
+        "strategy_returns": [
+            {
+                "date": "2026-01-01",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.01",
+                "strategy_id": "strategy-live",
+            },
+            {
+                "date": "2026-01-02",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.02",
+                "strategy_id": "strategy-live",
+            },
+        ],
+    }
+
+    rows = reporter._account_strategy_performance(catalog)
+
+    assert len(rows) == 2
+    assert all("return_path_status" not in row for row in rows)
 
 
 def _amount(value: str) -> dict[str, str]:

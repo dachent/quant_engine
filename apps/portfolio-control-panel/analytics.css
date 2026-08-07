@@ -465,6 +465,13 @@ section[data-view="capital"] .callout-neutral {
   color: var(--text-soft);
 }
 
+#factor-detail,
+#factor-detail .callout {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 #factor-detail .badge-positive {
   border-color: #367a65;
   background: #173d33;
