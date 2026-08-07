@@ -195,6 +195,119 @@ def _baseline(root: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
     )
 
 
+def _attribution(
+    root: Path, baseline_ref: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, str], Path]:
+    pointer = read_current(root)
+    catalog_path = (
+        root / "generations" / pointer.generation_id / "strategy-attribution.json"
+    )
+    if catalog_path.is_symlink() or not catalog_path.is_file():
+        raise ReportValidationError("strategy attribution catalog is missing or linked")
+    catalog = _load_json(catalog_path, "strategy attribution catalog")
+    if catalog.get("catalog_schema_version") != 1:
+        raise ReportValidationError("strategy attribution schema is unsupported")
+    attribution_baseline = _object(catalog.get("baseline"), "attribution.baseline")
+    if attribution_baseline != dict(baseline_ref):
+        raise ReportValidationError("strategy attribution baseline identity differs")
+    sha256, _ = hash_file(catalog_path)
+    return (
+        catalog,
+        {"catalog_sha256": sha256, "generation_id": pointer.generation_id},
+        catalog_path,
+    )
+
+
+def _merge_attribution(
+    strategies: Sequence[Mapping[str, Any]], attribution: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    benchmarks = {
+        str(item.get("strategy_id")): item
+        for item in _objects(
+            attribution.get("benchmark_assignments"),
+            "attribution.benchmark_assignments",
+        )
+    }
+    comparisons = {
+        str(item.get("strategy_id")): item
+        for item in _objects(attribution.get("comparisons"), "attribution.comparisons")
+    }
+    costs = {
+        str(item.get("strategy_id")): item
+        for item in _objects(attribution.get("costs"), "attribution.costs")
+    }
+    strategy_ids = {str(item.get("strategy_id")) for item in strategies}
+    if (
+        set(benchmarks) != strategy_ids
+        or set(comparisons) != strategy_ids
+        or set(costs) != strategy_ids
+    ):
+        raise ReportValidationError("strategy attribution boundary differs")
+    result = []
+    for item in strategies:
+        strategy_id = str(item["strategy_id"])
+        benchmark = benchmarks[strategy_id]
+        comparison = comparisons[strategy_id]
+        cost = costs[strategy_id]
+        metrics_value = comparison.get("metrics")
+        metrics = (
+            {}
+            if metrics_value is None
+            else _object(metrics_value, "attribution.comparison.metrics")
+        )
+        result.append(
+            {
+                **item,
+                "benchmark_assignment_status": benchmark.get("status"),
+                "benchmark_id": benchmark.get("benchmark_id"),
+                "benchmark_effective_start": benchmark.get("effective_start"),
+                "benchmark_effective_end": benchmark.get("effective_end"),
+                "benchmark_version_ref": benchmark.get("version_ref"),
+                "benchmark_rationale": benchmark.get("rationale"),
+                "provider_comparison_status": comparison.get("status"),
+                "provider_comparison_disposition": comparison.get("disposition"),
+                "provider_comparison_version_compatibility": comparison.get(
+                    "version_compatibility_status"
+                ),
+                "provider_comparison_observations": metrics.get("observations"),
+                "provider_comparison_observed_start": metrics.get("observed_start"),
+                "provider_comparison_observed_end": metrics.get("observed_end"),
+                "provider_account_cumulative_return": metrics.get(
+                    "account_cumulative_return"
+                ),
+                "provider_reference_cumulative_return": metrics.get(
+                    "reference_cumulative_return"
+                ),
+                "provider_cumulative_gap": metrics.get("cumulative_gap"),
+                "provider_active_return_annualized": metrics.get(
+                    "active_return_annualized"
+                ),
+                "provider_tracking_error_annualized": metrics.get(
+                    "tracking_error_annualized"
+                ),
+                "provider_information_ratio": metrics.get("information_ratio"),
+                "provider_beta": metrics.get("beta"),
+                "provider_correlation": metrics.get("correlation"),
+                "provider_upside_capture": metrics.get("upside_capture"),
+                "provider_downside_capture": metrics.get("downside_capture"),
+                "provider_relative_drawdown": metrics.get("relative_drawdown"),
+                "cash_drag_status": comparison.get("cash_drag_status"),
+                "cash_drag_reason": comparison.get("cash_drag_reason"),
+                "legacy_baseline_disposition": comparison.get(
+                    "legacy_baseline_disposition"
+                ),
+                "annual_external_cost_rate_pre_tax": cost.get(
+                    "annual_external_cost_rate_pre_tax"
+                ),
+                "annual_external_cost_usd": cost.get("annual_external_cost_usd"),
+                "after_tax_annual_cost_rate": cost.get("after_tax_annual_cost_rate"),
+                "after_tax_status": cost.get("after_tax_status"),
+                "fees_status": cost.get("fees_status"),
+            }
+        )
+    return result
+
+
 def _amount(record: Mapping[str, Any], field_name: str) -> Decimal:
     amount = _object(record.get(field_name), field_name)
     if amount.get("status") != "AVAILABLE":
@@ -1473,6 +1586,7 @@ def build_report_data(
     baseline_root: Path,
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
+    attribution_root: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -1480,6 +1594,13 @@ def build_report_data(
     performance = _account_strategy_performance(catalog)
     strategy_provider_evidence = _strategy_provider_evidence(catalog)
     strategy_summary = _strategies(catalog, performance)
+    attribution_catalog: dict[str, Any] | None = None
+    attribution_ref: dict[str, str] | None = None
+    if attribution_root is not None:
+        attribution_catalog, attribution_ref, _ = _attribution(
+            attribution_root, baseline_ref
+        )
+        strategy_summary = _merge_attribution(strategy_summary, attribution_catalog)
     coverage = _coverage(catalog)
     hwm_summary: dict[str, Any] | None = None
     hwm_provenance: list[dict[str, Any]] = []
@@ -1552,6 +1673,10 @@ def build_report_data(
                 "item": "Workbook authority",
                 "value": "Workbook formulas are display/reconciliation checks. Canonical JSON and tested code are calculation authority.",
             },
+            {
+                "item": "Strategy attribution",
+                "value": "Provider/model comparisons use exact common dates only. Version-unresolved results remain descriptive; benchmark, cash-drag, fee, or after-tax gaps stay unavailable rather than becoming zero.",
+            },
         ],
         "portfolio_summary": _portfolio_summary(catalog, hwm_summary),
         "observation_windows": catalog.get("observation_windows", []),
@@ -1584,6 +1709,18 @@ def build_report_data(
                 )
             ],
             *hwm_provenance,
+            *(
+                [
+                    {
+                        "artifact": "strategy-attribution",
+                        "as_of_date": attribution_catalog.get("as_of_date"),
+                        "schema": "strategy-attribution/1",
+                        "sha256": attribution_ref["catalog_sha256"],
+                    }
+                ]
+                if attribution_catalog is not None and attribution_ref is not None
+                else []
+            ),
         ],
         "reconciliation_checks": _reconciliation_checks(
             catalog, baseline_root, baseline_ref, provider_ledger_root
@@ -1598,6 +1735,13 @@ def build_report_data(
     }
     if hwm_summary is not None:
         report["hwm_summary"] = hwm_summary
+    if attribution_catalog is not None and attribution_ref is not None:
+        report["strategy_attribution"] = {
+            "benchmark_assignments": attribution_catalog["benchmark_assignments"],
+            "comparisons": attribution_catalog["comparisons"],
+            "costs": attribution_catalog["costs"],
+            "generation_id": attribution_ref["generation_id"],
+        }
     return report, canonical_json_bytes(report), baseline_catalog_path
 
 
@@ -1970,9 +2114,10 @@ def build_candidate(
     output_root: Path,
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
+    attribution_root: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
-        baseline_root, freshness_health_path, provider_ledger_root
+        baseline_root, freshness_health_path, provider_ledger_root, attribution_root
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -2339,9 +2484,10 @@ def verify_candidate(
     excel_workbook: Path,
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
+    attribution_root: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
-        baseline_root, freshness_health_path, provider_ledger_root
+        baseline_root, freshness_health_path, provider_ledger_root, attribution_root
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:
@@ -2399,6 +2545,7 @@ def publish_report(
     output_root: Path,
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
+    attribution_root: Path | None = None,
 ) -> dict[str, Any]:
     _validate_canonicalization_evidence(candidate_dir, excel_workbook)
     verification = verify_candidate(
@@ -2407,6 +2554,7 @@ def publish_report(
         excel_workbook,
         freshness_health_path,
         provider_ledger_root,
+        attribution_root,
     )
     run = _load_json(xlsx_result, "xlsx-win run result")
     validation = _load_json(validation_result, "xlsx-win validation result")
@@ -2415,7 +2563,7 @@ def publish_report(
     if validation.get("all_passed") is not True:
         raise ReportValidationError("xlsx-win workbook invariants did not all pass")
     report, report_bytes, baseline_catalog_path = build_report_data(
-        baseline_root, freshness_health_path, provider_ledger_root
+        baseline_root, freshness_health_path, provider_ledger_root, attribution_root
     )
     as_of = _date(report.get("as_of_date"), "report.as_of_date")
     verification_bytes = canonical_json_bytes(verification)
@@ -2466,6 +2614,18 @@ def publish_report(
             "1",
         ),
     ]
+    if attribution_root is not None:
+        _attribution_catalog, _attribution_ref, attribution_catalog_path = _attribution(
+            attribution_root, report["baseline"]
+        )
+        artifact_specs.append(
+            (
+                attribution_catalog_path,
+                "input/strategy-attribution.json",
+                "strategy-attribution",
+                "1",
+            )
+        )
     if freshness_health_path is not None:
         artifact_specs.extend(
             [
@@ -2556,6 +2716,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--baseline-root", type=Path, required=True)
     build.add_argument("--freshness-health", type=Path)
     build.add_argument("--provider-ledger-root", type=Path)
+    build.add_argument("--attribution-root", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -2563,6 +2724,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--excel-workbook", type=Path, required=True)
     verify.add_argument("--freshness-health", type=Path)
     verify.add_argument("--provider-ledger-root", type=Path)
+    verify.add_argument("--attribution-root", type=Path)
     canonicalize = commands.add_parser("canonicalize")
     canonicalize.add_argument("--workbook", type=Path, required=True)
     canonicalize.add_argument("--evidence", type=Path, required=True)
@@ -2578,6 +2740,7 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--output-root", type=Path, required=True)
     publish.add_argument("--freshness-health", type=Path)
     publish.add_argument("--provider-ledger-root", type=Path)
+    publish.add_argument("--attribution-root", type=Path)
     return parser
 
 
@@ -2590,6 +2753,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output_root,
                 args.freshness_health,
                 args.provider_ledger_root,
+                args.attribution_root,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -2598,6 +2762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.excel_workbook,
                 args.freshness_health,
                 args.provider_ledger_root,
+                args.attribution_root,
             )
         elif args.command == "canonicalize":
             result = canonicalize_workbook(args.workbook, args.evidence)
@@ -2613,6 +2778,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output_root,
                 args.freshness_health,
                 args.provider_ledger_root,
+                args.attribution_root,
             )
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         print(f"portfolio-report: FAIL: {exc}", file=sys.stderr)
