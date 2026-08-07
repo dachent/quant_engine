@@ -552,7 +552,17 @@ def _correlation() -> dict[str, object]:
         "dependence": {
             "blend_cells": blends,
             "correlation_one": {
-                "components": [],
+                "components": [
+                    {
+                        "adverse_loss_fraction": "0.37249726899852387",
+                        "allocation_weight": str(1 / 9),
+                        "loss_contribution": str(
+                            Decimal("0.37249726899852387") / Decimal(9)
+                        ),
+                        "series_id": series_id,
+                    }
+                    for series_id in STRATEGY_NAMES
+                ],
                 "expected_loss": "0.37249726899852387",
                 "loss": "0.37249726899852387",
                 "reconciliation_difference": "0",
@@ -867,6 +877,31 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     contract_path = tmp_path / "source-contract.json"
     contract_path.write_bytes(canonical_json_bytes(contract))
     monkeypatch.setattr(panel, "SOURCE_CONTRACT", contract_path)
+    cluster_contract_path = tmp_path / "economic-driver-clusters.json"
+    _write_json(
+        cluster_contract_path,
+        {
+            "as_of_date": "2026-07-30",
+            "budget_rule": "ONE_AGGREGATE_ADVERSE_LOSS_BUDGET_PER_ECONOMIC_DRIVER_CLUSTER_NO_STRATEGY_LABEL_DIVERSIFICATION_CREDIT",
+            "clusters": [
+                {
+                    "cluster_id": "SYNTHETIC_CLUSTER",
+                    "label": "Synthetic shared driver",
+                    "members": list(STRATEGY_NAMES),
+                    "rationale": "Synthetic cluster used to verify aggregate budget rendering.",
+                }
+            ],
+            "historical_audit_reference": {
+                "classification": "SYNTHETIC_REFERENCE",
+                "full_systematic_loss": "0.3725",
+                "after_rejected_sleeves_loss": "0.2715",
+                "note": "Synthetic test reference.",
+            },
+            "schema_version": 1,
+            "systematic_loss_limit": "0.15",
+        },
+    )
+    monkeypatch.setattr(panel, "ECONOMIC_DRIVER_CLUSTERS", cluster_contract_path)
     freshness = tmp_path / "freshness-health.json"
     _write_json(
         freshness,
@@ -999,6 +1034,14 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     assert data["factor_analysis"]["unavailable_count"] == 4
     assert data["dependence_analysis"]["available_pair_count"] == 10
     assert data["dependence_analysis"]["pair_count"] == 36
+    cluster_budget = data["dependence_analysis"]["economic_driver_cluster_budget"]
+    assert cluster_budget["systematic_loss_limit"] == "0.15"
+    assert cluster_budget["status"] == "BREACHES_SYSTEMATIC_LOSS_LIMIT"
+    assert float(cluster_budget["limit_breach"]) == pytest.approx(0.22249726899852387)
+    assert cluster_budget["clusters"][0]["members"] == list(STRATEGY_NAMES)
+    assert float(cluster_budget["clusters"][0]["loss_contribution"]) == (
+        pytest.approx(0.37249726899852387)
+    )
     assert data["default_dependence_mode"] == "LIVE_ONLY"
     assert list(data["dependence_modes"]) == ["LIVE_ONLY"]
     assert data["hybrid_mode_gate"]["status"] == (

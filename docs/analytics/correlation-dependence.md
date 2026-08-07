@@ -13,6 +13,17 @@ that must not be collapsed into one number:
    semidefinite correlation matrices; and
 7. a separate correlation-one loss bound.
 
+The control-panel consumer compares that loss bound with the governed 15%
+systematic loss limit and binds every current strategy to exactly one
+economic-driver cluster using
+`contracts/portfolio-economic-driver-clusters-v1.json`. Cluster allocation and
+adverse-loss contributions are summed before display: different strategy or
+provider labels do not earn diversification credit. TT Portfolio, QSI, Volatis,
+and GrizzlyBears therefore share one tactical timing and multi-asset regime
+budget. Pairwise measured correlations remain visible inside the cluster and
+stay separate from conceptual priors and the conservative correlation-one
+scenario.
+
 Missing series, short overlaps, constants, and incompatible evidence layers do
 not receive inferred correlations. Their observed cells are `UNAVAILABLE`.
 Conceptual priors remain visible as assumptions, while a separate decision view
