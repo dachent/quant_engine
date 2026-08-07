@@ -23,10 +23,10 @@ without preserving stale calculations or hard-coded operator conclusions.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
   contribution reconciliation, and each dated dynamic exposure path come only
   from accepted analytics generations. The clean-room dynamic FLS lens remains
-  under `<portfolio-root>/analytics/decomposition`; the current strategy views bind six
+  under `<portfolio-root>/analytics/decomposition`; the current strategy views bind five
   independently published generations under
   `<portfolio-root>/analytics/decomposition-lenses` for U.S./European economic
-  factors, U.S./multi-asset ETF style, U.S. sector returns, and U.S. 49-industry
+  factors, U.S. equity ETF style, U.S. sector returns, and U.S. 49-industry
   returns. These lenses are selectable but never concatenated. Static
   RBSA and clean-room dynamic FLS results are both labeled
   `MPI_INFORMED_NON_EQUIVALENT`; neither is proprietary MPI output nor a claim
