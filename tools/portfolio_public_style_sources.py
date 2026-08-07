@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, cast, Mapping, Sequence
 
 
-BUILDER_VERSION = "0.1.0"
+BUILDER_VERSION = "0.2.0"
 OUTPUT_NAME = "etf_style_returns_daily.csv"
 SECTOR_OUTPUT_NAME = "us_sector_returns_daily.csv"
 YAHOO_COLUMNS = (
@@ -151,7 +151,7 @@ def _catalog_tickers(
         if tuple(selected_ids) == ("us-sector-return",)
         else OUTPUT_NAME
     )
-    role = "SECTOR_RETURN_PROXY" if lens == "RETURN_INDUSTRY" else "ETF_STYLE"
+    role = "SECTOR_RETURN_PROXY" if lens == "RETURN_SECTOR" else "ETF_STYLE"
     return tuple(tickers), cash, tuple(selected_ids), output_name, role
 
 

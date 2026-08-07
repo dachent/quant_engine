@@ -76,14 +76,16 @@ also emit the full dated exposure path, exposure-change diagnostics, exact
 smoothness sensitivity, training-only leave-one-out predictions, and causal
 walk-forward holdout forecasts.
 
-For `DYNAMIC_FLS`, every candidate smoothness value is evaluated by literally
-omitting each training observation in turn, refitting the connected state path,
-and calculating Predicted R-squared from those omitted-observation forecasts.
-The largest smoothness value within the declared tolerance of the best score is
-selected, favoring the smoother path without using holdout data. Holdout
-forecasts use only the prior filtered state. A holdout observation can update a
-later filtered state but cannot change the factor set, smoothing parameter,
-ridge, intercept, or training path.
+For `DYNAMIC_FLS`, every candidate smoothness value is evaluated with exact
+leave-one-out predictions from the fitted linear smoother's leverage and the
+PRESS identity. This is mathematically identical to omitting each training
+observation and refitting the connected state path, but avoids one full block
+solve per omitted observation. A unit proof compares the optimized predictions
+with direct omission-and-refit predictions. The largest smoothness value within
+the declared tolerance of the best score is selected, favoring the smoother
+path without using holdout data. Holdout forecasts use only the prior filtered
+state. A holdout observation can update a later filtered state but cannot
+change the factor set, smoothing parameter, ridge, intercept, or training path.
 
 Every dynamic result is compared with a static unconstrained benchmark using
 the same factors, training boundary, state ridge, and holdout. The comparison
@@ -128,17 +130,38 @@ every candidate and whether it was selected by the training-only model rule,
 requested but not selected, or outside the requested model sets.
 
 Each new specification also declares one closed `analysis_lens`:
-`ECONOMIC_FACTOR`, `ETF_STYLE`, or `RETURN_INDUSTRY`. Legacy specifications
+`ECONOMIC_FACTOR`, `ETF_STYLE`, `RETURN_SECTOR`, or `RETURN_INDUSTRY`. Legacy specifications
 without the field remain explicitly labeled `HISTORICAL_MINIMUM_PROOF`. The
 lens is hash-bound into the analytics result and generation so factor, style,
-and industry models can be stored and rendered separately; no consumer may
+sector, and industry models can be stored and rendered separately; no consumer may
 concatenate them into a single exposure model.
+
+Every exposure record publishes `beta` as the primary coefficient name and
+retains `exposure` as a backwards-compatible alias with the identical numeric
+value. For unconstrained economic-factor, sector, and industry models, beta is
+conditional return sensitivity holding the other selected regressors constant.
+For long-only simplex ETF-style models, beta is a fitted non-negative proxy
+loading and the vector sums to one. Dynamic paths publish an effective-dated
+`betas` map alongside the legacy `exposures` alias.
+
+Sealed-holdout predicted R-squared is
+`1 - SSE_holdout / sum((y_holdout - mean(y_train))^2)`. The model and all
+regularization or smoothness choices are fixed using training evidence before
+this period is scored. A value above zero means the model predicts the withheld
+period better than repeatedly forecasting the training-period mean; zero or a
+negative value fails the portfolio-manager-use gate. It is predictive evidence,
+not the ordinary in-sample R-squared and not proof that alpha is causal.
 
 Supported evidence layers are `ACCOUNT_LIVE`, `PROVIDER_LIVE`,
 `OFFICIAL_VEHICLE`, `PREDECESSOR`, `SHADOW_OOS`, `BACKTEST`, and
-`CONCEPTUAL_STRESS`. One series may have only one layer. The current portfolio
-consumer may select `ACCOUNT_LIVE` results; other layers remain separate
-evidence.
+`CONCEPTUAL_STRESS`. A `LIVE_ONLY` series has exactly one accepted live layer
+and rejects backtest rows. The current portfolio consumer may select
+`ACCOUNT_LIVE` results; other live layers remain separate evidence.
+`LIVE_PLUS_BACKTEST` accepts at most one live layer plus version-matched
+`BACKTEST` rows, admits only dates before live inception, and publishes
+per-series counts, rejected overlap counts, and a composition disposition. A
+hybrid row with zero accepted backtest observations remains explicitly
+live-only in substance.
 
 Existing specifications without `estimator` remain `STATIC_RBSA`. A dynamic
 model adds:

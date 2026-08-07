@@ -748,7 +748,7 @@ def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
         "us-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[0]}),
         "us-equity-style": ("ETF_STYLE", {STRATEGY_NAMES[2]}),
         "us-industry": ("RETURN_INDUSTRY", {STRATEGY_NAMES[8]}),
-        "us-sector": ("RETURN_INDUSTRY", {STRATEGY_NAMES[7]}),
+        "us-sector": ("RETURN_SECTOR", {STRATEGY_NAMES[7]}),
     }
     for source_key, (analysis_lens, selected_names) in assignments.items():
         value = _decomposition()
@@ -2078,7 +2078,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 13" in renderer
+    assert "data.panel_schema_version !== 14" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -2147,6 +2147,15 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     ):
         assert f'  "{group}",' in qa
     assert "All five production decomposition lenses are rendered and exercised" in qa
+    assert (
+        "Factor analyses expose live-only and compatible-history modes without "
+        "inventing prehistory"
+    ) in qa
+    assert (
+        'const requiredFactorEvidenceModes = ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]' in qa
+    )
+    assert 'includes("1,486 backtest")' in qa
+    assert "item.requested_beta_rows.every((row) => row.beta_visible)" in qa
     assert "Clean-room dynamic FLS path and same-factor validation are rendered" in qa
     assert "All observed windows and both true drawdown regimes are exercised" in qa
     assert "Every weekly display group is rendered and exercised" in qa
@@ -2182,6 +2191,13 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
         {"const": ["LIVE_ONLY"]},
         {"const": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]},
     ]
+    decomposition = schema["properties"]["decomposition_lenses"]
+    assert decomposition["properties"]["default_evidence_mode"] == {
+        "const": "LIVE_ONLY"
+    }
+    assert decomposition["properties"]["evidence_modes"]["items"] == {
+        "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]
+    }
     assert "replication_analysis" in schema["required"]
     canonical = schema["properties"]["canonical_strategy_series"]["items"]
     assert canonical["additionalProperties"] is False

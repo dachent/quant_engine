@@ -167,7 +167,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                 "column_policy": "CANDIDATE_ID",
             },
             "sector": {
-                "lens": "RETURN_INDUSTRY",
+                "lens": "RETURN_SECTOR",
                 "universe_id": "sector",
                 "input_key": "sector_returns",
                 "risk_free_column": "BIL",
@@ -282,7 +282,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     assert {item["analysis_lens"] for item in manifest["specs"]} == {
         "ECONOMIC_FACTOR",
         "ETF_STYLE",
-        "RETURN_INDUSTRY",
+        "RETURN_SECTOR",
     }
     dispositions = json.loads(outputs["candidate-dispositions.json"])
     assert len(dispositions["candidate_dispositions"]) == 12

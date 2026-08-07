@@ -38,8 +38,8 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-PANEL_SCHEMA_VERSION: Final = 13
-BUILDER_VERSION: Final = "2.4.0"
+PANEL_SCHEMA_VERSION: Final = 14
+BUILDER_VERSION: Final = "2.5.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -91,11 +91,10 @@ LINT_CAPTURES: Final = tuple(
 )
 DECOMPOSITION_LENS_SOURCES: Final = {
     "europe-economic": ("ECONOMIC_FACTOR", "European economic factors"),
-    "multi-asset-style": ("ETF_STYLE", "Multi-asset ETF style"),
     "us-economic": ("ECONOMIC_FACTOR", "U.S. economic factors"),
     "us-equity-style": ("ETF_STYLE", "U.S. equity style"),
     "us-industry": ("RETURN_INDUSTRY", "U.S. 49-industry returns"),
-    "us-sector": ("RETURN_INDUSTRY", "U.S. sector returns"),
+    "us-sector": ("RETURN_SECTOR", "U.S. sector returns"),
 }
 DECOMPOSITION_LENS_GROUPS: Final = (
     (
@@ -107,7 +106,7 @@ DECOMPOSITION_LENS_GROUPS: Final = (
     (
         "ETF_STYLE",
         "ETF style",
-        ("us-equity-style", "multi-asset-style"),
+        ("us-equity-style",),
         "TOTAL_RETURN_ETF_PROXY",
     ),
     (
@@ -833,6 +832,28 @@ def _factor_analysis(
     methodology_version = _text(
         decomposition.get("methodology_version"), "factor.methodology_version"
     )
+    evidence_mode = _text(
+        decomposition.get("evidence_mode", "LIVE_ONLY"),
+        "factor.evidence_mode",
+    )
+    raw_composition = decomposition.get("series_composition", {})
+    composition = _object(raw_composition, "factor.series_composition")
+    series_composition: dict[str, dict[str, Any]] = {}
+    for declared_series_id, raw_value in composition.items():
+        if not isinstance(declared_series_id, str) or not declared_series_id:
+            raise ControlPanelValidationError(
+                "factor series composition has an invalid series id"
+            )
+        value = _object(raw_value, f"factor.series_composition.{declared_series_id}")
+        if value.get("series_id", declared_series_id) != declared_series_id:
+            raise ControlPanelValidationError(
+                f"factor series composition identity differs: {declared_series_id}"
+            )
+        if value.get("evidence_mode", evidence_mode) != evidence_mode:
+            raise ControlPanelValidationError(
+                f"factor series composition mode differs: {declared_series_id}"
+            )
+        series_composition[declared_series_id] = value
     selections = _objects(decomposition.get("model_selections"), "model_selections")
     if {
         _text(row.get("series_id"), "selection.series_id") for row in selections
@@ -899,6 +920,7 @@ def _factor_analysis(
                     "selection_status": _text(
                         selection.get("status"), "selection.status"
                     ),
+                    "series_composition": series_composition.get(series_id, {}),
                     "series_id": series_id,
                     "status": "UNAVAILABLE",
                     "unavailable_reasons": reasons or ["UNAVAILABLE_NO_MODEL_EVIDENCE"],
@@ -944,9 +966,31 @@ def _factor_analysis(
                 raise ControlPanelValidationError(
                     f"diagnostic selection state is inconsistent: {series_id}"
                 )
+            raw_diagnostic_outputs = model.get("diagnostic_outputs")
+            diagnostic_outputs = (
+                raw_diagnostic_outputs
+                if isinstance(raw_diagnostic_outputs, dict)
+                else {}
+            )
+            diagnostic_alpha = (
+                _object(
+                    diagnostic_outputs.get("alpha"),
+                    "model.diagnostic_outputs.alpha",
+                )
+                if diagnostic_outputs.get("alpha") is not None
+                else None
+            )
+            diagnostic_exposures = (
+                _objects(
+                    diagnostic_outputs.get("exposures"),
+                    "model.diagnostic_outputs.exposures",
+                )
+                if diagnostic_outputs.get("exposures") is not None
+                else []
+            )
             rows.append(
                 {
-                    "alpha": None,
+                    "alpha": diagnostic_alpha,
                     "contribution_summary": None,
                     "cost_coverage": _text(
                         model.get("cost_coverage"), "model.cost_coverage"
@@ -957,14 +1001,16 @@ def _factor_analysis(
                     "evidence_layer": _text(
                         model.get("evidence_layer"), "model.evidence_layer"
                     ),
-                    "exposures": [],
+                    "exposures": diagnostic_exposures,
                     "model_id": model_id,
                     "model_quality": model_quality,
                     "selection_status": _text(
                         selection.get("status"), "selection.status"
                     ),
+                    "series_composition": series_composition.get(series_id, {}),
                     "series_id": series_id,
                     "status": "DIAGNOSTIC_ONLY",
+                    "use_boundary": "FORENSIC_DIAGNOSTIC_NOT_PM_ACCEPTED",
                     "unavailable_reasons": [
                         _text(
                             model_quality.get("gate_reason"),
@@ -1086,6 +1132,7 @@ def _factor_analysis(
                 "model_id": model_id,
                 "model_quality": model_quality,
                 "selection_status": _text(selection.get("status"), "selection.status"),
+                "series_composition": series_composition.get(series_id, {}),
                 "series_id": series_id,
                 "status": "AVAILABLE",
                 "unavailable_reasons": [],
@@ -1120,6 +1167,7 @@ def _factor_analysis(
         "available_count": available_count,
         "diagnostic_count": diagnostic_count,
         "dynamic_available_count": dynamic_available_count,
+        "evidence_mode": evidence_mode,
         "generation_id": identity["generation_id"],
         "method_label": method_label,
         "methodology_manifest_sha256": _text(
@@ -1128,6 +1176,7 @@ def _factor_analysis(
         ),
         "methodology_version": methodology_version,
         "proxy_governance": accepted_proxy_governance,
+        "series_composition": series_composition,
         "series": rows,
         "source_sha256": identity["sha256"],
         "sources": _object(decomposition.get("sources"), "factor.sources"),
@@ -1161,10 +1210,32 @@ def _unavailable_factor_row(series_id: str, reason: str) -> dict[str, Any]:
     }
 
 
-def _decomposition_lenses(
+def _dynamic_factor_lens(
+    decomposition: Mapping[str, Any],
+    identity: Mapping[str, str],
+    strategy_names: set[str],
+) -> dict[str, Any]:
+    if decomposition.get("analysis_lens") not in {
+        None,
+        "HISTORICAL_MINIMUM_PROOF",
+    }:
+        raise ControlPanelValidationError("dynamic decomposition lens differs")
+    return {
+        **_factor_analysis(decomposition, identity, strategy_names),
+        "as_of_policy": "SINGLE_ACCEPTED_GENERATION",
+        "evidence_classification": "MPI_INFORMED_NON_EQUIVALENT",
+        "lens_id": "DYNAMIC_STYLE",
+        "lens_label": "Dynamic style path (clean-room FLS)",
+        "release_scope": "SEALED_HOLDOUT_GATED_DYNAMIC_ANALYSIS",
+        "return_basis": "CONFIGURED_EXCESS_RETURN",
+    }
+
+
+def _decomposition_lenses_for_mode(
     root: Path,
     plan_bundle: Path,
     strategy_names: Mapping[str, str],
+    evidence_mode: str,
 ) -> tuple[dict[str, Any], tuple[Path, ...]]:
     manifest_path = plan_bundle / "plan-manifest.json"
     plan_path = (
@@ -1233,6 +1304,11 @@ def _decomposition_lenses(
         if decomposition.get("analysis_lens") != expected_lens:
             raise ControlPanelValidationError(
                 f"decomposition lens differs for {source_key}"
+            )
+        declared_mode = decomposition.get("evidence_mode", "LIVE_ONLY")
+        if declared_mode != evidence_mode:
+            raise ControlPanelValidationError(
+                f"decomposition evidence mode differs for {source_key}"
             )
         selected_names = {
             _text(item.get("series_id"), "lens selection series_id")
@@ -1328,6 +1404,7 @@ def _decomposition_lenses(
                     and row.get("status") == "AVAILABLE"
                     for row in rows
                 ),
+                "evidence_mode": evidence_mode,
                 "generation_id": composite_hash,
                 "lens_id": lens_id,
                 "lens_label": label,
@@ -1361,6 +1438,57 @@ def _decomposition_lenses(
             "plan_manifest_sha256": _hash(manifest_path),
         },
         tuple(source_paths + [manifest_path, plan_path, dispositions_path]),
+    )
+
+
+def _decomposition_lenses(
+    root: Path,
+    plan_bundle: Path,
+    strategy_names: Mapping[str, str],
+) -> tuple[dict[str, Any], tuple[Path, ...]]:
+    live, live_paths = _decomposition_lenses_for_mode(
+        root, plan_bundle, strategy_names, "LIVE_ONLY"
+    )
+    modes: dict[str, list[dict[str, Any]]] = {"LIVE_ONLY": live["lenses"]}
+    all_paths = list(live_paths)
+    hybrid_root = root / "LIVE_PLUS_BACKTEST"
+    if hybrid_root.is_dir() and not hybrid_root.is_symlink():
+        hybrid, hybrid_paths = _decomposition_lenses_for_mode(
+            hybrid_root, plan_bundle, strategy_names, "LIVE_PLUS_BACKTEST"
+        )
+        dynamic_root = hybrid_root / "dynamic-style"
+        if not dynamic_root.is_dir() or dynamic_root.is_symlink():
+            raise ControlPanelValidationError(
+                "hybrid dynamic-style decomposition is absent"
+            )
+        dynamic, dynamic_identity, dynamic_path = _current_analytics(
+            dynamic_root,
+            filename="decomposition.json",
+            field_name="hybrid dynamic-style decomposition",
+            expected_schema_version=(1, 2),
+        )
+        if dynamic.get("evidence_mode") != "LIVE_PLUS_BACKTEST":
+            raise ControlPanelValidationError(
+                "hybrid dynamic-style evidence mode differs"
+            )
+        hybrid["lenses"] = [
+            *hybrid["lenses"],
+            _dynamic_factor_lens(
+                dynamic,
+                dynamic_identity,
+                set(strategy_names.values()),
+            ),
+        ]
+        modes["LIVE_PLUS_BACKTEST"] = hybrid["lenses"]
+        all_paths.extend((*hybrid_paths, dynamic_path))
+    return (
+        {
+            **live,
+            "default_evidence_mode": "LIVE_ONLY",
+            "evidence_modes": list(modes),
+            "modes": modes,
+        },
+        tuple(dict.fromkeys(all_paths)),
     )
 
 
@@ -2241,19 +2369,18 @@ def _panel_data(
     factor_analysis = _factor_analysis(
         decomposition, decomposition_identity, current_strategy_names
     )
-    dynamic_factor_analysis = {
-        **factor_analysis,
-        "as_of_policy": "SINGLE_ACCEPTED_GENERATION",
-        "evidence_classification": "MPI_INFORMED_NON_EQUIVALENT",
-        "lens_id": "DYNAMIC_STYLE",
-        "lens_label": "Dynamic style path (clean-room FLS)",
-        "release_scope": "SEALED_HOLDOUT_GATED_DYNAMIC_ANALYSIS",
-        "return_basis": "CONFIGURED_EXCESS_RETURN",
-    }
+    dynamic_factor_analysis = _dynamic_factor_lens(
+        decomposition,
+        decomposition_identity,
+        current_strategy_names,
+    )
     if decomposition_lenses is None:
         accepted_decomposition_lenses = {
+            "default_evidence_mode": "LIVE_ONLY",
             "default_lens": "DYNAMIC_STYLE",
+            "evidence_modes": ["LIVE_ONLY"],
             "lenses": [dynamic_factor_analysis],
+            "modes": {"LIVE_ONLY": [dynamic_factor_analysis]},
             "plan_bundle_id": None,
             "plan_manifest_sha256": None,
         }
@@ -2276,6 +2403,28 @@ def _panel_data(
             *list(lens_rows),
             dynamic_factor_analysis,
         ]
+        raw_modes = accepted_decomposition_lenses.get("modes")
+        if raw_modes is not None:
+            modes = _object(raw_modes, "decomposition lens modes")
+            live_mode = _objects(modes.get("LIVE_ONLY"), "live decomposition lenses")
+            if {
+                _text(row.get("lens_id"), "live decomposition lens_id")
+                for row in live_mode
+            } != lens_ids:
+                raise ControlPanelValidationError(
+                    "live decomposition mode lens set differs"
+                )
+            accepted_modes = dict(modes)
+            accepted_modes["LIVE_ONLY"] = [*live_mode, dynamic_factor_analysis]
+            hybrid_mode = accepted_modes.get("LIVE_PLUS_BACKTEST")
+            if hybrid_mode is not None and {
+                _text(row.get("lens_id"), "hybrid decomposition lens_id")
+                for row in _objects(hybrid_mode, "hybrid decomposition lenses")
+            } != lens_ids | {"DYNAMIC_STYLE"}:
+                raise ControlPanelValidationError(
+                    "hybrid decomposition mode lens set differs"
+                )
+            accepted_decomposition_lenses["modes"] = accepted_modes
     accepted_weekly_returns = (
         dict(weekly_returns)
         if weekly_returns is not None
@@ -2675,7 +2824,7 @@ def _panel_data(
                 + (
                     ", ".join(
                         f"{item['strategy_name']} (${item['current_value_usd']}; {item['reason']})"
-                        for item in hwm_summary["excluded_details"]
+                        for item in hwm_summary.get("excluded_details", [])
                     )
                     or "none"
                 )

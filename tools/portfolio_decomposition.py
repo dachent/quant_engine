@@ -35,7 +35,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 ANALYTICS_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.8.0"
+BUILDER_VERSION: Final = "1.9.0"
 METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-3"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
 ANALYSIS_LENSES: Final = {
@@ -43,6 +43,7 @@ ANALYSIS_LENSES: Final = {
     "ETF_STYLE",
     "HISTORICAL_MINIMUM_PROOF",
     "RETURN_INDUSTRY",
+    "RETURN_SECTOR",
 }
 NEAR_DUPLICATE_ABSOLUTE_CORRELATION: Final = 0.98
 UNREGULARIZED_CONDITION_NUMBER_LIMIT: Final = 1_000.0
@@ -76,6 +77,7 @@ RETURN_TYPES: Final = {"EXCESS", "TOTAL"}
 CONSTRAINTS: Final = {"UNCONSTRAINED", "LONG_ONLY_SUM_TO_ONE"}
 COST_COVERAGE: Final = {"COMPLETE", "INCOMPLETE"}
 ESTIMATORS: Final = {"STATIC_RBSA", "DYNAMIC_FLS"}
+EVIDENCE_MODES: Final = {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -150,6 +152,7 @@ class ModelDefinition:
 class Specification:
     analysis_lens: str
     as_of_date: date
+    evidence_mode: str
     maximum_factor_staleness_days: int
     target_source: SourceDefinition
     factor_source: SourceDefinition
@@ -158,6 +161,7 @@ class Specification:
     factors: tuple[FactorDefinition, ...]
     models: tuple[ModelDefinition, ...]
     provenance_sources: tuple[SourceDefinition, ...]
+    series_composition: Mapping[str, Mapping[str, object]]
 
 
 @dataclass(frozen=True)
@@ -486,8 +490,12 @@ def _load_spec(path: Path) -> Specification:
     }
     if "analysis_lens" in root:
         root_keys.add("analysis_lens")
+    if "evidence_mode" in root:
+        root_keys.add("evidence_mode")
     if "provenance_sources" in root:
         root_keys.add("provenance_sources")
+    if "series_composition" in root:
+        root_keys.add("series_composition")
     _strict_keys(root, root_keys, "specification")
     if root["schema_version"] != 1:
         raise DecompositionError("specification schema_version is unsupported")
@@ -497,6 +505,11 @@ def _load_spec(path: Path) -> Specification:
     )
     if analysis_lens not in ANALYSIS_LENSES:
         raise DecompositionError("specification.analysis_lens is unsupported")
+    evidence_mode = _text(
+        root.get("evidence_mode", "LIVE_ONLY"), "specification.evidence_mode"
+    )
+    if evidence_mode not in EVIDENCE_MODES:
+        raise DecompositionError("specification.evidence_mode is unsupported")
     factor_source_object = _object(root["factor_source"], "factor_source")
     _strict_keys(
         factor_source_object,
@@ -547,9 +560,16 @@ def _load_spec(path: Path) -> Specification:
             raise DecompositionError(
                 f"model {model.model_id} references unknown factors {sorted(unknown)}"
             )
+    raw_composition = root.get("series_composition", {})
+    if not isinstance(raw_composition, dict) or not all(
+        isinstance(key, str) and isinstance(value, dict)
+        for key, value in raw_composition.items()
+    ):
+        raise DecompositionError("specification.series_composition must be an object")
     return Specification(
         analysis_lens=analysis_lens,
         as_of_date=_day(root["as_of_date"], "as_of_date"),
+        evidence_mode=evidence_mode,
         maximum_factor_staleness_days=_integer(
             root["maximum_factor_staleness_days"],
             "maximum_factor_staleness_days",
@@ -571,6 +591,7 @@ def _load_spec(path: Path) -> Specification:
                 _objects(root.get("provenance_sources", []), "provenance_sources")
             )
         ),
+        series_composition=cast(Mapping[str, Mapping[str, object]], raw_composition),
     )
 
 
@@ -594,7 +615,9 @@ def _verify_source(root: Path, definition: SourceDefinition) -> Path:
     return path
 
 
-def _read_targets(path: Path, as_of_date: date) -> dict[str, list[TargetRow]]:
+def _read_targets(
+    path: Path, as_of_date: date, evidence_mode: str = "LIVE_ONLY"
+) -> dict[str, list[TargetRow]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if tuple(reader.fieldnames or ()) != TARGET_HEADERS:
@@ -603,7 +626,8 @@ def _read_targets(path: Path, as_of_date: date) -> dict[str, list[TargetRow]]:
             )
         grouped: dict[str, list[TargetRow]] = {}
         seen: set[tuple[str, date]] = set()
-        metadata: dict[str, tuple[str, str, str]] = {}
+        metadata: dict[str, tuple[str, str]] = {}
+        layers: dict[str, set[str]] = {}
         for line_number, raw in enumerate(reader, start=2):
             series_id = _text(raw["series_id"], f"target line {line_number} series_id")
             day = _day(raw["date"], f"target line {line_number} date")
@@ -631,12 +655,13 @@ def _read_targets(path: Path, as_of_date: date) -> dict[str, list[TargetRow]]:
             if key in seen:
                 raise DecompositionError("target series contains a duplicate date")
             seen.add(key)
-            signature = (layer, basis, return_type)
+            signature = (basis, return_type)
             if series_id in metadata and metadata[series_id] != signature:
                 raise DecompositionError(
-                    "one target series cannot mix evidence layers or return semantics"
+                    "one target series cannot mix return semantics"
                 )
             metadata[series_id] = signature
+            layers.setdefault(series_id, set()).add(layer)
             raw_cost = raw["cost"].strip()
             cost = (
                 None if not raw_cost else _finite(raw_cost, "target cost", minimum=0.0)
@@ -656,6 +681,34 @@ def _read_targets(path: Path, as_of_date: date) -> dict[str, list[TargetRow]]:
         raise DecompositionError("target source contains no observations")
     for rows in grouped.values():
         rows.sort(key=lambda item: item.day)
+    for series_id, rows in grouped.items():
+        observed_layers = layers[series_id]
+        live_layers = observed_layers - {"BACKTEST"}
+        if evidence_mode == "LIVE_ONLY":
+            if "BACKTEST" in observed_layers or len(live_layers) != 1:
+                raise DecompositionError(
+                    "LIVE_ONLY target series cannot mix evidence layers or include backtest"
+                )
+            continue
+        if evidence_mode != "LIVE_PLUS_BACKTEST":
+            raise DecompositionError("target evidence mode is unsupported")
+        if len(live_layers) != 1:
+            raise DecompositionError(
+                "LIVE_PLUS_BACKTEST requires exactly one accepted live evidence layer"
+            )
+        if "BACKTEST" not in observed_layers:
+            continue
+        live_inception = min(
+            row.day for row in rows if row.evidence_layer != "BACKTEST"
+        )
+        if any(
+            row.day >= live_inception
+            for row in rows
+            if row.evidence_layer == "BACKTEST"
+        ):
+            raise DecompositionError(
+                "LIVE_PLUS_BACKTEST may use backtest only before live inception"
+            )
     return grouped
 
 
@@ -1147,23 +1200,70 @@ def _dynamic_loo_score(
     smoothness: float,
     ridge: float,
 ) -> tuple[float | None, FloatArray]:
-    """Compute the paper's leave-one-out Predicted R-squared directly."""
+    """Compute exact leave-one-out predictions from linear-smoother leverage.
 
-    predictions = np.empty(len(target), dtype=np.float64)
-    for omitted in range(len(target)):
-        weights = np.ones(len(target), dtype=np.float64)
-        weights[omitted] = 0.0
-        fit = _dynamic_fit(
-            matrix,
-            target,
-            smoothness=smoothness,
-            ridge=ridge,
-            weights=weights,
+    The penalized FLS estimator is linear in the target for fixed smoothness
+    and ridge values.  The standard PRESS identity therefore reproduces the
+    result of omitting and refitting every observation without n separate
+    block solves.
+    """
+
+    fit = _dynamic_fit(
+        matrix,
+        target,
+        smoothness=smoothness,
+        ridge=ridge,
+    )
+    observation_count, factor_count = matrix.shape
+    identity = np.eye(factor_count, dtype=np.float64)
+    diagonal = [
+        cast(
+            FloatArray,
+            (
+                np.outer(matrix[index], matrix[index])
+                + (
+                    ridge
+                    + smoothness * (1.0 if index in {0, observation_count - 1} else 2.0)
+                )
+                * identity
+            ).astype(np.float64),
         )
-        predictions[omitted] = fit.intercept + matrix[omitted] @ fit.exposures[omitted]
+        for index in range(observation_count)
+    ]
+    off_diagonal = [
+        (-smoothness * identity).copy() for _ in range(observation_count - 1)
+    ]
+    right = np.zeros(
+        (observation_count, factor_count, observation_count + 1),
+        dtype=np.float64,
+    )
+    for index in range(observation_count):
+        right[index, :, index] = matrix[index]
+        right[index, :, -1] = matrix[index]
+    solved, _rank_status = _block_tridiagonal_solve(
+        diagonal,
+        off_diagonal,
+        cast(FloatArray, right),
+    )
+    influence = solved[:, :, :-1]
+    intercept_solution = solved[:, :, -1]
+    denominator = float(observation_count) - float(np.sum(matrix * intercept_solution))
+    if abs(denominator) <= 1e-12:
+        raise DecompositionError("dynamic intercept is not identifiable")
+    projected_influence = np.einsum("tk,tkn->n", matrix, influence)
+    intercept_influence = (1.0 - projected_influence) / denominator
+    local_influence = np.einsum("ik,iki->i", matrix, influence, optimize=False)
+    local_intercept_projection = np.sum(matrix * intercept_solution, axis=1)
+    leverage = local_influence + intercept_influence * (
+        1.0 - local_intercept_projection
+    )
+    remaining = 1.0 - leverage
+    if np.any(np.abs(remaining) <= 1e-12):
+        return None, cast(FloatArray, np.full(observation_count, np.nan))
+    predictions = (fit.fitted - leverage * target) / remaining
     return (
         _r_squared(target, predictions, float(np.mean(target))),
-        cast(FloatArray, predictions),
+        cast(FloatArray, predictions.astype(np.float64)),
     )
 
 
@@ -1575,6 +1675,10 @@ def _dynamic_model_result(
             change_rows.append((change_norm, target_row.day.isoformat()))
         exposure_path.append(
             {
+                "betas": {
+                    factor_id: _number(exposure[column])
+                    for column, factor_id in enumerate(model.factor_ids)
+                },
                 "date": target_row.day.isoformat(),
                 "estimation_state": estimation_state,
                 "exposure_change_l2": _number(change_norm),
@@ -1607,6 +1711,7 @@ def _dynamic_model_result(
     evaluation_means = np.mean(test_matrix, axis=0)
     exposures = [
         {
+            "beta": _number(latest_exposure[index]),
             "confidence_status": "UNAVAILABLE_DYNAMIC_PATH_INFERENCE",
             "exposure": _number(latest_exposure[index]),
             "factor_id": factor_id,
@@ -2050,6 +2155,7 @@ def _model_result(
         )
         exposures.append(
             {
+                "beta": _number(fit.exposures[index]),
                 "confidence_status": confidence_status,
                 "exposure": _number(fit.exposures[index]),
                 "factor_id": factor_id,
@@ -2303,7 +2409,7 @@ def build_decomposition(
         (definition, _verify_source(source_root, definition))
         for definition in spec.provenance_sources
     )
-    targets = _read_targets(target_path, spec.as_of_date)
+    targets = _read_targets(target_path, spec.as_of_date, spec.evidence_mode)
     factors, _headers = _read_factors(factor_path, spec)
     definitions = {item.factor_id: item for item in spec.factors}
     results = [
@@ -2316,6 +2422,17 @@ def build_decomposition(
         )
         for model in spec.models
     ]
+    for model_result in results:
+        model_result["evidence_mode"] = spec.evidence_mode
+        model_result["evidence_layers"] = sorted(
+            {
+                row.evidence_layer
+                for row in targets.get(str(model_result.get("series_id")), [])
+            }
+        )
+        model_result["series_composition"] = dict(
+            spec.series_composition.get(str(model_result.get("series_id")), {})
+        )
     selections = _select_models(results, spec.models)
     methodology_hash, methodology_size = hash_file(METHODOLOGY_PATH)
     source_summary = {
@@ -2343,12 +2460,16 @@ def build_decomposition(
         "analytics_schema_version": ANALYTICS_SCHEMA_VERSION,
         "as_of_date": spec.as_of_date.isoformat(),
         "builder_version": BUILDER_VERSION,
+        "evidence_mode": spec.evidence_mode,
         "method_label": METHOD_LABEL,
         "methodology_manifest_sha256": methodology_hash,
         "methodology_version": METHODOLOGY_VERSION,
         "model_results": results,
         "model_selections": selections,
         "proxy_governance": _proxy_governance(spec, results),
+        "series_composition": {
+            key: dict(value) for key, value in sorted(spec.series_composition.items())
+        },
         "sources": source_summary,
     }
     analytics_hash = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
