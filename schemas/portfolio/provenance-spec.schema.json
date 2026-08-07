@@ -12,12 +12,13 @@
     "roots",
     "source_groups",
     "strategies",
+    "strategy_version_catalog",
     "reserve_account",
     "tracker_imports",
     "assumptions"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "policy_version": {"const": "PORT-PERF-1"},
     "as_of_date": {"type": "string", "format": "date"},
     "acquisition_date": {"type": "string", "format": "date"},
@@ -37,6 +38,9 @@
       "minItems": 9,
       "maxItems": 9,
       "items": {"$ref": "#/$defs/strategy"}
+    },
+    "strategy_version_catalog": {
+      "$ref": "strategy-version-catalog.schema.json"
     },
     "reserve_account": {"$ref": "#/$defs/reserve_account"},
     "tracker_imports": {"$ref": "#/$defs/tracker_imports"},

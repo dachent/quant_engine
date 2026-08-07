@@ -38,7 +38,7 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-PANEL_SCHEMA_VERSION: Final = 10
+PANEL_SCHEMA_VERSION: Final = 11
 BUILDER_VERSION: Final = "2.1.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
@@ -1317,6 +1317,99 @@ def _weekly_return_analysis(
     }
 
 
+def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
+    blocked = []
+    for row in strategies:
+        compatibility = str(row.get("version_compatibility_status") or "UNRESOLVED")
+        report_status = str(
+            row.get("live_plus_backtest_status")
+            or "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
+        )
+        if (
+            compatibility != "PROVEN_COMPATIBLE"
+            or report_status != "ELIGIBLE_PROVEN_COMPATIBLE"
+        ):
+            blocked.append(
+                {
+                    "compatibility_status": compatibility,
+                    "reason": str(
+                        row.get("live_plus_backtest_reason")
+                        or row.get("version_compatibility_reason")
+                        or "No effective-dated compatibility evidence is recorded."
+                    ),
+                    "strategy_id": _text(
+                        row.get("strategy_id"), "strategy.strategy_id"
+                    ),
+                    "strategy_name": _text(
+                        row.get("strategy_name"), "strategy.strategy_name"
+                    ),
+                }
+            )
+    if blocked:
+        return {
+            "blocked_strategies": blocked,
+            "reason": (
+                f"LIVE_PLUS_BACKTEST is unavailable because {len(blocked)} current "
+                "strategy version(s) are not PROVEN_COMPATIBLE."
+            ),
+            "status": "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE",
+        }
+    return {
+        "blocked_strategies": [],
+        "reason": (
+            "Every current strategy version is effective-dated and PROVEN_COMPATIBLE."
+        ),
+        "status": "ELIGIBLE_PROVEN_COMPATIBLE",
+    }
+
+
+def _govern_weekly_hybrid_modes(
+    weekly: Mapping[str, Any], gate: Mapping[str, Any]
+) -> dict[str, Any]:
+    source_modes = weekly.get("strategy_evidence_modes", [])
+    hybrid_configured = (
+        weekly.get("generation_id") is not None
+        and isinstance(source_modes, list)
+        and "LIVE_PLUS_BACKTEST" in source_modes
+    )
+    hybrid_eligible = gate["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
+    accepted = {
+        **weekly,
+        "hybrid_mode_reason": (
+            gate["reason"]
+            if not hybrid_eligible or hybrid_configured
+            else "No accepted weekly-return generation with a hybrid mode is configured."
+        ),
+        "hybrid_mode_status": (
+            gate["status"]
+            if not hybrid_eligible or hybrid_configured
+            else "UNAVAILABLE_NOT_CONFIGURED"
+        ),
+    }
+    if hybrid_eligible and hybrid_configured:
+        return accepted
+    accepted["strategy_evidence_modes"] = ["LIVE_ONLY"]
+    accepted_rows: list[dict[str, Any]] = []
+    for raw in _objects(weekly.get("series"), "weekly series"):
+        row = dict(raw)
+        if row.get("primary_group") == "STRATEGY":
+            for field in (
+                "calendar_basis_by_mode",
+                "observation_meta_by_mode",
+                "values_by_mode",
+            ):
+                value = row.get(field)
+                if isinstance(value, dict):
+                    row[field] = (
+                        {"LIVE_ONLY": value["LIVE_ONLY"]}
+                        if "LIVE_ONLY" in value
+                        else {}
+                    )
+        accepted_rows.append(row)
+    accepted["series"] = accepted_rows
+    return accepted
+
+
 def _dependence_analysis(
     correlation: Mapping[str, Any],
     identity: Mapping[str, str],
@@ -1741,6 +1834,7 @@ def _panel_data(
         )
         for row in strategies
     }
+    hybrid_mode_gate = _hybrid_mode_gate(strategies)
     evidence_by_strategy, evidence_identity = _strategy_evidence(
         report, report_identity, strategy_evidence_path, set(strategy_names)
     )
@@ -1811,6 +1905,9 @@ def _panel_data(
             "weeks": [],
         }
     )
+    accepted_weekly_returns = _govern_weekly_hybrid_modes(
+        accepted_weekly_returns, hybrid_mode_gate
+    )
     raw_modes = correlation.get("dependence_modes")
     if raw_modes is None:
         default_dependence_mode = "LIVE_ONLY"
@@ -1839,6 +1936,11 @@ def _panel_data(
             raise ControlPanelValidationError(
                 "default dependence payload differs from LIVE_ONLY"
             )
+        accepted_mode_names = (
+            ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
+            if hybrid_mode_gate["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
+            else ("LIVE_ONLY",)
+        )
         dependence_modes = {
             mode: _dependence_analysis(
                 correlation,
@@ -1849,7 +1951,7 @@ def _panel_data(
                 ),
                 evidence_mode=mode,
             )
-            for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
+            for mode in accepted_mode_names
         }
         dependence_analysis = dependence_modes[default_dependence_mode]
     canonical_strategy_series = _canonical_strategy_series_contracts(
@@ -2248,6 +2350,7 @@ def _panel_data(
         "reconciliation_checks": reconciliations,
         "strategies": strategies,
         "hwm_summary": hwm_summary,
+        "hybrid_mode_gate": hybrid_mode_gate,
         "weekly_returns": accepted_weekly_returns,
     }
 
@@ -2884,6 +2987,35 @@ def verify_candidate(
                 "modes": sorted(
                     _object(data.get("dependence_modes"), "dependence modes")
                 ),
+            },
+        )
+    )
+    hybrid_gate = _object(data.get("hybrid_mode_gate"), "hybrid mode gate")
+    hybrid_blocked = hybrid_gate.get("status") != "ELIGIBLE_PROVEN_COMPATIBLE"
+    weekly_modes = set(
+        _object(data.get("weekly_returns"), "weekly returns").get(
+            "strategy_evidence_modes", []
+        )
+    )
+    dependence_mode_names = set(
+        _object(data.get("dependence_modes"), "dependence modes")
+    )
+    checks.append(
+        _check(
+            "Hybrid analytics fail closed on strategy-version compatibility",
+            bool(hybrid_gate.get("reason"))
+            and (
+                not hybrid_blocked
+                or (
+                    "LIVE_PLUS_BACKTEST" not in weekly_modes
+                    and "LIVE_PLUS_BACKTEST" not in dependence_mode_names
+                    and bool(hybrid_gate.get("blocked_strategies"))
+                )
+            ),
+            {
+                "dependence_modes": sorted(dependence_mode_names),
+                "status": hybrid_gate.get("status"),
+                "weekly_modes": sorted(weekly_modes),
             },
         )
     )

@@ -70,6 +70,10 @@ def _report() -> dict[str, object]:
             "strategy_name": STRATEGY_NAMES[index],
             "systematic_weight": str(1 / 9),
             "version_ref": None,
+            "version_compatibility_reason": "Synthetic version remains unresolved.",
+            "version_compatibility_status": "UNRESOLVED",
+            "live_plus_backtest_reason": "UNRESOLVED: Synthetic version remains unresolved.",
+            "live_plus_backtest_status": "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE",
         }
         for index in range(9)
     ]
@@ -997,6 +1001,10 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     assert data["dependence_analysis"]["pair_count"] == 36
     assert data["default_dependence_mode"] == "LIVE_ONLY"
     assert list(data["dependence_modes"]) == ["LIVE_ONLY"]
+    assert data["hybrid_mode_gate"]["status"] == (
+        "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
+    )
+    assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 9
 
 
 def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
@@ -1053,7 +1061,26 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
 
 def test_layered_dependence_modes_are_preserved_without_changing_default_authority(
     inputs: dict[str, Path],
+    tmp_path: Path,
 ) -> None:
+    compatible_report = _report()
+    for strategy in compatible_report["strategy_summary"]:
+        strategy.update(
+            {
+                "live_plus_backtest_reason": (
+                    "Effective-dated registry marks the current strategy version PROVEN_COMPATIBLE."
+                ),
+                "live_plus_backtest_status": "ELIGIBLE_PROVEN_COMPATIBLE",
+                "version_compatibility_reason": "Synthetic compatibility is proven.",
+                "version_compatibility_status": "PROVEN_COMPATIBLE",
+            }
+        )
+    report_root = tmp_path / "compatible-reporting"
+    _publish_report(
+        report_root,
+        tmp_path / "compatible-portfolio-report-data.json",
+        compatible_report,
+    )
     _publish_analytics(
         inputs["correlation"],
         "correlation.json",
@@ -1061,7 +1088,7 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
         "synthetic-correlation-v2",
     )
     result = panel.build_candidate(
-        inputs["report"],
+        report_root,
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
@@ -1081,6 +1108,36 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
         == 60
     )
     assert data["advisory"]["correlation_one_stress"] == "0.37249726899852387"
+    assert data["hybrid_mode_gate"]["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
+
+
+def test_unresolved_versions_suppress_layered_hybrid_analytics(
+    inputs: dict[str, Path],
+) -> None:
+    _publish_analytics(
+        inputs["correlation"],
+        "correlation.json",
+        _correlation_v2(),
+        "synthetic-correlation-v2",
+    )
+    result = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
+    data = json.loads(
+        (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert list(data["dependence_modes"]) == ["LIVE_ONLY"]
+    assert data["weekly_returns"]["strategy_evidence_modes"] == ["LIVE_ONLY"]
+    assert data["hybrid_mode_gate"]["status"] == (
+        "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
+    )
+    assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 9
 
 
 def test_template_line_endings_do_not_change_identity(
@@ -1897,6 +1954,19 @@ def test_renderer_distinguishes_nav_presence_from_hwm_qualification() -> None:
     assert "governed HWM daily NAV is stale or incomplete" in renderer
 
 
+def test_renderer_exposes_effective_dated_strategy_version_dispositions() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "row.version_disposition" in renderer
+    assert "row.version_effective_start" in renderer
+    assert "row.design_status" in renderer
+    assert "row.backtest_status" in renderer
+    assert "row.live_boundary_status" in renderer
+    assert "row.version_compatibility_status" in renderer
+    assert "data.hybrid_mode_gate.reason" in renderer
+    assert "weekly?.strategy_evidence_modes" in renderer
+
+
 def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None:
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
 
@@ -1906,7 +1976,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 10" in renderer
+    assert "data.panel_schema_version !== 11" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -1997,6 +2067,17 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
         panel.PANEL_SCHEMA_VERSION
     )
     assert "canonical_strategy_series" in schema["required"]
+    assert "hybrid_mode_gate" in schema["required"]
+    blocked = schema["properties"]["hybrid_mode_gate"]["properties"][
+        "blocked_strategies"
+    ]["items"]
+    assert blocked["additionalProperties"] is False
+    assert schema["properties"]["weekly_returns"]["properties"][
+        "strategy_evidence_modes"
+    ]["oneOf"] == [
+        {"const": ["LIVE_ONLY"]},
+        {"const": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]},
+    ]
     canonical = schema["properties"]["canonical_strategy_series"]["items"]
     assert canonical["additionalProperties"] is False
     assert set(canonical["required"]) == {

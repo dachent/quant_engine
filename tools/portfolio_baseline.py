@@ -680,15 +680,22 @@ def _provenance(
     if actual_hash != expected_hash:
         raise BaselineValidationError("provenance catalog hash differs")
     catalog = _load_json(path, "provenance catalog")
-    if catalog.get("catalog_schema_version") != 1:
+    provenance_schema_version = catalog.get("catalog_schema_version")
+    if provenance_schema_version not in {1, 2}:
         raise BaselineValidationError("provenance catalog schema is unsupported")
+    if provenance_schema_version == 2 and not isinstance(
+        catalog.get("strategy_version_catalog"), dict
+    ):
+        raise BaselineValidationError(
+            "provenance v2 requires a strategy version catalog"
+        )
     artifact = SourceArtifact(
         artifact_id="provenance/portfolio-provenance.json",
         sha256=actual_hash,
         size_bytes=size,
         as_of_date=_date(catalog.get("as_of_date"), "provenance.as_of_date"),
         schema_name="portfolio-provenance-catalog",
-        schema_version="1",
+        schema_version=str(provenance_schema_version),
     )
     return (
         catalog,
@@ -2543,6 +2550,8 @@ def build_catalog(
         "unmapped_records": unmapped,
         "attribution_dispositions": attribution_dispositions,
     }
+    if provenance.get("strategy_version_catalog") is not None:
+        catalog["strategy_version_catalog"] = provenance["strategy_version_catalog"]
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
         artifact_id="normalized/portfolio-baseline.json",

@@ -13,6 +13,13 @@ without preserving stale calculations or hard-coded operator conclusions.
   HWM freshness is evaluated on the lane admitted for that strategy. A
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
+- Every strategy row also projects the effective-dated v2 strategy-version
+  registry: overall disposition, design/configuration/backtest/live-boundary
+  status, cost and benchmark evidence, source route, compatibility, and named
+  gaps. QSI and EchoTrade remain unresolved where no authoritative producing
+  artifact is admitted; the GrizzlyBears and TuringTrader rejected-provider
+  dispositions remain visible. Return evidence does not manufacture a design
+  or backtest version.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
   contribution reconciliation, and each dated dynamic exposure path come only
   from accepted analytics generations. The clean-room dynamic FLS lens remains
@@ -43,13 +50,13 @@ without preserving stale calculations or hard-coded operator conclusions.
   only from the accepted `<portfolio-root>/analytics/correlation` generation and
   remain separately labeled.
 - Dependence defaults to `LIVE_ONLY`. When the accepted correlation generation
-  also contains `LIVE_PLUS_BACKTEST`, the operator may switch to an explicitly
-  labeled hybrid view. It uses only version-matched backtest observations before
-  live inception; live observations remain authoritative from inception onward,
-  and the hybrid view cannot change readiness, allocation, or risk-control
-  conclusions. Individual series without eligible backtest prehistory remain
-  live-only inside the hybrid view and report zero backtest rows. A schema-v1
-  generation without the evidence-mode contract disables the hybrid selector.
+  also contains `LIVE_PLUS_BACKTEST`, the operator may switch to the explicitly
+  labeled hybrid view only when every current effective-dated strategy registry
+  row is `PROVEN_COMPATIBLE`. Otherwise the hybrid payload is suppressed and the
+  selector remains visible but disabled with the named compatibility blockers.
+  An admitted hybrid uses only version-matched backtest observations before live
+  inception; live observations remain authoritative from inception onward, and
+  the hybrid view cannot change readiness, allocation, or risk-control conclusions.
 - Weekly returns come only from the accepted
   `<portfolio-root>/analytics/weekly-returns` generation. Every row uses an ISO
   Monday-through-Sunday week and compounds accepted daily returns as
