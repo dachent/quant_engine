@@ -457,7 +457,7 @@
       const width = Math.min(48, Math.abs(exposure) / maximumExposure * 48);
       const left = exposure < 0 ? 50 - width : 50;
       const uncertainty = item.standard_error == null ? "Coefficient SE unavailable for fitted method" : `SE ${decimal(item.standard_error)}`;
-      return `<div class="exposure-row"><div class="exposure-name"><strong>${safe(item.factor_id)}</strong><span>${safe(uncertainty)}</span></div><div class="exposure-track" aria-label="${safe(item.factor_id)} exposure ${decimal(item.exposure)}"><span class="exposure-fill ${exposure < 0 ? "is-negative" : ""}" style="left:${left}%;width:${width}%"></span></div><div class="exposure-value">${decimal(item.exposure)}×</div></div>`;
+      return `<div class="exposure-row"><div class="exposure-name"><strong>${safe(item.factor_id)}</strong><span>${safe(uncertainty)}</span></div><div class="exposure-track" aria-hidden="true"><span class="exposure-fill ${exposure < 0 ? "is-negative" : ""}" style="left:${left}%;width:${width}%"></span></div><div class="exposure-value">${decimal(item.exposure)}×</div></div>`;
     }).join("");
     const contributionRows = [
       ...Object.entries(summary.factor_means).map(([factor, value]) => `<tr><td>${safe(factor)}</td><td>Factor contribution</td><td class="numeric">${pct(value, 3)}</td></tr>`),
@@ -958,6 +958,15 @@
     window.addEventListener("hashchange", () => setView(location.hash.slice(1) || "command", false));
   }
 
+  function prepareScrollableTableRegions() {
+    $$(".table-wrap").forEach((region) => {
+      const caption = $("caption", region)?.textContent?.trim();
+      region.tabIndex = 0;
+      region.setAttribute("role", "region");
+      region.setAttribute("aria-label", caption ? `${caption} scrollable table` : "Scrollable table");
+    });
+  }
+
   function init() {
     try {
       if (!data || data.panel_schema_version !== 12) throw new Error("Embedded dashboard data is missing or unsupported");
@@ -965,7 +974,7 @@
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
       populateContextControls();
-      renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderWeekly(); renderCandidates(); renderData(); bindEvents();
+      renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderWeekly(); renderCandidates(); renderData(); prepareScrollableTableRegions(); bindEvents();
       $("#loading-state").hidden = true;
       $("#app").dataset.appState = "ready";
       const requested = location.hash.slice(1);
