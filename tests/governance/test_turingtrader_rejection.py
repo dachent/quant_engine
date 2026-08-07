@@ -58,7 +58,9 @@ def _assert_approved_shape(
         assert len(value) >= schema.get("minItems", 0)
         assert len(value) <= schema.get("maxItems", len(value))
         if schema.get("uniqueItems"):
-            assert len({json.dumps(item, sort_keys=True) for item in value}) == len(value)
+            assert len({json.dumps(item, sort_keys=True) for item in value}) == len(
+                value
+            )
         if "items" in schema:
             for item in value:
                 _assert_approved_shape(item, schema["items"], root)
