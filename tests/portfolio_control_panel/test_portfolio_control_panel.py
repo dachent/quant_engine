@@ -2310,3 +2310,44 @@ def test_context_and_material_exceptions_have_operator_routes() -> None:
     assert 'row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE"' in renderer
     assert "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH" in renderer
     assert 'id="remediation-table"' in template
+
+
+def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> None:
+    template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (panel.DEFAULT_TEMPLATE_ROOT / "analytics.css").read_text(encoding="utf-8")
+    browser_qa = (panel.DEFAULT_TEMPLATE_ROOT / "browser_qa.mjs").read_text(
+        encoding="utf-8"
+    )
+    interaction_qa = (panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs").read_text(
+        encoding="utf-8"
+    )
+
+    for term in (
+        "HWM",
+        "TWR / MWR",
+        "Evidence state",
+        "Model state",
+        "Gate state",
+        "MPI-informed, non-equivalent",
+    ):
+        assert term in template
+    assert 'id="operator-glossary"' in template
+    assert "min-height: 44px" in styles
+    assert ".weekly-cell" in styles
+    assert ".weekly-toggle" in styles
+    assert "#factor-model-table" in styles
+    assert "#performance-table" in styles
+    assert "#coverage-table" in styles
+    assert "@media (prefers-reduced-motion: reduce)" in styles
+    assert ":focus-visible" in styles
+    assert 'button.setAttribute("aria-controls", view.id)' in renderer
+    assert "$$('[data-open-view]').forEach" in renderer
+    assert 'group.setAttribute("role", "group")' in renderer
+    assert 'options["exclude-candidates"] === "true"' in browser_qa
+    assert 'scope: excludeCandidates ? "NON_CANDIDATE" : "FULL"' in browser_qa
+    assert 'options["exclude-candidates"] !== "true"' in interaction_qa
+    assert 'scope: includeCandidates ? "FULL" : "NON_CANDIDATE"' in interaction_qa
+    assert (
+        "All eight non-Candidate mobile surfaces meet the 44px target" in interaction_qa
+    )

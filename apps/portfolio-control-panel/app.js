@@ -864,7 +864,20 @@
   }
 
   function bindEvents() {
-    $$('[data-nav]').forEach((button) => button.addEventListener("click", () => setView(button.dataset.nav)));
+    $$('[data-nav]').forEach((button) => {
+      const view = $(`[data-view="${button.dataset.nav}"]`);
+      if (view) {
+        view.id ||= `view-${button.dataset.nav}`;
+        button.setAttribute("aria-controls", view.id);
+      }
+      button.addEventListener("click", () => setView(button.dataset.nav));
+    });
+    $$('[data-open-view]').forEach((button) => {
+      const view = $(`[data-view="${button.dataset.openView}"]`);
+      if (!view) return;
+      view.id ||= `view-${button.dataset.openView}`;
+      button.setAttribute("aria-controls", view.id);
+    });
     document.addEventListener("click", (event) => {
       const button = event.target.closest("[data-open-view]");
       if (!button) return;
@@ -940,6 +953,7 @@
     $("#context-strategy").addEventListener("change", (event) => { selectedContextStrategy = event.target.value; applyContext(); });
     $("#context-reset").addEventListener("click", () => { selectedContextAccount = "ALL"; selectedContextStrategy = "ALL"; applyContext(); });
     $("#snapshot-button").addEventListener("click", () => showToast(`Portfolio facts ${formatDate(data.meta.portfolio_as_of)} · freshness evaluated ${formatDate(data.meta.freshness_evaluated_on)} · Report ${data.meta.report_generation_id.slice(0, 12)}… · read-only local artifact.`));
+    $$('.segmented, .strategy-selector').forEach((group) => group.setAttribute("role", "group"));
     $$('.segment').forEach((button) => button.setAttribute("aria-pressed", String(button.classList.contains("is-active"))));
     window.addEventListener("hashchange", () => setView(location.hash.slice(1) || "command", false));
   }
