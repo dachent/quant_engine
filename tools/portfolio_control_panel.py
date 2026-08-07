@@ -308,15 +308,55 @@ def _freshness_health(path: Path | None, portfolio_as_of: str) -> list[dict[str,
         )
     payload = _load_json(path, "freshness health")
     schema_version = payload.get("assessment_schema_version")
-    expected_bundle_keys = (
-        {"assessment_schema_version", "as_of_date", "assessments", "policy"}
-        if schema_version == 2
-        else {"assessment_schema_version", "as_of_date", "assessments", "policies"}
-    )
-    if set(payload) != expected_bundle_keys:
+    expected_bundle_keys = {
+        "assessment_schema_version",
+        "as_of_date",
+        "assessments",
+        "policy" if schema_version == 2 else "policies",
+    }
+    accepted_bundle_keys = {frozenset(expected_bundle_keys)}
+    if schema_version == 3:
+        accepted_bundle_keys.add(frozenset(expected_bundle_keys | {"provider_ledger"}))
+    if frozenset(payload) not in accepted_bundle_keys:
         raise ControlPanelValidationError("freshness health keys differ")
     if schema_version not in {2, 3}:
         raise ControlPanelValidationError("freshness health schema is unsupported")
+    if "provider_ledger" in payload:
+        provider_ledger = payload.get("provider_ledger")
+        ledger_identity = _object(provider_ledger, "freshness provider ledger")
+        if set(ledger_identity) != {
+            "as_of_date",
+            "catalog_sha256",
+            "catalog_size_bytes",
+            "generation_id",
+            "manifest_sha256",
+            "manifest_size_bytes",
+        }:
+            raise ControlPanelValidationError("freshness provider ledger keys differ")
+        ledger_as_of = date.fromisoformat(
+            _text(ledger_identity.get("as_of_date"), "freshness ledger as_of_date")
+        )
+        freshness_as_of = date.fromisoformat(
+            _text(payload.get("as_of_date"), "freshness health as_of_date")
+        )
+        if ledger_as_of > freshness_as_of:
+            raise ControlPanelValidationError(
+                "freshness provider ledger postdates the evaluation"
+            )
+        for field in ("catalog_sha256", "generation_id", "manifest_sha256"):
+            if not re.fullmatch(
+                r"[0-9a-f]{64}",
+                _text(ledger_identity.get(field), f"freshness ledger {field}"),
+            ):
+                raise ControlPanelValidationError(
+                    f"freshness provider ledger {field} differs"
+                )
+        for field in ("catalog_size_bytes", "manifest_size_bytes"):
+            value = ledger_identity.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ControlPanelValidationError(
+                    f"freshness provider ledger {field} differs"
+                )
     as_of = _text(payload.get("as_of_date"), "freshness health as_of_date")
     if date.fromisoformat(as_of) < date.fromisoformat(portfolio_as_of):
         raise ControlPanelValidationError("freshness health predates the portfolio")

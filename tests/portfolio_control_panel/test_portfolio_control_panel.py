@@ -1435,6 +1435,14 @@ def test_schema_v3_nonrequired_stale_lane_does_not_block_panel(
                 }
             ],
             "policies": [policy],
+            "provider_ledger": {
+                "as_of_date": "2026-08-03",
+                "catalog_sha256": "a" * 64,
+                "catalog_size_bytes": 100,
+                "generation_id": "b" * 64,
+                "manifest_sha256": "c" * 64,
+                "manifest_size_bytes": 200,
+            },
         },
     )
 
@@ -1449,6 +1457,16 @@ def test_schema_v3_nonrequired_stale_lane_does_not_block_panel(
     assert rows[0]["grace_days"] == 2
     assert rows[0]["stale_after_days"] == 5
     assert rows[0]["reconciled_on"] == "2026-08-03"
+
+    replay = json.loads(health.read_text(encoding="utf-8"))
+    replay["provider_ledger"]["as_of_date"] = "2026-08-04"
+    invalid = tmp_path / "freshness-v3-future-ledger.json"
+    _write_json(invalid, replay)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="ledger postdates the evaluation",
+    ):
+        panel._freshness_health(invalid, "2026-08-03")
 
 
 def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -> None:
