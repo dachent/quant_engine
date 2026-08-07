@@ -172,6 +172,9 @@ def test_freshness_prefers_account_lane_and_blocks_stale_strategy(
     )
     assert by_lane[("matrixport", "PROVIDER_CAPTURE", "positions")]["state"] == ("LATE")
     assert result["assessment_schema_version"] == 3
+    assert result["provider_ledger"]["generation_id"] == generation_id
+    assert len(result["provider_ledger"]["manifest_sha256"]) == 64
+    assert len(result["provider_ledger"]["catalog_sha256"]) == 64
     assert {row["policy_id"] for row in result["policies"]} == {
         "daily-calendar-24x7",
         "daily-weekday-session",

@@ -36,7 +36,7 @@ CURRENT = date(2026, 8, 6)
 PREVIOUS = date(2026, 8, 3)
 
 
-def _ledger(root: Path) -> str:
+def _ledger(root: Path) -> tuple[str, dict[str, object]]:
     source = b"synthetic-ledger\n"
     manifest = GenerationManifest.build(
         as_of_date=PREVIOUS,
@@ -50,7 +50,7 @@ def _ledger(root: Path) -> str:
         ),
         artifacts=(
             SourceArtifact(
-                artifact_id="input/ledger.json",
+                artifact_id="normalized/provider-ledger.json",
                 sha256=hashlib.sha256(source).hexdigest(),
                 size_bytes=len(source),
                 as_of_date=PREVIOUS,
@@ -60,20 +60,83 @@ def _ledger(root: Path) -> str:
         ),
         verification=VerificationStatus.VERIFIED,
     )
-    stage_generation(root, manifest)
+    staged = stage_generation(root, manifest)
+    (staged.parent / "provider-ledger.json").write_bytes(source)
     publish_generation(root, manifest.generation_id)
-    return manifest.generation_id
+    manifest_path = staged.parent / "generation.json"
+    return manifest.generation_id, {
+        "as_of_date": manifest.as_of_date.isoformat(),
+        "catalog_sha256": hashlib.sha256(source).hexdigest(),
+        "catalog_size_bytes": len(source),
+        "generation_id": manifest.generation_id,
+        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "manifest_size_bytes": manifest_path.stat().st_size,
+    }
 
 
 def _write(path: Path, value: dict[str, object]) -> None:
     path.write_bytes(canonical_json_bytes(value))
 
 
+def _input_identity(
+    tmp_path: Path, name: str, *, panel: bool = False
+) -> dict[str, object]:
+    path = tmp_path / "control-inputs" / f"{name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = canonical_json_bytes({"source": name})
+    path.write_bytes(content)
+    identity: dict[str, object] = {
+        "path": str(path),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": len(content),
+    }
+    identity["panel_id" if panel else "generation_id"] = hashlib.sha256(
+        name.encode("utf-8")
+    ).hexdigest()
+    if not panel:
+        identity["as_of_date"] = PREVIOUS.isoformat()
+    return identity
+
+
+def _recomputation(tmp_path: Path) -> dict[str, object]:
+    return {
+        "as_of_date": CURRENT.isoformat(),
+        "component_count": 2,
+        "declared_values": {
+            "correlation_stress": "0.3",
+            "panel_headline": "0.3",
+            "report_headline": "0.3",
+        },
+        "differences": {
+            "correlation_declared": "0",
+            "declared_contribution_sum": "0",
+            "maximum_component": "0",
+            "panel_headline": "0",
+            "report_headline": "0",
+        },
+        "generation_checks": {
+            "panel_correlation_matches_current": True,
+            "panel_freshness_matches_evaluation_date": True,
+            "panel_report_matches_current": True,
+        },
+        "inputs": {
+            "correlation": _input_identity(tmp_path, "correlation"),
+            "panel": _input_identity(tmp_path, "panel", panel=True),
+            "report": _input_identity(tmp_path, "report"),
+        },
+        "method": "DECIMAL_SUM_ALLOCATION_WEIGHT_TIMES_ADVERSE_LOSS_FRACTION",
+        "recomputed_correlation_one_stress": "0.3",
+        "receipt_schema_version": 1,
+        "status": "PASS",
+        "tolerance": "0.000000000001",
+    }
+
+
 def test_cycle_records_unauthorized_reads_and_local_notification(
     tmp_path: Path,
 ) -> None:
     ledger_root = tmp_path / "ledger"
-    generation_id = _ledger(ledger_root)
+    generation_id, ledger_identity = _ledger(ledger_root)
     freshness = tmp_path / "freshness.json"
     _write(
         freshness,
@@ -103,10 +166,11 @@ def test_cycle_records_unauthorized_reads_and_local_notification(
                 },
             ],
             "policies": [],
+            "provider_ledger": ledger_identity,
         },
     )
     recomputation = tmp_path / "recomputation.json"
-    _write(recomputation, {"as_of_date": CURRENT.isoformat(), "status": "PASS"})
+    _write(recomputation, _recomputation(tmp_path))
 
     receipt = cycle.build_receipt(
         ledger_root,
@@ -145,7 +209,7 @@ def test_cycle_records_unauthorized_reads_and_local_notification(
 
 def test_cycle_fails_when_freshness_date_is_replayed(tmp_path: Path) -> None:
     ledger_root = tmp_path / "ledger"
-    generation_id = _ledger(ledger_root)
+    generation_id, ledger_identity = _ledger(ledger_root)
     freshness = tmp_path / "freshness.json"
     _write(
         freshness,
@@ -154,12 +218,72 @@ def test_cycle_fails_when_freshness_date_is_replayed(tmp_path: Path) -> None:
             "as_of_date": PREVIOUS.isoformat(),
             "assessments": [],
             "policies": [],
+            "provider_ledger": ledger_identity,
+        },
+    )
+    recomputation = tmp_path / "recomputation.json"
+    _write(recomputation, _recomputation(tmp_path))
+
+    with pytest.raises(cycle.RollforwardCycleError, match="evaluation date differs"):
+        cycle.build_receipt(
+            ledger_root,
+            generation_id,
+            freshness,
+            recomputation,
+            CURRENT,
+            PREVIOUS,
+        )
+
+
+def test_cycle_rejects_freshness_from_another_ledger(tmp_path: Path) -> None:
+    ledger_root = tmp_path / "ledger"
+    generation_id, ledger_identity = _ledger(ledger_root)
+    ledger_identity["generation_id"] = "b" * 64
+    freshness = tmp_path / "freshness.json"
+    _write(
+        freshness,
+        {
+            "assessment_schema_version": 3,
+            "as_of_date": CURRENT.isoformat(),
+            "assessments": [],
+            "policies": [],
+            "provider_ledger": ledger_identity,
+        },
+    )
+    recomputation = tmp_path / "recomputation.json"
+    _write(recomputation, _recomputation(tmp_path))
+
+    with pytest.raises(cycle.RollforwardCycleError, match="ledger identity differs"):
+        cycle.build_receipt(
+            ledger_root,
+            generation_id,
+            freshness,
+            recomputation,
+            CURRENT,
+            PREVIOUS,
+        )
+
+
+def test_cycle_rejects_truncated_recomputation_receipt(tmp_path: Path) -> None:
+    ledger_root = tmp_path / "ledger"
+    generation_id, ledger_identity = _ledger(ledger_root)
+    freshness = tmp_path / "freshness.json"
+    _write(
+        freshness,
+        {
+            "assessment_schema_version": 3,
+            "as_of_date": CURRENT.isoformat(),
+            "assessments": [],
+            "policies": [],
+            "provider_ledger": ledger_identity,
         },
     )
     recomputation = tmp_path / "recomputation.json"
     _write(recomputation, {"as_of_date": CURRENT.isoformat(), "status": "PASS"})
 
-    with pytest.raises(cycle.RollforwardCycleError, match="evaluation date differs"):
+    with pytest.raises(
+        cycle.RollforwardCycleError, match="recomputation fields differ"
+    ):
         cycle.build_receipt(
             ledger_root,
             generation_id,

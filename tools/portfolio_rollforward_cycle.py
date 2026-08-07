@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import date
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
@@ -54,6 +55,158 @@ def _identity(path: Path) -> dict[str, object]:
     return {"path": str(path.resolve()), "sha256": digest, "size_bytes": size}
 
 
+def _strict_object(
+    value: object, label: str, expected_keys: set[str]
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        raise RollforwardCycleError(f"{label} fields differ")
+    return value
+
+
+def _hash_text(value: object, label: str) -> str:
+    accepted = _text(value, label)
+    if len(accepted) != 64 or any(
+        character not in "0123456789abcdef" for character in accepted
+    ):
+        raise RollforwardCycleError(f"{label} must be a lowercase SHA-256")
+    return accepted
+
+
+def _positive_size(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise RollforwardCycleError(f"{label} must be a positive integer")
+    return value
+
+
+def _decimal(value: object, label: str) -> Decimal:
+    if not isinstance(value, str) or not value:
+        raise RollforwardCycleError(f"{label} must be decimal text")
+    try:
+        accepted = Decimal(value)
+    except InvalidOperation as exc:
+        raise RollforwardCycleError(f"{label} must be decimal text") from exc
+    if not accepted.is_finite():
+        raise RollforwardCycleError(f"{label} must be finite")
+    return accepted
+
+
+def _validate_input_identity(value: object, label: str, *, panel: bool = False) -> None:
+    identity_key = "panel_id" if panel else "generation_id"
+    expected = {"path", "sha256", "size_bytes", identity_key}
+    if not panel:
+        expected.add("as_of_date")
+    identity = _strict_object(value, label, expected)
+    _hash_text(identity.get(identity_key), f"{label}.{identity_key}")
+    _hash_text(identity.get("sha256"), f"{label}.sha256")
+    expected_size = _positive_size(identity.get("size_bytes"), f"{label}.size_bytes")
+    path = Path(_text(identity.get("path"), f"{label}.path"))
+    if path.is_symlink() or not path.is_file():
+        raise RollforwardCycleError(f"{label} input is missing or linked")
+    observed_hash, observed_size = hash_file(path)
+    if (observed_hash, observed_size) != (identity["sha256"], expected_size):
+        raise RollforwardCycleError(f"{label} input identity differs")
+    if not panel:
+        try:
+            date.fromisoformat(_text(identity.get("as_of_date"), f"{label}.as_of_date"))
+        except ValueError as exc:
+            raise RollforwardCycleError(f"{label}.as_of_date must be a date") from exc
+
+
+def _validate_recomputation(
+    recomputation: Mapping[str, Any], evaluation_date: date
+) -> None:
+    expected_top_level = {
+        "as_of_date",
+        "component_count",
+        "declared_values",
+        "differences",
+        "generation_checks",
+        "inputs",
+        "method",
+        "recomputed_correlation_one_stress",
+        "receipt_schema_version",
+        "status",
+        "tolerance",
+    }
+    if set(recomputation) != expected_top_level:
+        raise RollforwardCycleError("control recomputation fields differ")
+    if recomputation.get("receipt_schema_version") != 1:
+        raise RollforwardCycleError("control recomputation schema differs")
+    if recomputation.get("status") != "PASS":
+        raise RollforwardCycleError("control recomputation did not pass")
+    if recomputation.get("as_of_date") != evaluation_date.isoformat():
+        raise RollforwardCycleError("control recomputation date differs")
+    if recomputation.get("method") != (
+        "DECIMAL_SUM_ALLOCATION_WEIGHT_TIMES_ADVERSE_LOSS_FRACTION"
+    ):
+        raise RollforwardCycleError("control recomputation method differs")
+    component_count = recomputation.get("component_count")
+    if (
+        isinstance(component_count, bool)
+        or not isinstance(component_count, int)
+        or component_count < 1
+    ):
+        raise RollforwardCycleError("control recomputation component count differs")
+
+    declared = _strict_object(
+        recomputation.get("declared_values"),
+        "control recomputation declared values",
+        {"correlation_stress", "panel_headline", "report_headline"},
+    )
+    for key, value in declared.items():
+        _decimal(value, f"control recomputation declared_values.{key}")
+    differences = _strict_object(
+        recomputation.get("differences"),
+        "control recomputation differences",
+        {
+            "correlation_declared",
+            "declared_contribution_sum",
+            "maximum_component",
+            "panel_headline",
+            "report_headline",
+        },
+    )
+    tolerance = _decimal(
+        recomputation.get("tolerance"), "control recomputation tolerance"
+    )
+    if tolerance != Decimal("0.000000000001"):
+        raise RollforwardCycleError("control recomputation tolerance differs")
+    if any(
+        value < 0 or value > tolerance
+        for value in (
+            _decimal(raw, f"control recomputation differences.{key}")
+            for key, raw in differences.items()
+        )
+    ):
+        raise RollforwardCycleError(
+            "control recomputation differences exceed tolerance"
+        )
+    _decimal(
+        recomputation.get("recomputed_correlation_one_stress"),
+        "control recomputation headline",
+    )
+
+    checks = _strict_object(
+        recomputation.get("generation_checks"),
+        "control recomputation generation checks",
+        {
+            "panel_correlation_matches_current",
+            "panel_freshness_matches_evaluation_date",
+            "panel_report_matches_current",
+        },
+    )
+    if not all(value is True for value in checks.values()):
+        raise RollforwardCycleError("control recomputation generation check failed")
+    inputs = _strict_object(
+        recomputation.get("inputs"),
+        "control recomputation inputs",
+        {"correlation", "panel", "report"},
+    )
+    _validate_input_identity(inputs["correlation"], "correlation")
+    _validate_input_identity(inputs["panel"], "panel", panel=True)
+    _validate_input_identity(inputs["report"], "report")
+
+
 def _request_identity(row: Mapping[str, Any], evaluation_date: date) -> str:
     identity = {
         "evaluation_date": evaluation_date.isoformat(),
@@ -87,6 +240,45 @@ def build_receipt(
         raise RollforwardCycleError("freshness health schema must be 3")
     if freshness.get("as_of_date") != evaluation_date.isoformat():
         raise RollforwardCycleError("freshness evaluation date differs")
+    ledger_artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "normalized/provider-ledger.json"
+        ),
+        None,
+    )
+    if ledger_artifact is None:
+        raise RollforwardCycleError("provider ledger catalog artifact is absent")
+    freshness_ledger = _strict_object(
+        freshness.get("provider_ledger"),
+        "freshness provider ledger",
+        {
+            "as_of_date",
+            "catalog_sha256",
+            "catalog_size_bytes",
+            "generation_id",
+            "manifest_sha256",
+            "manifest_size_bytes",
+        },
+    )
+    if (
+        freshness_ledger.get("as_of_date") != manifest.as_of_date.isoformat()
+        or freshness_ledger.get("generation_id") != pointer.generation_id
+        or freshness_ledger.get("manifest_sha256") != pointer.manifest_sha256
+        or freshness_ledger.get("catalog_sha256") != ledger_artifact.sha256
+        or freshness_ledger.get("catalog_size_bytes") != ledger_artifact.size_bytes
+    ):
+        raise RollforwardCycleError("freshness provider ledger identity differs")
+    manifest_path = (
+        provider_ledger_root.resolve()
+        / "generations"
+        / pointer.generation_id
+        / "generation.json"
+    )
+    _, manifest_size = hash_file(manifest_path)
+    if freshness_ledger.get("manifest_size_bytes") != manifest_size:
+        raise RollforwardCycleError("freshness provider ledger manifest size differs")
     assessments = _objects(freshness.get("assessments"), "freshness assessments")
     for row in assessments:
         if row.get("evaluated_on") != evaluation_date.isoformat():
@@ -132,10 +324,7 @@ def build_receipt(
     )
 
     recomputation = _load(recomputation_path.resolve(), "control recomputation")
-    if recomputation.get("status") != "PASS":
-        raise RollforwardCycleError("control recomputation did not pass")
-    if recomputation.get("as_of_date") != evaluation_date.isoformat():
-        raise RollforwardCycleError("control recomputation date differs")
+    _validate_recomputation(recomputation, evaluation_date)
 
     states = Counter(_text(row.get("state"), "freshness state") for row in assessments)
     providers = Counter(str(row["provider_id"]) for row in escalations)

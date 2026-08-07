@@ -106,6 +106,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         "advisory": {"correlation_one_stress": "0.3"},
         "meta": {
             "correlation_generation_id": correlation_generation,
+            "freshness_evaluated_on": AS_OF.isoformat(),
             "report_generation_id": report_generation,
         },
     }
@@ -147,6 +148,27 @@ def test_mismatched_panel_headline_fails_closed(tmp_path: Path) -> None:
     dashboard_path = candidate / "data" / "dashboard_data.json"
     dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
     dashboard["advisory"]["correlation_one_stress"] = "0.2"
+    content = canonical_json_bytes(dashboard)
+    dashboard_path.write_bytes(content)
+    manifest_path = candidate / "candidate.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_sha256"]["data/dashboard_data.json"] = hashlib.sha256(
+        content
+    ).hexdigest()
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(
+        recompute.ControlRecomputeError,
+        match="independent headline recomputation differs",
+    ):
+        recompute.build_receipt(correlation_root, report_root, candidate, AS_OF)
+
+
+def test_prior_day_panel_freshness_fails_closed(tmp_path: Path) -> None:
+    correlation_root, report_root, candidate = _inputs(tmp_path)
+    dashboard_path = candidate / "data" / "dashboard_data.json"
+    dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
+    dashboard["meta"]["freshness_evaluated_on"] = "2026-08-05"
     content = canonical_json_bytes(dashboard)
     dashboard_path.write_bytes(content)
     manifest_path = candidate / "candidate.json"

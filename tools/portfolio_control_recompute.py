@@ -182,6 +182,10 @@ def build_receipt(
     generation_checks = {
         "panel_correlation_matches_current": panel_meta.get("correlation_generation_id")
         == correlation_identity["generation_id"],
+        "panel_freshness_matches_evaluation_date": panel_meta.get(
+            "freshness_evaluated_on"
+        )
+        == evaluation_date.isoformat(),
         "panel_report_matches_current": panel_meta.get("report_generation_id")
         == report_identity["generation_id"],
     }

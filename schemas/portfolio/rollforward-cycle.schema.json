@@ -6,18 +6,107 @@
   "additionalProperties": false,
   "required": ["attempt_policy", "cycle_id", "cycle_schema_version", "dated_cycle_evidence", "evaluation_date", "freshness", "notification_receipt", "pointer_effects", "provider_ledger", "provider_read_plan", "recomputation", "status"],
   "properties": {
-    "attempt_policy": {"type": "object"},
+    "attempt_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["external_read_retry_limit", "local_retry_limit", "unknown_external_outcome_retry"],
+      "properties": {
+        "external_read_retry_limit": {"const": 0},
+        "local_retry_limit": {"const": 2},
+        "unknown_external_outcome_retry": {"const": "PROHIBITED"}
+      }
+    },
     "cycle_id": {"$ref": "#/$defs/hash"},
     "cycle_schema_version": {"const": 1},
-    "dated_cycle_evidence": {"type": "object", "properties": {"status": {"const": "SECOND_DATED_MANUAL_CYCLE_RECORDED"}}},
+    "dated_cycle_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_cycle_date", "previous_cycle_date", "status"],
+      "properties": {
+        "current_cycle_date": {"type": "string", "format": "date"},
+        "previous_cycle_date": {"type": "string", "format": "date"},
+        "status": {"const": "SECOND_DATED_MANUAL_CYCLE_RECORDED"}
+      }
+    },
     "evaluation_date": {"type": "string", "format": "date"},
-    "freshness": {"type": "object"},
-    "notification_receipt": {"type": "object", "properties": {"external_notification_sent": {"const": false}, "status": {"const": "RECORDED_FOR_NEXT_PANEL_GENERATION"}}},
-    "pointer_effects": {"type": "object", "properties": {"advanced": {"const": false}}},
-    "provider_ledger": {"type": "object"},
-    "provider_read_plan": {"type": "array", "items": {"type": "object", "properties": {"retry_limit": {"const": 0}, "status": {"const": "NOT_AUTHORIZED_NOT_EXECUTED"}}}},
-    "recomputation": {"type": "object"},
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assessment_count", "escalation_count", "path", "provider_escalation_counts", "sha256", "size_bytes", "state_counts"],
+      "properties": {
+        "assessment_count": {"type": "integer", "minimum": 0},
+        "escalation_count": {"type": "integer", "minimum": 0},
+        "path": {"type": "string", "minLength": 1},
+        "provider_escalation_counts": {"$ref": "#/$defs/counts"},
+        "sha256": {"$ref": "#/$defs/hash"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "state_counts": {"$ref": "#/$defs/counts"}
+      }
+    },
+    "notification_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "external_notification_sent", "recorded_escalation_count", "status"],
+      "properties": {
+        "channel": {"const": "LOCAL_CONTROL_PANEL_OPERATOR_QUEUE"},
+        "external_notification_sent": {"const": false},
+        "recorded_escalation_count": {"type": "integer", "minimum": 0},
+        "status": {"const": "RECORDED_FOR_NEXT_PANEL_GENERATION"}
+      }
+    },
+    "pointer_effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["advanced", "reason"],
+      "properties": {
+        "advanced": {"const": false},
+        "reason": {"const": "AUTHORIZED_PROVIDER_REFRESH_AND_PREREQUISITE_RELEASE_NOT_COMPLETE"}
+      }
+    },
+    "provider_ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of_date", "generation_id", "manifest_sha256"],
+      "properties": {
+        "as_of_date": {"type": "string", "format": "date"},
+        "generation_id": {"$ref": "#/$defs/hash"},
+        "manifest_sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "provider_read_plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["acquisition_path", "effect", "fact_type", "lane", "provider_id", "request_identity", "retry_limit", "status", "subject_id"],
+        "properties": {
+          "acquisition_path": {"enum": ["DECLARED_PROVIDER_READ_REQUIRES_EXPLICIT_APPROVAL", "HAR_FIRST_API_ONLY_FOR_DECLARED_HAR_GAP_WITH_APPROVAL"]},
+          "effect": {"const": "READ_ONLY_EXTERNAL"},
+          "fact_type": {"type": "string", "minLength": 1},
+          "lane": {"type": "string", "minLength": 1},
+          "provider_id": {"type": "string", "minLength": 1},
+          "request_identity": {"$ref": "#/$defs/hash"},
+          "retry_limit": {"const": 0},
+          "status": {"const": "NOT_AUTHORIZED_NOT_EXECUTED"},
+          "subject_id": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "recomputation": {"$ref": "#/$defs/fileIdentity"},
     "status": {"const": "PASS_WITH_RETAINED_ESCALATIONS"}
   },
-  "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+  "$defs": {
+    "counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "fileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/hash"},
+        "size_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
 }
