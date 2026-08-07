@@ -244,25 +244,39 @@ await page.locator('[data-weekly-group="STRATEGY"]').click();
 await page.locator('[data-weekly-mode="LIVE_ONLY"]').click();
 await page.locator("[data-weekly-series]").first().click();
 const weeklyLiveDetail = await page.locator("#weekly-detail").textContent();
-await page.locator('[data-weekly-mode="LIVE_PLUS_BACKTEST"]').click();
-const weeklyModePressed = await page.locator('[data-weekly-mode="LIVE_PLUS_BACKTEST"]').getAttribute("aria-pressed");
-await page.locator("[data-weekly-series]").first().click();
-const weeklyHybridDetail = await page.locator("#weekly-detail").textContent();
+const weeklyLivePressed = await page.locator('[data-weekly-mode="LIVE_ONLY"]').getAttribute("aria-pressed");
+const weeklyHybridMode = page.locator('[data-weekly-mode="LIVE_PLUS_BACKTEST"]');
+const weeklyHybridDisabled = await weeklyHybridMode.isDisabled();
+const weeklyHybridTitle = await weeklyHybridMode.getAttribute("title");
+let weeklyModePressed = await weeklyHybridMode.getAttribute("aria-pressed");
+let weeklyHybridDetail = null;
+if (!weeklyHybridDisabled) {
+  await weeklyHybridMode.click();
+  weeklyModePressed = await weeklyHybridMode.getAttribute("aria-pressed");
+  await page.locator("[data-weekly-series]").first().click();
+  weeklyHybridDetail = await page.locator("#weekly-detail").textContent();
+}
 checks.push(check(
   "Weekly returns disclose live and hybrid strategy evidence without enabling the partial week",
   weeklyRows === 9
     && benchmarkRows === 9
     && currentWeekIncluded === false
-    && weeklyModePressed === "true"
+    && weeklyLivePressed === "true"
     && weeklyLiveDetail?.includes("Live only")
     && weeklyLiveDetail.includes("Accepted observations")
-    && weeklyHybridDetail?.includes("Live plus backtest")
-    && weeklyHybridDetail.includes("Accepted observations"),
+    && (weeklyHybridDisabled
+      ? weeklyModePressed === "false" && weeklyHybridTitle?.includes("not PROVEN_COMPATIBLE")
+      : weeklyModePressed === "true"
+        && weeklyHybridDetail?.includes("Live plus backtest")
+        && weeklyHybridDetail.includes("Accepted observations")),
   {
     benchmark_rows: benchmarkRows,
+    hybrid_available: !weeklyHybridDisabled,
     hybrid_detail_visible: weeklyHybridDetail?.includes("Live plus backtest"),
     hybrid_pressed: weeklyModePressed,
+    hybrid_title: weeklyHybridTitle,
     live_detail_visible: weeklyLiveDetail?.includes("Live only"),
+    live_pressed: weeklyLivePressed,
     partial_week_enabled: currentWeekIncluded,
     strategy_rows: weeklyRows,
   },

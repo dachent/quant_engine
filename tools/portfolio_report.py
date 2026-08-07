@@ -336,6 +336,17 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             ].add(_date(record.get("date"), "calendar.date"))
 
     rows: list[dict[str, Any]] = []
+    assignments = _objects(catalog.get("assignments"), "assignments")
+    current_assignments_by_strategy: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for assignment in assignments:
+        if (
+            assignment.get("mapping_status") == "MAPPED"
+            and assignment.get("strategy_id") is not None
+            and assignment.get("effective_end") is None
+        ):
+            current_assignments_by_strategy[
+                _text(assignment.get("strategy_id"), "assignment.strategy_id")
+            ].append(assignment)
     account_live_paths: dict[tuple[str, str], dict[str, Any]] = {}
     canonical_live = _account_live_return_series(catalog)
     for evidence in _objects(
@@ -349,9 +360,44 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
         if canonical is None:
             continue
         account = _object(evidence.get("account"), "evidence.account")
-        for scope in _objects(account.get("account_scopes", []), "account_scopes"):
-            account_id = _text(scope.get("account_id"), "account_scope.account_id")
+        account_scopes = _objects(account.get("account_scopes", []), "account_scopes")
+        scoped_accounts: list[tuple[str, str, str | None]] = [
+            (
+                _text(scope.get("account_id"), "account_scope.account_id"),
+                "EVIDENCE_ACCOUNT_SCOPE",
+                None,
+            )
+            for scope in account_scopes
+        ]
+        if not scoped_accounts:
+            current_assignments = current_assignments_by_strategy.get(strategy_id, [])
+            if len(current_assignments) == 1:
+                assignment = current_assignments[0]
+                assignment_start = assignment.get("effective_start")
+                observed_start = account.get("observed_start")
+                if (
+                    assignment_start is not None
+                    and observed_start is not None
+                    and _date(observed_start, "evidence.account.observed_start")
+                    >= _date(assignment_start, "assignment.effective_start")
+                ):
+                    scoped_accounts = [
+                        (
+                            _text(
+                                assignment.get("account_id"),
+                                "assignment.account_id",
+                            ),
+                            "UNIQUE_CURRENT_EFFECTIVE_DATED_ASSIGNMENT",
+                            _text(
+                                assignment.get("assignment_id"),
+                                "assignment.assignment_id",
+                            ),
+                        )
+                    ]
+        for account_id, binding, assignment_id in scoped_accounts:
             account_live_paths[(account_id, strategy_id)] = {
+                "return_path_account_binding": binding,
+                "return_path_assignment_id": assignment_id,
                 "return_path_authority": "CANONICAL_ACCOUNT_LIVE_STRATEGY_RETURNS",
                 "return_path_cumulative_return": canonical["cumulative_return"],
                 "return_path_evidence_layer": "ACCOUNT_LIVE",
@@ -362,7 +408,6 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
                 "return_path_series_sha256": canonical["return_series_sha256"],
                 "return_path_status": "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH",
             }
-    assignments = _objects(catalog.get("assignments"), "assignments")
     for assignment in assignments:
         account_id = _text(assignment.get("account_id"), "assignment.account_id")
         mapping_status = _text(
