@@ -801,3 +801,90 @@ section[data-view="capital"] .callout-neutral {
   .table-pagination,
   .text-action { display: none !important; }
 }
+
+/* PORT-A11Y-001: durable keyboard, touch, reflow, and reduced-motion contracts. */
+:where(a, button, input, select, summary, [tabindex]):focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.nav-item,
+.segment,
+.ghost-button,
+.strategy-chip,
+.text-action,
+.disclosure-panel summary,
+.search-control input,
+.context-bar select {
+  min-inline-size: 44px;
+  min-height: 44px;
+}
+
+.text-action {
+  align-items: center;
+  padding-inline: 4px;
+}
+
+#factor-model-table,
+#performance-table,
+#historical-gap-table,
+#coverage-table,
+#remediation-table,
+#source-table {
+  min-width: 760px;
+}
+
+.glossary-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  margin: 18px 20px 20px;
+}
+
+.glossary-list > div {
+  border-bottom: 1px solid var(--border);
+  padding: 14px 16px;
+}
+
+.glossary-list dt {
+  color: var(--text);
+  font-weight: 850;
+}
+
+.glossary-list dd {
+  margin: 5px 0 0;
+  color: var(--text-soft);
+  line-height: 1.55;
+}
+
+@media (max-width: 760px) {
+  .nav-item,
+  .segment,
+  .ghost-button,
+  .strategy-chip,
+  .text-action {
+    min-height: 44px;
+  }
+
+  .glossary-list {
+    grid-template-columns: 1fr;
+  }
+
+  .table-wrap,
+  .matrix-shell,
+  .weekly-table-shell {
+    overscroll-behavior-inline: contain;
+    scrollbar-gutter: stable;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
