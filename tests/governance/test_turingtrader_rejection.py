@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+import pytest
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = (
@@ -15,6 +17,12 @@ MANIFEST_PATH = (
     / "source-rejection.v1.json"
 )
 DOCUMENT_PATH = REPOSITORY_ROOT / "docs" / "providers" / "turingtrader.md"
+SCHEMA_PATH = (
+    REPOSITORY_ROOT
+    / "schemas"
+    / "providers"
+    / "turingtrader-source-rejection.schema.json"
+)
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -22,6 +30,58 @@ def _manifest() -> dict[str, Any]:
     value = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     assert isinstance(value, dict)
     return value
+
+
+def _assert_approved_shape(
+    value: Any, schema: dict[str, Any], root: dict[str, Any]
+) -> None:
+    if "$ref" in schema:
+        name = schema["$ref"].removeprefix("#/$defs/")
+        assert name in root["$defs"]
+        _assert_approved_shape(value, root["$defs"][name], root)
+        return
+    if "const" in schema:
+        assert value == schema["const"]
+    if "enum" in schema:
+        assert value in schema["enum"]
+    value_type = schema.get("type")
+    if value_type == "object":
+        assert isinstance(value, dict)
+        properties = schema["properties"]
+        assert schema["additionalProperties"] is False
+        assert set(schema.get("required", [])) <= set(value)
+        assert not (set(value) - set(properties))
+        for key, item in value.items():
+            _assert_approved_shape(item, properties[key], root)
+    elif value_type == "array":
+        assert isinstance(value, list)
+        assert len(value) >= schema.get("minItems", 0)
+        assert len(value) <= schema.get("maxItems", len(value))
+        if schema.get("uniqueItems"):
+            assert len({json.dumps(item, sort_keys=True) for item in value}) == len(value)
+        if "items" in schema:
+            for item in value:
+                _assert_approved_shape(item, schema["items"], root)
+    elif value_type == "string":
+        assert isinstance(value, str)
+        assert len(value) >= schema.get("minLength", 0)
+        if "pattern" in schema:
+            assert re.fullmatch(schema["pattern"], value)
+    elif value_type == "integer":
+        assert isinstance(value, int) and not isinstance(value, bool)
+        assert value >= schema.get("minimum", value)
+
+
+def test_manifest_uses_the_approved_sanitized_derivative_schema() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    _assert_approved_shape(_manifest(), schema, schema)
+    assert schema["additionalProperties"] is False
+
+    forbidden = _manifest()
+    forbidden["verified_source_metadata"][0]["source_locator"] = "private"
+    with pytest.raises(AssertionError):
+        _assert_approved_shape(forbidden, schema, schema)
 
 
 def test_verified_metadata_and_unhydrated_capture_boundary_are_exact() -> None:
