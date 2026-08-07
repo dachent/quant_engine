@@ -2121,6 +2121,8 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     assert "Every weekly display group is rendered and exercised" in qa
     assert "Dependence live and hybrid evidence disclosures are exercised" in qa
     assert "Weekly returns disclose live and hybrid strategy evidence" in qa
+    assert "const weeklyHybridDisabled = await weeklyHybridMode.isDisabled();" in qa
+    assert 'weeklyHybridTitle?.includes("not PROVEN_COMPATIBLE")' in qa
     assert (
         "Privacy-safe account context filters lifecycle, positions, and performance"
         in qa
@@ -2337,6 +2339,7 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
     assert ".weekly-cell" in styles
     assert ".weekly-toggle" in styles
     assert "#factor-model-table" in styles
+    assert "#factor-detail .callout" in styles
     assert "#performance-table" in styles
     assert "#coverage-table" in styles
     assert "@media (prefers-reduced-motion: reduce)" in styles
