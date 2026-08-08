@@ -66,6 +66,19 @@ without preserving stale calculations or hard-coded operator conclusions.
   pre-inception backtest boundary as Dependence. Factor rows remain labeled as
   excess or long-short returns; strategy, ETF style, sector, industry, and core
   benchmark rows retain their declared total-return or proxy basis.
+- Layered strategy underwriting is recomputed for all nine current strategies
+  under `PORT-UNDERWRITE-1`. Authoritative design, exact-version backtest,
+  provider/model live, account live, and implementation reconciliation remain
+  separate. The result combines long-history statistical membership,
+  model-versus-account diagnostics, pre-live-defined regime checks,
+  correlation-one leave-one-out stress, and economic-driver cluster budgets.
+  It is advisory only: automatic drop, allocation, readiness, execution, and
+  order authority are all `NONE`.
+- Data health renders the complete `fact_coverage_matrix`,
+  `observation_windows`, and `attribution_dispositions` payloads. A
+  `NO_ACCEPTED_FACT_PATH` row means no admitted account/fact source exists; it
+  never means zero balance or zero activity. The Factors view renders the
+  governed `selection_boundary` beside the lens methodology.
 - The Candidates view is the hash-locked 2026-07-17 audit appendix. Its 33 rows
   are not `Strategy` identities and cannot update current totals, rank a new
   candidate, authorize diligence, or allocate capital.
@@ -101,6 +114,7 @@ $legacy = Join-Path $engine "_strategy_allocation_audit\model_harness_baseline\c
 $lensRoot = Join-Path $portfolioRoot 'analytics\decomposition-lenses'
 $planBundle = "<hash-bound decomposition planning bundle>"
 $weekly = Join-Path $portfolioRoot 'analytics\weekly-returns'
+$replication = Join-Path $portfolioRoot 'analytics\replication'
 $freshness = "<exact hash-bound release freshness-health.json>"
 
 uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
@@ -108,6 +122,7 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `
+  --replication-root $replication `
   --freshness-health $freshness
 ```
 
@@ -151,6 +166,7 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `
+  --replication-root $replication `
   --freshness-health $freshness
 ```
 
@@ -162,7 +178,15 @@ to the analytics generations, dynamic
 estimator disclosures when present, measured/unavailable dependence counts
 derived exactly from the accepted generation, live-only default authority,
 optional version-matched backtest composition, explicit unavailable facts, and
-frozen-appendix isolation.
+frozen-appendix isolation. It also proves that all four previously passive
+evidence sections are consumed by the renderer and that the nine-strategy
+underwriting ledger reconciles without fabricated causal components or any
+automatic decision authority.
+
+The Windows-first end-to-end operator procedure, including the full evidence
+stack, non-duplication rules, visual QA, Candidate interaction QA last, and
+coordinated publication, is in
+[`portfolio-underwriting-rollforward.md`](portfolio-underwriting-rollforward.md).
 
 The Weekly returns view exposes all accepted strategies, U.S. and European
 economic factors, U.S. equity and multi-asset ETF styles, sectors, 49
@@ -279,6 +303,7 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `
+  --replication-root $replication `
   --freshness-health $freshness
 ```
 

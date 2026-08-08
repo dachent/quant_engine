@@ -1,5 +1,10 @@
 # Governed data rollforward
 
+For the Windows operator sequence that rolls forward the expanded per-strategy
+underwriting, all analysis lenses, the control panel, Candidate interaction QA
+last, and the coordinated release, use
+[`portfolio-underwriting-rollforward.md`](portfolio-underwriting-rollforward.md).
+
 `DATA-PIPE-001` turns an accepted private source-to-panel dependency graph into
 one explicit, resumable release. The pipeline specification is private because
 it contains absolute data paths. It names every source artifact, immutable

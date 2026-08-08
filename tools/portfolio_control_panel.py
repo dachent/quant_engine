@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import hashlib
 import json
 import math
@@ -38,8 +38,8 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-PANEL_SCHEMA_VERSION: Final = 15
-BUILDER_VERSION: Final = "2.6.0"
+PANEL_SCHEMA_VERSION: Final = 16
+BUILDER_VERSION: Final = "2.7.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -58,6 +58,11 @@ ECONOMIC_DRIVER_CLUSTERS = (
     Path(__file__).resolve().parents[1]
     / "contracts"
     / "portfolio-economic-driver-clusters-v1.json"
+)
+STRATEGY_UNDERWRITING_POLICY = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-strategy-underwriting-v1.json"
 )
 DEFAULT_TEMPLATE_ROOT = (
     Path(__file__).resolve().parents[1] / "apps" / "portfolio-control-panel"
@@ -2319,6 +2324,859 @@ def _canonical_strategy_series_contracts(
     return contracts
 
 
+def _optional_float(value: object, field_name: str) -> float | None:
+    return None if value is None else _finite_float(value, field_name)
+
+
+def _quantile(values: Sequence[float], probability: float) -> float:
+    if not values:
+        raise ControlPanelValidationError("quantile input is empty")
+    if probability < 0 or probability > 1:
+        raise ControlPanelValidationError("quantile probability is outside [0, 1]")
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * probability
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def _mean_or_none(values: Sequence[float]) -> str | None:
+    return _number_text(sum(values) / len(values)) if values else None
+
+
+def _weekly_values(
+    row: Mapping[str, Any],
+    *,
+    evidence_mode: str | None = None,
+) -> dict[str, float]:
+    if evidence_mode is None:
+        raw_values = _object(row.get("values"), "weekly values")
+        raw_metadata = _object(row.get("observation_meta"), "weekly metadata")
+    else:
+        modes = _object(row.get("values_by_mode"), "weekly values_by_mode")
+        metadata_modes = _object(
+            row.get("observation_meta_by_mode"),
+            "weekly observation_meta_by_mode",
+        )
+        raw = modes.get(evidence_mode)
+        raw_metadata_mode = metadata_modes.get(evidence_mode)
+        if raw is None or raw_metadata_mode is None:
+            return {}
+        raw_values = _object(raw, f"weekly values_by_mode.{evidence_mode}")
+        raw_metadata = _object(
+            raw_metadata_mode,
+            f"weekly observation_meta_by_mode.{evidence_mode}",
+        )
+    accepted: dict[str, float] = {}
+    for week, value in raw_values.items():
+        if value is None:
+            continue
+        try:
+            date.fromisoformat(week)
+        except ValueError as exc:
+            raise ControlPanelValidationError(
+                f"weekly return has an invalid week: {week}"
+            ) from exc
+        metadata = raw_metadata.get(week)
+        if (
+            not isinstance(metadata, list)
+            or len(metadata) < 4
+            or metadata[3] != "COMPLETE_WITHIN_ACCEPTED_CALENDAR"
+        ):
+            continue
+        accepted[week] = _finite_float(value, f"weekly return {week}")
+    return accepted
+
+
+def _factor_row_for_strategy(
+    decomposition_lenses: Mapping[str, Any],
+    evidence_mode: str,
+    strategy_name: str,
+    lens_id: str = "ECONOMIC_FACTOR",
+) -> dict[str, Any] | None:
+    modes = _object(decomposition_lenses.get("modes"), "decomposition lens modes")
+    lenses_value = modes.get(evidence_mode)
+    if lenses_value is None:
+        return None
+    lenses = _objects(lenses_value, f"decomposition lenses {evidence_mode}")
+    lens = next((row for row in lenses if row.get("lens_id") == lens_id), None)
+    if lens is None:
+        return None
+    return next(
+        (
+            row
+            for row in _objects(lens.get("series"), f"{lens_id} series")
+            if row.get("series_id") == strategy_name
+        ),
+        None,
+    )
+
+
+def _model_account_gap_underwriting(
+    strategy: Mapping[str, Any], gap_policy: Mapping[str, Any]
+) -> dict[str, Any]:
+    strategy_name = _text(strategy.get("strategy_name"), "gap strategy_name")
+    comparison_status = str(strategy.get("provider_comparison_status") or "UNAVAILABLE")
+    available = comparison_status.startswith("DESCRIPTIVE_EXACT_DATE")
+    total_gap = (
+        _optional_float(
+            strategy.get("provider_cumulative_gap"),
+            f"provider cumulative gap {strategy_name}",
+        )
+        if available
+        else None
+    )
+    beta = (
+        _optional_float(strategy.get("provider_beta"), f"provider beta {strategy_name}")
+        if available
+        else None
+    )
+    correlation = (
+        _optional_float(
+            strategy.get("provider_correlation"),
+            f"provider correlation {strategy_name}",
+        )
+        if available
+        else None
+    )
+    tracking_error = (
+        _optional_float(
+            strategy.get("provider_tracking_error_annualized"),
+            f"provider tracking error {strategy_name}",
+        )
+        if available
+        else None
+    )
+    if not available:
+        signature = "UNAVAILABLE_NO_ACCEPTED_MODEL_OR_PROVIDER_COMPARISON"
+    elif (
+        correlation is not None
+        and beta is not None
+        and tracking_error is not None
+        and correlation
+        >= _finite_float(
+            gap_policy.get("path_aligned_minimum_correlation"),
+            "path_aligned_minimum_correlation",
+        )
+        and _finite_float(
+            gap_policy.get("path_aligned_beta_minimum"),
+            "path_aligned_beta_minimum",
+        )
+        <= beta
+        <= _finite_float(
+            gap_policy.get("path_aligned_beta_maximum"),
+            "path_aligned_beta_maximum",
+        )
+        and tracking_error
+        <= _finite_float(
+            gap_policy.get("path_aligned_maximum_tracking_error_annualized"),
+            "path_aligned_maximum_tracking_error_annualized",
+        )
+    ):
+        signature = "PATH_ALIGNED_PERSISTENT_LEVEL_DIFFERENCE"
+    elif correlation is not None and correlation >= _finite_float(
+        gap_policy.get("partial_path_minimum_correlation"),
+        "partial_path_minimum_correlation",
+    ):
+        signature = "PARTIAL_PATH_DIVERGENCE"
+    else:
+        signature = "MATERIAL_PATH_DIVERGENCE"
+    unresolved_causes: list[str] = []
+    if available:
+        if (
+            strategy.get("provider_comparison_version_compatibility")
+            != "PROVEN_COMPATIBLE"
+        ):
+            unresolved_causes.append("REFERENCE_VERSION_COMPATIBILITY_NOT_PROVEN")
+        if strategy.get("cash_drag_status") != "AVAILABLE":
+            unresolved_causes.append("COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE")
+        if strategy.get("fees_status") != "AVAILABLE_COMPLETE":
+            unresolved_causes.append("ACCOUNT_BOUND_FEE_PATH_INCOMPLETE")
+        unresolved_causes.extend(
+            [
+                "ORDER_TIMING_AND_FILL_ATTRIBUTION_UNAVAILABLE",
+                "SLIPPAGE_AND_TRADE_LEVEL_CAUSAL_ATTRIBUTION_UNAVAILABLE",
+            ]
+        )
+    # No current fact is causally bound to the exact-date gap. The residual is
+    # therefore the complete total, rather than a fabricated component split.
+    unresolved_residual = total_gap
+    return {
+        "status": (
+            "QUANTIFIED_TOTAL_CAUSAL_COMPONENTS_UNRESOLVED"
+            if available
+            else "UNAVAILABLE_NO_ACCEPTED_MODEL_OR_PROVIDER_COMPARISON"
+        ),
+        "comparison_status": comparison_status,
+        "observed_start": strategy.get("provider_comparison_observed_start"),
+        "observed_end": strategy.get("provider_comparison_observed_end"),
+        "observations": strategy.get("provider_comparison_observations"),
+        "reference_cumulative_return": strategy.get(
+            "provider_reference_cumulative_return"
+        ),
+        "account_cumulative_return": strategy.get("provider_account_cumulative_return"),
+        "total_gap": _number_text(total_gap) if total_gap is not None else None,
+        "causally_bound_components": [],
+        "unresolved_residual": (
+            _number_text(unresolved_residual)
+            if unresolved_residual is not None
+            else None
+        ),
+        "reconciliation_error": (
+            _number_text(total_gap - unresolved_residual)
+            if total_gap is not None and unresolved_residual is not None
+            else None
+        ),
+        "signature": signature,
+        "beta": strategy.get("provider_beta"),
+        "correlation": strategy.get("provider_correlation"),
+        "tracking_error_annualized": strategy.get("provider_tracking_error_annualized"),
+        "unresolved_causes": unresolved_causes,
+        "cost_boundary": gap_policy.get("subscription_cost_rule"),
+    }
+
+
+def _regime_underwriting(
+    strategy: Mapping[str, Any],
+    weekly_rows: Mapping[str, Mapping[str, Any]],
+    regime_policy: Mapping[str, Any],
+    *,
+    matched_backtest_observations: int,
+) -> dict[str, Any]:
+    strategy_name = _text(strategy.get("strategy_name"), "regime strategy_name")
+    benchmark_specs = _object(
+        regime_policy.get("benchmark_series"), "regime benchmark series"
+    )
+    benchmark_id = strategy.get("benchmark_id")
+    specification = (
+        _object(benchmark_specs[benchmark_id], f"benchmark {benchmark_id}")
+        if isinstance(benchmark_id, str) and benchmark_id in benchmark_specs
+        else None
+    )
+    benchmark_map: dict[str, float] = {}
+    accepted_specification: dict[str, Any] | None = None
+    if specification is not None:
+        components_value = specification.get("components")
+        if not isinstance(components_value, list) or not components_value:
+            raise ControlPanelValidationError(
+                f"benchmark specification lacks components: {benchmark_id}"
+            )
+        component_ids = [
+            _text(value, f"benchmark component {benchmark_id}")
+            for value in components_value
+        ]
+        component_maps: list[dict[str, float]] = []
+        for component_id in component_ids:
+            component = weekly_rows.get(component_id)
+            if component is None:
+                component_maps = []
+                break
+            component_maps.append(_weekly_values(component))
+        if component_maps:
+            common_weeks = set(component_maps[0])
+            for values in component_maps[1:]:
+                common_weeks &= set(values)
+            benchmark_map = {
+                week: sum(values[week] for values in component_maps)
+                / len(component_maps)
+                for week in sorted(common_weeks)
+            }
+        accepted_specification = {
+            **specification,
+            "benchmark_id": benchmark_id,
+            "components": component_ids,
+        }
+
+    strategy_weekly = weekly_rows.get(f"strategy:{strategy_name}")
+    live_values = (
+        _weekly_values(strategy_weekly, evidence_mode="LIVE_ONLY")
+        if strategy_weekly is not None
+        else {}
+    )
+    hybrid_values = (
+        _weekly_values(strategy_weekly, evidence_mode="LIVE_PLUS_BACKTEST")
+        if strategy_weekly is not None and matched_backtest_observations > 0
+        else {}
+    )
+    live_start_value = strategy.get("account_live_observed_start")
+    live_start = (
+        date.fromisoformat(str(live_start_value))
+        if isinstance(live_start_value, str) and live_start_value
+        else None
+    )
+    live_week = (
+        (live_start - timedelta(days=live_start.weekday())).isoformat()
+        if live_start is not None
+        else None
+    )
+    threshold_history = (
+        [
+            value
+            for week, value in benchmark_map.items()
+            if live_week and week < live_week
+        ]
+        if live_week
+        else []
+    )
+    minimum_threshold_weeks = int(
+        _finite_float(
+            regime_policy.get("minimum_threshold_history_weeks"),
+            "minimum_threshold_history_weeks",
+        )
+    )
+    minimum_prehistory_weeks = int(
+        _finite_float(
+            regime_policy.get("minimum_matched_prehistory_regime_weeks"),
+            "minimum_matched_prehistory_regime_weeks",
+        )
+    )
+    minimum_live_weeks = int(
+        _finite_float(
+            regime_policy.get("minimum_live_regime_weeks_for_distribution_comparison"),
+            "minimum_live_regime_weeks_for_distribution_comparison",
+        )
+    )
+    threshold_status = (
+        "AVAILABLE_PRELIVE_BENCHMARK_HISTORY"
+        if len(threshold_history) >= minimum_threshold_weeks
+        else "UNAVAILABLE_INSUFFICIENT_PRELIVE_BENCHMARK_HISTORY"
+    )
+    lower_tail_threshold: float | None = None
+    high_absolute_threshold: float | None = None
+    regime_rows: list[dict[str, Any]] = []
+    if threshold_status == "AVAILABLE_PRELIVE_BENCHMARK_HISTORY":
+        lower_tail_threshold = _quantile(
+            threshold_history,
+            _finite_float(regime_policy.get("lower_tail_quantile"), "lower tail"),
+        )
+        high_absolute_threshold = _quantile(
+            [abs(value) for value in threshold_history],
+            _finite_float(
+                regime_policy.get("high_absolute_return_quantile"),
+                "high absolute return quantile",
+            ),
+        )
+        predicates = {
+            "BENCHMARK_NEGATIVE": lambda value: value < 0,
+            "BENCHMARK_LOWER_DECILE": lambda value: value <= lower_tail_threshold,
+            "BENCHMARK_HIGH_ABSOLUTE_RETURN": lambda value: (
+                abs(value) >= high_absolute_threshold
+            ),
+        }
+        regimes_value = regime_policy.get("regimes")
+        if not isinstance(regimes_value, list) or not regimes_value:
+            raise ControlPanelValidationError("underwriting regimes are absent")
+        for raw_regime_id in regimes_value:
+            regime_id = _text(raw_regime_id, "underwriting regime")
+            predicate = predicates.get(regime_id)
+            if predicate is None:
+                raise ControlPanelValidationError(
+                    f"unsupported underwriting regime: {regime_id}"
+                )
+            live_observations = [
+                (week, live_values[week], benchmark_map[week])
+                for week in sorted(set(live_values) & set(benchmark_map))
+                if live_week and week >= live_week and predicate(benchmark_map[week])
+            ]
+            prehistory_observations = [
+                (week, hybrid_values[week], benchmark_map[week])
+                for week in sorted(set(hybrid_values) & set(benchmark_map))
+                if live_week and week < live_week and predicate(benchmark_map[week])
+            ]
+            prehistory_values = [item[1] for item in prehistory_observations]
+            empirical_range = (
+                (
+                    _quantile(
+                        prehistory_values,
+                        _finite_float(
+                            regime_policy.get("empirical_lower_quantile"),
+                            "empirical lower quantile",
+                        ),
+                    ),
+                    _quantile(
+                        prehistory_values,
+                        _finite_float(
+                            regime_policy.get("empirical_upper_quantile"),
+                            "empirical upper quantile",
+                        ),
+                    ),
+                )
+                if len(prehistory_values) >= minimum_prehistory_weeks
+                else None
+            )
+            outside_count = (
+                sum(
+                    value < empirical_range[0] or value > empirical_range[1]
+                    for _, value, _ in live_observations
+                )
+                if empirical_range is not None
+                else None
+            )
+            if not live_observations:
+                state = "UNAVAILABLE_NO_LIVE_REGIME_OBSERVATIONS"
+            elif empirical_range is None:
+                state = "EVENT_EVIDENCE_ONLY_NO_MATCHED_PREHISTORY_RANGE"
+            elif len(live_observations) < minimum_live_weeks:
+                state = "EVENT_EVIDENCE_ONLY_INSUFFICIENT_LIVE_SAMPLE"
+            else:
+                state = "AVAILABLE_EMPIRICAL_PREHISTORY_COMPARISON"
+            latest = live_observations[-1] if live_observations else None
+            regime_rows.append(
+                {
+                    "regime_id": regime_id,
+                    "status": state,
+                    "live_observations": len(live_observations),
+                    "live_mean_return": _mean_or_none(
+                        [item[1] for item in live_observations]
+                    ),
+                    "live_positive_fraction": (
+                        _number_text(
+                            sum(item[1] > 0 for item in live_observations)
+                            / len(live_observations)
+                        )
+                        if live_observations
+                        else None
+                    ),
+                    "benchmark_live_mean_return": _mean_or_none(
+                        [item[2] for item in live_observations]
+                    ),
+                    "matched_prehistory_observations": len(prehistory_observations),
+                    "matched_prehistory_mean_return": _mean_or_none(prehistory_values),
+                    "empirical_p05": (
+                        _number_text(empirical_range[0])
+                        if empirical_range is not None
+                        else None
+                    ),
+                    "empirical_p95": (
+                        _number_text(empirical_range[1])
+                        if empirical_range is not None
+                        else None
+                    ),
+                    "outside_empirical_range_observations": outside_count,
+                    "latest_week": latest[0] if latest is not None else None,
+                    "latest_strategy_return": (
+                        _number_text(latest[1]) if latest is not None else None
+                    ),
+                    "latest_benchmark_return": (
+                        _number_text(latest[2]) if latest is not None else None
+                    ),
+                    "latest_event_range_status": (
+                        (
+                            "WITHIN_EMPIRICAL_PREHISTORY_90_PERCENT_RANGE"
+                            if empirical_range[0] <= latest[1] <= empirical_range[1]
+                            else "OUTSIDE_EMPIRICAL_PREHISTORY_90_PERCENT_RANGE_SINGLE_EVENT"
+                        )
+                        if latest is not None and empirical_range is not None
+                        else "UNAVAILABLE_NO_EMPIRICAL_PREHISTORY_RANGE"
+                    ),
+                }
+            )
+        if any(
+            item["status"] == "AVAILABLE_EMPIRICAL_PREHISTORY_COMPARISON"
+            for item in regime_rows
+        ):
+            status = "AVAILABLE_VERSION_MATCHED_PREHISTORY_COMPARISON"
+        elif live_values:
+            status = "DESCRIPTIVE_LIVE_EVENTS_ONLY"
+        else:
+            status = "UNAVAILABLE_NO_ACCOUNT_LIVE_WEEKLY_RETURNS"
+    else:
+        status = threshold_status
+    return {
+        "status": status,
+        "threshold_status": threshold_status,
+        "threshold_history_weeks": len(threshold_history),
+        "benchmark": accepted_specification,
+        "live_inception": live_start.isoformat() if live_start else None,
+        "lower_tail_threshold": (
+            _number_text(lower_tail_threshold)
+            if lower_tail_threshold is not None
+            else None
+        ),
+        "high_absolute_return_threshold": (
+            _number_text(high_absolute_threshold)
+            if high_absolute_threshold is not None
+            else None
+        ),
+        "regimes": regime_rows,
+        "interpretation": regime_policy.get("interpretation"),
+    }
+
+
+def _strategy_underwriting(
+    strategies: Sequence[Mapping[str, Any]],
+    decomposition_lenses: Mapping[str, Any],
+    dependence: Mapping[str, Any],
+    weekly_returns: Mapping[str, Any],
+    portfolio_as_of: str,
+) -> tuple[dict[str, Any], str]:
+    """Compose an advisory evidence ledger without creating new fact authority."""
+
+    policy = _load_json(STRATEGY_UNDERWRITING_POLICY, "underwriting policy")
+    if (
+        policy.get("schema_version") != 1
+        or policy.get("policy_id") != "PORT-UNDERWRITE-1"
+    ):
+        raise ControlPanelValidationError("underwriting policy identity is unsupported")
+    policy_hash = _hash(STRATEGY_UNDERWRITING_POLICY)
+    gap_policy = _object(policy.get("model_account_gap"), "model_account_gap policy")
+    regime_policy = _object(policy.get("regime_conformance"), "regime policy")
+    weekly_rows = {
+        _text(row.get("series_id"), "weekly series_id"): row
+        for row in _objects(weekly_returns.get("series"), "weekly series")
+    }
+    cluster_budget = _object(
+        dependence.get("economic_driver_cluster_budget"),
+        "economic_driver_cluster_budget",
+    )
+    clusters = _objects(cluster_budget.get("clusters"), "economic driver clusters")
+    correlation_one = _object(dependence.get("correlation_one"), "correlation_one")
+    components = {
+        _text(row.get("series_id"), "correlation-one series_id"): row
+        for row in _objects(
+            correlation_one.get("components"), "correlation_one components"
+        )
+    }
+    total_stress = _finite_float(correlation_one.get("loss"), "correlation_one loss")
+    modes = _object(decomposition_lenses.get("modes"), "decomposition modes")
+
+    rows: list[dict[str, Any]] = []
+    for strategy in strategies:
+        strategy_id = _text(strategy.get("strategy_id"), "underwriting strategy_id")
+        strategy_name = _text(
+            strategy.get("strategy_name"), "underwriting strategy_name"
+        )
+        live_factor = _factor_row_for_strategy(
+            decomposition_lenses, "LIVE_ONLY", strategy_name
+        )
+        hybrid_factor = _factor_row_for_strategy(
+            decomposition_lenses, "LIVE_PLUS_BACKTEST", strategy_name
+        )
+        hybrid_composition = (
+            _object(
+                hybrid_factor.get("series_composition", {}),
+                f"hybrid factor composition {strategy_name}",
+            )
+            if hybrid_factor is not None
+            else {}
+        )
+        matched_backtest_observations = int(
+            _finite_float(
+                hybrid_composition.get("backtest_observations_used", 0),
+                f"matched backtest observations {strategy_name}",
+            )
+        )
+        long_history_status = (
+            "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE"
+            if matched_backtest_observations > 0
+            else "UNAVAILABLE_NO_VERSION_MATCHED_BACKTEST_PREHISTORY"
+        )
+        lens_evidence: list[dict[str, Any]] = []
+        for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+            if modes.get(mode) is None:
+                continue
+            for lens in _objects(modes[mode], f"decomposition mode {mode}"):
+                series_row = next(
+                    (
+                        item
+                        for item in _objects(lens.get("series"), "decomposition series")
+                        if item.get("series_id") == strategy_name
+                    ),
+                    None,
+                )
+                if series_row is None:
+                    continue
+                coverage = (
+                    _object(series_row.get("coverage"), "underwriting coverage")
+                    if series_row.get("coverage") is not None
+                    else {}
+                )
+                quality = _object(
+                    series_row.get("model_quality", {}),
+                    "underwriting model quality",
+                )
+                lens_evidence.append(
+                    {
+                        "evidence_mode": mode,
+                        "lens_id": _text(lens.get("lens_id"), "underwriting lens_id"),
+                        "status": _text(
+                            series_row.get("status"), "underwriting lens status"
+                        ),
+                        "aligned_observations": coverage.get("aligned_observations"),
+                        "holdout_predicted_r_squared": quality.get(
+                            "holdout_predicted_r_squared"
+                        ),
+                    }
+                )
+
+        gap = _model_account_gap_underwriting(strategy, gap_policy)
+        regimes = _regime_underwriting(
+            strategy,
+            weekly_rows,
+            regime_policy,
+            matched_backtest_observations=matched_backtest_observations,
+        )
+        design_status = str(strategy.get("design_status") or "UNAVAILABLE")
+        design_authority_status = (
+            "AUTHORITATIVE_DESIGN_AVAILABLE"
+            if design_status == "EVIDENCED"
+            else "INFERRED_ECONOMIC_ARCHETYPE_ONLY"
+        )
+        design_conformance_status = (
+            "AUTHORITATIVE_DESIGN_AND_EMPIRICAL_PREHISTORY_COMPARABLE"
+            if design_authority_status == "AUTHORITATIVE_DESIGN_AVAILABLE"
+            and regimes["status"] == "AVAILABLE_VERSION_MATCHED_PREHISTORY_COMPARISON"
+            else "DIAGNOSTIC_ONLY_NOT_AUTHORITATIVE_DESIGN_CONFORMANCE"
+        )
+
+        cluster = next(
+            (item for item in clusters if strategy_name in item.get("members", [])),
+            None,
+        )
+        component = components.get(strategy_name)
+        loss_contribution = (
+            _finite_float(
+                component.get("loss_contribution"),
+                f"loss contribution {strategy_name}",
+            )
+            if component is not None
+            else None
+        )
+        portfolio_fit_status = (
+            "CLUSTER_BUDGET_BREACH"
+            if cluster and str(cluster.get("budget_status", "")).startswith("BREACHES")
+            else "WITHIN_CURRENT_CLUSTER_STRESS_BOUNDARY"
+        )
+        portfolio_fit = {
+            "cluster_id": cluster.get("cluster_id") if cluster else None,
+            "cluster_label": cluster.get("label") if cluster else None,
+            "cluster_budget_status": cluster.get("budget_status") if cluster else None,
+            "cluster_allocation_weight": cluster.get("allocation_weight")
+            if cluster
+            else None,
+            "cluster_loss_contribution": cluster.get("loss_contribution")
+            if cluster
+            else None,
+            "cluster_observed_pair_correlation_minimum": (
+                cluster.get("observed_pair_correlation_minimum") if cluster else None
+            ),
+            "cluster_observed_pair_correlation_maximum": (
+                cluster.get("observed_pair_correlation_maximum") if cluster else None
+            ),
+            "strategy_systematic_weight": strategy.get("systematic_weight"),
+            "strategy_correlation_one_loss_contribution": (
+                _number_text(loss_contribution)
+                if loss_contribution is not None
+                else None
+            ),
+            "strategy_share_of_correlation_one_loss": (
+                _number_text(loss_contribution / total_stress)
+                if loss_contribution is not None and total_stress
+                else None
+            ),
+            "leave_one_out_correlation_one_loss": (
+                _number_text(total_stress - loss_contribution)
+                if loss_contribution is not None
+                else None
+            ),
+            "leave_one_out_stress_reduction": (
+                _number_text(loss_contribution)
+                if loss_contribution is not None
+                else None
+            ),
+            "portfolio_fit_status": portfolio_fit_status,
+        }
+
+        recommendation_reasons: list[str] = []
+        total_gap = _optional_float(
+            gap.get("total_gap"), f"underwriting total gap {strategy_name}"
+        )
+        if strategy.get("hwm_scope") == "EXCLUDED_DE_MINIMIS":
+            advisory_action = "DE_MINIMIS_VISIBLE_NO_RESEARCH_PRIORITY"
+            recommendation_reasons.append("EXPLICIT_DE_MINIMIS_HWM_EXCLUSION")
+        elif total_gap is not None and total_gap <= -0.05:
+            advisory_action = "REVIEW_IMPLEMENTATION_GAP_BEFORE_CAPITAL_DECISION"
+            recommendation_reasons.extend(
+                ["MODEL_ACCOUNT_GAP_AT_OR_BELOW_MINUS_FIVE_PERCENT", gap["signature"]]
+            )
+        elif portfolio_fit_status == "CLUSTER_BUDGET_BREACH":
+            advisory_action = "REVIEW_SHARED_CLUSTER_BUDGET_NOT_PROVIDER_LABEL"
+            recommendation_reasons.append("SHARED_ECONOMIC_DRIVER_CLUSTER_BREACH")
+        elif long_history_status != "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE":
+            advisory_action = (
+                "RETAIN_MONITORING_INSUFFICIENT_LONG_HISTORY_FOR_DROP_DECISION"
+            )
+            recommendation_reasons.append("NO_VERSION_MATCHED_BACKTEST_PREHISTORY")
+        else:
+            advisory_action = "RETAIN_MONITORING_NO_DROP_AUTHORITY"
+            recommendation_reasons.append("NO_AUTOMATED_DROP_RULE_TRIGGERED")
+        if design_authority_status != "AUTHORITATIVE_DESIGN_AVAILABLE":
+            recommendation_reasons.append("AUTHORITATIVE_DESIGN_INTENT_UNAVAILABLE")
+
+        evidence = strategy.get("provider_evidence")
+        provider_evidence = (
+            _object(evidence, f"provider evidence {strategy_name}")
+            if evidence is not None
+            else {}
+        )
+
+        def factor_value(
+            row: Mapping[str, Any] | None, container: str, field: str
+        ) -> object:
+            if row is None or row.get(container) is None:
+                return None
+            return _object(
+                row.get(container), f"underwriting {container} {strategy_name}"
+            ).get(field)
+
+        rows.append(
+            {
+                "strategy_id": strategy_id,
+                "strategy_name": strategy_name,
+                "evidence_layers": {
+                    "design": {
+                        "status": design_status,
+                        "authority_status": design_authority_status,
+                        "version_ref": strategy.get("design_version_ref"),
+                        "economic_family": strategy.get("economic_family"),
+                    },
+                    "backtest": {
+                        "status": strategy.get("backtest_status"),
+                        "version_ref": strategy.get("backtest_version_ref"),
+                        "compatibility_status": strategy.get(
+                            "version_compatibility_status"
+                        ),
+                        "matched_observations": matched_backtest_observations,
+                    },
+                    "provider_or_model_live": {
+                        "status": (
+                            "AVAILABLE"
+                            if provider_evidence.get("provider") is not None
+                            or gap["total_gap"] is not None
+                            else "UNAVAILABLE"
+                        ),
+                        "comparison_status": gap["comparison_status"],
+                        "observed_start": gap["observed_start"],
+                        "observed_end": gap["observed_end"],
+                    },
+                    "account_live": {
+                        "status": strategy.get("account_live_status"),
+                        "observed_start": strategy.get("account_live_observed_start"),
+                        "observed_end": strategy.get("account_live_observed_end"),
+                        "observations": strategy.get(
+                            "account_live_return_observations"
+                        ),
+                        "cumulative_return": strategy.get(
+                            "account_live_cumulative_return"
+                        ),
+                        "max_drawdown": strategy.get("account_live_max_drawdown"),
+                    },
+                    "implementation_reconciliation": {
+                        "status": gap["status"],
+                        "comparison_status": gap["comparison_status"],
+                    },
+                },
+                "design_fit": {
+                    "status": design_authority_status,
+                    "economic_family": strategy.get("economic_family"),
+                    "portfolio_role": cluster.get("label") if cluster else None,
+                    "role_authority": (
+                        "GOVERNED_ECONOMIC_DRIVER_CLUSTER"
+                        if cluster is not None
+                        else "UNAVAILABLE"
+                    ),
+                    "conformance_status": design_conformance_status,
+                },
+                "long_history": {
+                    "status": long_history_status,
+                    "matched_backtest_observations": matched_backtest_observations,
+                    "live_aligned_observations": factor_value(
+                        live_factor, "coverage", "aligned_observations"
+                    ),
+                    "hybrid_aligned_observations": factor_value(
+                        hybrid_factor, "coverage", "aligned_observations"
+                    ),
+                    "live_net_alpha": factor_value(
+                        live_factor, "alpha", "net_annualized"
+                    ),
+                    "hybrid_net_alpha": factor_value(
+                        hybrid_factor, "alpha", "net_annualized"
+                    ),
+                    "live_holdout_predicted_r_squared": factor_value(
+                        live_factor,
+                        "model_quality",
+                        "holdout_predicted_r_squared",
+                    ),
+                    "hybrid_holdout_predicted_r_squared": factor_value(
+                        hybrid_factor,
+                        "model_quality",
+                        "holdout_predicted_r_squared",
+                    ),
+                    "lens_evidence": lens_evidence,
+                },
+                "model_account_gap": gap,
+                "regime_conformance": regimes,
+                "portfolio_fit": portfolio_fit,
+                "advisory_disposition": {
+                    "action": advisory_action,
+                    "reasons": recommendation_reasons,
+                    "drop_decision_status": "NO_AUTOMATIC_DROP_AUTHORITY",
+                    "allocation_effect": "NONE",
+                    "execution_effect": "NONE",
+                },
+            }
+        )
+    if len(rows) != 9 or {row["strategy_id"] for row in rows} != {
+        str(row.get("strategy_id")) for row in strategies
+    }:
+        raise ControlPanelValidationError("underwriting strategy boundary differs")
+    return (
+        {
+            "schema_version": 1,
+            "policy_id": policy["policy_id"],
+            "policy_sha256": policy_hash,
+            "as_of_date": portfolio_as_of,
+            "authority_boundary": _object(
+                policy.get("decision_boundary"), "underwriting decision boundary"
+            ),
+            "methodology": {
+                "evidence_layer_rule": "SEPARATE_NEVER_SILENTLY_CONCATENATED",
+                "long_history_rule": "EXACT_VERSION_MATCH_REQUIRED",
+                "gap_rule": gap_policy.get("causal_component_rule"),
+                "regime_rule": regime_policy.get("threshold_estimation"),
+                "portfolio_fit_rule": _object(
+                    policy.get("portfolio_fit"), "portfolio fit policy"
+                ).get("cluster_rule"),
+            },
+            "counts": {
+                "strategies": len(rows),
+                "authoritative_design": sum(
+                    row["design_fit"]["status"] == "AUTHORITATIVE_DESIGN_AVAILABLE"
+                    for row in rows
+                ),
+                "version_matched_long_history": sum(
+                    row["long_history"]["status"]
+                    == "AVAILABLE_VERSION_MATCHED_BACKTEST_PLUS_LIVE"
+                    for row in rows
+                ),
+                "quantified_model_account_gap": sum(
+                    row["model_account_gap"]["total_gap"] is not None for row in rows
+                ),
+                "empirical_regime_comparison": sum(
+                    row["regime_conformance"]["status"]
+                    == "AVAILABLE_VERSION_MATCHED_PREHISTORY_COMPARISON"
+                    for row in rows
+                ),
+            },
+            "rows": rows,
+        },
+        policy_hash,
+    )
+
+
 def _panel_data(
     report: Mapping[str, Any],
     report_identity: Mapping[str, str],
@@ -2743,6 +3601,13 @@ def _panel_data(
         }
         for row in strategies
     ]
+    strategy_underwriting, underwriting_policy_hash = _strategy_underwriting(
+        strategies,
+        accepted_decomposition_lenses,
+        dependence_analysis,
+        accepted_weekly_returns,
+        _text(report.get("as_of_date"), "report.as_of_date"),
+    )
     admitted_nav_names = sorted(
         _text(row.get("strategy_name"), "provider NAV strategy_name")
         for row in strategies
@@ -2941,6 +3806,18 @@ def _panel_data(
             "sha256": _hash(ECONOMIC_DRIVER_CLUSTERS),
         },
         {
+            "artifact": "portfolio-strategy-underwriting-policy",
+            "as_of_date": _text(
+                _load_json(
+                    STRATEGY_UNDERWRITING_POLICY,
+                    "strategy underwriting policy",
+                ).get("as_of_date"),
+                "strategy underwriting policy as_of_date",
+            ),
+            "schema": "portfolio-strategy-underwriting-policy/1",
+            "sha256": underwriting_policy_hash,
+        },
+        {
             "artifact": "portfolio-hwm-policy",
             "as_of_date": hwm_policy["material_perimeter"]["exclusions"][0][
                 "effective_date"
@@ -3106,6 +3983,7 @@ def _panel_data(
             "strategy_evidence_source": (
                 evidence_identity["source"] if evidence_identity is not None else None
             ),
+            "underwriting_policy_sha256": underwriting_policy_hash,
             "report_generation_id": report_identity["generation_id"],
             "report_sha256": report_identity["sha256"],
             "replication_generation_id": accepted_replication.get("generation_id"),
@@ -3125,6 +4003,7 @@ def _panel_data(
         "reconciliation_checks": reconciliations,
         "replication_analysis": accepted_replication,
         "strategies": strategies,
+        "strategy_underwriting": strategy_underwriting,
         "hwm_summary": hwm_summary,
         "hybrid_mode_gate": hybrid_mode_gate,
         "weekly_returns": accepted_weekly_returns,
@@ -3788,6 +4667,138 @@ def verify_candidate(
             },
         )
     )
+    fact_matrix_rows = _objects(
+        data.get("fact_coverage_matrix"), "fact coverage matrix"
+    )
+    no_path_rows = [
+        row for row in fact_matrix_rows if row.get("status") == "NO_ACCEPTED_FACT_PATH"
+    ]
+    checks.append(
+        _check(
+            "Published evidence-scope sections are rendered",
+            all(
+                token in javascript
+                for token in (
+                    "data.fact_coverage_matrix",
+                    "data.attribution_dispositions",
+                    "data.observation_windows",
+                    "proxyGovernance.selection_boundary",
+                )
+            )
+            and all(
+                token in html
+                for token in (
+                    'id="fact-coverage-matrix-table"',
+                    'id="attribution-dispositions-table"',
+                    'id="observation-windows-table"',
+                    'id="factor-lens-boundary"',
+                )
+            )
+            and bool(fact_matrix_rows),
+            {
+                "fact_coverage_rows": len(fact_matrix_rows),
+                "no_accepted_fact_path_rows": len(no_path_rows),
+                "attribution_dispositions": len(
+                    _objects(
+                        data.get("attribution_dispositions"),
+                        "attribution dispositions",
+                    )
+                ),
+                "observation_windows": len(
+                    _objects(data.get("observation_windows"), "observation windows")
+                ),
+            },
+        )
+    )
+    underwriting = _object(data.get("strategy_underwriting"), "strategy underwriting")
+    underwriting_rows = _objects(underwriting.get("rows"), "strategy underwriting rows")
+    authority_boundary = _object(
+        underwriting.get("authority_boundary"), "underwriting authority boundary"
+    )
+    expected_layer_keys = {
+        "design",
+        "backtest",
+        "provider_or_model_live",
+        "account_live",
+        "implementation_reconciliation",
+    }
+    gap_reconciles = True
+    for row in underwriting_rows:
+        gap = _object(row.get("model_account_gap"), "underwriting model-account gap")
+        total_gap = _optional_float(gap.get("total_gap"), "underwriting total gap")
+        residual = _optional_float(
+            gap.get("unresolved_residual"), "underwriting unresolved residual"
+        )
+        reconciliation_error = _optional_float(
+            gap.get("reconciliation_error"), "underwriting reconciliation error"
+        )
+        components = _objects(
+            gap.get("causally_bound_components"),
+            "underwriting causally bound components",
+        )
+        if components or (
+            total_gap is not None
+            and (
+                residual is None
+                or reconciliation_error is None
+                or abs(total_gap - residual) > 1e-12
+                or abs(reconciliation_error) > 1e-12
+            )
+        ):
+            gap_reconciles = False
+            break
+    checks.append(
+        _check(
+            "Layered strategy underwriting is governed and advisory only",
+            underwriting.get("policy_id") == "PORT-UNDERWRITE-1"
+            and len(underwriting_rows) == 9
+            and {row.get("strategy_id") for row in underwriting_rows}
+            == {row.get("strategy_id") for row in data["strategies"]}
+            and all(
+                set(
+                    _object(
+                        row.get("evidence_layers"),
+                        "underwriting evidence layers",
+                    )
+                )
+                == expected_layer_keys
+                for row in underwriting_rows
+            )
+            and authority_boundary.get("automatic_drop_authority") == "NONE"
+            and authority_boundary.get("allocation_authority") == "NONE"
+            and authority_boundary.get("readiness_gate_effect") == "NONE"
+            and authority_boundary.get("execution_authority") == "NONE"
+            and all(
+                _object(
+                    row.get("advisory_disposition"),
+                    "underwriting advisory disposition",
+                ).get("allocation_effect")
+                == "NONE"
+                and _object(
+                    row.get("advisory_disposition"),
+                    "underwriting advisory disposition",
+                ).get("execution_effect")
+                == "NONE"
+                for row in underwriting_rows
+            )
+            and gap_reconciles,
+            {
+                "policy_id": underwriting.get("policy_id"),
+                "strategies": len(underwriting_rows),
+                "authoritative_design": _object(
+                    underwriting.get("counts"), "underwriting counts"
+                ).get("authoritative_design"),
+                "version_matched_long_history": _object(
+                    underwriting.get("counts"), "underwriting counts"
+                ).get("version_matched_long_history"),
+                "quantified_model_account_gap": _object(
+                    underwriting.get("counts"), "underwriting counts"
+                ).get("quantified_model_account_gap"),
+                "authority_boundary": authority_boundary,
+                "gap_reconciles_without_fabricated_components": gap_reconciles,
+            },
+        )
+    )
     factor_rows = _objects(data["factor_analysis"].get("series"), "factor.series")
     checks.append(
         _check(
@@ -4352,6 +5363,13 @@ def publish_panel(
             artifact_id="input/portfolio-economic-driver-clusters.json",
             as_of_date=publication_as_of,
             schema_name="portfolio-economic-driver-clusters",
+            schema_version="1",
+        ),
+        SourceArtifact.from_path(
+            STRATEGY_UNDERWRITING_POLICY,
+            artifact_id="input/portfolio-strategy-underwriting-policy.json",
+            as_of_date=publication_as_of,
+            schema_name="portfolio-strategy-underwriting-policy",
             schema_version="1",
         ),
     ]
