@@ -39,7 +39,7 @@
     "weekly_returns"
   ],
   "properties": {
-    "panel_schema_version": { "const": 14 },
+    "panel_schema_version": { "const": 15 },
     "meta": {
       "type": "object",
       "additionalProperties": false,
@@ -111,7 +111,7 @@
     "hybrid_mode_gate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["blocked_strategies", "reason", "status"],
+      "required": ["blocked_strategies", "eligible_strategies", "reason", "status"],
       "properties": {
         "blocked_strategies": {
           "type": "array",
@@ -127,8 +127,23 @@
             }
           }
         },
+        "eligible_strategies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["compatibility_status", "reason", "strategy_id", "strategy_name", "version_ref"],
+            "properties": {
+              "compatibility_status": { "const": "PROVEN_COMPATIBLE" },
+              "reason": { "type": "string", "minLength": 1 },
+              "strategy_id": { "type": "string", "minLength": 1 },
+              "strategy_name": { "type": "string", "minLength": 1 },
+              "version_ref": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
         "reason": { "type": "string", "minLength": 1 },
-        "status": { "enum": ["ELIGIBLE_PROVEN_COMPATIBLE", "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"] }
+        "status": { "enum": ["ELIGIBLE_PROVEN_COMPATIBLE", "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY", "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"] }
       }
     },
     "account_summary": { "$ref": "#/$defs/rows" },
@@ -332,7 +347,7 @@
         "display_groups": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "hybrid_mode_reason": { "type": "string", "minLength": 1 },
-        "hybrid_mode_status": { "enum": ["ELIGIBLE_PROVEN_COMPATIBLE", "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE", "UNAVAILABLE_NOT_CONFIGURED"] },
+        "hybrid_mode_status": { "enum": ["ELIGIBLE_PROVEN_COMPATIBLE", "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY", "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE", "UNAVAILABLE_NOT_CONFIGURED"] },
         "observation_meta_fields": { "const": ["daily_observation_count", "actual_observed_start", "actual_observed_end", "coverage_status", "boundary_reasons"] },
         "series": { "type": "array", "items": { "type": "object" } },
         "source_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },

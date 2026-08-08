@@ -206,7 +206,7 @@ def _attribution(
     if catalog_path.is_symlink() or not catalog_path.is_file():
         raise ReportValidationError("strategy attribution catalog is missing or linked")
     catalog = _load_json(catalog_path, "strategy attribution catalog")
-    if catalog.get("catalog_schema_version") != 1:
+    if catalog.get("catalog_schema_version") not in {1, 2}:
         raise ReportValidationError("strategy attribution schema is unsupported")
     attribution_baseline = _object(catalog.get("baseline"), "attribution.baseline")
     if attribution_baseline != dict(baseline_ref):
@@ -233,6 +233,14 @@ def _merge_attribution(
         str(item.get("strategy_id")): item
         for item in _objects(attribution.get("comparisons"), "attribution.comparisons")
     }
+    raw_benchmark_comparisons = attribution.get("benchmark_comparisons", [])
+    benchmark_comparisons = {
+        str(item.get("strategy_id")): item
+        for item in _objects(
+            raw_benchmark_comparisons,
+            "attribution.benchmark_comparisons",
+        )
+    }
     costs = {
         str(item.get("strategy_id")): item
         for item in _objects(attribution.get("costs"), "attribution.costs")
@@ -242,6 +250,7 @@ def _merge_attribution(
         set(benchmarks) != strategy_ids
         or set(comparisons) != strategy_ids
         or set(costs) != strategy_ids
+        or (benchmark_comparisons and set(benchmark_comparisons) != strategy_ids)
     ):
         raise ReportValidationError("strategy attribution boundary differs")
     result = []
@@ -249,12 +258,22 @@ def _merge_attribution(
         strategy_id = str(item["strategy_id"])
         benchmark = benchmarks[strategy_id]
         comparison = comparisons[strategy_id]
+        benchmark_comparison = benchmark_comparisons.get(strategy_id, {})
         cost = costs[strategy_id]
         metrics_value = comparison.get("metrics")
         metrics = (
             {}
             if metrics_value is None
             else _object(metrics_value, "attribution.comparison.metrics")
+        )
+        benchmark_metrics_value = benchmark_comparison.get("metrics")
+        benchmark_metrics = (
+            {}
+            if benchmark_metrics_value is None
+            else _object(
+                benchmark_metrics_value,
+                "attribution.benchmark_comparison.metrics",
+            )
         )
         result.append(
             {
@@ -265,6 +284,47 @@ def _merge_attribution(
                 "benchmark_effective_end": benchmark.get("effective_end"),
                 "benchmark_version_ref": benchmark.get("version_ref"),
                 "benchmark_rationale": benchmark.get("rationale"),
+                "benchmark_comparison_status": benchmark_comparison.get(
+                    "status", "UNAVAILABLE"
+                ),
+                "benchmark_comparison_disposition": benchmark_comparison.get(
+                    "disposition",
+                    "No exact-date benchmark-relative comparison is admitted.",
+                ),
+                "benchmark_comparison_observations": benchmark_metrics.get(
+                    "observations"
+                ),
+                "benchmark_comparison_observed_start": benchmark_metrics.get(
+                    "observed_start"
+                ),
+                "benchmark_comparison_observed_end": benchmark_metrics.get(
+                    "observed_end"
+                ),
+                "benchmark_account_cumulative_return": benchmark_metrics.get(
+                    "account_cumulative_return"
+                ),
+                "benchmark_reference_cumulative_return": benchmark_metrics.get(
+                    "reference_cumulative_return"
+                ),
+                "benchmark_cumulative_gap": benchmark_metrics.get("cumulative_gap"),
+                "benchmark_active_return_annualized": benchmark_metrics.get(
+                    "active_return_annualized"
+                ),
+                "benchmark_tracking_error_annualized": benchmark_metrics.get(
+                    "tracking_error_annualized"
+                ),
+                "benchmark_information_ratio": benchmark_metrics.get(
+                    "information_ratio"
+                ),
+                "benchmark_beta": benchmark_metrics.get("beta"),
+                "benchmark_correlation": benchmark_metrics.get("correlation"),
+                "benchmark_upside_capture": benchmark_metrics.get("upside_capture"),
+                "benchmark_downside_capture": benchmark_metrics.get(
+                    "downside_capture"
+                ),
+                "benchmark_relative_drawdown": benchmark_metrics.get(
+                    "relative_drawdown"
+                ),
                 "provider_comparison_status": comparison.get("status"),
                 "provider_comparison_disposition": comparison.get("disposition"),
                 "provider_comparison_version_compatibility": comparison.get(
@@ -1909,6 +1969,9 @@ def build_report_data(
     if attribution_catalog is not None and attribution_ref is not None:
         report["strategy_attribution"] = {
             "benchmark_assignments": attribution_catalog["benchmark_assignments"],
+            "benchmark_comparisons": attribution_catalog.get(
+                "benchmark_comparisons", []
+            ),
             "comparisons": attribution_catalog["comparisons"],
             "costs": attribution_catalog["costs"],
             "generation_id": attribution_ref["generation_id"],
