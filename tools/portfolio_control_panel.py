@@ -1729,7 +1729,7 @@ def _govern_weekly_hybrid_modes(
         accepted["series"] = accepted_rows
         return accepted
     accepted["strategy_evidence_modes"] = ["LIVE_ONLY"]
-    accepted_rows: list[dict[str, Any]] = []
+    live_only_rows: list[dict[str, Any]] = []
     for raw in _objects(weekly.get("series"), "weekly series"):
         row = dict(raw)
         if row.get("primary_group") == "STRATEGY":
@@ -1746,8 +1746,8 @@ def _govern_weekly_hybrid_modes(
                         if "LIVE_ONLY" in value
                         else {}
                     )
-        accepted_rows.append(row)
-    accepted["series"] = accepted_rows
+        live_only_rows.append(row)
+    accepted["series"] = live_only_rows
     return accepted
 
 
