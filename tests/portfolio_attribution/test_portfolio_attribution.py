@@ -120,9 +120,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path]:
                 else "No authoritative synthetic assignment."
             ),
             "status": (
-                "EVIDENCED"
-                if index == 1
-                else "UNAVAILABLE_NO_AUTHORITATIVE_ASSIGNMENT"
+                "EVIDENCED" if index == 1 else "UNAVAILABLE_NO_AUTHORITATIVE_ASSIGNMENT"
             ),
             "strategy_id": f"strategy-{index}",
             "version_ref": "benchmark:v1" if index == 1 else None,

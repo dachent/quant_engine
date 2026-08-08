@@ -319,9 +319,7 @@ def _merge_attribution(
                 "benchmark_beta": benchmark_metrics.get("beta"),
                 "benchmark_correlation": benchmark_metrics.get("correlation"),
                 "benchmark_upside_capture": benchmark_metrics.get("upside_capture"),
-                "benchmark_downside_capture": benchmark_metrics.get(
-                    "downside_capture"
-                ),
+                "benchmark_downside_capture": benchmark_metrics.get("downside_capture"),
                 "benchmark_relative_drawdown": benchmark_metrics.get(
                     "relative_drawdown"
                 ),

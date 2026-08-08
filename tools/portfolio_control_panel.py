@@ -1622,7 +1622,9 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
                     "strategy_name": _text(
                         row.get("strategy_name"), "strategy.strategy_name"
                     ),
-                    "version_ref": _text(row.get("version_ref"), "strategy.version_ref"),
+                    "version_ref": _text(
+                        row.get("version_ref"), "strategy.version_ref"
+                    ),
                 }
             )
     if blocked:
@@ -1687,9 +1689,7 @@ def _govern_weekly_hybrid_modes(
             _text(item.get("strategy_name"), "eligible strategy_name"): _text(
                 item.get("version_ref"), "eligible version_ref"
             )
-            for item in _objects(
-                gate.get("eligible_strategies"), "eligible strategies"
-            )
+            for item in _objects(gate.get("eligible_strategies"), "eligible strategies")
         }
         accepted_rows: list[dict[str, Any]] = []
         for raw in _objects(weekly.get("series"), "weekly series"):
@@ -2498,9 +2498,7 @@ def _panel_data(
             accepted_modes["LIVE_ONLY"] = [*live_mode, dynamic_factor_analysis]
             hybrid_mode = accepted_modes.get("LIVE_PLUS_BACKTEST")
             if hybrid_mode is not None:
-                hybrid_lenses = _objects(
-                    hybrid_mode, "hybrid decomposition lenses"
-                )
+                hybrid_lenses = _objects(hybrid_mode, "hybrid decomposition lenses")
                 if {
                     _text(row.get("lens_id"), "hybrid decomposition lens_id")
                     for row in hybrid_lenses
@@ -2536,9 +2534,10 @@ def _panel_data(
                                 series.get("series_composition"),
                                 f"hybrid decomposition composition {strategy_name}",
                             )
-                            if composition.get("strategy_version") != eligible_versions[
-                                strategy_name
-                            ]:
+                            if (
+                                composition.get("strategy_version")
+                                != eligible_versions[strategy_name]
+                            ):
                                 raise ControlPanelValidationError(
                                     "eligible decomposition hybrid version differs "
                                     f"from registry: {strategy_name}"
@@ -2551,10 +2550,13 @@ def _panel_data(
                                 raw_composition,
                                 f"hybrid decomposition composition {strategy_name}",
                             )
-                            if _finite_float(
-                                composition.get("backtest_observations_used", 0),
-                                "hybrid decomposition backtest observations",
-                            ) != 0:
+                            if (
+                                _finite_float(
+                                    composition.get("backtest_observations_used", 0),
+                                    "hybrid decomposition backtest observations",
+                                )
+                                != 0
+                            ):
                                 raise ControlPanelValidationError(
                                     "unresolved strategy uses backtest history in hybrid "
                                     f"decomposition: {strategy_name}"
@@ -2629,9 +2631,7 @@ def _panel_data(
             "ELIGIBLE_PROVEN_COMPATIBLE",
         }
         accepted_mode_names = (
-            ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
-            if hybrid_eligible
-            else ("LIVE_ONLY",)
+            ("LIVE_ONLY", "LIVE_PLUS_BACKTEST") if hybrid_eligible else ("LIVE_ONLY",)
         )
         dependence_modes = {
             mode: _dependence_analysis(
@@ -2685,10 +2685,13 @@ def _panel_data(
                     hybrid_composition.get(strategy_name),
                     f"hybrid composition {strategy_name}",
                 )
-                if _finite_float(
-                    row.get("backtest_observations_used", 0),
-                    f"hybrid composition {strategy_name} backtest observations",
-                ) != 0:
+                if (
+                    _finite_float(
+                        row.get("backtest_observations_used", 0),
+                        f"hybrid composition {strategy_name} backtest observations",
+                    )
+                    != 0
+                ):
                     raise ControlPanelValidationError(
                         "unresolved strategy uses backtest history in hybrid dependence: "
                         f"{strategy_name}"

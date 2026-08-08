@@ -567,8 +567,7 @@ def stage_catalog(
             row["metrics"] is not None for row in catalog["comparisons"]
         ),
         "available_benchmark_comparisons": sum(
-            row["metrics"] is not None
-            for row in catalog["benchmark_comparisons"]
+            row["metrics"] is not None for row in catalog["benchmark_comparisons"]
         ),
         "catalog_sha256": catalog_artifact.sha256,
         "generation_id": manifest.generation_id,
