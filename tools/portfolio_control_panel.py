@@ -2354,12 +2354,22 @@ def _weekly_values(
 ) -> dict[str, float]:
     if evidence_mode is None:
         raw_values = _object(row.get("values"), "weekly values")
+        raw_metadata = _object(row.get("observation_meta"), "weekly metadata")
     else:
         modes = _object(row.get("values_by_mode"), "weekly values_by_mode")
+        metadata_modes = _object(
+            row.get("observation_meta_by_mode"),
+            "weekly observation_meta_by_mode",
+        )
         raw = modes.get(evidence_mode)
-        if raw is None:
+        raw_metadata_mode = metadata_modes.get(evidence_mode)
+        if raw is None or raw_metadata_mode is None:
             return {}
         raw_values = _object(raw, f"weekly values_by_mode.{evidence_mode}")
+        raw_metadata = _object(
+            raw_metadata_mode,
+            f"weekly observation_meta_by_mode.{evidence_mode}",
+        )
     accepted: dict[str, float] = {}
     for week, value in raw_values.items():
         if value is None:
@@ -2370,6 +2380,13 @@ def _weekly_values(
             raise ControlPanelValidationError(
                 f"weekly return has an invalid week: {week}"
             ) from exc
+        metadata = raw_metadata.get(week)
+        if (
+            not isinstance(metadata, list)
+            or len(metadata) < 4
+            or metadata[3] != "COMPLETE_WITHIN_ACCEPTED_CALENDAR"
+        ):
+            continue
         accepted[week] = _finite_float(value, f"weekly return {week}")
     return accepted
 

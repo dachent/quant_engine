@@ -2636,6 +2636,40 @@ def test_replication_surface_discloses_simple_rule_without_claiming_provider_log
     assert "not a recovered copy of the provider's hidden trading rules" in renderer
 
 
+def test_regime_weekly_values_exclude_partial_boundaries_in_every_mode() -> None:
+    complete = [
+        5,
+        "2026-07-06",
+        "2026-07-10",
+        "COMPLETE_WITHIN_ACCEPTED_CALENDAR",
+        [],
+    ]
+    partial = [
+        3,
+        "2026-07-13",
+        "2026-07-15",
+        "PARTIAL_BOUNDARY",
+        ["CURRENT_AS_OF"],
+    ]
+    row = {
+        "values": {"2026-07-06": "0.01", "2026-07-13": "0.25"},
+        "observation_meta": {
+            "2026-07-06": complete,
+            "2026-07-13": partial,
+        },
+        "values_by_mode": {"LIVE_ONLY": {"2026-07-06": "0.02", "2026-07-13": "0.50"}},
+        "observation_meta_by_mode": {
+            "LIVE_ONLY": {
+                "2026-07-06": complete,
+                "2026-07-13": partial,
+            }
+        },
+    }
+
+    assert panel._weekly_values(row) == {"2026-07-06": 0.01}
+    assert panel._weekly_values(row, evidence_mode="LIVE_ONLY") == {"2026-07-06": 0.02}
+
+
 def test_context_and_material_exceptions_have_operator_routes() -> None:
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")

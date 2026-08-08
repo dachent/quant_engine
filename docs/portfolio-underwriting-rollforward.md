@@ -136,6 +136,8 @@ Acceptance requires:
   defined, sample length, collinearity/stability evidence, and sealed-holdout
   diagnostics;
 - regime thresholds use benchmark weeks strictly before account-live inception;
+- regime statistics admit only `COMPLETE_WITHIN_ACCEPTED_CALENDAR` weeks and
+  exclude partial source-boundary and current weeks;
 - all fact-matrix, attribution-disposition, observation-window, and selection-
   boundary payloads are referenced by the renderer;
 - all nine existing views remain present.
