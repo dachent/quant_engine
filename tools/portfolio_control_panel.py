@@ -2402,9 +2402,7 @@ def _model_account_gap_underwriting(
     strategy: Mapping[str, Any], gap_policy: Mapping[str, Any]
 ) -> dict[str, Any]:
     strategy_name = _text(strategy.get("strategy_name"), "gap strategy_name")
-    comparison_status = str(
-        strategy.get("provider_comparison_status") or "UNAVAILABLE"
-    )
+    comparison_status = str(strategy.get("provider_comparison_status") or "UNAVAILABLE")
     available = comparison_status.startswith("DESCRIPTIVE_EXACT_DATE")
     total_gap = (
         _optional_float(
@@ -2471,7 +2469,10 @@ def _model_account_gap_underwriting(
         signature = "MATERIAL_PATH_DIVERGENCE"
     unresolved_causes: list[str] = []
     if available:
-        if strategy.get("provider_comparison_version_compatibility") != "PROVEN_COMPATIBLE":
+        if (
+            strategy.get("provider_comparison_version_compatibility")
+            != "PROVEN_COMPATIBLE"
+        ):
             unresolved_causes.append("REFERENCE_VERSION_COMPATIBILITY_NOT_PROVEN")
         if strategy.get("cash_drag_status") != "AVAILABLE":
             unresolved_causes.append("COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE")
@@ -2499,9 +2500,7 @@ def _model_account_gap_underwriting(
         "reference_cumulative_return": strategy.get(
             "provider_reference_cumulative_return"
         ),
-        "account_cumulative_return": strategy.get(
-            "provider_account_cumulative_return"
-        ),
+        "account_cumulative_return": strategy.get("provider_account_cumulative_return"),
         "total_gap": _number_text(total_gap) if total_gap is not None else None,
         "causally_bound_components": [],
         "unresolved_residual": (
@@ -2517,9 +2516,7 @@ def _model_account_gap_underwriting(
         "signature": signature,
         "beta": strategy.get("provider_beta"),
         "correlation": strategy.get("provider_correlation"),
-        "tracking_error_annualized": strategy.get(
-            "provider_tracking_error_annualized"
-        ),
+        "tracking_error_annualized": strategy.get("provider_tracking_error_annualized"),
         "unresolved_causes": unresolved_causes,
         "cost_boundary": gap_policy.get("subscription_cost_rule"),
     }
@@ -2599,7 +2596,11 @@ def _regime_underwriting(
         else None
     )
     threshold_history = (
-        [value for week, value in benchmark_map.items() if live_week and week < live_week]
+        [
+            value
+            for week, value in benchmark_map.items()
+            if live_week and week < live_week
+        ]
         if live_week
         else []
     )
@@ -2644,8 +2645,9 @@ def _regime_underwriting(
         predicates = {
             "BENCHMARK_NEGATIVE": lambda value: value < 0,
             "BENCHMARK_LOWER_DECILE": lambda value: value <= lower_tail_threshold,
-            "BENCHMARK_HIGH_ABSOLUTE_RETURN": lambda value: abs(value)
-            >= high_absolute_threshold,
+            "BENCHMARK_HIGH_ABSOLUTE_RETURN": lambda value: (
+                abs(value) >= high_absolute_threshold
+            ),
         }
         regimes_value = regime_policy.get("regimes")
         if not isinstance(regimes_value, list) or not regimes_value:
@@ -2724,12 +2726,8 @@ def _regime_underwriting(
                     "benchmark_live_mean_return": _mean_or_none(
                         [item[2] for item in live_observations]
                     ),
-                    "matched_prehistory_observations": len(
-                        prehistory_observations
-                    ),
-                    "matched_prehistory_mean_return": _mean_or_none(
-                        prehistory_values
-                    ),
+                    "matched_prehistory_observations": len(prehistory_observations),
+                    "matched_prehistory_mean_return": _mean_or_none(prehistory_values),
                     "empirical_p05": (
                         _number_text(empirical_range[0])
                         if empirical_range is not None
@@ -2801,7 +2799,10 @@ def _strategy_underwriting(
     """Compose an advisory evidence ledger without creating new fact authority."""
 
     policy = _load_json(STRATEGY_UNDERWRITING_POLICY, "underwriting policy")
-    if policy.get("schema_version") != 1 or policy.get("policy_id") != "PORT-UNDERWRITE-1":
+    if (
+        policy.get("schema_version") != 1
+        or policy.get("policy_id") != "PORT-UNDERWRITE-1"
+    ):
         raise ControlPanelValidationError("underwriting policy identity is unsupported")
     policy_hash = _hash(STRATEGY_UNDERWRITING_POLICY)
     gap_policy = _object(policy.get("model_account_gap"), "model_account_gap policy")
@@ -2818,7 +2819,9 @@ def _strategy_underwriting(
     correlation_one = _object(dependence.get("correlation_one"), "correlation_one")
     components = {
         _text(row.get("series_id"), "correlation-one series_id"): row
-        for row in _objects(correlation_one.get("components"), "correlation_one components")
+        for row in _objects(
+            correlation_one.get("components"), "correlation_one components"
+        )
     }
     total_stress = _finite_float(correlation_one.get("loss"), "correlation_one loss")
     modes = _object(decomposition_lenses.get("modes"), "decomposition modes")
@@ -2882,7 +2885,9 @@ def _strategy_underwriting(
                     {
                         "evidence_mode": mode,
                         "lens_id": _text(lens.get("lens_id"), "underwriting lens_id"),
-                        "status": _text(series_row.get("status"), "underwriting lens status"),
+                        "status": _text(
+                            series_row.get("status"), "underwriting lens status"
+                        ),
                         "aligned_observations": coverage.get("aligned_observations"),
                         "holdout_predicted_r_squared": quality.get(
                             "holdout_predicted_r_squared"
@@ -2906,8 +2911,7 @@ def _strategy_underwriting(
         design_conformance_status = (
             "AUTHORITATIVE_DESIGN_AND_EMPIRICAL_PREHISTORY_COMPARABLE"
             if design_authority_status == "AUTHORITATIVE_DESIGN_AVAILABLE"
-            and regimes["status"]
-            == "AVAILABLE_VERSION_MATCHED_PREHISTORY_COMPARISON"
+            and regimes["status"] == "AVAILABLE_VERSION_MATCHED_PREHISTORY_COMPARISON"
             else "DIAGNOSTIC_ONLY_NOT_AUTHORITATIVE_DESIGN_CONFORMANCE"
         )
 
@@ -2926,16 +2930,19 @@ def _strategy_underwriting(
         )
         portfolio_fit_status = (
             "CLUSTER_BUDGET_BREACH"
-            if cluster
-            and str(cluster.get("budget_status", "")).startswith("BREACHES")
+            if cluster and str(cluster.get("budget_status", "")).startswith("BREACHES")
             else "WITHIN_CURRENT_CLUSTER_STRESS_BOUNDARY"
         )
         portfolio_fit = {
             "cluster_id": cluster.get("cluster_id") if cluster else None,
             "cluster_label": cluster.get("label") if cluster else None,
             "cluster_budget_status": cluster.get("budget_status") if cluster else None,
-            "cluster_allocation_weight": cluster.get("allocation_weight") if cluster else None,
-            "cluster_loss_contribution": cluster.get("loss_contribution") if cluster else None,
+            "cluster_allocation_weight": cluster.get("allocation_weight")
+            if cluster
+            else None,
+            "cluster_loss_contribution": cluster.get("loss_contribution")
+            if cluster
+            else None,
             "cluster_observed_pair_correlation_minimum": (
                 cluster.get("observed_pair_correlation_minimum") if cluster else None
             ),
@@ -3130,8 +3137,7 @@ def _strategy_underwriting(
             "counts": {
                 "strategies": len(rows),
                 "authoritative_design": sum(
-                    row["design_fit"]["status"]
-                    == "AUTHORITATIVE_DESIGN_AVAILABLE"
+                    row["design_fit"]["status"] == "AUTHORITATIVE_DESIGN_AVAILABLE"
                     for row in rows
                 ),
                 "version_matched_long_history": sum(
@@ -4648,9 +4654,7 @@ def verify_candidate(
         data.get("fact_coverage_matrix"), "fact coverage matrix"
     )
     no_path_rows = [
-        row
-        for row in fact_matrix_rows
-        if row.get("status") == "NO_ACCEPTED_FACT_PATH"
+        row for row in fact_matrix_rows if row.get("status") == "NO_ACCEPTED_FACT_PATH"
     ]
     checks.append(
         _check(
@@ -4689,12 +4693,8 @@ def verify_candidate(
             },
         )
     )
-    underwriting = _object(
-        data.get("strategy_underwriting"), "strategy underwriting"
-    )
-    underwriting_rows = _objects(
-        underwriting.get("rows"), "strategy underwriting rows"
-    )
+    underwriting = _object(data.get("strategy_underwriting"), "strategy underwriting")
+    underwriting_rows = _objects(underwriting.get("rows"), "strategy underwriting rows")
     authority_boundary = _object(
         underwriting.get("authority_boundary"), "underwriting authority boundary"
     )

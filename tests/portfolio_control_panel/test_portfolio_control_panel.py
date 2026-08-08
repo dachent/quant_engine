@@ -1117,9 +1117,10 @@ def test_underwriting_gap_signatures_are_diagnostic_not_fabricated() -> None:
         assert result["causally_bound_components"] == []
         assert result["unresolved_residual"] == result["total_gap"]
         assert result["reconciliation_error"] == "0"
-        assert "COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE" in result[
-            "unresolved_causes"
-        ]
+        assert (
+            "COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE"
+            in result["unresolved_causes"]
+        )
 
 
 def test_renderer_exposes_underwriting_and_all_orphaned_evidence_sections() -> None:
@@ -2619,7 +2620,9 @@ def test_factor_surface_separates_source_availability_from_model_acceptance() ->
     assert "clean-room dynamic FLS path" in template
 
 
-def test_replication_surface_discloses_simple_rule_without_claiming_provider_logic() -> None:
+def test_replication_surface_discloses_simple_rule_without_claiming_provider_logic() -> (
+    None
+):
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
 
     assert "Replication rule:" in renderer
