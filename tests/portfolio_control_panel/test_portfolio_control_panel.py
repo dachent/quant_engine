@@ -1049,6 +1049,102 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     )
     assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 9
     assert data["hybrid_mode_gate"]["eligible_strategies"] == []
+    underwriting = data["strategy_underwriting"]
+    assert underwriting["policy_id"] == "PORT-UNDERWRITE-1"
+    assert underwriting["counts"]["strategies"] == 9
+    assert underwriting["authority_boundary"] == {
+        "allocation_authority": "NONE",
+        "automatic_drop_authority": "NONE",
+        "execution_authority": "NONE",
+        "readiness_gate_effect": "NONE",
+        "use": "ADVISORY_UNDERWRITING_AND_EVIDENCE_PRIORITIZATION",
+    }
+    assert all(
+        set(row["evidence_layers"])
+        == {
+            "account_live",
+            "backtest",
+            "design",
+            "implementation_reconciliation",
+            "provider_or_model_live",
+        }
+        for row in underwriting["rows"]
+    )
+
+
+def test_underwriting_gap_signatures_are_diagnostic_not_fabricated() -> None:
+    policy = json.loads(
+        Path("contracts/portfolio-strategy-underwriting-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )["model_account_gap"]
+    aligned = panel._model_account_gap_underwriting(
+        {
+            "strategy_name": "TT Portfolio",
+            "provider_comparison_status": "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
+            "provider_cumulative_gap": "-0.05124933645",
+            "provider_reference_cumulative_return": "0.049011",
+            "provider_account_cumulative_return": "-0.002239",
+            "provider_beta": "0.9713",
+            "provider_correlation": "0.9847",
+            "provider_tracking_error_annualized": "0.0297",
+            "provider_comparison_version_compatibility": "UNRESOLVED",
+            "cash_drag_status": "UNAVAILABLE",
+            "fees_status": "PARTIAL",
+        },
+        policy,
+    )
+    divergent = panel._model_account_gap_underwriting(
+        {
+            "strategy_name": "AI Factor [P123]",
+            "provider_comparison_status": "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
+            "provider_cumulative_gap": "-0.168283912268",
+            "provider_reference_cumulative_return": "0.175664",
+            "provider_account_cumulative_return": "0.00738",
+            "provider_beta": "0.9864",
+            "provider_correlation": "0.8293",
+            "provider_tracking_error_annualized": "0.11785",
+            "provider_comparison_version_compatibility": "UNRESOLVED",
+            "cash_drag_status": "UNAVAILABLE",
+            "fees_status": "PARTIAL",
+        },
+        policy,
+    )
+
+    assert aligned["signature"] == "PATH_ALIGNED_PERSISTENT_LEVEL_DIFFERENCE"
+    assert divergent["signature"] == "PARTIAL_PATH_DIVERGENCE"
+    for result in (aligned, divergent):
+        assert result["causally_bound_components"] == []
+        assert result["unresolved_residual"] == result["total_gap"]
+        assert result["reconciliation_error"] == "0"
+        assert "COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE" in result[
+            "unresolved_causes"
+        ]
+
+
+def test_renderer_exposes_underwriting_and_all_orphaned_evidence_sections() -> None:
+    renderer = Path("apps/portfolio-control-panel/app.js").read_text(encoding="utf-8")
+    template = Path("apps/portfolio-control-panel/index.html").read_text(
+        encoding="utf-8"
+    )
+
+    for payload_key in (
+        "fact_coverage_matrix",
+        "attribution_dispositions",
+        "observation_windows",
+        "selection_boundary",
+    ):
+        assert payload_key in renderer
+    assert "data.strategy_underwriting" in renderer
+    assert "causally_bound_components" in renderer
+    assert "NO_AUTOMATIC_DROP_AUTHORITY" not in renderer
+    for element_id in (
+        "underwriting-table",
+        "fact-coverage-matrix-table",
+        "observation-windows-table",
+        "attribution-dispositions-table",
+    ):
+        assert f'id="{element_id}"' in template
 
 
 def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
@@ -2247,7 +2343,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 15" in renderer
+    assert "data.panel_schema_version !== 16" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -2350,6 +2446,8 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     )
     assert "canonical_strategy_series" in schema["required"]
     assert "hybrid_mode_gate" in schema["required"]
+    assert "strategy_underwriting" in schema["required"]
+    assert "underwriting_policy_sha256" in schema["properties"]["meta"]["required"]
     blocked = schema["properties"]["hybrid_mode_gate"]["properties"][
         "blocked_strategies"
     ]["items"]
@@ -2521,6 +2619,20 @@ def test_factor_surface_separates_source_availability_from_model_acceptance() ->
     assert "clean-room dynamic FLS path" in template
 
 
+def test_replication_surface_discloses_simple_rule_without_claiming_provider_logic() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "Replication rule:" in renderer
+    assert "SPY excess return" in renderer
+    assert "IWM excess return" in renderer
+    assert "HYG excess return" in renderer
+    assert "use only the prior model state" in renderer
+    assert "clip each factor" in renderer
+    assert "cap gross factor exposure" in renderer
+    assert "zero-excess-return cash" in renderer
+    assert "not a recovered copy of the provider's hidden trading rules" in renderer
+
+
 def test_context_and_material_exceptions_have_operator_routes() -> None:
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
@@ -2568,6 +2680,10 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
     assert "#factor-detail .callout" in styles
     assert "#performance-table" in styles
     assert "#coverage-table" in styles
+    assert "#underwriting-table [data-label]::before" in styles
+    assert "#fact-coverage-matrix-table [data-label]::before" in styles
+    assert 'data-label="Long-history statistical membership"' in renderer
+    assert 'data-label="Named missing interval"' in renderer
     assert "@media (prefers-reduced-motion: reduce)" in styles
     assert ":focus-visible" in styles
     assert 'button.setAttribute("aria-controls", view.id)' in renderer

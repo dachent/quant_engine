@@ -36,14 +36,15 @@
     "reconciliation_checks",
     "replication_analysis",
     "strategies",
+    "strategy_underwriting",
     "weekly_returns"
   ],
   "properties": {
-    "panel_schema_version": { "const": 15 },
+    "panel_schema_version": { "const": 16 },
     "meta": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["baseline_generation_id", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "freshness_evaluated_on", "hwm_policy_sha256", "hwm_status_code_version", "hwm_status_semantics", "panel_mode", "portfolio_as_of", "replication_generation_id", "replication_sha256", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "strategy_evidence_source", "template_hashes", "weekly_returns_generation_id", "weekly_returns_sha256"],
+      "required": ["baseline_generation_id", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "freshness_evaluated_on", "hwm_policy_sha256", "hwm_status_code_version", "hwm_status_semantics", "panel_mode", "portfolio_as_of", "replication_generation_id", "replication_sha256", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "strategy_evidence_source", "template_hashes", "underwriting_policy_sha256", "weekly_returns_generation_id", "weekly_returns_sha256"],
       "properties": {
         "baseline_generation_id": { "$ref": "#/$defs/hash" },
         "correlation_generation_id": { "$ref": "#/$defs/hash" },
@@ -67,6 +68,7 @@
         "strategy_evidence_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "strategy_evidence_source": { "const": "CANONICAL_PORTFOLIO_REPORT" },
         "template_hashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/hash" } },
+        "underwriting_policy_sha256": { "$ref": "#/$defs/hash" },
         "weekly_returns_generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "weekly_returns_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] }
       }
@@ -336,6 +338,63 @@
       }
     },
     "strategies": { "type": "array", "minItems": 9, "maxItems": 9, "items": { "type": "object" } },
+    "strategy_underwriting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of_date", "authority_boundary", "counts", "methodology", "policy_id", "policy_sha256", "rows", "schema_version"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "policy_id": { "const": "PORT-UNDERWRITE-1" },
+        "policy_sha256": { "$ref": "#/$defs/hash" },
+        "as_of_date": { "type": "string", "format": "date" },
+        "authority_boundary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allocation_authority", "automatic_drop_authority", "execution_authority", "readiness_gate_effect", "use"],
+          "properties": {
+            "allocation_authority": { "const": "NONE" },
+            "automatic_drop_authority": { "const": "NONE" },
+            "execution_authority": { "const": "NONE" },
+            "readiness_gate_effect": { "const": "NONE" },
+            "use": { "const": "ADVISORY_UNDERWRITING_AND_EVIDENCE_PRIORITIZATION" }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["authoritative_design", "empirical_regime_comparison", "quantified_model_account_gap", "strategies", "version_matched_long_history"],
+          "properties": {
+            "authoritative_design": { "type": "integer", "minimum": 0, "maximum": 9 },
+            "empirical_regime_comparison": { "type": "integer", "minimum": 0, "maximum": 9 },
+            "quantified_model_account_gap": { "type": "integer", "minimum": 0, "maximum": 9 },
+            "strategies": { "const": 9 },
+            "version_matched_long_history": { "type": "integer", "minimum": 0, "maximum": 9 }
+          }
+        },
+        "methodology": { "type": "object" },
+        "rows": {
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["advisory_disposition", "design_fit", "evidence_layers", "long_history", "model_account_gap", "portfolio_fit", "regime_conformance", "strategy_id", "strategy_name"],
+            "properties": {
+              "strategy_id": { "type": "string", "minLength": 1 },
+              "strategy_name": { "type": "string", "minLength": 1 },
+              "evidence_layers": { "type": "object" },
+              "design_fit": { "type": "object" },
+              "long_history": { "type": "object" },
+              "model_account_gap": { "type": "object" },
+              "regime_conformance": { "type": "object" },
+              "portfolio_fit": { "type": "object" },
+              "advisory_disposition": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
     "weekly_returns": {
       "type": "object",
       "required": ["analytics_schema_version", "as_of_date", "current_week", "default_evidence_mode", "display_groups", "generation_id", "hybrid_mode_reason", "hybrid_mode_status", "observation_meta_fields", "series", "source_sha256", "strategy_evidence_modes", "week_policy", "weeks"],
