@@ -28,11 +28,15 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-SCHEMA_VERSION: Final = 1
-CATALOG_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.0.0"
+SCHEMA_VERSION: Final = 2
+CATALOG_SCHEMA_VERSION: Final = 2
+BUILDER_VERSION: Final = "1.1.0"
 STRATEGY_COUNT: Final = 9
 CATALOG_NAME: Final = "strategy-attribution.json"
+AVAILABLE_STATUSES: Final = {
+    "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+    "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
+}
 AVAILABLE_STATUS: Final = "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED"
 
 
@@ -241,6 +245,86 @@ def _comparison_metrics(
     }
 
 
+def _accepted_comparison(
+    comparison: Mapping[str, Any],
+    series: Mapping[str, Mapping[date, Decimal]],
+) -> dict[str, Any]:
+    accepted = dict(comparison)
+    status = accepted.get("status")
+    metrics = None
+    legacy_delta = None
+    legacy_disposition = "NOT_APPLICABLE"
+    if status in AVAILABLE_STATUSES:
+        account_id = _text(
+            accepted.get("account_series_id"), "comparison.account_series_id"
+        )
+        reference_id = _text(
+            accepted.get("reference_series_id"), "comparison.reference_series_id"
+        )
+        if account_id not in series or reference_id not in series:
+            raise AttributionValidationError("comparison series is missing")
+        start = (
+            None
+            if accepted.get("observed_start") is None
+            else date.fromisoformat(
+                _text(accepted.get("observed_start"), "comparison.observed_start")
+            )
+        )
+        end = (
+            None
+            if accepted.get("observed_end") is None
+            else date.fromisoformat(
+                _text(accepted.get("observed_end"), "comparison.observed_end")
+            )
+        )
+        if (start is None) != (end is None) or (
+            start is not None and end is not None and end < start
+        ):
+            raise AttributionValidationError("comparison interval is invalid")
+        account_series = {
+            day: value
+            for day, value in series[account_id].items()
+            if (start is None or day >= start) and (end is None or day <= end)
+        }
+        reference_series = {
+            day: value
+            for day, value in series[reference_id].items()
+            if (start is None or day >= start) and (end is None or day <= end)
+        }
+        metrics = _comparison_metrics(
+            account_series,
+            reference_series,
+            int(accepted.get("periods_per_year", 0)),
+        )
+        expected_gap = accepted.get("expected_legacy_cumulative_gap")
+        if expected_gap is not None:
+            legacy_delta_value = _decimal(
+                metrics["cumulative_gap"], "computed cumulative gap"
+            ) - _decimal(expected_gap, "expected legacy cumulative gap")
+            legacy_delta = _decimal_text(legacy_delta_value)
+            legacy_disposition = (
+                "INDEPENDENTLY_REPRODUCED"
+                if abs(legacy_delta_value) <= Decimal("0.000000000001")
+                else "CORRECTED_BY_CURRENT_EXACT_DATE_SOURCE"
+            )
+    elif status == "UNAVAILABLE":
+        if (
+            accepted.get("account_series_id") is not None
+            or accepted.get("reference_series_id") is not None
+        ):
+            raise AttributionValidationError(
+                "unavailable comparison cannot name comparison series"
+            )
+    else:
+        raise AttributionValidationError("comparison status differs")
+    return {
+        **accepted,
+        "legacy_baseline_delta": legacy_delta,
+        "legacy_baseline_disposition": legacy_disposition,
+        "metrics": metrics,
+    }
+
+
 def build_catalog(
     baseline_root: Path, spec_path: Path
 ) -> tuple[dict[str, Any], bytes, list[SourceArtifact]]:
@@ -278,10 +362,18 @@ def build_catalog(
         raise AttributionValidationError("source manifest is not verified")
     series = _rows(source_path)
     benchmark_rows = spec.get("benchmark_assignments")
+    benchmark_comparison_rows = spec.get("benchmark_comparisons")
     comparison_rows = spec.get("comparisons")
-    if not isinstance(benchmark_rows, list) or not isinstance(comparison_rows, list):
+    if (
+        not isinstance(benchmark_rows, list)
+        or not isinstance(benchmark_comparison_rows, list)
+        or not isinstance(comparison_rows, list)
+    ):
         raise AttributionValidationError("strategy rows must be arrays")
-    if len(benchmark_rows) != STRATEGY_COUNT or len(comparison_rows) != STRATEGY_COUNT:
+    if any(
+        len(rows) != STRATEGY_COUNT
+        for rows in (benchmark_rows, benchmark_comparison_rows, comparison_rows)
+    ):
         raise AttributionValidationError("attribution requires exactly 9 strategy rows")
     benchmark_by_id = {
         _text(item.get("strategy_id"), "benchmark.strategy_id"): item
@@ -293,11 +385,22 @@ def build_catalog(
         for item in comparison_rows
         if isinstance(item, dict)
     }
-    if set(benchmark_by_id) != set(strategies) or set(comparison_by_id) != set(
-        strategies
+    benchmark_comparison_by_id = {
+        _text(item.get("strategy_id"), "benchmark comparison.strategy_id"): item
+        for item in benchmark_comparison_rows
+        if isinstance(item, dict)
+    }
+    if any(
+        set(rows) != set(strategies)
+        for rows in (
+            benchmark_by_id,
+            benchmark_comparison_by_id,
+            comparison_by_id,
+        )
     ):
         raise AttributionValidationError("attribution strategy boundary differs")
     accepted_benchmarks: list[dict[str, Any]] = []
+    accepted_benchmark_comparisons: list[dict[str, Any]] = []
     accepted_comparisons: list[dict[str, Any]] = []
     allocations = {
         str(item.get("strategy_id")): item
@@ -326,82 +429,34 @@ def build_catalog(
                 "unavailable benchmark cannot name an accepted benchmark"
             )
         accepted_benchmarks.append(benchmark)
-        comparison = dict(comparison_by_id[strategy_id])
-        status = comparison.get("status")
-        metrics = None
-        legacy_delta = None
-        legacy_disposition = "NOT_APPLICABLE"
-        if status == AVAILABLE_STATUS:
-            account_id = _text(
-                comparison.get("account_series_id"), "comparison.account_series_id"
-            )
-            reference_id = _text(
-                comparison.get("reference_series_id"),
-                "comparison.reference_series_id",
-            )
-            if account_id not in series or reference_id not in series:
-                raise AttributionValidationError("comparison series is missing")
-            start = (
-                None
-                if comparison.get("observed_start") is None
-                else date.fromisoformat(
-                    _text(comparison.get("observed_start"), "comparison.observed_start")
+        benchmark_comparison = dict(benchmark_comparison_by_id[strategy_id])
+        if benchmark.get("status") == "EVIDENCED":
+            if benchmark_comparison.get("status") not in AVAILABLE_STATUSES:
+                raise AttributionValidationError(
+                    "evidenced benchmark requires an available comparison"
                 )
-            )
-            end = (
-                None
-                if comparison.get("observed_end") is None
-                else date.fromisoformat(
-                    _text(comparison.get("observed_end"), "comparison.observed_end")
-                )
-            )
-            if (start is None) != (end is None) or (
-                start is not None and end is not None and end < start
-            ):
-                raise AttributionValidationError("comparison interval is invalid")
-            account_series = {
-                day: value
-                for day, value in series[account_id].items()
-                if (start is None or day >= start) and (end is None or day <= end)
-            }
-            reference_series = {
-                day: value
-                for day, value in series[reference_id].items()
-                if (start is None or day >= start) and (end is None or day <= end)
-            }
-            metrics = _comparison_metrics(
-                account_series,
-                reference_series,
-                int(comparison.get("periods_per_year", 0)),
-            )
-            expected_gap = comparison.get("expected_legacy_cumulative_gap")
-            if expected_gap is not None:
-                legacy_delta_value = _decimal(
-                    metrics["cumulative_gap"], "computed cumulative gap"
-                ) - _decimal(expected_gap, "expected legacy cumulative gap")
-                legacy_delta = _decimal_text(legacy_delta_value)
-                legacy_disposition = (
-                    "INDEPENDENTLY_REPRODUCED"
-                    if abs(legacy_delta_value) <= Decimal("0.000000000001")
-                    else "CORRECTED_BY_CURRENT_EXACT_DATE_SOURCE"
-                )
-        elif status == "UNAVAILABLE":
-            if (
-                comparison.get("account_series_id") is not None
-                or comparison.get("reference_series_id") is not None
+            if benchmark_comparison.get("reference_series_id") != benchmark.get(
+                "benchmark_id"
             ):
                 raise AttributionValidationError(
-                    "unavailable comparison cannot name comparison series"
+                    "benchmark comparison reference differs from assignment"
                 )
-        else:
-            raise AttributionValidationError("comparison status differs")
+            if (
+                benchmark_comparison.get("version_compatibility_status")
+                != "PROVEN_COMPATIBLE"
+            ):
+                raise AttributionValidationError(
+                    "benchmark return version must be proven compatible"
+                )
+        elif benchmark_comparison.get("status") != "UNAVAILABLE":
+            raise AttributionValidationError(
+                "unavailable benchmark assignment cannot produce metrics"
+            )
+        accepted_benchmark_comparisons.append(
+            _accepted_comparison(benchmark_comparison, series)
+        )
         accepted_comparisons.append(
-            {
-                **comparison,
-                "legacy_baseline_delta": legacy_delta,
-                "legacy_baseline_disposition": legacy_disposition,
-                "metrics": metrics,
-            }
+            _accepted_comparison(comparison_by_id[strategy_id], series)
         )
         allocation = allocations[strategy_id]
         current_value = _decimal(
@@ -435,6 +490,7 @@ def build_catalog(
         "as_of_date": as_of.isoformat(),
         "baseline": baseline_identity,
         "benchmark_assignments": accepted_benchmarks,
+        "benchmark_comparisons": accepted_benchmark_comparisons,
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "comparisons": accepted_comparisons,
         "costs": accepted_costs,
@@ -488,7 +544,12 @@ def stage_catalog(
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="nine current strategies with exact-date metrics or explicit unavailable dispositions",
-            fact_types=("benchmark assignment", "cost", "provider-account attribution"),
+            fact_types=(
+                "benchmark assignment",
+                "benchmark-relative attribution",
+                "cost",
+                "provider-account attribution",
+            ),
             observed_start=as_of,
             observed_end=as_of,
         ),
@@ -504,6 +565,9 @@ def stage_catalog(
     return {
         "available_comparisons": sum(
             row["metrics"] is not None for row in catalog["comparisons"]
+        ),
+        "available_benchmark_comparisons": sum(
+            row["metrics"] is not None for row in catalog["benchmark_comparisons"]
         ),
         "catalog_sha256": catalog_artifact.sha256,
         "generation_id": manifest.generation_id,

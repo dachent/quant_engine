@@ -652,9 +652,9 @@ def _correlation_v2() -> dict[str, object]:
             "observed_start": "2026-01-02",
             "series_id": series_id,
             "status": "AVAILABLE_LIVE_ONLY",
-            "strategy_version": "v1",
+            "strategy_version": f"synthetic-version:strategy-{index}",
         }
-        for series_id in STRATEGY_NAMES
+        for index, series_id in enumerate(STRATEGY_NAMES)
     }
     combined = json.loads(json.dumps(live))
     combined["evidence_mode"] = "LIVE_PLUS_BACKTEST"
@@ -1048,6 +1048,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
     )
     assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 9
+    assert data["hybrid_mode_gate"]["eligible_strategies"] == []
 
 
 def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
@@ -1116,6 +1117,7 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
                 "live_plus_backtest_status": "ELIGIBLE_PROVEN_COMPATIBLE",
                 "version_compatibility_reason": "Synthetic compatibility is proven.",
                 "version_compatibility_status": "PROVEN_COMPATIBLE",
+                "version_ref": f"synthetic-version:{strategy['strategy_id']}",
             }
         )
     report_root = tmp_path / "compatible-reporting"
@@ -1152,6 +1154,172 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
     )
     assert data["advisory"]["correlation_one_stress"] == "0.37249726899852387"
     assert data["hybrid_mode_gate"]["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
+    assert len(data["hybrid_mode_gate"]["eligible_strategies"]) == 9
+
+
+def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    partially_compatible_report = _report()
+    eligible = partially_compatible_report["strategy_summary"][0]
+    eligible.update(
+        {
+            "live_plus_backtest_reason": (
+                "Effective-dated registry proves the current strategy version compatible."
+            ),
+            "live_plus_backtest_status": "ELIGIBLE_PROVEN_COMPATIBLE",
+            "version_compatibility_reason": "Synthetic compatibility is proven.",
+            "version_compatibility_status": "PROVEN_COMPATIBLE",
+            "version_ref": "synthetic-version:strategy-0",
+        }
+    )
+    report_root = tmp_path / "partially-compatible-reporting"
+    _publish_report(
+        report_root,
+        tmp_path / "partially-compatible-portfolio-report-data.json",
+        partially_compatible_report,
+    )
+    correlation = _correlation_v2()
+    hybrid_composition = correlation["dependence_modes"]["LIVE_PLUS_BACKTEST"][
+        "series_composition"
+    ]
+    for strategy_name in STRATEGY_NAMES[1:]:
+        row = hybrid_composition[strategy_name]
+        row["backtest_observations_used"] = 0
+        row["observed_start"] = row["live_inception"]
+        row["status"] = "AVAILABLE_LIVE_ONLY_NO_COMPATIBLE_BACKTEST"
+    _publish_analytics(
+        inputs["correlation"],
+        "correlation.json",
+        correlation,
+        "synthetic-correlation-v2-partial",
+    )
+
+    result = panel.build_candidate(
+        report_root,
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+    )
+    candidate = Path(result["candidate_dir"])
+    verification = panel.verify_candidate(
+        report_root,
+        inputs["legacy"],
+        candidate,
+        freshness_health_path=inputs["freshness"],
+    )
+    assert verification["all_passed"] is True
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    gate = data["hybrid_mode_gate"]
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+    assert [row["strategy_name"] for row in gate["eligible_strategies"]] == [
+        STRATEGY_NAMES[0]
+    ]
+    assert len(gate["blocked_strategies"]) == 8
+    assert set(data["dependence_modes"]) == {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}
+    assert data["weekly_returns"]["hybrid_mode_status"] == (
+        "UNAVAILABLE_NOT_CONFIGURED"
+    )
+    governed_weekly = panel._govern_weekly_hybrid_modes(
+        {
+            "generation_id": "a" * 64,
+            "series": [
+                {
+                    "calendar_basis_by_mode": {
+                        "LIVE_ONLY": "NYSE",
+                        "LIVE_PLUS_BACKTEST": "NYSE",
+                    },
+                    "display_name": strategy_name,
+                    "mode_coverage": {
+                        "LIVE_ONLY": {
+                            "strategy_version": f"synthetic-version:strategy-{index}"
+                        },
+                        "LIVE_PLUS_BACKTEST": {
+                            "strategy_version": f"synthetic-version:strategy-{index}"
+                        },
+                    },
+                    "observation_meta_by_mode": {
+                        "LIVE_ONLY": {"2026-01-05": [5]},
+                        "LIVE_PLUS_BACKTEST": {"2026-01-05": [5]},
+                    },
+                    "primary_group": "STRATEGY",
+                    "series_id": strategy_name,
+                    "values_by_mode": {
+                        "LIVE_ONLY": {"2026-01-05": "0.01"},
+                        "LIVE_PLUS_BACKTEST": {"2026-01-05": "0.01"},
+                    },
+                }
+                for index, strategy_name in enumerate(STRATEGY_NAMES)
+            ],
+            "strategy_evidence_modes": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+        },
+        gate,
+    )
+    assert governed_weekly["strategy_evidence_modes"] == [
+        "LIVE_ONLY",
+        "LIVE_PLUS_BACKTEST",
+    ]
+    weekly_by_id = {
+        row["series_id"]: row
+        for row in governed_weekly["series"]
+        if row["primary_group"] == "STRATEGY"
+    }
+    assert "LIVE_PLUS_BACKTEST" in weekly_by_id[STRATEGY_NAMES[0]]["values_by_mode"]
+    assert list(weekly_by_id[STRATEGY_NAMES[1]]["values_by_mode"]) == ["LIVE_ONLY"]
+    assert list(weekly_by_id[STRATEGY_NAMES[1]]["mode_coverage"]) == ["LIVE_ONLY"]
+
+
+def test_weekly_hybrid_rejects_a_registry_version_mismatch() -> None:
+    gate = {
+        "blocked_strategies": [],
+        "eligible_strategies": [
+            {
+                "compatibility_status": "PROVEN_COMPATIBLE",
+                "reason": "Synthetic compatibility is proven.",
+                "strategy_id": "strategy-0",
+                "strategy_name": STRATEGY_NAMES[0],
+                "version_ref": "registry-version",
+            }
+        ],
+        "reason": "Synthetic compatibility is proven.",
+        "status": "ELIGIBLE_PROVEN_COMPATIBLE",
+    }
+    weekly = {
+        "generation_id": "a" * 64,
+        "series": [
+            {
+                "calendar_basis_by_mode": {
+                    "LIVE_ONLY": "NYSE",
+                    "LIVE_PLUS_BACKTEST": "NYSE",
+                },
+                "display_name": STRATEGY_NAMES[0],
+                "mode_coverage": {
+                    "LIVE_ONLY": {"strategy_version": "registry-version"},
+                    "LIVE_PLUS_BACKTEST": {"strategy_version": "different-version"},
+                },
+                "observation_meta_by_mode": {
+                    "LIVE_ONLY": {"2026-01-05": [5]},
+                    "LIVE_PLUS_BACKTEST": {"2026-01-05": [5]},
+                },
+                "primary_group": "STRATEGY",
+                "series_id": f"strategy:{STRATEGY_NAMES[0]}",
+                "values_by_mode": {
+                    "LIVE_ONLY": {"2026-01-05": "0.01"},
+                    "LIVE_PLUS_BACKTEST": {"2026-01-05": "0.01"},
+                },
+            }
+        ],
+        "strategy_evidence_modes": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+    }
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="eligible weekly hybrid version differs from registry",
+    ):
+        panel._govern_weekly_hybrid_modes(weekly, gate)
 
 
 def test_unresolved_versions_suppress_layered_hybrid_analytics(
@@ -1181,6 +1349,7 @@ def test_unresolved_versions_suppress_layered_hybrid_analytics(
         "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
     )
     assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 9
+    assert data["hybrid_mode_gate"]["eligible_strategies"] == []
 
 
 def test_template_line_endings_do_not_change_identity(
@@ -2078,7 +2247,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 14" in renderer
+    assert "data.panel_schema_version !== 15" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -2185,6 +2354,13 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
         "blocked_strategies"
     ]["items"]
     assert blocked["additionalProperties"] is False
+    eligible = schema["properties"]["hybrid_mode_gate"]["properties"][
+        "eligible_strategies"
+    ]["items"]
+    assert eligible["additionalProperties"] is False
+    assert eligible["properties"]["compatibility_status"] == {
+        "const": "PROVEN_COMPATIBLE"
+    }
     assert schema["properties"]["weekly_returns"]["properties"][
         "strategy_evidence_modes"
     ]["oneOf"] == [

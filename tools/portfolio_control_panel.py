@@ -38,8 +38,8 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-PANEL_SCHEMA_VERSION: Final = 14
-BUILDER_VERSION: Final = "2.5.0"
+PANEL_SCHEMA_VERSION: Final = 15
+BUILDER_VERSION: Final = "2.6.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -1580,6 +1580,7 @@ def _weekly_return_analysis(
 
 def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
     blocked = []
+    eligible = []
     for row in strategies:
         compatibility = str(row.get("version_compatibility_status") or "UNRESOLVED")
         report_status = str(
@@ -1606,9 +1607,41 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
                     ),
                 }
             )
+        else:
+            eligible.append(
+                {
+                    "compatibility_status": compatibility,
+                    "reason": str(
+                        row.get("live_plus_backtest_reason")
+                        or row.get("version_compatibility_reason")
+                        or "Effective-dated compatibility evidence is recorded."
+                    ),
+                    "strategy_id": _text(
+                        row.get("strategy_id"), "strategy.strategy_id"
+                    ),
+                    "strategy_name": _text(
+                        row.get("strategy_name"), "strategy.strategy_name"
+                    ),
+                    "version_ref": _text(
+                        row.get("version_ref"), "strategy.version_ref"
+                    ),
+                }
+            )
     if blocked:
+        if eligible:
+            return {
+                "blocked_strategies": blocked,
+                "eligible_strategies": eligible,
+                "reason": (
+                    f"LIVE_PLUS_BACKTEST is enabled independently for {len(eligible)} "
+                    f"PROVEN_COMPATIBLE strategy version(s); {len(blocked)} unresolved "
+                    "strategy version(s) remain live-only."
+                ),
+                "status": "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+            }
         return {
             "blocked_strategies": blocked,
+            "eligible_strategies": [],
             "reason": (
                 f"LIVE_PLUS_BACKTEST is unavailable because {len(blocked)} current "
                 "strategy version(s) are not PROVEN_COMPATIBLE."
@@ -1617,6 +1650,7 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
         }
     return {
         "blocked_strategies": [],
+        "eligible_strategies": eligible,
         "reason": (
             "Every current strategy version is effective-dated and PROVEN_COMPATIBLE."
         ),
@@ -1633,7 +1667,10 @@ def _govern_weekly_hybrid_modes(
         and isinstance(source_modes, list)
         and "LIVE_PLUS_BACKTEST" in source_modes
     )
-    hybrid_eligible = gate["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
+    hybrid_eligible = gate["status"] in {
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+        "ELIGIBLE_PROVEN_COMPATIBLE",
+    }
     accepted = {
         **weekly,
         "hybrid_mode_reason": (
@@ -1648,14 +1685,57 @@ def _govern_weekly_hybrid_modes(
         ),
     }
     if hybrid_eligible and hybrid_configured:
+        eligible_versions = {
+            _text(item.get("strategy_name"), "eligible strategy_name"): _text(
+                item.get("version_ref"), "eligible version_ref"
+            )
+            for item in _objects(gate.get("eligible_strategies"), "eligible strategies")
+        }
+        accepted_rows: list[dict[str, Any]] = []
+        for raw in _objects(weekly.get("series"), "weekly series"):
+            row = dict(raw)
+            if row.get("primary_group") == "STRATEGY":
+                strategy_name = _text(
+                    row.get("display_name", row.get("series_id")),
+                    "weekly strategy name",
+                )
+                expected_version = eligible_versions.get(strategy_name)
+                if expected_version is not None:
+                    mode_coverage = _object(
+                        row.get("mode_coverage"), "weekly mode coverage"
+                    )
+                    hybrid_coverage = _object(
+                        mode_coverage.get("LIVE_PLUS_BACKTEST"),
+                        "weekly hybrid mode coverage",
+                    )
+                    if hybrid_coverage.get("strategy_version") != expected_version:
+                        raise ControlPanelValidationError(
+                            "eligible weekly hybrid version differs from registry: "
+                            f"{strategy_name}"
+                        )
+                else:
+                    # Retain the strategy and its live history, but do not expose a
+                    # hybrid value, calendar, metadata, or coverage claim.
+                    for field in (
+                        "calendar_basis_by_mode",
+                        "mode_coverage",
+                        "observation_meta_by_mode",
+                        "values_by_mode",
+                    ):
+                        value = row.get(field)
+                        if isinstance(value, dict):
+                            row[field] = {"LIVE_ONLY": value.get("LIVE_ONLY", {})}
+            accepted_rows.append(row)
+        accepted["series"] = accepted_rows
         return accepted
     accepted["strategy_evidence_modes"] = ["LIVE_ONLY"]
-    accepted_rows: list[dict[str, Any]] = []
+    live_only_rows: list[dict[str, Any]] = []
     for raw in _objects(weekly.get("series"), "weekly series"):
         row = dict(raw)
         if row.get("primary_group") == "STRATEGY":
             for field in (
                 "calendar_basis_by_mode",
+                "mode_coverage",
                 "observation_meta_by_mode",
                 "values_by_mode",
             ):
@@ -1666,8 +1746,8 @@ def _govern_weekly_hybrid_modes(
                         if "LIVE_ONLY" in value
                         else {}
                     )
-        accepted_rows.append(row)
-    accepted["series"] = accepted_rows
+        live_only_rows.append(row)
+    accepted["series"] = live_only_rows
     return accepted
 
 
@@ -2417,13 +2497,75 @@ def _panel_data(
             accepted_modes = dict(modes)
             accepted_modes["LIVE_ONLY"] = [*live_mode, dynamic_factor_analysis]
             hybrid_mode = accepted_modes.get("LIVE_PLUS_BACKTEST")
-            if hybrid_mode is not None and {
-                _text(row.get("lens_id"), "hybrid decomposition lens_id")
-                for row in _objects(hybrid_mode, "hybrid decomposition lenses")
-            } != lens_ids | {"DYNAMIC_STYLE"}:
-                raise ControlPanelValidationError(
-                    "hybrid decomposition mode lens set differs"
-                )
+            if hybrid_mode is not None:
+                hybrid_lenses = _objects(hybrid_mode, "hybrid decomposition lenses")
+                if {
+                    _text(row.get("lens_id"), "hybrid decomposition lens_id")
+                    for row in hybrid_lenses
+                } != lens_ids | {"DYNAMIC_STYLE"}:
+                    raise ControlPanelValidationError(
+                        "hybrid decomposition mode lens set differs"
+                    )
+                eligible_versions = {
+                    _text(item.get("strategy_name"), "eligible strategy_name"): _text(
+                        item.get("version_ref"), "eligible version_ref"
+                    )
+                    for item in _objects(
+                        hybrid_mode_gate.get("eligible_strategies"),
+                        "eligible strategies",
+                    )
+                }
+                blocked_names = {
+                    _text(item.get("strategy_name"), "blocked strategy_name")
+                    for item in _objects(
+                        hybrid_mode_gate.get("blocked_strategies"),
+                        "blocked strategies",
+                    )
+                }
+                for lens in hybrid_lenses:
+                    for series in _objects(
+                        lens.get("series"), "hybrid decomposition series"
+                    ):
+                        strategy_name = _text(
+                            series.get("series_id"), "hybrid decomposition series_id"
+                        )
+                        if strategy_name in eligible_versions:
+                            composition = _object(
+                                series.get("series_composition"),
+                                f"hybrid decomposition composition {strategy_name}",
+                            )
+                            if (
+                                composition.get("strategy_version")
+                                != eligible_versions[strategy_name]
+                            ):
+                                raise ControlPanelValidationError(
+                                    "eligible decomposition hybrid version differs "
+                                    f"from registry: {strategy_name}"
+                                )
+                        elif strategy_name in blocked_names:
+                            raw_composition = series.get("series_composition")
+                            if raw_composition is None:
+                                continue
+                            composition = _object(
+                                raw_composition,
+                                f"hybrid decomposition composition {strategy_name}",
+                            )
+                            if (
+                                _finite_float(
+                                    composition.get("backtest_observations_used", 0),
+                                    "hybrid decomposition backtest observations",
+                                )
+                                != 0
+                            ):
+                                raise ControlPanelValidationError(
+                                    "unresolved strategy uses backtest history in hybrid "
+                                    f"decomposition: {strategy_name}"
+                                )
+                        else:
+                            raise ControlPanelValidationError(
+                                "hybrid decomposition strategy is outside registry gate: "
+                                f"{strategy_name}"
+                            )
             accepted_decomposition_lenses["modes"] = accepted_modes
     accepted_weekly_returns = (
         dict(weekly_returns)
@@ -2484,10 +2626,12 @@ def _panel_data(
             raise ControlPanelValidationError(
                 "default dependence payload differs from LIVE_ONLY"
             )
+        hybrid_eligible = hybrid_mode_gate["status"] in {
+            "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+            "ELIGIBLE_PROVEN_COMPATIBLE",
+        }
         accepted_mode_names = (
-            ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
-            if hybrid_mode_gate["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
-            else ("LIVE_ONLY",)
+            ("LIVE_ONLY", "LIVE_PLUS_BACKTEST") if hybrid_eligible else ("LIVE_ONLY",)
         )
         dependence_modes = {
             mode: _dependence_analysis(
@@ -2501,6 +2645,57 @@ def _panel_data(
             )
             for mode in accepted_mode_names
         }
+        if "LIVE_PLUS_BACKTEST" in dependence_modes:
+            eligible_versions = {
+                _text(item.get("strategy_name"), "eligible strategy_name"): _text(
+                    item.get("version_ref"), "eligible version_ref"
+                )
+                for item in _objects(
+                    hybrid_mode_gate.get("eligible_strategies"),
+                    "eligible strategies",
+                )
+            }
+            blocked_names = {
+                _text(item.get("strategy_name"), "blocked strategy_name")
+                for item in _objects(
+                    hybrid_mode_gate.get("blocked_strategies"),
+                    "blocked strategies",
+                )
+            }
+            hybrid_composition = _object(
+                dependence_modes["LIVE_PLUS_BACKTEST"].get("series_composition"),
+                "hybrid dependence series composition",
+            )
+            if set(hybrid_composition) != set(eligible_versions) | blocked_names:
+                raise ControlPanelValidationError(
+                    "hybrid dependence strategy boundary differs from registry gate"
+                )
+            for strategy_name, expected_version in eligible_versions.items():
+                row = _object(
+                    hybrid_composition.get(strategy_name),
+                    f"hybrid composition {strategy_name}",
+                )
+                if row.get("strategy_version") != expected_version:
+                    raise ControlPanelValidationError(
+                        "eligible dependence hybrid version differs from registry: "
+                        f"{strategy_name}"
+                    )
+            for strategy_name in blocked_names:
+                row = _object(
+                    hybrid_composition.get(strategy_name),
+                    f"hybrid composition {strategy_name}",
+                )
+                if (
+                    _finite_float(
+                        row.get("backtest_observations_used", 0),
+                        f"hybrid composition {strategy_name} backtest observations",
+                    )
+                    != 0
+                ):
+                    raise ControlPanelValidationError(
+                        "unresolved strategy uses backtest history in hybrid dependence: "
+                        f"{strategy_name}"
+                    )
         dependence_analysis = dependence_modes[default_dependence_mode]
     canonical_strategy_series = _canonical_strategy_series_contracts(
         evidence_by_strategy,
@@ -3661,11 +3856,20 @@ def verify_candidate(
         )
     )
     hybrid_gate = _object(data.get("hybrid_mode_gate"), "hybrid mode gate")
-    hybrid_blocked = hybrid_gate.get("status") != "ELIGIBLE_PROVEN_COMPATIBLE"
+    hybrid_status = hybrid_gate.get("status")
+    hybrid_blocked = hybrid_status == "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
+    hybrid_partial = hybrid_status == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
     weekly_modes = set(
         _object(data.get("weekly_returns"), "weekly returns").get(
             "strategy_evidence_modes", []
         )
+    )
+    weekly_hybrid_satisfied = (
+        "LIVE_PLUS_BACKTEST" in weekly_modes
+        or _object(data.get("weekly_returns"), "weekly returns").get(
+            "hybrid_mode_status"
+        )
+        == "UNAVAILABLE_NOT_CONFIGURED"
     )
     dependence_mode_names = set(
         _object(data.get("dependence_modes"), "dependence modes")
@@ -3675,11 +3879,26 @@ def verify_candidate(
             "Hybrid analytics fail closed on strategy-version compatibility",
             bool(hybrid_gate.get("reason"))
             and (
-                not hybrid_blocked
+                (
+                    not hybrid_blocked
+                    and not hybrid_partial
+                    and bool(hybrid_gate.get("eligible_strategies"))
+                    and not hybrid_gate.get("blocked_strategies")
+                    and weekly_hybrid_satisfied
+                    and "LIVE_PLUS_BACKTEST" in dependence_mode_names
+                )
+                or (
+                    hybrid_partial
+                    and bool(hybrid_gate.get("eligible_strategies"))
+                    and bool(hybrid_gate.get("blocked_strategies"))
+                    and weekly_hybrid_satisfied
+                    and "LIVE_PLUS_BACKTEST" in dependence_mode_names
+                )
                 or (
                     "LIVE_PLUS_BACKTEST" not in weekly_modes
                     and "LIVE_PLUS_BACKTEST" not in dependence_mode_names
                     and bool(hybrid_gate.get("blocked_strategies"))
+                    and not hybrid_gate.get("eligible_strategies")
                 )
             ),
             {

@@ -7,6 +7,7 @@
   "required": [
     "as_of_date",
     "benchmark_assignments",
+    "benchmark_comparisons",
     "catalog_schema_version",
     "comparisons",
     "costs",
@@ -14,11 +15,12 @@
     "source_returns_sha256"
   ],
   "properties": {
-    "catalog_schema_version": {"const": 1},
+    "catalog_schema_version": {"const": 2},
     "as_of_date": {"type": "string", "format": "date"},
     "source_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "source_returns_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "benchmark_assignments": {"type": "array", "minItems": 9, "maxItems": 9},
+    "benchmark_comparisons": {"type": "array", "minItems": 9, "maxItems": 9},
     "comparisons": {"type": "array", "minItems": 9, "maxItems": 9},
     "costs": {"type": "array", "minItems": 9, "maxItems": 9}
   }
