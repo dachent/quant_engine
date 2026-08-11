@@ -841,7 +841,10 @@ def build_analytics(
     hybrid_lenses: dict[str, str] = {}
     hybrid_bundles: dict[str, str] = {}
     hybrid_root = lenses_root / "LIVE_PLUS_BACKTEST"
-    evidence_mode_root = output_root / "decomposition-evidence-modes"
+    # Keep this private staging name short. The content-addressed bundle adds a
+    # 64-character directory plus nested provenance names, and the authoritative
+    # Windows runtime may still enforce the legacy 260-character path ceiling.
+    evidence_mode_root = output_root / "hybrid-inputs"
     hybrid_dynamic = _build_hybrid_decomposition(
         base_spec=base_spec,
         base_source=base_source,
