@@ -206,6 +206,10 @@ python tools/portfolio_pipeline_materialize.py spec --recipe (Join-Path $cycleRo
 python tools/data_pipeline.py plan --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py execute --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py status --spec (Join-Path $runRoot 'pipeline-spec.json')
+python tools/portfolio_pipeline_materialize.py production-spec --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') --prepared-root $runRoot --semantic-gate (Join-Path $runRoot 'evidence\post-build-semantic.json') --portfolio-root $portfolioRoot --state-root (Join-Path $cycleRoot 'production-state') --spec (Join-Path $cycleRoot 'production-spec.json')
+python tools/data_pipeline.py plan --spec (Join-Path $cycleRoot 'production-spec.json')
+python tools/data_pipeline.py execute --spec (Join-Path $cycleRoot 'production-spec.json')
+python tools/data_pipeline.py execute --spec (Join-Path $cycleRoot 'production-spec.json') --commit
 ```
 
 Before removing an old storage root, require exact source/destination inventories,

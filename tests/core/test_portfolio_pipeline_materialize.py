@@ -15,6 +15,7 @@ from quant_engine.core import (
     CoverageClaim,
     CoverageStatus,
     GenerationManifest,
+    PipelineSpec,
     SourceArtifact,
     VerificationStatus,
     inventory_generation,
@@ -345,6 +346,79 @@ def test_generation_date_rule_allows_dated_ledger_only() -> None:
     assert materializer._generation_as_of_allowed("ledger", earlier, AS_OF)
     assert not materializer._generation_as_of_allowed("baseline", earlier, AS_OF)
     assert not materializer._generation_as_of_allowed("ledger", date(2026, 8, 4), AS_OF)
+
+
+def test_production_spec_binds_stable_thirteen_root_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    short_stage_roots = dict(materializer.PRODUCTION_STAGE_ROOTS)
+    analytics_root_ids = [
+        root_id
+        for root_id in short_stage_roots
+        if not root_id.startswith("portfolio-") and root_id != "provider-ledger"
+    ]
+    for index, root_id in enumerate(analytics_root_ids):
+        short_stage_roots[root_id] = Path("stages") / "a" / str(index)
+    monkeypatch.setattr(materializer, "PRODUCTION_STAGE_ROOTS", short_stage_roots)
+    recipe_path, prepared_root = _fixture(tmp_path)
+    analytics_ids: dict[str, str] = {}
+    for root_id, relative in materializer.PRODUCTION_STAGE_ROOTS.items():
+        if root_id.startswith("portfolio-") or root_id == "provider-ledger":
+            continue
+        staged_root = prepared_root / relative
+        generation = _generation(
+            staged_root,
+            root_id,
+            {"analytics.json": {"root_id": root_id}},
+        )
+        _write_json(staged_root / "CURRENT.json", {"generation_id": generation.name})
+        analytics_ids[root_id] = generation.name
+    panel = next((prepared_root / "stages" / "panel" / "generations").iterdir())
+    _mutate_json(
+        panel / "data" / "dashboard_data.json",
+        lambda payload: payload["meta"].update(
+            {
+                "correlation_generation_id": analytics_ids["correlation"],
+                "decomposition_generation_id": analytics_ids["factor-decomposition"],
+                "weekly_returns_generation_id": analytics_ids["weekly-returns"],
+            }
+        ),
+    )
+    _refresh_expected_generation(recipe_path, prepared_root, "panel")
+    _write_json(
+        prepared_root / "evidence" / "post-build-semantic.json",
+        materializer._semantic_gate_payload(materializer._recipe(recipe_path)),
+    )
+    _write_json(
+        prepared_root / "portfolio-orchestration-contract.json",
+        {"release_commit": "a" * 40, "state": "PASS"},
+    )
+    monkeypatch.setattr(
+        materializer,
+        "_git",
+        lambda _repo, *args: "a" * 40 if args == ("rev-parse", "HEAD") else "",
+    )
+    production_root = tmp_path / "production"
+    spec_path = tmp_path / "release" / "production-spec.json"
+
+    result = materializer.build_production_spec(
+        recipe_path,
+        prepared_root,
+        prepared_root / "evidence" / "post-build-semantic.json",
+        production_root,
+        tmp_path / "production-state",
+        spec_path,
+    )
+
+    spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
+    assert result["root_count"] == 13
+    assert set(spec.roots) == set(materializer.PRODUCTION_ROOTS)
+    assert spec.coordination_root == production_root / "releases"
+    assert (
+        spec.release_generations["portfolio-panel"]
+        == next((prepared_root / "stages" / "panel" / "generations").iterdir()).name
+    )
+    assert spec.release_generations["correlation"] == analytics_ids["correlation"]
 
 
 def test_semantic_accepts_explicitly_rendered_freshness_blocker(

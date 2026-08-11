@@ -367,12 +367,27 @@ advancing pointers.
   --spec (Join-Path $runRoot 'pipeline-spec.json')
 ```
 
-After inspection, commit the same immutable specification. Do not rebuild
-between preparation and commit.
+The prepared specification above proves the complete graph in a private root;
+it is not the production cutover. Bind those exact generations to the stable
+13-root production authority, then plan, prepare, and commit that second
+immutable specification. This preserves the existing coordinated root set and
+prevents a private proof directory from being mistaken for production.
 
 ```powershell
+& $enginePython tools\portfolio_pipeline_materialize.py production-spec `
+  --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') `
+  --prepared-root $runRoot `
+  --semantic-gate (Join-Path $runRoot 'evidence\post-build-semantic.json') `
+  --portfolio-root $portfolioRoot `
+  --state-root (Join-Path $cycleRoot 'production-state') `
+  --spec (Join-Path $cycleRoot 'production-spec.json')
+
+& $enginePython tools\data_pipeline.py plan `
+  --spec (Join-Path $cycleRoot 'production-spec.json')
 & $enginePython tools\data_pipeline.py execute `
-  --spec (Join-Path $runRoot 'pipeline-spec.json') `
+  --spec (Join-Path $cycleRoot 'production-spec.json')
+& $enginePython tools\data_pipeline.py execute `
+  --spec (Join-Path $cycleRoot 'production-spec.json') `
   --commit
 ```
 

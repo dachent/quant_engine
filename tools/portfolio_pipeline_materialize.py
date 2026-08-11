@@ -43,6 +43,38 @@ ROOT_IDS = {
     "report": "reporting",
     "panel": "control-panel",
 }
+PRODUCTION_ROOTS = {
+    "correlation": Path("analytics/correlation"),
+    "europe-economic": Path("analytics/decomposition-lenses/europe-economic"),
+    "factor-decomposition": Path("analytics/decomposition"),
+    "multi-asset-style": Path("analytics/decomposition-lenses/multi-asset-style"),
+    "portfolio-baseline": Path("baseline"),
+    "portfolio-panel": Path("control-panel"),
+    "portfolio-report": Path("reporting"),
+    "provider-ledger": Path("provider-ledger"),
+    "us-economic": Path("analytics/decomposition-lenses/us-economic"),
+    "us-equity-style": Path("analytics/decomposition-lenses/us-equity-style"),
+    "us-industry": Path("analytics/decomposition-lenses/us-industry"),
+    "us-sector": Path("analytics/decomposition-lenses/us-sector"),
+    "weekly-returns": Path("analytics/weekly-returns"),
+}
+PRODUCTION_STAGE_ROOTS = {
+    "correlation": Path("stages/analytics/correlation"),
+    "europe-economic": Path("stages/analytics/decomposition-lenses/europe-economic"),
+    "factor-decomposition": Path("stages/analytics/decomposition"),
+    "multi-asset-style": Path(
+        "stages/analytics/decomposition-lenses/multi-asset-style"
+    ),
+    "portfolio-baseline": Path("stages/baseline"),
+    "portfolio-panel": Path("stages/panel"),
+    "portfolio-report": Path("stages/report"),
+    "provider-ledger": Path("stages/ledger"),
+    "us-economic": Path("stages/analytics/decomposition-lenses/us-economic"),
+    "us-equity-style": Path("stages/analytics/decomposition-lenses/us-equity-style"),
+    "us-industry": Path("stages/analytics/decomposition-lenses/us-industry"),
+    "us-sector": Path("stages/analytics/decomposition-lenses/us-sector"),
+    "weekly-returns": Path("stages/analytics/weekly-returns"),
+}
 GENERATION_STAGE = {
     "ledger": "ledger",
     "baseline": "baseline",
@@ -1174,6 +1206,184 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
     return {"contract": str(contract_path), "nodes": len(nodes), "spec": str(spec_path)}
 
 
+def build_production_spec(
+    recipe_path: Path,
+    prepared_root: Path,
+    semantic_path: Path,
+    portfolio_root: Path,
+    state_root: Path,
+    spec_path: Path,
+) -> dict[str, Any]:
+    """Bind a verified private proof to the stable production root set."""
+
+    recipe = _recipe(recipe_path)
+    repo = Path(__file__).resolve().parents[1]
+    release_commit = _git(repo, "rev-parse", "HEAD")
+    if release_commit != recipe["release_commit"] or _git(
+        repo, "status", "--porcelain=v1", "--untracked-files=all"
+    ):
+        raise MaterializationError("repository must be clean at the recipe commit")
+    prepared_root = prepared_root.resolve()
+    semantic_path = semantic_path.resolve()
+    portfolio_root = portfolio_root.resolve()
+    state_root = state_root.resolve()
+    if portfolio_root == repo or repo in portfolio_root.parents:
+        raise MaterializationError("production portfolio root must be outside Git")
+
+    sources: dict[str, Path] = {}
+    generation_ids: dict[str, str] = {}
+    nodes: list[dict[str, Any]] = []
+    for root_id, relative in PRODUCTION_STAGE_ROOTS.items():
+        staged_root = prepared_root / relative
+        if root_id in {
+            "provider-ledger",
+            "portfolio-baseline",
+            "portfolio-report",
+            "portfolio-panel",
+        }:
+            role = {
+                "provider-ledger": "ledger",
+                "portfolio-baseline": "baseline",
+                "portfolio-report": "report",
+                "portfolio-panel": "panel",
+            }[root_id]
+            generation_id = _text(
+                recipe["expected_generations"][role]["generation_id"],
+                f"{root_id} generation_id",
+            )
+        else:
+            generation_id, _ = _current_generation(staged_root)
+        source = staged_root / "generations" / generation_id
+        inventory = inventory_generation(source)
+        files = inventory.get("files")
+        if not isinstance(files, list):
+            raise MaterializationError(f"{root_id} generation inventory differs")
+        expected = (
+            recipe["expected_generations"][role]
+            if root_id
+            in {
+                "provider-ledger",
+                "portfolio-baseline",
+                "portfolio-report",
+                "portfolio-panel",
+            }
+            else None
+        )
+        actual = {
+            "files": files,
+            "generation_id": inventory["generation_id"],
+            "manifest_sha256": inventory["manifest_sha256"],
+        }
+        if expected is not None and actual != expected:
+            raise MaterializationError(f"{root_id} prepared generation differs")
+        sources[root_id] = source
+        generation_ids[root_id] = generation_id
+        nodes.append(
+            {
+                "depends_on": [],
+                "files": files,
+                "generation_id": generation_id,
+                "kind": "GENERATION",
+                "manifest_sha256": inventory["manifest_sha256"],
+                "node_id": f"publish-{root_id}",
+                "release_target": True,
+                "root_id": root_id,
+                "source_dir": str(source),
+            }
+        )
+
+    panel_generation = sources["portfolio-panel"]
+    panel_payload = _load(
+        panel_generation / "data" / "dashboard_data.json", "prepared panel data"
+    )
+    panel_meta = panel_payload.get("meta")
+    expected_panel_analytics = {
+        "correlation_generation_id": generation_ids["correlation"],
+        "decomposition_generation_id": generation_ids["factor-decomposition"],
+        "weekly_returns_generation_id": generation_ids["weekly-returns"],
+    }
+    if not isinstance(panel_meta, dict) or any(
+        panel_meta.get(key) != value for key, value in expected_panel_analytics.items()
+    ):
+        raise MaterializationError("prepared panel analytics authority differs")
+
+    expected_semantic = canonical_json_bytes(_semantic_gate_payload(recipe))
+    if semantic_path.read_bytes() != expected_semantic:
+        raise MaterializationError("prepared semantic gate differs")
+    orchestration_path = prepared_root / "portfolio-orchestration-contract.json"
+    orchestration_sha = _sha(orchestration_path)[0]
+    orchestration = _load(orchestration_path, "prepared orchestration contract")
+    prepared_release_commit = _text(
+        orchestration.get("release_commit"), "prepared orchestration release_commit"
+    )
+    if len(prepared_release_commit) != 40:
+        raise MaterializationError("prepared orchestration release_commit differs")
+    launcher = prepared_root / "stages" / "panel" / "index.html"
+    launcher_sha = _sha(launcher)[0]
+    if launcher_sha != recipe["panel_launcher_sha256"]:
+        raise MaterializationError("prepared launcher differs")
+
+    contract = {
+        "code_commit": release_commit,
+        "generation_ids": generation_ids,
+        "orchestration_contract_sha256": orchestration_sha,
+        "pipeline_id": recipe["pipeline_id"],
+        "prepared_release_commit": prepared_release_commit,
+        "production_roots": {
+            root_id: str(portfolio_root / relative)
+            for root_id, relative in PRODUCTION_ROOTS.items()
+        },
+        "schema_version": 1,
+        "semantic_gate_sha256": hashlib.sha256(expected_semantic).hexdigest(),
+        "source_generations": {key: str(value) for key, value in sources.items()},
+    }
+    contract_path = spec_path.with_name("portfolio-production-rebind-contract.json")
+    contract_bytes = canonical_json_bytes(contract)
+    _write_exact(contract_path, contract_bytes)
+    spec = {
+        "as_of_date": recipe["as_of_date"],
+        "code_commit": release_commit,
+        "companions": [
+            {
+                "companion_id": "portfolio-panel-launcher",
+                "relative_path": "index.html",
+                "root_id": "portfolio-panel",
+                "sha256": launcher_sha,
+                "source_path": str(launcher),
+            }
+        ],
+        "coordination_root": str(portfolio_root / "releases"),
+        "created_at": datetime.now(UTC).isoformat(),
+        "gates": [
+            {
+                "gate_id": "port-underwrite-production-rebind",
+                "path": str(contract_path),
+                "sha256": hashlib.sha256(contract_bytes).hexdigest(),
+            },
+            {
+                "gate_id": "post-build-semantic",
+                "path": str(semantic_path),
+                "sha256": hashlib.sha256(expected_semantic).hexdigest(),
+            },
+        ],
+        "nodes": nodes,
+        "pipeline_id": f"{recipe['pipeline_id']}-production",
+        "roots": {
+            root_id: str(portfolio_root / relative)
+            for root_id, relative in PRODUCTION_ROOTS.items()
+        },
+        "schema_version": 1,
+        "state_root": str(state_root),
+    }
+    _write_exact(spec_path, canonical_json_bytes(spec))
+    return {
+        "contract": str(contract_path),
+        "nodes": len(nodes),
+        "root_count": len(PRODUCTION_ROOTS),
+        "spec": str(spec_path),
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1197,6 +1407,13 @@ def _parser() -> argparse.ArgumentParser:
     spec_cmd.add_argument("--recipe", type=Path, required=True)
     spec_cmd.add_argument("--output-root", type=Path, required=True)
     spec_cmd.add_argument("--spec", type=Path, required=True)
+    production_cmd = commands.add_parser("production-spec")
+    production_cmd.add_argument("--recipe", type=Path, required=True)
+    production_cmd.add_argument("--prepared-root", type=Path, required=True)
+    production_cmd.add_argument("--semantic-gate", type=Path, required=True)
+    production_cmd.add_argument("--portfolio-root", type=Path, required=True)
+    production_cmd.add_argument("--state-root", type=Path, required=True)
+    production_cmd.add_argument("--spec", type=Path, required=True)
     return parser
 
 
@@ -1217,8 +1434,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.pipeline_id,
                 args.output,
             )
-        else:
+        elif args.command == "spec":
             result = build_spec(args.recipe, args.output_root, args.spec)
+        else:
+            result = build_production_spec(
+                args.recipe,
+                args.prepared_root,
+                args.semantic_gate,
+                args.portfolio_root,
+                args.state_root,
+                args.spec,
+            )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"portfolio-pipeline: FAIL: {exc}", file=sys.stderr)
         return 1
