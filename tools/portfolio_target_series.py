@@ -45,6 +45,15 @@ QUANTBASE_ACTIVITY_FIELDS: Final = frozenset(
 )
 CORRELATION_FIELDS: Final = ("series_id", "date", "return", "evidence_layer")
 CORRELATION_FIELDS_V2: Final = (*CORRELATION_FIELDS, "strategy_version")
+STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
+STRATEGY_HISTORY_STATUSES: Final = frozenset(
+    {
+        "ACCEPTED_EXACT_VERSION_HISTORY",
+        "ACCEPTED_EXACT_VERSION_PLUS_GOVERNED_SIGNAL_PRICE_EXTENSION",
+        "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+        "ACCEPTED_PROVIDER_MODEL_HISTORY",
+    }
+)
 
 
 class TargetSeriesError(ValueError):
@@ -1118,6 +1127,197 @@ def _portfolio123_simulation_returns(
     }
 
 
+def _strategy_history_returns(
+    manifest_path: Path,
+    returns_path: Path,
+) -> tuple[
+    dict[str, list[dict[str, str]]],
+    dict[str, dict[str, object]],
+    dict[str, dict[str, object]],
+    dict[str, object],
+]:
+    """Admit a hash-bound, multi-strategy history bundle.
+
+    History compatibility and account implementation reconciliation are
+    deliberately separate. A current, version-identified model history may be
+    used for economic inference even when execution capture or account/model
+    reconciliation remains incomplete. The latter status is retained in the
+    evidence proof and must never erase the former history.
+    """
+
+    manifest = _load_json(manifest_path, "strategy history manifest")
+    if manifest.get("schema_version") != STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION:
+        raise TargetSeriesError("strategy history manifest schema is unsupported")
+    if manifest.get("verification") != "VERIFIED":
+        raise TargetSeriesError("strategy history bundle is not verified")
+    try:
+        history_as_of = date.fromisoformat(str(manifest.get("as_of_date", "")))
+    except ValueError as exc:
+        raise TargetSeriesError("strategy history as-of date is invalid") from exc
+    artifact = manifest.get("returns_artifact")
+    if not isinstance(artifact, dict):
+        raise TargetSeriesError("strategy history returns artifact is invalid")
+    expected_hash = str(artifact.get("sha256", ""))
+    expected_size = artifact.get("size_bytes")
+    actual_hash, actual_size = _sha256(returns_path)
+    if (
+        len(expected_hash) != 64
+        or not isinstance(expected_size, int)
+        or (actual_hash, actual_size) != (expected_hash, expected_size)
+    ):
+        raise TargetSeriesError("strategy history returns differ from manifest")
+
+    rows = _csv_rows(
+        returns_path,
+        frozenset(CORRELATION_FIELDS_V2),
+        "strategy history returns",
+    )
+    if rows and tuple(rows[0]) != CORRELATION_FIELDS_V2:
+        raise TargetSeriesError("strategy history return header differs")
+    raw_series = manifest.get("series")
+    if not isinstance(raw_series, list) or not raw_series:
+        raise TargetSeriesError("strategy history manifest lacks series")
+    definitions: dict[str, dict[str, object]] = {}
+    for raw in raw_series:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("strategy history definition is invalid")
+        series_id = str(raw.get("series_id", "")).strip()
+        version = str(raw.get("strategy_version", "")).strip()
+        status = str(raw.get("history_status", "")).strip()
+        observations = raw.get("return_observations")
+        if (
+            not series_id
+            or not version
+            or status not in STRATEGY_HISTORY_STATUSES
+            or not isinstance(observations, int)
+            or observations <= 0
+            or series_id in definitions
+        ):
+            raise TargetSeriesError("strategy history definition is invalid")
+        if not isinstance(raw.get("required_for_analysis"), bool):
+            raise TargetSeriesError("strategy history required flag is invalid")
+        for field in (
+            "compatibility_basis",
+            "frequency",
+            "implementation_reconciliation_status",
+            "observed_end",
+            "observed_start",
+        ):
+            if not str(raw.get(field, "")).strip():
+                raise TargetSeriesError(
+                    f"strategy history {field} is missing: {series_id}"
+                )
+        try:
+            observed_start = date.fromisoformat(str(raw["observed_start"]))
+            observed_end = date.fromisoformat(str(raw["observed_end"]))
+        except ValueError as exc:
+            raise TargetSeriesError(
+                f"strategy history interval is invalid: {series_id}"
+            ) from exc
+        if observed_end < observed_start:
+            raise TargetSeriesError(
+                f"strategy history interval is reversed: {series_id}"
+            )
+        definitions[series_id] = dict(raw)
+
+    dispositions: dict[str, dict[str, object]] = {}
+    raw_dispositions = manifest.get("history_dispositions", [])
+    if not isinstance(raw_dispositions, list):
+        raise TargetSeriesError("strategy history dispositions are invalid")
+    for raw in raw_dispositions:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("strategy history disposition is invalid")
+        series_id = str(raw.get("series_id", "")).strip()
+        status = str(raw.get("status", "")).strip()
+        history_status = str(raw.get("history_status", "")).strip()
+        version = str(raw.get("strategy_version", "")).strip()
+        implementation = str(
+            raw.get("implementation_reconciliation_status", "")
+        ).strip()
+        reason = str(raw.get("reason", "")).strip()
+        if (
+            not series_id
+            or not status
+            or not history_status.startswith("UNAVAILABLE_")
+            or not version
+            or not implementation
+            or not reason
+            or not isinstance(raw.get("required_for_analysis"), bool)
+            or series_id in definitions
+            or series_id in dispositions
+        ):
+            raise TargetSeriesError("strategy history disposition is invalid")
+        dispositions[series_id] = dict(raw)
+
+    grouped: dict[str, list[dict[str, str]]] = {
+        series_id: [] for series_id in definitions
+    }
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        series_id = row["series_id"]
+        definition = definitions.get(series_id)
+        if definition is None:
+            raise TargetSeriesError(
+                f"strategy history returns contain undeclared series: {series_id}"
+            )
+        if row["evidence_layer"] != "BACKTEST":
+            raise TargetSeriesError("strategy history may contain only BACKTEST rows")
+        if row["strategy_version"] != definition["strategy_version"]:
+            raise TargetSeriesError(
+                f"strategy history version differs: {series_id}"
+            )
+        try:
+            observed = date.fromisoformat(row["date"])
+        except ValueError as exc:
+            raise TargetSeriesError(
+                f"strategy history date is invalid: {series_id}"
+            ) from exc
+        value = _decimal(row["return"], f"strategy history return {series_id}")
+        if value <= -1:
+            raise TargetSeriesError(
+                f"strategy history return is invalid: {series_id}"
+            )
+        if observed > history_as_of:
+            raise TargetSeriesError(
+                f"strategy history exceeds its as-of date: {series_id}"
+            )
+        key = (series_id, observed.isoformat())
+        if key in seen:
+            raise TargetSeriesError(
+                f"strategy history contains duplicate dates: {series_id}"
+            )
+        seen.add(key)
+        grouped[series_id].append(dict(row))
+
+    for series_id, definition in definitions.items():
+        accepted = sorted(grouped[series_id], key=lambda item: item["date"])
+        if len(accepted) != definition["return_observations"]:
+            raise TargetSeriesError(
+                f"strategy history observation count differs: {series_id}"
+            )
+        if (
+            not accepted
+            or accepted[0]["date"] != definition["observed_start"]
+            or accepted[-1]["date"] != definition["observed_end"]
+        ):
+            raise TargetSeriesError(
+                f"strategy history observation bounds differ: {series_id}"
+            )
+        grouped[series_id] = accepted
+
+    proof = {
+        "as_of_date": history_as_of.isoformat(),
+        "bundle_id": manifest.get("bundle_id"),
+        "manifest_sha256": _sha256(manifest_path)[0],
+        "returns_sha256": actual_hash,
+        "returns_size_bytes": actual_size,
+        "schema_version": manifest["schema_version"],
+        "verification": manifest["verification"],
+    }
+    proof["disposition_count"] = len(dispositions)
+    return grouped, definitions, dispositions, proof
+
+
 def build_layered_correlation_inputs(
     base_spec_path: Path,
     base_returns_path: Path,
@@ -1130,13 +1330,15 @@ def build_layered_correlation_inputs(
     portfolio123_series_id: str,
     strategy_evidence_content: bytes,
     as_of_date: str,
+    strategy_history_manifest_path: Path | None = None,
+    strategy_history_returns_path: Path | None = None,
 ) -> tuple[bytes, bytes, bytes, bytes]:
     """Build a hash-bound v2 live-plus-backtest correlation source.
 
-    Account-live observations remain the selected authority. A Portfolio123
-    simulation is admitted only when the accepted provider generation contains
-    one explicit ``live_sim_twin`` relationship. The correlation builder later
-    enforces the strict pre-live boundary.
+    Account-live observations remain the selected authority. Portfolio123 is
+    one admitted history adapter, not the sole history path. Additional
+    strategies are admitted through one verified, hash-bound history bundle.
+    The correlation builder later enforces the strict pre-live boundary.
     """
 
     spec = _load_json(base_spec_path, "base correlation spec")
@@ -1206,6 +1408,29 @@ def build_layered_correlation_inputs(
         )
     strategy_evidence_hash = hashlib.sha256(strategy_evidence_content).hexdigest()
 
+    if (strategy_history_manifest_path is None) != (
+        strategy_history_returns_path is None
+    ):
+        raise TargetSeriesError(
+            "strategy history manifest and returns must be supplied together"
+        )
+    history_rows: dict[str, list[dict[str, str]]] = {}
+    history_definitions: dict[str, dict[str, object]] = {}
+    history_dispositions: dict[str, dict[str, object]] = {}
+    history_proof: dict[str, object] | None = None
+    if (
+        strategy_history_manifest_path is not None
+        and strategy_history_returns_path is not None
+    ):
+        (
+            history_rows,
+            history_definitions,
+            history_dispositions,
+            history_proof,
+        ) = _strategy_history_returns(
+            strategy_history_manifest_path, strategy_history_returns_path
+        )
+
     target_rows = _target_rows(target_content)
     series_ids = spec.get("series_ids")
     if not isinstance(series_ids, list) or any(
@@ -1215,6 +1440,15 @@ def build_layered_correlation_inputs(
     requested = set(series_ids)
     if portfolio123_series_id not in requested:
         raise TargetSeriesError("Portfolio123 series is absent from correlation spec")
+    unknown_history = (set(history_definitions) | set(history_dispositions)) - requested
+    if unknown_history:
+        raise TargetSeriesError(
+            "strategy history contains series absent from correlation spec"
+        )
+    if portfolio123_series_id in history_definitions:
+        raise TargetSeriesError(
+            "Portfolio123 history is declared by more than one accepted adapter"
+        )
     unknown = {row["series_id"] for row in target_rows} - requested
     if unknown:
         raise TargetSeriesError("target rows contain unrequested correlation series")
@@ -1236,6 +1470,7 @@ def build_layered_correlation_inputs(
         if live_layer not in {"ACCOUNT_LIVE", "PROVIDER_LIVE", "OFFICIAL_VEHICLE"}:
             raise TargetSeriesError("a correlation series lacks an accepted live layer")
         live_layer_by_series[series_id] = live_layer
+        implementation_lineage: object | None = None
         if series_id == portfolio123_series_id:
             version = _strategy_version(
                 "p123-live-sim-twin",
@@ -1249,20 +1484,69 @@ def build_layered_correlation_inputs(
                 },
             )
             status = "ACCEPTED_GENERATION_BOUND_LIVE_SIM_TWIN"
+            backtest_source = "portfolio123-live-sim-twin"
+            backtest_observations = len(simulation_rows)
+            backtest_observed_start = simulation_rows[0]["date"]
+            backtest_observed_end = simulation_rows[-1]["date"]
+            compatibility_basis = "EXACT_GENERATION_BOUND_LIVE_SIM_TWIN"
+            history_status = "ACCEPTED_EXACT_VERSION_HISTORY"
+            implementation_status = "TESTED_EXACT_DATE_PATHS"
+            disposition_reason = None
+        elif series_id in history_definitions:
+            definition = history_definitions[series_id]
+            version = str(definition["strategy_version"])
+            status = str(definition["history_status"])
+            backtest_source = "strategy-history-bundle"
+            backtest_observations = int(definition["return_observations"])
+            backtest_observed_start = str(definition["observed_start"])
+            backtest_observed_end = str(definition["observed_end"])
+            compatibility_basis = str(definition["compatibility_basis"])
+            history_status = str(definition["history_status"])
+            implementation_status = str(
+                definition["implementation_reconciliation_status"]
+            )
+            implementation_lineage = definition.get("implementation_lineage")
+            disposition_reason = None
+        elif series_id in history_dispositions:
+            disposition = history_dispositions[series_id]
+            version = str(disposition["strategy_version"])
+            status = str(disposition["status"])
+            backtest_source = None
+            backtest_observations = 0
+            backtest_observed_start = None
+            backtest_observed_end = None
+            compatibility_basis = None
+            history_status = str(disposition["history_status"])
+            implementation_status = str(
+                disposition["implementation_reconciliation_status"]
+            )
+            disposition_reason = str(disposition["reason"])
         else:
             version = _strategy_version(
                 "accepted-live-path",
                 {"rows": rows, "series_id": series_id},
             )
-            status = "ACCEPTED_LIVE_PATH_NO_MATCHED_BACKTEST"
+            status = "NO_DECLARED_VERSIONED_HISTORY"
+            backtest_source = None
+            backtest_observations = 0
+            backtest_observed_start = None
+            backtest_observed_end = None
+            compatibility_basis = None
+            history_status = "UNAVAILABLE_NOT_DECLARED"
+            implementation_status = "NOT_EVALUATED"
+            disposition_reason = None
         version_by_series[series_id] = version
         mapping_proof.append(
             {
-                "backtest_source": (
-                    "portfolio123-live-sim-twin"
-                    if series_id == portfolio123_series_id
-                    else None
-                ),
+                "backtest_observations": backtest_observations,
+                "backtest_observed_end": backtest_observed_end,
+                "backtest_observed_start": backtest_observed_start,
+                "backtest_source": backtest_source,
+                "compatibility_basis": compatibility_basis,
+                "history_status": history_status,
+                "history_disposition_reason": disposition_reason,
+                "implementation_lineage": implementation_lineage,
+                "implementation_reconciliation_status": implementation_status,
                 "live_evidence_layer": live_layer,
                 "live_observations": len(rows),
                 "series_id": series_id,
@@ -1290,6 +1574,9 @@ def build_layered_correlation_inputs(
                 "strategy_version": version_by_series[portfolio123_series_id],
             }
         )
+    for series_id, accepted_rows in history_rows.items():
+        for row in accepted_rows:
+            combined.append(dict(row))
     series_order = {series_id: index for index, series_id in enumerate(series_ids)}
     combined.sort(
         key=lambda row: (
@@ -1307,7 +1594,11 @@ def build_layered_correlation_inputs(
     correlation_content = buffer.getvalue().encode("utf-8")
 
     spec["schema_version"] = 2
-    spec["as_of_date"] = max(str(spec.get("as_of_date", "")), as_of_date)
+    spec["as_of_date"] = max(
+        str(spec.get("as_of_date", "")),
+        as_of_date,
+        str((history_proof or {}).get("as_of_date", "")),
+    )
     spec["evidence_mode_series"] = [
         {
             "live_evidence_layer": live_layer_by_series[series_id],
@@ -1344,6 +1635,7 @@ def build_layered_correlation_inputs(
         },
         "series_mappings": mapping_proof,
         "simulation_coverage": simulation_coverage,
+        "strategy_history_bundle": history_proof,
         "sources": {
             "accepted_target_rows": {
                 "sha256": hashlib.sha256(target_content).hexdigest(),
@@ -1706,6 +1998,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-account-entity-id")
     parser.add_argument("--portfolio123-strategy-id")
     parser.add_argument("--portfolio123-account-series-id")
+    parser.add_argument("--strategy-history-manifest", type=Path)
+    parser.add_argument("--strategy-history-returns", type=Path)
     parser.add_argument("--provider-ledger-manifest", type=Path)
     parser.add_argument("--provider-ledger-catalog", type=Path)
     parser.add_argument("--layered-correlation-only", action="store_true")
@@ -1794,6 +2088,8 @@ def main() -> int:
                 args.portfolio123_account_series_id,
                 strategy_evidence,
                 str(evidence_value["as_of_date"]),
+                args.strategy_history_manifest,
+                args.strategy_history_returns,
             )
             correlation_root = args.output_root / "correlation"
             _write_exact(correlation_root / "spec.json", correlation_spec)
@@ -1846,6 +2142,8 @@ def main() -> int:
                 args.portfolio123_account_series_id,
                 args.portfolio123_strategy_evidence.read_bytes(),
                 as_of_date,
+                args.strategy_history_manifest,
+                args.strategy_history_returns,
             )
             _write_exact(args.output_root / "spec.json", specification)
             _write_exact(args.output_root / "returns.csv", returns)
@@ -1966,6 +2264,8 @@ def main() -> int:
                     args.portfolio123_account_series_id,
                     strategy_evidence,
                     str(evidence_value["as_of_date"]),
+                    args.strategy_history_manifest,
+                    args.strategy_history_returns,
                 )
                 _write_exact(
                     correlation_root / "evidence-proof.json", correlation_proof

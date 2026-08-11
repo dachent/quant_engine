@@ -97,9 +97,51 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
     }
 
 
+def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
+    correlation_root = _path(
+        recipe["correlation_source_root"]["path"], "correlation source root"
+    )
+    proof_path = correlation_root / "evidence-proof.json"
+    proof = _load(proof_path, "strategy history compatibility contract")
+    if proof.get("builder") != "portfolio-target-series/layered-correlation-1":
+        raise VerticalBuildError("strategy history contract builder differs")
+    if proof.get("evidence_mode_policy") != {
+        "default": "LIVE_ONLY",
+        "hybrid": "BACKTEST_STRICTLY_BEFORE_FIRST_LIVE_THEN_LIVE",
+        "post_inception_backtest_fill": False,
+    }:
+        raise VerticalBuildError("strategy history evidence policy differs")
+    mappings = proof.get("series_mappings")
+    if not isinstance(mappings, list) or len(mappings) != 9:
+        raise VerticalBuildError("strategy history contract boundary differs")
+    names = []
+    for row in mappings:
+        if not isinstance(row, dict):
+            raise VerticalBuildError("strategy history contract row is invalid")
+        names.append(_text(row.get("series_id"), "history series_id"))
+        observations = row.get("backtest_observations")
+        status = _text(row.get("history_status"), "history status")
+        _text(row.get("strategy_version"), "history strategy_version")
+        if not isinstance(observations, int) or observations < 0:
+            raise VerticalBuildError("strategy history observations are invalid")
+        if status.startswith("ACCEPTED_") != (observations > 0):
+            raise VerticalBuildError(
+                "strategy history status and observations differ"
+            )
+    if len(set(names)) != len(names):
+        raise VerticalBuildError("strategy history contract duplicates a series")
+    target_sha, target_size = _sha(correlation_root / "returns.csv")
+    if (
+        proof.get("target_sha256") != target_sha
+        or proof.get("target_size_bytes") != target_size
+    ):
+        raise VerticalBuildError("strategy history contract target identity differs")
+    return proof_path
+
+
 def _recipe(path: Path) -> dict[str, Any]:
     recipe = _load(path, "vertical-build recipe")
-    if recipe.get("schema_version") != 3:
+    if recipe.get("schema_version") != 5:
         raise VerticalBuildError("vertical-build recipe schema is unsupported")
     required = {
         "as_of_date",
@@ -107,11 +149,13 @@ def _recipe(path: Path) -> dict[str, Any]:
         "baseline_spec",
         "correlation_source_root",
         "decomposition_plan_bundle",
+        "implementation_reconciliation",
         "legacy_panel",
         "pipeline_id",
         "provider_ledger_spec",
         "release_commit",
         "schema_version",
+        "strategy_attribution_root",
     }
     if set(recipe) != required:
         raise VerticalBuildError("vertical-build recipe keys differ")
@@ -120,6 +164,7 @@ def _recipe(path: Path) -> dict[str, Any]:
         "provider_ledger_spec",
         "baseline_spec",
         "base_factor_file",
+        "implementation_reconciliation",
     ):
         definition = recipe[key]
         if not isinstance(definition, dict) or set(definition) != {
@@ -136,6 +181,7 @@ def _recipe(path: Path) -> dict[str, Any]:
         "decomposition_plan_bundle",
         "correlation_source_root",
         "legacy_panel",
+        "strategy_attribution_root",
     ):
         definition = recipe[key]
         if not isinstance(definition, dict) or set(definition) != {
@@ -150,6 +196,7 @@ def _recipe(path: Path) -> dict[str, Any]:
             "inventory_sha256": definition["inventory_sha256"],
         }:
             raise VerticalBuildError(f"{key} inventory differs")
+    _history_contract_path(recipe)
     return recipe
 
 
@@ -167,6 +214,8 @@ def create_recipe(
     provider_ledger_spec: Path,
     baseline_spec: Path,
     base_factor_file: Path,
+    implementation_reconciliation: Path,
+    strategy_attribution_root: Path,
     decomposition_plan_bundle: Path,
     correlation_source_root: Path,
     legacy_panel: Path,
@@ -182,6 +231,9 @@ def create_recipe(
         "as_of_date": as_of_date,
         "base_factor_file": _file_definition(base_factor_file.resolve()),
         "baseline_spec": _file_definition(baseline_spec.resolve()),
+        "implementation_reconciliation": _file_definition(
+            implementation_reconciliation.resolve()
+        ),
         "correlation_source_root": {
             "path": str(correlation_source_root.resolve()),
             **_directory_inventory(correlation_source_root.resolve()),
@@ -197,7 +249,11 @@ def create_recipe(
         "pipeline_id": pipeline_id,
         "provider_ledger_spec": _file_definition(provider_ledger_spec.resolve()),
         "release_commit": release_commit,
-        "schema_version": 3,
+        "schema_version": 5,
+        "strategy_attribution_root": {
+            "path": str(strategy_attribution_root.resolve()),
+            **_directory_inventory(strategy_attribution_root.resolve()),
+        },
     }
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
@@ -717,6 +773,9 @@ def build_report_candidate(
     baseline_root: Path,
     provider_ledger_root: Path,
     freshness_health: Path,
+    history_contract: Path,
+    implementation_reconciliation: Path,
+    attribution_root: Path,
     output_root: Path,
 ) -> dict[str, Any]:
     built = _tool(
@@ -728,6 +787,12 @@ def build_report_candidate(
         str(provider_ledger_root),
         "--freshness-health",
         str(freshness_health),
+        "--history-contract",
+        str(history_contract),
+        "--implementation-reconciliation",
+        str(implementation_reconciliation),
+        "--attribution-root",
+        str(attribution_root),
         "--output-root",
         str(output_root),
         timeout=7200,
@@ -740,6 +805,9 @@ def build_workbook(
     baseline_root: Path,
     provider_ledger_root: Path,
     freshness_health: Path,
+    history_contract: Path,
+    implementation_reconciliation: Path,
+    attribution_root: Path,
     candidate: Path,
     output_root: Path,
 ) -> dict[str, Any]:
@@ -813,6 +881,12 @@ def build_workbook(
         str(excel_workbook),
         "--freshness-health",
         str(freshness_health),
+        "--history-contract",
+        str(history_contract),
+        "--implementation-reconciliation",
+        str(implementation_reconciliation),
+        "--attribution-root",
+        str(attribution_root),
     )
     published = _tool(
         "portfolio_report.py",
@@ -833,6 +907,12 @@ def build_workbook(
         str(output_root),
         "--freshness-health",
         str(freshness_health),
+        "--history-contract",
+        str(history_contract),
+        "--implementation-reconciliation",
+        str(implementation_reconciliation),
+        "--attribution-root",
+        str(attribution_root),
         timeout=7200,
     )
     return {
@@ -848,15 +928,27 @@ def build_report(
     baseline_root: Path,
     provider_ledger_root: Path,
     freshness_health: Path,
+    history_contract: Path,
+    implementation_reconciliation: Path,
+    attribution_root: Path,
     output_root: Path,
 ) -> dict[str, Any]:
     candidate = build_report_candidate(
-        baseline_root, provider_ledger_root, freshness_health, output_root
+        baseline_root,
+        provider_ledger_root,
+        freshness_health,
+        history_contract,
+        implementation_reconciliation,
+        attribution_root,
+        output_root,
     )
     return build_workbook(
         baseline_root,
         provider_ledger_root,
         freshness_health,
+        history_contract,
+        implementation_reconciliation,
+        attribution_root,
         Path(_text(candidate.get("candidate_dir"), "report candidate")),
         output_root,
     )
@@ -995,6 +1087,16 @@ def build_stage(
     """Build exactly one source-to-panel stage from its predecessor outputs."""
 
     stages = output_root / "stages"
+    recipe = _recipe(recipe_path)
+    history_contract = _history_contract_path(recipe)
+    implementation_reconciliation = _path(
+        recipe["implementation_reconciliation"]["path"],
+        "implementation reconciliation",
+    )
+    strategy_attribution_root = _path(
+        recipe["strategy_attribution_root"]["path"],
+        "strategy attribution root",
+    )
     if role == "ledger":
         result = build_ledger(recipe_path, stages / "ledger")
     elif role == "baseline":
@@ -1017,6 +1119,9 @@ def build_stage(
             stages / "baseline",
             stages / "ledger",
             _path(ledger.get("freshness_health"), "freshness health"),
+            history_contract,
+            implementation_reconciliation,
+            strategy_attribution_root,
             stages / "report-candidate",
         )
     elif role == "workbook":
@@ -1026,6 +1131,9 @@ def build_stage(
             stages / "baseline",
             stages / "ledger",
             _path(ledger.get("freshness_health"), "freshness health"),
+            history_contract,
+            implementation_reconciliation,
+            strategy_attribution_root,
             _path(report.get("candidate_dir"), "report candidate"),
             stages / "report",
         )
@@ -1105,6 +1213,10 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--provider-ledger-spec", type=Path, required=True)
     recipe.add_argument("--baseline-spec", type=Path, required=True)
     recipe.add_argument("--base-factor-file", type=Path, required=True)
+    recipe.add_argument(
+        "--implementation-reconciliation", type=Path, required=True
+    )
+    recipe.add_argument("--strategy-attribution-root", type=Path, required=True)
     recipe.add_argument("--decomposition-plan-bundle", type=Path, required=True)
     recipe.add_argument("--correlation-source-root", type=Path, required=True)
     recipe.add_argument("--legacy-panel", type=Path, required=True)
@@ -1145,6 +1257,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider_ledger_spec=args.provider_ledger_spec,
                 baseline_spec=args.baseline_spec,
                 base_factor_file=args.base_factor_file,
+                implementation_reconciliation=args.implementation_reconciliation,
+                strategy_attribution_root=args.strategy_attribution_root,
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 correlation_source_root=args.correlation_source_root,
                 legacy_panel=args.legacy_panel,

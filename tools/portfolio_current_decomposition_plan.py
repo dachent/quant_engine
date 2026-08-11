@@ -601,14 +601,19 @@ def build_bundle(
         target_last = max(
             targets_by_series[series_id][-1] for series_id in assigned_series
         )
-        as_of = min(complete_dates[-1], target_last)
+        analysis_as_of = target_last
+        factor_as_of = min(complete_dates[-1], analysis_as_of)
+        maximum_factor_staleness_days = _integer(
+            source_plan.get("maximum_factor_staleness_days", 10),
+            f"source {source_key} maximum_factor_staleness_days",
+        )
         complete_date_set = set(complete_dates)
         projected_factor_rows = [
             [row["date"], *(row[column] for column in required)]
             for row in market_rows[input_key]
             if (observed := _day(row["date"], f"market input {input_key} date"))
             in complete_date_set
-            and observed <= as_of
+            and observed <= factor_as_of
         ]
         projected_factor_content = _csv_bytes(
             ("date", *required), projected_factor_rows
@@ -619,7 +624,7 @@ def build_bundle(
             [row[header] for header in TARGET_HEADERS]
             for row in target_rows
             if row["series_id"] in assigned_series
-            and _day(row["date"], "target date") <= as_of
+            and _day(row["date"], "target date") <= analysis_as_of
         ]
         projected_target_content = _csv_bytes(TARGET_HEADERS, projected_target_rows)
         target_relative = f"inputs/lenses/{source_key}-targets.csv"
@@ -633,7 +638,7 @@ def build_bundle(
                 row
                 for row in target_rows
                 if row["series_id"] == series_id
-                and _day(row["date"], "target date") <= as_of
+                and _day(row["date"], "target date") <= analysis_as_of
             ]
             if evidence_mode == "LIVE_PLUS_BACKTEST":
                 value = base_composition.get(series_id)
@@ -670,7 +675,7 @@ def build_bundle(
             aligned = sorted(
                 set(targets_by_series[series_id]).intersection(complete_dates)
             )
-            aligned = [observed for observed in aligned if observed <= as_of]
+            aligned = [observed for observed in aligned if observed <= analysis_as_of]
             proposed_test = int(
                 (Decimal(len(aligned)) * holdout_fraction).to_integral_value(
                     rounding=ROUND_CEILING
@@ -745,7 +750,7 @@ def build_bundle(
             )
         spec = {
             "analysis_lens": lens,
-            "as_of_date": as_of.isoformat(),
+            "as_of_date": analysis_as_of.isoformat(),
             "evidence_mode": evidence_mode,
             "factor_source": {
                 "artifact_id": f"market/{source_key}.csv",
@@ -758,7 +763,7 @@ def build_bundle(
                 "schema_name": f"portfolio-{source_key}-returns",
                 "schema_version": "1",
             },
-            "maximum_factor_staleness_days": 10,
+            "maximum_factor_staleness_days": maximum_factor_staleness_days,
             "models": models,
             "provenance_sources": generated_provenance,
             "schema_version": 1,

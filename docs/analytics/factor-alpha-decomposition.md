@@ -203,7 +203,11 @@ The overlay contract is
 `schemas/portfolio/strategy-provider-evidence.schema.json`.
 
 The roll-forward CLI takes explicit paths and provider identities from local
-configuration; none is hard-coded or committed:
+configuration; none is hard-coded or committed. A separately verified
+strategy-history bundle supplies version-bound GrizzlyBears, QSI,
+TuringTrader, and Volatis histories. The Portfolio123 live-simulation twin
+supplies AI Factor. History compatibility never asserts that the brokerage
+account executed the model correctly; trade reconciliation remains separate.
 
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_target_series.py `
@@ -227,6 +231,8 @@ uv run --frozen --no-sync python tools/portfolio_target_series.py `
   --portfolio123-account-entity-id "<local-account-id>" `
   --portfolio123-strategy-id "p123-ai-factor" `
   --portfolio123-account-series-id "AI Factor [P123]" `
+  --strategy-history-manifest "<strategy-history-manifest.json>" `
+  --strategy-history-returns "<strategy-history-returns.csv>" `
   --output-root "<private-roll-forward-input-root>"
 ```
 
@@ -236,10 +242,13 @@ manifest. The simulation must be the accepted generation's unique
 `live_sim_twin` for the provider-live entity, and that provider path must have
 accepted exact-date reconciliation to the account-live series. Its indexed
 model path is converted to consecutive returns and bound to the same
-generation-derived strategy-version reference as the account-live series. The dependence builder
-uses those rows only before the first account-live observation. Other
-strategies remain available in the hybrid view with their live evidence and
-zero backtest observations; absent strategies remain unavailable. Omitting all
+generation-derived strategy-version reference as the account-live series. The
+dependence builder uses all admitted history only before the first account-live
+observation. The current contract admits long history for AI Factor,
+GrizzlyBears, QSI, TuringTrader, and Volatis. EU remains unavailable because
+the exact connected model was omitted from the HAR export; other long EU
+curves are not interchangeable. EchoTrade is deprecated with no history and
+Composer is immaterial with unconnected history. Omitting all
 three arguments preserves the replay-compatible schema-v1 output. Supplying a
 partial set fails closed.
 

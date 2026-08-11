@@ -154,6 +154,14 @@ compatible with the decomposition engine: date, risk-free return, then factor
 or industry returns. It never fills, interpolates, or treats missing values as
 zero.
 
+Coverage is reported as three separate intervals: the complete retained
+strategy target, the complete model-specific factor source, and their
+exact-common-date aligned regression sample. A model-source publication lag
+must never truncate or relabel the retained strategy interval. Kenneth French
+daily files are monthly-published public sources and use a declared 45-calendar-
+day lag allowance; the aligned end still stops at the last available provider
+observation and names the factor source as the limiting input.
+
 `tools/portfolio_public_style_sources.py` independently verifies the governed
 Yahoo adjusted-history artifact and its sibling source manifest, derives the
 exact requested ETF candidate universe from the catalog, and publishes

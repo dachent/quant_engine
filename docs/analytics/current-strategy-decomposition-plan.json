@@ -14,6 +14,7 @@
       "lens": "ECONOMIC_FACTOR",
       "universe_id": "us-equity-economic-factors",
       "input_key": "us_factors",
+      "maximum_factor_staleness_days": 45,
       "risk_free_column": "rf",
       "return_type": "EXCESS",
       "column_policy": "LOWER_CANDIDATE_ID"
@@ -22,6 +23,7 @@
       "lens": "ECONOMIC_FACTOR",
       "universe_id": "europe-equity-economic-factors",
       "input_key": "europe_factors",
+      "maximum_factor_staleness_days": 45,
       "risk_free_column": "rf",
       "return_type": "EXCESS",
       "column_policy": "REMOVE_EU_PREFIX_THEN_LOWER"
@@ -30,6 +32,7 @@
       "lens": "ETF_STYLE",
       "universe_id": "us-equity-six-cell-style",
       "input_key": "style_returns",
+      "maximum_factor_staleness_days": 10,
       "risk_free_column": "BIL",
       "return_type": "TOTAL",
       "column_policy": "CANDIDATE_ID"
@@ -38,14 +41,16 @@
       "lens": "ETF_STYLE",
       "universe_id": "multi-asset-etf-style",
       "input_key": "style_returns",
+      "maximum_factor_staleness_days": 10,
       "risk_free_column": "BIL",
       "return_type": "TOTAL",
       "column_policy": "CANDIDATE_ID"
     },
-    "us-sector": {
-      "lens": "RETURN_SECTOR",
+  "us-sector": {
+    "lens": "RETURN_SECTOR",
       "universe_id": "us-sector-return",
       "input_key": "sector_returns",
+      "maximum_factor_staleness_days": 10,
       "risk_free_column": "BIL",
       "return_type": "TOTAL",
       "column_policy": "CANDIDATE_ID"
@@ -54,6 +59,7 @@
       "lens": "RETURN_INDUSTRY",
       "universe_id": "us-49-industry-return",
       "input_key": "us_industries",
+      "maximum_factor_staleness_days": 45,
       "risk_free_column": "rf",
       "return_type": "TOTAL",
       "column_policy": "CANDIDATE_ID"
@@ -90,21 +96,12 @@
         {
           "source_key": "us-sector",
           "constraint": "UNCONSTRAINED",
-          "factor_sets": [
-            ["XLY", "XLF", "XLK"],
-            ["XLC", "XLY", "XLP", "XLE", "XLF", "XLV"],
-            ["XLC", "XLY", "XLP", "XLE", "XLF", "XLV", "XLI", "XLB", "XLRE", "XLK", "XLU"]
-          ]
+          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
         },
         {
           "source_key": "us-industry",
           "constraint": "UNCONSTRAINED",
-          "factor_sets": [
-            ["Softw", "Chips", "Hardw"],
-            ["Softw", "Chips", "Hardw", "Drugs", "Banks", "Rtail"],
-            ["Softw", "Chips", "Hardw", "Drugs", "Hlth", "Banks", "Insur", "Fin", "Rtail", "Mach"]
-          ],
-          "screened_out_candidates": ["Agric", "Food", "Soda", "Beer", "Smoke", "Toys", "Fun", "Books", "Hshld", "Clths", "MedEq", "Chems", "Rubbr", "Txtls", "BldMt", "Cnstr", "Steel", "FabPr", "ElcEq", "Autos", "Aero", "Ships", "Guns", "Gold", "Mines", "Coal", "Oil", "Util", "Telcm", "PerSv", "BusSv", "LabEq", "Paper", "Boxes", "Trans", "Whlsl", "Meals", "RlEst", "Other"]
+          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
         }
       ]
     },
@@ -153,23 +150,27 @@
           ]
         },
         {
+          "source_key": "multi-asset-style",
+          "constraint": "LONG_ONLY_SUM_TO_ONE",
+          "factor_sets": [
+            ["ITOT"],
+            ["ITOT", "IEFA", "IEMG"],
+            ["ITOT", "IEF", "TLT"],
+            ["ITOT", "HYG", "GLD"],
+            ["ITOT", "TLT", "LQD", "HYG", "VNQ", "GLD"],
+            ["ITOT", "IEFA", "IEMG", "IEF", "HYG", "GLD"],
+            ["ITOT", "TLT", "HYG", "GLD", "DBC", "UUP"]
+          ]
+        },
+        {
           "source_key": "us-sector",
           "constraint": "UNCONSTRAINED",
-          "factor_sets": [
-            ["XLY", "XLF", "XLK"],
-            ["XLC", "XLY", "XLP", "XLE", "XLF", "XLV"],
-            ["XLC", "XLY", "XLP", "XLE", "XLF", "XLV", "XLI", "XLB", "XLRE", "XLK", "XLU"]
-          ]
+          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
         },
         {
           "source_key": "us-industry",
           "constraint": "UNCONSTRAINED",
-          "factor_sets": [
-            ["Softw", "Chips", "Hardw"],
-            ["Softw", "Chips", "Hardw", "Drugs", "Banks", "Rtail"],
-            ["Softw", "Chips", "Hardw", "Drugs", "Hlth", "Banks", "Insur", "Fin", "Rtail", "Mach"]
-          ],
-          "screened_out_candidates": ["Agric", "Food", "Soda", "Beer", "Smoke", "Toys", "Fun", "Books", "Hshld", "Clths", "MedEq", "Chems", "Rubbr", "Txtls", "BldMt", "Cnstr", "Steel", "FabPr", "ElcEq", "Autos", "Aero", "Ships", "Guns", "Gold", "Mines", "Coal", "Oil", "Util", "Telcm", "PerSv", "BusSv", "LabEq", "Paper", "Boxes", "Trans", "Whlsl", "Meals", "RlEst", "Other"]
+          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
         }
       ]
     },

@@ -29,10 +29,14 @@ def _recipe(tmp_path: Path) -> Path:
     provider = tmp_path / "provider.json"
     baseline = tmp_path / "baseline.json"
     base_factor = tmp_path / "factors.csv"
+    implementation = tmp_path / "implementation.json"
+    attribution = tmp_path / "strategy-attribution"
     legacy = tmp_path / "legacy"
-    for path in (provider, baseline):
+    for path in (provider, baseline, implementation):
         path.write_text("{}", encoding="utf-8")
     legacy.mkdir()
+    attribution.mkdir()
+    (attribution / "CURRENT.json").write_text("{}", encoding="utf-8")
     (legacy / "app.js").write_text("// legacy shell", encoding="utf-8")
     base_factor.write_text("date,RF\n", encoding="utf-8")
     plan = tmp_path / "plan"
@@ -40,7 +44,34 @@ def _recipe(tmp_path: Path) -> Path:
     (plan / "inputs").mkdir(parents=True)
     correlation.mkdir()
     (plan / "inputs" / "one.txt").write_text("one", encoding="utf-8")
-    (correlation / "returns.csv").write_text("date,value\n", encoding="utf-8")
+    returns = correlation / "returns.csv"
+    returns.write_text("date,value\n", encoding="utf-8")
+    content = returns.read_bytes()
+    (correlation / "evidence-proof.json").write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-08-03",
+                "builder": "portfolio-target-series/layered-correlation-1",
+                "evidence_mode_policy": {
+                    "default": "LIVE_ONLY",
+                    "hybrid": "BACKTEST_STRICTLY_BEFORE_FIRST_LIVE_THEN_LIVE",
+                    "post_inception_backtest_fill": False,
+                },
+                "series_mappings": [
+                    {
+                        "backtest_observations": 1,
+                        "history_status": "ACCEPTED_EXACT_VERSION_HISTORY",
+                        "series_id": f"Strategy {index}",
+                        "strategy_version": f"synthetic:{index}",
+                    }
+                    for index in range(9)
+                ],
+                "target_sha256": hashlib.sha256(content).hexdigest(),
+                "target_size_bytes": len(content),
+            }
+        ),
+        encoding="utf-8",
+    )
     plan_inventory = builder._directory_inventory(plan)
     correlation_inventory = builder._directory_inventory(correlation)
     payload = {
@@ -49,11 +80,16 @@ def _recipe(tmp_path: Path) -> Path:
         "baseline_spec": _file_definition(baseline),
         "correlation_source_root": {"path": str(correlation), **correlation_inventory},
         "decomposition_plan_bundle": {"path": str(plan), **plan_inventory},
+        "implementation_reconciliation": _file_definition(implementation),
         "legacy_panel": {"path": str(legacy), **builder._directory_inventory(legacy)},
         "pipeline_id": "synthetic-source-to-panel",
         "provider_ledger_spec": _file_definition(provider),
         "release_commit": "a" * 40,
-        "schema_version": 3,
+        "schema_version": 5,
+        "strategy_attribution_root": {
+            "path": str(attribution),
+            **builder._directory_inventory(attribution),
+        },
     }
     recipe = tmp_path / "recipe.json"
     recipe.write_text(json.dumps(payload), encoding="utf-8")
@@ -106,10 +142,14 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     provider = tmp_path / "provider.json"
     baseline = tmp_path / "baseline.json"
     base_factor = tmp_path / "factors.csv"
+    implementation = tmp_path / "implementation.json"
+    attribution = tmp_path / "strategy-attribution"
     legacy = tmp_path / "legacy"
-    for path in (provider, baseline):
+    for path in (provider, baseline, implementation):
         path.write_text("{}", encoding="utf-8")
     legacy.mkdir()
+    attribution.mkdir()
+    (attribution / "CURRENT.json").write_text("{}", encoding="utf-8")
     (legacy / "app.js").write_text("// legacy shell", encoding="utf-8")
     base_factor.write_text("date,RF\n", encoding="utf-8")
     plan = tmp_path / "plan"
@@ -117,13 +157,42 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     plan.mkdir()
     correlation.mkdir()
     (plan / "plan.json").write_text("{}", encoding="utf-8")
-    (correlation / "returns.csv").write_text("date,value\n", encoding="utf-8")
+    returns = correlation / "returns.csv"
+    returns.write_text("date,value\n", encoding="utf-8")
+    content = returns.read_bytes()
+    (correlation / "evidence-proof.json").write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-08-03",
+                "builder": "portfolio-target-series/layered-correlation-1",
+                "evidence_mode_policy": {
+                    "default": "LIVE_ONLY",
+                    "hybrid": "BACKTEST_STRICTLY_BEFORE_FIRST_LIVE_THEN_LIVE",
+                    "post_inception_backtest_fill": False,
+                },
+                "series_mappings": [
+                    {
+                        "backtest_observations": 1,
+                        "history_status": "ACCEPTED_EXACT_VERSION_HISTORY",
+                        "series_id": f"Strategy {index}",
+                        "strategy_version": f"synthetic:{index}",
+                    }
+                    for index in range(9)
+                ],
+                "target_sha256": hashlib.sha256(content).hexdigest(),
+                "target_size_bytes": len(content),
+            }
+        ),
+        encoding="utf-8",
+    )
     output = tmp_path / "generated-recipe.json"
 
     result = builder.create_recipe(
         provider_ledger_spec=provider,
         baseline_spec=baseline,
         base_factor_file=base_factor,
+        implementation_reconciliation=implementation,
+        strategy_attribution_root=attribution,
         decomposition_plan_bundle=plan,
         correlation_source_root=correlation,
         legacy_panel=legacy,
@@ -134,7 +203,7 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     )
 
     assert result["recipe"] == str(output)
-    assert builder._recipe(output)["schema_version"] == 3
+    assert builder._recipe(output)["schema_version"] == 5
 
 
 def test_xlsx_startup_deadline_is_the_only_extended_failure() -> None:

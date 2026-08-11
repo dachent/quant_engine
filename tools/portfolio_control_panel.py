@@ -622,22 +622,80 @@ def _source_inputs(legacy_panel: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         )
     source_files = _object(contract.get("source_files"), "source_files")
     observed: dict[str, str] = {}
+    raw_source_matches = True
+    mismatched_relative: str | None = None
     for relative, expected in source_files.items():
         path = legacy_panel / relative
+        if path.is_symlink() or not path.is_file():
+            raw_source_matches = False
+            mismatched_relative = relative
+            break
         actual = _hash(path)
         if actual != _text(expected, f"source_files.{relative}"):
-            raise ControlPanelValidationError(f"legacy source hash differs: {relative}")
+            raw_source_matches = False
+            mismatched_relative = relative
+            break
         observed[relative] = actual
     appendix = _object(contract.get("frozen_appendix"), "frozen_appendix")
     data_relative = _text(appendix.get("data_file"), "frozen_appendix.data_file")
     data_path = legacy_panel / data_relative
-    if _hash(data_path) != appendix.get("data_sha256"):
-        raise ControlPanelValidationError("frozen appendix data hash differs")
-    legacy = _load_json(data_path, "frozen candidate appendix")
+    source_mode = "RAW_FROZEN_SOURCE"
+    if raw_source_matches and _hash(data_path) == appendix.get("data_sha256"):
+        legacy = _load_json(data_path, "frozen candidate appendix")
+    else:
+        rolled = _load_json(data_path, "rolled control-panel payload")
+        if rolled.get("candidate_appendix") is None:
+            suffix = f": {mismatched_relative}" if mismatched_relative else ""
+            raise ControlPanelValidationError(f"legacy source hash differs{suffix}")
+        candidate = _load_json(
+            legacy_panel / "candidate.json", "rolled control-panel candidate"
+        )
+        artifact_hashes = _object(
+            candidate.get("artifact_sha256"), "rolled candidate artifact_sha256"
+        )
+        if artifact_hashes.get(data_relative) != _hash(data_path):
+            raise ControlPanelValidationError(
+                "rolled control-panel payload hash differs"
+            )
+        meta = _object(rolled.get("meta"), "rolled control-panel meta")
+        observed = _object(
+            meta.get("source_shell_hashes"), "rolled source_shell_hashes"
+        )
+        if observed != source_files:
+            raise ControlPanelValidationError(
+                "rolled frozen source-shell hashes differ"
+            )
+        legacy = _object(
+            rolled.get("candidate_appendix"), "rolled candidate appendix"
+        )
+        normalized_sha256 = _text(
+            appendix.get("normalized_sha256"),
+            "frozen_appendix.normalized_sha256",
+        )
+        if hashlib.sha256(canonical_json_bytes(legacy)).hexdigest() != normalized_sha256:
+            raise ControlPanelValidationError(
+                "rolled frozen appendix canonical hash differs"
+            )
+        if legacy.get("source_sha256") != appendix.get("data_sha256"):
+            raise ControlPanelValidationError(
+                "rolled frozen appendix source hash differs"
+            )
+        if (
+            legacy.get("as_of_date") != appendix.get("as_of_date")
+            or legacy.get("status") != appendix.get("status")
+        ):
+            raise ControlPanelValidationError(
+                "rolled frozen appendix boundary differs"
+            )
+        source_mode = "GOVERNED_PANEL_ROLLFORWARD"
     providers = _objects(legacy.get("providers"), "legacy.providers")
     if len(providers) != appendix.get("candidate_count"):
         raise ControlPanelValidationError("frozen candidate count differs")
-    return legacy, {"contract": contract, "observed_hashes": observed}
+    return legacy, {
+        "contract": contract,
+        "observed_hashes": observed,
+        "source_mode": source_mode,
+    }
 
 
 def _summary(report: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1587,23 +1645,43 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
     blocked = []
     eligible = []
     for row in strategies:
-        compatibility = str(row.get("version_compatibility_status") or "UNRESOLVED")
-        report_status = str(
-            row.get("live_plus_backtest_status")
-            or "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
-        )
-        if (
-            compatibility != "PROVEN_COMPATIBLE"
-            or report_status != "ELIGIBLE_PROVEN_COMPATIBLE"
-        ):
+        history_status = row.get("history_compatibility_status")
+        if history_status is not None:
+            accepted = (
+                history_status == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                and row.get("live_plus_backtest_status")
+                == "ELIGIBLE_ACCEPTED_HISTORY"
+            )
+            compatibility = "PROVEN_COMPATIBLE" if accepted else str(history_status)
+            reason = str(
+                row.get("live_plus_backtest_reason")
+                or row.get("history_compatibility_reason")
+                or "No accepted strategy history is recorded."
+            )
+            version_ref = row.get("history_version_ref")
+        else:
+            compatibility = str(
+                row.get("version_compatibility_status") or "UNRESOLVED"
+            )
+            report_status = str(
+                row.get("live_plus_backtest_status")
+                or "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
+            )
+            accepted = (
+                compatibility == "PROVEN_COMPATIBLE"
+                and report_status == "ELIGIBLE_PROVEN_COMPATIBLE"
+            )
+            reason = str(
+                row.get("live_plus_backtest_reason")
+                or row.get("version_compatibility_reason")
+                or "No effective-dated compatibility evidence is recorded."
+            )
+            version_ref = row.get("version_ref")
+        if not accepted:
             blocked.append(
                 {
                     "compatibility_status": compatibility,
-                    "reason": str(
-                        row.get("live_plus_backtest_reason")
-                        or row.get("version_compatibility_reason")
-                        or "No effective-dated compatibility evidence is recorded."
-                    ),
+                    "reason": reason,
                     "strategy_id": _text(
                         row.get("strategy_id"), "strategy.strategy_id"
                     ),
@@ -1616,11 +1694,7 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
             eligible.append(
                 {
                     "compatibility_status": compatibility,
-                    "reason": str(
-                        row.get("live_plus_backtest_reason")
-                        or row.get("version_compatibility_reason")
-                        or "Effective-dated compatibility evidence is recorded."
-                    ),
+                    "reason": reason,
                     "strategy_id": _text(
                         row.get("strategy_id"), "strategy.strategy_id"
                     ),
@@ -1628,7 +1702,7 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
                         row.get("strategy_name"), "strategy.strategy_name"
                     ),
                     "version_ref": _text(
-                        row.get("version_ref"), "strategy.version_ref"
+                        version_ref, "strategy history version_ref"
                     ),
                 }
             )
@@ -1639,8 +1713,9 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
                 "eligible_strategies": eligible,
                 "reason": (
                     f"LIVE_PLUS_BACKTEST is enabled independently for {len(eligible)} "
-                    f"PROVEN_COMPATIBLE strategy version(s); {len(blocked)} unresolved "
-                    "strategy version(s) remain live-only."
+                    f"strategy history path(s); {len(blocked)} strategy history "
+                    "path(s) remain unavailable and live-only. Implementation "
+                    "reconciliation is evaluated separately."
                 ),
                 "status": "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
             }
@@ -1649,7 +1724,7 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
             "eligible_strategies": [],
             "reason": (
                 f"LIVE_PLUS_BACKTEST is unavailable because {len(blocked)} current "
-                "strategy version(s) are not PROVEN_COMPATIBLE."
+                "strategy history path(s) are not accepted for economic inference."
             ),
             "status": "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE",
         }
@@ -1657,7 +1732,8 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
         "blocked_strategies": [],
         "eligible_strategies": eligible,
         "reason": (
-            "Every current strategy version is effective-dated and PROVEN_COMPATIBLE."
+            "Every current strategy has an accepted, version-bound history path for "
+            "economic inference; implementation reconciliation remains separate."
         ),
         "status": "ELIGIBLE_PROVEN_COMPATIBLE",
     }
@@ -2256,9 +2332,18 @@ def _canonical_strategy_series_contracts(
                 f"factor/dependence canonical-series value parity failed: {series_id}"
             )
         factor_observed = {
-            "observed_end": factor_coverage.get("target_observed_end"),
-            "observed_start": factor_coverage.get("target_observed_start"),
-            "return_observations": factor_coverage.get("target_observations"),
+            "observed_end": factor_coverage.get(
+                "canonical_live_observed_end",
+                factor_coverage.get("target_observed_end"),
+            ),
+            "observed_start": factor_coverage.get(
+                "canonical_live_observed_start",
+                factor_coverage.get("target_observed_start"),
+            ),
+            "return_observations": factor_coverage.get(
+                "canonical_live_observations",
+                factor_coverage.get("target_observations"),
+            ),
         }
         if factor_observed != {
             key: expected[key]
@@ -3022,6 +3107,15 @@ def _strategy_underwriting(
             if evidence is not None
             else {}
         )
+        implementation_value = strategy.get("implementation_reconciliation")
+        implementation_detail = (
+            _object(
+                implementation_value,
+                f"implementation reconciliation {strategy_name}",
+            )
+            if implementation_value is not None
+            else None
+        )
 
         def factor_value(
             row: Mapping[str, Any] | None, container: str, field: str
@@ -3042,12 +3136,19 @@ def _strategy_underwriting(
                         "authority_status": design_authority_status,
                         "version_ref": strategy.get("design_version_ref"),
                         "economic_family": strategy.get("economic_family"),
+                        "implementation_lineage": strategy.get(
+                            "implementation_lineage"
+                        ),
                     },
                     "backtest": {
                         "status": strategy.get("backtest_status"),
-                        "version_ref": strategy.get("backtest_version_ref"),
+                        "version_ref": strategy.get("history_version_ref")
+                        or strategy.get("backtest_version_ref"),
                         "compatibility_status": strategy.get(
-                            "version_compatibility_status"
+                            "history_compatibility_status"
+                        ),
+                        "compatibility_basis": strategy.get(
+                            "history_compatibility_reason"
                         ),
                         "matched_observations": matched_backtest_observations,
                     },
@@ -3075,8 +3176,21 @@ def _strategy_underwriting(
                         "max_drawdown": strategy.get("account_live_max_drawdown"),
                     },
                     "implementation_reconciliation": {
-                        "status": gap["status"],
-                        "comparison_status": gap["comparison_status"],
+                        "status": strategy.get(
+                            "implementation_reconciliation_status"
+                        )
+                        or gap["status"],
+                        "comparison_status": (
+                            _object(
+                                implementation_detail.get(
+                                    "return_reconciliation", {}
+                                ),
+                                f"implementation metrics {strategy_name}",
+                            ).get("status")
+                            if implementation_detail is not None
+                            else gap["comparison_status"]
+                        ),
+                        "detail": implementation_detail,
                     },
                 },
                 "design_fit": {
@@ -3144,7 +3258,10 @@ def _strategy_underwriting(
             ),
             "methodology": {
                 "evidence_layer_rule": "SEPARATE_NEVER_SILENTLY_CONCATENATED",
-                "long_history_rule": "EXACT_VERSION_MATCH_REQUIRED",
+                "long_history_rule": (
+                    "VERSION_BOUND_HISTORY_FOR_INFERENCE_SEPARATE_FROM_"
+                    "IMPLEMENTATION_RECONCILIATION"
+                ),
                 "gap_rule": gap_policy.get("causal_component_rule"),
                 "regime_rule": regime_policy.get("threshold_estimation"),
                 "portfolio_fit_rule": _object(

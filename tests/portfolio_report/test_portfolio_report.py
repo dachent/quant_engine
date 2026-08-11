@@ -39,6 +39,22 @@ sys.modules[SPEC.name] = reporter
 SPEC.loader.exec_module(reporter)
 
 
+def test_public_report_value_redacts_portfolio123_entity_identifiers() -> None:
+    value = {
+        "provider": {"entity_id": "1853536", "provider_id": "portfolio123"},
+        "version_ref": "p123-entity:1832531",
+        "reason": "No exact return series reconciles entity 1832531.",
+        "unchanged": "13 accepted holdings",
+    }
+
+    assert reporter._public_report_value(value) == {
+        "provider": {"entity_id": "[redacted]", "provider_id": "portfolio123"},
+        "version_ref": "p123-entity:[redacted]",
+        "reason": "No exact return series reconciles connected entity.",
+        "unchanged": "13 accepted holdings",
+    }
+
+
 def _excel_saved_package(
     path: Path,
     *,

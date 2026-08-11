@@ -1558,6 +1558,48 @@ def test_source_drift_fails_closed(inputs: dict[str, Path]) -> None:
         )
 
 
+def test_governed_panel_rollforward_reuses_verified_frozen_appendix(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    contract = json.loads(panel.SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    raw = json.loads(
+        (inputs["legacy"] / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    candidate_appendix = {
+        "as_of_date": contract["frozen_appendix"]["as_of_date"],
+        "providers": raw["providers"],
+        "source_sha256": contract["frozen_appendix"]["data_sha256"],
+        "status": contract["frozen_appendix"]["status"],
+        "tier_counts": {},
+    }
+    contract["frozen_appendix"]["normalized_sha256"] = hashlib.sha256(
+        canonical_json_bytes(candidate_appendix)
+    ).hexdigest()
+    panel.SOURCE_CONTRACT.write_bytes(canonical_json_bytes(contract))
+
+    rolled = tmp_path / "rolled-panel"
+    payload_path = rolled / "data" / "dashboard_data.json"
+    _write_json(
+        payload_path,
+        {
+            "candidate_appendix": candidate_appendix,
+            "meta": {"source_shell_hashes": contract["source_files"]},
+        },
+    )
+    _write_json(
+        rolled / "candidate.json",
+        {"artifact_sha256": {"data/dashboard_data.json": _sha(payload_path)}},
+    )
+
+    accepted, source = panel._source_inputs(rolled)
+
+    assert accepted == candidate_appendix
+    assert source["source_mode"] == "GOVERNED_PANEL_ROLLFORWARD"
+    assert source["observed_hashes"] == contract["source_files"]
+
+
 def test_freshness_health_is_visible_with_dates_and_reason(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:

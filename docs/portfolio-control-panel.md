@@ -16,10 +16,11 @@ without preserving stale calculations or hard-coded operator conclusions.
 - Every strategy row also projects the effective-dated v2 strategy-version
   registry: overall disposition, design/configuration/backtest/live-boundary
   status, cost and benchmark evidence, source route, compatibility, and named
-  gaps. QSI and EchoTrade remain unresolved where no authoritative producing
-  artifact is admitted; the GrizzlyBears and TuringTrader rejected-provider
-  dispositions remain visible. Return evidence does not manufacture a design
-  or backtest version.
+  gaps. QSI, GrizzlyBears, TuringTrader, and Volatis have admitted version-bound
+  history. EU is a named exact-model HAR export defect; long EU curves from
+  different books are retained but rejected as substitutes. EchoTrade is
+  deprecated with no history, and Composer is immaterial with unconnected
+  history. Return evidence does not manufacture a design or backtest version.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
   contribution reconciliation, and each dated dynamic exposure path come only
   from accepted analytics generations. The clean-room dynamic FLS lens remains
@@ -44,6 +45,16 @@ without preserving stale calculations or hard-coded operator conclusions.
 - Portfolio123 provider-live evidence is displayed alongside, but never joined
   to, the IBKR account-live TWR. Provider history, current account snapshot,
   exact-date overlap, and implementation-gap dates remain separately labeled.
+  The implementation-reconciliation artifact also separates provider/model
+  instructions, connected live books, temporary P123 books, broker executions,
+  and account returns for AI Factor, GrizzlyBears, and TuringTrader. It reports
+  exact-common-date beta, correlation, tracking error, capture, relative
+  drawdown, trade-event coverage, and confirmed root causes without treating
+  unmatched events as automatically manual. The interpretation and corrective
+  actions are documented in
+  `docs/analytics/model-to-actual-rcca.md`; event coverage is one-to-one and
+  remains explicitly quantity/notional-unverified where the model source does
+  not provide account-sized orders.
 - Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
   matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come

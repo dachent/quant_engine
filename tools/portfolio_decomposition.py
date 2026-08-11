@@ -35,7 +35,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 ANALYTICS_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.9.0"
+BUILDER_VERSION: Final = "1.10.0"
 METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-3"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
 ANALYSIS_LENSES: Final = {
@@ -783,6 +783,7 @@ def _canonical_live_series_sha256(rows: Sequence[TargetRow]) -> str:
     ordered = [
         {"date": row.day.isoformat(), "return": row.canonical_return}
         for row in sorted(rows, key=lambda item: item.day)
+        if row.evidence_layer != "BACKTEST"
     ]
     encoded = (
         json.dumps(ordered, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -1899,17 +1900,45 @@ def _model_result(
     factor_definitions: Mapping[str, FactorDefinition],
     maximum_staleness_days: int,
 ) -> dict[str, object]:
+    live_target_rows = [
+        row for row in (target_rows or ()) if row.evidence_layer != "BACKTEST"
+    ]
+    complete_factor_dates = [
+        observed
+        for observed, factor_row in factor_rows.items()
+        if all(factor_row.values.get(factor_id) is not None for factor_id in model.factor_ids)
+    ]
+    factor_observed_start = (
+        min(complete_factor_dates).isoformat() if complete_factor_dates else None
+    )
+    factor_observed_end = (
+        max(complete_factor_dates).isoformat() if complete_factor_dates else None
+    )
     empty_coverage: dict[str, object] = {
         "aligned_observations": 0,
         "alignment_ratio": "0",
         "canonical_live_series_sha256": (
-            _canonical_live_series_sha256(target_rows) if target_rows else None
+            _canonical_live_series_sha256(live_target_rows)
+            if live_target_rows
+            else None
         ),
+        "canonical_live_observed_end": (
+            live_target_rows[-1].day.isoformat() if live_target_rows else None
+        ),
+        "canonical_live_observed_start": (
+            live_target_rows[0].day.isoformat() if live_target_rows else None
+        ),
+        "canonical_live_observations": len(live_target_rows),
         "factor_missing_target_dates": 0,
         "factor_missing_weekdays": 0,
         "factor_missing_weekends": 0,
+        "factor_observations": len(complete_factor_dates),
+        "factor_observed_end": factor_observed_end,
+        "factor_observed_start": factor_observed_start,
+        "limiting_input": "UNAVAILABLE_NO_ALIGNED_OBSERVATIONS",
         "observed_end": None,
         "observed_start": None,
+        "source_lag_calendar_days": None,
         "target_observations": len(target_rows or ()),
         "target_cumulative_return": None,
         "target_current_drawdown": None,
@@ -1960,15 +1989,45 @@ def _model_result(
             maximum_drawdown = max(maximum_drawdown, 1.0 - wealth / peak)
         current_drawdown = 1.0 - wealth / peak
         cumulative_return = wealth - 1.0
+    latest_target = target_rows[-1].day
+    latest_factor = max(complete_factor_dates) if complete_factor_dates else None
+    aligned_end = aligned[-1][0].day if aligned else None
+    natural_common_end = (
+        min(latest_target, latest_factor) if latest_factor is not None else None
+    )
+    if latest_factor is None:
+        limiting_input = "FACTOR_SOURCE_NO_COMPLETE_MODEL_ROW"
+    elif aligned_end is not None and natural_common_end is not None and aligned_end < natural_common_end:
+        limiting_input = "EXACT_DATE_ALIGNMENT_GAP"
+    elif latest_target > latest_factor:
+        limiting_input = "FACTOR_SOURCE_PUBLICATION_LAG"
+    elif latest_target < latest_factor:
+        limiting_input = "STRATEGY_TARGET"
+    else:
+        limiting_input = "COMMON_END_DATE"
     coverage = {
         "aligned_observations": len(aligned),
         "alignment_ratio": _number(len(aligned) / len(target_rows)),
-        "canonical_live_series_sha256": _canonical_live_series_sha256(target_rows),
+        "canonical_live_series_sha256": _canonical_live_series_sha256(
+            live_target_rows
+        ),
+        "canonical_live_observed_end": live_target_rows[-1].day.isoformat(),
+        "canonical_live_observed_start": live_target_rows[0].day.isoformat(),
+        "canonical_live_observations": len(live_target_rows),
         "factor_missing_target_dates": len(missing_dates),
         "factor_missing_weekdays": sum(day.weekday() < 5 for day in missing_dates),
         "factor_missing_weekends": sum(day.weekday() >= 5 for day in missing_dates),
+        "factor_observations": len(complete_factor_dates),
+        "factor_observed_end": factor_observed_end,
+        "factor_observed_start": factor_observed_start,
+        "limiting_input": limiting_input,
         "observed_end": aligned[-1][0].day.isoformat() if aligned else None,
         "observed_start": aligned[0][0].day.isoformat() if aligned else None,
+        "source_lag_calendar_days": (
+            max(0, (latest_target - latest_factor).days)
+            if latest_factor is not None
+            else None
+        ),
         "target_observations": len(target_rows),
         "target_cumulative_return": _number(cumulative_return),
         "target_current_drawdown": _number(current_drawdown),
@@ -1982,8 +2041,10 @@ def _model_result(
         return _unavailable_result(
             model, target_rows, "UNAVAILABLE_NO_ALIGNED_OBSERVATIONS", coverage
         )
-    latest_factor = max(factor_rows)
-    latest_target = target_rows[-1].day
+    if latest_factor is None:
+        return _unavailable_result(
+            model, target_rows, "UNAVAILABLE_NO_COMPLETE_FACTOR_OBSERVATIONS", coverage
+        )
     if (latest_target - latest_factor).days > maximum_staleness_days:
         return _unavailable_result(
             model, target_rows, "UNAVAILABLE_STALE_FACTORS", coverage
