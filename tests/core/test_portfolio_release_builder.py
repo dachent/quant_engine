@@ -422,3 +422,58 @@ def test_workbook_validation_resume_requires_all_invariants(tmp_path: Path) -> N
         encoding="utf-8",
     )
     assert builder._accepted_workbook_validation(path) is None
+
+
+def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_spec = tmp_path / "base-spec.json"
+    base_source = tmp_path / "base-source"
+    correlation_source = tmp_path / "correlation-source"
+    bundle_root = tmp_path / "bundles"
+    output_root = tmp_path / "analytics"
+    base_spec.write_text("{}", encoding="utf-8")
+    base_source.mkdir()
+    correlation_source.mkdir()
+    (correlation_source / "returns.csv").write_text("returns", encoding="utf-8")
+    (correlation_source / "spec.json").write_text("{}", encoding="utf-8")
+    bundle = bundle_root / ("b" * 64)
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_tool(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append((args, kwargs))
+        if args[0] == "portfolio_decomposition_evidence_modes.py":
+            bundle.mkdir(parents=True)
+            (bundle / "base-spec.json").write_text("{}", encoding="utf-8")
+            return {"bundle_id": bundle.name, "destination": str(bundle)}
+        if args[1] == "publish":
+            return {"generation_id": "c" * 64}
+        return {"candidate_dir": str(tmp_path / "candidate")}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+
+    result = builder._build_hybrid_decomposition(
+        base_spec=base_spec,
+        base_source=base_source,
+        correlation_source=correlation_source,
+        bundle_root=bundle_root,
+        output_root=output_root,
+    )
+
+    assert result["bundle_id"] == "b" * 64
+    assert result["generation_id"] == "c" * 64
+    assert calls[0][0] == (
+        "portfolio_decomposition_evidence_modes.py",
+        "--base-spec",
+        str(base_spec),
+        "--base-source-root",
+        str(base_source),
+        "--layered-returns",
+        str(correlation_source / "returns.csv"),
+        "--correlation-spec",
+        str(correlation_source / "spec.json"),
+        "--output-root",
+        str(bundle_root),
+    )
+    assert calls[1][0][0:2] == ("portfolio_decomposition.py", "stage")
+    assert calls[2][0][0:2] == ("portfolio_decomposition.py", "publish")

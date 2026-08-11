@@ -226,6 +226,16 @@ executes the ledger, baseline, attribution, decomposition lenses, dynamic
 replication, dependence, weekly returns, report, workbook, and panel from the
 declared inputs; it does not copy a prior panel.
 
+For every static decomposition lens and the clean-room dynamic-style model, the
+vertical builder publishes two separate generations. `LIVE_ONLY` uses the
+accepted account-live target. `LIVE_PLUS_BACKTEST` is materialized through
+`portfolio_decomposition_evidence_modes.py` from the same hash-bound layered
+history contract used by dependence and weekly returns. That adapter admits
+only matching-version `BACKTEST` rows strictly before live inception and then
+lets the accepted live target win. The hybrid factor control must remain
+disabled if this complete second stack is absent; browser interaction QA treats
+that condition as a release failure.
+
 Choose exactly one provider-ledger source. Use `--provider-ledger-spec` when
 provider facts changed and the ledger must be rebuilt. Use
 `--provider-ledger-generation` when the analysis plan is deliberately bound to

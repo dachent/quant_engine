@@ -2463,7 +2463,8 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     assert (
         'const requiredFactorEvidenceModes = ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]' in qa
     )
-    assert 'includes("1,486 backtest")' in qa
+    assert '/[1-9][0-9,]* backtest/.test(row.evidence ?? "")' in qa
+    assert "const disabled = await button.isDisabled();" in qa
     assert "item.requested_beta_rows.every((row) => row.beta_visible)" in qa
     assert "Clean-room dynamic FLS path and same-factor validation are rendered" in qa
     assert "All observed windows and both true drawdown regimes are exercised" in qa

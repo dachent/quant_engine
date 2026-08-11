@@ -714,6 +714,62 @@ def build_attribution(recipe_path: Path, output_root: Path) -> dict[str, Any]:
     }
 
 
+def _build_hybrid_decomposition(
+    *,
+    base_spec: Path,
+    base_source: Path,
+    correlation_source: Path,
+    bundle_root: Path,
+    output_root: Path,
+) -> dict[str, Any]:
+    """Publish one version-bound hybrid decomposition from the shared history contract."""
+
+    bundle = _tool(
+        "portfolio_decomposition_evidence_modes.py",
+        "--base-spec",
+        str(base_spec),
+        "--base-source-root",
+        str(base_source),
+        "--layered-returns",
+        str(correlation_source / "returns.csv"),
+        "--correlation-spec",
+        str(correlation_source / "spec.json"),
+        "--output-root",
+        str(bundle_root),
+        timeout=7200,
+    )
+    source_root = _path(bundle.get("destination"), "hybrid decomposition bundle")
+    hybrid_spec = source_root / "base-spec.json"
+    _tool(
+        "portfolio_decomposition.py",
+        "stage",
+        "--spec",
+        str(hybrid_spec),
+        "--source-root",
+        str(source_root),
+        "--output-root",
+        str(output_root),
+        timeout=7200,
+    )
+    published = _tool(
+        "portfolio_decomposition.py",
+        "publish",
+        "--spec",
+        str(hybrid_spec),
+        "--source-root",
+        str(source_root),
+        "--output-root",
+        str(output_root),
+        timeout=7200,
+    )
+    return {
+        "bundle_id": _text(bundle.get("bundle_id"), "hybrid bundle_id"),
+        "bundle_root": str(source_root),
+        "generation_id": _text(published.get("generation_id"), "hybrid generation_id"),
+        "root": str(output_root),
+    }
+
+
 def build_analytics(
     recipe_path: Path,
     attribution_bundle: Path,
@@ -777,8 +833,25 @@ def build_analytics(
         str(decomposition_root),
         timeout=7200,
     )
+    correlation_source = _path(
+        recipe["correlation_source_root"]["path"], "correlation source root"
+    )
     lenses_root = output_root / "decomposition-lenses"
     lenses: dict[str, str] = {}
+    hybrid_lenses: dict[str, str] = {}
+    hybrid_bundles: dict[str, str] = {}
+    hybrid_root = lenses_root / "LIVE_PLUS_BACKTEST"
+    evidence_mode_root = output_root / "decomposition-evidence-modes"
+    hybrid_dynamic = _build_hybrid_decomposition(
+        base_spec=base_spec,
+        base_source=base_source,
+        correlation_source=correlation_source,
+        bundle_root=evidence_mode_root / "dynamic-style",
+        output_root=hybrid_root / "dynamic-style",
+    )
+    hybrid_bundles["dynamic-style"] = _text(
+        hybrid_dynamic.get("bundle_id"), "hybrid dynamic bundle_id"
+    )
     plan = _load(attribution_bundle / "plan-manifest.json", "attribution plan")
     specs = plan.get("specs")
     if not isinstance(specs, list) or not specs:
@@ -812,9 +885,19 @@ def build_analytics(
             timeout=7200,
         )
         lenses[source_key] = _text(result.get("generation_id"), "lens generation_id")
-    correlation_source = _path(
-        recipe["correlation_source_root"]["path"], "correlation source root"
-    )
+        hybrid = _build_hybrid_decomposition(
+            base_spec=lens_spec,
+            base_source=attribution_bundle,
+            correlation_source=correlation_source,
+            bundle_root=evidence_mode_root / source_key,
+            output_root=hybrid_root / source_key,
+        )
+        hybrid_lenses[source_key] = _text(
+            hybrid.get("generation_id"), "hybrid lens generation_id"
+        )
+        hybrid_bundles[source_key] = _text(
+            hybrid.get("bundle_id"), "hybrid lens bundle_id"
+        )
     correlation_root = output_root / "correlation"
     _tool(
         "portfolio_correlation.py",
@@ -885,6 +968,9 @@ def build_analytics(
         "correlation_generation_id": correlation.get("generation_id"),
         "correlation_root": str(correlation_root),
         "decomposition_generation_id": decomposition.get("generation_id"),
+        "hybrid_decomposition_bundle_ids": hybrid_bundles,
+        "hybrid_dynamic_generation_id": hybrid_dynamic.get("generation_id"),
+        "hybrid_lens_generations": hybrid_lenses,
         "decomposition_lenses_root": str(lenses_root),
         "decomposition_root": str(decomposition_root),
         "lens_generations": lenses,
