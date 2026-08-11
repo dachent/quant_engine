@@ -211,3 +211,9 @@ def test_candidate_verification_is_byte_exact(tmp_path: Path) -> None:
     (candidate / "replication.json").write_text("{}", encoding="utf-8")
     with pytest.raises(replication.ReplicationError, match="exact rebuild"):
         replication.verify_candidate(spec, source_root, candidate)
+
+
+def test_series_count_fails_closed_on_malformed_payload() -> None:
+    assert replication._series_count({"replication_results": []}) == 0
+    with pytest.raises(replication.ReplicationError, match="must be an array"):
+        replication._series_count({"replication_results": "not-an-array"})

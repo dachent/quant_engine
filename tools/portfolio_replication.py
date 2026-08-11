@@ -736,6 +736,13 @@ def _verify_exact(candidate: Path, manifest: GenerationManifest, result_bytes: b
             raise ReplicationError(f"candidate {name} differs from exact rebuild")
 
 
+def _series_count(payload: Mapping[str, object]) -> int:
+    results = payload.get("replication_results")
+    if not isinstance(results, list):
+        raise ReplicationError("replication_results must be an array")
+    return len(results)
+
+
 def stage_candidate(spec_path: Path, source_root: Path, output_root: Path) -> dict[str, object]:
     payload, manifest, result_bytes = build_replication(spec_path, source_root)
     candidates = output_root.resolve() / "candidates"
@@ -757,7 +764,7 @@ def stage_candidate(spec_path: Path, source_root: Path, output_root: Path) -> di
         "analytics_hash": payload["analytics_hash"],
         "candidate": str(candidate),
         "generation_id": manifest.generation_id,
-        "series_count": len(payload["replication_results"]),
+        "series_count": _series_count(payload),
     }
 
 
@@ -790,7 +797,7 @@ def publish(
         "analytics_hash": payload["analytics_hash"],
         "generation_id": manifest.generation_id,
         "publication_state": pointer.state.value,
-        "series_count": len(payload["replication_results"]),
+        "series_count": _series_count(payload),
     }
 
 
