@@ -7,6 +7,15 @@ from pathlib import Path
 
 import pytest
 
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tools" / "portfolio_release_builder.py"
@@ -23,6 +32,44 @@ def _file_definition(path: Path) -> dict[str, object]:
         "sha256": hashlib.sha256(content).hexdigest(),
         "size_bytes": len(content),
     }
+
+
+def _provider_ledger_generation(tmp_path: Path) -> Path:
+    catalog = (
+        json.dumps(
+            {"as_of_date": "2026-08-03", "catalog_schema_version": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=builder.date.fromisoformat("2026-08-03"),
+        adapter=AdapterIdentity("quant-engine-provider-ledger", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic provider ledger",
+            fact_types=("positions",),
+            observed_start=builder.date.fromisoformat("2026-08-03"),
+            observed_end=builder.date.fromisoformat("2026-08-03"),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/provider-ledger.json",
+                sha256=hashlib.sha256(catalog).hexdigest(),
+                size_bytes=len(catalog),
+                as_of_date=builder.date.fromisoformat("2026-08-03"),
+                schema_name="provider-ledger-catalog",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    generation = tmp_path / manifest.generation_id
+    generation.mkdir()
+    (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+    (generation / "provider-ledger.json").write_bytes(catalog)
+    return generation
 
 
 def _recipe(tmp_path: Path) -> Path:
@@ -208,6 +255,7 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
 
     result = builder.create_recipe(
         provider_ledger_spec=provider,
+        provider_ledger_generation=None,
         baseline_spec=baseline,
         base_factor_file=base_factor,
         implementation_reconciliation=implementation,
@@ -224,6 +272,51 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
 
     assert result["recipe"] == str(output)
     assert builder._recipe(output)["schema_version"] == 6
+
+
+def test_create_recipe_can_bind_verified_immutable_provider_ledger(
+    tmp_path: Path,
+) -> None:
+    source_recipe = _recipe(tmp_path)
+    payload = json.loads(source_recipe.read_text(encoding="utf-8"))
+    generation = _provider_ledger_generation(tmp_path)
+    output = tmp_path / "reused-ledger-recipe.json"
+
+    result = builder.create_recipe(
+        provider_ledger_spec=None,
+        provider_ledger_generation=generation,
+        baseline_spec=Path(payload["baseline_spec"]["path"]),
+        base_factor_file=Path(payload["base_factor_file"]["path"]),
+        implementation_reconciliation=Path(
+            payload["implementation_reconciliation"]["path"]
+        ),
+        implementation_return_attribution=Path(
+            payload["implementation_return_attribution"]["path"]
+        ),
+        strategy_attribution_root=Path(payload["strategy_attribution_root"]["path"]),
+        decomposition_plan_bundle=Path(payload["decomposition_plan_bundle"]["path"]),
+        correlation_source_root=Path(payload["correlation_source_root"]["path"]),
+        legacy_panel=Path(payload["legacy_panel"]["path"]),
+        as_of_date="2026-08-03",
+        pipeline_id="synthetic-reused-ledger",
+        release_commit="a" * 40,
+        output=output,
+    )
+
+    assert result["recipe"] == str(output)
+    accepted = builder._recipe(output)
+    assert accepted["schema_version"] == 7
+    assert accepted["provider_ledger_generation"]["path"] == str(generation)
+
+
+def test_reusable_provider_ledger_fails_when_catalog_identity_differs(
+    tmp_path: Path,
+) -> None:
+    generation = _provider_ledger_generation(tmp_path)
+    (generation / "provider-ledger.json").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(builder.VerticalBuildError, match="identity differs"):
+        builder._validated_reusable_provider_ledger(generation)
 
 
 def test_xlsx_startup_deadline_is_the_only_extended_failure() -> None:

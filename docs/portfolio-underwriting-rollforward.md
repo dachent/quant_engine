@@ -34,6 +34,7 @@ $runRoot = Join-Path $cycleRoot 'run'
 $legacyPanel = '<accepted-legacy-panel-root>'
 $planBundle = '<exact-hash-bound-decomposition-plan-bundle>'
 $providerLedgerSpec = '<exact-new-root-provider-ledger-spec.json>'
+$providerLedgerGeneration = '<exact-verified-provider-ledger-generation-directory>'
 $baselineSpec = '<exact-new-root-baseline-spec.json>'
 $baseFactorFile = '<exact-new-root-factor-file.csv>'
 $correlationSourceRoot = '<exact-new-root-correlation-source-root>'
@@ -225,9 +226,17 @@ executes the ledger, baseline, attribution, decomposition lenses, dynamic
 replication, dependence, weekly returns, report, workbook, and panel from the
 declared inputs; it does not copy a prior panel.
 
+Choose exactly one provider-ledger source. Use `--provider-ledger-spec` when
+provider facts changed and the ledger must be rebuilt. Use
+`--provider-ledger-generation` when the analysis plan is deliberately bound to
+an already-published immutable ledger. Reuse verifies the generation manifest,
+adapter, catalog artifact hash, byte count, schema, date, and complete directory
+inventory before staging the exact bytes under the new proof root. It never
+reconstructs missing historical provenance or accepts a mutable pointer.
+
 ```powershell
 & $enginePython tools\portfolio_release_builder.py recipe `
-  --provider-ledger-spec $providerLedgerSpec `
+  --provider-ledger-generation $providerLedgerGeneration `
   --baseline-spec $baselineSpec `
   --base-factor-file $baseFactorFile `
   --implementation-reconciliation $implementationReconciliation `

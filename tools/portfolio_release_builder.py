@@ -12,7 +12,13 @@ import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 
-from quant_engine.core import hash_file, publish_generation, read_current
+from quant_engine.core import (
+    GenerationManifest,
+    VerificationStatus,
+    hash_file,
+    publish_generation,
+    read_current,
+)
 from quant_engine.core.contracts import canonical_json_bytes
 
 
@@ -97,6 +103,61 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
     }
 
 
+def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
+    if path.is_symlink() or not path.is_dir():
+        raise VerticalBuildError("reusable provider-ledger generation is unavailable")
+    if len(path.name) != 64 or any(
+        character not in "0123456789abcdef" for character in path.name
+    ):
+        raise VerticalBuildError("reusable provider-ledger generation id is invalid")
+    files = {
+        item.relative_to(path).as_posix(): item
+        for item in path.rglob("*")
+        if item.is_file()
+    }
+    if set(files) != {"generation.json", "provider-ledger.json"}:
+        raise VerticalBuildError("reusable provider-ledger file boundary differs")
+    if any(item.is_symlink() for item in files.values()):
+        raise VerticalBuildError("reusable provider-ledger contains a link")
+    try:
+        manifest = GenerationManifest.from_json_bytes(
+            files["generation.json"].read_bytes()
+        )
+    except (OSError, ValueError) as exc:
+        raise VerticalBuildError(
+            "reusable provider-ledger manifest is invalid"
+        ) from exc
+    if manifest.generation_id != path.name:
+        raise VerticalBuildError("reusable provider-ledger generation id differs")
+    if manifest.verification is not VerificationStatus.VERIFIED:
+        raise VerticalBuildError("reusable provider-ledger is not verified")
+    if (
+        manifest.adapter.name != "quant-engine-provider-ledger"
+        or manifest.adapter.version != "1"
+    ):
+        raise VerticalBuildError("reusable provider-ledger adapter differs")
+    artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "normalized/provider-ledger.json"
+        ),
+        None,
+    )
+    if artifact is None:
+        raise VerticalBuildError("reusable provider-ledger artifact is absent")
+    catalog_sha256, catalog_size = _sha(files["provider-ledger.json"])
+    if artifact.sha256 != catalog_sha256 or artifact.size_bytes != catalog_size:
+        raise VerticalBuildError("reusable provider-ledger artifact identity differs")
+    catalog = _load(files["provider-ledger.json"], "reusable provider-ledger")
+    if (
+        catalog.get("as_of_date") != manifest.as_of_date.isoformat()
+        or catalog.get("catalog_schema_version") != 1
+    ):
+        raise VerticalBuildError("reusable provider-ledger catalog contract differs")
+    return manifest.generation_id, files["provider-ledger.json"]
+
+
 def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
     correlation_root = _path(
         recipe["correlation_source_root"]["path"], "correlation source root"
@@ -139,7 +200,8 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
 
 def _recipe(path: Path) -> dict[str, Any]:
     recipe = _load(path, "vertical-build recipe")
-    if recipe.get("schema_version") != 6:
+    schema_version = recipe.get("schema_version")
+    if schema_version not in {6, 7}:
         raise VerticalBuildError("vertical-build recipe schema is unsupported")
     required = {
         "as_of_date",
@@ -151,16 +213,17 @@ def _recipe(path: Path) -> dict[str, Any]:
         "implementation_return_attribution",
         "legacy_panel",
         "pipeline_id",
-        "provider_ledger_spec",
         "release_commit",
         "schema_version",
         "strategy_attribution_root",
     }
+    required.add(
+        "provider_ledger_spec" if schema_version == 6 else "provider_ledger_generation"
+    )
     if set(recipe) != required:
         raise VerticalBuildError("vertical-build recipe keys differ")
     date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
     for key in (
-        "provider_ledger_spec",
         "baseline_spec",
         "base_factor_file",
         "implementation_reconciliation",
@@ -177,6 +240,18 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError(f"{key} identity differs")
+    if schema_version == 6:
+        definition = recipe["provider_ledger_spec"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise VerticalBuildError("provider_ledger_spec definition differs")
+        artifact = _path(definition["path"], "provider_ledger_spec.path")
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("provider_ledger_spec identity differs")
     for key in (
         "decomposition_plan_bundle",
         "correlation_source_root",
@@ -196,6 +271,22 @@ def _recipe(path: Path) -> dict[str, Any]:
             "inventory_sha256": definition["inventory_sha256"],
         }:
             raise VerticalBuildError(f"{key} inventory differs")
+    if schema_version == 7:
+        definition = recipe["provider_ledger_generation"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "file_count",
+            "inventory_sha256",
+            "path",
+        }:
+            raise VerticalBuildError("provider_ledger_generation definition differs")
+        generation = _path(definition["path"], "provider_ledger_generation.path")
+        actual = _directory_inventory(generation)
+        if actual != {
+            "file_count": definition["file_count"],
+            "inventory_sha256": definition["inventory_sha256"],
+        }:
+            raise VerticalBuildError("provider_ledger_generation inventory differs")
+        _validated_reusable_provider_ledger(generation)
     _history_contract_path(recipe)
     return recipe
 
@@ -211,7 +302,8 @@ def _file_definition(path: Path) -> dict[str, object]:
 
 def create_recipe(
     *,
-    provider_ledger_spec: Path,
+    provider_ledger_spec: Path | None,
+    provider_ledger_generation: Path | None,
     baseline_spec: Path,
     base_factor_file: Path,
     implementation_reconciliation: Path,
@@ -228,7 +320,9 @@ def create_recipe(
     date.fromisoformat(as_of_date)
     if len(release_commit) != 40:
         raise VerticalBuildError("release commit differs")
-    payload = {
+    if (provider_ledger_spec is None) == (provider_ledger_generation is None):
+        raise VerticalBuildError("exactly one provider-ledger source must be supplied")
+    payload: dict[str, Any] = {
         "as_of_date": as_of_date,
         "base_factor_file": _file_definition(base_factor_file.resolve()),
         "baseline_spec": _file_definition(baseline_spec.resolve()),
@@ -251,14 +345,26 @@ def create_recipe(
             **_directory_inventory(legacy_panel.resolve()),
         },
         "pipeline_id": pipeline_id,
-        "provider_ledger_spec": _file_definition(provider_ledger_spec.resolve()),
         "release_commit": release_commit,
-        "schema_version": 6,
         "strategy_attribution_root": {
             "path": str(strategy_attribution_root.resolve()),
             **_directory_inventory(strategy_attribution_root.resolve()),
         },
     }
+    if provider_ledger_spec is not None:
+        payload["provider_ledger_spec"] = _file_definition(
+            provider_ledger_spec.resolve()
+        )
+        payload["schema_version"] = 6
+    else:
+        assert provider_ledger_generation is not None
+        generation = provider_ledger_generation.resolve()
+        _validated_reusable_provider_ledger(generation)
+        payload["provider_ledger_generation"] = {
+            "path": str(generation),
+            **_directory_inventory(generation),
+        }
+        payload["schema_version"] = 7
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
     return {"pipeline_id": pipeline_id, "recipe": str(output)}
@@ -441,21 +547,34 @@ def _published_generation(root: Path) -> tuple[str, Path]:
 
 def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
-    source_spec = _path(recipe["provider_ledger_spec"]["path"], "provider spec")
-    spec = _load(source_spec, "provider-ledger specification")
-    spec["output_root"] = str(output_root.resolve())
-    derived = output_root / "config" / "provider-ledger-spec.json"
-    _write_exact(derived, canonical_json_bytes(spec))
-    staged = _tool("provider_ledger.py", "stage", "--spec", str(derived))
-    generation_id = _text(staged.get("generation_id"), "ledger generation_id")
-    _tool(
-        "provider_ledger.py",
-        "verify",
-        "--spec",
-        str(derived),
-        "--generation-id",
-        generation_id,
-    )
+    if recipe["schema_version"] == 6:
+        source_spec = _path(recipe["provider_ledger_spec"]["path"], "provider spec")
+        spec = _load(source_spec, "provider-ledger specification")
+        spec["output_root"] = str(output_root.resolve())
+        derived = output_root / "config" / "provider-ledger-spec.json"
+        _write_exact(derived, canonical_json_bytes(spec))
+        staged = _tool("provider_ledger.py", "stage", "--spec", str(derived))
+        generation_id = _text(staged.get("generation_id"), "ledger generation_id")
+        _tool(
+            "provider_ledger.py",
+            "verify",
+            "--spec",
+            str(derived),
+            "--generation-id",
+            generation_id,
+        )
+        source_mode = "REBUILT_FROM_BOUND_SPEC"
+    else:
+        source = _path(
+            recipe["provider_ledger_generation"]["path"],
+            "provider-ledger generation",
+        )
+        generation_id, _ = _validated_reusable_provider_ledger(source)
+        destination = output_root / "generations" / generation_id
+        for artifact in sorted(source.iterdir(), key=lambda item: item.name):
+            _write_exact(destination / artifact.name, artifact.read_bytes())
+        _validated_reusable_provider_ledger(destination)
+        source_mode = "REUSED_VERIFIED_IMMUTABLE_GENERATION"
     pointer = publish_generation(output_root, generation_id)
     freshness = output_root / "freshness-health.json"
     _tool(
@@ -474,6 +593,7 @@ def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
         "generation_id": generation_id,
         "publication_state": pointer.state.value,
         "root": str(output_root),
+        "source_mode": source_mode,
     }
 
 
@@ -1231,7 +1351,9 @@ def _parser() -> argparse.ArgumentParser:
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--path", type=Path, required=True)
     recipe = commands.add_parser("recipe")
-    recipe.add_argument("--provider-ledger-spec", type=Path, required=True)
+    provider = recipe.add_mutually_exclusive_group(required=True)
+    provider.add_argument("--provider-ledger-spec", type=Path)
+    provider.add_argument("--provider-ledger-generation", type=Path)
     recipe.add_argument("--baseline-spec", type=Path, required=True)
     recipe.add_argument("--base-factor-file", type=Path, required=True)
     recipe.add_argument("--implementation-reconciliation", type=Path, required=True)
@@ -1275,6 +1397,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "recipe":
             result = create_recipe(
                 provider_ledger_spec=args.provider_ledger_spec,
+                provider_ledger_generation=args.provider_ledger_generation,
                 baseline_spec=args.baseline_spec,
                 base_factor_file=args.base_factor_file,
                 implementation_reconciliation=args.implementation_reconciliation,

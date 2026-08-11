@@ -176,8 +176,13 @@ the browser-QA evidence, repository commit, locked Python runtime, and stable
 panel launcher into the core pipeline specification used by
 `tools/data_pipeline.py`.
 
-No stage copies a prior release or substitutes a marker for computation. The
-semantic command calculates six bridges from the newly built artifacts:
+No stage copies a prior report or panel or substitutes a marker for computation.
+When provider facts changed, the recipe uses `--provider-ledger-spec` and
+rebuilds the ledger. When a frozen analysis plan is bound to an unchanged,
+already-published ledger, `--provider-ledger-generation` may reuse only that
+exact VERIFIED generation after validating its manifest, adapter, catalog
+artifact, schema, date, and full directory inventory. The semantic command
+calculates six bridges from the resulting artifacts:
 financial identities, current strategy mappings, ledger-to-baseline-to-report
 lineage, analytics/report/panel equality (including HWM), freshness, and exact
 generation/release evidence. Quantitative details are retained beside the
@@ -192,7 +197,7 @@ specification from the new root.
 
 ```powershell
 $env:QE_PIPELINE_PYTHON = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
-python tools/portfolio_release_builder.py recipe --provider-ledger-spec <new-root-provider-ledger-spec.json> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --implementation-reconciliation <exact-implementation-reconciliation.json> --implementation-return-attribution <exact-return-attribution.json> --strategy-attribution-root <exact-strategy-attribution-root> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
+python tools/portfolio_release_builder.py recipe --provider-ledger-generation <exact-verified-generation-directory> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --implementation-reconciliation <exact-implementation-reconciliation.json> --implementation-return-attribution <exact-return-attribution.json> --strategy-attribution-root <exact-strategy-attribution-root> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
 python tools/portfolio_release_builder.py build --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot
 <run browser and interaction QA against the emitted panel candidate>
 python tools/portfolio_release_builder.py stage --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot --role panel --qa-dir $qaRoot
