@@ -385,6 +385,21 @@ class RepositoryBoundaryTests(unittest.TestCase):
             self.assertIn("PATH_FORBIDDEN_ROOT", by_path[path])
         self.assertIn("PATH_FORBIDDEN_SEGMENT", by_path[paths[-1]])
 
+    def test_current_and_legacy_portfolio123_roots_are_forbidden(self) -> None:
+        policy = self.policy()
+        paths = [
+            "dataPortfolio123/ordinary.txt",
+            "data_Portfolio123/ordinary.txt",
+        ]
+        for path in paths:
+            self.write(path, b"ordinary text")
+        findings = self.scan(policy, *paths)
+        by_path = {path: set() for path in paths}
+        for finding in findings:
+            by_path[finding.path].add(finding.code)
+        for path in paths:
+            self.assertIn("PATH_FORBIDDEN_ROOT", by_path[path])
+
     def test_git_symlink_and_reparse_attribute_have_stable_codes(self) -> None:
         policy = self.policy()
         findings = boundary.scan_tracked_entries(
