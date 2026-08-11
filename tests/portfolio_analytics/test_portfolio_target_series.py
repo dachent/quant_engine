@@ -566,6 +566,56 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
         },
         sort_keys=True,
     ).encode("utf-8")
+    history_returns = tmp_path / "strategy-history.csv"
+    history_returns.write_text(
+        "series_id,date,return,evidence_layer,strategy_version\n"
+        "Other,2025-12-30,0.02,BACKTEST,other-current:v1\n"
+        "Other,2025-12-31,-0.01,BACKTEST,other-current:v1\n",
+        encoding="utf-8",
+    )
+    history_manifest = tmp_path / "strategy-history.json"
+    history_manifest.write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-01-06",
+                "bundle_id": "b" * 64,
+                "returns_artifact": {
+                    "sha256": hashlib.sha256(history_returns.read_bytes()).hexdigest(),
+                    "size_bytes": history_returns.stat().st_size,
+                },
+                "schema_version": 1,
+                "history_dispositions": [
+                    {
+                        "history_status": "UNAVAILABLE_EXPORT_DEFECT",
+                        "implementation_reconciliation_status": (
+                            "BLOCKED_HISTORY_EXPORT_DEFECT"
+                        ),
+                        "reason": "Exact connected model history was not exported.",
+                        "required_for_analysis": True,
+                        "series_id": "Missing",
+                        "status": ("EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED"),
+                        "strategy_version": "missing-current:v1",
+                    }
+                ],
+                "series": [
+                    {
+                        "compatibility_basis": "SYNTHETIC_CURRENT_SPECIFICATION",
+                        "frequency": "DAILY_TRADING",
+                        "history_status": "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+                        "implementation_reconciliation_status": "UNRESOLVED",
+                        "observed_end": "2025-12-31",
+                        "observed_start": "2025-12-30",
+                        "required_for_analysis": True,
+                        "return_observations": 2,
+                        "series_id": "Other",
+                        "strategy_version": "other-current:v1",
+                    }
+                ],
+                "verification": "VERIFIED",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     spec_bytes, returns_bytes, proof_bytes, manifest_bytes = (
         build_layered_correlation_inputs(
@@ -580,6 +630,8 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
             "AI Factor [P123]",
             strategy_evidence,
             "2026-01-06",
+            history_manifest,
+            history_returns,
         )
     )
     spec = json.loads(spec_bytes)
@@ -588,6 +640,7 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
     ai = [row for row in rows if row["series_id"] == "AI Factor [P123]"]
     backtest = [row for row in ai if row["evidence_layer"] == "BACKTEST"]
     live = [row for row in ai if row["evidence_layer"] == "ACCOUNT_LIVE"]
+    other = [row for row in rows if row["series_id"] == "Other"]
 
     assert spec["schema_version"] == 2
     assert spec["return_source"]["schema_version"] == "2"
@@ -602,12 +655,23 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
             if item["series_id"] == "AI Factor [P123]"
         )
     }
+    assert len([row for row in other if row["evidence_layer"] == "BACKTEST"]) == 2
+    assert {row["strategy_version"] for row in other} == {"other-current:v1"}
+    other_mapping = next(
+        item for item in proof["series_mappings"] if item["series_id"] == "Other"
+    )
+    assert other_mapping["history_status"] == ("ACCEPTED_CURRENT_SPECIFICATION_HISTORY")
+    assert other_mapping["implementation_reconciliation_status"] == "UNRESOLVED"
     missing = next(
         item for item in proof["series_mappings"] if item["series_id"] == "Missing"
     )
     assert missing["live_observations"] == 0
-    assert missing["status"] == "ACCEPTED_LIVE_PATH_NO_MATCHED_BACKTEST"
+    assert missing["status"] == ("EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED")
+    assert missing["history_disposition_reason"] == (
+        "Exact connected model history was not exported."
+    )
     assert proof["simulation_coverage"]["relationship_type"] == "live_sim_twin"
+    assert proof["strategy_history_bundle"]["verification"] == "VERIFIED"
     assert manifest_bytes == manifest.read_bytes()
 
     wrong_relationship = tmp_path / "wrong-relationships.parquet"

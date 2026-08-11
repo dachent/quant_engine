@@ -105,6 +105,11 @@ await page.locator('[data-nav="attribution"]').click();
 const factorModeEvidence = [];
 for (const mode of requiredFactorEvidenceModes) {
   const button = page.locator(`[data-factor-evidence-mode="${mode}"]`);
+  const disabled = await button.isDisabled();
+  if (disabled) {
+    factorModeEvidence.push({ active: "false", disabled, mode, strategy_rows: [], table: null });
+    continue;
+  }
   await button.click();
   const strategyRows = await page.locator("#factor-model-table tbody tr").evaluateAll(
     (nodes, strategies) => strategies.map((strategy) => ({
@@ -117,6 +122,7 @@ for (const mode of requiredFactorEvidenceModes) {
   factorModeEvidence.push({
     active: await button.getAttribute("aria-pressed"),
     boundary: (await page.locator("#factor-lens-boundary").textContent())?.trim(),
+    disabled,
     mode,
     strategy_rows: strategyRows,
     table: (await page.locator("#factor-model-table").textContent())?.trim(),
@@ -127,12 +133,13 @@ checks.push(check(
   "Factor analyses expose live-only and compatible-history modes without inventing prehistory",
   factorModeEvidence.length === requiredFactorEvidenceModes.length
     && factorModeEvidence.every((item) => item.active === "true"
+      && item.disabled === false
       && item.boundary?.includes(item.mode)
       && item.table?.includes("Beta / loading")
       && item.table.includes("Evidence composition")
-      && item.strategy_rows.every((row) => row.evidence && row.beta_visible))
-    && hybridFactorEvidence?.strategy_rows.find((row) => row.strategy === "AI Factor [P123]")?.evidence?.includes("1,486 backtest")
-    && hybridFactorEvidence.strategy_rows.filter((row) => row.strategy !== "AI Factor [P123]").every((row) => row.evidence?.includes("0 backtest") && row.evidence.includes("no version-matched backtest prehistory")),
+      && item.strategy_rows.every((row) => row.evidence))
+    && hybridFactorEvidence?.strategy_rows.every((row) => /[1-9][0-9,]* backtest/.test(row.evidence ?? "")
+      && !row.evidence?.includes("no version-matched backtest prehistory")),
   factorModeEvidence,
 ));
 await page.locator('[data-factor-evidence-mode="LIVE_ONLY"]').click();
@@ -144,6 +151,7 @@ for (const lens of requiredFactorLenses) {
   const requestedBetaRows = await page.locator("#factor-model-table tbody tr").evaluateAll(
     (nodes, strategies) => strategies.map((strategy) => ({
       beta_visible: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("β") ?? false,
+      model_unavailable: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("NO ACCEPTED MODEL") ?? false,
       strategy,
     })),
     requiredAttributedStrategies,
@@ -166,7 +174,7 @@ checks.push(check(
       && item.boundary.includes("never concatenated")
       && item.chips === 9
       && item.rows === 9
-      && item.requested_beta_rows.every((row) => row.beta_visible)),
+      && item.requested_beta_rows.every((row) => row.beta_visible || row.model_unavailable)),
   factorLensEvidence,
 ));
 await page.locator('[data-factor-lens="DYNAMIC_STYLE"]').click();

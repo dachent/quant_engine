@@ -228,7 +228,12 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     qa_dir = tmp_path / "qa"
     _write_json(qa_dir / "qa-validation.json", {"all_passed": True})
     source_files = []
-    for name in ("provider.json", "baseline.json"):
+    for name in (
+        "provider.json",
+        "baseline.json",
+        "implementation.json",
+        "implementation-return-attribution.json",
+    ):
         path = tmp_path / name
         _write_json(path, {"synthetic": True})
         source_files.append(path)
@@ -237,19 +242,24 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     (legacy / "app.js").write_text("// synthetic shell", encoding="utf-8")
     plan = tmp_path / "plan"
     correlation = tmp_path / "correlation"
+    attribution = tmp_path / "attribution"
     _write_json(plan / "manifest.json", {"synthetic": True})
     _write_json(correlation / "spec.json", {"synthetic": True})
+    _write_json(attribution / "catalog.json", {"synthetic": True})
     vertical = {
         "as_of_date": AS_OF.isoformat(),
         "base_factor_file": _definition(source_files[0]),
         "baseline_spec": _definition(source_files[1]),
         "correlation_source_root": _dir_definition(correlation),
         "decomposition_plan_bundle": _dir_definition(plan),
+        "implementation_reconciliation": _definition(source_files[2]),
+        "implementation_return_attribution": _definition(source_files[3]),
         "legacy_panel": _dir_definition(legacy),
         "pipeline_id": "synthetic-vertical",
         "provider_ledger_spec": _definition(source_files[0]),
         "release_commit": "a" * 40,
-        "schema_version": 3,
+        "schema_version": 6,
+        "strategy_attribution_root": _dir_definition(attribution),
     }
     vertical_path = tmp_path / "vertical-recipe.json"
     _write_json(vertical_path, vertical)
@@ -283,7 +293,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     return recipe_path, output_root
 
 
-def test_create_recipe_accepts_schema_v3_vertical_recipe(tmp_path: Path) -> None:
+def test_create_recipe_accepts_schema_v6_vertical_recipe(tmp_path: Path) -> None:
     source_recipe, proof_root = _fixture(tmp_path)
     source = json.loads(source_recipe.read_text(encoding="utf-8"))
     output = tmp_path / "created-pipeline-recipe.json"
@@ -292,12 +302,93 @@ def test_create_recipe_accepts_schema_v3_vertical_recipe(tmp_path: Path) -> None
         vertical_recipe=Path(source["vertical_recipe"]["path"]),
         proof_root=proof_root,
         qa_dir=Path(source["qa_dir"]["path"]),
-        pipeline_id="schema-v3-release",
+        pipeline_id="schema-v6-release",
         output=output,
     )
 
-    assert result == {"pipeline_id": "schema-v3-release", "recipe": str(output)}
+    assert result == {"pipeline_id": "schema-v6-release", "recipe": str(output)}
     assert materializer._recipe(output)["release_commit"] == "a" * 40
+
+
+def test_create_recipe_accepts_schema_v7_provider_generation(tmp_path: Path) -> None:
+    source_recipe, proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    provider_generation = tmp_path / "provider-ledger-generation"
+    _write_json(provider_generation / "catalog.json", {"synthetic": True})
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(provider_generation)
+    vertical["schema_version"] = 7
+    _write_json(vertical_path, vertical)
+    source["vertical_recipe"] = _definition(vertical_path)
+    _write_json(source_recipe, source)
+    output = tmp_path / "created-schema-v7-pipeline-recipe.json"
+
+    result = materializer.create_recipe(
+        vertical_recipe=vertical_path,
+        proof_root=proof_root,
+        qa_dir=Path(source["qa_dir"]["path"]),
+        pipeline_id="schema-v7-release",
+        output=output,
+    )
+
+    assert result == {"pipeline_id": "schema-v7-release", "recipe": str(output)}
+    paths = materializer._vertical_source_paths(vertical_path)
+    assert provider_generation in paths
+    assert Path(vertical["base_factor_file"]["path"]) in paths
+
+
+def test_generation_date_rule_allows_dated_ledger_only() -> None:
+    earlier = date(2026, 7, 31)
+
+    assert materializer._generation_as_of_allowed("ledger", earlier, AS_OF)
+    assert not materializer._generation_as_of_allowed("baseline", earlier, AS_OF)
+    assert not materializer._generation_as_of_allowed("ledger", date(2026, 8, 4), AS_OF)
+
+
+def test_semantic_accepts_explicitly_rendered_freshness_blocker(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root = _fixture(tmp_path)
+    assessment = {
+        "blocks_current_consumers": True,
+        "escalation_required": True,
+        "evaluated_on": AS_OF.isoformat(),
+        "fact_type": "strategy-returns",
+        "lane": "ACCOUNT",
+        "provider_id": "schwab",
+        "reason": "accepted observation exceeded the stale boundary",
+        "required_for_current": True,
+        "state": "STALE",
+        "subject_id": "strategy-1",
+    }
+    _write_json(
+        output_root / "stages" / "ledger" / "freshness-health.json",
+        {"as_of_date": AS_OF.isoformat(), "assessments": [assessment]},
+    )
+    panel = next((output_root / "stages" / "panel" / "generations").iterdir())
+    _mutate_json(
+        panel / "data" / "dashboard_data.json",
+        lambda payload: payload.update(
+            {
+                "coverage": [
+                    {
+                        **assessment,
+                        "category": "DATA_FRESHNESS",
+                        "status": assessment["state"],
+                    }
+                ]
+            }
+        ),
+    )
+    _refresh_expected_generation(recipe, output_root, "panel")
+
+    result = materializer.semantic(
+        recipe, output_root / "evidence" / "post-build-semantic.json"
+    )
+
+    assert result["state"] == "PASS"
 
 
 def test_semantic_reconciliation_calculates_all_six_bridges(tmp_path: Path) -> None:
@@ -330,6 +421,24 @@ def _mutate_json(path: Path, update: Callable[[dict[str, object]], None]) -> Non
     payload = json.loads(path.read_text(encoding="utf-8"))
     update(payload)
     _write_json(path, payload)
+
+
+def _refresh_expected_generation(
+    recipe_path: Path, output_root: Path, role: str
+) -> None:
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    generation = next(
+        (
+            output_root / "stages" / materializer.GENERATION_ROOT[role] / "generations"
+        ).iterdir()
+    )
+    inventory = inventory_generation(generation)
+    recipe["expected_generations"][role] = {
+        "files": inventory["files"],
+        "generation_id": inventory["generation_id"],
+        "manifest_sha256": inventory["manifest_sha256"],
+    }
+    _write_json(recipe_path, recipe)
 
 
 def _financial_failure(root: Path) -> None:
@@ -516,6 +625,7 @@ def test_generated_semantic_command_declares_exact_gate_file(
             "correlation_source_root",
             "decomposition_plan_bundle",
             "legacy_panel",
+            "provider_ledger_generation",
             "provider_ledger_spec",
         }
     }

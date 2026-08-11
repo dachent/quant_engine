@@ -347,6 +347,11 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
     assert model["coverage"]["target_observed_start"] == days[0].isoformat()
     assert model["coverage"]["target_cumulative_return"] is not None
     assert model["coverage"]["target_observed_end"] == days[-1].isoformat()
+    assert model["coverage"]["factor_observed_start"] == days[0].isoformat()
+    assert model["coverage"]["factor_observed_end"] == days[-1].isoformat()
+    assert model["coverage"]["factor_observations"] == len(days)
+    assert model["coverage"]["limiting_input"] == "COMMON_END_DATE"
+    assert model["coverage"]["source_lag_calendar_days"] == 0
     assert 0 <= float(model["coverage"]["target_current_drawdown"]) < 1
     assert float(model["coverage"]["target_max_drawdown"]) >= float(
         model["coverage"]["target_current_drawdown"]
@@ -811,4 +816,29 @@ def test_canonical_live_series_digest_normalizes_decimal_spelling(
 
     assert _selected(second)["coverage"]["canonical_live_series_sha256"] == (
         first_digest
+    )
+
+
+def test_canonical_live_series_digest_excludes_backtest_rows() -> None:
+    live = decomposition.TargetRow(
+        date(2026, 1, 2),
+        0.01,
+        "0.01",
+        "ACCOUNT_LIVE",
+        "NET",
+        "TOTAL",
+        None,
+    )
+    backtest = decomposition.TargetRow(
+        date(2025, 12, 31),
+        0.02,
+        "0.02",
+        "BACKTEST",
+        "NET",
+        "TOTAL",
+        None,
+    )
+
+    assert decomposition._canonical_live_series_sha256([backtest, live]) == (
+        decomposition._canonical_live_series_sha256([live])
     )

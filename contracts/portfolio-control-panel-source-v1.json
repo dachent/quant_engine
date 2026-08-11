@@ -5,6 +5,7 @@
     "candidate_count": 33,
     "data_file": "data/dashboard_data.json",
     "data_sha256": "fd89c96a03ab39616a2deafc5866e48c6afb683de6d375f62571e07154b33bd7",
+    "normalized_sha256": "a6fc0179e1701bcb4675542213a8b186fb896aec3f7f6f682c14acf6c75d46f5",
     "status": "FROZEN_AUDIT_APPENDIX"
   },
   "source": "strategy-allocation-audit/model_harness_baseline/control-panel-qa/portfolio_control_panel",

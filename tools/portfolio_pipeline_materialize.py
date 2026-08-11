@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -225,7 +225,7 @@ def _recipe(path: Path) -> dict[str, Any]:
     )
     vertical = _load(vertical_path, "vertical recipe")
     if (
-        vertical.get("schema_version") != 3
+        vertical.get("schema_version") not in {6, 7}
         or vertical.get("release_commit") != recipe["release_commit"]
         or vertical.get("as_of_date") != recipe["as_of_date"]
     ):
@@ -241,18 +241,35 @@ def _recipe(path: Path) -> dict[str, Any]:
 
 def _vertical_source_paths(vertical_path: Path) -> list[Path]:
     vertical = _load(vertical_path, "vertical recipe")
+    schema_version = vertical.get("schema_version")
+    if schema_version not in {6, 7}:
+        raise MaterializationError("vertical recipe schema differs")
     paths = [vertical_path]
     for key in (
-        "provider_ledger_spec",
         "baseline_spec",
         "base_factor_file",
+        "implementation_reconciliation",
+        "implementation_return_attribution",
         "legacy_panel",
     ):
         value = vertical.get(key)
         if not isinstance(value, dict):
             raise MaterializationError(f"vertical recipe {key} differs")
         paths.append(_absolute(value.get("path"), f"vertical recipe {key}.path"))
-    for key in ("decomposition_plan_bundle", "correlation_source_root"):
+    provider_key = (
+        "provider_ledger_spec" if schema_version == 6 else "provider_ledger_generation"
+    )
+    provider = vertical.get(provider_key)
+    if not isinstance(provider, dict):
+        raise MaterializationError(f"vertical recipe {provider_key} differs")
+    paths.append(
+        _absolute(provider.get("path"), f"vertical recipe {provider_key}.path")
+    )
+    for key in (
+        "strategy_attribution_root",
+        "decomposition_plan_bundle",
+        "correlation_source_root",
+    ):
         value = vertical.get(key)
         if not isinstance(value, dict):
             raise MaterializationError(f"vertical recipe {key} differs")
@@ -275,7 +292,7 @@ def create_recipe(
     output: Path,
 ) -> dict[str, Any]:
     vertical = _load(vertical_recipe.resolve(), "vertical recipe")
-    if vertical.get("schema_version") != 3:
+    if vertical.get("schema_version") not in {6, 7}:
         raise MaterializationError("vertical recipe schema differs")
     expected: dict[str, object] = {}
     for role in RELEASE_ROLES:
@@ -382,6 +399,35 @@ def _result(
     checks[name] = {"evidence": evidence, "status": "PASS" if passed else "FAIL"}
 
 
+def _generation_as_of_allowed(
+    role: str, generation_as_of: date, release_as_of: date
+) -> bool:
+    """Allow a dated source ledger while keeping derived release roles exact-date."""
+
+    return (
+        generation_as_of <= release_as_of
+        if role == "ledger"
+        else generation_as_of == release_as_of
+    )
+
+
+def _freshness_key(row: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
+    provider = row.get("provider_id")
+    subject = row.get("subject_id")
+    lane = row.get("lane")
+    fact_type = row.get("fact_type")
+    if not all(
+        isinstance(value, str) and value.strip()
+        for value in (provider, subject, lane, fact_type)
+    ):
+        return None
+    assert isinstance(provider, str)
+    assert isinstance(subject, str)
+    assert isinstance(lane, str)
+    assert isinstance(fact_type, str)
+    return provider.strip(), subject.strip(), lane.strip(), fact_type.strip()
+
+
 def _semantic_gate_payload(recipe: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "as_of_date": recipe["as_of_date"],
@@ -408,6 +454,7 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     output_root = output_path.parent.parent
     checks: dict[str, dict[str, Any]] = {}
+    release_as_of = date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
 
     generation_rows: dict[str, dict[str, Any]] = {}
     generation_ok = True
@@ -427,17 +474,22 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
                 "generation_id": inventory["generation_id"],
                 "manifest_sha256": inventory["manifest_sha256"],
             }
+            generation_as_of = manifest.as_of_date
             passed = (
                 actual == expected
                 and manifest.verification is VerificationStatus.VERIFIED
                 and manifest.coverage.status
                 is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
-                and manifest.as_of_date.isoformat() == recipe["as_of_date"]
+                and _generation_as_of_allowed(role, generation_as_of, release_as_of)
             )
             generation_rows[role] = {
                 "actual_generation_id": actual["generation_id"],
+                "as_of_rule": (
+                    "ON_OR_BEFORE_RELEASE" if role == "ledger" else "EXACT_RELEASE_DATE"
+                ),
                 "expected_generation_id": expected["generation_id"],
                 "file_count": len(inventory_files),
+                "generation_as_of_date": generation_as_of.isoformat(),
                 "status": "PASS" if passed else "FAIL",
             }
         except (OSError, ValueError) as exc:
@@ -618,22 +670,63 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
     freshness_path = output_root / "stages" / "ledger" / "freshness-health.json"
     freshness = _load(freshness_path, "freshness evidence")
     assessments = freshness.get("assessments")
-    blocking = (
+    assessment_rows = (
+        [row for row in assessments if isinstance(row, dict)]
+        if isinstance(assessments, list)
+        else []
+    )
+    assessment_shape_ok = isinstance(assessments, list) and len(assessment_rows) == len(
+        assessments
+    )
+    evaluation_ok = assessment_shape_ok and all(
+        row.get("evaluated_on") == recipe["as_of_date"] for row in assessment_rows
+    )
+    blocking = [
+        row for row in assessment_rows if row.get("blocks_current_consumers") is True
+    ]
+    blocking_disclosures = {
+        _freshness_key(row): (row.get("state"), row.get("reason")) for row in blocking
+    }
+    blockers_disclosed = all(
+        _freshness_key(row) is not None
+        and row.get("required_for_current") is True
+        and row.get("escalation_required") is True
+        and row.get("state") in {"STALE", "UNAVAILABLE"}
+        and isinstance(row.get("reason"), str)
+        and bool(str(row["reason"]).strip())
+        for row in blocking
+    )
+    panel_coverage = panel.get("coverage")
+    rendered_blocking = (
         [
             row
-            for row in assessments
-            if isinstance(row, dict) and row.get("blocks_current_consumers") is True
+            for row in panel_coverage
+            if isinstance(row, dict)
+            and row.get("category") == "DATA_FRESHNESS"
+            and row.get("blocks_current_consumers") is True
         ]
-        if isinstance(assessments, list)
-        else ["INVALID_ASSESSMENTS"]
+        if isinstance(panel_coverage, list)
+        else []
     )
-    freshness_ok = freshness.get("as_of_date") == recipe["as_of_date"] and not blocking
+    rendered_disclosures = {
+        _freshness_key(row): (row.get("status"), row.get("reason"))
+        for row in rendered_blocking
+    }
+    rendered_disclosures_ok = blocking_disclosures == rendered_disclosures
+    freshness_ok = (
+        freshness.get("as_of_date") == recipe["as_of_date"]
+        and evaluation_ok
+        and blockers_disclosed
+        and rendered_disclosures_ok
+    )
     _result(
         checks,
         "freshness",
         freshness_ok,
         as_of_date=freshness.get("as_of_date"),
         blocking_assessment_count=len(blocking),
+        blockers_explicitly_disclosed=blockers_disclosed,
+        blockers_rendered_in_panel=rendered_disclosures_ok,
         sha256=_sha(freshness_path)[0],
     )
 

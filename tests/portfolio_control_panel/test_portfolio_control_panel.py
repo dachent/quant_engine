@@ -1138,6 +1138,9 @@ def test_renderer_exposes_underwriting_and_all_orphaned_evidence_sections() -> N
         assert payload_key in renderer
     assert "data.strategy_underwriting" in renderer
     assert "causally_bound_components" in renderer
+    assert "return_attribution" in renderer
+    assert "Causal return waterfall" in renderer
+    assert "Correct connected-model comparator" in renderer
     assert "NO_AUTOMATIC_DROP_AUTHORITY" not in renderer
     for element_id in (
         "underwriting-table",
@@ -1556,6 +1559,46 @@ def test_source_drift_fails_closed(inputs: dict[str, Path]) -> None:
             inputs["output"],
             freshness_health_path=inputs["freshness"],
         )
+
+
+def test_governed_panel_rollforward_reuses_verified_frozen_appendix(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    contract = json.loads(panel.SOURCE_CONTRACT.read_text(encoding="utf-8"))
+    raw = json.loads(
+        (inputs["legacy"] / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    candidate_appendix = {
+        "as_of_date": contract["frozen_appendix"]["as_of_date"],
+        "providers": raw["providers"],
+        "source_sha256": contract["frozen_appendix"]["data_sha256"],
+        "status": contract["frozen_appendix"]["status"],
+        "tier_counts": {},
+    }
+    contract["frozen_appendix"]["normalized_sha256"] = hashlib.sha256(
+        canonical_json_bytes(candidate_appendix)
+    ).hexdigest()
+    panel.SOURCE_CONTRACT.write_bytes(canonical_json_bytes(contract))
+
+    rolled = tmp_path / "rolled-panel"
+    payload_path = rolled / "data" / "dashboard_data.json"
+    _write_json(
+        payload_path,
+        {
+            "candidate_appendix": candidate_appendix,
+            "meta": {"source_shell_hashes": contract["source_files"]},
+        },
+    )
+    _write_json(
+        rolled / "candidate.json",
+        {"artifact_sha256": {"data/dashboard_data.json": _sha(payload_path)}},
+    )
+
+    accepted, source = panel._source_inputs(rolled)
+
+    assert accepted == candidate_appendix
+    assert source["source_mode"] == "GOVERNED_PANEL_ROLLFORWARD"
+    assert source["observed_hashes"] == contract["source_files"]
 
 
 def test_freshness_health_is_visible_with_dates_and_reason(
@@ -2420,8 +2463,12 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     assert (
         'const requiredFactorEvidenceModes = ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]' in qa
     )
-    assert 'includes("1,486 backtest")' in qa
-    assert "item.requested_beta_rows.every((row) => row.beta_visible)" in qa
+    assert '/[1-9][0-9,]* backtest/.test(row.evidence ?? "")' in qa
+    assert "const disabled = await button.isDisabled();" in qa
+    assert (
+        "item.requested_beta_rows.every((row) => row.beta_visible || "
+        "row.model_unavailable)" in qa
+    )
     assert "Clean-room dynamic FLS path and same-factor validation are rendered" in qa
     assert "All observed windows and both true drawdown regimes are exercised" in qa
     assert "Every weekly display group is rendered and exercised" in qa

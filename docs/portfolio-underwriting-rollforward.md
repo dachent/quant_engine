@@ -22,6 +22,10 @@ QA, and stable launcher use Windows paths and Windows filesystem semantics.
 $repoRoot = [IO.Path]::GetFullPath($PWD)
 $portfolioRoot = [IO.Path]::GetFullPath('C:\Tools\quant-engine\data')
 $enginePython = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
+$taskPackagePath = (
+  Get-ChildItem (Join-Path $repoRoot 'packages') -Directory |
+    ForEach-Object { Join-Path $_.FullName 'src' }
+) -join [IO.Path]::PathSeparator
 $cycleId = '<yyyy-mm-dd-port-underwrite-nnn>'
 $cycleRoot = Join-Path $portfolioRoot (Join-Path 'rollforward' $cycleId)
 $proofRoot = Join-Path $cycleRoot 'proof'
@@ -30,12 +34,27 @@ $runRoot = Join-Path $cycleRoot 'run'
 $legacyPanel = '<accepted-legacy-panel-root>'
 $planBundle = '<exact-hash-bound-decomposition-plan-bundle>'
 $providerLedgerSpec = '<exact-new-root-provider-ledger-spec.json>'
+$providerLedgerGeneration = '<exact-verified-provider-ledger-generation-directory>'
 $baselineSpec = '<exact-new-root-baseline-spec.json>'
 $baseFactorFile = '<exact-new-root-factor-file.csv>'
 $correlationSourceRoot = '<exact-new-root-correlation-source-root>'
+$strategyHistoryRoot = Join-Path $cycleRoot 'strategy-history'
+$implementationReconciliation = Join-Path $cycleRoot 'implementation-reconciliation.json'
+$implementationReturnAttribution = Join-Path $cycleRoot 'implementation-return-attribution.json'
+$strategyAttributionRoot = '<exact-published-strategy-attribution-root>'
 $asOfDate = '<yyyy-mm-dd>'
 $releaseCommit = (git rev-parse HEAD).Trim()
 $env:QE_PIPELINE_PYTHON = $enginePython
+$env:PYTHONPATH = $taskPackagePath
+
+$loadedCore = (& $enginePython -c @'
+from pathlib import Path
+import quant_engine.core
+print(Path(quant_engine.core.__file__).resolve())
+'@).Trim()
+if (-not $loadedCore.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) {
+  throw "Python package authority escaped the release checkout: $loadedCore"
+}
 
 if ($portfolioRoot -like '*\OneDrive -*' -or $portfolioRoot -like '*\repo\*') {
   throw 'Portfolio authority must remain outside synced storage and Git.'
@@ -47,7 +66,11 @@ if ((git status --porcelain).Count -ne 0) {
 
 Do not substitute a copied historical recipe or an ambient `CURRENT.json` path.
 The cycle must name exact source paths, generation IDs, hashes, repository
-commit, runtime, and lock file.
+commit, runtime, and lock file. The package-authority guard is mandatory because
+the durable virtual environment may retain an editable link to an older
+worktree; `PYTHONPATH` deliberately places the release checkout's `packages/*/src`
+ahead of that stale link while reusing only the durable environment's installed
+dependencies.
 
 ## What is recomputed
 
@@ -84,6 +107,107 @@ observation windows, effective-dated account assignments, strategy versions,
 benchmark assignments, and provider dispositions. A later package date is not
 evidence that a fact's observation window advanced.
 
+Normalize retained strategy history before composing the hybrid target. The
+history adapter is local and read-only; it does not call a provider. Supply the
+exact retained GrizzlyBears, QSI, TuringTrader, and Volatis sources and the
+published Portfolio123 generation:
+
+```powershell
+& $enginePython tools\portfolio_strategy_history.py `
+  --grizzly-original-design-workbook '<original-futures-design-trade-log.xlsx>' `
+  --grizzly-spx-workbook '<exact-spx-research-backtest.xlsx>' `
+  --grizzly-spy-workbook '<exact-spy-research-backtest.xlsx>' `
+  --grizzly-workbook '<exact-spxl-current-implementation-backtest.xlsx>' `
+  --grizzly-blended-trade-history '<exact-current-all-backtest-plus-live-trades.csv>' `
+  --grizzly-live-trade-history '<exact-current-live-only-trades.csv>' `
+  --tt-workbook '<exact-current-six-workbook.xlsx>' `
+  --qsi-subscription-archive '<exact-qsi-archive.json>' `
+  --qsi-current-subscription-archive '<exact-newest-qsi-subscription-zip>' `
+  --qsi-appendix-workbook '<exact-qsi-appendix.xlsx>' `
+  --qsi-price-root '<exact-qsi-price-root>' `
+  --price-extension-json '<exact-hash-bound-public-price-extension.json>' `
+  --volatis-pricehistory-csv '<exact-volatis-pricehistory.csv>' `
+  --portfolio123-generation-root '<exact-published-p123-generation>' `
+  --as-of-date $asOfDate `
+  --output-root $strategyHistoryRoot
+```
+
+The newest QSI archive is the authority for every overlapping weekly row; the
+older archive is retained only before the newer archive begins. Rows after the
+declared panel as-of date remain provenance and are not admitted to returns.
+Record overlap revisions and exact excluded-row counts in the history manifest.
+For GrizzlyBears, validate the live-only file as a subset of the combined file.
+The original design is the futures implementation recorded in
+`VIX-TA-Macro Advanced.xlsx`, with SPX as its underlying signal/price reference.
+The SPX, SPY, and SPXL workbooks are separate implementation backtests of the
+same strategy logic. They are not interchangeable evidence layers: the futures
+workbook is design evidence, SPX and SPY are comparative research, and SPXL is
+the selected current implementation backtest. Portfolio risk and
+model-to-account reconciliation therefore bind to SPXL; design-conformance and
+implementation-sensitivity review retain all four hash-bound layers. Extend
+only the admitted SPXL portfolio-return series with the accepted signal state
+and hash-bound SPXL adjusted-close observations.
+
+The strategy target, factor source, and exact-common-date model interval are
+separate coverage facts. Preserve target rows through their actual strategy
+end date even when a public factor source publishes later on a monthly lag.
+Kenneth French economic-factor and industry sources use a declared 45-calendar-
+day publication-lag allowance; ETF style and sector sources retain a 10-day
+allowance. The panel must display all three intervals and the limiting input.
+
+Pass the emitted manifest and returns to `portfolio_target_series.py` with
+`--strategy-history-manifest` and `--strategy-history-returns`. Its
+`evidence-proof.json` is the release history contract. It must contain nine
+series rows and these explicit non-silent dispositions: EU is an exact-model
+HAR export defect; EchoTrade is deprecated with no retained history; Composer
+is immaterial and its history is not connected. Similar long EU curves are
+different model books and cannot substitute for the connected EU model.
+
+Recompute the separate trade/implementation evidence for AI Factor,
+GrizzlyBears, and TuringTrader. Portfolio123 remains HAR-first; this command
+uses no P123 API and emits no raw account or provider identifiers.
+
+```powershell
+& $enginePython tools\portfolio_implementation_reconciliation.py `
+  --p123-generation-root '<exact-published-p123-generation>' `
+  --ibkr-generation-root '<exact-ibkr-generation>' `
+  --ibkr-xml-root '<exact-retained-ibkr-xml-root>' `
+  --ibkr-current-xml '<exact-current-ibkr-flex.xml>' `
+  --schwab-catalog '<exact-schwab-generation.json>' `
+  --provider-ledger-root '<exact-provider-ledger-generation>' `
+  --tt-workbook '<exact-current-six-workbook.xlsx>' `
+  --grizzly-signals '<exact-current-live-only-trades.csv>' `
+  --grizzly-blended-history '<exact-current-all-backtest-plus-live-trades.csv>' `
+  --spxl-market-data '<exact-hash-bound-spxl-price.json>' `
+  --as-of-date $asOfDate `
+  --output $implementationReconciliation
+
+& $enginePython tools\portfolio_implementation_return_attribution.py `
+  --p123-generation-root '<exact-published-p123-generation>' `
+  --ibkr-generation-root '<exact-ibkr-generation>' `
+  --ibkr-xml-root '<exact-retained-ibkr-xml-root>' `
+  --ibkr-current-xml '<exact-current-ibkr-flex.xml>' `
+  --schwab-catalog '<exact-schwab-generation.json>' `
+  --provider-ledger-root '<exact-provider-ledger-generation>' `
+  --tt-workbook '<exact-current-six-workbook.xlsx>' `
+  --tt-market-data '<exact-hash-bound-tt-model-symbol-price.json>' `
+  --tt-market-data '<exact-hash-bound-tt-broker-only-symbol-price.json>' `
+  --grizzly-signals '<exact-current-live-only-trades.csv>' `
+  --grizzly-market-data '<exact-hash-bound-spxl-price.json>' `
+  --as-of-date $asOfDate `
+  --output $implementationReturnAttribution
+```
+
+The causal artifact is not optional operator prose. It must close every bridge
+to the exact endpoint or retain the unsupported remainder explicitly. AI uses
+the effective connected-model mix inferred from unique matched trade quantities;
+the primary-only model is never a whole-account benchmark. AI lot provenance
+remains candidate-based until broker model tags exist. Grizzly intraday slippage
+remains bounded when Schwab has no execution timestamp. TT uses broker NAV/flow
+returns, never an inherited overlap exception, and is causal only from the first
+complete current-six allocation snapshot. Preserve these statuses on every
+rollforward.
+
 ## 2. Build freshness and the complete vertical
 
 Create the same-day freshness artifact from the exact provider-ledger
@@ -102,11 +226,32 @@ executes the ledger, baseline, attribution, decomposition lenses, dynamic
 replication, dependence, weekly returns, report, workbook, and panel from the
 declared inputs; it does not copy a prior panel.
 
+For every static decomposition lens and the clean-room dynamic-style model, the
+vertical builder publishes two separate generations. `LIVE_ONLY` uses the
+accepted account-live target. `LIVE_PLUS_BACKTEST` is materialized through
+`portfolio_decomposition_evidence_modes.py` from the same hash-bound layered
+history contract used by dependence and weekly returns. That adapter admits
+only matching-version `BACKTEST` rows strictly before live inception and then
+lets the accepted live target win. The hybrid factor control must remain
+disabled if this complete second stack is absent; browser interaction QA treats
+that condition as a release failure.
+
+Choose exactly one provider-ledger source. Use `--provider-ledger-spec` when
+provider facts changed and the ledger must be rebuilt. Use
+`--provider-ledger-generation` when the analysis plan is deliberately bound to
+an already-published immutable ledger. Reuse verifies the generation manifest,
+adapter, catalog artifact hash, byte count, schema, date, and complete directory
+inventory before staging the exact bytes under the new proof root. It never
+reconstructs missing historical provenance or accepts a mutable pointer.
+
 ```powershell
 & $enginePython tools\portfolio_release_builder.py recipe `
-  --provider-ledger-spec $providerLedgerSpec `
+  --provider-ledger-generation $providerLedgerGeneration `
   --baseline-spec $baselineSpec `
   --base-factor-file $baseFactorFile `
+  --implementation-reconciliation $implementationReconciliation `
+  --implementation-return-attribution $implementationReturnAttribution `
+  --strategy-attribution-root $strategyAttributionRoot `
   --decomposition-plan-bundle $planBundle `
   --correlation-source-root $correlationSourceRoot `
   --legacy-panel $legacyPanel `
@@ -236,6 +381,14 @@ stable launcher, and a fresh production-launcher browser capture. Retain the
 recipe, specification, plan, receipts, QA, semantic gates, release manifest,
 journal, and post-commit verification under `$cycleRoot`.
 
+The coordinated semantic gate distinguishes evidence freshness from release
+integrity. A verified provider-ledger generation may predate the analysis date;
+the same-date freshness bundle must assess that exact ledger. A stale or
+unavailable current fact remains fail-closed for the affected consumer, but it
+does not hide an otherwise verified advisory panel when every blocker is dated,
+marked for escalation, and rendered in Data Health. A missing, future-dated,
+malformed, or unrendered blocker still fails coordinated publication.
+
 ## Recovery and non-duplication rules
 
 - Resume the same unchanged specification after a local failure; do not create
@@ -263,8 +416,10 @@ unavailable until their source facts are admitted:
 
 - authoritative design artifacts and exact strategy versions for strategies
   currently represented only by an inferred economic archetype;
-- version-matched pre-live backtests for strategies whose hybrid path currently
-  equals live-only evidence;
+- repair of the exact connected EU Portfolio123 HAR export; retained long EU
+  curves from other model books are evidence of the export gap, not substitutes;
+- version-matched pre-live history for Robuxio if it becomes available and is
+  admitted; EchoTrade and Composer are governed non-required dispositions;
 - complete daily account cash and fee paths, plus order/fill timestamps and
   slippage evidence, for causal model-to-account gap decomposition;
 - accepted provider/model paths where no exact-common-date comparison exists;

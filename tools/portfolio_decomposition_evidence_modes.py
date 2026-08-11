@@ -159,10 +159,10 @@ def build_bundle(
     layered_by_series: dict[str, list[dict[str, str]]] = {}
     for row in layered_rows:
         series_id = _text(row.get("series_id"), "layered series_id")
-        definition = definitions.get(series_id)
-        if definition is None:
+        series_definition = definitions.get(series_id)
+        if series_definition is None:
             raise EvidenceModeError("layered return series is undeclared")
-        if row["strategy_version"] != definition.get("strategy_version"):
+        if row["strategy_version"] != series_definition.get("strategy_version"):
             raise EvidenceModeError(f"layered strategy version differs: {series_id}")
         if row["evidence_layer"] not in {
             "ACCOUNT_LIVE",

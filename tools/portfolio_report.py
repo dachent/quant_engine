@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -46,13 +47,16 @@ from quant_engine.portfolio_ledger import (
 
 REPORT_SCHEMA_VERSION: Final = 1
 _CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
-BUILDER_VERSION: Final = "1.2.1"
+BUILDER_VERSION: Final = "1.3.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
 HWM_POLICY: Final = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
 )
+_P123_ENTITY_REF_RE: Final = re.compile(r"\bp123-entity:\d+\b", re.IGNORECASE)
+_P123_ENTITY_TEXT_RE: Final = re.compile(r"\bPortfolio123 entity \d+\b", re.IGNORECASE)
+_PROVIDER_ENTITY_TEXT_RE: Final = re.compile(r"\bentity \d{5,}\b", re.IGNORECASE)
 SHEET_NAMES: Final = (
     "Portfolio Summary",
     "Account Summary",
@@ -140,6 +144,15 @@ def _decimal(value: object, field_name: str) -> Decimal:
     return accepted
 
 
+def _finite_number(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ReportValidationError(f"{field_name} must be a finite number")
+    accepted = float(value)
+    if not math.isfinite(accepted):
+        raise ReportValidationError(f"{field_name} must be a finite number")
+    return accepted
+
+
 def _object(value: object, field_name: str) -> dict[str, Any]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ReportValidationError(f"{field_name} must be an object")
@@ -150,6 +163,26 @@ def _objects(value: object, field_name: str) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         raise ReportValidationError(f"{field_name} must be an array")
     return [_object(item, field_name) for item in value]
+
+
+def _public_report_value(value: object) -> object:
+    """Remove raw Portfolio123 entity identifiers from operator-facing output."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[redacted]"
+                if key == "entity_id" and item is not None
+                else _public_report_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_public_report_value(item) for item in value]
+    if isinstance(value, str):
+        sanitized = _P123_ENTITY_TEXT_RE.sub("Portfolio123 connected entity", value)
+        sanitized = _PROVIDER_ENTITY_TEXT_RE.sub("connected entity", sanitized)
+        return _P123_ENTITY_REF_RE.sub("p123-entity:[redacted]", sanitized)
+    return value
 
 
 def _load_json(path: Path, field_name: str) -> dict[str, Any]:
@@ -825,8 +858,265 @@ def _strategy_provider_evidence(catalog: Mapping[str, Any]) -> list[dict[str, An
     return rows
 
 
+def _history_contract(
+    path: Path,
+    *,
+    portfolio_as_of: str,
+    strategy_names: set[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    payload = _load_json(path, "strategy history compatibility contract")
+    if payload.get("builder") != "portfolio-target-series/layered-correlation-1":
+        raise ReportValidationError("strategy history contract builder differs")
+    contract_as_of = _date(payload.get("as_of_date"), "history contract as_of_date")
+    if contract_as_of > _date(portfolio_as_of, "portfolio as_of_date"):
+        raise ReportValidationError("strategy history contract is future-dated")
+    policy = _object(
+        payload.get("evidence_mode_policy"),
+        "history contract evidence_mode_policy",
+    )
+    if policy != {
+        "default": "LIVE_ONLY",
+        "hybrid": "BACKTEST_STRICTLY_BEFORE_FIRST_LIVE_THEN_LIVE",
+        "post_inception_backtest_fill": False,
+    }:
+        raise ReportValidationError("strategy history evidence policy differs")
+    rows = _objects(payload.get("series_mappings"), "history contract series_mappings")
+    by_name: dict[str, dict[str, Any]] = {}
+    for raw in rows:
+        name = _text(raw.get("series_id"), "history contract series_id")
+        if name in by_name:
+            raise ReportValidationError(
+                f"strategy history contract duplicates series: {name}"
+            )
+        history_status = _text(raw.get("history_status"), f"history status {name}")
+        _text(raw.get("strategy_version"), f"history version {name}")
+        observations = raw.get("backtest_observations")
+        if not isinstance(observations, int) or observations < 0:
+            raise ReportValidationError(
+                f"strategy history observations are invalid: {name}"
+            )
+        accepted = history_status.startswith("ACCEPTED_")
+        if accepted != (observations > 0):
+            raise ReportValidationError(
+                f"strategy history status and observations differ: {name}"
+            )
+        compatibility_basis = raw.get("compatibility_basis")
+        if accepted:
+            _text(compatibility_basis, f"history compatibility basis {name}")
+            _date(raw.get("backtest_observed_start"), f"history start {name}")
+            _date(raw.get("backtest_observed_end"), f"history end {name}")
+        elif compatibility_basis is not None:
+            raise ReportValidationError(
+                f"unavailable strategy has a compatibility basis: {name}"
+            )
+        _text(
+            raw.get("implementation_reconciliation_status"),
+            f"implementation reconciliation status {name}",
+        )
+        by_name[name] = dict(raw)
+    if set(by_name) != strategy_names:
+        raise ReportValidationError("strategy history contract boundary differs")
+    sha256, size = hash_file(path)
+    return by_name, {
+        "as_of_date": contract_as_of.isoformat(),
+        "evidence_mode_policy": dict(policy),
+        "series_count": len(by_name),
+        "sha256": sha256,
+        "size_bytes": size,
+    }
+
+
+def _implementation_reconciliation_contract(
+    path: Path,
+    *,
+    portfolio_as_of: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    payload = _load_json(path, "implementation reconciliation contract")
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("builder") != "portfolio-implementation-reconciliation"
+        or payload.get("verification") != "VERIFIED"
+    ):
+        raise ReportValidationError("implementation reconciliation contract differs")
+    contract_as_of = _date(
+        payload.get("as_of_date"), "implementation reconciliation as_of_date"
+    )
+    if contract_as_of > _date(portfolio_as_of, "portfolio as_of_date"):
+        raise ReportValidationError("implementation reconciliation is future-dated")
+    rows = _objects(
+        payload.get("strategies"), "implementation reconciliation strategies"
+    )
+    expected = {"grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"}
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        strategy_id = _text(
+            row.get("strategy_id"), "implementation reconciliation strategy_id"
+        )
+        if strategy_id in by_id:
+            raise ReportValidationError(
+                "implementation reconciliation duplicates a strategy"
+            )
+        if row.get("verification") != "VERIFIED":
+            raise ReportValidationError(
+                "implementation reconciliation strategy is not verified"
+            )
+        metrics = _object(
+            row.get("return_reconciliation"),
+            f"implementation return reconciliation {strategy_id}",
+        )
+        observations = metrics.get("observations")
+        if not isinstance(observations, int) or observations < 2:
+            raise ReportValidationError(
+                "implementation reconciliation observations are invalid"
+            )
+        _date(metrics.get("observed_start"), "implementation observed_start")
+        _date(metrics.get("observed_end"), "implementation observed_end")
+        causes = _objects(row.get("root_causes"), "implementation root causes")
+        if not causes:
+            raise ReportValidationError(
+                "implementation reconciliation lacks root-cause dispositions"
+            )
+        by_id[strategy_id] = dict(row)
+    if set(by_id) != expected:
+        raise ReportValidationError(
+            "implementation reconciliation strategy boundary differs"
+        )
+    sha256, size = hash_file(path)
+    return by_id, {
+        "as_of_date": contract_as_of.isoformat(),
+        "reconciliation_id": _text(
+            payload.get("reconciliation_id"),
+            "implementation reconciliation identity",
+        ),
+        "schema_version": payload["schema_version"],
+        "sha256": sha256,
+        "size_bytes": size,
+        "strategy_count": len(by_id),
+    }
+
+
+def _implementation_return_attribution_contract(
+    path: Path,
+    *,
+    portfolio_as_of: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    payload = _load_json(path, "implementation return attribution contract")
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("builder") != "portfolio-implementation-return-attribution"
+        or payload.get("verification")
+        != "VERIFIED_WITH_DECLARED_PARTIAL_CAUSAL_BOUNDARIES"
+    ):
+        raise ReportValidationError(
+            "implementation return attribution contract differs"
+        )
+    contract_as_of = _date(
+        payload.get("as_of_date"), "implementation return attribution as_of_date"
+    )
+    portfolio_boundary = _date(portfolio_as_of, "portfolio as_of_date")
+    rows = _objects(
+        payload.get("strategies"), "implementation return attribution strategies"
+    )
+    expected = {"grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"}
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        strategy_id = _text(
+            row.get("strategy_id"), "implementation return attribution strategy_id"
+        )
+        if strategy_id in by_id:
+            raise ReportValidationError(
+                "implementation return attribution duplicates a strategy"
+            )
+        verification = _text(
+            row.get("verification"),
+            f"implementation return attribution verification {strategy_id}",
+        )
+        if verification not in {
+            "PARTIAL_EXACT_ACTUAL_PNL_PARTIAL_COUNTERFACTUAL_GAP",
+            "VERIFIED_WITH_DECLARED_PROXY",
+            "VERIFIED_WITH_DECLARED_PUBLIC_PRICE_PROXY",
+        }:
+            raise ReportValidationError(
+                "implementation return attribution strategy is not accepted"
+            )
+        observed_start = _date(
+            row.get("observed_start"),
+            f"implementation return attribution observed_start {strategy_id}",
+        )
+        observed_end = _date(
+            row.get("observed_end"),
+            f"implementation return attribution observed_end {strategy_id}",
+        )
+        if observed_end < observed_start or observed_end > portfolio_boundary:
+            raise ReportValidationError(
+                "implementation return attribution observation boundary differs"
+            )
+        if contract_as_of < observed_end:
+            raise ReportValidationError(
+                "implementation return attribution predates its evidence"
+            )
+        bridge = _object(
+            row.get("bridge"), f"implementation return attribution bridge {strategy_id}"
+        )
+        model_return = _finite_number(
+            bridge.get("model_return"),
+            f"implementation return attribution model return {strategy_id}",
+        )
+        account_return = _finite_number(
+            bridge.get("account_return"),
+            f"implementation return attribution account return {strategy_id}",
+        )
+        gap_pp = _finite_number(
+            bridge.get("gap_pp"),
+            f"implementation return attribution gap {strategy_id}",
+        )
+        categories = _objects(
+            bridge.get("categories"),
+            f"implementation return attribution categories {strategy_id}",
+        )
+        if not categories:
+            raise ReportValidationError(
+                "implementation return attribution categories are empty"
+            )
+        category_total = sum(
+            _finite_number(
+                category.get("effect_pp"),
+                f"implementation return attribution effect {strategy_id}",
+            )
+            for category in categories
+        )
+        if not math.isclose(
+            gap_pp, (account_return - model_return) * 100.0, abs_tol=1e-10
+        ) or not math.isclose(gap_pp, category_total, abs_tol=1e-8):
+            raise ReportValidationError(
+                "implementation return attribution bridge does not reconcile"
+            )
+        by_id[strategy_id] = dict(row)
+    if set(by_id) != expected:
+        raise ReportValidationError(
+            "implementation return attribution strategy boundary differs"
+        )
+    sha256, size = hash_file(path)
+    return by_id, {
+        "as_of_date": contract_as_of.isoformat(),
+        "attribution_id": _text(
+            payload.get("attribution_id"),
+            "implementation return attribution identity",
+        ),
+        "schema_version": payload["schema_version"],
+        "sha256": sha256,
+        "size_bytes": size,
+        "strategy_count": len(by_id),
+    }
+
+
 def _strategies(
-    catalog: Mapping[str, Any], performance: Sequence[Mapping[str, Any]]
+    catalog: Mapping[str, Any],
+    performance: Sequence[Mapping[str, Any]],
+    history_contract: Mapping[str, Mapping[str, Any]] | None = None,
+    implementation_contract: Mapping[str, Mapping[str, Any]] | None = None,
+    implementation_return_attribution_contract: Mapping[str, Mapping[str, Any]]
+    | None = None,
 ) -> list[dict[str, Any]]:
     raw_version_catalog = catalog.get("strategy_version_catalog")
     strategy_versions: dict[str, dict[str, Any]] = {}
@@ -1021,11 +1311,74 @@ def _strategies(
             "compatibility_reason",
             "Compatibility is unavailable without an effective-dated registry row.",
         )
-        live_plus_backtest_status = (
-            "ELIGIBLE_PROVEN_COMPATIBLE"
-            if compatibility_status == "PROVEN_COMPATIBLE"
-            else "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
+        history = (
+            dict(history_contract.get(str(strategy.get("name")), {}))
+            if history_contract is not None
+            else {}
         )
+        implementation = (
+            dict(implementation_contract.get(strategy_id, {}))
+            if implementation_contract is not None
+            else {}
+        )
+        implementation_return_attribution = (
+            dict(implementation_return_attribution_contract.get(strategy_id, {}))
+            if implementation_return_attribution_contract is not None
+            else {}
+        )
+        history_observations = history.get("backtest_observations")
+        history_accepted = bool(
+            history
+            and str(history.get("history_status", "")).startswith("ACCEPTED_")
+            and isinstance(history_observations, int)
+            and history_observations > 0
+        )
+        if history_contract is not None:
+            history_compatibility_status = (
+                "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                if history_accepted
+                else "UNAVAILABLE_NO_ACCEPTED_HISTORY"
+            )
+            history_compatibility_reason = (
+                _text(
+                    history.get("compatibility_basis"),
+                    f"history compatibility basis {strategy_id}",
+                )
+                if history_accepted
+                else str(
+                    history.get("history_disposition_reason")
+                    or history.get("status")
+                    or history.get("history_status")
+                )
+            )
+            live_plus_backtest_status = (
+                "ELIGIBLE_ACCEPTED_HISTORY"
+                if history_accepted
+                else "BLOCKED_NO_ACCEPTED_HISTORY"
+            )
+            live_plus_backtest_reason = (
+                "History is accepted for economic inference under "
+                f"{history_compatibility_reason}; live implementation reconciliation "
+                "remains a separate control."
+                if history_accepted
+                else (
+                    "No accepted strategy history is routed: "
+                    f"{str(history_compatibility_reason).rstrip('.')}."
+                )
+            )
+        else:
+            history_compatibility_status = None
+            history_compatibility_reason = None
+            live_plus_backtest_status = (
+                "ELIGIBLE_PROVEN_COMPATIBLE"
+                if compatibility_status == "PROVEN_COMPATIBLE"
+                else "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
+            )
+            live_plus_backtest_reason = (
+                "Effective-dated registry marks the current strategy version PROVEN_COMPATIBLE."
+                if compatibility_status == "PROVEN_COMPATIBLE"
+                else f"{compatibility_status}: {compatibility_reason}"
+            )
         available_segments, total_segments = performance_count[strategy_id]
         rows.append(
             {
@@ -1103,12 +1456,28 @@ def _strategies(
                 "version_effective_end": version.get("effective_end"),
                 "version_compatibility_status": compatibility_status,
                 "version_compatibility_reason": compatibility_reason,
-                "live_plus_backtest_status": live_plus_backtest_status,
-                "live_plus_backtest_reason": (
-                    "Effective-dated registry marks the current strategy version PROVEN_COMPATIBLE."
-                    if compatibility_status == "PROVEN_COMPATIBLE"
-                    else f"{compatibility_status}: {compatibility_reason}"
+                "history_compatibility_status": history_compatibility_status,
+                "history_compatibility_reason": history_compatibility_reason,
+                "history_version_ref": history.get("strategy_version"),
+                "history_observations": history_observations,
+                "history_observed_start": history.get("backtest_observed_start"),
+                "history_observed_end": history.get("backtest_observed_end"),
+                "implementation_lineage": history.get("implementation_lineage"),
+                "implementation_reconciliation_status": history.get(
+                    "implementation_reconciliation_status"
+                )
+                if not implementation
+                else (
+                    "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
+                    if implementation_return_attribution
+                    else "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION"
                 ),
+                "implementation_reconciliation": implementation or None,
+                "implementation_return_attribution": (
+                    implementation_return_attribution or None
+                ),
+                "live_plus_backtest_status": live_plus_backtest_status,
+                "live_plus_backtest_reason": live_plus_backtest_reason,
                 "design_status": design.get("status", "UNAVAILABLE"),
                 "design_version_ref": design.get("version_ref"),
                 "configuration_status": configuration.get("status", "UNAVAILABLE"),
@@ -1813,13 +2182,55 @@ def build_report_data(
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
     attribution_root: Path | None = None,
+    history_contract_path: Path | None = None,
+    implementation_reconciliation_path: Path | None = None,
+    implementation_return_attribution_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
     catalog, baseline_ref, baseline_catalog_path = _baseline(baseline_root)
     performance = _account_strategy_performance(catalog)
     strategy_provider_evidence = _strategy_provider_evidence(catalog)
-    strategy_summary = _strategies(catalog, performance)
+    strategy_names = {
+        _text(item.get("name"), "strategy.name")
+        for item in _objects(catalog.get("strategies"), "strategies")
+    }
+    history_contract: dict[str, dict[str, Any]] | None = None
+    history_contract_ref: dict[str, Any] | None = None
+    if history_contract_path is not None:
+        history_contract, history_contract_ref = _history_contract(
+            history_contract_path,
+            portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
+            strategy_names=strategy_names,
+        )
+    implementation_contract: dict[str, dict[str, Any]] | None = None
+    implementation_contract_ref: dict[str, Any] | None = None
+    if implementation_reconciliation_path is not None:
+        implementation_contract, implementation_contract_ref = (
+            _implementation_reconciliation_contract(
+                implementation_reconciliation_path,
+                portfolio_as_of=_text(
+                    catalog.get("as_of_date"), "portfolio as_of_date"
+                ),
+            )
+        )
+    implementation_return_attribution_contract: dict[str, dict[str, Any]] | None = None
+    implementation_return_attribution_ref: dict[str, Any] | None = None
+    if implementation_return_attribution_path is not None:
+        (
+            implementation_return_attribution_contract,
+            implementation_return_attribution_ref,
+        ) = _implementation_return_attribution_contract(
+            implementation_return_attribution_path,
+            portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
+        )
+    strategy_summary = _strategies(
+        catalog,
+        performance,
+        history_contract,
+        implementation_contract,
+        implementation_return_attribution_contract,
+    )
     attribution_catalog: dict[str, Any] | None = None
     attribution_ref: dict[str, str] | None = None
     if attribution_root is not None:
@@ -1941,6 +2352,44 @@ def build_report_data(
             *(
                 [
                     {
+                        "artifact": "strategy-history-compatibility-contract",
+                        "as_of_date": history_contract_ref["as_of_date"],
+                        "schema": "portfolio-target-series-evidence-proof/1",
+                        "sha256": history_contract_ref["sha256"],
+                    }
+                ]
+                if history_contract_ref is not None
+                else []
+            ),
+            *(
+                [
+                    {
+                        "artifact": "strategy-implementation-return-attribution",
+                        "as_of_date": implementation_return_attribution_ref[
+                            "as_of_date"
+                        ],
+                        "schema": "portfolio-implementation-return-attribution/1",
+                        "sha256": implementation_return_attribution_ref["sha256"],
+                    }
+                ]
+                if implementation_return_attribution_ref is not None
+                else []
+            ),
+            *(
+                [
+                    {
+                        "artifact": "strategy-implementation-reconciliation",
+                        "as_of_date": implementation_contract_ref["as_of_date"],
+                        "schema": "portfolio-implementation-reconciliation/1",
+                        "sha256": implementation_contract_ref["sha256"],
+                    }
+                ]
+                if implementation_contract_ref is not None
+                else []
+            ),
+            *(
+                [
+                    {
                         "artifact": "strategy-attribution",
                         "as_of_date": attribution_catalog.get("as_of_date"),
                         "schema": "strategy-attribution/1",
@@ -1962,6 +2411,14 @@ def build_report_data(
         "transactions_and_flows": _transactions_and_flows(catalog),
         "twr_mwr": performance,
     }
+    if history_contract_ref is not None:
+        report["strategy_history_contract"] = history_contract_ref
+    if implementation_contract_ref is not None:
+        report["implementation_reconciliation_contract"] = implementation_contract_ref
+    if implementation_return_attribution_ref is not None:
+        report["implementation_return_attribution_contract"] = (
+            implementation_return_attribution_ref
+        )
     if hwm_summary is not None:
         report["hwm_summary"] = hwm_summary
     if attribution_catalog is not None and attribution_ref is not None:
@@ -1974,6 +2431,7 @@ def build_report_data(
             "costs": attribution_catalog["costs"],
             "generation_id": attribution_ref["generation_id"],
         }
+    report = _object(_public_report_value(report), "public report")
     return report, canonical_json_bytes(report), baseline_catalog_path
 
 
@@ -2347,9 +2805,18 @@ def build_candidate(
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
     attribution_root: Path | None = None,
+    history_contract_path: Path | None = None,
+    implementation_reconciliation_path: Path | None = None,
+    implementation_return_attribution_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
-        baseline_root, freshness_health_path, provider_ledger_root, attribution_root
+        baseline_root,
+        freshness_health_path,
+        provider_ledger_root,
+        attribution_root,
+        history_contract_path,
+        implementation_reconciliation_path,
+        implementation_return_attribution_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -2717,9 +3184,18 @@ def verify_candidate(
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
     attribution_root: Path | None = None,
+    history_contract_path: Path | None = None,
+    implementation_reconciliation_path: Path | None = None,
+    implementation_return_attribution_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
-        baseline_root, freshness_health_path, provider_ledger_root, attribution_root
+        baseline_root,
+        freshness_health_path,
+        provider_ledger_root,
+        attribution_root,
+        history_contract_path,
+        implementation_reconciliation_path,
+        implementation_return_attribution_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:
@@ -2778,6 +3254,9 @@ def publish_report(
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
     attribution_root: Path | None = None,
+    history_contract_path: Path | None = None,
+    implementation_reconciliation_path: Path | None = None,
+    implementation_return_attribution_path: Path | None = None,
 ) -> dict[str, Any]:
     _validate_canonicalization_evidence(candidate_dir, excel_workbook)
     verification = verify_candidate(
@@ -2787,6 +3266,9 @@ def publish_report(
         freshness_health_path,
         provider_ledger_root,
         attribution_root,
+        history_contract_path,
+        implementation_reconciliation_path,
+        implementation_return_attribution_path,
     )
     run = _load_json(xlsx_result, "xlsx-win run result")
     validation = _load_json(validation_result, "xlsx-win validation result")
@@ -2795,7 +3277,13 @@ def publish_report(
     if validation.get("all_passed") is not True:
         raise ReportValidationError("xlsx-win workbook invariants did not all pass")
     report, report_bytes, baseline_catalog_path = build_report_data(
-        baseline_root, freshness_health_path, provider_ledger_root, attribution_root
+        baseline_root,
+        freshness_health_path,
+        provider_ledger_root,
+        attribution_root,
+        history_contract_path,
+        implementation_reconciliation_path,
+        implementation_return_attribution_path,
     )
     as_of = _date(report.get("as_of_date"), "report.as_of_date")
     verification_bytes = canonical_json_bytes(verification)
@@ -2855,6 +3343,33 @@ def publish_report(
                 attribution_catalog_path,
                 "input/strategy-attribution.json",
                 "strategy-attribution",
+                "1",
+            )
+        )
+    if history_contract_path is not None:
+        artifact_specs.append(
+            (
+                history_contract_path,
+                "input/strategy-history-compatibility-contract.json",
+                "portfolio-target-series-evidence-proof",
+                "1",
+            )
+        )
+    if implementation_reconciliation_path is not None:
+        artifact_specs.append(
+            (
+                implementation_reconciliation_path,
+                "input/strategy-implementation-reconciliation.json",
+                "portfolio-implementation-reconciliation",
+                "1",
+            )
+        )
+    if implementation_return_attribution_path is not None:
+        artifact_specs.append(
+            (
+                implementation_return_attribution_path,
+                "input/strategy-implementation-return-attribution.json",
+                "portfolio-implementation-return-attribution",
                 "1",
             )
         )
@@ -2949,6 +3464,9 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--freshness-health", type=Path)
     build.add_argument("--provider-ledger-root", type=Path)
     build.add_argument("--attribution-root", type=Path)
+    build.add_argument("--history-contract", type=Path)
+    build.add_argument("--implementation-reconciliation", type=Path)
+    build.add_argument("--implementation-return-attribution", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -2957,6 +3475,9 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--freshness-health", type=Path)
     verify.add_argument("--provider-ledger-root", type=Path)
     verify.add_argument("--attribution-root", type=Path)
+    verify.add_argument("--history-contract", type=Path)
+    verify.add_argument("--implementation-reconciliation", type=Path)
+    verify.add_argument("--implementation-return-attribution", type=Path)
     canonicalize = commands.add_parser("canonicalize")
     canonicalize.add_argument("--workbook", type=Path, required=True)
     canonicalize.add_argument("--evidence", type=Path, required=True)
@@ -2973,6 +3494,9 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--freshness-health", type=Path)
     publish.add_argument("--provider-ledger-root", type=Path)
     publish.add_argument("--attribution-root", type=Path)
+    publish.add_argument("--history-contract", type=Path)
+    publish.add_argument("--implementation-reconciliation", type=Path)
+    publish.add_argument("--implementation-return-attribution", type=Path)
     return parser
 
 
@@ -2986,6 +3510,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.freshness_health,
                 args.provider_ledger_root,
                 args.attribution_root,
+                args.history_contract,
+                args.implementation_reconciliation,
+                args.implementation_return_attribution,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -2995,6 +3522,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.freshness_health,
                 args.provider_ledger_root,
                 args.attribution_root,
+                args.history_contract,
+                args.implementation_reconciliation,
+                args.implementation_return_attribution,
             )
         elif args.command == "canonicalize":
             result = canonicalize_workbook(args.workbook, args.evidence)
@@ -3011,6 +3541,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.freshness_health,
                 args.provider_ledger_root,
                 args.attribution_root,
+                args.history_contract,
+                args.implementation_reconciliation,
+                args.implementation_return_attribution,
             )
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         print(f"portfolio-report: FAIL: {exc}", file=sys.stderr)
