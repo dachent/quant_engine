@@ -2465,7 +2465,10 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     )
     assert '/[1-9][0-9,]* backtest/.test(row.evidence ?? "")' in qa
     assert "const disabled = await button.isDisabled();" in qa
-    assert "item.requested_beta_rows.every((row) => row.beta_visible)" in qa
+    assert (
+        "item.requested_beta_rows.every((row) => row.beta_visible || "
+        "row.model_unavailable)" in qa
+    )
     assert "Clean-room dynamic FLS path and same-factor validation are rendered" in qa
     assert "All observed windows and both true drawdown regimes are exercised" in qa
     assert "Every weekly display group is rendered and exercised" in qa

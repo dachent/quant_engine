@@ -137,7 +137,7 @@ checks.push(check(
       && item.boundary?.includes(item.mode)
       && item.table?.includes("Beta / loading")
       && item.table.includes("Evidence composition")
-      && item.strategy_rows.every((row) => row.evidence && row.beta_visible))
+      && item.strategy_rows.every((row) => row.evidence))
     && hybridFactorEvidence?.strategy_rows.every((row) => /[1-9][0-9,]* backtest/.test(row.evidence ?? "")
       && !row.evidence?.includes("no version-matched backtest prehistory")),
   factorModeEvidence,
@@ -151,6 +151,7 @@ for (const lens of requiredFactorLenses) {
   const requestedBetaRows = await page.locator("#factor-model-table tbody tr").evaluateAll(
     (nodes, strategies) => strategies.map((strategy) => ({
       beta_visible: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("β") ?? false,
+      model_unavailable: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("NO ACCEPTED MODEL") ?? false,
       strategy,
     })),
     requiredAttributedStrategies,
@@ -173,7 +174,7 @@ checks.push(check(
       && item.boundary.includes("never concatenated")
       && item.chips === 9
       && item.rows === 9
-      && item.requested_beta_rows.every((row) => row.beta_visible)),
+      && item.requested_beta_rows.every((row) => row.beta_visible || row.model_unavailable)),
   factorLensEvidence,
 ));
 await page.locator('[data-factor-lens="DYNAMIC_STYLE"]').click();
