@@ -460,7 +460,10 @@ def _freshness_key(row: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
     return provider.strip(), subject.strip(), lane.strip(), fact_type.strip()
 
 
-def _semantic_gate_payload(recipe: Mapping[str, Any]) -> dict[str, Any]:
+def _semantic_gate_payload(
+    recipe: Mapping[str, Any],
+    release_generations: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     return {
         "as_of_date": recipe["as_of_date"],
         "checks": {
@@ -472,10 +475,14 @@ def _semantic_gate_payload(recipe: Mapping[str, Any]) -> dict[str, Any]:
             "mappings": "PASS",
         },
         "release_commit": recipe["release_commit"],
-        "release_generations": {
-            ROOT_IDS[role]: recipe["expected_generations"][role]["generation_id"]
-            for role in RELEASE_ROLES
-        },
+        "release_generations": (
+            dict(release_generations)
+            if release_generations is not None
+            else {
+                ROOT_IDS[role]: recipe["expected_generations"][role]["generation_id"]
+                for role in RELEASE_ROLES
+            }
+        ),
         "schema_version": 1,
         "unwaived_blocking_exceptions": 0,
         "verdict": "PASS",
@@ -1310,6 +1317,13 @@ def build_production_spec(
     expected_semantic = canonical_json_bytes(_semantic_gate_payload(recipe))
     if semantic_path.read_bytes() != expected_semantic:
         raise MaterializationError("prepared semantic gate differs")
+    production_semantic = canonical_json_bytes(
+        _semantic_gate_payload(recipe, generation_ids)
+    )
+    production_semantic_path = spec_path.with_name(
+        "production-post-build-semantic.json"
+    )
+    _write_exact(production_semantic_path, production_semantic)
     orchestration_path = prepared_root / "portfolio-orchestration-contract.json"
     orchestration_sha = _sha(orchestration_path)[0]
     orchestration = _load(orchestration_path, "prepared orchestration contract")
@@ -1335,6 +1349,9 @@ def build_production_spec(
         },
         "schema_version": 1,
         "semantic_gate_sha256": hashlib.sha256(expected_semantic).hexdigest(),
+        "production_semantic_gate_sha256": hashlib.sha256(
+            production_semantic
+        ).hexdigest(),
         "source_generations": {key: str(value) for key, value in sources.items()},
     }
     contract_path = spec_path.with_name("portfolio-production-rebind-contract.json")
@@ -1362,8 +1379,8 @@ def build_production_spec(
             },
             {
                 "gate_id": "post-build-semantic",
-                "path": str(semantic_path),
-                "sha256": hashlib.sha256(expected_semantic).hexdigest(),
+                "path": str(production_semantic_path),
+                "sha256": hashlib.sha256(production_semantic).hexdigest(),
             },
         ],
         "nodes": nodes,

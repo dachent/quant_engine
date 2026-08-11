@@ -419,6 +419,11 @@ def test_production_spec_binds_stable_thirteen_root_authority(
         == next((prepared_root / "stages" / "panel" / "generations").iterdir()).name
     )
     assert spec.release_generations["correlation"] == analytics_ids["correlation"]
+    semantic_gate = next(
+        gate for gate in spec.gates if gate.gate_id == "post-build-semantic"
+    )
+    semantic_payload = json.loads(semantic_gate.path.read_text(encoding="utf-8"))
+    assert semantic_payload["release_generations"] == spec.release_generations
 
 
 def test_semantic_accepts_explicitly_rendered_freshness_blocker(
