@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "skill": "portfolio123",
-  "governing_issue": 18,
+  "governing_issue": 204,
   "files": [
     {
       "path": "SKILL.md",
-      "sha256": "c986b22d0d5aec13de68f2fae463a4704b108db9f7bde5b79f54ca96dad8a356"
+      "sha256": "68ea452ad4df09d78d53e53b11c83138649a9f555a1785ea40f54bab9543cad8"
     },
     {
       "path": "agents/openai.yaml",
@@ -73,7 +73,7 @@
     },
     {
       "path": "references/web-contracts.md",
-      "sha256": "12950d43e4a7712e4f848eeccc38e087111a607c91cfd6dd5561943a7df600cb"
+      "sha256": "132f961a0c7b609bb1fdc149081f60a5e45a4cf1d42943f50a15c7a966b7d8c7"
     }
   ]
 }

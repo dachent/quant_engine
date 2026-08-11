@@ -6,7 +6,7 @@
 - Use an already authenticated user-controlled browser profile; never copy its
   cookies or session material into Git.
 - Capture into a new immutable source-run staging directory under the configured
-  `data_Portfolio123` root.
+  `dataPortfolio123` root.
 - Record browser, capture-tool, contract, schema, source, and acquisition versions.
 
 ## Capture plans

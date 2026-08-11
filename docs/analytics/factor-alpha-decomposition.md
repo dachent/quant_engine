@@ -217,7 +217,7 @@ uv run --frozen --no-sync python tools/portfolio_target_series.py `
   --quantbase-activity "<Quantbase-account-activity.csv>" `
   --quantbase-fund-id "<local-fund-id>" `
   --quantbase-series-id "Volatis Strategy" `
-  --portfolio123-manifest "<data_Portfolio123-generation.json>" `
+  --portfolio123-manifest "<dataPortfolio123-generation.json>" `
   --portfolio123-equity "<har_equity_curve.parquet>" `
   --portfolio123-metadata "<har_account_metadata.parquet>" `
   --portfolio123-returns "<returns_daily.parquet>" `

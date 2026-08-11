@@ -34,7 +34,7 @@ boundary so high-churn generations are not stored in OneDrive:
 _quant_engine/
   repo/
   xBin/
-  data_Portfolio123/
+  dataPortfolio123/
   dataMatrixport/
   dataQuantbase/
   dataSchwab/
