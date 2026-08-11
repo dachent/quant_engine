@@ -192,7 +192,7 @@ specification from the new root.
 
 ```powershell
 $env:QE_PIPELINE_PYTHON = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
-python tools/portfolio_release_builder.py recipe --provider-ledger-spec <new-root-provider-ledger-spec.json> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
+python tools/portfolio_release_builder.py recipe --provider-ledger-spec <new-root-provider-ledger-spec.json> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --implementation-reconciliation <exact-implementation-reconciliation.json> --implementation-return-attribution <exact-return-attribution.json> --strategy-attribution-root <exact-strategy-attribution-root> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
 python tools/portfolio_release_builder.py build --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot
 <run browser and interaction QA against the emitted panel candidate>
 python tools/portfolio_release_builder.py stage --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot --role panel --qa-dir $qaRoot

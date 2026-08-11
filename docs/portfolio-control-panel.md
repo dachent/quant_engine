@@ -54,7 +54,12 @@ without preserving stale calculations or hard-coded operator conclusions.
   actions are documented in
   `docs/analytics/model-to-actual-rcca.md`; event coverage is one-to-one and
   remains explicitly quantity/notional-unverified where the model source does
-  not provide account-sized orders.
+  not provide account-sized orders. The separate causal return-attribution
+  artifact is also a mandatory hash-bound vertical input. For AI Factor it
+  corrects the primary-only benchmark to the inferred effective connected-model
+  mix; for GrizzlyBears and TuringTrader it renders every supported ordered
+  counterfactual category and any explicit residual. The report contract proves
+  that each displayed waterfall closes to the exact model/account endpoint.
 - Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
   matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come

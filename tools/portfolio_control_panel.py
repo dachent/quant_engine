@@ -39,7 +39,7 @@ from quant_engine.portfolio_ledger import (
 
 
 PANEL_SCHEMA_VERSION: Final = 16
-BUILDER_VERSION: Final = "2.7.0"
+BUILDER_VERSION: Final = "2.8.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -3109,6 +3109,20 @@ def _strategy_underwriting(
             if implementation_value is not None
             else None
         )
+        return_attribution_value = strategy.get("implementation_return_attribution")
+        return_attribution_detail = (
+            _object(
+                return_attribution_value,
+                f"implementation return attribution {strategy_name}",
+            )
+            if return_attribution_value is not None
+            else None
+        )
+        if return_attribution_detail is not None:
+            implementation_detail = {
+                **(implementation_detail or {}),
+                "return_attribution": return_attribution_detail,
+            }
 
         def factor_value(
             row: Mapping[str, Any] | None, container: str, field: str
@@ -3173,11 +3187,20 @@ def _strategy_underwriting(
                         or gap["status"],
                         "comparison_status": (
                             _object(
-                                implementation_detail.get("return_reconciliation", {}),
+                                implementation_detail.get("return_reconciliation"),
                                 f"implementation metrics {strategy_name}",
                             ).get("status")
                             if implementation_detail is not None
-                            else gap["comparison_status"]
+                            and implementation_detail.get("return_reconciliation")
+                            is not None
+                            else (
+                                _object(
+                                    return_attribution_detail.get("bridge"),
+                                    f"causal return bridge {strategy_name}",
+                                ).get("status")
+                                if return_attribution_detail is not None
+                                else gap["comparison_status"]
+                            )
                         ),
                         "detail": implementation_detail,
                     },
@@ -4829,6 +4852,8 @@ def verify_candidate(
         "implementation_reconciliation",
     }
     gap_reconciles = True
+    causal_attribution_reconciles = True
+    causal_attribution_strategy_ids: set[str] = set()
     for row in underwriting_rows:
         gap = _object(row.get("model_account_gap"), "underwriting model-account gap")
         total_gap = _optional_float(gap.get("total_gap"), "underwriting total gap")
@@ -4853,6 +4878,48 @@ def verify_candidate(
         ):
             gap_reconciles = False
             break
+        layers = _object(row.get("evidence_layers"), "underwriting evidence layers")
+        implementation = _object(
+            layers.get("implementation_reconciliation"),
+            "underwriting implementation reconciliation",
+        )
+        detail_value = implementation.get("detail")
+        if detail_value is None:
+            continue
+        detail = _object(detail_value, "underwriting implementation detail")
+        attribution_value = detail.get("return_attribution")
+        if attribution_value is None:
+            continue
+        attribution = _object(
+            attribution_value, "underwriting implementation return attribution"
+        )
+        bridge = _object(attribution.get("bridge"), "underwriting causal return bridge")
+        model_return = _finite_float(
+            bridge.get("model_return"), "underwriting causal model return"
+        )
+        account_return = _finite_float(
+            bridge.get("account_return"), "underwriting causal account return"
+        )
+        gap_pp = _finite_float(bridge.get("gap_pp"), "underwriting causal gap")
+        category_total = sum(
+            _finite_float(
+                category.get("effect_pp"), "underwriting causal category effect"
+            )
+            for category in _objects(
+                bridge.get("categories"), "underwriting causal categories"
+            )
+        )
+        strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
+        causal_attribution_strategy_ids.add(strategy_id)
+        if not math.isclose(
+            gap_pp, (account_return - model_return) * 100.0, abs_tol=1e-10
+        ) or not math.isclose(gap_pp, category_total, abs_tol=1e-8):
+            causal_attribution_reconciles = False
+            break
+    causal_contract_present = any(
+        row.get("artifact") == "strategy-implementation-return-attribution"
+        for row in _objects(data.get("provenance"), "panel provenance")
+    )
     checks.append(
         _check(
             "Layered strategy underwriting is governed and advisory only",
@@ -4887,7 +4954,13 @@ def verify_candidate(
                 == "NONE"
                 for row in underwriting_rows
             )
-            and gap_reconciles,
+            and gap_reconciles
+            and causal_attribution_reconciles
+            and (
+                not causal_contract_present
+                or causal_attribution_strategy_ids
+                == {"grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"}
+            ),
             {
                 "policy_id": underwriting.get("policy_id"),
                 "strategies": len(underwriting_rows),
@@ -4902,6 +4975,10 @@ def verify_candidate(
                 ).get("quantified_model_account_gap"),
                 "authority_boundary": authority_boundary,
                 "gap_reconciles_without_fabricated_components": gap_reconciles,
+                "causal_attribution_reconciles": causal_attribution_reconciles,
+                "causal_attribution_strategy_ids": sorted(
+                    causal_attribution_strategy_ids
+                ),
             },
         )
     )

@@ -139,7 +139,7 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
 
 def _recipe(path: Path) -> dict[str, Any]:
     recipe = _load(path, "vertical-build recipe")
-    if recipe.get("schema_version") != 5:
+    if recipe.get("schema_version") != 6:
         raise VerticalBuildError("vertical-build recipe schema is unsupported")
     required = {
         "as_of_date",
@@ -148,6 +148,7 @@ def _recipe(path: Path) -> dict[str, Any]:
         "correlation_source_root",
         "decomposition_plan_bundle",
         "implementation_reconciliation",
+        "implementation_return_attribution",
         "legacy_panel",
         "pipeline_id",
         "provider_ledger_spec",
@@ -163,6 +164,7 @@ def _recipe(path: Path) -> dict[str, Any]:
         "baseline_spec",
         "base_factor_file",
         "implementation_reconciliation",
+        "implementation_return_attribution",
     ):
         definition = recipe[key]
         if not isinstance(definition, dict) or set(definition) != {
@@ -213,6 +215,7 @@ def create_recipe(
     baseline_spec: Path,
     base_factor_file: Path,
     implementation_reconciliation: Path,
+    implementation_return_attribution: Path,
     strategy_attribution_root: Path,
     decomposition_plan_bundle: Path,
     correlation_source_root: Path,
@@ -232,6 +235,9 @@ def create_recipe(
         "implementation_reconciliation": _file_definition(
             implementation_reconciliation.resolve()
         ),
+        "implementation_return_attribution": _file_definition(
+            implementation_return_attribution.resolve()
+        ),
         "correlation_source_root": {
             "path": str(correlation_source_root.resolve()),
             **_directory_inventory(correlation_source_root.resolve()),
@@ -247,7 +253,7 @@ def create_recipe(
         "pipeline_id": pipeline_id,
         "provider_ledger_spec": _file_definition(provider_ledger_spec.resolve()),
         "release_commit": release_commit,
-        "schema_version": 5,
+        "schema_version": 6,
         "strategy_attribution_root": {
             "path": str(strategy_attribution_root.resolve()),
             **_directory_inventory(strategy_attribution_root.resolve()),
@@ -773,6 +779,7 @@ def build_report_candidate(
     freshness_health: Path,
     history_contract: Path,
     implementation_reconciliation: Path,
+    implementation_return_attribution: Path,
     attribution_root: Path,
     output_root: Path,
 ) -> dict[str, Any]:
@@ -789,6 +796,8 @@ def build_report_candidate(
         str(history_contract),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
+        "--implementation-return-attribution",
+        str(implementation_return_attribution),
         "--attribution-root",
         str(attribution_root),
         "--output-root",
@@ -805,6 +814,7 @@ def build_workbook(
     freshness_health: Path,
     history_contract: Path,
     implementation_reconciliation: Path,
+    implementation_return_attribution: Path,
     attribution_root: Path,
     candidate: Path,
     output_root: Path,
@@ -883,6 +893,8 @@ def build_workbook(
         str(history_contract),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
+        "--implementation-return-attribution",
+        str(implementation_return_attribution),
         "--attribution-root",
         str(attribution_root),
     )
@@ -909,6 +921,8 @@ def build_workbook(
         str(history_contract),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
+        "--implementation-return-attribution",
+        str(implementation_return_attribution),
         "--attribution-root",
         str(attribution_root),
         timeout=7200,
@@ -928,6 +942,7 @@ def build_report(
     freshness_health: Path,
     history_contract: Path,
     implementation_reconciliation: Path,
+    implementation_return_attribution: Path,
     attribution_root: Path,
     output_root: Path,
 ) -> dict[str, Any]:
@@ -937,6 +952,7 @@ def build_report(
         freshness_health,
         history_contract,
         implementation_reconciliation,
+        implementation_return_attribution,
         attribution_root,
         output_root,
     )
@@ -946,6 +962,7 @@ def build_report(
         freshness_health,
         history_contract,
         implementation_reconciliation,
+        implementation_return_attribution,
         attribution_root,
         Path(_text(candidate.get("candidate_dir"), "report candidate")),
         output_root,
@@ -1091,6 +1108,10 @@ def build_stage(
         recipe["implementation_reconciliation"]["path"],
         "implementation reconciliation",
     )
+    implementation_return_attribution = _path(
+        recipe["implementation_return_attribution"]["path"],
+        "implementation return attribution",
+    )
     strategy_attribution_root = _path(
         recipe["strategy_attribution_root"]["path"],
         "strategy attribution root",
@@ -1119,6 +1140,7 @@ def build_stage(
             _path(ledger.get("freshness_health"), "freshness health"),
             history_contract,
             implementation_reconciliation,
+            implementation_return_attribution,
             strategy_attribution_root,
             stages / "report-candidate",
         )
@@ -1131,6 +1153,7 @@ def build_stage(
             _path(ledger.get("freshness_health"), "freshness health"),
             history_contract,
             implementation_reconciliation,
+            implementation_return_attribution,
             strategy_attribution_root,
             _path(report.get("candidate_dir"), "report candidate"),
             stages / "report",
@@ -1212,6 +1235,7 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--baseline-spec", type=Path, required=True)
     recipe.add_argument("--base-factor-file", type=Path, required=True)
     recipe.add_argument("--implementation-reconciliation", type=Path, required=True)
+    recipe.add_argument("--implementation-return-attribution", type=Path, required=True)
     recipe.add_argument("--strategy-attribution-root", type=Path, required=True)
     recipe.add_argument("--decomposition-plan-bundle", type=Path, required=True)
     recipe.add_argument("--correlation-source-root", type=Path, required=True)
@@ -1254,6 +1278,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 baseline_spec=args.baseline_spec,
                 base_factor_file=args.base_factor_file,
                 implementation_reconciliation=args.implementation_reconciliation,
+                implementation_return_attribution=(
+                    args.implementation_return_attribution
+                ),
                 strategy_attribution_root=args.strategy_attribution_root,
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 correlation_source_root=args.correlation_source_root,

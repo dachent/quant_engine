@@ -225,7 +225,7 @@ def _recipe(path: Path) -> dict[str, Any]:
     )
     vertical = _load(vertical_path, "vertical recipe")
     if (
-        vertical.get("schema_version") != 3
+        vertical.get("schema_version") != 6
         or vertical.get("release_commit") != recipe["release_commit"]
         or vertical.get("as_of_date") != recipe["as_of_date"]
     ):
@@ -246,13 +246,19 @@ def _vertical_source_paths(vertical_path: Path) -> list[Path]:
         "provider_ledger_spec",
         "baseline_spec",
         "base_factor_file",
+        "implementation_reconciliation",
+        "implementation_return_attribution",
         "legacy_panel",
     ):
         value = vertical.get(key)
         if not isinstance(value, dict):
             raise MaterializationError(f"vertical recipe {key} differs")
         paths.append(_absolute(value.get("path"), f"vertical recipe {key}.path"))
-    for key in ("decomposition_plan_bundle", "correlation_source_root"):
+    for key in (
+        "strategy_attribution_root",
+        "decomposition_plan_bundle",
+        "correlation_source_root",
+    ):
         value = vertical.get(key)
         if not isinstance(value, dict):
             raise MaterializationError(f"vertical recipe {key} differs")
@@ -275,7 +281,7 @@ def create_recipe(
     output: Path,
 ) -> dict[str, Any]:
     vertical = _load(vertical_recipe.resolve(), "vertical recipe")
-    if vertical.get("schema_version") != 3:
+    if vertical.get("schema_version") != 6:
         raise MaterializationError("vertical recipe schema differs")
     expected: dict[str, object] = {}
     for role in RELEASE_ROLES:

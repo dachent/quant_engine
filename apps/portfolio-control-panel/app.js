@@ -455,15 +455,28 @@
         ["Reconciliation", layers.implementation_reconciliation.status, layers.implementation_reconciliation.comparison_status],
       ].map(([label, status, note]) => `<span class="evidence-line"><strong>${safe(label)}</strong>${statusText(status)}<small>${safe(humanStatus(note))}</small></span>`).join("");
       const verifiedMetrics = implementationDetail?.return_reconciliation;
+      const returnAttribution = implementationDetail?.return_attribution;
+      const causalBridge = returnAttribution?.bridge;
       const confirmedCauses = (implementationDetail?.root_causes || []).filter((item) => item.status === "CONFIRMED");
       const trade = implementationDetail?.trade_reconciliation;
       const verifiedGapMarkup = verifiedMetrics
         ? `<span class="cell-primary">Verified model ${pct(verifiedMetrics.model_cumulative_return)} · account ${pct(verifiedMetrics.account_cumulative_return)} · gap ${pct(verifiedMetrics.account_minus_model_cumulative)}</span><span class="cell-secondary">${formatDate(verifiedMetrics.observed_start)}–${formatDate(verifiedMetrics.observed_end)} · ${integer.format(verifiedMetrics.observations)} exact common dates · β ${decimal(verifiedMetrics.beta_to_model)} · correlation ${decimal(verifiedMetrics.daily_return_correlation)} · tracking error ${pct(verifiedMetrics.annualized_tracking_error)}</span><span class="cell-secondary">Information ratio ${decimal(verifiedMetrics.information_ratio)} · up/down capture ${pct(verifiedMetrics.up_capture)}/${pct(verifiedMetrics.down_capture)} · relative drawdown ${pct(verifiedMetrics.relative_drawdown)}</span><span class="cell-secondary">Confirmed causes: ${safe(confirmedCauses.map((item) => humanStatus(item.cause)).join(" · ") || "none")}</span>${trade ? `<span class="cell-secondary">Model events ${integer.format(trade.model_event_count)} · matched ${integer.format((trade.matched_same_date_count || 0) + (trade.matched_delayed_count || 0))} · missed ${integer.format(trade.missed_model_event_count)} · unexplained broker events ${integer.format(trade.actual_unexplained_count)}</span>` : ""}<span class="cell-secondary">${safe(humanStatus(verifiedMetrics.status))}</span>`
         : "";
+      const causalCategoryMarkup = (causalBridge?.categories || []).map((item) => {
+        const effect = Number(item.effect_pp);
+        const effectText = `${effect > 0 ? "+" : ""}${decimal(effect, 3)} pp`;
+        return `<span class="cell-secondary"><strong>${safe(humanStatus(item.category))}</strong> ${safe(effectText)} · ${safe(humanStatus(item.status))}${item.method ? ` · ${safe(item.method)}` : ""}</span>`;
+      }).join("");
+      const causalMixMarkup = causalBridge?.effective_account_model_mix_return == null
+        ? ""
+        : `<span class="cell-secondary"><strong>Correct connected-model comparator:</strong> effective model mix ${pct(causalBridge.effective_account_model_mix_return)} · account-vs-mix gap ${decimal(causalBridge.effective_account_model_mix_gap_pp, 3)} pp. The primary AI model alone is not the whole-account benchmark.</span>`;
+      const causalGapMarkup = causalBridge
+        ? `<span class="cell-primary">Causal return waterfall · model ${pct(causalBridge.model_return)} · account ${pct(causalBridge.account_return)} · exact gap ${decimal(causalBridge.gap_pp, 3)} pp</span>${causalMixMarkup}${causalCategoryMarkup}<span class="cell-secondary">${formatDate(returnAttribution.observed_start)}–${formatDate(returnAttribution.observed_end)} · ${safe(humanStatus(causalBridge.status))} · ${safe(humanStatus(returnAttribution.verification))}</span>`
+        : "";
       const legacyGapMarkup = gap.total_gap == null
         ? `${statusText(gap.status)}<span class="cell-secondary">No accepted model/provider path can be compared with the account. No gap or cause is inferred.</span>`
         : `<span class="cell-primary">Reference ${pct(gap.reference_cumulative_return)} · account ${pct(gap.account_cumulative_return)} · gap ${pct(gap.total_gap)}</span><span class="cell-secondary">${safe(humanStatus(gap.signature))} · β ${decimal(gap.beta)} · correlation ${decimal(gap.correlation)} · tracking error ${pct(gap.tracking_error_annualized)}</span><span class="cell-secondary">Causally bound components ${integer.format(gap.causally_bound_components.length)} · unresolved residual ${pct(gap.unresolved_residual)} · reconciliation error ${decimal(gap.reconciliation_error, 8)}</span><span class="cell-secondary">Unknown: ${safe((gap.unresolved_causes || []).map(humanStatus).join(" · ") || "none")}</span>`;
-      const gapMarkup = verifiedGapMarkup || legacyGapMarkup;
+      const gapMarkup = `${verifiedGapMarkup || legacyGapMarkup}${causalGapMarkup}`;
       const regimeRows = (regimes.regimes || []).map((item) => `<span class="regime-line"><strong>${safe(humanStatus(item.regime_id))}</strong><small>${integer.format(item.live_observations)} live · mean ${pct(item.live_mean_return)}; ${integer.format(item.matched_prehistory_observations)} matched pre-live · mean ${pct(item.matched_prehistory_mean_return)}; latest ${formatDate(item.latest_week)} ${pct(item.latest_strategy_return)} versus benchmark ${pct(item.latest_benchmark_return)} · ${safe(humanStatus(item.latest_event_range_status))}</small></span>`).join("");
       const benchmark = regimes.benchmark ? `${regimes.benchmark.components.join(" + ")} · ${humanStatus(regimes.benchmark.method)}` : "No admitted benchmark path";
       return `<tr data-underwriting-strategy="${safe(row.strategy_id)}">

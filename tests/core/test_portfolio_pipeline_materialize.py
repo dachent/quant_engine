@@ -228,7 +228,12 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     qa_dir = tmp_path / "qa"
     _write_json(qa_dir / "qa-validation.json", {"all_passed": True})
     source_files = []
-    for name in ("provider.json", "baseline.json"):
+    for name in (
+        "provider.json",
+        "baseline.json",
+        "implementation.json",
+        "implementation-return-attribution.json",
+    ):
         path = tmp_path / name
         _write_json(path, {"synthetic": True})
         source_files.append(path)
@@ -237,19 +242,24 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     (legacy / "app.js").write_text("// synthetic shell", encoding="utf-8")
     plan = tmp_path / "plan"
     correlation = tmp_path / "correlation"
+    attribution = tmp_path / "attribution"
     _write_json(plan / "manifest.json", {"synthetic": True})
     _write_json(correlation / "spec.json", {"synthetic": True})
+    _write_json(attribution / "catalog.json", {"synthetic": True})
     vertical = {
         "as_of_date": AS_OF.isoformat(),
         "base_factor_file": _definition(source_files[0]),
         "baseline_spec": _definition(source_files[1]),
         "correlation_source_root": _dir_definition(correlation),
         "decomposition_plan_bundle": _dir_definition(plan),
+        "implementation_reconciliation": _definition(source_files[2]),
+        "implementation_return_attribution": _definition(source_files[3]),
         "legacy_panel": _dir_definition(legacy),
         "pipeline_id": "synthetic-vertical",
         "provider_ledger_spec": _definition(source_files[0]),
         "release_commit": "a" * 40,
-        "schema_version": 3,
+        "schema_version": 6,
+        "strategy_attribution_root": _dir_definition(attribution),
     }
     vertical_path = tmp_path / "vertical-recipe.json"
     _write_json(vertical_path, vertical)
@@ -283,7 +293,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     return recipe_path, output_root
 
 
-def test_create_recipe_accepts_schema_v3_vertical_recipe(tmp_path: Path) -> None:
+def test_create_recipe_accepts_schema_v6_vertical_recipe(tmp_path: Path) -> None:
     source_recipe, proof_root = _fixture(tmp_path)
     source = json.loads(source_recipe.read_text(encoding="utf-8"))
     output = tmp_path / "created-pipeline-recipe.json"
@@ -292,11 +302,11 @@ def test_create_recipe_accepts_schema_v3_vertical_recipe(tmp_path: Path) -> None
         vertical_recipe=Path(source["vertical_recipe"]["path"]),
         proof_root=proof_root,
         qa_dir=Path(source["qa_dir"]["path"]),
-        pipeline_id="schema-v3-release",
+        pipeline_id="schema-v6-release",
         output=output,
     )
 
-    assert result == {"pipeline_id": "schema-v3-release", "recipe": str(output)}
+    assert result == {"pipeline_id": "schema-v6-release", "recipe": str(output)}
     assert materializer._recipe(output)["release_commit"] == "a" * 40
 
 

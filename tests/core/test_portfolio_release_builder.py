@@ -30,9 +30,17 @@ def _recipe(tmp_path: Path) -> Path:
     baseline = tmp_path / "baseline.json"
     base_factor = tmp_path / "factors.csv"
     implementation = tmp_path / "implementation.json"
+    implementation_return_attribution = (
+        tmp_path / "implementation-return-attribution.json"
+    )
     attribution = tmp_path / "strategy-attribution"
     legacy = tmp_path / "legacy"
-    for path in (provider, baseline, implementation):
+    for path in (
+        provider,
+        baseline,
+        implementation,
+        implementation_return_attribution,
+    ):
         path.write_text("{}", encoding="utf-8")
     legacy.mkdir()
     attribution.mkdir()
@@ -81,11 +89,14 @@ def _recipe(tmp_path: Path) -> Path:
         "correlation_source_root": {"path": str(correlation), **correlation_inventory},
         "decomposition_plan_bundle": {"path": str(plan), **plan_inventory},
         "implementation_reconciliation": _file_definition(implementation),
+        "implementation_return_attribution": _file_definition(
+            implementation_return_attribution
+        ),
         "legacy_panel": {"path": str(legacy), **builder._directory_inventory(legacy)},
         "pipeline_id": "synthetic-source-to-panel",
         "provider_ledger_spec": _file_definition(provider),
         "release_commit": "a" * 40,
-        "schema_version": 5,
+        "schema_version": 6,
         "strategy_attribution_root": {
             "path": str(attribution),
             **builder._directory_inventory(attribution),
@@ -143,9 +154,17 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.json"
     base_factor = tmp_path / "factors.csv"
     implementation = tmp_path / "implementation.json"
+    implementation_return_attribution = (
+        tmp_path / "implementation-return-attribution.json"
+    )
     attribution = tmp_path / "strategy-attribution"
     legacy = tmp_path / "legacy"
-    for path in (provider, baseline, implementation):
+    for path in (
+        provider,
+        baseline,
+        implementation,
+        implementation_return_attribution,
+    ):
         path.write_text("{}", encoding="utf-8")
     legacy.mkdir()
     attribution.mkdir()
@@ -192,6 +211,7 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
         baseline_spec=baseline,
         base_factor_file=base_factor,
         implementation_reconciliation=implementation,
+        implementation_return_attribution=implementation_return_attribution,
         strategy_attribution_root=attribution,
         decomposition_plan_bundle=plan,
         correlation_source_root=correlation,
@@ -203,7 +223,7 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     )
 
     assert result["recipe"] == str(output)
-    assert builder._recipe(output)["schema_version"] == 5
+    assert builder._recipe(output)["schema_version"] == 6
 
 
 def test_xlsx_startup_deadline_is_the_only_extended_failure() -> None:

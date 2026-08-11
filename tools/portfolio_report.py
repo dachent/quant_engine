@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -140,6 +141,15 @@ def _decimal(value: object, field_name: str) -> Decimal:
         raise ReportValidationError(f"{field_name} must be decimal text") from exc
     if not accepted.is_finite():
         raise ReportValidationError(f"{field_name} must be finite")
+    return accepted
+
+
+def _finite_number(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ReportValidationError(f"{field_name} must be a finite number")
+    accepted = float(value)
+    if not math.isfinite(accepted):
+        raise ReportValidationError(f"{field_name} must be a finite number")
     return accepted
 
 
@@ -985,11 +995,128 @@ def _implementation_reconciliation_contract(
     }
 
 
+def _implementation_return_attribution_contract(
+    path: Path,
+    *,
+    portfolio_as_of: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    payload = _load_json(path, "implementation return attribution contract")
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("builder") != "portfolio-implementation-return-attribution"
+        or payload.get("verification")
+        != "VERIFIED_WITH_DECLARED_PARTIAL_CAUSAL_BOUNDARIES"
+    ):
+        raise ReportValidationError(
+            "implementation return attribution contract differs"
+        )
+    contract_as_of = _date(
+        payload.get("as_of_date"), "implementation return attribution as_of_date"
+    )
+    portfolio_boundary = _date(portfolio_as_of, "portfolio as_of_date")
+    rows = _objects(
+        payload.get("strategies"), "implementation return attribution strategies"
+    )
+    expected = {"grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"}
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        strategy_id = _text(
+            row.get("strategy_id"), "implementation return attribution strategy_id"
+        )
+        if strategy_id in by_id:
+            raise ReportValidationError(
+                "implementation return attribution duplicates a strategy"
+            )
+        verification = _text(
+            row.get("verification"),
+            f"implementation return attribution verification {strategy_id}",
+        )
+        if verification not in {
+            "PARTIAL_EXACT_ACTUAL_PNL_PARTIAL_COUNTERFACTUAL_GAP",
+            "VERIFIED_WITH_DECLARED_PROXY",
+            "VERIFIED_WITH_DECLARED_PUBLIC_PRICE_PROXY",
+        }:
+            raise ReportValidationError(
+                "implementation return attribution strategy is not accepted"
+            )
+        observed_start = _date(
+            row.get("observed_start"),
+            f"implementation return attribution observed_start {strategy_id}",
+        )
+        observed_end = _date(
+            row.get("observed_end"),
+            f"implementation return attribution observed_end {strategy_id}",
+        )
+        if observed_end < observed_start or observed_end > portfolio_boundary:
+            raise ReportValidationError(
+                "implementation return attribution observation boundary differs"
+            )
+        if contract_as_of < observed_end:
+            raise ReportValidationError(
+                "implementation return attribution predates its evidence"
+            )
+        bridge = _object(
+            row.get("bridge"), f"implementation return attribution bridge {strategy_id}"
+        )
+        model_return = _finite_number(
+            bridge.get("model_return"),
+            f"implementation return attribution model return {strategy_id}",
+        )
+        account_return = _finite_number(
+            bridge.get("account_return"),
+            f"implementation return attribution account return {strategy_id}",
+        )
+        gap_pp = _finite_number(
+            bridge.get("gap_pp"),
+            f"implementation return attribution gap {strategy_id}",
+        )
+        categories = _objects(
+            bridge.get("categories"),
+            f"implementation return attribution categories {strategy_id}",
+        )
+        if not categories:
+            raise ReportValidationError(
+                "implementation return attribution categories are empty"
+            )
+        category_total = sum(
+            _finite_number(
+                category.get("effect_pp"),
+                f"implementation return attribution effect {strategy_id}",
+            )
+            for category in categories
+        )
+        if not math.isclose(
+            gap_pp, (account_return - model_return) * 100.0, abs_tol=1e-10
+        ) or not math.isclose(gap_pp, category_total, abs_tol=1e-8):
+            raise ReportValidationError(
+                "implementation return attribution bridge does not reconcile"
+            )
+        by_id[strategy_id] = dict(row)
+    if set(by_id) != expected:
+        raise ReportValidationError(
+            "implementation return attribution strategy boundary differs"
+        )
+    sha256, size = hash_file(path)
+    return by_id, {
+        "as_of_date": contract_as_of.isoformat(),
+        "attribution_id": _text(
+            payload.get("attribution_id"),
+            "implementation return attribution identity",
+        ),
+        "schema_version": payload["schema_version"],
+        "sha256": sha256,
+        "size_bytes": size,
+        "strategy_count": len(by_id),
+    }
+
+
 def _strategies(
     catalog: Mapping[str, Any],
     performance: Sequence[Mapping[str, Any]],
     history_contract: Mapping[str, Mapping[str, Any]] | None = None,
     implementation_contract: Mapping[str, Mapping[str, Any]] | None = None,
+    implementation_return_attribution_contract: Mapping[str, Mapping[str, Any]]
+    | None = None,
 ) -> list[dict[str, Any]]:
     raw_version_catalog = catalog.get("strategy_version_catalog")
     strategy_versions: dict[str, dict[str, Any]] = {}
@@ -1194,6 +1321,11 @@ def _strategies(
             if implementation_contract is not None
             else {}
         )
+        implementation_return_attribution = (
+            dict(implementation_return_attribution_contract.get(strategy_id, {}))
+            if implementation_return_attribution_contract is not None
+            else {}
+        )
         history_observations = history.get("backtest_observations")
         history_accepted = bool(
             history
@@ -1335,8 +1467,15 @@ def _strategies(
                     "implementation_reconciliation_status"
                 )
                 if not implementation
-                else "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION",
+                else (
+                    "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
+                    if implementation_return_attribution
+                    else "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION"
+                ),
                 "implementation_reconciliation": implementation or None,
+                "implementation_return_attribution": (
+                    implementation_return_attribution or None
+                ),
                 "live_plus_backtest_status": live_plus_backtest_status,
                 "live_plus_backtest_reason": live_plus_backtest_reason,
                 "design_status": design.get("status", "UNAVAILABLE"),
@@ -2045,6 +2184,7 @@ def build_report_data(
     attribution_root: Path | None = None,
     history_contract_path: Path | None = None,
     implementation_reconciliation_path: Path | None = None,
+    implementation_return_attribution_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -2074,8 +2214,22 @@ def build_report_data(
                 ),
             )
         )
+    implementation_return_attribution_contract: dict[str, dict[str, Any]] | None = None
+    implementation_return_attribution_ref: dict[str, Any] | None = None
+    if implementation_return_attribution_path is not None:
+        (
+            implementation_return_attribution_contract,
+            implementation_return_attribution_ref,
+        ) = _implementation_return_attribution_contract(
+            implementation_return_attribution_path,
+            portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
+        )
     strategy_summary = _strategies(
-        catalog, performance, history_contract, implementation_contract
+        catalog,
+        performance,
+        history_contract,
+        implementation_contract,
+        implementation_return_attribution_contract,
     )
     attribution_catalog: dict[str, Any] | None = None
     attribution_ref: dict[str, str] | None = None
@@ -2210,6 +2364,20 @@ def build_report_data(
             *(
                 [
                     {
+                        "artifact": "strategy-implementation-return-attribution",
+                        "as_of_date": implementation_return_attribution_ref[
+                            "as_of_date"
+                        ],
+                        "schema": "portfolio-implementation-return-attribution/1",
+                        "sha256": implementation_return_attribution_ref["sha256"],
+                    }
+                ]
+                if implementation_return_attribution_ref is not None
+                else []
+            ),
+            *(
+                [
+                    {
                         "artifact": "strategy-implementation-reconciliation",
                         "as_of_date": implementation_contract_ref["as_of_date"],
                         "schema": "portfolio-implementation-reconciliation/1",
@@ -2247,6 +2415,10 @@ def build_report_data(
         report["strategy_history_contract"] = history_contract_ref
     if implementation_contract_ref is not None:
         report["implementation_reconciliation_contract"] = implementation_contract_ref
+    if implementation_return_attribution_ref is not None:
+        report["implementation_return_attribution_contract"] = (
+            implementation_return_attribution_ref
+        )
     if hwm_summary is not None:
         report["hwm_summary"] = hwm_summary
     if attribution_catalog is not None and attribution_ref is not None:
@@ -2635,6 +2807,7 @@ def build_candidate(
     attribution_root: Path | None = None,
     history_contract_path: Path | None = None,
     implementation_reconciliation_path: Path | None = None,
+    implementation_return_attribution_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -2643,6 +2816,7 @@ def build_candidate(
         attribution_root,
         history_contract_path,
         implementation_reconciliation_path,
+        implementation_return_attribution_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -3012,6 +3186,7 @@ def verify_candidate(
     attribution_root: Path | None = None,
     history_contract_path: Path | None = None,
     implementation_reconciliation_path: Path | None = None,
+    implementation_return_attribution_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -3020,6 +3195,7 @@ def verify_candidate(
         attribution_root,
         history_contract_path,
         implementation_reconciliation_path,
+        implementation_return_attribution_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:
@@ -3080,6 +3256,7 @@ def publish_report(
     attribution_root: Path | None = None,
     history_contract_path: Path | None = None,
     implementation_reconciliation_path: Path | None = None,
+    implementation_return_attribution_path: Path | None = None,
 ) -> dict[str, Any]:
     _validate_canonicalization_evidence(candidate_dir, excel_workbook)
     verification = verify_candidate(
@@ -3091,6 +3268,7 @@ def publish_report(
         attribution_root,
         history_contract_path,
         implementation_reconciliation_path,
+        implementation_return_attribution_path,
     )
     run = _load_json(xlsx_result, "xlsx-win run result")
     validation = _load_json(validation_result, "xlsx-win validation result")
@@ -3105,6 +3283,7 @@ def publish_report(
         attribution_root,
         history_contract_path,
         implementation_reconciliation_path,
+        implementation_return_attribution_path,
     )
     as_of = _date(report.get("as_of_date"), "report.as_of_date")
     verification_bytes = canonical_json_bytes(verification)
@@ -3182,6 +3361,15 @@ def publish_report(
                 implementation_reconciliation_path,
                 "input/strategy-implementation-reconciliation.json",
                 "portfolio-implementation-reconciliation",
+                "1",
+            )
+        )
+    if implementation_return_attribution_path is not None:
+        artifact_specs.append(
+            (
+                implementation_return_attribution_path,
+                "input/strategy-implementation-return-attribution.json",
+                "portfolio-implementation-return-attribution",
                 "1",
             )
         )
@@ -3278,6 +3466,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--attribution-root", type=Path)
     build.add_argument("--history-contract", type=Path)
     build.add_argument("--implementation-reconciliation", type=Path)
+    build.add_argument("--implementation-return-attribution", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -3288,6 +3477,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--attribution-root", type=Path)
     verify.add_argument("--history-contract", type=Path)
     verify.add_argument("--implementation-reconciliation", type=Path)
+    verify.add_argument("--implementation-return-attribution", type=Path)
     canonicalize = commands.add_parser("canonicalize")
     canonicalize.add_argument("--workbook", type=Path, required=True)
     canonicalize.add_argument("--evidence", type=Path, required=True)
@@ -3306,6 +3496,7 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--attribution-root", type=Path)
     publish.add_argument("--history-contract", type=Path)
     publish.add_argument("--implementation-reconciliation", type=Path)
+    publish.add_argument("--implementation-return-attribution", type=Path)
     return parser
 
 
@@ -3321,6 +3512,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.attribution_root,
                 args.history_contract,
                 args.implementation_reconciliation,
+                args.implementation_return_attribution,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -3332,6 +3524,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.attribution_root,
                 args.history_contract,
                 args.implementation_reconciliation,
+                args.implementation_return_attribution,
             )
         elif args.command == "canonicalize":
             result = canonicalize_workbook(args.workbook, args.evidence)
@@ -3350,6 +3543,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.attribution_root,
                 args.history_contract,
                 args.implementation_reconciliation,
+                args.implementation_return_attribution,
             )
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         print(f"portfolio-report: FAIL: {exc}", file=sys.stderr)

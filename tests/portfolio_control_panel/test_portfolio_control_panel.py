@@ -1138,6 +1138,9 @@ def test_renderer_exposes_underwriting_and_all_orphaned_evidence_sections() -> N
         assert payload_key in renderer
     assert "data.strategy_underwriting" in renderer
     assert "causally_bound_components" in renderer
+    assert "return_attribution" in renderer
+    assert "Causal return waterfall" in renderer
+    assert "Correct connected-model comparator" in renderer
     assert "NO_AUTOMATIC_DROP_AUTHORITY" not in renderer
     for element_id in (
         "underwriting-table",

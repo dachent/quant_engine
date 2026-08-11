@@ -231,6 +231,7 @@ declared inputs; it does not copy a prior panel.
   --baseline-spec $baselineSpec `
   --base-factor-file $baseFactorFile `
   --implementation-reconciliation $implementationReconciliation `
+  --implementation-return-attribution $implementationReturnAttribution `
   --strategy-attribution-root $strategyAttributionRoot `
   --decomposition-plan-bundle $planBundle `
   --correlation-source-root $correlationSourceRoot `
