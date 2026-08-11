@@ -381,6 +381,14 @@ stable launcher, and a fresh production-launcher browser capture. Retain the
 recipe, specification, plan, receipts, QA, semantic gates, release manifest,
 journal, and post-commit verification under `$cycleRoot`.
 
+The coordinated semantic gate distinguishes evidence freshness from release
+integrity. A verified provider-ledger generation may predate the analysis date;
+the same-date freshness bundle must assess that exact ledger. A stale or
+unavailable current fact remains fail-closed for the affected consumer, but it
+does not hide an otherwise verified advisory panel when every blocker is dated,
+marked for escalation, and rendered in Data Health. A missing, future-dated,
+malformed, or unrendered blocker still fails coordinated publication.
+
 ## Recovery and non-duplication rules
 
 - Resume the same unchanged specification after a local failure; do not create

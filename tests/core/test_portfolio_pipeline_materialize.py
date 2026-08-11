@@ -339,6 +339,58 @@ def test_create_recipe_accepts_schema_v7_provider_generation(tmp_path: Path) -> 
     assert Path(vertical["base_factor_file"]["path"]) in paths
 
 
+def test_generation_date_rule_allows_dated_ledger_only() -> None:
+    earlier = date(2026, 7, 31)
+
+    assert materializer._generation_as_of_allowed("ledger", earlier, AS_OF)
+    assert not materializer._generation_as_of_allowed("baseline", earlier, AS_OF)
+    assert not materializer._generation_as_of_allowed("ledger", date(2026, 8, 4), AS_OF)
+
+
+def test_semantic_accepts_explicitly_rendered_freshness_blocker(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root = _fixture(tmp_path)
+    assessment = {
+        "blocks_current_consumers": True,
+        "escalation_required": True,
+        "evaluated_on": AS_OF.isoformat(),
+        "fact_type": "strategy-returns",
+        "lane": "ACCOUNT",
+        "provider_id": "schwab",
+        "reason": "accepted observation exceeded the stale boundary",
+        "required_for_current": True,
+        "state": "STALE",
+        "subject_id": "strategy-1",
+    }
+    _write_json(
+        output_root / "stages" / "ledger" / "freshness-health.json",
+        {"as_of_date": AS_OF.isoformat(), "assessments": [assessment]},
+    )
+    panel = next((output_root / "stages" / "panel" / "generations").iterdir())
+    _mutate_json(
+        panel / "data" / "dashboard_data.json",
+        lambda payload: payload.update(
+            {
+                "coverage": [
+                    {
+                        **assessment,
+                        "category": "DATA_FRESHNESS",
+                        "status": assessment["state"],
+                    }
+                ]
+            }
+        ),
+    )
+    _refresh_expected_generation(recipe, output_root, "panel")
+
+    result = materializer.semantic(
+        recipe, output_root / "evidence" / "post-build-semantic.json"
+    )
+
+    assert result["state"] == "PASS"
+
+
 def test_semantic_reconciliation_calculates_all_six_bridges(tmp_path: Path) -> None:
     recipe, output_root = _fixture(tmp_path)
 
@@ -369,6 +421,24 @@ def _mutate_json(path: Path, update: Callable[[dict[str, object]], None]) -> Non
     payload = json.loads(path.read_text(encoding="utf-8"))
     update(payload)
     _write_json(path, payload)
+
+
+def _refresh_expected_generation(
+    recipe_path: Path, output_root: Path, role: str
+) -> None:
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    generation = next(
+        (
+            output_root / "stages" / materializer.GENERATION_ROOT[role] / "generations"
+        ).iterdir()
+    )
+    inventory = inventory_generation(generation)
+    recipe["expected_generations"][role] = {
+        "files": inventory["files"],
+        "generation_id": inventory["generation_id"],
+        "manifest_sha256": inventory["manifest_sha256"],
+    }
+    _write_json(recipe_path, recipe)
 
 
 def _financial_failure(root: Path) -> None:
