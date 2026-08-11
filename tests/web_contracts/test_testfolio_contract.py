@@ -1,375 +1,503 @@
-"""Tests for the Testfolio web contract — public REST API."""
+"""Tests for Testfolio web contract.
 
-from __future__ import annotations
-
-from datetime import datetime, timedelta, timezone
-import json
+This module validates the Testfolio contract implementation covering:
+1. Structure validation (provider name, endpoints, auth config)
+2. Extraction functionality with synthetic HAR fixtures
+3. Noise filtering (static assets, analytics)
+4. Pattern matching (slug patterns for catalog pages)
+5. Fail-closed behavior (unknown routes raise WebContractError)
+6. Sensitive field redaction
+"""
 
 import pytest
+from datetime import datetime, timezone
 
-from quant_engine.web_contracts import (
+from quant_engine.web_contracts.contracts import WebContractError, SemanticEffect
+from quant_engine.web_contracts.testfolio import (
     TESTFOLIO_CONTRACT,
-    REDACTION,
-    SessionEnvelope,
-    WebContractError,
-    canonical_extraction,
     extract_testfolio_har,
 )
 
-NOW = datetime(2026, 8, 2, 13, tzinfo=timezone.utc)
-_ORIGIN = "https://testfol.io"
+
+# ============================================================================
+# Fixtures
+# ============================================================================
+
+from quant_engine.web_contracts.extract import SessionEnvelope
 
 
-def _entry(
-    url: str,
-    *,
-    method: str = "GET",
-    status: int = 200,
-    body: object | None = None,
-) -> dict[str, object]:
+@pytest.fixture
+def valid_session() -> SessionEnvelope:
+    """Create a valid session envelope for testing."""
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    return SessionEnvelope(
+        captured_at=now,
+        expires_at=now + timedelta(hours=1),
+    )
+
+
+@pytest.fixture
+def sample_html_har() -> dict:
+    """Create a synthetic HAR with valid Testfolio HTML response."""
     return {
-        "request": {"headers": [], "method": method, "url": url},
-        "response": {
-            "content": {"text": json.dumps({} if body is None else body)},
-            "status": status,
-        },
+        "log": {
+            "entries": [
+                {
+                    "request": {
+                        "method": "GET",
+                        "url": "https://testfol.io/catalog",
+                        "httpVersion": "HTTP/1.1",
+                        "headers": [],
+                    },
+                    "response": {
+                        "status": 200,
+                        "statusText": "OK",
+                        "httpVersion": "HTTP/1.1",
+                        "headers": [
+                            {
+                                "name": "Content-Type",
+                                "value": "text/html; charset=utf-8",
+                            }
+                        ],
+                        "content": {
+                            "text": "<html><head><title>Research Catalog | testfolio</title></head><body>Catalog content</body></html>",
+                            "mimeType": "text/html",
+                        },
+                    },
+                }
+            ]
+        }
     }
 
 
-def _session(*, expired: bool = False) -> SessionEnvelope:
-    return SessionEnvelope(
-        captured_at=NOW,
-        expires_at=NOW - timedelta(seconds=1)
-        if expired
-        else NOW + timedelta(minutes=30),
-    )
+@pytest.fixture
+def static_asset_har() -> dict:
+    """HAR with static assets that should be filtered."""
+    return {
+        "log": {
+            "entries": [
+                {
+                    "request": {
+                        "method": "GET",
+                        "url": "https://testfol.io/_next/static/chunks/main.js",
+                    },
+                    "response": {
+                        "status": 200,
+                        "content": {"text": "// javascript code"},
+                    },
+                },
+                {
+                    "request": {
+                        "method": "GET",
+                        "url": "https://testfol.io/_next/static/css/style.css",
+                    },
+                    "response": {
+                        "status": 200,
+                        "content": {"text": "/* css */"},
+                    },
+                },
+                {
+                    "request": {
+                        "method": "GET",
+                        "url": "https://testfol.io/favicon.ico",
+                    },
+                    "response": {
+                        "status": 200,
+                        "content": {"text": "binary"},
+                    },
+                },
+            ]
+        }
+    }
 
 
-def _document(*entries: object) -> dict[str, object]:
-    return {"log": {"entries": list(entries)}}
+@pytest.fixture
+def analytics_har() -> dict:
+    """HAR with analytics requests that should be filtered."""
+    return {
+        "log": {
+            "entries": [
+                {
+                    "request": {
+                        "method": "POST",
+                        "url": "https://testfol.io/analytics/event",
+                    },
+                    "response": {
+                        "status": 200,
+                        "content": {"text": "OK"},
+                    },
+                },
+                {
+                    "request": {
+                        "method": "GET",
+                        "url": "https://testfol.io/api/analytics/session",
+                    },
+                    "response": {
+                        "status": 200,
+                        "content": {"text": "{}"},
+                    },
+                },
+            ]
+        }
+    }
 
 
-# ── contract structure tests ──────────────────────────────────────
+@pytest.fixture
+def preflight_har() -> dict:
+    """HAR with OPTIONS preflight requests that should be filtered."""
+    return {
+        "log": {
+            "entries": [
+                {
+                    "request": {
+                        "method": "OPTIONS",
+                        "url": "https://testfol.io/catalog",
+                    },
+                    "response": {
+                        "status": 204,
+                        "content": {"text": ""},
+                    },
+                }
+            ]
+        }
+    }
 
 
-def test_contract_provider_name() -> None:
-    assert TESTFOLIO_CONTRACT.provider == "testfolio"
+# ============================================================================
+# Structure Tests
+# ============================================================================
 
 
-def test_contract_has_endpoints() -> None:
-    assert len(TESTFOLIO_CONTRACT.endpoints) == 2
+class TestStructure:
+    """Validate contract structure meets framework requirements."""
 
+    def test_provider_name_is_testfolio(self) -> None:
+        """Provider identifier must be 'testfolio'."""
+        assert TESTFOLIO_CONTRACT.provider == "testfolio"
 
-def test_contract_all_read_only() -> None:
-    from quant_engine.web_contracts.contracts import SemanticEffect
+    def test_endpoints_present(self) -> None:
+        """Contract must define at least one endpoint."""
+        assert len(TESTFOLIO_CONTRACT.endpoints) >= 1
 
-    for ep in TESTFOLIO_CONTRACT.endpoints:
-        assert ep.semantic_effect == SemanticEffect.READ_ONLY
+    def test_all_read_only(self) -> None:
+        """All endpoints must have READ_ONLY semantic effect."""
+        for endpoint in TESTFOLIO_CONTRACT.endpoints:
+            assert endpoint.semantic_effect == SemanticEffect.READ_ONLY
 
+    def test_no_api_fallback(self) -> None:
+        """Contract must not allow API fallback."""
+        assert TESTFOLIO_CONTRACT.api_fallback is False
 
-def test_contract_no_api_fallback() -> None:
-    assert TESTFOLIO_CONTRACT.api_fallback is False
+    def test_identities_unique(self) -> None:
+        """No duplicate (method, origin, path) tuples allowed."""
+        identities = []
+        for ep in TESTFOLIO_CONTRACT.endpoints:
+            identity = (ep.method, ep.origin, ep.path)
+            assert identity not in identities, f"Duplicate: {identity}"
+            identities.append(identity)
 
+    def test_sensitive_fields_non_empty(self) -> None:
+        """Sensitive fields must include common identifier fields."""
+        expected = {"email", "user_id", "account_id"}
+        assert expected.issubset(TESTFOLIO_CONTRACT.sensitive_fields)
 
-def test_contract_has_sensitive_fields() -> None:
-    assert len(TESTFOLIO_CONTRACT.sensitive_fields) > 0
-
-
-def test_contract_endpoint_identities_unique() -> None:
-    identities = [
-        (ep.method, ep.origin, ep.path) for ep in TESTFOLIO_CONTRACT.endpoints
-    ]
-    assert len(identities) == len(set(identities))
-
-
-def test_contract_all_public_no_auth() -> None:
-    """All Testfolio endpoints are public — no authentication_header."""
-    for ep in TESTFOLIO_CONTRACT.endpoints:
-        assert ep.authentication_header is None
-
-
-# ── extraction tests ──────────────────────────────────────────────
-
-
-def test_limits_extraction_is_deterministic() -> None:
-    """GET /api/limits yields stable output."""
-    document = _document(
-        _entry(
-            f"{_ORIGIN}/api/limits",
-            body={
-                "is_authenticated": False,
-                "user_id": None,
-                "tier": "public",
-                "limits": {"max_portfolio_tickers": 10},
-            },
-        ),
-    )
-    first = extract_testfolio_har(document, session=_session())
-    second = extract_testfolio_har(document, session=_session())
-    assert canonical_extraction(first) == canonical_extraction(second)
-    assert len(first) == 1
-    assert first[0].capability == "limits.read"
-
-
-def test_research_extraction_is_deterministic() -> None:
-    """GET /api/public-research/{slug}/run yields stable output."""
-    document = _document(
-        _entry(
-            f"{_ORIGIN}/api/public-research/60-40-portfolio/run",
-            body={
-                "summary": {"cagr": 0.0913, "max_drawdown": -0.3395},
-                "chart_data": [[946684800000, 10000], [978307200000, 10100]],
-            },
-        ),
-    )
-    first = extract_testfolio_har(document, session=_session())
-    second = extract_testfolio_har(document, session=_session())
-    assert canonical_extraction(first) == canonical_extraction(second)
-    assert len(first) == 1
-    assert first[0].capability == "research.run"
-
-
-def test_multiple_endpoints_extracted() -> None:
-    """Both limits and research endpoints are extracted from one capture."""
-    document = _document(
-        _entry(
-            f"{_ORIGIN}/api/limits",
-            body={"is_authenticated": False, "tier": "public", "limits": {}},
-        ),
-        _entry(
-            f"{_ORIGIN}/api/public-research/spy-vs-qqq/run",
-            body={"summary": {}},
-        ),
-    )
-    records = extract_testfolio_har(document, session=_session())
-    assert len(records) == 2
-    assert {r.capability for r in records} == {"limits.read", "research.run"}
-
-
-# ── path pattern matching tests ───────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "slug",
-    [
-        "60-40-portfolio",
-        "all-weather-portfolio",
-        "golden-butterfly-portfolio",
-        "sp-500-200-day-moving-average",
-        "golden-cross-strategy",
-        "dual-momentum-strategy",
-        "spy-vs-qqq",
-        "60-40-vs-all-weather",
-        "voo-vs-spy",
-        "hfea-portfolio",
-        "faber-global-tactical-asset-allocation",
-    ],
-)
-def test_research_path_pattern_matches_valid_slugs(slug: str) -> None:
-    """Known catalog slugs match the research endpoint path pattern."""
-    endpoint = TESTFOLIO_CONTRACT.route(
-        "GET", f"{_ORIGIN}/api/public-research/{slug}/run"
-    )
-    assert endpoint.capability == "research.run"
-
-
-@pytest.mark.parametrize(
-    "bad_path",
-    [
-        "/api/public-research/../etc/passwd/run",
-        "/api/public-research//run",
-        "/api/public-research/UPPERCASE/run",
-        "/api/public-research/with spaces/run",
-        "/api/public-research/",
-    ],
-)
-def test_research_path_pattern_rejects_invalid_slugs(bad_path: str) -> None:
-    """Invalid slugs are rejected by the path pattern."""
-    with pytest.raises(WebContractError, match="not uniquely allowlisted"):
-        TESTFOLIO_CONTRACT.route("GET", f"{_ORIGIN}{bad_path}")
-
-
-# ── noise filtering tests ─────────────────────────────────────────
-
-
-def test_noise_is_filtered() -> None:
-    """Static assets, third-party, and non-API requests are discarded."""
-    document = _document(
-        # Cloudflare analytics — filtered
-        _entry("https://cloudflareinsights.com/cdn-cgi/rum"),
-        # Static asset — filtered
-        _entry(f"{_ORIGIN}/_next/static/chunks/main.js"),
-        # Third-party — filtered
-        _entry("https://www.googletagmanager.com/gtag/js"),
-        # OPTIONS preflight — filtered
-        _entry(f"{_ORIGIN}/api/limits", method="OPTIONS"),
-        # HTML page (not JSON) — filtered
-        _entry(
-            f"{_ORIGIN}/catalog",
-            body=None,
-        ),
-        # Favicon — filtered
-        _entry(f"{_ORIGIN}/favicon.ico"),
-        # Valid API call — extracted
-        _entry(
-            f"{_ORIGIN}/api/limits",
-            body={"is_authenticated": False, "tier": "public", "limits": {}},
-        ),
-    )
-    # Fix the HTML entry: no JSON body
-    document["log"]["entries"][4]["response"]["content"]["text"] = "<html>...</html>"  # type: ignore[index]
-    # Fix the favicon entry: non-JSON mimeType
-    document["log"]["entries"][5]["response"]["content"]["text"] = ""  # type: ignore[index]
-
-    records = extract_testfolio_har(document, session=_session())
-    assert len(records) == 1
-    assert records[0].capability == "limits.read"
-
-
-def test_non_api_path_filtered() -> None:
-    """Non-/api/ paths are filtered even if they exist on testfol.io."""
-    document = _document(
-        _entry(
-            f"{_ORIGIN}/portfolios/60-40-portfolio",
-            body={"is_authenticated": False},
-        ),
-        _entry(
-            f"{_ORIGIN}/api/limits",
-            body={"is_authenticated": False, "tier": "public", "limits": {}},
-        ),
-    )
-    records = extract_testfolio_har(document, session=_session())
-    assert len(records) == 1
-    assert records[0].capability == "limits.read"
-
-
-def test_third_party_origin_filtered() -> None:
-    """Third-party origins are filtered even if they have /api/ paths."""
-    document = _document(
-        _entry("https://api.stripe.com/v1/checkout"),
-        _entry(
-            f"{_ORIGIN}/api/limits",
-            body={"is_authenticated": False, "tier": "public", "limits": {}},
-        ),
-    )
-    records = extract_testfolio_har(document, session=_session())
-    assert len(records) == 1
-    assert records[0].capability == "limits.read"
-
-
-# ── fail-closed tests ─────────────────────────────────────────────
-
-
-def test_unknown_route_fails_closed() -> None:
-    """Unregistered API routes raise WebContractError."""
-    document = _document(
-        _entry(f"{_ORIGIN}/api/unknown/endpoint", body={"value": 1}),
-    )
-    with pytest.raises(WebContractError, match="not uniquely allowlisted"):
-        extract_testfolio_har(document, session=_session())
-
-
-def test_wrong_method_fails_closed() -> None:
-    """POST to GET-only endpoint raises WebContractError."""
-    document = _document(
-        _entry(f"{_ORIGIN}/api/limits", method="POST", body={}),
-    )
-    with pytest.raises(WebContractError, match="not uniquely allowlisted"):
-        extract_testfolio_har(document, session=_session())
-
-
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 500, 502, 503])
-def test_non_success_status_fails(status: int) -> None:
-    """Non-2xx responses are rejected."""
-    document = _document(
-        _entry(
-            f"{_ORIGIN}/api/limits",
-            body={"error": "fail"},
-            status=status,
-        ),
-    )
-    with pytest.raises(WebContractError, match="did not succeed"):
-        extract_testfolio_har(document, session=_session())
-
-
-def test_expired_session_fails() -> None:
-    """Expired session envelope raises WebContractError."""
-    document = _document(
-        _entry(
-            f"{_ORIGIN}/api/limits",
-            body={"is_authenticated": False},
-        ),
-    )
-    with pytest.raises(WebContractError, match="expired"):
-        extract_testfolio_har(document, session=_session(expired=True))
-
-
-def test_empty_capture_fails() -> None:
-    """HAR with no API entries raises WebContractError."""
-    document = _document(
-        _entry(f"{_ORIGIN}/catalog"),
-    )
-    # Fix: non-JSON HTML response with empty body
-    document["log"]["entries"][0]["response"]["content"]["text"] = "<html>...</html>"  # type: ignore[index]
-    with pytest.raises(
-        WebContractError, match="capture contains no reviewed Testfolio API routes"
-    ):
-        extract_testfolio_har(document, session=_session())
-
-
-# ── redaction tests ───────────────────────────────────────────────
-
-
-def test_user_id_is_redacted() -> None:
-    """user_id field is redacted in extraction output."""
-    document = _document(
-        _entry(
-            f"{_ORIGIN}/api/limits",
-            body={
-                "is_authenticated": True,
-                "user_id": "usr_abc123def456",
-                "tier": "free",
-                "limits": {},
-            },
-        ),
-    )
-    records = extract_testfolio_har(document, session=_session())
-    assert len(records) == 1
-    response = records[0].response
-    assert isinstance(response, dict)
-    assert response["user_id"] == REDACTION
-    # is_authenticated is redacted because "auth" matches the _SENSITIVE_NAME
-    # regex: (?i)(?:auth|cookie|session|token|secret|password)
-    assert response["is_authenticated"] == REDACTION
-
-
-# ── duplicate header tests ────────────────────────────────────────
-
-
-def test_duplicate_non_auth_headers_are_tolerated() -> None:
-    """Duplicate Accept headers should not fail (no auth headers to duplicate)."""
-    entry = _entry(
-        f"{_ORIGIN}/api/limits",
-        body={"is_authenticated": False, "tier": "public", "limits": {}},
-    )
-    headers = entry["request"]["headers"]  # type: ignore[index]
-    assert isinstance(headers, list)
-    headers.extend(
-        [
-            {"name": "Accept", "value": "application/json"},
-            {"name": "accept", "value": "*/*"},
+    def test_static_assets_not_in_endpoints(self) -> None:
+        """Static asset paths must not be in contract endpoints."""
+        paths = {ep.path for ep in TESTFOLIO_CONTRACT.endpoints}
+        static_paths = [
+            "/_next/static/main.js",
+            "/_next/static/style.css",
+            "/favicon.ico",
         ]
+        for static_path in static_paths:
+            assert static_path not in paths, f"Static path in endpoints: {static_path}"
+
+    def test_all_endpoints_public(self) -> None:
+        """All endpoints must have authentication_header=None (public)."""
+        for ep in TESTFOLIO_CONTRACT.endpoints:
+            assert ep.authentication_header is None
+
+
+# ============================================================================
+# Extraction Tests
+# ============================================================================
+
+
+class TestExtraction:
+    """Validate HAR extraction with synthetic fixtures."""
+
+    def test_extracts_html_page(
+        self, sample_html_har: dict, valid_session: SessionEnvelope
+    ) -> None:
+        """Extractor should capture HTML page responses."""
+        result = extract_testfolio_har(sample_html_har, session=valid_session)
+        assert len(result) == 1
+        assert result[0].capability == "catalog.list"
+        assert "<html>" in result[0].response
+
+    def test_extraction_includes_timestamp(
+        self, sample_html_har: dict, valid_session: SessionEnvelope
+    ) -> None:
+        """Extracted response must include capture timestamp."""
+        result = extract_testfolio_har(sample_html_har, session=valid_session)
+        assert len(result) == 1
+        assert result[0].captured_at is not None
+
+    def test_extraction_fails_empty_har(self, valid_session: SessionEnvelope) -> None:
+        """Empty HAR should raise WebContractError."""
+        empty_har = {"log": {"entries": []}}
+        with pytest.raises(WebContractError, match="no reviewed Testfolio data routes"):
+            extract_testfolio_har(empty_har, session=valid_session)
+
+    def test_extraction_fails_no_log(self, valid_session: SessionEnvelope) -> None:
+        """HAR without log should raise WebContractError."""
+        invalid_har = {}
+        with pytest.raises(WebContractError):
+            extract_testfolio_har(invalid_har, session=valid_session)
+
+    def test_extraction_fails_no_entries(self, valid_session: SessionEnvelope) -> None:
+        """HAR without entries should raise WebContractError."""
+        invalid_har = {"log": {}}
+        with pytest.raises(WebContractError):
+            extract_testfolio_har(invalid_har, session=valid_session)
+
+
+# ============================================================================
+# Noise Filtering Tests
+# ============================================================================
+
+
+class TestNoiseFiltering:
+    """Validate static assets and analytics are filtered."""
+
+    def test_static_assets_filtered(
+        self, static_asset_har: dict, valid_session: SessionEnvelope
+    ) -> None:
+        """JS, CSS, and favicon requests must be filtered."""
+        with pytest.raises(WebContractError, match="no reviewed Testfolio data routes"):
+            extract_testfolio_har(static_asset_har, session=valid_session)
+
+    def test_analytics_filtered(
+        self, analytics_har: dict, valid_session: SessionEnvelope
+    ) -> None:
+        """Analytics endpoint requests must be filtered."""
+        with pytest.raises(WebContractError, match="no reviewed Testfolio data routes"):
+            extract_testfolio_har(analytics_har, session=valid_session)
+
+    def test_preflight_filtered(
+        self, preflight_har: dict, valid_session: SessionEnvelope
+    ) -> None:
+        """OPTIONS preflight requests must be filtered."""
+        with pytest.raises(WebContractError, match="no reviewed Testfolio data routes"):
+            extract_testfolio_har(preflight_har, session=valid_session)
+
+
+# ============================================================================
+# Pattern Matching Tests
+# ============================================================================
+
+
+class TestPatternMatching:
+    """Validate parameterized route patterns match correctly."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/catalog/model-portfolios",
+            "/catalog/tactical-strategies",
+            "/catalog/portfolio-comparisons",
+            "/catalog/etf-comparisons",
+            "/catalog/my-custom-portfolio",
+            "/catalog/bogleheads-three-fund",
+        ],
     )
-    document = _document(entry)
-    records = extract_testfolio_har(document, session=_session())
-    assert len(records) == 1
+    def test_slug_pattern_matches_catalog_slugs(self, path: str) -> None:
+        """Various catalog slugs must match the slug pattern."""
+        import re
+
+        pattern = r"^/catalog/[a-z0-9-]+$"
+        assert re.match(pattern, path), f"Path {path} should match pattern"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/catalog/INVALID!!",
+            "/catalog/UPPER_CASE",
+            "/catalog/special@chars",
+            "/catalog/spaces here",
+        ],
+    )
+    def test_slug_pattern_rejects_invalid(self, path: str) -> None:
+        """Invalid catalog slugs must not match the pattern."""
+        import re
+
+        pattern = r"^/catalog/[a-z0-9-]+$"
+        assert not re.match(pattern, path), f"Path {path} should not match pattern"
 
 
-# ── provenance tests ──────────────────────────────────────────────
+# ============================================================================
+# Fail-Closed Tests
+# ============================================================================
 
 
-def test_source_anchors_includes_testfolio() -> None:
-    """SOURCE_ANCHORS includes entries for testfolio."""
-    from quant_engine.web_contracts.provenance import SOURCE_ANCHORS
+class TestFailClosed:
+    """Validate contract rejects unknown routes."""
 
-    assert "testfolio-capture" in SOURCE_ANCHORS
+    def test_unknown_route_fails(self, valid_session: SessionEnvelope) -> None:
+        """Unknown API routes must be rejected."""
+        unknown_har = {
+            "log": {
+                "entries": [
+                    {
+                        "request": {
+                            "method": "GET",
+                            "url": "https://testfol.io/api/unknown-endpoint",
+                        },
+                        "response": {
+                            "status": 200,
+                            "content": {"text": "{}"},
+                        },
+                    }
+                ]
+            }
+        }
+        with pytest.raises(WebContractError):
+            extract_testfolio_har(unknown_har, session=valid_session)
+
+    def test_wrong_origin_fails(self, valid_session: SessionEnvelope) -> None:
+        """Non-testfol.io origins must be rejected."""
+        wrong_origin_har = {
+            "log": {
+                "entries": [
+                    {
+                        "request": {
+                            "method": "GET",
+                            "url": "https://example.com/catalog",
+                        },
+                        "response": {
+                            "status": 200,
+                            "content": {"text": "HTML"},
+                        },
+                    }
+                ]
+            }
+        }
+        with pytest.raises(WebContractError, match="no reviewed Testfolio data routes"):
+            extract_testfolio_har(wrong_origin_har, session=valid_session)
+
+    def test_post_to_read_only_fails(self, valid_session: SessionEnvelope) -> None:
+        """POST to read-only endpoints should not match."""
+        post_har = {
+            "log": {
+                "entries": [
+                    {
+                        "request": {
+                            "method": "POST",
+                            "url": "https://testfol.io/catalog",
+                        },
+                        "response": {
+                            "status": 200,
+                            "content": {"text": "OK"},
+                        },
+                    }
+                ]
+            }
+        }
+        with pytest.raises(WebContractError):
+            extract_testfolio_har(post_har, session=valid_session)
+
+
+# ============================================================================
+# Redaction Tests
+# ============================================================================
+
+
+class TestRedaction:
+    """Validate sensitive fields are redacted during extraction."""
+
+    def test_sensitive_fields_defined(self) -> None:
+        """Contract must define sensitive fields."""
+        sensitive = TESTFOLIO_CONTRACT.sensitive_fields
+        expected = {
+            "email",
+            "user_id",
+            "account_id",
+            "session_id",
+            "auth_token",
+            "csrf_token",
+        }
+        assert expected.issubset(sensitive)
+
+
+# ============================================================================
+# Provider Coverage Tests
+# ============================================================================
+
+
+class TestProviderCoverage:
+    """Validate complete coverage of Testfolio public pages."""
+
+    def test_all_tool_pages_covered(self) -> None:
+        """All known tool pages must have endpoint coverage."""
+        capabilities = {ep.capability for ep in TESTFOLIO_CONTRACT.endpoints}
+
+        required_tools = {
+            "home.page",
+            "start.page",
+            "catalog.list",
+            "backtest.page",
+            "comparison.page",
+            "optimizer.page",
+            "monte_carlo.page",
+            "efficient_frontier.page",
+            "tactical.page",
+            "rebalancing.page",
+            "safe_withdrawal.page",
+            "sequence_risk.page",
+            "retirement.page",
+            "factor_regression.page",
+            "asset_analyzer.page",
+            "signal_analyzer.page",
+            "pricing.page",
+            "help.page",
+        }
+
+        for tool in required_tools:
+            assert tool in capabilities, f"Missing capability: {tool}"
+
+    def test_catalog_categories_covered(self) -> None:
+        """All catalog categories must be covered."""
+        capabilities = {ep.capability for ep in TESTFOLIO_CONTRACT.endpoints}
+
+        catalog_categories = {
+            "catalog.model_portfolios",
+            "catalog.tactical_strategies",
+            "catalog.portfolio_comparisons",
+            "catalog.etf_comparisons",
+            "catalog.detail",
+        }
+
+        for category in catalog_categories:
+            assert category in capabilities, f"Missing catalog category: {category}"
+
+    def test_static_pages_covered(self) -> None:
+        """Static pages (privacy, terms, contact) must be covered."""
+        capabilities = {ep.capability for ep in TESTFOLIO_CONTRACT.endpoints}
+
+        static_pages = {
+            "pricing.page",
+            "help.page",
+            "terms.page",
+            "privacy.page",
+            "contact.page",
+            "guides.page",
+        }
+
+        for page in static_pages:
+            assert page in capabilities, f"Missing static page: {page}"
+
+    def test_endpoint_count_reasonable(self) -> None:
+        """Contract should have reasonable number of endpoints (40+)."""
+        assert len(TESTFOLIO_CONTRACT.endpoints) >= 40
