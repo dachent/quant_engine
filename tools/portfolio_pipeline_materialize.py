@@ -225,7 +225,7 @@ def _recipe(path: Path) -> dict[str, Any]:
     )
     vertical = _load(vertical_path, "vertical recipe")
     if (
-        vertical.get("schema_version") != 6
+        vertical.get("schema_version") not in {6, 7}
         or vertical.get("release_commit") != recipe["release_commit"]
         or vertical.get("as_of_date") != recipe["as_of_date"]
     ):
@@ -241,9 +241,11 @@ def _recipe(path: Path) -> dict[str, Any]:
 
 def _vertical_source_paths(vertical_path: Path) -> list[Path]:
     vertical = _load(vertical_path, "vertical recipe")
+    schema_version = vertical.get("schema_version")
+    if schema_version not in {6, 7}:
+        raise MaterializationError("vertical recipe schema differs")
     paths = [vertical_path]
     for key in (
-        "provider_ledger_spec",
         "baseline_spec",
         "base_factor_file",
         "implementation_reconciliation",
@@ -254,6 +256,15 @@ def _vertical_source_paths(vertical_path: Path) -> list[Path]:
         if not isinstance(value, dict):
             raise MaterializationError(f"vertical recipe {key} differs")
         paths.append(_absolute(value.get("path"), f"vertical recipe {key}.path"))
+    provider_key = (
+        "provider_ledger_spec" if schema_version == 6 else "provider_ledger_generation"
+    )
+    provider = vertical.get(provider_key)
+    if not isinstance(provider, dict):
+        raise MaterializationError(f"vertical recipe {provider_key} differs")
+    paths.append(
+        _absolute(provider.get("path"), f"vertical recipe {provider_key}.path")
+    )
     for key in (
         "strategy_attribution_root",
         "decomposition_plan_bundle",
@@ -281,7 +292,7 @@ def create_recipe(
     output: Path,
 ) -> dict[str, Any]:
     vertical = _load(vertical_recipe.resolve(), "vertical recipe")
-    if vertical.get("schema_version") != 6:
+    if vertical.get("schema_version") not in {6, 7}:
         raise MaterializationError("vertical recipe schema differs")
     expected: dict[str, object] = {}
     for role in RELEASE_ROLES:

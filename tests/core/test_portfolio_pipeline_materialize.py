@@ -310,6 +310,35 @@ def test_create_recipe_accepts_schema_v6_vertical_recipe(tmp_path: Path) -> None
     assert materializer._recipe(output)["release_commit"] == "a" * 40
 
 
+def test_create_recipe_accepts_schema_v7_provider_generation(tmp_path: Path) -> None:
+    source_recipe, proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    provider_generation = tmp_path / "provider-ledger-generation"
+    _write_json(provider_generation / "catalog.json", {"synthetic": True})
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(provider_generation)
+    vertical["schema_version"] = 7
+    _write_json(vertical_path, vertical)
+    source["vertical_recipe"] = _definition(vertical_path)
+    _write_json(source_recipe, source)
+    output = tmp_path / "created-schema-v7-pipeline-recipe.json"
+
+    result = materializer.create_recipe(
+        vertical_recipe=vertical_path,
+        proof_root=proof_root,
+        qa_dir=Path(source["qa_dir"]["path"]),
+        pipeline_id="schema-v7-release",
+        output=output,
+    )
+
+    assert result == {"pipeline_id": "schema-v7-release", "recipe": str(output)}
+    paths = materializer._vertical_source_paths(vertical_path)
+    assert provider_generation in paths
+    assert Path(vertical["base_factor_file"]["path"]) in paths
+
+
 def test_semantic_reconciliation_calculates_all_six_bridges(tmp_path: Path) -> None:
     recipe, output_root = _fixture(tmp_path)
 
@@ -526,6 +555,7 @@ def test_generated_semantic_command_declares_exact_gate_file(
             "correlation_source_root",
             "decomposition_plan_bundle",
             "legacy_panel",
+            "provider_ledger_generation",
             "provider_ledger_spec",
         }
     }
