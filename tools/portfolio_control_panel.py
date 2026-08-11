@@ -665,14 +665,15 @@ def _source_inputs(legacy_panel: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             raise ControlPanelValidationError(
                 "rolled frozen source-shell hashes differ"
             )
-        legacy = _object(
-            rolled.get("candidate_appendix"), "rolled candidate appendix"
-        )
+        legacy = _object(rolled.get("candidate_appendix"), "rolled candidate appendix")
         normalized_sha256 = _text(
             appendix.get("normalized_sha256"),
             "frozen_appendix.normalized_sha256",
         )
-        if hashlib.sha256(canonical_json_bytes(legacy)).hexdigest() != normalized_sha256:
+        if (
+            hashlib.sha256(canonical_json_bytes(legacy)).hexdigest()
+            != normalized_sha256
+        ):
             raise ControlPanelValidationError(
                 "rolled frozen appendix canonical hash differs"
             )
@@ -680,13 +681,10 @@ def _source_inputs(legacy_panel: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             raise ControlPanelValidationError(
                 "rolled frozen appendix source hash differs"
             )
-        if (
-            legacy.get("as_of_date") != appendix.get("as_of_date")
-            or legacy.get("status") != appendix.get("status")
-        ):
-            raise ControlPanelValidationError(
-                "rolled frozen appendix boundary differs"
-            )
+        if legacy.get("as_of_date") != appendix.get("as_of_date") or legacy.get(
+            "status"
+        ) != appendix.get("status"):
+            raise ControlPanelValidationError("rolled frozen appendix boundary differs")
         source_mode = "GOVERNED_PANEL_ROLLFORWARD"
     providers = _objects(legacy.get("providers"), "legacy.providers")
     if len(providers) != appendix.get("candidate_count"):
@@ -1649,8 +1647,7 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
         if history_status is not None:
             accepted = (
                 history_status == "ACCEPTED_FOR_ECONOMIC_INFERENCE"
-                and row.get("live_plus_backtest_status")
-                == "ELIGIBLE_ACCEPTED_HISTORY"
+                and row.get("live_plus_backtest_status") == "ELIGIBLE_ACCEPTED_HISTORY"
             )
             compatibility = "PROVEN_COMPATIBLE" if accepted else str(history_status)
             reason = str(
@@ -1660,9 +1657,7 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
             )
             version_ref = row.get("history_version_ref")
         else:
-            compatibility = str(
-                row.get("version_compatibility_status") or "UNRESOLVED"
-            )
+            compatibility = str(row.get("version_compatibility_status") or "UNRESOLVED")
             report_status = str(
                 row.get("live_plus_backtest_status")
                 or "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
@@ -1701,9 +1696,7 @@ def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
                     "strategy_name": _text(
                         row.get("strategy_name"), "strategy.strategy_name"
                     ),
-                    "version_ref": _text(
-                        version_ref, "strategy history version_ref"
-                    ),
+                    "version_ref": _text(version_ref, "strategy history version_ref"),
                 }
             )
     if blocked:
@@ -3176,15 +3169,11 @@ def _strategy_underwriting(
                         "max_drawdown": strategy.get("account_live_max_drawdown"),
                     },
                     "implementation_reconciliation": {
-                        "status": strategy.get(
-                            "implementation_reconciliation_status"
-                        )
+                        "status": strategy.get("implementation_reconciliation_status")
                         or gap["status"],
                         "comparison_status": (
                             _object(
-                                implementation_detail.get(
-                                    "return_reconciliation", {}
-                                ),
+                                implementation_detail.get("return_reconciliation", {}),
                                 f"implementation metrics {strategy_name}",
                             ).get("status")
                             if implementation_detail is not None

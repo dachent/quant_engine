@@ -1906,7 +1906,10 @@ def _model_result(
     complete_factor_dates = [
         observed
         for observed, factor_row in factor_rows.items()
-        if all(factor_row.values.get(factor_id) is not None for factor_id in model.factor_ids)
+        if all(
+            factor_row.values.get(factor_id) is not None
+            for factor_id in model.factor_ids
+        )
     ]
     factor_observed_start = (
         min(complete_factor_dates).isoformat() if complete_factor_dates else None
@@ -1997,7 +2000,11 @@ def _model_result(
     )
     if latest_factor is None:
         limiting_input = "FACTOR_SOURCE_NO_COMPLETE_MODEL_ROW"
-    elif aligned_end is not None and natural_common_end is not None and aligned_end < natural_common_end:
+    elif (
+        aligned_end is not None
+        and natural_common_end is not None
+        and aligned_end < natural_common_end
+    ):
         limiting_input = "EXACT_DATE_ALIGNMENT_GAP"
     elif latest_target > latest_factor:
         limiting_input = "FACTOR_SOURCE_PUBLICATION_LAG"
@@ -2008,9 +2015,7 @@ def _model_result(
     coverage = {
         "aligned_observations": len(aligned),
         "alignment_ratio": _number(len(aligned) / len(target_rows)),
-        "canonical_live_series_sha256": _canonical_live_series_sha256(
-            live_target_rows
-        ),
+        "canonical_live_series_sha256": _canonical_live_series_sha256(live_target_rows),
         "canonical_live_observed_end": live_target_rows[-1].day.isoformat(),
         "canonical_live_observed_start": live_target_rows[0].day.isoformat(),
         "canonical_live_observations": len(live_target_rows),

@@ -41,7 +41,16 @@ def _grizzly_original_futures(path: Path) -> None:
     sheet.write_row(
         0,
         0,
-        ["Date (EST)", "Action", "SPX", "Prev Price", "Profit / Loss", "PnL %", "Model", "Buy & Hold"],
+        [
+            "Date (EST)",
+            "Action",
+            "SPX",
+            "Prev Price",
+            "Profit / Loss",
+            "PnL %",
+            "Model",
+            "Buy & Hold",
+        ],
     )
     start = datetime(2010, 1, 1)
     model = 100.0
@@ -85,7 +94,10 @@ def _tt(path: Path) -> None:
     for index in range(1_002):
         raw.write_datetime(index + 1, 0, start + timedelta(days=index))
         if index:
-            levels = [level * (1 + 0.001 * (offset + 1)) for offset, level in enumerate(levels)]
+            levels = [
+                level * (1 + 0.001 * (offset + 1))
+                for offset, level in enumerate(levels)
+            ]
         raw.write_row(index + 1, 1, levels)
     workbook.close()
 
@@ -96,7 +108,11 @@ def _qsi_appendix(path: Path) -> None:
     sheet.write_row(0, 0, ["Fund Ticker", "Fund Name", "Fund Role", "Alternatives"])
     start = datetime(2025, 1, 3)
     for index in range(30):
-        sheet.write(index * 0 + 0, index + 4, (start + timedelta(days=7 * index)).strftime("%Y-%m-%d"))
+        sheet.write(
+            index * 0 + 0,
+            index + 4,
+            (start + timedelta(days=7 * index)).strftime("%Y-%m-%d"),
+        )
     sheet.write(4, 0, "Stratum 3x Return")
     sheet.write_row(5, 0, ["SPXL", "Synthetic", "US equity beta", None])
     for index in range(30):
@@ -183,8 +199,7 @@ def _qsi_current_archive(path: Path) -> None:
     workbook.close()
     with ZipFile(path, "w", ZIP_DEFLATED) as archive:
         archive.writestr(
-            "Quanta 72 Paid Sub Files/Weekly_File_Drops/"
-            "stratum_data_combined.xlsx",
+            "Quanta 72 Paid Sub Files/Weekly_File_Drops/stratum_data_combined.xlsx",
             embedded.getvalue(),
         )
 
@@ -323,7 +338,9 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
         "Volatis Strategy",
     }
     assert {row["evidence_layer"] for row in rows} == {"BACKTEST"}
-    assert len([row for row in rows if row["series_id"] == "GrizzlyBears VTMA"]) == 1_001
+    assert (
+        len([row for row in rows if row["series_id"] == "GrizzlyBears VTMA"]) == 1_001
+    )
     assert len([row for row in rows if row["series_id"] == "TT Portfolio"]) == 1_001
     qsi_rows = [row for row in rows if row["series_id"] == "QSI"]
     assert len(qsi_rows) == 2_650
@@ -331,9 +348,10 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
         item for item in manifest["series"] if item["series_id"] == "QSI"
     )
     assert qsi_manifest["exact_weekly_observations"] == 530
-    assert qsi_manifest["daily_reconstruction_validation"][
-        "price_shape_correlation"
-    ] > 0.999
+    assert (
+        qsi_manifest["daily_reconstruction_validation"]["price_shape_correlation"]
+        > 0.999
+    )
     assert len([row for row in rows if row["series_id"] == "Volatis Strategy"]) == 3
     dispositions = {
         item["series_id"]: item for item in manifest["history_dispositions"]
@@ -342,15 +360,20 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
         "EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED"
     )
     assert dispositions["EU [P123]"]["required_for_analysis"] is True
-    assert dispositions["EU [P123]"]["retained_but_not_admitted"][0][
-        "return_observations"
-    ] == 1
-    assert dispositions["Growth at Market Pivot Points [EchoTrade]"][
-        "required_for_analysis"
-    ] is False
-    assert dispositions["[Composer] - The Holy Grail (Buy Copy)"][
-        "required_for_analysis"
-    ] is False
+    assert (
+        dispositions["EU [P123]"]["retained_but_not_admitted"][0]["return_observations"]
+        == 1
+    )
+    assert (
+        dispositions["Growth at Market Pivot Points [EchoTrade]"][
+            "required_for_analysis"
+        ]
+        is False
+    )
+    assert (
+        dispositions["[Composer] - The Holy Grail (Buy Copy)"]["required_for_analysis"]
+        is False
+    )
 
 
 def test_grizzly_lineage_separates_futures_design_from_live_spxl(
@@ -426,9 +449,7 @@ def test_grizzly_manual_live_file_is_validated_as_combined_subset(
 ) -> None:
     blended = tmp_path / "grizzly-all.csv"
     live = tmp_path / "grizzly-live.csv"
-    header = (
-        "Date (ET),Action,SPX,Prev Price,Profit / Loss,PnL %,Model,Buy & Hold\n"
-    )
+    header = "Date (ET),Action,SPX,Prev Price,Profit / Loss,PnL %,Model,Buy & Hold\n"
     start = datetime(2020, 1, 2, 15)
     combined_rows = []
     for index in range(102):

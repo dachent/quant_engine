@@ -22,7 +22,7 @@ import statistics
 from typing import Any, Final, Iterable, Mapping, Sequence
 from xml.etree import ElementTree
 
-import pyarrow.parquet as parquet
+import pyarrow.parquet as parquet  # type: ignore[import-untyped]
 
 from quant_engine.core.contracts import canonical_json_bytes
 
@@ -116,9 +116,7 @@ def _float(value: object | None, name: str) -> float:
     return float(accepted)
 
 
-def _artifact(
-    manifest: Mapping[str, Any], artifact_id: str
-) -> Mapping[str, Any]:
+def _artifact(manifest: Mapping[str, Any], artifact_id: str) -> Mapping[str, Any]:
     matches = [
         item
         for item in manifest.get("artifacts", [])
@@ -170,7 +168,7 @@ def _relative_drawdown(model: Sequence[float], actual: Sequence[float]) -> float
 
 def relative_metrics(
     model: Mapping[date, float], actual: Mapping[date, float]
-) -> dict[str, object]:
+) -> dict[str, Any]:
     common = sorted(set(model) & set(actual))
     if len(common) < 2:
         raise ImplementationReconciliationError(
@@ -180,9 +178,7 @@ def relative_metrics(
     actual_values = [actual[observed] for observed in common]
     active = [
         actual_value - model_value
-        for model_value, actual_value in zip(
-            model_values, actual_values, strict=True
-        )
+        for model_value, actual_value in zip(model_values, actual_values, strict=True)
     ]
     model_cumulative = _compound(model_values)
     actual_cumulative = _compound(actual_values)
@@ -205,16 +201,12 @@ def relative_metrics(
     )
     up = [
         (model_value, actual_value)
-        for model_value, actual_value in zip(
-            model_values, actual_values, strict=True
-        )
+        for model_value, actual_value in zip(model_values, actual_values, strict=True)
         if model_value > 0
     ]
     down = [
         (model_value, actual_value)
-        for model_value, actual_value in zip(
-            model_values, actual_values, strict=True
-        )
+        for model_value, actual_value in zip(model_values, actual_values, strict=True)
         if model_value < 0
     ]
     up_capture = (
@@ -285,12 +277,20 @@ def _aggregate_events(events: Iterable[TradeEvent]) -> list[TradeEvent]:
         total_quantity = sum(quantities, Decimal(0)) if quantities else None
         price = None
         if priced:
-            denominator = sum((abs(row.quantity or Decimal(0)) for row in priced), Decimal(0))
+            denominator = sum(
+                (abs(row.quantity or Decimal(0)) for row in priced), Decimal(0)
+            )
             if denominator:
-                price = sum(
-                    (abs(row.quantity or Decimal(0)) * (row.price or Decimal(0)) for row in priced),
-                    Decimal(0),
-                ) / denominator
+                price = (
+                    sum(
+                        (
+                            abs(row.quantity or Decimal(0)) * (row.price or Decimal(0))
+                            for row in priced
+                        ),
+                        Decimal(0),
+                    )
+                    / denominator
+                )
         result.append(
             TradeEvent(
                 observed,
@@ -337,9 +337,7 @@ def _pair_events_one_to_one(
     pairs: list[tuple[TradeEvent, TradeEvent, int]] = []
     for key, raw_model in sorted(model_groups.items()):
         expected = sorted(raw_model, key=lambda event: event.observed)
-        observed = sorted(
-            actual_groups.get(key, []), key=lambda event: event.observed
-        )
+        observed = sorted(actual_groups.get(key, []), key=lambda event: event.observed)
         model_index = 0
         actual_index = 0
         while model_index < len(expected) and actual_index < len(observed):
@@ -468,7 +466,8 @@ def _p123_book_ids(
     primary_rows = [
         row
         for row in managed
-        if "small and micro cap index 125 stocks" in str(row.get("assetName") or "").casefold()
+        if "small and micro cap index 125 stocks"
+        in str(row.get("assetName") or "").casefold()
         and str(row.get("isAccountLive") or "").casefold() == "true"
     ]
     if len(primary_rows) != 1:
@@ -502,14 +501,16 @@ def _p123_book_ids(
         entity_id = str(row.get("assetUid") or "")
         if not entity_id or entity_id == primary_id:
             continue
-        same_account = bool(primary_account) and str(row.get("account") or "") == primary_account
-        same_account_uid = bool(primary_account_uid) and str(
-            row.get("accountUid") or ""
-        ) == primary_account_uid
-        if (
-            (same_account or same_account_uid)
-            and str(row.get("isAccountLive") or "").casefold() == "true"
-        ):
+        same_account = (
+            bool(primary_account) and str(row.get("account") or "") == primary_account
+        )
+        same_account_uid = (
+            bool(primary_account_uid)
+            and str(row.get("accountUid") or "") == primary_account_uid
+        )
+        if (same_account or same_account_uid) and str(
+            row.get("isAccountLive") or ""
+        ).casefold() == "true":
             current_by_id[entity_id] = row
 
     admitted_by_id: dict[str, tuple[str, str]] = {}
@@ -535,13 +536,17 @@ def _p123_book_ids(
         current_by_id.items(), key=lambda item: str(item[1].get("assetName") or "")
     ):
         admitted = admitted_by_id.get(entity_id)
-        role = admitted[0] if admitted else (
-            "TEMP_CONNECTED_"
-            + re.sub(
-                r"[^A-Z0-9]+",
-                "_",
-                str(row.get("assetName") or entity_id).upper(),
-            ).strip("_")[:72]
+        role = (
+            admitted[0]
+            if admitted
+            else (
+                "TEMP_CONNECTED_"
+                + re.sub(
+                    r"[^A-Z0-9]+",
+                    "_",
+                    str(row.get("assetName") or entity_id).upper(),
+                ).strip("_")[:72]
+            )
         )
         result[role] = {
             "connection_status": (
@@ -605,8 +610,7 @@ def _model_account_cash(
         if reference
         and reference
         in {
-            str(row.get(field) or "")
-            for field in ("_entity_id", "id", "name", "label")
+            str(row.get(field) or "") for field in ("_entity_id", "id", "name", "label")
         }
     ]
     if len(matches) != 1:
@@ -660,7 +664,7 @@ def _ai_reconciliation(
     ibkr_catalog: Mapping[str, Any],
     ibkr_xml_paths: Sequence[Path],
     ledger: Mapping[str, Any],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     tables = p123_root / "tables"
     managed = parquet.read_table(
         tables / "har_managed_metadata.parquet",
@@ -723,9 +727,7 @@ def _ai_reconciliation(
         ]
         for role, item in book_inventory.items()
     }
-    coverage = {
-        role: event_coverage(rows, actual) for role, rows in books.items()
-    }
+    coverage = {role: event_coverage(rows, actual) for role, rows in books.items()}
     classification = {
         "AMBIGUOUS_PRIMARY_AND_TEMPORARY": 0,
         "PRIMARY_ONLY": 0,
@@ -738,9 +740,7 @@ def _ai_reconciliation(
             _matched(model, event) for model in books["PRIMARY_AI_FACTOR"]
         )
         temporary_match = any(
-            _matched(model, event)
-            for role in temporary_roles
-            for model in books[role]
+            _matched(model, event) for role in temporary_roles for model in books[role]
         )
         if primary_match and temporary_match:
             classification["AMBIGUOUS_PRIMARY_AND_TEMPORARY"] += 1
@@ -775,9 +775,7 @@ def _ai_reconciliation(
         declared_overlap.get("account_minus_provider_cumulative"),
         "Portfolio123 declared cumulative gap",
     )
-    actual_fees = sum(
-        (row.fees or Decimal(0) for row in actual), Decimal(0)
-    )
+    actual_fees = sum((row.fees or Decimal(0) for row in actual), Decimal(0))
     primary_model_fees = sum(
         (row.fees or Decimal(0) for row in books["PRIMARY_AI_FACTOR"]),
         Decimal(0),
@@ -819,9 +817,7 @@ def _ai_reconciliation(
         ],
         "return_reconciliation": metrics,
         "return_window_comparison": {
-            "expanded_exact_common_gap": metrics[
-                "account_minus_model_cumulative"
-            ],
+            "expanded_exact_common_gap": metrics["account_minus_model_cumulative"],
             "expanded_minus_declared_gap": (
                 float(metrics["account_minus_model_cumulative"]) - declared_gap
             ),
@@ -838,7 +834,8 @@ def _ai_reconciliation(
                     "but no primary-book candidate within the declared lag."
                 ),
                 "status": (
-                    "CONFIRMED" if current_temporary_count and temporary_unique
+                    "CONFIRMED"
+                    if current_temporary_count and temporary_unique
                     else "NOT_OBSERVED"
                 ),
             },
@@ -986,9 +983,9 @@ def _tt_allocation_events(
         composite: dict[str, Decimal] = {}
         for component in components:
             for symbol, weight in state[component].items():
-                composite[symbol] = composite.get(symbol, Decimal(0)) + weight / Decimal(
-                    len(components)
-                )
+                composite[symbol] = composite.get(
+                    symbol, Decimal(0)
+                ) + weight / Decimal(len(components))
         if previous is not None:
             for symbol in sorted(set(previous) | set(composite)):
                 delta = composite.get(symbol, Decimal(0)) - previous.get(
@@ -1068,7 +1065,10 @@ def _tt_current_weights(
     current_account_ids: set[str] = set()
     actual_values: dict[str, Decimal] = {}
     for row in schwab.get("positions", []):
-        if not isinstance(row, dict) or str(row.get("record_id")) not in accepted_positions:
+        if (
+            not isinstance(row, dict)
+            or str(row.get("record_id")) not in accepted_positions
+        ):
             continue
         value = row.get("market_value")
         if not isinstance(value, dict) or value.get("status") != "AVAILABLE":
@@ -1098,14 +1098,14 @@ def _tt_current_weights(
         and str(row.get("account_id")) in current_account_ids
     ]
     latest_nav_by_account: dict[str, tuple[str, Decimal]] = {}
-    for row in nav_rows:
+    for nav_row in nav_rows:
         amount = (
-            _decimal(row.get("nav", {}).get("value"))
-            if isinstance(row.get("nav"), dict)
+            _decimal(nav_row.get("nav", {}).get("value"))
+            if isinstance(nav_row.get("nav"), dict)
             else None
         )
-        account_id = str(row.get("account_id"))
-        observed = str(row.get("as_of_date"))
+        account_id = str(nav_row.get("account_id"))
+        observed = str(nav_row.get("as_of_date"))
         if amount is not None and (
             account_id not in latest_nav_by_account
             or observed > latest_nav_by_account[account_id][0]
@@ -1132,7 +1132,10 @@ def _tt_current_weights(
     economic_actual["CASH_OR_BIL"] = cash + economic_actual.pop("BIL", Decimal(0))
     economic_symbols = set(economic_target) | set(economic_actual)
     economic_distance = sum(
-        abs(economic_actual.get(symbol, Decimal(0)) - economic_target.get(symbol, Decimal(0)))
+        abs(
+            economic_actual.get(symbol, Decimal(0))
+            - economic_target.get(symbol, Decimal(0))
+        )
         for symbol in economic_symbols
     ) / Decimal(2)
     return {
@@ -1167,7 +1170,7 @@ def _tt_reconciliation(
     fees = sum((row.fees or Decimal(0) for row in comparable_actual), Decimal(0))
     component_counts = sorted(
         {
-            int(row.get("component_account_count"))
+            int(row["component_account_count"])
             for row in ledger.get("strategy_returns", [])
             if isinstance(row, dict)
             and row.get("strategy_id") == "tt-portfolio"
@@ -1203,7 +1206,9 @@ def _tt_reconciliation(
         }
 
     first_allocation_date = min(row.observed for row in comparable_model)
-    before_allocation = segment(common_dates[0], first_allocation_date - timedelta(days=1))
+    before_allocation = segment(
+        common_dates[0], first_allocation_date - timedelta(days=1)
+    )
     after_allocation = segment(first_allocation_date, common_dates[-1])
     concentrated_gap = segment(date(2026, 3, 31), date(2026, 4, 1))
     return {
@@ -1252,7 +1257,8 @@ def _tt_reconciliation(
                     "membership changed."
                 ),
                 "status": (
-                    "UNRESOLVED_BLOCKING" if account_boundary_differs
+                    "UNRESOLVED_BLOCKING"
+                    if account_boundary_differs
                     else "NOT_OBSERVED"
                 ),
             },
@@ -1338,7 +1344,9 @@ def _grizzly_model_states(
         with signal_path.open("r", encoding="utf-8-sig", newline="") as handle:
             rows = list(csv.DictReader(handle))
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
-        raise ImplementationReconciliationError("Grizzly signal file is invalid") from exc
+        raise ImplementationReconciliationError(
+            "Grizzly signal file is invalid"
+        ) from exc
     signals: list[tuple[datetime, str]] = []
     for row in rows:
         raw_timestamp = str(
@@ -1346,25 +1354,25 @@ def _grizzly_model_states(
         ).strip()
         if raw_timestamp.endswith(" ET"):
             raw_timestamp = raw_timestamp[:-3]
-        observed = None
+        parsed_observed: datetime | None = None
         for pattern in (
             "%m/%d/%Y, %I:%M %p",
             "%m/%d/%Y %I:%M %p",
             "%Y-%m-%d %H:%M",
         ):
             try:
-                observed = datetime.strptime(raw_timestamp, pattern)
+                parsed_observed = datetime.strptime(raw_timestamp, pattern)
                 break
             except ValueError:
                 continue
-        if observed is None:
+        if parsed_observed is None:
             raise ImplementationReconciliationError(
                 "Grizzly signal timestamp is invalid"
             )
         action = str(row.get("Trade") or row.get("Action") or "").casefold()
         if action not in {"sell", "rebuy", "buy"}:
             continue
-        signals.append((observed, action))
+        signals.append((parsed_observed, action))
     signals.sort()
     calendar = sorted(calendar)
     first = calendar[0]
@@ -1384,20 +1392,20 @@ def _grizzly_model_states(
         effective.setdefault(trade_day, []).append((observed, action))
     states: dict[date, bool] = {}
     events: list[TradeEvent] = []
-    for observed in calendar:
+    for trading_day in calendar:
         before = invested
-        for _, action in sorted(effective.get(observed, [])):
+        for _, action in sorted(effective.get(trading_day, [])):
             invested = action != "sell"
         if invested != before:
             events.append(
-                TradeEvent(observed, "SPXL", "BUY" if invested else "SELL")
+                TradeEvent(trading_day, "SPXL", "BUY" if invested else "SELL")
             )
-        states[observed] = invested
+        states[trading_day] = invested
     return states, events
 
 
 def _grizzly_actual(
-    schwab: Mapping[str, Any]
+    schwab: Mapping[str, Any],
 ) -> tuple[dict[date, bool], list[TradeEvent]]:
     by_account: dict[str, set[str]] = {}
     for row in schwab.get("positions", []):
@@ -1406,7 +1414,9 @@ def _grizzly_actual(
         by_account.setdefault(str(row.get("account_id")), set()).add(
             str(row.get("symbol") or "").upper()
         )
-    matches = [account for account, symbols in by_account.items() if symbols == {"SPXL"}]
+    matches = [
+        account for account, symbols in by_account.items() if symbols == {"SPXL"}
+    ]
     if len(matches) != 1:
         raise ImplementationReconciliationError(
             "dedicated Grizzly SPXL account is not unique"
@@ -1657,7 +1667,9 @@ def build_reconciliation(
     p123_manifest_path = p123_generation_root / "generation.json"
     p123_manifest = _json(p123_manifest_path, "Portfolio123 generation manifest")
     if p123_manifest.get("verification") != "VERIFIED":
-        raise ImplementationReconciliationError("Portfolio123 generation is not verified")
+        raise ImplementationReconciliationError(
+            "Portfolio123 generation is not verified"
+        )
     sources.append(
         _verify_artifact(
             p123_manifest_path,
@@ -1744,15 +1756,11 @@ def build_reconciliation(
             )
         )
 
-    grizzly = _grizzly_reconciliation(
-        grizzly_signals, spxl_market_data, ledger, schwab
-    )
+    grizzly = _grizzly_reconciliation(grizzly_signals, spxl_market_data, ledger, schwab)
     if grizzly_history_validation is not None:
         grizzly["signal_history_validation"] = grizzly_history_validation
     strategies = [
-        _ai_reconciliation(
-            p123_generation_root, ibkr_catalog, xml_paths, ledger
-        ),
+        _ai_reconciliation(p123_generation_root, ibkr_catalog, xml_paths, ledger),
         grizzly,
         _tt_reconciliation(tt_workbook, ledger, schwab),
     ]
@@ -1828,9 +1836,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "output": str(args.output),
                 "reconciliation_id": payload["reconciliation_id"],
-                "strategies": [
-                    item["strategy_id"] for item in payload["strategies"]
-                ],
+                "strategies": [item["strategy_id"] for item in payload["strategies"]],
                 "verification": payload["verification"],
             },
             sort_keys=True,

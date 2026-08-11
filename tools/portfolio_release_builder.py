@@ -125,9 +125,7 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
         if not isinstance(observations, int) or observations < 0:
             raise VerticalBuildError("strategy history observations are invalid")
         if status.startswith("ACCEPTED_") != (observations > 0):
-            raise VerticalBuildError(
-                "strategy history status and observations differ"
-            )
+            raise VerticalBuildError("strategy history status and observations differ")
     if len(set(names)) != len(names):
         raise VerticalBuildError("strategy history contract duplicates a series")
     target_sha, target_size = _sha(correlation_root / "returns.csv")
@@ -1213,9 +1211,7 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--provider-ledger-spec", type=Path, required=True)
     recipe.add_argument("--baseline-spec", type=Path, required=True)
     recipe.add_argument("--base-factor-file", type=Path, required=True)
-    recipe.add_argument(
-        "--implementation-reconciliation", type=Path, required=True
-    )
+    recipe.add_argument("--implementation-reconciliation", type=Path, required=True)
     recipe.add_argument("--strategy-attribution-root", type=Path, required=True)
     recipe.add_argument("--decomposition-plan-bundle", type=Path, required=True)
     recipe.add_argument("--correlation-source-root", type=Path, required=True)

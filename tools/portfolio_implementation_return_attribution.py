@@ -22,11 +22,12 @@ import statistics
 from typing import Any, Final, Iterable, Mapping, Sequence
 from xml.etree import ElementTree
 
-import pyarrow.parquet as parquet
+import pyarrow.parquet as parquet  # type: ignore[import-untyped]
 
 from quant_engine.core.contracts import canonical_json_bytes
 
 import portfolio_implementation_reconciliation as reconciliation
+from portfolio_strategy_history import _cell, _excel_date, _xlsx_rows
 import provider_ledger
 
 
@@ -78,7 +79,9 @@ def _market_rows(path: Path) -> dict[str, dict[date, dict[str, float]]]:
     for row in payload.get("rows", []):
         if not isinstance(row, dict):
             continue
-        symbol = aliases.get(str(row.get("Ticker") or "").upper(), str(row.get("Ticker") or "").upper())
+        symbol = aliases.get(
+            str(row.get("Ticker") or "").upper(), str(row.get("Ticker") or "").upper()
+        )
         observed = date.fromisoformat(str(row.get("Date"))[:10])
         values = {}
         for field in ("Open", "High", "Low", "Close", "Adj Close", "Dividends"):
@@ -300,36 +303,38 @@ def _p123_ai_books(
 ) -> tuple[
     str,
     dict[str, list[reconciliation.TradeEvent]],
-    list[dict[str, object]],
+    list[dict[str, Any]],
     dict[str, dict[date, float]],
     dict[str, date],
 ]:
     tables = p123_root / "tables"
-    managed = parquet.read_table(
-        tables / "har_managed_metadata.parquet"
-    ).to_pylist()
+    managed = parquet.read_table(tables / "har_managed_metadata.parquet").to_pylist()
     registry = parquet.read_table(tables / "strategy_registry.parquet").to_pylist()
-    transactions = parquet.read_table(
-        tables / "har_transactions.parquet"
-    ).to_pylist()
+    transactions = parquet.read_table(tables / "har_transactions.parquet").to_pylist()
     inventory, primary = reconciliation._p123_book_ids(managed, registry)
     books = {
         role: reconciliation._p123_trade_events(transactions, item["entity_id"])
         for role, item in inventory.items()
     }
     primary_id = str(primary.get("assetUid") or "")
-    role_by_entity = {
-        item["entity_id"]: role for role, item in inventory.items()
-    }
+    role_by_entity = {item["entity_id"]: role for role, item in inventory.items()}
     primary_account = str(primary.get("account") or "")
     primary_account_uid = str(primary.get("accountUid") or "")
-    current_perimeter = []
+    current_perimeter: list[dict[str, Any]] = []
     connection_dates: dict[str, date] = {}
     for row in managed:
-        same_account = bool(primary_account) and str(row.get("account") or "") == primary_account
-        same_uid = bool(primary_account_uid) and str(row.get("accountUid") or "") == primary_account_uid
+        same_account = (
+            bool(primary_account) and str(row.get("account") or "") == primary_account
+        )
+        same_uid = (
+            bool(primary_account_uid)
+            and str(row.get("accountUid") or "") == primary_account_uid
+        )
         entity_id = str(row.get("assetUid") or "")
-        if not (same_account or same_uid) or str(row.get("isAccountLive") or "").casefold() != "true":
+        if (
+            not (same_account or same_uid)
+            or str(row.get("isAccountLive") or "").casefold() != "true"
+        ):
             continue
         current_perimeter.append(
             {
@@ -421,7 +426,9 @@ def _event_classification(
     return result, primary_pairs, pairs_by_book
 
 
-def _scale_at(schedules: Mapping[str, Mapping[date, float]], role: str, observed: date) -> float:
+def _scale_at(
+    schedules: Mapping[str, Mapping[date, float]], role: str, observed: date
+) -> float:
     eligible = [
         (effective, value)
         for effective, value in schedules.get(role, {}).items()
@@ -438,11 +445,11 @@ def _ai_model_mix(
     ],
     equity_by_role: Mapping[str, Mapping[date, float]],
     connection_dates: Mapping[str, date],
-    current_perimeter: Sequence[Mapping[str, object]],
+    current_perimeter: Sequence[Mapping[str, Any]],
     nav: Mapping[date, Mapping[str, float]],
     account_returns: Mapping[date, float],
     common: Sequence[date],
-) -> tuple[dict[str, object], dict[str, dict[date, float]]]:
+) -> tuple[dict[str, Any], dict[str, dict[date, float]]]:
     """Construct the model benchmark actually represented in the shared account."""
 
     owners: dict[reconciliation.TradeEvent, set[str]] = defaultdict(set)
@@ -451,7 +458,7 @@ def _ai_model_mix(
             owners[actual].add(role)
 
     schedules: dict[str, dict[date, float]] = defaultdict(dict)
-    schedule_evidence: dict[str, dict[str, object]] = {}
+    schedule_evidence: dict[str, dict[str, Any]] = {}
     for role in (
         "PRIMARY_AI_FACTOR",
         "TEMP_CONNECTED_ANDREAS_SC_AI_MQ_LIVE",
@@ -492,7 +499,11 @@ def _ai_model_mix(
         inception = connection_dates.get(role)
         latest = max(equity_by_role[role])
         market_value = float(perimeter[role].get("reported_market_value") or 0)
-        if inception is not None and market_value > 0 and equity_by_role[role][latest] > 0:
+        if (
+            inception is not None
+            and market_value > 0
+            and equity_by_role[role][latest] > 0
+        ):
             schedules[role][inception] = market_value / equity_by_role[role][latest]
             schedule_evidence[role] = {
                 "effective_scale_observations": 1,
@@ -557,14 +568,14 @@ def _allocate_lot_mtm(
     account_returns: Mapping[date, float],
     start: date,
     end: date,
-) -> tuple[dict[str, float], dict[str, object]]:
-    events_by_day_symbol: dict[
-        tuple[date, str], list[reconciliation.TradeEvent]
-    ] = defaultdict(list)
+) -> tuple[dict[str, float], dict[str, Any]]:
+    events_by_day_symbol: dict[tuple[date, str], list[reconciliation.TradeEvent]] = (
+        defaultdict(list)
+    )
     for event in actual:
         if start <= event.observed <= end:
             events_by_day_symbol[(event.observed, event.symbol)].append(event)
-    lots: dict[str, list[list[object]]] = defaultdict(list)
+    lots: dict[str, list[list[Any]]] = defaultdict(list)
     daily_contributions: dict[date, dict[str, float]] = {}
     reconciliation_adjustments = 0
 
@@ -573,9 +584,7 @@ def _allocate_lot_mtm(
         current = sum(float(lot[0]) for lot in lots[symbol])
         difference = expected - current
         if abs(difference) > 1e-6:
-            lots[symbol].append(
-                [difference, "OPENING_OR_POSITION_RECONCILIATION"]
-            )
+            lots[symbol].append([difference, "OPENING_OR_POSITION_RECONCILIATION"])
             reconciliation_adjustments += 1
 
     def apply_event(symbol: str, event: reconciliation.TradeEvent) -> None:
@@ -610,7 +619,9 @@ def _allocate_lot_mtm(
             denominator = sum(abs(float(lot[0])) for lot in lots[symbol])
             if denominator:
                 for quantity, category in lots[symbol]:
-                    pnl_by_category[str(category)] += prior * abs(float(quantity)) / denominator
+                    pnl_by_category[str(category)] += (
+                        prior * abs(float(quantity)) / denominator
+                    )
             else:
                 pnl_by_category["CASH_FINANCING_FEES_TAXES_AND_UNCLASSIFIED"] += prior
 
@@ -623,17 +634,25 @@ def _allocate_lot_mtm(
             intraday = row.get("transactionMtm", 0.0) + row.get("commissions", 0.0)
             if event_total:
                 for event, weight in zip(day_events, event_weights, strict=True):
-                    pnl_by_category[classifications[event]] += intraday * weight / event_total
+                    pnl_by_category[classifications[event]] += (
+                        intraday * weight / event_total
+                    )
             else:
-                pnl_by_category["CASH_FINANCING_FEES_TAXES_AND_UNCLASSIFIED"] += intraday
-            pnl_by_category["CASH_FINANCING_FEES_TAXES_AND_UNCLASSIFIED"] += row.get("other", 0.0)
+                pnl_by_category["CASH_FINANCING_FEES_TAXES_AND_UNCLASSIFIED"] += (
+                    intraday
+                )
+            pnl_by_category["CASH_FINANCING_FEES_TAXES_AND_UNCLASSIFIED"] += row.get(
+                "other", 0.0
+            )
             allocated = (
                 row.get("priorOpenMtm", 0.0)
                 + row.get("transactionMtm", 0.0)
                 + row.get("commissions", 0.0)
                 + row.get("other", 0.0)
             )
-            pnl_by_category["CASH_FINANCING_FEES_TAXES_AND_UNCLASSIFIED"] += row.get("total", 0.0) - allocated
+            pnl_by_category["CASH_FINANCING_FEES_TAXES_AND_UNCLASSIFIED"] += (
+                row.get("total", 0.0) - allocated
+            )
             for event in day_events:
                 apply_event(symbol, event)
             adjust_inventory(symbol, row.get("closeQuantity", 0.0))
@@ -648,7 +667,11 @@ def _allocate_lot_mtm(
         )
         daily_contributions[observed] = contributions
     linked = _frongello_link(
-        {item: value for item, value in account_returns.items() if start <= item <= end},
+        {
+            item: value
+            for item, value in account_returns.items()
+            if start <= item <= end
+        },
         daily_contributions,
     )
     return linked, {
@@ -662,15 +685,13 @@ def _ai_execution_shortfall(
     *,
     primary_events: Sequence[reconciliation.TradeEvent],
     actual_events: Sequence[reconciliation.TradeEvent],
-    pairs: Sequence[
-        tuple[reconciliation.TradeEvent, reconciliation.TradeEvent, int]
-    ],
+    pairs: Sequence[tuple[reconciliation.TradeEvent, reconciliation.TradeEvent, int]],
     scale_schedules: Mapping[str, Mapping[date, float]],
     nav: Mapping[date, Mapping[str, float]],
     daily_mtm: Mapping[date, Mapping[str, Mapping[str, float]]],
     start: date,
     end: date,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     pair_by_model = {model: (actual, lag) for model, actual, lag in pairs}
     missed = [
         item
@@ -698,19 +719,38 @@ def _ai_execution_shortfall(
         sizing_ratios.append(float(actual.quantity) / target_quantity)
         side_sign = -1.0 if model.side == "BUY" else 1.0
         if lag > 0:
-            close = daily_mtm.get(actual.observed, {}).get(actual.symbol, {}).get("closePrice")
+            close = (
+                daily_mtm.get(actual.observed, {})
+                .get(actual.symbol, {})
+                .get("closePrice")
+            )
             if close:
-                delay_effect += side_sign * target_quantity * (close - float(model.price)) / account_nav
-                fill_effect += side_sign * target_quantity * (float(actual.price) - close) / account_nav
+                delay_effect += (
+                    side_sign
+                    * target_quantity
+                    * (close - float(model.price))
+                    / account_nav
+                )
+                fill_effect += (
+                    side_sign
+                    * target_quantity
+                    * (float(actual.price) - close)
+                    / account_nav
+                )
                 tested += 1
         else:
-            fill_effect += side_sign * target_quantity * (float(actual.price) - float(model.price)) / account_nav
+            fill_effect += (
+                side_sign
+                * target_quantity
+                * (float(actual.price) - float(model.price))
+                / account_nav
+            )
             tested += 1
 
     # Closed missed-buy lots provide a conservative, source-native estimate of
     # the return the account did not receive.  Open missed lots and missed exits
     # remain in the residual.
-    open_lots: dict[str, list[list[object]]] = defaultdict(list)
+    open_lots: dict[str, list[list[Any]]] = defaultdict(list)
     missed_buy_contribution = 0.0
     missed_buy_closed_quantity = 0.0
     for event in sorted(
@@ -726,9 +766,7 @@ def _ai_execution_shortfall(
                     quantity,
                     float(event.price),
                     event not in pair_by_model,
-                    _scale_at(
-                        scale_schedules, "PRIMARY_AI_FACTOR", event.observed
-                    ),
+                    _scale_at(scale_schedules, "PRIMARY_AI_FACTOR", event.observed),
                     nav.get(event.observed, {}).get("startingValue"),
                 ]
             )
@@ -771,7 +809,7 @@ def ai_attribution(
     ibkr_catalog: Mapping[str, Any],
     xml_paths: Sequence[Path],
     ledger: Mapping[str, Any],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     (
         _,
         books,
@@ -921,9 +959,7 @@ def ai_attribution(
             "gap_pp": exact_gap_pp,
             "model_return": exact_model,
             "effective_account_model_mix_return": mixed_model_return,
-            "effective_account_model_mix_gap_pp": (
-                exact_account - mixed_model_return
-            )
+            "effective_account_model_mix_gap_pp": (exact_account - mixed_model_return)
             * 100.0,
             "status": "EXACT_OPERATIONAL_BRIDGE_NO_UNNAMED_RESIDUAL",
         },
@@ -946,14 +982,16 @@ def ai_attribution(
 
 def _grizzly_account(
     schwab: Mapping[str, Any],
-) -> tuple[str, list[Mapping[str, Any]], list[reconciliation.TradeEvent]]:
+) -> tuple[str, list[dict[str, Any]], list[reconciliation.TradeEvent]]:
     by_account: dict[str, set[str]] = defaultdict(set)
     for row in schwab.get("positions", []):
         if isinstance(row, dict):
             by_account[str(row.get("account_id"))].add(
                 str(row.get("symbol") or "").upper()
             )
-    matches = [account for account, symbols in by_account.items() if symbols == {"SPXL"}]
+    matches = [
+        account for account, symbols in by_account.items() if symbols == {"SPXL"}
+    ]
     if len(matches) != 1:
         raise ReturnAttributionError("dedicated Grizzly account is not unique")
     account = matches[0]
@@ -1045,7 +1083,7 @@ def grizzly_attribution(
     market_data: Path,
     schwab: Mapping[str, Any],
     ledger: Mapping[str, Any],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     all_market = _market_rows(market_data)
     prices = all_market.get("SPXL", {})
     if not prices:
@@ -1070,9 +1108,7 @@ def grizzly_attribution(
     paired_model = {item for item, _, _ in pairs}
     missed = [item for item in model_events if item not in paired_model]
 
-    baseline_events = [
-        (item, prices[item.observed]["Open"]) for item in model_events
-    ]
+    baseline_events = [(item, prices[item.observed]["Open"]) for item in model_events]
     model_proxy = _grizzly_state_simulation(baseline_events, prices, common_end)
 
     after_missed_events = [
@@ -1080,9 +1116,7 @@ def grizzly_attribution(
         for item in model_events
         if item not in missed
     ]
-    after_missed = _grizzly_state_simulation(
-        after_missed_events, prices, common_end
-    )
+    after_missed = _grizzly_state_simulation(after_missed_events, prices, common_end)
 
     after_delay_events = []
     after_fill_events = []
@@ -1096,9 +1130,7 @@ def grizzly_attribution(
         if actual_event.price is None:
             raise ReturnAttributionError("Grizzly fill price is unavailable")
         after_fill_events.append((delayed_event, float(actual_event.price)))
-    after_delay = _grizzly_state_simulation(
-        after_delay_events, prices, common_end
-    )
+    after_delay = _grizzly_state_simulation(after_delay_events, prices, common_end)
     after_fill = _grizzly_state_simulation(after_fill_events, prices, common_end)
     after_sizing = _grizzly_actual_ledger_return(
         rows, prices, common_end, include_income_and_fees=False
@@ -1179,19 +1211,15 @@ def grizzly_attribution(
 def _tt_target_snapshots(
     workbook: Path, components: Sequence[str]
 ) -> dict[date, dict[str, float]]:
-    rows = reconciliation._xlsx_rows(workbook, "raw_tt_allochist")
+    rows = _xlsx_rows(workbook, "raw_tt_allochist")
     component_snapshots: dict[tuple[str, date], dict[str, Decimal]] = {}
     for row in rows[1:]:
-        component = str(reconciliation._cell(row, 0) or "").strip()
+        component = str(_cell(row, 0) or "").strip()
         if component not in components:
             continue
-        observed = reconciliation._excel_date(
-            reconciliation._cell(row, 1), "TT allocation date"
-        )
-        symbol = _canonical_symbol(
-            str(reconciliation._cell(row, 2) or "").strip()
-        )
-        weight = reconciliation._decimal(reconciliation._cell(row, 3))
+        observed = _excel_date(_cell(row, 1), "TT allocation date")
+        symbol = _canonical_symbol(str(_cell(row, 2) or "").strip())
+        weight = reconciliation._decimal(_cell(row, 3))
         if symbol and weight is not None:
             component_snapshots.setdefault((component, observed), {})[symbol] = weight
     by_date: dict[date, list[tuple[str, dict[str, Decimal]]]] = defaultdict(list)
@@ -1208,7 +1236,9 @@ def _tt_target_snapshots(
         for component in components:
             for symbol, weight in state[component].items():
                 composite[symbol] += weight / Decimal(len(components))
-        result[observed] = {symbol: float(weight) for symbol, weight in composite.items()}
+        result[observed] = {
+            symbol: float(weight) for symbol, weight in composite.items()
+        }
     return result
 
 
@@ -1249,19 +1279,21 @@ def _tt_price_returns(
     end: date,
 ) -> tuple[list[date], dict[str, dict[date, float]]]:
     symbols = sorted(prices)
-    common = sorted(
-        set.intersection(
-            *(set(prices[symbol]) for symbol in symbols)
-        )
-    )
+    common = sorted(set.intersection(*(set(prices[symbol]) for symbol in symbols)))
     calendar = [item for item in common if start <= item <= end]
     returns: dict[str, dict[date, float]] = defaultdict(dict)
     for symbol in symbols:
         previous_date = None
         for observed in sorted(prices[symbol]):
             if previous_date is not None and observed in calendar:
-                previous = prices[symbol][previous_date].get("Adj Close") or prices[symbol][previous_date]["Close"]
-                current = prices[symbol][observed].get("Adj Close") or prices[symbol][observed]["Close"]
+                previous = (
+                    prices[symbol][previous_date].get("Adj Close")
+                    or prices[symbol][previous_date]["Close"]
+                )
+                current = (
+                    prices[symbol][observed].get("Adj Close")
+                    or prices[symbol][observed]["Close"]
+                )
                 returns[symbol][observed] = current / previous - 1.0
             previous_date = observed
     return calendar, dict(returns)
@@ -1302,7 +1334,7 @@ def _tt_cash_return_contribution(
     account_returns: Mapping[date, float],
     start: date,
     end: date,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Link retained TT income and explicit fees to the broker return path."""
 
     active_accounts = {
@@ -1325,7 +1357,10 @@ def _tt_cash_return_contribution(
         "Qualified Dividend": "DIVIDENDS",
     }
     for row in schwab.get("transactions", []):
-        if not isinstance(row, dict) or str(row.get("account_id")) not in active_accounts:
+        if (
+            not isinstance(row, dict)
+            or str(row.get("account_id")) not in active_accounts
+        ):
             continue
         raw_day = str(row.get("event_date") or "")
         if not raw_day:
@@ -1336,7 +1371,11 @@ def _tt_cash_return_contribution(
         kind = str(row.get("kind") or "")
         category = included.get(kind)
         amount = row.get("amount")
-        if category and isinstance(amount, dict) and amount.get("status") == "AVAILABLE":
+        if (
+            category
+            and isinstance(amount, dict)
+            and amount.get("status") == "AVAILABLE"
+        ):
             value = float(amount["value"])
             daily[observed][category] += value / capital[observed]
             observed_usd[category] += value
@@ -1369,7 +1408,7 @@ def _tt_actual_holdings_return(
     prices: Mapping[str, Mapping[date, Mapping[str, float]]],
     start: date,
     end: date,
-) -> tuple[dict[str, object], float, float]:
+) -> tuple[dict[str, Any], float, float]:
     """Reconstruct TT security P&L from account holdings and every broker fill."""
 
     rows_by_day = {
@@ -1396,7 +1435,7 @@ def _tt_actual_holdings_return(
         key=lambda row: (str(row["event_date"]), str(row.get("record_id") or "")),
     )
     holdings: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    by_day: dict[date, list[Mapping[str, Any]]] = defaultdict(list)
+    by_day: dict[date, list[dict[str, Any]]] = defaultdict(list)
     for row in transactions:
         observed = date.fromisoformat(str(row["event_date"]))
         account = str(row["account_id"])
@@ -1417,7 +1456,9 @@ def _tt_actual_holdings_return(
         capital = float(broker["beginning_capital"])
         if capital <= 0:
             continue
-        active_accounts = {str(item) for item in broker.get("component_account_ids", [])}
+        active_accounts = {
+            str(item) for item in broker.get("component_account_ids", [])
+        }
         price_pnl = 0.0
         for account in active_accounts:
             for symbol, quantity in holdings[account].items():
@@ -1433,24 +1474,24 @@ def _tt_actual_holdings_return(
                 price_pnl += quantity * (current["Close"] - previous)
 
         fill_pnl = 0.0
-        for row in by_day.get(observed, []):
-            account = str(row["account_id"])
+        for transaction in by_day.get(observed, []):
+            account = str(transaction["account_id"])
             if account not in active_accounts:
                 continue
-            symbol = _canonical_symbol(str(row.get("symbol") or ""))
-            quantity = float(row["quantity"])
-            fill = float(row["execution_price"])
+            symbol = _canonical_symbol(str(transaction.get("symbol") or ""))
+            quantity = float(transaction["quantity"])
+            fill = float(transaction["execution_price"])
             current = prices.get(symbol, {}).get(observed)
             if current is None:
                 unpriced_trade_events += 1
             else:
                 close = current["Close"]
                 fill_pnl += quantity * (
-                    close - fill if row["kind"] == "Buy" else fill - close
+                    close - fill if transaction["kind"] == "Buy" else fill - close
                 )
                 tested_trade_events += 1
             holdings[account][symbol] += quantity * (
-                1.0 if row["kind"] == "Buy" else -1.0
+                1.0 if transaction["kind"] == "Buy" else -1.0
             )
         close_benchmark_daily.append(price_pnl / capital)
         actual_fill_daily.append((price_pnl + fill_pnl) / capital)
@@ -1478,14 +1519,12 @@ def tt_attribution(
     market_data: Sequence[Path],
     schwab: Mapping[str, Any],
     ledger: Mapping[str, Any],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     components = reconciliation._tt_components(workbook)
     snapshots = _tt_target_snapshots(workbook, components)
     prices = _market_rows_many(market_data)
     model_events = _tt_weighted_events(snapshots)
-    actual_events = _canonical_events(
-        reconciliation._tt_actual_events(ledger, schwab)
-    )
+    actual_events = _canonical_events(reconciliation._tt_actual_events(ledger, schwab))
     target_boundary = min(snapshots)
     inherited_account_returns = reconciliation._returns(
         ledger.get("strategy_returns", []),
@@ -1505,12 +1544,16 @@ def tt_attribution(
         evidence_layer="ACCOUNT_LIVE",
     )
     if not account_returns:
-        raise ReturnAttributionError("TT broker-authoritative account path is unavailable")
+        raise ReturnAttributionError(
+            "TT broker-authoritative account path is unavailable"
+        )
     model_returns = reconciliation._tt_model_returns(workbook, components)
     exact_common = sorted(set(model_returns) & set(account_returns))
     eligible_start = [item for item in exact_common if item > target_boundary]
     if not eligible_start:
-        raise ReturnAttributionError("TT post-target-boundary return path is unavailable")
+        raise ReturnAttributionError(
+            "TT post-target-boundary return path is unavailable"
+        )
     start = eligible_start[0]
     end = min(max(account_returns), max(max(rows) for rows in prices.values()))
     snapshots = {
@@ -1519,16 +1562,16 @@ def tt_attribution(
         if target_boundary <= observed <= end
     }
     if not snapshots or min(snapshots) != target_boundary:
-        raise ReturnAttributionError("TT complete target history does not start at boundary")
+        raise ReturnAttributionError(
+            "TT complete target history does not start at boundary"
+        )
     initial = snapshots[target_boundary]
     weighted = [item for item in model_events if start <= item.event.observed <= end]
     comparable_model = [item.event for item in weighted]
     comparable_actual = [
         item for item in actual_events if start <= item.observed <= end
     ]
-    pairs = reconciliation._pair_events_one_to_one(
-        comparable_model, comparable_actual
-    )
+    pairs = reconciliation._pair_events_one_to_one(comparable_model, comparable_actual)
     pair_by_model = {model: (actual, lag) for model, actual, lag in pairs}
     delta_by_event = {item.event: item.delta for item in weighted}
     ideal_schedule = [
@@ -1685,9 +1728,7 @@ def tt_attribution(
             item
             for item in snapshot_dates
             if item > actual_event.observed
-            and abs(
-                snapshots[item].get(actual_event.symbol, 0.0) - target_weight
-            )
+            and abs(snapshots[item].get(actual_event.symbol, 0.0) - target_weight)
             >= 0.0005
         ]
         reentry_boundary = future_changes[0] if future_changes else end
@@ -1725,7 +1766,9 @@ def tt_attribution(
         fill_effect += sign * abs(delta) * (float(actual_event.price) / benchmark - 1.0)
         fill_tested += 1
     common = sorted(
-        item for item in set(model_returns) & set(account_returns) if start <= item <= end
+        item
+        for item in set(model_returns) & set(account_returns)
+        if start <= item <= end
     )
     exact_model = _compound(model_returns[item] for item in common)
     exact_account = _compound(account_returns[item] for item in common)
@@ -1883,7 +1926,7 @@ def build_attribution(
             ledger=ledger,
         ),
     ]
-    payload: dict[str, object] = {
+    payload: dict[str, Any] = {
         "as_of_date": date.fromisoformat(as_of_date).isoformat(),
         "builder": "portfolio-implementation-return-attribution",
         "builder_version": BUILDER_VERSION,
@@ -1915,14 +1958,36 @@ def build_attribution(
         ],
         "schema_version": SCHEMA_VERSION,
         "source_artifacts": [
-            {**_sha256(provider_ledger_root / "provider-ledger.json"), "source_id": "provider-ledger"},
+            {
+                **_sha256(provider_ledger_root / "provider-ledger.json"),
+                "source_id": "provider-ledger",
+            },
             {**_sha256(schwab_catalog), "source_id": "schwab-catalog"},
             {**_sha256(ibkr_catalog_path), "source_id": "ibkr-catalog"},
-            {**_sha256(p123_generation_root / "generation.json"), "source_id": "portfolio123-generation"},
-            {**_sha256(p123_generation_root / "tables" / "har_managed_metadata.parquet"), "source_id": "portfolio123-managed-metadata"},
-            {**_sha256(p123_generation_root / "tables" / "har_transactions.parquet"), "source_id": "portfolio123-model-transactions"},
-            {**_sha256(p123_generation_root / "tables" / "har_equity_curve.parquet"), "source_id": "portfolio123-model-equity-har"},
-            {**_sha256(p123_generation_root / "tables" / "strategy_registry.parquet"), "source_id": "portfolio123-strategy-registry"},
+            {
+                **_sha256(p123_generation_root / "generation.json"),
+                "source_id": "portfolio123-generation",
+            },
+            {
+                **_sha256(
+                    p123_generation_root / "tables" / "har_managed_metadata.parquet"
+                ),
+                "source_id": "portfolio123-managed-metadata",
+            },
+            {
+                **_sha256(p123_generation_root / "tables" / "har_transactions.parquet"),
+                "source_id": "portfolio123-model-transactions",
+            },
+            {
+                **_sha256(p123_generation_root / "tables" / "har_equity_curve.parquet"),
+                "source_id": "portfolio123-model-equity-har",
+            },
+            {
+                **_sha256(
+                    p123_generation_root / "tables" / "strategy_registry.parquet"
+                ),
+                "source_id": "portfolio123-strategy-registry",
+            },
             {**_sha256(grizzly_signals), "source_id": "grizzly-signals"},
             {**_sha256(grizzly_market_data), "source_id": "grizzly-market-data"},
             {**_sha256(tt_workbook), "source_id": "tt-workbook"},
@@ -1934,10 +1999,11 @@ def build_attribution(
         {**_sha256(path), "source_id": "ibkr-activity-flex"} for path in xml_paths
     )
     payload["source_artifacts"].extend(
-        {**_sha256(path), "source_id": "tt-market-data"}
-        for path in tt_market_data
+        {**_sha256(path), "source_id": "tt-market-data"} for path in tt_market_data
     )
-    payload["attribution_id"] = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+    payload["attribution_id"] = hashlib.sha256(
+        canonical_json_bytes(payload)
+    ).hexdigest()
     return canonical_json_bytes(payload)
 
 
@@ -1976,7 +2042,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(content)
     payload = json.loads(content)
-    print(json.dumps({"attribution_id": payload["attribution_id"], "output": str(args.output)}))
+    print(
+        json.dumps(
+            {"attribution_id": payload["attribution_id"], "output": str(args.output)}
+        )
+    )
     return 0
 
 

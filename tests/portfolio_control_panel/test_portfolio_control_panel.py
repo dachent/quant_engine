@@ -1563,9 +1563,7 @@ def test_governed_panel_rollforward_reuses_verified_frozen_appendix(
 ) -> None:
     contract = json.loads(panel.SOURCE_CONTRACT.read_text(encoding="utf-8"))
     raw = json.loads(
-        (inputs["legacy"] / "data" / "dashboard_data.json").read_text(
-            encoding="utf-8"
-        )
+        (inputs["legacy"] / "data" / "dashboard_data.json").read_text(encoding="utf-8")
     )
     candidate_appendix = {
         "as_of_date": contract["frozen_appendix"]["as_of_date"],

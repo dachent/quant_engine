@@ -580,9 +580,7 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
                 "as_of_date": "2026-01-06",
                 "bundle_id": "b" * 64,
                 "returns_artifact": {
-                    "sha256": hashlib.sha256(
-                        history_returns.read_bytes()
-                    ).hexdigest(),
+                    "sha256": hashlib.sha256(history_returns.read_bytes()).hexdigest(),
                     "size_bytes": history_returns.stat().st_size,
                 },
                 "schema_version": 1,
@@ -595,9 +593,7 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
                         "reason": "Exact connected model history was not exported.",
                         "required_for_analysis": True,
                         "series_id": "Missing",
-                        "status": (
-                            "EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED"
-                        ),
+                        "status": ("EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED"),
                         "strategy_version": "missing-current:v1",
                     }
                 ],
@@ -664,17 +660,13 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
     other_mapping = next(
         item for item in proof["series_mappings"] if item["series_id"] == "Other"
     )
-    assert other_mapping["history_status"] == (
-        "ACCEPTED_CURRENT_SPECIFICATION_HISTORY"
-    )
+    assert other_mapping["history_status"] == ("ACCEPTED_CURRENT_SPECIFICATION_HISTORY")
     assert other_mapping["implementation_reconciliation_status"] == "UNRESOLVED"
     missing = next(
         item for item in proof["series_mappings"] if item["series_id"] == "Missing"
     )
     assert missing["live_observations"] == 0
-    assert missing["status"] == (
-        "EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED"
-    )
+    assert missing["status"] == ("EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED")
     assert missing["history_disposition_reason"] == (
         "Exact connected model history was not exported."
     )

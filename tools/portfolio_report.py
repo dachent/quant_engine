@@ -54,9 +54,7 @@ HWM_POLICY: Final = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
 )
 _P123_ENTITY_REF_RE: Final = re.compile(r"\bp123-entity:\d+\b", re.IGNORECASE)
-_P123_ENTITY_TEXT_RE: Final = re.compile(
-    r"\bPortfolio123 entity \d+\b", re.IGNORECASE
-)
+_P123_ENTITY_TEXT_RE: Final = re.compile(r"\bPortfolio123 entity \d+\b", re.IGNORECASE)
 _PROVIDER_ENTITY_TEXT_RE: Final = re.compile(r"\bentity \d{5,}\b", re.IGNORECASE)
 SHEET_NAMES: Final = (
     "Portfolio Summary",
@@ -171,9 +169,7 @@ def _public_report_value(value: object) -> object:
     if isinstance(value, list):
         return [_public_report_value(item) for item in value]
     if isinstance(value, str):
-        sanitized = _P123_ENTITY_TEXT_RE.sub(
-            "Portfolio123 connected entity", value
-        )
+        sanitized = _P123_ENTITY_TEXT_RE.sub("Portfolio123 connected entity", value)
         sanitized = _PROVIDER_ENTITY_TEXT_RE.sub("connected entity", sanitized)
         return _P123_ENTITY_REF_RE.sub("p123-entity:[redacted]", sanitized)
     return value
@@ -882,9 +878,7 @@ def _history_contract(
             raise ReportValidationError(
                 f"strategy history contract duplicates series: {name}"
             )
-        history_status = _text(
-            raw.get("history_status"), f"history status {name}"
-        )
+        history_status = _text(raw.get("history_status"), f"history status {name}")
         _text(raw.get("strategy_version"), f"history version {name}")
         observations = raw.get("backtest_observations")
         if not isinstance(observations, int) or observations < 0:
@@ -2252,9 +2246,7 @@ def build_report_data(
     if history_contract_ref is not None:
         report["strategy_history_contract"] = history_contract_ref
     if implementation_contract_ref is not None:
-        report["implementation_reconciliation_contract"] = (
-            implementation_contract_ref
-        )
+        report["implementation_reconciliation_contract"] = implementation_contract_ref
     if hwm_summary is not None:
         report["hwm_summary"] = hwm_summary
     if attribution_catalog is not None and attribution_ref is not None:

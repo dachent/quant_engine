@@ -194,9 +194,7 @@ def _xlsx_rows(path: Path, sheet_name: str) -> list[list[object | None]]:
         return _xlsx_rows_from_archive(archive, sheet_name)
 
 
-def _xlsx_rows_content(
-    content: bytes, sheet_name: str
-) -> list[list[object | None]]:
+def _xlsx_rows_content(content: bytes, sheet_name: str) -> list[list[object | None]]:
     """Read an XLSX embedded in a retained provider archive."""
 
     try:
@@ -345,9 +343,7 @@ def _grizzly_implementation_lineage(
         "SPY": _grizzly_simulation_dates(spy_workbook, "SPY"),
         "SPXL": _grizzly_simulation_dates(spxl_workbook, "SPXL"),
     }
-    if not (
-        variant_dates["SPX"] == variant_dates["SPY"] == variant_dates["SPXL"]
-    ):
+    if not (variant_dates["SPX"] == variant_dates["SPY"] == variant_dates["SPXL"]):
         raise StrategyHistoryError(
             "Grizzly SPX, SPY, and SPXL research backtests do not share one calendar"
         )
@@ -466,9 +462,11 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
     """
 
     try:
-        import pyarrow.parquet as parquet
+        import pyarrow.parquet as parquet  # type: ignore[import-untyped]
     except ImportError as exc:  # pragma: no cover - installed project dependency
-        raise StrategyHistoryError("pyarrow is required for Portfolio123 proof") from exc
+        raise StrategyHistoryError(
+            "pyarrow is required for Portfolio123 proof"
+        ) from exc
 
     metadata_path, metadata_artifact, manifest = _verified_generation_artifact(
         generation_root, "tables/har_managed_metadata.parquet"
@@ -479,10 +477,8 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
     daily_path, daily_artifact, daily_manifest = _verified_generation_artifact(
         generation_root, "tables/returns_daily.parquet"
     )
-    registry_path, registry_artifact, registry_manifest = (
-        _verified_generation_artifact(
-            generation_root, "tables/strategy_registry.parquet"
-        )
+    registry_path, registry_artifact, registry_manifest = _verified_generation_artifact(
+        generation_root, "tables/strategy_registry.parquet"
     )
     generation_id = str(manifest.get("generation_id", ""))
     if (
@@ -523,9 +519,7 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
     exact_equity = [
         row for row in equity if str(row.get("_entity_id") or "") in exact_ids
     ]
-    exact_daily = [
-        row for row in daily if str(row.get("entity_id") or "") in exact_ids
-    ]
+    exact_daily = [row for row in daily if str(row.get("entity_id") or "") in exact_ids]
     if exact_equity or exact_daily:
         raise StrategyHistoryError(
             "Portfolio123 exact EU history is now present; admit it before publishing"
@@ -641,7 +635,7 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
 
 def _grizzly_trade_history(
     path: Path, source_id: str
-) -> tuple[list[dict[str, object]], dict[str, object]]:
+) -> tuple[list[dict[str, Any]], dict[str, object]]:
     source = _source_identity(path, source_id)
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -661,7 +655,7 @@ def _grizzly_trade_history(
             raw_rows = list(reader)
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         raise StrategyHistoryError("Grizzly trade history is invalid") from exc
-    rows: list[dict[str, object]] = []
+    rows: list[dict[str, Any]] = []
     for raw in raw_rows:
         timestamp = str(raw.get("Date (ET)") or "").strip()
         if timestamp.endswith(" ET"):
@@ -697,7 +691,9 @@ def _grizzly_trade_history(
             }
         )
     if len(rows) < 100 or rows != sorted(rows, key=lambda item: item["observed"]):
-        raise StrategyHistoryError("Grizzly trade history is unexpectedly short or unsorted")
+        raise StrategyHistoryError(
+            "Grizzly trade history is unexpectedly short or unsorted"
+        )
     if len({item["observed"] for item in rows}) != len(rows):
         raise StrategyHistoryError("Grizzly trade-history timestamps overlap")
     return rows, source
@@ -705,7 +701,7 @@ def _grizzly_trade_history(
 
 def _grizzly_manual_histories(
     blended_path: Path, live_path: Path
-) -> tuple[list[dict[str, object]], dict[str, object], list[dict[str, object]]]:
+) -> tuple[list[dict[str, Any]], dict[str, object], list[dict[str, object]]]:
     blended, blended_source = _grizzly_trade_history(
         blended_path, "grizzlybulls-all-backtest-live-trade-history"
     )
@@ -713,13 +709,14 @@ def _grizzly_manual_histories(
         live_path, "grizzlybulls-live-only-trade-history"
     )
     by_timestamp = {item["observed"]: item for item in blended}
-    exact_overlap = [item for item in live if by_timestamp.get(item["observed"]) == item]
+    exact_overlap = [
+        item for item in live if by_timestamp.get(item["observed"]) == item
+    ]
     missing = [item for item in live if item["observed"] not in by_timestamp]
     differing = [
         item
         for item in live
-        if item["observed"] in by_timestamp
-        and by_timestamp[item["observed"]] != item
+        if item["observed"] in by_timestamp and by_timestamp[item["observed"]] != item
     ]
     if (
         differing
@@ -733,7 +730,9 @@ def _grizzly_manual_histories(
         )
     sell_rows = [item for item in blended if item["action"] == "SELL"]
     if len(sell_rows) < 50 or any(item["pnl_fraction"] is None for item in sell_rows):
-        raise StrategyHistoryError("Grizzly realized model-return evidence is incomplete")
+        raise StrategyHistoryError(
+            "Grizzly realized model-return evidence is incomplete"
+        )
     validation = {
         "all_history_observations": len(blended),
         "all_history_observed_start": blended[0]["observed"].isoformat(),
@@ -785,7 +784,7 @@ def _yahoo_price_extension(
 def _grizzly_proxy_extension(
     *,
     exact: Sequence[tuple[date, Decimal]],
-    manual: Sequence[Mapping[str, object]],
+    manual: Sequence[Mapping[str, Any]],
     price_root: Path,
     price_extension_json: Path,
     as_of_date: date,
@@ -903,6 +902,9 @@ def _grizzly(
     implementation_lineage: dict[str, object] | None = None
     lineage_sources: list[dict[str, object]] = []
     if all(item is not None for item in lineage_inputs):
+        assert original_design_workbook is not None
+        assert spx_workbook is not None
+        assert spy_workbook is not None
         implementation_lineage, lineage_sources = _grizzly_implementation_lineage(
             original_design_workbook=original_design_workbook,
             spx_workbook=spx_workbook,
@@ -944,6 +946,11 @@ def _grizzly(
             raise StrategyHistoryError(
                 "Grizzly manual extension requires both trade files, prices, and as-of date"
             )
+        assert blended_trade_history is not None
+        assert live_trade_history is not None
+        assert price_root is not None
+        assert price_extension_json is not None
+        assert as_of_date is not None
         manual, manual_validation, manual_sources = _grizzly_manual_histories(
             blended_trade_history, live_trade_history
         )
@@ -1049,7 +1056,9 @@ def _tt(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
             component_columns[match.group(1)] = index
     if set(component_columns) != {slug for slug, _ in components}:
         missing = sorted({slug for slug, _ in components} - set(component_columns))
-        raise StrategyHistoryError(f"TT current component histories are missing: {missing}")
+        raise StrategyHistoryError(
+            f"TT current component histories are missing: {missing}"
+        )
     previous: dict[str, Decimal] = {}
     values: list[tuple[date, Decimal]] = []
     for row in raw[1:]:
@@ -1069,8 +1078,11 @@ def _tt(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
             continue
         if set(previous) == set(levels):
             portfolio_return = sum(
-                weight * (levels[slug] / previous[slug] - Decimal(1))
-                for slug, weight in components
+                (
+                    weight * (levels[slug] / previous[slug] - Decimal(1))
+                    for slug, weight in components
+                ),
+                start=Decimal(0),
             )
             values.append((_excel_date(raw_date, "TT date"), portfolio_return))
         previous = levels
@@ -1078,8 +1090,7 @@ def _tt(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
         raise StrategyHistoryError("TT current-six history is unexpectedly short")
     definition = {
         "components": [
-            {"allocation": str(weight), "slug": slug}
-            for slug, weight in components
+            {"allocation": str(weight), "slug": slug} for slug, weight in components
         ],
         "method": "DAILY_FIXED_WEIGHT_COMPONENT_RETURN_SUM",
         "source_sha256": source["sha256"],
@@ -1101,7 +1112,7 @@ def _tt(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
 
 def _qsi_archive_weeks(
     path: Path,
-) -> tuple[list[dict[str, object]], dict[str, object], dict[str, object]]:
+) -> tuple[list[dict[str, Any]], dict[str, object], dict[str, object]]:
     archive_source = _source_identity(path, "qsi-paid-subscription-archive")
     try:
         with ZipFile(path) as archive:
@@ -1137,7 +1148,7 @@ def _qsi_archive_weeks(
     }
     if not required <= set(headers):
         raise StrategyHistoryError("QSI embedded weekly-return headers differ")
-    weeks: list[dict[str, object]] = []
+    weeks: list[dict[str, Any]] = []
     for row in rows[1:]:
         raw_start = _cell(row, headers["Week Start Date"])
         raw_end = _cell(row, headers["Week End Date"])
@@ -1145,14 +1156,12 @@ def _qsi_archive_weeks(
         raw_validation = _cell(row, headers["Stratum Returns (No Slippage)"])
         if None in {raw_start, raw_end, raw_target, raw_validation}:
             continue
-        labels = str(_cell(row, headers["Stratum Label"]) or "").replace(
-            "/", " "
-        ).split()
+        labels = (
+            str(_cell(row, headers["Stratum Label"]) or "").replace("/", " ").split()
+        )
         allocations = [
             _decimal(item.strip(), "QSI model allocation")
-            for item in str(
-                _cell(row, headers["Weight Allocations"]) or ""
-            ).split("/")
+            for item in str(_cell(row, headers["Weight Allocations"]) or "").split("/")
             if item.strip()
         ]
         if not labels or len(labels) != len(allocations):
@@ -1178,7 +1187,7 @@ def _qsi_archive_weeks(
 
 def _qsi_current_archive_weeks(
     path: Path,
-) -> tuple[list[dict[str, object]], dict[str, object], dict[str, object]]:
+) -> tuple[list[dict[str, Any]], dict[str, object], dict[str, object]]:
     archive_source = _source_identity(path, "qsi-current-paid-subscription-archive")
     try:
         with ZipFile(path) as archive:
@@ -1194,7 +1203,9 @@ def _qsi_current_archive_weeks(
             member_name = matches[0]
             content = archive.read(member_name)
     except (OSError, BadZipFile, KeyError) as exc:
-        raise StrategyHistoryError("QSI current subscription archive is invalid") from exc
+        raise StrategyHistoryError(
+            "QSI current subscription archive is invalid"
+        ) from exc
     member_source = _content_identity(
         content,
         "qsi-current-exact-weekly-model-path",
@@ -1213,21 +1224,21 @@ def _qsi_current_archive_weeks(
     }
     if not required <= set(headers):
         raise StrategyHistoryError("QSI current weekly-data headers differ")
-    weeks: list[dict[str, object]] = []
+    weeks: list[dict[str, Any]] = []
     for row in rows[1:]:
         raw_end = _cell(row, headers["Week Ending Date"])
         raw_exact = _cell(row, headers["Stratum 3x Returns (with slippage)"])
         raw_validation = _cell(row, headers["Stratum 3x Returns"])
         if None in {raw_end, raw_exact, raw_validation}:
             continue
-        labels = str(_cell(row, headers["Stratum 3x Label"]) or "").replace(
-            "/", " "
-        ).split()
+        labels = (
+            str(_cell(row, headers["Stratum 3x Label"]) or "").replace("/", " ").split()
+        )
         allocations = [
             _decimal(item.strip(), "QSI current model allocation")
-            for item in str(
-                _cell(row, headers["allocation_reference"]) or ""
-            ).split("/")
+            for item in str(_cell(row, headers["allocation_reference"]) or "").split(
+                "/"
+            )
             if item.strip()
         ]
         if not labels or len(labels) != len(allocations):
@@ -1258,8 +1269,8 @@ def _qsi_current_archive_weeks(
 
 
 def _qsi_revision_validation(
-    prior: Sequence[Mapping[str, object]],
-    current: Sequence[Mapping[str, object]],
+    prior: Sequence[Mapping[str, Any]],
+    current: Sequence[Mapping[str, Any]],
     label: str,
 ) -> dict[str, object]:
     prior_by_end = {item["end"]: item for item in prior}
@@ -1314,7 +1325,7 @@ def _qsi_revision_validation(
 
 def _qsi_appendix_weeks(
     path: Path,
-) -> tuple[list[dict[str, object]], dict[str, object]]:
+) -> tuple[list[dict[str, Any]], dict[str, object]]:
     source = _source_identity(path, "qsi-current-3x-appendix")
     rows = _xlsx_rows(path, "Stratum 3x")
     if not rows:
@@ -1329,11 +1340,10 @@ def _qsi_appendix_weeks(
     ticker_rows = [
         row
         for row in rows
-        if str(_cell(row, 0) or "").strip()
-        not in {"Fund Ticker", "Stratum 3x Return"}
+        if str(_cell(row, 0) or "").strip() not in {"Fund Ticker", "Stratum 3x Return"}
         and str(_cell(row, 2) or "").strip() != "Metric"
     ]
-    weeks: list[dict[str, object]] = []
+    weeks: list[dict[str, Any]] = []
     for index in range(4, max(len(header), len(metric))):
         raw_date = _cell(header, index)
         raw_return = _cell(metric, index)
@@ -1423,7 +1433,7 @@ def _correlation(left: Sequence[float], right: Sequence[float]) -> float:
 
 
 def _qsi_daily_path(
-    weeks: Sequence[Mapping[str, object]],
+    weeks: Sequence[Mapping[str, Any]],
     prices: Mapping[str, Mapping[date, Decimal]],
 ) -> tuple[list[tuple[date, Decimal]], dict[str, object]]:
     calendar = sorted(prices.get("SPXL", {}))
@@ -1451,7 +1461,9 @@ def _qsi_daily_path(
             raise StrategyHistoryError(f"QSI week end lacks price evidence: {end}")
         total_weight = sum(weights.values(), Decimal(0))
         if abs(total_weight - Decimal(1)) > Decimal("0.01"):
-            raise StrategyHistoryError(f"QSI weekly allocations do not sum to one: {end}")
+            raise StrategyHistoryError(
+                f"QSI weekly allocations do not sum to one: {end}"
+            )
         cash_residual = Decimal(1) - total_weight
         levels: list[Decimal] = []
         for observed in trading_days:
@@ -1496,24 +1508,23 @@ def _qsi_daily_path(
         exact_anchor_errors.append(float(compounded - Decimal(1) - exact_return))
     errors = [
         predicted - actual
-        for predicted, actual in zip(
-            predicted_weekly, validation_weekly, strict=True
-        )
+        for predicted, actual in zip(predicted_weekly, validation_weekly, strict=True)
     ]
-    validation = {
-        "exact_weekly_anchor_max_abs_error": max(map(abs, exact_anchor_errors)),
-        "price_shape_correlation": _correlation(
-            predicted_weekly, validation_weekly
-        ),
-        "price_shape_mae": statistics.fmean(map(abs, errors)),
+    exact_weekly_anchor_max_abs_error = max(map(abs, exact_anchor_errors))
+    price_shape_correlation = _correlation(predicted_weekly, validation_weekly)
+    price_shape_mae = statistics.fmean(map(abs, errors))
+    validation: dict[str, object] = {
+        "exact_weekly_anchor_max_abs_error": exact_weekly_anchor_max_abs_error,
+        "price_shape_correlation": price_shape_correlation,
+        "price_shape_mae": price_shape_mae,
         "price_shape_max_abs_error": max(map(abs, errors)),
         "weekly_observations": len(weeks),
     }
-    if validation["price_shape_correlation"] < 0.98:
+    if price_shape_correlation < 0.98:
         raise StrategyHistoryError("QSI price-shape validation correlation is too low")
-    if validation["price_shape_mae"] > 0.005:
+    if price_shape_mae > 0.005:
         raise StrategyHistoryError("QSI price-shape validation error is too high")
-    if validation["exact_weekly_anchor_max_abs_error"] > 1e-12:
+    if exact_weekly_anchor_max_abs_error > 1e-12:
         raise StrategyHistoryError("QSI exact weekly anchoring failed")
     return daily, validation
 
@@ -1549,9 +1560,7 @@ def _qsi(
         }
         source_observed_end = max(item["end"] for item in latest)
         accepted_as_of = as_of_date or source_observed_end
-        excluded_after_as_of = sum(
-            item["end"] > accepted_as_of for item in latest
-        )
+        excluded_after_as_of = sum(item["end"] > accepted_as_of for item in latest)
         first_latest = min(item["end"] for item in latest)
         weeks = [
             *[item for item in historical if item["end"] < first_latest],
@@ -1564,11 +1573,7 @@ def _qsi(
     if len(set(ends)) != len(ends):
         raise StrategyHistoryError("QSI weekly histories overlap")
     tickers = sorted(
-        {
-            str(ticker)
-            for week in weeks
-            for ticker in dict(week["weights"])
-        }
+        {str(ticker) for week in weeks for ticker in dict(week["weights"])}
     )
     prices, price_sources = _qsi_prices(
         price_root, tickers, extension_json=price_extension_json
@@ -1620,6 +1625,7 @@ def _qsi(
     definition["exact_weekly_observed_end"] = max(ends).isoformat()
     definition["source_artifacts"] = sources
     if revision_validation is not None:
+        assert source_observed_end is not None
         definition["history_revision_validation"] = revision_validation
         definition["source_observed_end"] = source_observed_end.isoformat()
         definition["source_rows_excluded_after_as_of"] = excluded_after_as_of
@@ -1631,9 +1637,7 @@ def _volatis(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
-            if not {"time", "value", "cost_basis"} <= set(
-                reader.fieldnames or ()
-            ):
+            if not {"time", "value", "cost_basis"} <= set(reader.fieldnames or ()):
                 raise StrategyHistoryError("Volatis pricehistory headers differ")
             raw_rows = list(reader)
     except (OSError, UnicodeDecodeError) as exc:
@@ -1710,9 +1714,7 @@ def build_bundle(
             blended_trade_history=grizzly_blended_trade_history,
             live_trade_history=grizzly_live_trade_history,
             price_root=(
-                qsi_price_root
-                if grizzly_blended_trade_history is not None
-                else None
+                qsi_price_root if grizzly_blended_trade_history is not None else None
             ),
             price_extension_json=(
                 price_extension_json
@@ -1720,9 +1722,7 @@ def build_bundle(
                 else None
             ),
             as_of_date=(
-                accepted_as_of
-                if grizzly_blended_trade_history is not None
-                else None
+                accepted_as_of if grizzly_blended_trade_history is not None else None
             ),
         ),
         _tt(tt_workbook),

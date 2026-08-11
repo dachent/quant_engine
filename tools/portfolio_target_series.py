@@ -1263,9 +1263,7 @@ def _strategy_history_returns(
         if row["evidence_layer"] != "BACKTEST":
             raise TargetSeriesError("strategy history may contain only BACKTEST rows")
         if row["strategy_version"] != definition["strategy_version"]:
-            raise TargetSeriesError(
-                f"strategy history version differs: {series_id}"
-            )
+            raise TargetSeriesError(f"strategy history version differs: {series_id}")
         try:
             observed = date.fromisoformat(row["date"])
         except ValueError as exc:
@@ -1274,9 +1272,7 @@ def _strategy_history_returns(
             ) from exc
         value = _decimal(row["return"], f"strategy history return {series_id}")
         if value <= -1:
-            raise TargetSeriesError(
-                f"strategy history return is invalid: {series_id}"
-            )
+            raise TargetSeriesError(f"strategy history return is invalid: {series_id}")
         if observed > history_as_of:
             raise TargetSeriesError(
                 f"strategy history exceeds its as-of date: {series_id}"
@@ -1497,7 +1493,7 @@ def build_layered_correlation_inputs(
             version = str(definition["strategy_version"])
             status = str(definition["history_status"])
             backtest_source = "strategy-history-bundle"
-            backtest_observations = int(definition["return_observations"])
+            backtest_observations = int(str(definition["return_observations"]))
             backtest_observed_start = str(definition["observed_start"])
             backtest_observed_end = str(definition["observed_end"])
             compatibility_basis = str(definition["compatibility_basis"])
