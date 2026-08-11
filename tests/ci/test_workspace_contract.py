@@ -28,7 +28,7 @@ def test_example_config_keeps_portfolio_authority_off_synced_storage() -> None:
     paths = config["paths"]
     assert isinstance(paths, dict)
     assert paths["portfolio"] == "C:/Tools/quant-engine/data"
-    assert paths["portfolio123"] == "../data_Portfolio123"
+    assert paths["portfolio123"] == "../dataPortfolio123"
 
 
 def test_virtual_root_has_only_accepted_workspace_members() -> None:

@@ -16,7 +16,7 @@ forbidden_root_names = [
   "production-data",
   "account-data",
   "xBin",
-  "data_Portfolio123",
+  "dataPortfolio123",
   "dataMatrixport",
   "dataQuantbase",
   "dataSchwab",

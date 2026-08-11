@@ -184,7 +184,7 @@ _BARE_SENSITIVE_EXTENSIONS = dict(
 _REQUIRED_PROVIDER_ROOTS = frozenset(
     {
         "xbin",
-        "data_portfolio123",
+        "dataportfolio123",
         "datamatrixport",
         "dataquantbase",
         "dataschwab",
