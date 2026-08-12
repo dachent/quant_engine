@@ -124,6 +124,13 @@ permits, promote the highest-priority decision-complete, unblocked item covered
 by that authority. Only after recording the concrete ineligibility of every
 remaining Next item may the scheduler conclude that no work is ready.
 
+The deterministic default priority is ascending issue number. A current owner
+may override it only with an owner-authored comment on the selected issue that
+names all compared issue keys, their intended order, and the rationale. The
+promotion comment cites whether it applied the default or that override. An
+unlisted tie falls back to ascending issue number; update time, risk/type/area
+labels, and agent preference are never implicit priority sources.
+
 ### Dependency semantics
 
 - The issue body's `Blocked by` list is the authoritative dependency
@@ -373,7 +380,9 @@ At sprint close, update the issue and route exactly:
 - No item is ready after that refresh → record each remaining item's concrete
   dependency, authority, scope, effect, limit, or external-state blocker; mark
   the task blocked and stop.
-- Limit, blocker, changed authority, or reapproval trigger → hand off and stop.
+- Limit, blocker, changed authority, or reapproval trigger for one item →
+  preserve and hand off that item. Continue another eligible independent item;
+  stop the overall task only through the no-ready-work route above.
 
 ## Phase 8c — Integrated verification and handoff
 

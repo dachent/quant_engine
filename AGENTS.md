@@ -86,6 +86,12 @@ and hand off the blocker.
   the three-item active cap permits. Record the concrete reason every remaining
   `backlog:next` item is ineligible; routine phase boundaries and missing active
   labels are not blockers.
+- The deterministic default priority for eligible `backlog:next` items is
+  ascending issue number. A current owner may override that order only in an
+  owner-authored comment on the selected issue that names the compared issue
+  keys, their order, and the rationale. The promotion comment must cite the
+  default or override used; never infer priority from update time, risk/type/area
+  labels, or agent preference.
 - Waiting for CI, review, or integration is not a terminal condition. Retain an
   explicit monitor/integration owner for the exact candidate and continue any
   independent eligible work. Stop the overall task only when the refreshed
