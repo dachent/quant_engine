@@ -14,8 +14,10 @@ from typing import Any, Final, Mapping, Sequence
 PLAN_SCHEMA_VERSION: Final = 1
 _SUPPORTED_ROOT_LABELS: Final = {
     "alpaca": frozenset({"legacy-data"}),
+    "matrixport": frozenset({"cutover-recovery", "legacy-snapshot"}),
     "portfolio123": frozenset({"har-workspace", "legacy-data"}),
     "quantbase": frozenset({"legacy-workspace"}),
+    "schwab": frozenset({"cutover-recovery", "cutover-staging"}),
 }
 _SENSITIVE_NAME_MARKERS: Final = (
     "auth",
@@ -131,6 +133,23 @@ def _category(provider_id: str, label: str, relative: Path) -> str | None:
     if provider_id == "alpaca" and label == "legacy-data":
         if relative.suffix.lower() == ".md":
             return "PLAINTEXT_REPORT_RISK"
+        return None
+    if provider_id == "schwab" and label in {
+        "cutover-recovery",
+        "cutover-staging",
+    }:
+        if relative.suffix.lower() == ".json" and "cookies" in name:
+            return "AUTHENTICATED_SESSION_RISK"
+        return None
+    if provider_id == "matrixport" and label in {
+        "cutover-recovery",
+        "legacy-snapshot",
+    }:
+        parts = tuple(part.casefold() for part in relative.parts)
+        if name == "credentials.py":
+            return "PLAINTEXT_CREDENTIAL_HELPER_RISK"
+        if len(parts) >= 2 and parts[:2] == (".codex-bootstrap", "venv"):
+            return "RECOVERY_ENVIRONMENT_RISK"
         return None
     raise QuarantineError(f"unsupported provider/source label: {provider_id}/{label}")
 
@@ -260,6 +279,26 @@ def plan_alpaca(legacy_root: Path, quarantine_root: Path) -> dict[str, object]:
     return plan_provider(
         "alpaca",
         {"legacy-data": legacy_root},
+        quarantine_root,
+    )
+
+
+def plan_schwab(
+    recovery_root: Path, staging_root: Path, quarantine_root: Path
+) -> dict[str, object]:
+    return plan_provider(
+        "schwab",
+        {"cutover-recovery": recovery_root, "cutover-staging": staging_root},
+        quarantine_root,
+    )
+
+
+def plan_matrixport(
+    recovery_root: Path, snapshot_root: Path, quarantine_root: Path
+) -> dict[str, object]:
+    return plan_provider(
+        "matrixport",
+        {"cutover-recovery": recovery_root, "legacy-snapshot": snapshot_root},
         quarantine_root,
     )
 
@@ -445,6 +484,13 @@ def verify_plan(plan_path: Path) -> dict[str, object]:
     }
     if result_path.read_bytes() != _canonical_json(expected_apply):
         raise QuarantineError("apply result differs")
+    verify_path = plan_dir / "verify.json"
+    content = _canonical_json(result)
+    if verify_path.exists():
+        if verify_path.is_symlink() or verify_path.read_bytes() != content:
+            raise QuarantineError("existing verification differs")
+    else:
+        _write_create_only(verify_path, content)
     return result
 
 
@@ -556,6 +602,14 @@ def _parser() -> argparse.ArgumentParser:
     alpaca = subparsers.add_parser("plan-alpaca")
     alpaca.add_argument("--legacy-root", type=Path, required=True)
     alpaca.add_argument("--quarantine-root", type=Path, required=True)
+    schwab = subparsers.add_parser("plan-schwab")
+    schwab.add_argument("--recovery-root", type=Path, required=True)
+    schwab.add_argument("--staging-root", type=Path, required=True)
+    schwab.add_argument("--quarantine-root", type=Path, required=True)
+    matrixport = subparsers.add_parser("plan-matrixport")
+    matrixport.add_argument("--recovery-root", type=Path, required=True)
+    matrixport.add_argument("--snapshot-root", type=Path, required=True)
+    matrixport.add_argument("--quarantine-root", type=Path, required=True)
     for command in ("apply", "verify", "scan", "restore"):
         child = subparsers.add_parser(command)
         child.add_argument("--plan", type=Path, required=True)
@@ -571,6 +625,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = plan_quantbase(args.legacy_root, args.quarantine_root)
         elif args.command == "plan-alpaca":
             result = plan_alpaca(args.legacy_root, args.quarantine_root)
+        elif args.command == "plan-schwab":
+            result = plan_schwab(
+                args.recovery_root, args.staging_root, args.quarantine_root
+            )
+        elif args.command == "plan-matrixport":
+            result = plan_matrixport(
+                args.recovery_root, args.snapshot_root, args.quarantine_root
+            )
         elif args.command == "apply":
             result = apply_plan(args.plan)
         elif args.command == "verify":
