@@ -77,6 +77,15 @@ PANEL_FILES: Final = (
     "data/freshness-health.json",
 )
 DRIVER_MAP_PANEL_FILE: Final = "data/candidate-driver-map.json"
+DRIVER_MAP_CLUSTER_IDS: Final = frozenset(
+    {
+        "TACTICAL_TIMING_MULTI_ASSET",
+        "US_SYSTEMATIC_EQUITY",
+        "EUROPE_SYSTEMATIC_EQUITY",
+        "CRYPTO_DIRECTIONAL",
+        "DE_MINIMIS_OPERATIONAL",
+    }
+)
 VIEWS: Final = (
     "command",
     "capital",
@@ -635,10 +644,231 @@ def _candidate_driver_map(
         raise ControlPanelValidationError("candidate driver-map cardinality differs")
     if authority != expected_authority:
         raise ControlPanelValidationError("candidate driver-map authority differs")
+    as_of_date = _text(value.get("as_of_date"), "driver-map as_of_date")
+    try:
+        date.fromisoformat(as_of_date)
+    except ValueError as exc:
+        raise ControlPanelValidationError("driver-map as_of_date is invalid") from exc
+    if value.get("research_status") != "FROZEN_EVIDENCE_NOT_CURRENT":
+        raise ControlPanelValidationError(
+            "candidate driver-map research status differs"
+        )
+    _validate_driver_map_coverage(coverage)
+    _validate_driver_map_clusters(clusters)
+    _validate_driver_map_leave_one_out(leave_one_out)
+    _validate_driver_map_candidates(candidates)
+    portfolio = _object(value.get("portfolio"), "candidate driver-map portfolio")
+    _finite_float(
+        portfolio.get("systematic_loss_limit"),
+        "candidate driver-map systematic_loss_limit",
+    )
     return value, {
-        "as_of_date": _text(value.get("as_of_date"), "driver-map as_of_date"),
+        "as_of_date": as_of_date,
         "sha256": _hash(path),
     }
+
+
+def _driver_map_integer(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ControlPanelValidationError(
+            f"{field_name} must be a non-negative integer"
+        )
+    return value
+
+
+def _driver_map_strings(value: object, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ControlPanelValidationError(f"{field_name} must be an array")
+    return [_text(item, field_name) for item in value]
+
+
+def _driver_map_optional_number(value: object, field_name: str) -> None:
+    if value is not None:
+        _finite_float(value, field_name)
+
+
+def _validate_driver_map_coverage(coverage: Mapping[str, Any]) -> None:
+    measured = _driver_map_integer(
+        coverage.get("measured_candidate_count"),
+        "candidate driver-map measured_candidate_count",
+    )
+    unavailable = _driver_map_integer(
+        coverage.get("unavailable_candidate_count"),
+        "candidate driver-map unavailable_candidate_count",
+    )
+    if measured + unavailable != 33:
+        raise ControlPanelValidationError("candidate driver-map coverage differs")
+    _text(coverage.get("refresh_status"), "candidate driver-map refresh_status")
+
+
+def _validate_driver_map_clusters(clusters: Sequence[Mapping[str, Any]]) -> None:
+    cluster_ids = [
+        _text(row.get("cluster_id"), "candidate driver-map cluster_id")
+        for row in clusters
+    ]
+    if set(cluster_ids) != DRIVER_MAP_CLUSTER_IDS or len(cluster_ids) != len(
+        set(cluster_ids)
+    ):
+        raise ControlPanelValidationError(
+            "candidate driver-map cluster identity differs"
+        )
+    for row in clusters:
+        cluster_id = _text(row.get("cluster_id"), "candidate driver-map cluster_id")
+        _driver_map_strings(
+            row.get("members"), f"candidate driver-map {cluster_id} members"
+        )
+        for field in ("allocation_weight", "adverse_loss_budget"):
+            _finite_float(row.get(field), f"candidate driver-map {cluster_id} {field}")
+        _text(
+            row.get("budget_status"),
+            f"candidate driver-map {cluster_id} budget_status",
+        )
+        observed_count = _driver_map_integer(
+            row.get("observed_pair_count"),
+            f"candidate driver-map {cluster_id} observed_pair_count",
+        )
+        for field in (
+            "observed_pair_correlation_minimum",
+            "observed_pair_correlation_maximum",
+        ):
+            value = row.get(field)
+            if observed_count and value is None:
+                raise ControlPanelValidationError(
+                    f"candidate driver-map {cluster_id} {field} is missing"
+                )
+            _driver_map_optional_number(
+                value, f"candidate driver-map {cluster_id} {field}"
+            )
+
+
+def _validate_driver_map_leave_one_out(
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    series_ids: set[str] = set()
+    for row in rows:
+        series_id = _text(
+            row.get("series_id"), "candidate tactical leave-one-out series_id"
+        )
+        if series_id in series_ids:
+            raise ControlPanelValidationError(
+                "candidate tactical leave-one-out identity differs"
+            )
+        series_ids.add(series_id)
+        for field in (
+            "correlation_one_loss_reduction",
+            "central_case_loss_reduction",
+            "cluster_loss_without",
+        ):
+            _finite_float(row.get(field), f"candidate tactical leave-one-out {field}")
+        _text(
+            row.get("cluster_budget_status_without"),
+            "candidate tactical leave-one-out cluster_budget_status_without",
+        )
+
+
+def _validate_driver_map_candidates(candidates: Sequence[Mapping[str, Any]]) -> None:
+    candidate_ids: set[str] = set()
+    for row in candidates:
+        candidate_id = _text(
+            row.get("candidate_id"), "candidate driver-map candidate_id"
+        )
+        if candidate_id in candidate_ids:
+            raise ControlPanelValidationError("candidate driver-map identity differs")
+        candidate_ids.add(candidate_id)
+        for field in ("category", "tier", "portfolio_role"):
+            _text(row.get(field), f"candidate driver-map {candidate_id} {field}")
+        ticker = row.get("ticker")
+        if ticker is not None:
+            _text(ticker, f"candidate driver-map {candidate_id} ticker")
+        cost = _object(row.get("cost"), f"candidate driver-map {candidate_id} cost")
+        _text(cost.get("status"), f"candidate driver-map {candidate_id} cost status")
+        for field in ("expense_ratio", "annual_fixed_cost"):
+            _driver_map_optional_number(
+                cost.get(field), f"candidate driver-map {candidate_id} cost {field}"
+            )
+        live_metrics = _object(
+            row.get("live_metrics"),
+            f"candidate driver-map {candidate_id} live_metrics",
+        )
+        live_status = _text(
+            live_metrics.get("status"),
+            f"candidate driver-map {candidate_id} live_metrics status",
+        )
+        if live_status.startswith("AVAILABLE"):
+            for field in ("start_date", "end_date"):
+                _text(
+                    live_metrics.get(field),
+                    f"candidate driver-map {candidate_id} live_metrics {field}",
+                )
+            _driver_map_integer(
+                live_metrics.get("observations"),
+                f"candidate driver-map {candidate_id} live_metrics observations",
+            )
+        else:
+            _text(
+                live_metrics.get("reason"),
+                f"candidate driver-map {candidate_id} live_metrics reason",
+            )
+        scores = _objects(
+            row.get("cluster_scores"),
+            f"candidate driver-map {candidate_id} cluster_scores",
+        )
+        score_ids = [
+            _text(
+                score.get("cluster_id"),
+                f"candidate driver-map {candidate_id} cluster score identity",
+            )
+            for score in scores
+        ]
+        if set(score_ids) != DRIVER_MAP_CLUSTER_IDS or len(score_ids) != len(
+            set(score_ids)
+        ):
+            raise ControlPanelValidationError(
+                f"candidate driver-map {candidate_id} cluster score identity differs"
+            )
+        tactical = next(
+            score
+            for score in scores
+            if _text(
+                score.get("cluster_id"),
+                f"candidate driver-map {candidate_id} cluster score identity",
+            )
+            == "TACTICAL_TIMING_MULTI_ASSET"
+        )
+        _text(
+            tactical.get("status"),
+            f"candidate driver-map {candidate_id} tactical status",
+        )
+        _driver_map_strings(
+            tactical.get("missing_members"),
+            f"candidate driver-map {candidate_id} tactical missing_members",
+        )
+        downside = tactical.get("downside_correlation_mean")
+        _driver_map_optional_number(
+            downside,
+            f"candidate driver-map {candidate_id} tactical downside_correlation_mean",
+        )
+        if downside is not None:
+            for field in (
+                "pearson_mean",
+                "worst_decile_candidate_return_minimum",
+            ):
+                _finite_float(
+                    tactical.get(field),
+                    f"candidate driver-map {candidate_id} tactical {field}",
+                )
+            rank = _driver_map_integer(
+                tactical.get("descriptive_rank"),
+                f"candidate driver-map {candidate_id} tactical descriptive_rank",
+            )
+            if rank < 1:
+                raise ControlPanelValidationError(
+                    f"candidate driver-map {candidate_id} tactical descriptive_rank differs"
+                )
+        for field in ("window_start", "window_end"):
+            window = tactical.get(field)
+            if window is not None:
+                _text(window, f"candidate driver-map {candidate_id} tactical {field}")
 
 
 def _analytics_roots(

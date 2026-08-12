@@ -363,9 +363,9 @@ def build_payload(
     if not metrics:
         raise DriverMapError("no candidate live metrics are available")
     candidates: list[dict[str, Any]] = []
-    for row in provider_rows:
+    for row, normalized_ticker in zip(provider_rows, candidate_tickers, strict=True):
         candidate_id = _text(row.get("candidate"), "candidate")
-        ticker = row.get("ticker") or None
+        ticker = normalized_ticker or None
         research_rows = dependence_by_candidate.get(ticker or candidate_id, {})
         candidates.append(
             {
@@ -461,8 +461,28 @@ def build(
     candidate_live_metrics: Path,
     output: Path,
 ) -> dict[str, Any]:
+    payload = _expected_payload(
+        dependence,
+        provider_universe,
+        candidate_dependence,
+        candidate_live_metrics,
+    )
+    content = canonical_json_bytes(payload)
+    if output.exists() and output.read_bytes() != content:
+        raise DriverMapError("output exists with different content")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(content)
+    return payload
+
+
+def _expected_payload(
+    dependence: Path,
+    provider_universe: Path,
+    candidate_dependence: Path,
+    candidate_live_metrics: Path,
+) -> dict[str, Any]:
     cluster_contract = _load_json(CLUSTER_CONTRACT, "cluster contract")
-    payload = build_payload(
+    return build_payload(
         _load_json(dependence, "dependence artifact"),
         _load_csv(provider_universe, "provider universe"),
         _load_csv(candidate_dependence, "candidate dependence"),
@@ -476,12 +496,6 @@ def build(
         },
         cluster_contract=cluster_contract,
     )
-    content = canonical_json_bytes(payload)
-    if output.exists() and output.read_bytes() != content:
-        raise DriverMapError("output exists with different content")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(content)
-    return payload
 
 
 def verify(
@@ -492,21 +506,14 @@ def verify(
     artifact: Path,
 ) -> dict[str, Any]:
     actual = _load_json(artifact, "driver map")
-    temporary = artifact.parent / f".{artifact.name}.verify"
-    try:
-        expected = build(
-            dependence,
-            provider_universe,
-            candidate_dependence,
-            candidate_live_metrics,
-            temporary,
-        )
-        if canonical_json_bytes(actual) != canonical_json_bytes(expected):
-            raise DriverMapError(
-                "driver-map artifact differs from deterministic rebuild"
-            )
-    finally:
-        temporary.unlink(missing_ok=True)
+    expected = _expected_payload(
+        dependence,
+        provider_universe,
+        candidate_dependence,
+        candidate_live_metrics,
+    )
+    if canonical_json_bytes(actual) != canonical_json_bytes(expected):
+        raise DriverMapError("driver-map artifact differs from deterministic rebuild")
     return {
         "ok": True,
         "artifact_sha256": _hash(artifact),

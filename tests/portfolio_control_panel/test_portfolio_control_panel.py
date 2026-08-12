@@ -2451,14 +2451,75 @@ def test_candidate_driver_map_requires_fixed_cardinality_and_no_authority(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "driver-map.json"
+    cluster_ids = sorted(panel.DRIVER_MAP_CLUSTER_IDS)
     payload = {
         "schema_version": 1,
         "as_of_date": "2026-07-24",
-        "coverage": {"candidate_count": 33},
-        "candidates": [{"candidate_id": f"candidate-{index}"} for index in range(33)],
-        "driver_clusters": [{"cluster_id": f"cluster-{index}"} for index in range(5)],
+        "research_status": "FROZEN_EVIDENCE_NOT_CURRENT",
+        "coverage": {
+            "candidate_count": 33,
+            "measured_candidate_count": 33,
+            "unavailable_candidate_count": 0,
+            "refresh_status": "UNAVAILABLE_RAW_RETURN_INPUTS_NOT_RETAINED",
+        },
+        "portfolio": {"systematic_loss_limit": "0.15"},
+        "candidates": [
+            {
+                "candidate_id": f"candidate-{index}",
+                "ticker": f"C{index:02d}",
+                "category": "Test category",
+                "tier": "Tier 1",
+                "portfolio_role": "Research only",
+                "cost": {
+                    "status": "AVAILABLE_COMPONENTS_NO_MODELED_NOTIONAL",
+                    "expense_ratio": "0.01",
+                    "annual_fixed_cost": "0",
+                },
+                "live_metrics": {
+                    "status": "AVAILABLE_FROZEN_LIVE_VEHICLE_METRICS",
+                    "start_date": "2020-01-01",
+                    "end_date": "2026-07-24",
+                    "observations": 1000,
+                },
+                "cluster_scores": [
+                    {
+                        "cluster_id": cluster_id,
+                        "status": "AVAILABLE_DESCRIPTIVE_FROZEN",
+                        "missing_members": [],
+                        "downside_correlation_mean": "0.2",
+                        "pearson_mean": "0.1",
+                        "worst_decile_candidate_return_minimum": "0.01",
+                        "descriptive_rank": index + 1,
+                        "window_start": "2026-01-01",
+                        "window_end": "2026-07-17",
+                    }
+                    for cluster_id in cluster_ids
+                ],
+            }
+            for index in range(33)
+        ],
+        "driver_clusters": [
+            {
+                "cluster_id": cluster_id,
+                "members": [f"member-{index}"],
+                "allocation_weight": "0.2",
+                "adverse_loss_budget": "0.03",
+                "budget_status": "WITHIN_LIMIT",
+                "observed_pair_count": 1,
+                "observed_pair_correlation_minimum": "0.1",
+                "observed_pair_correlation_maximum": "0.1",
+            }
+            for index, cluster_id in enumerate(cluster_ids)
+        ],
         "tactical_leave_one_out": [
-            {"series_id": f"strategy-{index}"} for index in range(4)
+            {
+                "series_id": f"strategy-{index}",
+                "correlation_one_loss_reduction": "0.01",
+                "central_case_loss_reduction": "0.005",
+                "cluster_loss_without": "0.1",
+                "cluster_budget_status_without": "WITHIN_LIMIT",
+            }
+            for index in range(4)
         ],
         "authority_boundary": {
             "allocation_effect": "NONE",
@@ -2475,6 +2536,25 @@ def test_candidate_driver_map_requires_fixed_cardinality_and_no_authority(
     assert identity is not None
     assert identity["as_of_date"] == "2026-07-24"
     assert len(identity["sha256"]) == 64
+
+    del payload["candidates"][0]["cluster_scores"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="cluster_scores must be an array"
+    ):
+        panel._candidate_driver_map(path)
+    payload["candidates"][0]["cluster_scores"] = [
+        dict(payload["candidates"][1]["cluster_scores"][0])
+        for _ in range(len(cluster_ids))
+    ]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="cluster score identity differs"
+    ):
+        panel._candidate_driver_map(path)
+    payload["candidates"][0]["cluster_scores"] = [
+        dict(score) for score in payload["candidates"][1]["cluster_scores"]
+    ]
 
     payload["authority_boundary"]["allocation_effect"] = "SUGGEST"
     path.write_text(json.dumps(payload), encoding="utf-8")

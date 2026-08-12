@@ -228,7 +228,27 @@ def test_identical_inputs_rebuild_identical_bytes_and_verify(tmp_path: Path) -> 
     driver_map.build(*inputs, second)
 
     assert first.read_bytes() == second.read_bytes()
+    sentinel = tmp_path / ".first.json.verify"
+    sentinel.write_bytes(b"owned-by-another-process")
     assert driver_map.verify(*inputs, first)["ok"] is True
+    assert sentinel.read_bytes() == b"owned-by-another-process"
+
+
+def test_provider_ticker_is_normalized_before_evidence_joins(tmp_path: Path) -> None:
+    inputs = list(_inputs(tmp_path))
+    providers = _providers()
+    providers[0]["ticker"] = "  C00  "
+    inputs[1] = _write_csv(tmp_path / "providers-with-whitespace.csv", providers)
+
+    payload = driver_map.build(*inputs, tmp_path / "driver-map.json")
+
+    candidate = payload["candidates"][0]
+    assert candidate["ticker"] == "C00"
+    assert candidate["live_metrics"]["status"].startswith("AVAILABLE")
+    assert any(
+        score["status"] != "UNAVAILABLE_NO_ACCEPTED_MEASUREMENTS"
+        for score in candidate["cluster_scores"]
+    )
 
 
 def test_exact_candidate_count_is_enforced(tmp_path: Path) -> None:
