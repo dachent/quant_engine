@@ -766,6 +766,8 @@ def _snapshot_fingerprint(
     issues: Mapping[int, IssueRecord],
     pull_request_numbers: frozenset[int],
     native: Mapping[int, tuple[NativeDependency, ...]],
+    *,
+    force_open: frozenset[int] = frozenset(),
 ) -> str:
     payload = {
         "issues": [
@@ -774,7 +776,7 @@ def _snapshot_fingerprint(
                 "id": issue.database_id,
                 "title": issue.title,
                 "body": issue.body,
-                "state": issue.state,
+                "state": "open" if issue.number in force_open else issue.state,
                 "labels": issue.labels,
             }
             for issue in sorted(issues.values(), key=lambda item: item.number)
@@ -1149,25 +1151,11 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
     """Conservatively reconcile issue state and the native dependency mirror."""
 
     initial = load_snapshot(client, owner, repo)
-    if initial.structural_diagnostics:
-        return GuardReport(
-            mode="reconcile",
-            ok=False,
-            fingerprint=initial.fingerprint,
-            issues=_issue_results(initial, invalid_all=True),
-            diagnostics=initial.structural_diagnostics,
-        )
-
     current = load_snapshot(client, owner, repo)
-    if current.structural_diagnostics:
-        return GuardReport(
-            mode="reconcile",
-            ok=False,
-            fingerprint=current.fingerprint,
-            issues=_issue_results(current, invalid_all=True),
-            diagnostics=current.structural_diagnostics,
-        )
-    if current.fingerprint != initial.fingerprint:
+    if (
+        current.fingerprint != initial.fingerprint
+        or current.all_diagnostics != initial.all_diagnostics
+    ):
         return GuardReport(
             mode="reconcile",
             ok=False,
@@ -1177,9 +1165,31 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
         )
 
     mutations: list[Mutation] = []
-    illegal_closed = _illegal_reopen_order(
-        current.issues, _illegal_closed_numbers(current.issues)
-    )
+    if current.structural_diagnostics:
+        # A malformed dependency graph must still block all native-edge writes,
+        # but it must not shield independently illegal final handoffs from the
+        # fail-safe reopen control. Reopening is reversible and depends only on
+        # the affected closed issue's own body and state.
+        if any(
+            diagnostic.code == "ISSUE_NUMBER_DUPLICATE"
+            for diagnostic in current.structural_diagnostics
+        ):
+            illegal_closed: tuple[int, ...] = ()
+        else:
+            illegal_closed = tuple(
+                sorted(
+                    {
+                        diagnostic.issue_number
+                        for diagnostic in _final_handoff_diagnostics(current.issues)
+                        if diagnostic.issue_number is not None
+                    }
+                )
+            )
+    else:
+        illegal_closed = _illegal_reopen_order(
+            current.issues, _illegal_closed_numbers(current.issues)
+        )
+
     for number in illegal_closed:
         try:
             client.reopen_issue(number)
@@ -1191,6 +1201,101 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
                 issue_number=number,
             )
         mutations.append(Mutation("reopen", number))
+
+    if illegal_closed:
+        verification = load_snapshot(client, owner, repo)
+        observed_open = frozenset(
+            number
+            for number in illegal_closed
+            if (issue := verification.issues.get(number)) is not None
+            and issue.state == "open"
+        )
+        expected_observed = _snapshot_fingerprint(
+            current.issues,
+            current.pull_request_numbers,
+            current.native,
+            force_open=observed_open,
+        )
+        expected_observed_graph = _graph_state_fingerprint(
+            current, force_open=observed_open
+        )
+        graph_stable = _graph_state_fingerprint(verification) == expected_observed_graph
+        native_stable = (
+            verification.native_diagnostics == current.native_diagnostics
+            and verification.mirror_diagnostics == current.mirror_diagnostics
+        )
+        if observed_open != frozenset(illegal_closed):
+            if graph_stable and (
+                verification.graph_diagnostics
+                or (verification.fingerprint == expected_observed and native_stable)
+            ):
+                diagnostics = tuple(
+                    Diagnostic("REOPEN_VERIFICATION_FAILED", issue_number=number)
+                    for number in illegal_closed
+                    if number not in observed_open
+                )
+            else:
+                diagnostics = (Diagnostic("CONCURRENT_STATE_CHANGE"),)
+            return GuardReport(
+                mode="reconcile",
+                ok=False,
+                fingerprint=verification.fingerprint,
+                issues=_issue_results(
+                    verification,
+                    invalid_all=bool(verification.structural_diagnostics),
+                ),
+                diagnostics=diagnostics,
+                mutations=tuple(mutations),
+            )
+
+        if not graph_stable:
+            return GuardReport(
+                mode="reconcile",
+                ok=False,
+                fingerprint=verification.fingerprint,
+                issues=_issue_results(
+                    verification,
+                    invalid_all=bool(verification.structural_diagnostics),
+                ),
+                diagnostics=(Diagnostic("CONCURRENT_STATE_CHANGE"),),
+                mutations=tuple(mutations),
+            )
+
+        # Graph diagnostics suppress native reads by design. Once the exact
+        # requested reopen is visible, preserve that fail-closed result and do
+        # not mistake the intentionally absent native snapshot for drift.
+        if verification.graph_diagnostics:
+            current = verification
+        else:
+            expected = _snapshot_fingerprint(
+                current.issues,
+                current.pull_request_numbers,
+                current.native,
+                force_open=frozenset(illegal_closed),
+            )
+            if verification.fingerprint != expected or not native_stable:
+                return GuardReport(
+                    mode="reconcile",
+                    ok=False,
+                    fingerprint=verification.fingerprint,
+                    issues=_issue_results(
+                        verification,
+                        invalid_all=bool(verification.structural_diagnostics),
+                    ),
+                    diagnostics=(Diagnostic("CONCURRENT_STATE_CHANGE"),),
+                    mutations=tuple(mutations),
+                )
+            current = verification
+
+    if current.structural_diagnostics:
+        return GuardReport(
+            mode="reconcile",
+            ok=False,
+            fingerprint=current.fingerprint,
+            issues=_issue_results(current, invalid_all=True),
+            diagnostics=current.structural_diagnostics,
+            mutations=tuple(mutations),
+        )
 
     missing, stale = _native_delta(current, owner, repo)
     cycle_breaking = _cycle_breaking_stale(current, stale, owner, repo)

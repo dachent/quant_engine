@@ -104,6 +104,7 @@ class FakeClient:
         self.list_issue_count = 0
         self.change_on_second_read: tuple[int, str, object] | None = None
         self.fail_add = False
+        self.ignore_reopen = False
         self.ignore_add = False
         self.ignore_remove = False
 
@@ -122,6 +123,8 @@ class FakeClient:
 
     def reopen_issue(self, issue_number: int) -> None:
         self.calls.append(("reopen", issue_number))
+        if self.ignore_reopen:
+            return
         for item in self.issues:
             if item.get("number") == issue_number:
                 item["state"] = "open"
@@ -551,6 +554,95 @@ class ReconciliationTests(unittest.TestCase):
         self.assertTrue(report.ok)
         self.assertEqual(client.calls, [("reopen", 1)])
         self.assertEqual(report.issues[0].status, "GRAPH_READY")
+
+    def test_structural_diagnostic_does_not_shield_pending_final_handoff(self) -> None:
+        pending = _body("None").replace("Synthetic accepted evidence.", "Pending.")
+        client = FakeClient(
+            [
+                _issue(1, "A-001", "not a governed reference"),
+                _issue(2, "A-002", state="closed", body=pending),
+            ]
+        )
+        report = guard.reconcile(client, OWNER, REPO)
+        self.assertFalse(report.ok)
+        self.assertEqual(_diagnostic_codes(report), {"BLOCKED_BY_LINE_INVALID"})
+        self.assertEqual(client.calls, [("reopen", 2)])
+        self.assertEqual(
+            report.mutations,
+            (guard.Mutation("reopen", 2),),
+        )
+
+    def test_concurrent_change_aborts_structural_handoff_reopen(self) -> None:
+        pending = _body("None").replace("Synthetic accepted evidence.", "Pending.")
+        client = FakeClient(
+            [
+                _issue(1, "A-001", "not a governed reference"),
+                _issue(2, "A-002", state="closed", body=pending),
+            ]
+        )
+        client.change_on_second_read = (1, "title", "[A-001] Changed title")
+        report = guard.reconcile(client, OWNER, REPO)
+        self.assertFalse(report.ok)
+        self.assertEqual(_diagnostic_codes(report), {"CONCURRENT_STATE_CHANGE"})
+        self.assertEqual(client.calls, [])
+
+    def test_invalid_graph_reopens_only_independent_handoff_failure(self) -> None:
+        pending = _body("None").replace("Synthetic accepted evidence.", "Pending.")
+        client = FakeClient(
+            [
+                _issue(1, "A-001", "not a governed reference"),
+                _issue(2, "A-002", state="closed", body=pending),
+                _issue(3, "A-003", "#4 (A-004)", state="closed"),
+                _issue(4, "A-004"),
+            ]
+        )
+        report = guard.reconcile(client, OWNER, REPO)
+        self.assertFalse(report.ok)
+        self.assertEqual(_diagnostic_codes(report), {"BLOCKED_BY_LINE_INVALID"})
+        self.assertEqual(client.calls, [("reopen", 2)])
+        self.assertEqual(client.issues[2]["state"], "closed")
+
+    def test_reopen_created_structural_error_blocks_native_mutation(self) -> None:
+        pending = _body("None").replace("Synthetic accepted evidence.", "Pending.")
+        client = FakeClient(
+            [
+                _issue(1, "A-001", state="closed", body=pending, labels=[]),
+                _issue(2, "A-002", "#3 (A-003)"),
+                _issue(3, "A-003"),
+            ]
+        )
+        report = guard.reconcile(client, OWNER, REPO)
+        self.assertFalse(report.ok)
+        self.assertEqual(_diagnostic_codes(report), {"BACKLOG_STATE_MISSING"})
+        self.assertEqual(client.calls, [("reopen", 1)])
+        self.assertEqual(client.native, {})
+
+    def test_native_diagnostic_allows_only_independent_handoff_reopen(self) -> None:
+        pending = _body("None").replace("Synthetic accepted evidence.", "Pending.")
+        client = FakeClient(
+            [_issue(1, "A-001", state="closed", body=pending)],
+            {1: [{"id": None, "number": 2, "repository_url": REPOSITORY_URL}]},
+        )
+        report = guard.reconcile(client, OWNER, REPO)
+        self.assertFalse(report.ok)
+        self.assertEqual(_diagnostic_codes(report), {"NATIVE_RECORD_INVALID"})
+        self.assertEqual(client.calls, [("reopen", 1)])
+
+    def test_unobserved_reopen_blocks_native_mutation(self) -> None:
+        pending = _body("None").replace("Synthetic accepted evidence.", "Pending.")
+        client = FakeClient(
+            [
+                _issue(1, "A-001", state="closed", body=pending),
+                _issue(2, "A-002", "#3 (A-003)"),
+                _issue(3, "A-003"),
+            ]
+        )
+        client.ignore_reopen = True
+        report = guard.reconcile(client, OWNER, REPO)
+        self.assertFalse(report.ok)
+        self.assertEqual(_diagnostic_codes(report), {"REOPEN_VERIFICATION_FAILED"})
+        self.assertEqual(client.calls, [("reopen", 1)])
+        self.assertEqual(client.native, {})
 
     def test_reopen_order_honors_blockers_in_a_shortcut_graph(self) -> None:
         issues = [
