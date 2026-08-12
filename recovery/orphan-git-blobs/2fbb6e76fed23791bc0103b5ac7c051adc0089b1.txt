@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/security/synthetic-fixture-allowlist.schema.json",
+  "title": "Exact synthetic fixture allowlist entry",
+  "description": "One wholly synthetic repository fixture. SYNTHETIC is a provenance marker, not a sensitivity class.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "path",
+    "sha256",
+    "bytes",
+    "classification",
+    "purpose",
+    "governing_issue"
+  ],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Normalized repository-relative POSIX path under the synthetic fixture root.",
+      "pattern": "^tests/fixtures/synthetic/(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:\\/|$))(?!.*//)(?!.*:)(?!.*[\\u0000-\\u001F\\u007F])(?!.*\\/$)[^\\\\]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5242880
+    },
+    "classification": {
+      "const": "SYNTHETIC"
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!.*[\\u0000-\\u001F\\u007F]).+$"
+    },
+    "governing_issue": {
+      "type": "string",
+      "pattern": "^#[1-9][0-9]* \\([A-Z][A-Z0-9]*-[0-9]{3,}\\)$"
+    }
+  }
+}

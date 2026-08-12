@@ -1,0 +1,43 @@
+---
+name: Governed work item
+about: Create a quant_engine work item with the required operating contract
+title: "[AREA-000] "
+labels: []
+assignees: []
+---
+
+## Outcome
+
+<!-- State the observable end state. -->
+
+## In scope
+
+-
+
+## Out of scope
+
+-
+
+## Blocked by
+
+<!-- Use `None.` or one issue per line: `- [ ] #123 (KEY-001)`. -->
+
+## Acceptance evidence
+
+<!-- Name checks, expected results, evidence artifacts, failure signals, and reviewer where needed. -->
+
+## Allowed writes and external effects
+
+<!-- Name exact repository paths, local paths, and external effects. Use `None.` where appropriate. -->
+
+## Stop and reapproval triggers
+
+-
+
+## Recovery procedure
+
+<!-- State how a failed or partial attempt returns to a safe, evidence-preserving state. -->
+
+## Final evidence and handoff
+
+Pending.

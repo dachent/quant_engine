@@ -1,0 +1,1290 @@
+#!/usr/bin/env python3
+"""Fail-closed repository and endpoint boundary checks for quant_engine.
+
+The checker intentionally uses only the Python standard library.  Repository
+paths come from the Git index, not from a recursive filesystem walk, so the
+scan covers exactly the complete tracked tree.  Policy exceptions are exact,
+checksummed synthetic fixtures; they are never directory or glob exceptions.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import io
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import subprocess
+import sys
+import tomllib
+import zipfile
+from dataclasses import dataclass
+from typing import Any, Iterable, Mapping, Pattern, Sequence
+import unicodedata
+
+
+FIVE_MIB = 5 * 1024 * 1024
+_REPARSE_POINT_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_REASON_CODE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_EXACT_PATH_META = re.compile(r"[*?\[\]{}!]")
+_GOVERNING_ISSUE = re.compile(r"^#[1-9][0-9]* \([A-Z][A-Z0-9]*-[0-9]{3,}\)$")
+_FIXTURE_ROOT_PARTS = ("tests", "fixtures", "synthetic")
+_FIXTURE_FIELDS = frozenset(
+    {"path", "sha256", "bytes", "classification", "purpose", "governing_issue"}
+)
+_ENDPOINT_REQUIRED_FIELDS = frozenset(
+    {
+        "provider",
+        "capability",
+        "method",
+        "path_matcher",
+        "semantic_effect",
+        "terms_state",
+        "credential_class",
+        "approval_requirement",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Finding:
+    """A deterministic, non-secret-bearing policy finding."""
+
+    code: str
+    path: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class TrackedEntry:
+    mode: str
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class MagicSignature:
+    name: str
+    offset: int
+    value: bytes
+    reason_code: str
+
+
+@dataclass(frozen=True, slots=True)
+class EncodedPattern:
+    name: str
+    regex: Pattern[str]
+    reason_code: str
+
+
+@dataclass(frozen=True, slots=True)
+class SyntheticFixture:
+    path: str
+    sha256: str
+    bytes: int
+    classification: str
+    purpose: str
+    governing_issue: str
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryPolicy:
+    max_tracked_bytes: int
+    path_format: str
+    forbidden_root_names: frozenset[str]
+    forbidden_path_segments: frozenset[str]
+    forbidden_extensions: frozenset[str]
+    never_allow_extensions: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ContentPolicy:
+    text_scan_limit_bytes: int
+    magic_signatures: tuple[MagicSignature, ...]
+    encoded_patterns: tuple[EncodedPattern, ...]
+    redaction_indicators: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EndpointPolicy:
+    default_decision: str
+    allowed_semantic_effects: frozenset[str]
+    approved_terms_states: frozenset[str]
+    required_fields: tuple[str, ...]
+    forbidden_credential_classes: frozenset[str]
+    approval_required_effects: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryPolicy:
+    schema_version: str
+    repository: RepositoryPolicy
+    content: ContentPolicy
+    synthetic_fixtures: Mapping[str, SyntheticFixture]
+    endpoint: EndpointPolicy
+
+
+class PolicyLoadError(ValueError):
+    """A stable-code policy configuration error."""
+
+    def __init__(self, code: str, field: str, detail: str) -> None:
+        self.code = code
+        self.field = field
+        self.detail = detail
+        super().__init__(f"{code}: {field}: {detail}")
+
+
+class PathBoundaryError(ValueError):
+    """A stable-code repository path error."""
+
+    def __init__(self, code: str, detail: str) -> None:
+        self.code = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
+
+
+class RepositoryScanError(RuntimeError):
+    pass
+
+
+def _required_table(document: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    value = document.get(name)
+    if not isinstance(value, dict):
+        raise PolicyLoadError("POLICY_REQUIRED_TABLE_MISSING", name, "must be a table")
+    return value
+
+
+def _required_value(table: Mapping[str, Any], table_name: str, name: str) -> Any:
+    if name not in table:
+        raise PolicyLoadError(
+            "POLICY_REQUIRED_FIELD_MISSING", f"{table_name}.{name}", "field is required"
+        )
+    return table[name]
+
+
+def _reject_unknown_keys(
+    table: Mapping[str, Any], allowed: set[str] | frozenset[str], field: str
+) -> None:
+    unknown = sorted(set(table).difference(allowed))
+    if unknown:
+        raise PolicyLoadError(
+            "POLICY_UNKNOWN_FIELD",
+            field,
+            "unknown fields: " + ", ".join(unknown),
+        )
+
+
+def _positive_int(table: Mapping[str, Any], table_name: str, name: str) -> int:
+    value = _required_value(table, table_name, name)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise PolicyLoadError(
+            "POLICY_FIELD_INVALID", f"{table_name}.{name}", "must be a positive integer"
+        )
+    return value
+
+
+def _string(table: Mapping[str, Any], table_name: str, name: str) -> str:
+    value = _required_value(table, table_name, name)
+    if not isinstance(value, str) or not value.strip():
+        raise PolicyLoadError(
+            "POLICY_FIELD_INVALID", f"{table_name}.{name}", "must be a non-empty string"
+        )
+    return value.strip()
+
+
+def _string_list(
+    table: Mapping[str, Any], table_name: str, name: str, *, allow_empty: bool = False
+) -> tuple[str, ...]:
+    value = _required_value(table, table_name, name)
+    if not isinstance(value, list) or (not value and not allow_empty):
+        raise PolicyLoadError(
+            "POLICY_FIELD_INVALID",
+            f"{table_name}.{name}",
+            "must be a non-empty string array",
+        )
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        raise PolicyLoadError(
+            "POLICY_FIELD_INVALID", f"{table_name}.{name}", "contains an invalid string"
+        )
+    normalized = tuple(item.strip() for item in value)
+    if len({item.casefold() for item in normalized}) != len(normalized):
+        raise PolicyLoadError(
+            "POLICY_DUPLICATE_VALUE",
+            f"{table_name}.{name}",
+            "duplicates are not allowed",
+        )
+    return normalized
+
+
+def _reason_code(value: Any, field: str) -> str:
+    if not isinstance(value, str) or _REASON_CODE.fullmatch(value) is None:
+        raise PolicyLoadError(
+            "POLICY_REASON_CODE_INVALID",
+            field,
+            "must be an uppercase stable reason code",
+        )
+    return value
+
+
+def _extension_set(values: Sequence[str], field: str) -> frozenset[str]:
+    normalized: set[str] = set()
+    for value in values:
+        extension = value.casefold()
+        if not extension.startswith(".") or "/" in extension or "\\" in extension:
+            raise PolicyLoadError(
+                "POLICY_FIELD_INVALID",
+                field,
+                "extensions must begin with '.' and contain no path",
+            )
+        normalized.add(extension)
+    return frozenset(normalized)
+
+
+def _assert_boundary_coverage(
+    repository: RepositoryPolicy, content: ContentPolicy
+) -> None:
+    roots = repository.forbidden_root_names
+    required_root_groups = (
+        {"data"},
+        {"raw"},
+        {"quarantine"},
+        {"export", "exports"},
+        {"report", "reports"},
+    )
+    if any(not roots.intersection(group) for group in required_root_groups):
+        raise PolicyLoadError(
+            "POLICY_BOUNDARY_INCOMPLETE",
+            "repository.forbidden_root_names",
+            "must cover data, raw, quarantine, export, and report roots",
+        )
+    required_forbidden = {".har", ".sqlite", ".db", ".csv", ".xlsx"}
+    if not required_forbidden.issubset(repository.forbidden_extensions):
+        raise PolicyLoadError(
+            "POLICY_BOUNDARY_INCOMPLETE",
+            "repository.forbidden_extensions",
+            "must cover HAR, SQLite/database, CSV, and XLSX artifacts",
+        )
+    required_never_allow = {".har", ".cookie", ".sqlite", ".db", ".pem", ".key", ".zip"}
+    if not required_never_allow.issubset(repository.never_allow_extensions):
+        raise PolicyLoadError(
+            "POLICY_BOUNDARY_INCOMPLETE",
+            "repository.never_allow_extensions",
+            "must cover HAR, cookie, database, private-key, and archive files",
+        )
+    if not repository.never_allow_extensions.issubset(repository.forbidden_extensions):
+        raise PolicyLoadError(
+            "POLICY_BOUNDARY_INCOMPLETE",
+            "repository.never_allow_extensions",
+            "never-allow extensions must also be forbidden extensions",
+        )
+    magic_names = {item.name.casefold() for item in content.magic_signatures}
+    if not any("sqlite" in name for name in magic_names) or not any(
+        "archive" in name or "zip" in name for name in magic_names
+    ):
+        raise PolicyLoadError(
+            "POLICY_BOUNDARY_INCOMPLETE",
+            "content.magic_signatures",
+            "must include SQLite and archive/ZIP signatures",
+        )
+    pattern_names = {item.name.casefold() for item in content.encoded_patterns}
+    required_pattern_groups = (
+        {name for name in pattern_names if "credential" in name or "secret" in name},
+        {name for name in pattern_names if "session" in name or "cookie" in name},
+        {name for name in pattern_names if "account" in name},
+        {name for name in pattern_names if "private" in name and "key" in name},
+        {name for name in pattern_names if "lfs" in name},
+    )
+    if any(not group for group in required_pattern_groups):
+        raise PolicyLoadError(
+            "POLICY_BOUNDARY_INCOMPLETE",
+            "content.encoded_patterns",
+            "must cover credential, session, external-account, private-key, and Git LFS content",
+        )
+    if "synthetic" not in {value.casefold() for value in content.redaction_indicators}:
+        raise PolicyLoadError(
+            "POLICY_BOUNDARY_INCOMPLETE",
+            "content.redaction_indicators",
+            "must include the SYNTHETIC marker",
+        )
+
+
+def load_policy(path: Path | str) -> BoundaryPolicy:
+    """Load and fully validate a data-boundary TOML policy."""
+
+    policy_path = Path(path)
+    try:
+        document = tomllib.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise PolicyLoadError(
+            "POLICY_UNREADABLE", str(policy_path), type(exc).__name__
+        ) from exc
+
+    _reject_unknown_keys(
+        document,
+        {
+            "schema_version",
+            "repository",
+            "content",
+            "synthetic_fixture",
+            "endpoint_policy",
+        },
+        "policy",
+    )
+
+    raw_schema_version = document.get("schema_version")
+    if isinstance(raw_schema_version, bool) or not isinstance(
+        raw_schema_version, (str, int)
+    ):
+        raise PolicyLoadError(
+            "POLICY_REQUIRED_FIELD_MISSING",
+            "schema_version",
+            "must be a string or integer",
+        )
+    schema_version = str(raw_schema_version).strip()
+    if schema_version != "1":
+        raise PolicyLoadError("POLICY_FIELD_INVALID", "schema_version", "must equal 1")
+
+    repository_table = _required_table(document, "repository")
+    _reject_unknown_keys(
+        repository_table,
+        {
+            "max_tracked_bytes",
+            "path_format",
+            "forbidden_root_names",
+            "forbidden_path_segments",
+            "forbidden_extensions",
+            "never_allow_extensions",
+        },
+        "repository",
+    )
+    max_tracked_bytes = _positive_int(
+        repository_table, "repository", "max_tracked_bytes"
+    )
+    if max_tracked_bytes != FIVE_MIB:
+        raise PolicyLoadError(
+            "POLICY_LIMIT_INVALID",
+            "repository.max_tracked_bytes",
+            "must equal the governed 5 MiB limit (5242880 bytes)",
+        )
+    path_format = _string(repository_table, "repository", "path_format")
+    normalized_path_format = re.sub(r"[^a-z]+", "-", path_format.casefold()).strip("-")
+    if (
+        "relative" not in normalized_path_format
+        or "posix" not in normalized_path_format
+    ):
+        raise PolicyLoadError(
+            "POLICY_PATH_FORMAT_INVALID",
+            "repository.path_format",
+            "must require normalized repository-relative POSIX paths",
+        )
+    forbidden_roots = frozenset(
+        value.casefold()
+        for value in _string_list(
+            repository_table, "repository", "forbidden_root_names"
+        )
+    )
+    forbidden_segments = frozenset(
+        value.casefold()
+        for value in _string_list(
+            repository_table, "repository", "forbidden_path_segments"
+        )
+    )
+    repository = RepositoryPolicy(
+        max_tracked_bytes=max_tracked_bytes,
+        path_format=path_format,
+        forbidden_root_names=forbidden_roots,
+        forbidden_path_segments=forbidden_segments,
+        forbidden_extensions=_extension_set(
+            _string_list(repository_table, "repository", "forbidden_extensions"),
+            "repository.forbidden_extensions",
+        ),
+        never_allow_extensions=_extension_set(
+            _string_list(repository_table, "repository", "never_allow_extensions"),
+            "repository.never_allow_extensions",
+        ),
+    )
+
+    content_table = _required_table(document, "content")
+    _reject_unknown_keys(
+        content_table,
+        {
+            "text_scan_limit_bytes",
+            "magic_signatures",
+            "encoded_patterns",
+            "redaction_indicators",
+        },
+        "content",
+    )
+    scan_limit = _positive_int(content_table, "content", "text_scan_limit_bytes")
+    if scan_limit < max_tracked_bytes:
+        raise PolicyLoadError(
+            "POLICY_SCAN_LIMIT_INVALID",
+            "content.text_scan_limit_bytes",
+            "must scan every byte permitted by max_tracked_bytes",
+        )
+
+    raw_magic = _required_value(content_table, "content", "magic_signatures")
+    if not isinstance(raw_magic, list) or not raw_magic:
+        raise PolicyLoadError(
+            "POLICY_FIELD_INVALID",
+            "content.magic_signatures",
+            "must be a non-empty record array",
+        )
+    magic_signatures: list[MagicSignature] = []
+    for index, record in enumerate(raw_magic):
+        field = f"content.magic_signatures[{index}]"
+        if not isinstance(record, dict):
+            raise PolicyLoadError("POLICY_FIELD_INVALID", field, "must be a record")
+        _reject_unknown_keys(record, {"name", "offset", "hex", "reason_code"}, field)
+        name = _string(record, field, "name")
+        offset = _required_value(record, field, "offset")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise PolicyLoadError(
+                "POLICY_FIELD_INVALID", f"{field}.offset", "must be >= 0"
+            )
+        hex_value = _string(record, field, "hex")
+        try:
+            signature = bytes.fromhex(hex_value)
+        except ValueError as exc:
+            raise PolicyLoadError(
+                "POLICY_FIELD_INVALID", f"{field}.hex", "must be valid hexadecimal"
+            ) from exc
+        if not signature:
+            raise PolicyLoadError(
+                "POLICY_FIELD_INVALID", f"{field}.hex", "must not be empty"
+            )
+        reason_code = _reason_code(record.get("reason_code"), f"{field}.reason_code")
+        magic_signatures.append(MagicSignature(name, offset, signature, reason_code))
+
+    raw_patterns = _required_value(content_table, "content", "encoded_patterns")
+    if not isinstance(raw_patterns, list) or not raw_patterns:
+        raise PolicyLoadError(
+            "POLICY_FIELD_INVALID",
+            "content.encoded_patterns",
+            "must be a non-empty record array",
+        )
+    encoded_patterns: list[EncodedPattern] = []
+    for index, record in enumerate(raw_patterns):
+        field = f"content.encoded_patterns[{index}]"
+        if not isinstance(record, dict):
+            raise PolicyLoadError("POLICY_FIELD_INVALID", field, "must be a record")
+        _reject_unknown_keys(
+            record, {"name", "encoding", "value", "reason_code"}, field
+        )
+        name = _string(record, field, "name")
+        encoding = _string(record, field, "encoding")
+        if encoding != "base64-regex-utf8":
+            raise PolicyLoadError(
+                "POLICY_PATTERN_ENCODING_INVALID",
+                f"{field}.encoding",
+                "only base64-regex-utf8 is accepted",
+            )
+        encoded_value = _string(record, field, "value")
+        try:
+            decoded = base64.b64decode(encoded_value, validate=True).decode("utf-8")
+            compiled = re.compile(decoded)
+        except (ValueError, UnicodeError, re.error) as exc:
+            raise PolicyLoadError(
+                "POLICY_PATTERN_INVALID", f"{field}.value", type(exc).__name__
+            ) from exc
+        reason_code = _reason_code(record.get("reason_code"), f"{field}.reason_code")
+        encoded_patterns.append(EncodedPattern(name, compiled, reason_code))
+
+    content = ContentPolicy(
+        text_scan_limit_bytes=scan_limit,
+        magic_signatures=tuple(magic_signatures),
+        encoded_patterns=tuple(encoded_patterns),
+        redaction_indicators=_string_list(
+            content_table, "content", "redaction_indicators"
+        ),
+    )
+    _assert_boundary_coverage(repository, content)
+
+    fixture_records = document.get("synthetic_fixture", [])
+    if not isinstance(fixture_records, list):
+        raise PolicyLoadError(
+            "POLICY_FIELD_INVALID", "synthetic_fixture", "must be an array of tables"
+        )
+    fixtures: dict[str, SyntheticFixture] = {}
+    for index, record in enumerate(fixture_records):
+        field = f"synthetic_fixture[{index}]"
+        if not isinstance(record, dict):
+            raise PolicyLoadError("POLICY_FIELD_INVALID", field, "must be a table")
+        _reject_unknown_keys(record, _FIXTURE_FIELDS, field)
+        raw_path = _string(record, field, "path")
+        if _EXACT_PATH_META.search(raw_path) or raw_path.endswith("/"):
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_PATH_NOT_EXACT",
+                f"{field}.path",
+                "globs/directories are forbidden",
+            )
+        try:
+            fixture_path = normalize_repository_path(raw_path)
+        except PathBoundaryError as exc:
+            raise PolicyLoadError(exc.code, f"{field}.path", exc.detail) from exc
+        path_parts = tuple(
+            part.casefold() for part in PurePosixPath(fixture_path).parts
+        )
+        if path_parts[: len(_FIXTURE_ROOT_PARTS)] != _FIXTURE_ROOT_PARTS:
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_OUTSIDE_ROOT",
+                f"{field}.path",
+                "fixtures must be under tests/fixtures/synthetic/",
+            )
+        if path_parts[0] in repository.forbidden_root_names or any(
+            part in repository.forbidden_path_segments for part in path_parts
+        ):
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_PATH_FORBIDDEN",
+                f"{field}.path",
+                "fixtures cannot bypass forbidden roots or path segments",
+            )
+        if (
+            PurePosixPath(fixture_path).suffix.casefold()
+            in repository.never_allow_extensions
+        ):
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_PATH_FORBIDDEN",
+                f"{field}.path",
+                "fixtures cannot bypass never-allow extensions",
+            )
+        sha256 = _string(record, field, "sha256").casefold()
+        if _SHA256.fullmatch(sha256) is None:
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_HASH_INVALID",
+                f"{field}.sha256",
+                "must be lowercase SHA-256",
+            )
+        byte_count = _required_value(record, field, "bytes")
+        if (
+            isinstance(byte_count, bool)
+            or not isinstance(byte_count, int)
+            or byte_count < 0
+        ):
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_SIZE_INVALID",
+                f"{field}.bytes",
+                "must be a non-negative integer",
+            )
+        if byte_count > repository.max_tracked_bytes:
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_SIZE_INVALID",
+                f"{field}.bytes",
+                "cannot exceed repository limit",
+            )
+        classification = _string(record, field, "classification")
+        if classification != "SYNTHETIC":
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_CLASSIFICATION_INVALID",
+                f"{field}.classification",
+                "must equal SYNTHETIC",
+            )
+        purpose = _string(record, field, "purpose")
+        if len(purpose) > 512 or _CONTROL.search(purpose):
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_PURPOSE_INVALID",
+                f"{field}.purpose",
+                "must be 1-512 control-free characters",
+            )
+        governing_issue = _string(record, field, "governing_issue")
+        if _GOVERNING_ISSUE.fullmatch(governing_issue) is None:
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_ISSUE_INVALID",
+                f"{field}.governing_issue",
+                "must use #<number> (<STABLE-KEY>)",
+            )
+        fixture = SyntheticFixture(
+            path=fixture_path,
+            sha256=sha256,
+            bytes=byte_count,
+            classification=classification,
+            purpose=purpose,
+            governing_issue=governing_issue,
+        )
+        if fixture_path in fixtures:
+            raise PolicyLoadError(
+                "POLICY_FIXTURE_DUPLICATE", f"{field}.path", "duplicate exact path"
+            )
+        fixtures[fixture_path] = fixture
+
+    endpoint_table = _required_table(document, "endpoint_policy")
+    _reject_unknown_keys(
+        endpoint_table,
+        {
+            "default_decision",
+            "allowed_semantic_effects",
+            "approved_terms_states",
+            "required_fields",
+            "forbidden_credential_classes",
+            "approval_required_effects",
+        },
+        "endpoint_policy",
+    )
+    default_decision = _string(
+        endpoint_table, "endpoint_policy", "default_decision"
+    ).upper()
+    if default_decision != "DENY":
+        raise PolicyLoadError(
+            "POLICY_ENDPOINT_DEFAULT_INVALID",
+            "endpoint_policy.default_decision",
+            "must equal DENY",
+        )
+    endpoint = EndpointPolicy(
+        default_decision=default_decision,
+        allowed_semantic_effects=frozenset(
+            item.upper()
+            for item in _string_list(
+                endpoint_table, "endpoint_policy", "allowed_semantic_effects"
+            )
+        ),
+        approved_terms_states=frozenset(
+            item.upper()
+            for item in _string_list(
+                endpoint_table, "endpoint_policy", "approved_terms_states"
+            )
+        ),
+        required_fields=_string_list(
+            endpoint_table, "endpoint_policy", "required_fields"
+        ),
+        forbidden_credential_classes=frozenset(
+            item.upper()
+            for item in _string_list(
+                endpoint_table, "endpoint_policy", "forbidden_credential_classes"
+            )
+        ),
+        approval_required_effects=frozenset(
+            item.upper()
+            for item in _string_list(
+                endpoint_table, "endpoint_policy", "approval_required_effects"
+            )
+        ),
+    )
+    if not endpoint.allowed_semantic_effects or not endpoint.approved_terms_states:
+        raise PolicyLoadError(
+            "POLICY_BOUNDARY_INCOMPLETE",
+            "endpoint_policy",
+            "allow and terms sets cannot be empty",
+        )
+    if endpoint.allowed_semantic_effects.intersection(
+        endpoint.approval_required_effects
+    ):
+        raise PolicyLoadError(
+            "POLICY_ENDPOINT_EFFECT_CONFLICT",
+            "endpoint_policy",
+            "an effect cannot be both allowed and approval-required",
+        )
+    if endpoint.allowed_semantic_effects != {"READ_ONLY"}:
+        raise PolicyLoadError(
+            "POLICY_ENDPOINT_ALLOW_INVALID",
+            "endpoint_policy.allowed_semantic_effects",
+            "only READ_ONLY may be base-allowed",
+        )
+    if endpoint.approved_terms_states != {"APPROVED"}:
+        raise PolicyLoadError(
+            "POLICY_ENDPOINT_TERMS_INVALID",
+            "endpoint_policy.approved_terms_states",
+            "only APPROVED terms may be base-allowed",
+        )
+    if frozenset(endpoint.required_fields) != _ENDPOINT_REQUIRED_FIELDS:
+        raise PolicyLoadError(
+            "POLICY_ENDPOINT_FIELDS_INVALID",
+            "endpoint_policy.required_fields",
+            "must contain the exact governed endpoint fields",
+        )
+
+    return BoundaryPolicy(schema_version, repository, content, fixtures, endpoint)
+
+
+def normalize_repository_path(raw_path: str) -> str:
+    """Return a canonical repository-relative POSIX path or raise a stable error."""
+
+    if not isinstance(raw_path, str) or not raw_path:
+        raise PathBoundaryError("PATH_EMPTY", "path must be a non-empty string")
+    if _CONTROL.search(raw_path):
+        raise PathBoundaryError(
+            "PATH_CONTROL_CHARACTER", "control characters are forbidden"
+        )
+    if raw_path.startswith("\\\\") or raw_path.startswith("//"):
+        raise PathBoundaryError("PATH_UNC", "UNC paths are forbidden")
+    if _DRIVE_PREFIX.match(raw_path):
+        raise PathBoundaryError(
+            "PATH_DRIVE_QUALIFIED", "drive-qualified paths are forbidden"
+        )
+    if raw_path.startswith("/"):
+        raise PathBoundaryError("PATH_ABSOLUTE", "absolute paths are forbidden")
+    if "\\" in raw_path:
+        raise PathBoundaryError("PATH_NOT_POSIX", "backslashes are forbidden")
+    raw_parts = raw_path.split("/")
+    if ".." in raw_parts:
+        raise PathBoundaryError("PATH_TRAVERSAL", "parent traversal is forbidden")
+    if any(":" in part for part in raw_parts):
+        raise PathBoundaryError(
+            "PATH_WINDOWS_ADS", "colon/alternate stream syntax is forbidden"
+        )
+    if any(part not in {".", ".."} and part.endswith((" ", ".")) for part in raw_parts):
+        raise PathBoundaryError(
+            "PATH_WINDOWS_AMBIGUOUS", "trailing dots/spaces are forbidden"
+        )
+    normalized = str(PurePosixPath(raw_path))
+    if (
+        normalized != raw_path
+        or normalized in {"", "."}
+        or any(part in {"", "."} for part in raw_parts)
+        or unicodedata.normalize("NFC", raw_path) != raw_path
+    ):
+        raise PathBoundaryError(
+            "PATH_NOT_NORMALIZED", "path is not canonical POSIX form"
+        )
+    return normalized
+
+
+def has_reparse_attribute(file_attributes: int | None) -> bool:
+    """Pure helper used by deterministic tests and Windows path checks."""
+
+    return bool((file_attributes or 0) & _REPARSE_POINT_ATTRIBUTE)
+
+
+def _safe_display_path(path: str) -> str:
+    return path.encode("unicode_escape", errors="backslashreplace").decode("ascii")
+
+
+def _path_policy_findings(path: str, policy: RepositoryPolicy) -> list[Finding]:
+    parts = tuple(part.casefold() for part in PurePosixPath(path).parts)
+    findings: list[Finding] = []
+    if parts[0] in policy.forbidden_root_names:
+        findings.append(
+            Finding("PATH_FORBIDDEN_ROOT", path, "top-level root is denied")
+        )
+    if any(part in policy.forbidden_path_segments for part in parts):
+        findings.append(
+            Finding("PATH_FORBIDDEN_SEGMENT", path, "path contains a denied segment")
+        )
+    return findings
+
+
+def _filesystem_safety_findings(
+    root: Path, path: str
+) -> tuple[list[Finding], Path | None]:
+    findings: list[Finding] = []
+    root_resolved = root.resolve(strict=True)
+    candidate = root
+    for part in PurePosixPath(path).parts:
+        candidate = candidate / part
+        try:
+            metadata = os.lstat(candidate)
+        except FileNotFoundError:
+            return [Finding("FILE_MISSING", path, "tracked path is absent")], None
+        except OSError as exc:
+            return [Finding("FILE_UNREADABLE", path, type(exc).__name__)], None
+        if stat.S_ISLNK(metadata.st_mode):
+            return [
+                Finding("FS_SYMLINK", path, "filesystem symlink is forbidden")
+            ], None
+        if has_reparse_attribute(getattr(metadata, "st_file_attributes", None)):
+            return [
+                Finding(
+                    "FS_REPARSE_POINT", path, "filesystem reparse point is forbidden"
+                )
+            ], None
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root_resolved)
+    except (OSError, ValueError):
+        return [
+            Finding("PATH_OUTSIDE_ROOT", path, "resolved path escapes repository")
+        ], None
+    try:
+        leaf_metadata = os.lstat(candidate)
+    except OSError as exc:
+        return [Finding("FILE_UNREADABLE", path, type(exc).__name__)], None
+    if not stat.S_ISREG(leaf_metadata.st_mode):
+        findings.append(
+            Finding("FILE_NOT_REGULAR", path, "tracked path is not a regular file")
+        )
+        return findings, None
+    return findings, candidate
+
+
+def _looks_like_har(data: bytes) -> bool:
+    stripped = data.lstrip()
+    if not stripped.startswith(b"{"):
+        return False
+    try:
+        document = json.loads(stripped.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(document, dict):
+        return False
+    log = document.get("log")
+    if not isinstance(log, dict):
+        return False
+    entries = log.get("entries")
+    return isinstance(entries, list) and any(
+        isinstance(entry, dict) and "request" in entry and "response" in entry
+        for entry in entries
+    )
+
+
+def _inspect_synthetic_xlsx(data: bytes) -> tuple[bool, bool]:
+    """Return (safe OOXML container, contains SYNTHETIC marker)."""
+
+    required_members = {"[content_types].xml", "_rels/.rels", "xl/workbook.xml"}
+    seen: set[str] = set()
+    total_uncompressed = 0
+    marker_found = False
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            infos = archive.infolist()
+            if not infos or len(infos) > 2_000:
+                return False, False
+            for info in infos:
+                raw_name = info.filename
+                if (
+                    not raw_name
+                    or raw_name.startswith(("/", "\\"))
+                    or "\\" in raw_name
+                    or _CONTROL.search(raw_name)
+                    or ".." in PurePosixPath(raw_name).parts
+                    or info.flag_bits & 0x1
+                ):
+                    return False, False
+                normalized_name = raw_name.rstrip("/")
+                if not normalized_name:
+                    return False, False
+                folded_name = normalized_name.casefold()
+                if folded_name in seen:
+                    return False, False
+                seen.add(folded_name)
+                if info.is_dir():
+                    continue
+                total_uncompressed += info.file_size
+                if total_uncompressed > FIVE_MIB:
+                    return False, False
+                member = archive.read(info)
+                if b"SYNTHETIC" in member.upper():
+                    marker_found = True
+    except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile):
+        return False, False
+    return required_members.issubset(seen), marker_found
+
+
+def _file_findings(
+    path: str, absolute_path: Path, policy: BoundaryPolicy
+) -> list[Finding]:
+    findings: list[Finding] = []
+    fixture = policy.synthetic_fixtures.get(path)
+    extension = PurePosixPath(path).suffix.casefold()
+    if extension in policy.repository.never_allow_extensions:
+        findings.append(
+            Finding(
+                "FILE_EXTENSION_NEVER_ALLOWED", path, "extension cannot be allowlisted"
+            )
+        )
+    elif extension in policy.repository.forbidden_extensions and fixture is None:
+        findings.append(
+            Finding(
+                "FILE_EXTENSION_FORBIDDEN", path, "extension requires exact fixture"
+            )
+        )
+
+    try:
+        size = absolute_path.stat().st_size
+    except OSError as exc:
+        return findings + [Finding("FILE_UNREADABLE", path, type(exc).__name__)]
+    if size > policy.repository.max_tracked_bytes:
+        findings.append(Finding("FILE_TOO_LARGE", path, "tracked file exceeds 5 MiB"))
+        return findings
+    try:
+        data = absolute_path.read_bytes()
+    except OSError as exc:
+        return findings + [Finding("FILE_UNREADABLE", path, type(exc).__name__)]
+
+    is_synthetic_xlsx = fixture is not None and extension == ".xlsx"
+    xlsx_valid = False
+    xlsx_marker = False
+    if is_synthetic_xlsx:
+        xlsx_valid, xlsx_marker = _inspect_synthetic_xlsx(data)
+        if not xlsx_valid:
+            findings.append(
+                Finding(
+                    "FIXTURE_XLSX_INVALID",
+                    path,
+                    "allowlisted XLSX is not bounded OOXML",
+                )
+            )
+
+    for signature in policy.content.magic_signatures:
+        end = signature.offset + len(signature.value)
+        if len(data) >= end and data[signature.offset : end] == signature.value:
+            if (
+                is_synthetic_xlsx
+                and signature.offset == 0
+                and signature.value == b"PK\x03\x04"
+            ):
+                continue
+            findings.append(
+                Finding(
+                    signature.reason_code, path, f"matched {signature.name} signature"
+                )
+            )
+    if _looks_like_har(data):
+        findings.append(
+            Finding("CONTENT_HAR", path, "HAR structure detected after content parsing")
+        )
+
+    text = data[: policy.content.text_scan_limit_bytes].decode(
+        "utf-8", errors="replace"
+    )
+    for encoded_pattern in policy.content.encoded_patterns:
+        if encoded_pattern.regex.search(text):
+            findings.append(
+                Finding(
+                    encoded_pattern.reason_code,
+                    path,
+                    f"matched {encoded_pattern.name} rule",
+                )
+            )
+
+    if fixture is not None:
+        if size != fixture.bytes:
+            findings.append(
+                Finding(
+                    "FIXTURE_SIZE_MISMATCH", path, "bytes differ from exact allowlist"
+                )
+            )
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != fixture.sha256:
+            findings.append(
+                Finding("FIXTURE_HASH_MISMATCH", path, "SHA-256 differs from allowlist")
+            )
+        marker_present = (
+            xlsx_marker if is_synthetic_xlsx else "synthetic" in text.casefold()
+        )
+        if not marker_present:
+            findings.append(
+                Finding(
+                    "FIXTURE_SYNTHETIC_MARKER_MISSING",
+                    path,
+                    "allowlisted fixture lacks the SYNTHETIC marker",
+                )
+            )
+    return findings
+
+
+def scan_tracked_entries(
+    root: Path | str, policy: BoundaryPolicy, entries: Iterable[TrackedEntry]
+) -> list[Finding]:
+    """Scan an explicit set of Git-index entries under *root*."""
+
+    repository_root = Path(root)
+    if not repository_root.is_dir():
+        raise RepositoryScanError("repository root is not a directory")
+    findings: list[Finding] = []
+    seen: set[str] = set()
+    casefold_seen: dict[str, str] = {}
+    normalized_entries: list[TrackedEntry] = []
+    for entry in entries:
+        display_path = _safe_display_path(entry.path)
+        try:
+            path = normalize_repository_path(entry.path)
+        except PathBoundaryError as exc:
+            findings.append(Finding(exc.code, display_path, exc.detail))
+            continue
+        if path in seen:
+            findings.append(
+                Finding("GIT_DUPLICATE_PATH", path, "path appears more than once")
+            )
+            continue
+        seen.add(path)
+        folded = path.casefold()
+        if folded in casefold_seen and casefold_seen[folded] != path:
+            findings.append(
+                Finding("PATH_CASE_COLLISION", path, "case-insensitive collision")
+            )
+        else:
+            casefold_seen[folded] = path
+        normalized_entries.append(TrackedEntry(entry.mode, path))
+
+    for entry in normalized_entries:
+        path = entry.path
+        findings.extend(_path_policy_findings(path, policy.repository))
+        if entry.mode == "120000":
+            findings.append(
+                Finding("GIT_SYMLINK", path, "Git mode 120000 is forbidden")
+            )
+            continue
+        if entry.mode not in {"100644", "100755"}:
+            findings.append(
+                Finding(
+                    "GIT_UNSUPPORTED_MODE", path, "only regular file modes are allowed"
+                )
+            )
+            continue
+        fs_findings, absolute_path = _filesystem_safety_findings(repository_root, path)
+        findings.extend(fs_findings)
+        if absolute_path is not None:
+            findings.extend(_file_findings(path, absolute_path, policy))
+
+    for fixture_path in sorted(set(policy.synthetic_fixtures).difference(seen)):
+        findings.append(
+            Finding(
+                "FIXTURE_ALLOWLIST_ENTRY_MISSING",
+                fixture_path,
+                "allowlisted fixture is not present in the tracked tree",
+            )
+        )
+    return sorted(
+        findings, key=lambda item: (item.path.casefold(), item.code, item.detail)
+    )
+
+
+def parse_git_ls_files(payload: bytes) -> list[TrackedEntry]:
+    """Parse ``git ls-files -s -z`` output without shell quoting ambiguity."""
+
+    entries: list[TrackedEntry] = []
+    for raw_record in payload.split(b"\0"):
+        if not raw_record:
+            continue
+        try:
+            metadata, raw_path = raw_record.split(b"\t", 1)
+            mode_bytes, _object_id, stage_bytes = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise RepositoryScanError("malformed git ls-files record") from exc
+        if stage_bytes != b"0":
+            raise RepositoryScanError("unmerged Git index stages are forbidden")
+        try:
+            mode = mode_bytes.decode("ascii")
+            path = raw_path.decode("utf-8", errors="strict")
+        except UnicodeError as exc:
+            raise RepositoryScanError("Git path is not valid UTF-8") from exc
+        entries.append(TrackedEntry(mode, path))
+    return entries
+
+
+def list_git_tracked_entries(root: Path | str) -> list[TrackedEntry]:
+    """Read the complete stage-zero tracked tree from Git."""
+
+    repository_root = Path(root).resolve(strict=True)
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository_root), "ls-files", "-s", "-z", "--"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RepositoryScanError(
+            f"unable to enumerate Git index: {type(exc).__name__}"
+        ) from exc
+    if completed.returncode != 0:
+        raise RepositoryScanError("git ls-files failed")
+    return parse_git_ls_files(completed.stdout)
+
+
+_LITERAL_SOURCE_VALUES = {
+    "EMBEDDED",
+    "FALLBACK_LITERAL",
+    "HARDCODED",
+    "INLINE",
+    "LITERAL",
+    "PLAINTEXT",
+}
+_LITERAL_FIELD_NAMES = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "secret",
+    "session",
+    "token",
+}
+
+
+def validate_endpoint_record(
+    record: Mapping[str, Any], policy: EndpointPolicy, *, index: int = 0
+) -> list[Finding]:
+    """Validate endpoint authority by semantic effect, never by HTTP method."""
+
+    provider = record.get("provider")
+    name = record.get("name", record.get("id", index))
+    identity = f"endpoint:{provider if isinstance(provider, str) else 'unknown'}/{name}"
+    findings: list[Finding] = []
+    for field in policy.required_fields:
+        value = record.get(field)
+        if not isinstance(value, str) or not value.strip():
+            findings.append(
+                Finding(
+                    "ENDPOINT_REQUIRED_FIELD_MISSING",
+                    identity,
+                    f"required field: {field}",
+                )
+            )
+
+    semantic_effect = str(record.get("semantic_effect", "")).upper()
+    if semantic_effect not in policy.allowed_semantic_effects:
+        code = (
+            "ENDPOINT_EFFECT_REQUIRES_APPROVAL"
+            if semantic_effect in policy.approval_required_effects
+            else "ENDPOINT_EFFECT_DEFAULT_DENY"
+        )
+        findings.append(Finding(code, identity, "semantic effect is not approved"))
+
+    terms_state = str(record.get("terms_state", "")).upper()
+    if terms_state not in policy.approved_terms_states:
+        findings.append(
+            Finding(
+                "ENDPOINT_TERMS_UNAPPROVED", identity, "terms state is not approved"
+            )
+        )
+
+    credential_class = str(record.get("credential_class", "")).upper()
+    if credential_class in policy.forbidden_credential_classes:
+        findings.append(
+            Finding(
+                "ENDPOINT_CREDENTIAL_CLASS_FORBIDDEN",
+                identity,
+                "credential class is forbidden",
+            )
+        )
+    credential_source = str(record.get("credential_source", "")).upper()
+    if credential_source in _LITERAL_SOURCE_VALUES:
+        findings.append(
+            Finding(
+                "ENDPOINT_LITERAL_CREDENTIAL",
+                identity,
+                "literal credential source is forbidden",
+            )
+        )
+    if any(
+        key.casefold() in _LITERAL_FIELD_NAMES
+        and value not in (None, "", "NONE")
+        and key.casefold() not in {"credential_class", "credential_source"}
+        for key, value in record.items()
+    ):
+        findings.append(
+            Finding(
+                "ENDPOINT_LITERAL_CREDENTIAL",
+                identity,
+                "embedded credential field is forbidden",
+            )
+        )
+    path_matcher = str(record.get("path_matcher", "")).strip()
+    if path_matcher in {"*", "/**", ".*", "^.*$", "/.*"}:
+        findings.append(
+            Finding(
+                "ENDPOINT_MATCHER_UNBOUNDED",
+                identity,
+                "path matcher is not capability-bounded",
+            )
+        )
+    return sorted(set(findings), key=lambda item: (item.path, item.code, item.detail))
+
+
+def validate_endpoint_records(
+    records: Iterable[Mapping[str, Any]], policy: EndpointPolicy
+) -> list[Finding]:
+    findings: list[Finding] = []
+    for index, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            findings.append(
+                Finding(
+                    "ENDPOINT_RECORD_INVALID",
+                    f"endpoint:{index}",
+                    "record must be an object",
+                )
+            )
+            continue
+        findings.extend(validate_endpoint_record(record, policy, index=index))
+    return sorted(findings, key=lambda item: (item.path, item.code, item.detail))
+
+
+def _load_endpoint_records(path: Path) -> list[Mapping[str, Any]]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RepositoryScanError(
+            f"endpoint records are unreadable: {type(exc).__name__}"
+        ) from exc
+    records = document.get("endpoints") if isinstance(document, dict) else document
+    if not isinstance(records, list):
+        raise RepositoryScanError(
+            "endpoint records must be a list or an object with 'endpoints'"
+        )
+    return records
+
+
+def _print_findings(findings: Sequence[Finding], output_format: str) -> None:
+    if output_format == "json":
+        print(
+            json.dumps(
+                [
+                    {"code": item.code, "path": item.path, "detail": item.detail}
+                    for item in findings
+                ],
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    for item in findings:
+        print(f"{item.code}\t{item.path}\t{item.detail}")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--policy", type=Path, default=Path(".policy/data-boundary.toml")
+    )
+    parser.add_argument("--endpoint-records", type=Path)
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    args = parser.parse_args(argv)
+
+    try:
+        root = args.root.resolve(strict=True)
+        policy_path = args.policy if args.policy.is_absolute() else root / args.policy
+        policy = load_policy(policy_path)
+        entries = list_git_tracked_entries(root)
+        findings = scan_tracked_entries(root, policy, entries)
+        if args.endpoint_records is not None:
+            records_path = (
+                args.endpoint_records
+                if args.endpoint_records.is_absolute()
+                else root / args.endpoint_records
+            ).resolve(strict=True)
+            try:
+                records_path.relative_to(root)
+            except ValueError as exc:
+                raise RepositoryScanError(
+                    "endpoint records path escapes repository"
+                ) from exc
+            findings.extend(
+                validate_endpoint_records(
+                    _load_endpoint_records(records_path), policy.endpoint
+                )
+            )
+        findings = sorted(
+            findings, key=lambda item: (item.path.casefold(), item.code, item.detail)
+        )
+    except (PolicyLoadError, RepositoryScanError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    _print_findings(findings, args.format)
+    if findings:
+        return 1
+    print("repository-boundary: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

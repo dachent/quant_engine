@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "provider": "portfolio123",
+  "acquired_on": "2026-08-01",
+  "governing_issue": 18,
+  "sources": [
+    {
+      "source_id": "upstream-skill",
+      "locator": "https://github.com/cmoralesm/P123-Claude-Skill",
+      "revision": "9755143d946f702611b604fa3bfdb97d7f31ec32",
+      "license": "MIT",
+      "disposition": "Reference baseline; locally revised formula references curated below"
+    },
+    {
+      "source_id": "legacy-gist",
+      "locator": "https://gist.github.com/dachent/2b7124a36c45d291b72eea62290d31e3",
+      "revision": "0f709a453132a8493d24440e1377cba05f3fd966",
+      "disposition": "Provenance only; deletion remains separately deferred in issue 21"
+    },
+    {
+      "source_id": "installed-claude-skill",
+      "locator": "local-installed-skill:portfolio123",
+      "revision": "sha256:2425ca3bfdd739142b937dac762ba3e47d605ebbb33735f0d463da895728c158",
+      "disposition": "Revised formula references curated; environment file and executable examples excluded"
+    },
+    {
+      "source_id": "installed-codex-skill",
+      "locator": "local-installed-skill-search:codex",
+      "revision": null,
+      "disposition": "No Portfolio123 skill installation found on 2026-08-01"
+    },
+    {
+      "source_id": "legacy-har-capture",
+      "locator": "legacy-playground:p123_har",
+      "revision": "sha256:b0d6268c06376997a1549a8b7e4152158f6cc27f9b09f3971bd0d0a9992a6952",
+      "disposition": "Capture design curated into package and WCH contract; authenticated artifacts remain local"
+    },
+    {
+      "source_id": "legacy-har-extractor",
+      "locator": "legacy-playground:p123_har_to_csv",
+      "revision": "sha256:2a401ce187acd05bc6c5e079f73c757ee5b6289cdcf7a6bb2a707fa681953dae",
+      "disposition": "Extraction behavior informs issue 19 generation; source artifacts remain local"
+    },
+    {
+      "source_id": "legacy-har-runbook",
+      "locator": "legacy-playground:p123_runbook",
+      "revision": "sha256:d568ee4e2c0f8df045f06804437443e483d3df3a9af5bf2f7142fb9265d9e162",
+      "disposition": "Reviewed operational lessons curated into the repository runbook"
+    },
+    {
+      "source_id": "legacy-har-matrix",
+      "locator": "legacy-playground:p123_data_matrix",
+      "revision": "sha256:bd85bec496d62c290aaea53d8043f7a5f71c2ebd4a35cfa26a5e320c9586e566",
+      "disposition": "Private identifiers and values excluded; coverage informs issue 19"
+    }
+  ],
+  "curated_formula_references": {
+    "advanced-functions.md": "587229368dc44a21ebde630502b4d3e9cba6530d3bbb45c0494f00cc6a5ec8d8",
+    "benchmark-functions.md": "1c8aa7a2ca03968ff45588ee8213b36ea2c270262e49be9fc2cd92042d77a739",
+    "estimates.md": "da25424b51a75c2d1e39b653de82868c5e1812c5651ed74ca2fcfefb808755a8",
+    "financials.md": "9e93f519cb807dab1fd49040f1842578786a91eedcabba1b6574f0e8f21c54af",
+    "fundamentals.md": "db680d4bc63e82320a967026daa84a82c0fe0860d4b1dc1a397636cbfa2cd63a",
+    "industry-sector.md": "7f73005fa50fd17d655bf7e9367096a97c8708471692f6e81e6ee1bf0fd81a37",
+    "misc.md": "d05f40550d50db8844005356d3fe2a6d22914ece4841a9abb0b6f561a551b46c",
+    "ranking-system-xml.md": "e833c75bfc99234b9e2ad4687ee934923d2b9244fa4e77e8bd6148adea953c46",
+    "ratios-statistics.md": "57d0abaa10f93bb1d7cae24e4e6d5ad6d9633bdfceec638217895bcec8175735",
+    "strategy.md": "96784cbae9833afa2551a56113c0650d0a9e00dc387b78df1d73a8c0e1e4fa3d",
+    "taxonomy.md": "f2e2e18e18f31ca6e36f54fab3681469f1c85c285df72ab0cc2630b8caa236d9",
+    "technical.md": "a0552649bb317d2797c5cabd77629447f42886a935ddf51e67ced3b6a3fe743a",
+    "universe-filters.md": "0d5df7b9191168793a7e23bcbc1f8aa1a9b848cc7b727de6e1d49f4d24b3c971",
+    "universe-operations.md": "d825807555c7fecbd0a1fb8bc9de66b2f7b8d39d4734d04dad6ec29ab46758c4"
+  }
+}

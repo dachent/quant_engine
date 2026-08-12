@@ -1,0 +1,58 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      UV_LINK_MODE: copy
+      UV_NO_PROGRESS: "1"
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.32"
+          enable-cache: false
+      - name: Prove lock is current
+        run: uv lock --check
+      - name: Install the frozen workspace
+        run: uv sync --frozen --all-groups --all-packages --python "${{ matrix.python-version }}"
+      - name: Check formatting
+        run: uv run --frozen --no-sync ruff format --check .
+      - name: Check lint
+        run: uv run --frozen --no-sync ruff check .
+      - name: Type-check CI code
+        run: uv run --frozen --no-sync mypy packages/ci-controls/src tools/issue_guard.py
+      - name: Run bounded offline tests
+        run: uv run --frozen --no-sync pytest -q --disable-socket tests/security tests/ci tests/governance
+      - name: Build every workspace package
+        run: uv build --all-packages --no-sources --python "${{ matrix.python-version }}"

@@ -1,0 +1,53 @@
+[project]
+name = "quant-engine-workspace"
+version = "0.0.0"
+description = "Private governed workspace for quant_engine."
+requires-python = ">=3.11,<3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "mypy>=2.3,<2.4",
+  "pytest>=9.1,<9.2",
+  "pytest-socket>=0.7,<0.8",
+  "quant-engine-ci-controls",
+  "ruff==0.15.22",
+  "types-PyYAML>=6.0.12,<7",
+]
+
+[tool.uv]
+package = false
+required-version = ">=0.11.28,<0.12"
+
+[tool.uv.workspace]
+members = ["packages/ci-controls"]
+
+[tool.uv.sources]
+quant-engine-ci-controls = { workspace = true }
+
+[tool.pytest.ini_options]
+addopts = [
+  "-ra",
+  "--strict-config",
+  "--strict-markers",
+  "--maxfail=1",
+  "-p",
+  "no:cacheprovider",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+incremental = false
+pretty = true
+show_error_codes = true
+warn_unused_configs = true
+

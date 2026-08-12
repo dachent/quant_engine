@@ -1,0 +1,18 @@
+[project]
+name = "quant-engine-ci-controls"
+version = "0.1.0"
+description = "Repository-local CI controls for quant_engine."
+requires-python = ">=3.11,<3.14"
+dependencies = ["PyYAML>=6.0.3,<7"]
+classifiers = ["Private :: Do Not Upload"]
+
+[project.scripts]
+quant-engine-workflow-policy = "quant_engine.ci_controls.workflow_policy:main"
+
+[build-system]
+requires = ["uv_build==0.11.28"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "quant_engine.ci_controls"
+
