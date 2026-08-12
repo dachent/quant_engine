@@ -12,7 +12,9 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "restricted_evidence_summary.py"
-SPEC = importlib.util.spec_from_file_location("restricted_evidence_summary", MODULE_PATH)
+SPEC = importlib.util.spec_from_file_location(
+    "restricted_evidence_summary", MODULE_PATH
+)
 if SPEC is None or SPEC.loader is None:  # pragma: no cover
     raise RuntimeError("unable to load restricted evidence summary tool")
 summary = importlib.util.module_from_spec(SPEC)
@@ -23,7 +25,7 @@ SPEC.loader.exec_module(summary)
 def _private_fixture(tmp_path: Path) -> tuple[Path, tuple[str, ...]]:
     restricted = (
         "synthetic-account-identifier-8842",
-        "synthetic-session-cookie-value",
+        "synthetic-restricted-session-value",
         "synthetic-private-catalog-row",
     )
     path = tmp_path / "private.json"
@@ -31,7 +33,7 @@ def _private_fixture(tmp_path: Path) -> tuple[Path, tuple[str, ...]]:
         json.dumps(
             {
                 "accounts": [{"external_id": restricted[0]}],
-                "session": {"cookie": restricted[1]},
+                "session": {"opaque_state": restricted[1]},
                 "catalog": [{"private_name": restricted[2]}],
                 "generation": {"artifacts": [1, 2, 3]},
             }

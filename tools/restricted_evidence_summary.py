@@ -35,13 +35,13 @@ def _file_evidence(path: Path) -> tuple[bytes, str]:
 def _decode_pointer(pointer: str) -> tuple[str, ...]:
     if not pointer.startswith("/") or pointer == "/":
         raise EvidenceSummaryError("QUERY_POINTER_INVALID")
-    tokens: list[str] = []
+    segments: list[str] = []
     for raw in pointer[1:].split("/"):
-        token = raw.replace("~1", "/").replace("~0", "~")
-        if not token or token in {".", ".."}:
+        segment = raw.replace("~1", "/").replace("~0", "~")
+        if not segment or segment in {".", ".."}:
             raise EvidenceSummaryError("QUERY_POINTER_INVALID")
-        tokens.append(token)
-    return tuple(tokens)
+        segments.append(segment)
+    return tuple(segments)
 
 
 def _parse_query(value: str) -> tuple[str, tuple[str, ...], str]:
@@ -56,16 +56,16 @@ def _parse_query(value: str) -> tuple[str, tuple[str, ...], str]:
     return label, _decode_pointer(pointer), operation
 
 
-def _resolve(value: object, tokens: Sequence[str]) -> object:
+def _resolve(value: object, segments: Sequence[str]) -> object:
     current = value
-    for token in tokens:
+    for segment in segments:
         if isinstance(current, dict):
-            if token not in current:
+            if segment not in current:
                 raise EvidenceSummaryError("QUERY_FIELD_UNKNOWN")
-            current = current[token]
+            current = current[segment]
             continue
-        if isinstance(current, list) and token.isdecimal():
-            index = int(token)
+        if isinstance(current, list) and segment.isdecimal():
+            index = int(segment)
             if index >= len(current):
                 raise EvidenceSummaryError("QUERY_FIELD_UNKNOWN")
             current = current[index]
@@ -140,7 +140,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = summarize(args.input, args.query)
     except (OSError, EvidenceSummaryError) as exc:
-        code = str(exc) if isinstance(exc, EvidenceSummaryError) else "INPUT_READ_FAILED"
+        code = (
+            str(exc) if isinstance(exc, EvidenceSummaryError) else "INPUT_READ_FAILED"
+        )
         print(f"restricted-evidence-summary: FAIL: {code}", file=sys.stderr)
         return 1
     print(json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
