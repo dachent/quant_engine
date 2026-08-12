@@ -166,3 +166,52 @@ def test_alpaca_profile_quarantines_plaintext_reports_only(tmp_path: Path) -> No
     assert (source / "export" / "account.csv").is_file()
     assert (source / "code" / "adapter.py").is_file()
     assert not (source / "REPORT.md").exists()
+
+
+def test_schwab_profile_quarantines_cookie_jsons_and_persists_verify(
+    tmp_path: Path,
+) -> None:
+    recovery = tmp_path / "recovery"
+    staging = tmp_path / "staging"
+    (recovery / "capture").mkdir(parents=True)
+    (staging / "capture").mkdir(parents=True)
+    (recovery / "capture" / "schwab_cookies.json").write_bytes(b"cookie material")
+    (staging / "capture" / "schwab_cookies.json").write_bytes(b"cookie material")
+    (staging / "capture" / "summary.json").write_bytes(b"keep summary")
+
+    result = quarantine.plan_schwab(recovery, staging, tmp_path / "quarantine")
+    assert result["artifact_count"] == 2
+    plan_path = Path(str(result["plan_path"]))
+    quarantine.apply_plan(plan_path)
+    verified = quarantine.verify_plan(plan_path)
+
+    assert verified["state"] == "VERIFIED_QUARANTINED"
+    assert (plan_path.parent / "verify.json").is_file()
+    assert (staging / "capture" / "summary.json").is_file()
+    assert not (recovery / "capture" / "schwab_cookies.json").exists()
+
+
+def test_matrixport_profile_quarantines_helpers_and_recovery_environments(
+    tmp_path: Path,
+) -> None:
+    recovery = tmp_path / "recovery"
+    snapshot = tmp_path / "snapshot"
+    for root in (recovery, snapshot):
+        (root / ".codex-bootstrap" / "venv" / "Lib").mkdir(parents=True)
+        (root / "src").mkdir()
+        (root / ".codex-bootstrap" / "venv" / "Lib" / "module.py").write_bytes(
+            b"installed dependency"
+        )
+        (root / "src" / "credentials.py").write_bytes(b"credential helper")
+        (root / "src" / "client.py").write_bytes(b"keep client")
+
+    result = quarantine.plan_matrixport(recovery, snapshot, tmp_path / "quarantine")
+    assert result["artifact_count"] == 4
+    plan_path = Path(str(result["plan_path"]))
+    quarantine.apply_plan(plan_path)
+    quarantine.verify_plan(plan_path)
+
+    assert (plan_path.parent / "verify.json").is_file()
+    assert (recovery / "src" / "client.py").is_file()
+    assert not (snapshot / "src" / "credentials.py").exists()
+    assert not (recovery / ".codex-bootstrap" / "venv" / "Lib" / "module.py").exists()
