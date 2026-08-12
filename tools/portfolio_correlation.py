@@ -35,7 +35,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
 
-BUILDER_VERSION: Final = "1.4.0"
+BUILDER_VERSION: Final = "1.5.0"
 TRADING_OBSERVATION_HORIZONS: Final = (5, 21, 22, 63, 126, 130, 252, 260)
 RETURN_HEADERS: Final = ("series_id", "date", "return", "evidence_layer")
 RETURN_HEADERS_V2: Final = (*RETURN_HEADERS, "strategy_version")
@@ -1375,6 +1375,10 @@ def _dependence_payload(
 
     posterior = _nearest_correlation(posterior_pre, spec.eigenvalue_floor)
     stress = _nearest_correlation(stress_pre, spec.eigenvalue_floor)
+    performance = {
+        series_id: _performance_summary(returns.get(series_id, []))
+        for series_id in spec.series_ids
+    }
     loss = sum(
         item.allocation_weight * item.adverse_loss_fraction
         for item in spec.stress_components
@@ -1382,25 +1386,137 @@ def _dependence_payload(
     difference = loss - spec.expected_correlation_one_loss
     if abs(difference) > spec.correlation_one_tolerance:
         raise CorrelationError(
-            "correlation-one stress does not reconcile to expected loss"
+            "correlation-one stress does not reconcile to declared conservative loss"
         )
     stress_contributions = [
         {
-            "adverse_loss_fraction": _number(item.adverse_loss_fraction),
             "allocation_weight": _number(item.allocation_weight),
+            "authority": (
+                f"portfolio-correlation-spec/{spec.schema_version}:"
+                "correlation_one.components"
+            ),
+            "classification": "CONCEPTUAL_STRESS_BOUND_NOT_EXPECTATION",
+            "conservative_loss_fraction": _number(item.adverse_loss_fraction),
+            "evidence_layer": "CONCEPTUAL_STRESS",
             "loss_contribution": _number(
                 item.allocation_weight * item.adverse_loss_fraction
             ),
+            "method": "GOVERNED_CONSERVATIVE_BOUND_INPUT",
             "series_id": item.series_id,
         }
         for item in spec.stress_components
     ]
+    central_pre = np.eye(size, dtype=np.float64)
+    measured_pair_count = 0
+    for left_index, left in enumerate(spec.series_ids):
+        for right_index in range(left_index + 1, size):
+            right = spec.series_ids[right_index]
+            observed_text = cell_index[(left, right)]["pearson"]
+            value = 1.0 if observed_text is None else float(cast(str, observed_text))
+            if observed_text is not None:
+                measured_pair_count += 1
+            central_pre[left_index, right_index] = value
+            central_pre[right_index, left_index] = value
+    central_matrix = _nearest_correlation(central_pre, spec.eigenvalue_floor)
+    component_by_series = {item.series_id: item for item in spec.stress_components}
+    central_components: list[dict[str, object]] = []
+    central_vector: list[float] = []
+    for series_id in spec.series_ids:
+        component = component_by_series[series_id]
+        summary = performance[series_id]
+        maximum_drawdown = summary.get("maximum_drawdown")
+        composition = (
+            None if series_composition is None else series_composition.get(series_id)
+        )
+        if maximum_drawdown is None:
+            adverse_loss = component.adverse_loss_fraction
+            authority = (
+                f"portfolio-correlation-spec/{spec.schema_version}:"
+                "correlation_one.components"
+            )
+            evidence_layer = "CONCEPTUAL_STRESS"
+            method = "CONCEPTUAL_PRIOR_NO_ACCEPTED_OBSERVATIONS"
+            status = "PRIOR_NO_ACCEPTED_OBSERVATIONS"
+        else:
+            adverse_loss = abs(float(cast(str, maximum_drawdown)))
+            authority = f"{spec.source.artifact_id}:{spec.source.expected_sha256}"
+            if composition is None:
+                evidence_layer = returns[series_id][0].evidence_layer
+            else:
+                live_layer = str(composition.get("live_evidence_layer"))
+                evidence_layer = (
+                    f"BACKTEST_PLUS_{live_layer}"
+                    if evidence_mode == "LIVE_PLUS_BACKTEST"
+                    and int(
+                        cast(
+                            int | str,
+                            composition.get("backtest_observations_used", 0),
+                        )
+                    )
+                    > 0
+                    else live_layer
+                )
+            method = "ACCEPTED_PATH_MAXIMUM_DRAWDOWN"
+            status = "MEASURED"
+        central_vector.append(component.allocation_weight * adverse_loss)
+        central_components.append(
+            {
+                "adverse_loss_fraction": _number(adverse_loss),
+                "allocation_weight": _number(component.allocation_weight),
+                "authority": authority,
+                "evidence_layer": evidence_layer,
+                "loss_scale_contribution": _number(
+                    component.allocation_weight * adverse_loss
+                ),
+                "method": method,
+                "observed_end": summary.get("observed_end"),
+                "observed_start": summary.get("observed_start"),
+                "return_observations": summary.get("return_observations"),
+                "series_id": series_id,
+                "status": status,
+            }
+        )
+    vector = np.asarray(central_vector, dtype=np.float64)
+    central_loss_squared = float(vector @ central_matrix @ vector)
+    if central_loss_squared < -1e-12:
+        raise CorrelationError(
+            "central-case loss scale is negative after PSD projection"
+        )
+    central_loss = math.sqrt(max(0.0, central_loss_squared))
     result: dict[str, object] = {
         "blend_cells": blend_cells,
+        "central_case": {
+            "classification": (
+                "MEASURED_MAX_DRAWDOWN_WITH_NO_CREDIT_FOR_MISSING_PAIRS_PSD_PROJECTED"
+            ),
+            "components": central_components,
+            "dependence_matrix": {
+                "missing_pair_rule": "CORRELATION_ONE_NO_DIVERSIFICATION_CREDIT",
+                "projection": _matrix_summary(central_pre, central_matrix),
+                "source": "observed_cells.pearson",
+                "values": _matrix(central_matrix),
+            },
+            "governs_readiness": False,
+            "loss": _number(central_loss),
+            "measured_component_count": sum(
+                item["status"] == "MEASURED" for item in central_components
+            ),
+            "measured_pair_count": measured_pair_count,
+            "method": "SQRT_V_TRANSPOSE_CORRELATION_V",
+            "missing_pair_count": len(observed_cells) - measured_pair_count,
+            "prior_component_count": sum(
+                item["status"] == "PRIOR_NO_ACCEPTED_OBSERVATIONS"
+                for item in central_components
+            ),
+            "status": "AVAILABLE_NOT_A_PROBABILITY_FORECAST",
+        },
         "correlation_one": {
+            "classification": "CONSERVATIVE_STRESS_BOUND_NOT_EXPECTATION",
             "components": stress_contributions,
-            "expected_loss": _number(spec.expected_correlation_one_loss),
+            "declared_loss": _number(spec.expected_correlation_one_loss),
+            "governs_readiness": True,
             "loss": _number(loss),
+            "method": "SUM_WEIGHT_TIMES_GOVERNED_CONSERVATIVE_BOUND_INPUT",
             "reconciliation_difference": _number(difference),
             "status": "AVAILABLE_RECONCILED_SEPARATE_CONSERVATIVE_BOUND",
         },
@@ -1456,10 +1572,7 @@ def _dependence_payload(
             },
         },
         "observed_cells": observed_cells,
-        "performance": {
-            series_id: _performance_summary(returns.get(series_id, []))
-            for series_id in spec.series_ids
-        },
+        "performance": performance,
         "series_ids": list(spec.series_ids),
     }
     if evidence_mode is not None and series_composition is not None:
@@ -1544,6 +1657,7 @@ def build_correlation(
                 "stress, implementation, and correlation-one views."
             ),
             fact_types=(
+                "central-case-loss",
                 "conceptual-correlation",
                 "correlation-one-stress",
                 "implementation-coincidence",

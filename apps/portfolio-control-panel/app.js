@@ -776,6 +776,7 @@
   function renderDependence() {
     const dependence = currentDependence();
     const corrOne = data.dependence_analysis.correlation_one;
+    const centralCase = data.dependence_analysis.central_case;
     const clusterBudget = data.dependence_analysis.economic_driver_cluster_budget;
     const unavailable = dependence.pair_count - dependence.available_pair_count;
     const combined = selectedEvidenceMode === "LIVE_PLUS_BACKTEST";
@@ -797,16 +798,17 @@
     renderKpis("#dependence-kpis", [
       ["Measured pairs", `${dependence.available_pair_count}/${dependence.pair_count}`, combined ? "Version-matched pre-live backtest plus authoritative live" : "Exact-date live observations", "positive"],
       ["Unavailable pairs", String(unavailable), "No inferred diversification credit", "danger"],
-      ["Correlation-one loss", pct(corrOne.loss), `${pct(clusterBudget.limit_breach)} above the ${pct(clusterBudget.systematic_loss_limit)} systematic limit`, "danger"],
+      ["Correlation-one bound", pct(corrOne.loss), `${pct(clusterBudget.limit_breach)} above the ${pct(clusterBudget.systematic_loss_limit)} systematic limit; governs readiness`, "danger"],
       ["Analytics as of", formatDate(dependence.as_of_date), `Generation ${dependence.generation_id.slice(0, 12)}…`],
     ]);
     selectedPair ||= pairKey(dependence.cells.find((item) => item.observed.status === "AVAILABLE")?.left || dependence.series_ids[0], dependence.cells.find((item) => item.observed.status === "AVAILABLE")?.right || dependence.series_ids[1]);
     renderCorrelationMatrix();
     const selected = dependence.cells.find((item) => pairKey(item.left, item.right) === selectedPair) || dependence.cells[0];
     renderCorrelationDetail(selected.left, selected.right);
-    $("#correlation-one-summary").innerHTML = `<div class="metric-block"><div class="metric-label">Loss</div><div class="metric-value">${pct(corrOne.loss)}</div><div class="metric-note">Weighted component adverse losses</div></div><div class="metric-block"><div class="metric-label">Systematic limit</div><div class="metric-value">${pct(clusterBudget.systematic_loss_limit)}</div><div class="metric-note">Breach ${pct(clusterBudget.limit_breach)}</div></div><div class="metric-block"><div class="metric-label">Expected</div><div class="metric-value">${pct(corrOne.expected_loss)}</div><div class="metric-note">Accepted baseline reference</div></div><div class="metric-block"><div class="metric-label">Reconciliation</div><div class="metric-value">${safe(corrOne.reconciliation_difference)}</div><div class="metric-note">${safe(corrOne.status)}</div></div>`;
-    const componentRows = corrOne.components.map((row) => `<tr><td>${safe(row.series_id)}</td><td class="numeric">${pct(row.allocation_weight)}</td><td class="numeric">${pct(row.adverse_loss_fraction)}</td><td class="numeric">${pct(row.loss_contribution)}</td></tr>`);
-    $("#correlation-one-table").innerHTML = tableMarkup([["Strategy"], ["Weight", "numeric"], ["Adverse loss", "numeric"], ["Contribution", "numeric"]], componentRows.length ? componentRows : [emptyRow(4, "No component detail in this accepted fixture")]);
+    const centralLoss = centralCase.loss == null ? "Unavailable" : pct(centralCase.loss);
+    $("#correlation-one-summary").innerHTML = `<div class="metric-block"><div class="metric-label">Conservative bound</div><div class="metric-value">${pct(corrOne.loss)}</div><div class="metric-note">Governs readiness · ${safe(corrOne.method || corrOne.status)}</div></div><div class="metric-block"><div class="metric-label">Systematic limit</div><div class="metric-value">${pct(clusterBudget.systematic_loss_limit)}</div><div class="metric-note">Breach ${pct(clusterBudget.limit_breach)}</div></div><div class="metric-block"><div class="metric-label">Central case</div><div class="metric-value">${centralLoss}</div><div class="metric-note">Descriptive only · ${safe(centralCase.status)}</div></div><div class="metric-block"><div class="metric-label">Reconciliation</div><div class="metric-value">${safe(corrOne.reconciliation_difference)}</div><div class="metric-note">${safe(corrOne.status)}</div></div>`;
+    const componentRows = corrOne.components.map((row) => `<tr><td>${safe(row.series_id)}</td><td class="numeric">${pct(row.allocation_weight)}</td><td class="numeric">${pct(row.conservative_loss_fraction ?? row.adverse_loss_fraction)}</td><td class="numeric">${pct(row.loss_contribution)}</td></tr>`);
+    $("#correlation-one-table").innerHTML = tableMarkup([["Strategy"], ["Weight", "numeric"], ["Conservative loss", "numeric"], ["Contribution", "numeric"]], componentRows.length ? componentRows : [emptyRow(4, "No component detail in this accepted fixture")]);
     $("#economic-cluster-summary").innerHTML = `<strong>${statusText(clusterBudget.status)}</strong> · ${safe(humanStatus(clusterBudget.budget_rule))}. The frozen audit reference was ${pct(clusterBudget.historical_audit_reference.full_systematic_loss)} and ${pct(clusterBudget.historical_audit_reference.after_rejected_sleeves_loss)} after rejected sleeves; the operative control above is recomputed from current accepted components.`;
     const clusterRows = clusterBudget.clusters.map((cluster) => `<tr><td><span class="cell-primary">${safe(cluster.label)}</span><span class="cell-secondary">${safe(cluster.cluster_id)}</span></td><td>${safe(cluster.members.map(shortSeries).join(" · "))}</td><td class="numeric">${pct(cluster.allocation_weight)}</td><td class="numeric">${pct(cluster.loss_contribution)}</td><td>${cluster.observed_pair_correlation_minimum == null ? "—" : `${decimal(cluster.observed_pair_correlation_minimum)}–${decimal(cluster.observed_pair_correlation_maximum)}`}</td><td>${statusText(cluster.budget_status)}<span class="cell-secondary">${safe(cluster.rationale)}</span></td></tr>`);
     $("#economic-cluster-table").innerHTML = tableMarkup([["Driver cluster"], ["Members"], ["Aggregate weight", "numeric"], ["Adverse-loss budget", "numeric"], ["Observed pair range"], ["Budget state / rationale"]], clusterRows);
@@ -1186,7 +1188,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 16) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 17) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;

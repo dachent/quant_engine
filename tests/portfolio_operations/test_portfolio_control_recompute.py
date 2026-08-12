@@ -76,7 +76,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
                 "correlation_one": {
                     "components": [
                         {
-                            "adverse_loss_fraction": "0.25",
+                            "conservative_loss_fraction": "0.25",
                             "allocation_weight": "0.4",
                             "loss_contribution": "0.1",
                             "series_id": "one",

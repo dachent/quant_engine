@@ -128,7 +128,7 @@ def build_receipt(
     evaluation_date: date,
     tolerance: Decimal = DEFAULT_TOLERANCE,
 ) -> dict[str, object]:
-    """Recompute the stress from primitive weights and adverse losses."""
+    """Recompute the bound from primitive weights and conservative losses."""
 
     if tolerance <= 0:
         raise ControlRecomputeError("tolerance must be positive")
@@ -154,9 +154,10 @@ def build_receipt(
         weight = _decimal(
             component.get("allocation_weight"), f"component {index} weight"
         )
-        adverse_loss = _decimal(
-            component.get("adverse_loss_fraction"), f"component {index} adverse loss"
-        )
+        loss_fraction = component.get("conservative_loss_fraction")
+        if loss_fraction is None:
+            loss_fraction = component.get("adverse_loss_fraction")
+        adverse_loss = _decimal(loss_fraction, f"component {index} conservative loss")
         declared_contribution = _decimal(
             component.get("loss_contribution"), f"component {index} contribution"
         )
@@ -219,7 +220,7 @@ def build_receipt(
             "panel": panel_identity,
             "report": report_identity,
         },
-        "method": "DECIMAL_SUM_ALLOCATION_WEIGHT_TIMES_ADVERSE_LOSS_FRACTION",
+        "method": "DECIMAL_SUM_ALLOCATION_WEIGHT_TIMES_CONSERVATIVE_LOSS_FRACTION",
         "recomputed_correlation_one_stress": _decimal_text(recomputed),
         "receipt_schema_version": SCHEMA_VERSION,
         "status": status,

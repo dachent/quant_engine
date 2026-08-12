@@ -40,7 +40,7 @@
     "weekly_returns"
   ],
   "properties": {
-    "panel_schema_version": { "const": 16 },
+    "panel_schema_version": { "const": 17 },
     "meta": {
       "type": "object",
       "additionalProperties": false,
@@ -86,8 +86,9 @@
     "advisory": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["correlation_one_stress", "hwm_limit", "hwm_status", "hwm_status_code_version", "hwm_status_semantics", "nav_coverage", "readiness", "reason"],
+      "required": ["central_case_loss", "correlation_one_stress", "hwm_limit", "hwm_status", "hwm_status_code_version", "hwm_status_semantics", "nav_coverage", "readiness", "readiness_loss_measure", "reason"],
       "properties": {
+        "central_case_loss": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
         "correlation_one_stress": { "$ref": "#/$defs/decimal" },
         "hwm_limit": { "$ref": "#/$defs/decimal" },
         "hwm_status": { "type": "string" },
@@ -95,6 +96,7 @@
         "hwm_status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
         "nav_coverage": { "$ref": "#/$defs/decimal" },
         "readiness": { "type": "string" },
+        "readiness_loss_measure": { "const": "CORRELATION_ONE_CONSERVATIVE_BOUND" },
         "reason": { "type": "string" }
       }
     },
@@ -218,12 +220,13 @@
     "default_dependence_mode": { "const": "LIVE_ONLY" },
     "dependence_analysis": {
       "type": "object",
-      "required": ["analytics_hash", "as_of_date", "available_pair_count", "cells", "correlation_one", "economic_driver_cluster_budget", "generation_id", "matrices", "pair_count", "series_ids", "source_sha256"],
+      "required": ["analytics_hash", "as_of_date", "available_pair_count", "cells", "central_case", "correlation_one", "economic_driver_cluster_budget", "generation_id", "matrices", "pair_count", "series_ids", "source_sha256"],
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
         "as_of_date": { "type": "string", "format": "date" },
         "available_pair_count": { "type": "integer", "minimum": 0 },
         "cells": { "type": "array", "minItems": 36, "maxItems": 36, "items": { "type": "object" } },
+        "central_case": { "type": "object" },
         "correlation_one": { "type": "object" },
         "economic_driver_cluster_budget": { "type": "object" },
         "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },

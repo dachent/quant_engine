@@ -1,7 +1,7 @@
 # Correlation and dependence matrices
 
 `tools/portfolio_correlation.py` builds one coverage-aware dependence
-generation from hash-bound return evidence. It preserves six distinct things
+generation from hash-bound return evidence. It preserves eight distinct things
 that must not be collapsed into one number:
 
 1. measured Pearson correlation on compatible exact-date observations;
@@ -11,13 +11,14 @@ that must not be collapsed into one number:
 5. explicitly conceptual priors;
 6. capped observed/prior posterior and stress matrices projected to positive
    semidefinite correlation matrices; and
-7. a separate correlation-one loss bound.
+7. a measured-dependence central-case loss; and
+8. a separate correlation-one conservative loss bound.
 
 The control-panel consumer compares that loss bound with the governed 15%
 systematic loss limit and binds every current strategy to exactly one
 economic-driver cluster using
 `contracts/portfolio-economic-driver-clusters-v1.json`. Cluster allocation and
-adverse-loss contributions are summed before display: different strategy or
+conservative-loss contributions are summed before display: different strategy or
 provider labels do not earn diversification credit. TT Portfolio, QSI, Volatis,
 and GrizzlyBears therefore share one tactical timing and multi-asset regime
 budget. Pairwise measured correlations remain visible inside the cluster and
@@ -51,8 +52,25 @@ The JSON specification enumerates every requested series and every conceptual
 pair. It also fixes minimum samples, rolling window, downside minimum, tail
 quantile, posterior observation cap, PSD floor, stress uplift/cap, optional
 instrument/provider/venue mappings, and correlation-one component losses.
-Correlation-one weights must sum to 100%, and the calculated adverse loss must
-reconcile to the accepted expected loss within the declared tolerance.
+Correlation-one weights must sum to 100%, and the calculated conservative loss
+must reconcile to the specification's declared loss within tolerance. The
+legacy input key remains `expected_loss` for replay compatibility; the output
+does not represent it as an expectation.
+
+## Central case and readiness bound
+
+The central case uses each accepted evidence path's measured maximum drawdown
+as its loss scale. It applies measured exact-date Pearson dependence where
+available, sets missing pairs to correlation 1.0, projects that matrix to a
+positive-semidefinite correlation matrix, and calculates
+`sqrt(v transpose C v)`, where each element of `v` is allocation weight times
+loss scale. A series with no accepted observations uses its named conservative
+component as an explicit conceptual prior. Every component records its method,
+evidence layer, authority, observation window, and count.
+
+This central case is a descriptive scenario, not an expected return, a
+probability forecast, or a readiness governor. Readiness remains governed by
+the separately labeled correlation-one conservative bound.
 
 ## Evidence modes
 
