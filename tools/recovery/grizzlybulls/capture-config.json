@@ -1,0 +1,38 @@
+{
+  "site_name": "grizzlybulls",
+  "output_dir": "C:\\Users\\BorisVaisman\\OneDrive - Fertility Specialists Network\\Documents\\Playground\\har_grizzlybears\\har",
+  "page_load_wait": 5,
+  "settle_wait": 3,
+  "cdp_port": 9222,
+  "screenshot": false,
+  "target_pages": [
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/index.json",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/models.json",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/models/[slug].json?slug=ta-mr-basic",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/models/[slug].json?slug=ta-trend-basic",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/models/[slug].json?slug=vix-basic",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/models/[slug].json?slug=vix-advanced",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/models/[slug].json?slug=vix-ta-advanced",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/models/[slug].json?slug=vix-ta-macro-advanced",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/models/[slug].json?slug=vix-ta-macro-mp-extreme",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/indicators/[slug].json?slug=cyclically-adjusted-risk-premium",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/indicators/[slug].json?slug=normalized-buffett-indicator",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/indicators/[slug].json?slug=market-euphoria-index",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/indicators/[slug].json?slug=macroeconomic-conditions-index",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/premium.json",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/blog.json",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/blog/[slug].json?slug=allure-of-market-wizards",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/billionaires.json",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/billionaires/[slug].json?slug=warren-buffett",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/financial-terms.json",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/financial-terms/[slug].json?slug=0x-protocol",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/financial-terms/eli5.json",
+    "https://grizzlybulls.com/_next/data/F8IyKqz0GIQ_bQIo9594z/rankings/[slug].json?slug=top-8-greatest-traders-in-the-world",
+    "https://grizzlybulls.com/account",
+    "https://grizzlybulls.com/api/user",
+    "https://grizzlybulls.com/api/comments?user_id=null&page=1"
+  ],
+  "cookie_urls": [
+    "https://grizzlybulls.com"
+  ]
+}
