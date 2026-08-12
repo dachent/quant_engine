@@ -2440,11 +2440,145 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 17" in renderer
+    assert "data.panel_schema_version !== 18" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
     assert "Descriptive only" in renderer
+
+
+def test_candidate_driver_map_requires_fixed_cardinality_and_no_authority(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "driver-map.json"
+    cluster_ids = sorted(panel.DRIVER_MAP_CLUSTER_IDS)
+    payload = {
+        "schema_version": 1,
+        "as_of_date": "2026-07-24",
+        "research_status": "FROZEN_EVIDENCE_NOT_CURRENT",
+        "coverage": {
+            "candidate_count": 33,
+            "measured_candidate_count": 33,
+            "unavailable_candidate_count": 0,
+            "refresh_status": "UNAVAILABLE_RAW_RETURN_INPUTS_NOT_RETAINED",
+        },
+        "portfolio": {"systematic_loss_limit": "0.15"},
+        "candidates": [
+            {
+                "candidate_id": f"candidate-{index}",
+                "ticker": f"C{index:02d}",
+                "category": "Test category",
+                "tier": "Tier 1",
+                "portfolio_role": "Research only",
+                "cost": {
+                    "status": "AVAILABLE_COMPONENTS_NO_MODELED_NOTIONAL",
+                    "expense_ratio": "0.01",
+                    "annual_fixed_cost": "0",
+                },
+                "live_metrics": {
+                    "status": "AVAILABLE_FROZEN_LIVE_VEHICLE_METRICS",
+                    "start_date": "2020-01-01",
+                    "end_date": "2026-07-24",
+                    "observations": 1000,
+                },
+                "cluster_scores": [
+                    {
+                        "cluster_id": cluster_id,
+                        "status": "AVAILABLE_DESCRIPTIVE_FROZEN",
+                        "missing_members": [],
+                        "downside_correlation_mean": "0.2",
+                        "pearson_mean": "0.1",
+                        "worst_decile_candidate_return_minimum": "0.01",
+                        "descriptive_rank": index + 1,
+                        "window_start": "2026-01-01",
+                        "window_end": "2026-07-17",
+                    }
+                    for cluster_id in cluster_ids
+                ],
+            }
+            for index in range(33)
+        ],
+        "driver_clusters": [
+            {
+                "cluster_id": cluster_id,
+                "members": [f"member-{index}"],
+                "allocation_weight": "0.2",
+                "adverse_loss_budget": "0.03",
+                "budget_status": "WITHIN_LIMIT",
+                "observed_pair_count": 1,
+                "observed_pair_correlation_minimum": "0.1",
+                "observed_pair_correlation_maximum": "0.1",
+            }
+            for index, cluster_id in enumerate(cluster_ids)
+        ],
+        "tactical_leave_one_out": [
+            {
+                "series_id": f"strategy-{index}",
+                "correlation_one_loss_reduction": "0.01",
+                "central_case_loss_reduction": "0.005",
+                "cluster_loss_without": "0.1",
+                "cluster_budget_status_without": "WITHIN_LIMIT",
+            }
+            for index in range(4)
+        ],
+        "authority_boundary": {
+            "allocation_effect": "NONE",
+            "execution_effect": "NONE",
+            "readiness_effect": "NONE",
+            "automatic_add_drop_authority": "NONE",
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    accepted, identity = panel._candidate_driver_map(path)
+
+    assert accepted == payload
+    assert identity is not None
+    assert identity["as_of_date"] == "2026-07-24"
+    assert len(identity["sha256"]) == 64
+
+    del payload["candidates"][0]["cluster_scores"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="cluster_scores must be an array"
+    ):
+        panel._candidate_driver_map(path)
+    payload["candidates"][0]["cluster_scores"] = [
+        dict(payload["candidates"][1]["cluster_scores"][0])
+        for _ in range(len(cluster_ids))
+    ]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="cluster score identity differs"
+    ):
+        panel._candidate_driver_map(path)
+    payload["candidates"][0]["cluster_scores"] = [
+        dict(score) for score in payload["candidates"][1]["cluster_scores"]
+    ]
+
+    payload["authority_boundary"]["allocation_effect"] = "SUGGEST"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="driver-map authority differs"
+    ):
+        panel._candidate_driver_map(path)
+
+    payload["authority_boundary"]["allocation_effect"] = "NONE"
+    payload["authority_boundary"]["unexpected_effect"] = "NONE"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="driver-map authority differs"
+    ):
+        panel._candidate_driver_map(path)
+
+
+def test_published_panel_files_include_optional_driver_map() -> None:
+    without_driver_map = panel._published_panel_files(None)
+    with_driver_map = panel._published_panel_files(Path("driver-map.json"))
+
+    assert panel.DRIVER_MAP_PANEL_FILE not in without_driver_map
+    assert panel.DRIVER_MAP_PANEL_FILE in with_driver_map
+    assert with_driver_map[-1] == "candidate.json"
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -2478,6 +2612,8 @@ def test_mobile_layout_retains_dates_and_single_column_hwm() -> None:
 
     assert ".topbar-meta {\n    display: grid;" in css
     assert ".validation-card { grid-template-columns: 1fr; }" in css
+    assert ".metric-block .metric-note" in css
+    assert "overflow-wrap: anywhere;" in css
     assert "Mobile header retains portfolio date, freshness date, and coverage" in qa
     assert "Mobile HWM governor uses one readable column" in qa
 

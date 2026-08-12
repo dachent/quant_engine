@@ -38,7 +38,7 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-PANEL_SCHEMA_VERSION: Final = 17
+PANEL_SCHEMA_VERSION: Final = 18
 BUILDER_VERSION: Final = "2.9.1"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
@@ -75,6 +75,16 @@ PANEL_FILES: Final = (
     "data/dashboard_data.json",
     "data/dashboard_data.js",
     "data/freshness-health.json",
+)
+DRIVER_MAP_PANEL_FILE: Final = "data/candidate-driver-map.json"
+DRIVER_MAP_CLUSTER_IDS: Final = frozenset(
+    {
+        "TACTICAL_TIMING_MULTI_ASSET",
+        "US_SYSTEMATIC_EQUITY",
+        "EUROPE_SYSTEMATIC_EQUITY",
+        "CRYPTO_DIRECTIONAL",
+        "DE_MINIMIS_OPERATIONAL",
+    }
 )
 VIEWS: Final = (
     "command",
@@ -600,6 +610,265 @@ def _current_replication(
     if value.get("replication_schema_version") != 1:
         raise ControlPanelValidationError("dynamic replication schema is unsupported")
     return value, {"generation_id": pointer.generation_id, "sha256": _hash(path)}, path
+
+
+def _candidate_driver_map(
+    path: Path | None,
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    if path is None:
+        return None, None
+    value = _load_json(path, "candidate driver map")
+    if value.get("schema_version") != 1:
+        raise ControlPanelValidationError("candidate driver-map schema is unsupported")
+    coverage = _object(value.get("coverage"), "candidate driver-map coverage")
+    candidates = _objects(value.get("candidates"), "candidate driver-map candidates")
+    clusters = _objects(value.get("driver_clusters"), "candidate driver-map clusters")
+    leave_one_out = _objects(
+        value.get("tactical_leave_one_out"), "candidate tactical leave-one-out"
+    )
+    authority = _object(
+        value.get("authority_boundary"), "candidate driver-map authority"
+    )
+    expected_authority = {
+        "allocation_effect": "NONE",
+        "execution_effect": "NONE",
+        "readiness_effect": "NONE",
+        "automatic_add_drop_authority": "NONE",
+    }
+    if (
+        coverage.get("candidate_count") != 33
+        or len(candidates) != 33
+        or len(clusters) != 5
+        or len(leave_one_out) != 4
+    ):
+        raise ControlPanelValidationError("candidate driver-map cardinality differs")
+    if authority != expected_authority:
+        raise ControlPanelValidationError("candidate driver-map authority differs")
+    as_of_date = _text(value.get("as_of_date"), "driver-map as_of_date")
+    try:
+        date.fromisoformat(as_of_date)
+    except ValueError as exc:
+        raise ControlPanelValidationError("driver-map as_of_date is invalid") from exc
+    if value.get("research_status") != "FROZEN_EVIDENCE_NOT_CURRENT":
+        raise ControlPanelValidationError(
+            "candidate driver-map research status differs"
+        )
+    _validate_driver_map_coverage(coverage)
+    _validate_driver_map_clusters(clusters)
+    _validate_driver_map_leave_one_out(leave_one_out)
+    _validate_driver_map_candidates(candidates)
+    portfolio = _object(value.get("portfolio"), "candidate driver-map portfolio")
+    _finite_float(
+        portfolio.get("systematic_loss_limit"),
+        "candidate driver-map systematic_loss_limit",
+    )
+    return value, {
+        "as_of_date": as_of_date,
+        "sha256": _hash(path),
+    }
+
+
+def _driver_map_integer(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ControlPanelValidationError(
+            f"{field_name} must be a non-negative integer"
+        )
+    return value
+
+
+def _driver_map_strings(value: object, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ControlPanelValidationError(f"{field_name} must be an array")
+    return [_text(item, field_name) for item in value]
+
+
+def _driver_map_optional_number(value: object, field_name: str) -> None:
+    if value is not None:
+        _finite_float(value, field_name)
+
+
+def _validate_driver_map_coverage(coverage: Mapping[str, Any]) -> None:
+    measured = _driver_map_integer(
+        coverage.get("measured_candidate_count"),
+        "candidate driver-map measured_candidate_count",
+    )
+    unavailable = _driver_map_integer(
+        coverage.get("unavailable_candidate_count"),
+        "candidate driver-map unavailable_candidate_count",
+    )
+    if measured + unavailable != 33:
+        raise ControlPanelValidationError("candidate driver-map coverage differs")
+    _text(coverage.get("refresh_status"), "candidate driver-map refresh_status")
+
+
+def _validate_driver_map_clusters(clusters: Sequence[Mapping[str, Any]]) -> None:
+    cluster_ids = [
+        _text(row.get("cluster_id"), "candidate driver-map cluster_id")
+        for row in clusters
+    ]
+    if set(cluster_ids) != DRIVER_MAP_CLUSTER_IDS or len(cluster_ids) != len(
+        set(cluster_ids)
+    ):
+        raise ControlPanelValidationError(
+            "candidate driver-map cluster identity differs"
+        )
+    for row in clusters:
+        cluster_id = _text(row.get("cluster_id"), "candidate driver-map cluster_id")
+        _driver_map_strings(
+            row.get("members"), f"candidate driver-map {cluster_id} members"
+        )
+        for field in ("allocation_weight", "adverse_loss_budget"):
+            _finite_float(row.get(field), f"candidate driver-map {cluster_id} {field}")
+        _text(
+            row.get("budget_status"),
+            f"candidate driver-map {cluster_id} budget_status",
+        )
+        observed_count = _driver_map_integer(
+            row.get("observed_pair_count"),
+            f"candidate driver-map {cluster_id} observed_pair_count",
+        )
+        for field in (
+            "observed_pair_correlation_minimum",
+            "observed_pair_correlation_maximum",
+        ):
+            value = row.get(field)
+            if observed_count and value is None:
+                raise ControlPanelValidationError(
+                    f"candidate driver-map {cluster_id} {field} is missing"
+                )
+            _driver_map_optional_number(
+                value, f"candidate driver-map {cluster_id} {field}"
+            )
+
+
+def _validate_driver_map_leave_one_out(
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    series_ids: set[str] = set()
+    for row in rows:
+        series_id = _text(
+            row.get("series_id"), "candidate tactical leave-one-out series_id"
+        )
+        if series_id in series_ids:
+            raise ControlPanelValidationError(
+                "candidate tactical leave-one-out identity differs"
+            )
+        series_ids.add(series_id)
+        for field in (
+            "correlation_one_loss_reduction",
+            "central_case_loss_reduction",
+            "cluster_loss_without",
+        ):
+            _finite_float(row.get(field), f"candidate tactical leave-one-out {field}")
+        _text(
+            row.get("cluster_budget_status_without"),
+            "candidate tactical leave-one-out cluster_budget_status_without",
+        )
+
+
+def _validate_driver_map_candidates(candidates: Sequence[Mapping[str, Any]]) -> None:
+    candidate_ids: set[str] = set()
+    for row in candidates:
+        candidate_id = _text(
+            row.get("candidate_id"), "candidate driver-map candidate_id"
+        )
+        if candidate_id in candidate_ids:
+            raise ControlPanelValidationError("candidate driver-map identity differs")
+        candidate_ids.add(candidate_id)
+        for field in ("category", "tier", "portfolio_role"):
+            _text(row.get(field), f"candidate driver-map {candidate_id} {field}")
+        ticker = row.get("ticker")
+        if ticker is not None:
+            _text(ticker, f"candidate driver-map {candidate_id} ticker")
+        cost = _object(row.get("cost"), f"candidate driver-map {candidate_id} cost")
+        _text(cost.get("status"), f"candidate driver-map {candidate_id} cost status")
+        for field in ("expense_ratio", "annual_fixed_cost"):
+            _driver_map_optional_number(
+                cost.get(field), f"candidate driver-map {candidate_id} cost {field}"
+            )
+        live_metrics = _object(
+            row.get("live_metrics"),
+            f"candidate driver-map {candidate_id} live_metrics",
+        )
+        live_status = _text(
+            live_metrics.get("status"),
+            f"candidate driver-map {candidate_id} live_metrics status",
+        )
+        if live_status.startswith("AVAILABLE"):
+            for field in ("start_date", "end_date"):
+                _text(
+                    live_metrics.get(field),
+                    f"candidate driver-map {candidate_id} live_metrics {field}",
+                )
+            _driver_map_integer(
+                live_metrics.get("observations"),
+                f"candidate driver-map {candidate_id} live_metrics observations",
+            )
+        else:
+            _text(
+                live_metrics.get("reason"),
+                f"candidate driver-map {candidate_id} live_metrics reason",
+            )
+        scores = _objects(
+            row.get("cluster_scores"),
+            f"candidate driver-map {candidate_id} cluster_scores",
+        )
+        score_ids = [
+            _text(
+                score.get("cluster_id"),
+                f"candidate driver-map {candidate_id} cluster score identity",
+            )
+            for score in scores
+        ]
+        if set(score_ids) != DRIVER_MAP_CLUSTER_IDS or len(score_ids) != len(
+            set(score_ids)
+        ):
+            raise ControlPanelValidationError(
+                f"candidate driver-map {candidate_id} cluster score identity differs"
+            )
+        tactical = next(
+            score
+            for score in scores
+            if _text(
+                score.get("cluster_id"),
+                f"candidate driver-map {candidate_id} cluster score identity",
+            )
+            == "TACTICAL_TIMING_MULTI_ASSET"
+        )
+        _text(
+            tactical.get("status"),
+            f"candidate driver-map {candidate_id} tactical status",
+        )
+        _driver_map_strings(
+            tactical.get("missing_members"),
+            f"candidate driver-map {candidate_id} tactical missing_members",
+        )
+        downside = tactical.get("downside_correlation_mean")
+        _driver_map_optional_number(
+            downside,
+            f"candidate driver-map {candidate_id} tactical downside_correlation_mean",
+        )
+        if downside is not None:
+            for field in (
+                "pearson_mean",
+                "worst_decile_candidate_return_minimum",
+            ):
+                _finite_float(
+                    tactical.get(field),
+                    f"candidate driver-map {candidate_id} tactical {field}",
+                )
+            rank = _driver_map_integer(
+                tactical.get("descriptive_rank"),
+                f"candidate driver-map {candidate_id} tactical descriptive_rank",
+            )
+            if rank < 1:
+                raise ControlPanelValidationError(
+                    f"candidate driver-map {candidate_id} tactical descriptive_rank differs"
+                )
+        for field in ("window_start", "window_end"):
+            window = tactical.get(field)
+            if window is not None:
+                _text(window, f"candidate driver-map {candidate_id} tactical {field}")
 
 
 def _analytics_roots(
@@ -3397,6 +3666,8 @@ def _panel_data(
     weekly_returns: Mapping[str, Any] | None = None,
     freshness_health: list[dict[str, Any]] | None = None,
     replication_payload: Mapping[str, Any] | None = None,
+    candidate_driver_map: Mapping[str, Any] | None = None,
+    candidate_driver_map_identity: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -3978,6 +4249,18 @@ def _panel_data(
         *(
             [
                 {
+                    "artifact": "portfolio-candidate-driver-map",
+                    "as_of_date": candidate_driver_map_identity["as_of_date"],
+                    "schema": "portfolio-driver-map/1",
+                    "sha256": candidate_driver_map_identity["sha256"],
+                }
+            ]
+            if candidate_driver_map_identity is not None
+            else []
+        ),
+        *(
+            [
+                {
                     "artifact": "portfolio-dynamic-research-replication",
                     "as_of_date": accepted_replication["as_of_date"],
                     "schema": "portfolio-dynamic-replication/1",
@@ -4126,6 +4409,9 @@ def _panel_data(
             "status": appendix.get("status"),
             "tier_counts": dict(sorted(tier_counts.items())),
         },
+        "candidate_driver_map": (
+            dict(candidate_driver_map) if candidate_driver_map is not None else None
+        ),
         "capital": {
             "reserve": _summary_value(summary, "Reserve"),
             "systematic": _summary_value(summary, "Systematic capital"),
@@ -4165,6 +4451,11 @@ def _panel_data(
             "freshness_evaluated_on": freshness_evaluated_on,
             "correlation_generation_id": correlation_identity["generation_id"],
             "correlation_sha256": correlation_identity["sha256"],
+            "candidate_driver_map_sha256": (
+                candidate_driver_map_identity["sha256"]
+                if candidate_driver_map_identity is not None
+                else None
+            ),
             "decomposition_generation_id": decomposition_identity["generation_id"],
             "decomposition_sha256": decomposition_identity["sha256"],
             "decomposition_plan_bundle_id": accepted_decomposition_lenses.get(
@@ -4226,6 +4517,7 @@ def _rendered_files(
     weekly_returns_root: Path | None = None,
     freshness_health_path: Path | None = None,
     replication_root: Path | None = None,
+    candidate_driver_map_path: Path | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -4236,6 +4528,7 @@ def _rendered_files(
         Path,
         Path | None,
         tuple[Path, ...],
+        Path | None,
         Path | None,
         Path | None,
         Path | None,
@@ -4305,6 +4598,9 @@ def _rendered_files(
             strategy_name_set,
             decomposition_identity,
         )
+    candidate_driver_map, candidate_driver_map_identity = _candidate_driver_map(
+        candidate_driver_map_path
+    )
     legacy, source = _source_inputs(legacy_panel)
     data = _panel_data(
         report,
@@ -4321,6 +4617,8 @@ def _rendered_files(
         weekly_payload,
         freshness_health,
         replication_payload,
+        candidate_driver_map,
+        candidate_driver_map_identity,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -4332,6 +4630,8 @@ def _rendered_files(
         "data/dashboard_data.js": b"window.PORTFOLIO_DATA = " + data_bytes + b";\n",
         "data/freshness-health.json": freshness_health_path.read_bytes(),
     }
+    if candidate_driver_map_path is not None:
+        files["data/candidate-driver-map.json"] = candidate_driver_map_path.read_bytes()
     legacy_data = legacy_panel / "data" / "dashboard_data.json"
     return (
         files,
@@ -4346,6 +4646,7 @@ def _rendered_files(
             weekly_path,
             freshness_health_path,
             replication_path,
+            candidate_driver_map_path,
         ),
     )
 
@@ -4356,6 +4657,14 @@ def _panel_id(files: Mapping[str, bytes]) -> str:
         for name, content in sorted(files.items())
     }
     return hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+
+
+def _published_panel_files(candidate_driver_map_path: Path | None) -> tuple[str, ...]:
+    return (
+        *PANEL_FILES,
+        *((DRIVER_MAP_PANEL_FILE,) if candidate_driver_map_path is not None else ()),
+        "candidate.json",
+    )
 
 
 def _write_exact(path: Path, content: bytes) -> None:
@@ -4388,6 +4697,7 @@ def build_candidate(
     weekly_returns_root: Path | None = None,
     freshness_health_path: Path | None = None,
     replication_root: Path | None = None,
+    candidate_driver_map_path: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -4401,6 +4711,7 @@ def build_candidate(
         weekly_returns_root,
         freshness_health_path,
         replication_root,
+        candidate_driver_map_path,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -4475,6 +4786,7 @@ def verify_candidate(
     weekly_returns_root: Path | None = None,
     freshness_health_path: Path | None = None,
     replication_root: Path | None = None,
+    candidate_driver_map_path: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -4488,6 +4800,7 @@ def verify_candidate(
         weekly_returns_root,
         freshness_health_path,
         replication_root,
+        candidate_driver_map_path,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -4501,7 +4814,7 @@ def verify_candidate(
             path.is_file() and not path.is_symlink() and path.read_bytes() == content
         )
         exact = exact and matches
-    checks.append(_check("Candidate files are deterministic", exact, list(PANEL_FILES)))
+    checks.append(_check("Candidate files are deterministic", exact, sorted(expected)))
     html = expected["index.html"].decode("utf-8")
     javascript = expected["app.js"].decode("utf-8")
     checks.append(
@@ -4845,6 +5158,49 @@ def verify_candidate(
             },
         )
     )
+    driver_map = data.get("candidate_driver_map")
+    if driver_map is not None:
+        accepted_driver_map = _object(driver_map, "candidate driver map")
+        driver_coverage = _object(
+            accepted_driver_map.get("coverage"), "candidate driver-map coverage"
+        )
+        driver_authority = _object(
+            accepted_driver_map.get("authority_boundary"),
+            "candidate driver-map authority",
+        )
+        expected_driver_authority = {
+            "allocation_effect": "NONE",
+            "execution_effect": "NONE",
+            "readiness_effect": "NONE",
+            "automatic_add_drop_authority": "NONE",
+        }
+        checks.append(
+            _check(
+                "Candidate driver map is complete and advisory",
+                driver_coverage.get("candidate_count") == 33
+                and len(
+                    _objects(
+                        accepted_driver_map.get("driver_clusters"),
+                        "candidate driver-map clusters",
+                    )
+                )
+                == 5
+                and len(
+                    _objects(
+                        accepted_driver_map.get("tactical_leave_one_out"),
+                        "candidate tactical leave-one-out",
+                    )
+                )
+                == 4
+                and driver_authority == expected_driver_authority,
+                {
+                    "as_of": accepted_driver_map.get("as_of_date"),
+                    "candidates": driver_coverage.get("candidate_count"),
+                    "measured": driver_coverage.get("measured_candidate_count"),
+                    "refresh": driver_coverage.get("refresh_status"),
+                },
+            )
+        )
     checks.append(
         _check(
             "Incomplete facts remain explicit",
@@ -5528,6 +5884,7 @@ def publish_panel(
     weekly_returns_root: Path | None = None,
     freshness_health_path: Path | None = None,
     replication_root: Path | None = None,
+    candidate_driver_map_path: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         report_root,
@@ -5542,6 +5899,7 @@ def publish_panel(
         weekly_returns_root,
         freshness_health_path,
         replication_root,
+        candidate_driver_map_path,
     )
     qa = validate_qa(candidate_dir, qa_dir)
     _write_exact(
@@ -5559,6 +5917,7 @@ def publish_panel(
         weekly_returns_root,
         freshness_health_path,
         replication_root,
+        candidate_driver_map_path,
     )
     (
         report_path,
@@ -5570,6 +5929,7 @@ def publish_panel(
         weekly_returns_source,
         freshness_health_source,
         replication_source,
+        candidate_driver_map_source,
     ) = input_paths
     portfolio_as_of = date.fromisoformat(
         _text(data["meta"]["portfolio_as_of"], "as_of")
@@ -5637,6 +5997,19 @@ def publish_panel(
             schema_version="1",
         ),
     ]
+    if candidate_driver_map_source is not None:
+        driver_map = _object(data.get("candidate_driver_map"), "candidate driver map")
+        artifacts.append(
+            SourceArtifact.from_path(
+                candidate_driver_map_source,
+                artifact_id="input/portfolio-candidate-driver-map.json",
+                as_of_date=date.fromisoformat(
+                    _text(driver_map.get("as_of_date"), "driver-map as_of_date")
+                ),
+                schema_name="portfolio-driver-map",
+                schema_version="1",
+            )
+        )
     if (
         strategy_evidence_source is not None
         and data["meta"].get("strategy_evidence_source") == "LEGACY_COMPATIBILITY_INPUT"
@@ -5694,7 +6067,8 @@ def publish_panel(
                 schema_version=str(freshness_artifact["assessment_schema_version"]),
             )
         )
-    for relative in (*PANEL_FILES, "candidate.json"):
+    published_panel_files = _published_panel_files(candidate_driver_map_source)
+    for relative in published_panel_files:
         artifacts.append(
             SourceArtifact.from_path(
                 candidate_dir / relative,
@@ -5721,7 +6095,7 @@ def publish_panel(
         adapter=AdapterIdentity("portfolio-control-panel-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="accepted portfolio, factor/alpha, dynamic replication, dependence, weekly-return, and governed-HWM evidence rendered read-only with explicit gaps and a separate frozen candidate appendix",
+            boundary="accepted portfolio, factor/alpha, dynamic replication, dependence, weekly-return, governed-HWM, and candidate driver-map evidence rendered read-only with explicit gaps and no capital authority",
             fact_types=(
                 "portfolio control panel",
                 "factor and alpha attribution",
@@ -5730,7 +6104,7 @@ def publish_panel(
                 "weekly returns by strategy, factor, style, sector, industry, and benchmark",
                 "governed HWM coverage",
                 "browser QA",
-                "frozen appendix",
+                "frozen candidate evidence",
             ),
             observed_start=portfolio_as_of,
             observed_end=publication_as_of,
@@ -5740,7 +6114,7 @@ def publish_panel(
     )
     manifest_path = stage_generation(output_root, manifest)
     generation_dir = manifest_path.parent
-    for relative in (*PANEL_FILES, "candidate.json"):
+    for relative in published_panel_files:
         _copy_exact(candidate_dir / relative, generation_dir / relative)
     for path in qa_files:
         _copy_exact(path, generation_dir / "qa" / path.relative_to(qa_dir))
@@ -5793,6 +6167,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--correlation-root", type=Path)
         command.add_argument("--weekly-returns-root", type=Path)
         command.add_argument("--replication-root", type=Path)
+        command.add_argument("--candidate-driver-map", type=Path)
         command.add_argument("--strategy-evidence", type=Path)
         command.add_argument("--freshness-health", type=Path, required=True)
         command.add_argument("--output-root", type=Path, required=name != "verify")
@@ -5827,6 +6202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.weekly_returns_root,
                 args.freshness_health,
                 args.replication_root,
+                args.candidate_driver_map,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -5842,6 +6218,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.weekly_returns_root,
                 args.freshness_health,
                 args.replication_root,
+                args.candidate_driver_map,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -5865,6 +6242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.weekly_returns_root,
                 args.freshness_health,
                 args.replication_root,
+                args.candidate_driver_map,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)

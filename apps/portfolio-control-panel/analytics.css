@@ -178,6 +178,7 @@ th {
   margin-top: 5px;
   color: var(--muted);
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .exposure-list {
