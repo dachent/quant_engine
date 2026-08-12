@@ -14,6 +14,10 @@ from quant_engine.web_contracts.extract import (
     extract_har,
 )
 from quant_engine.web_contracts.provenance import SOURCE_ANCHORS
+from quant_engine.web_contracts.bestfolio import (
+    BESTFOLIO_CONTRACT,
+    extract_bestfolio_har,
+)
 from quant_engine.web_contracts.portfolio123 import PORTFOLIO123_CONTRACT
 from quant_engine.web_contracts.quantbase import (
     QUANTBASE_CONTRACT,
@@ -24,6 +28,7 @@ from quant_engine.web_contracts.schwab import SCHWAB_CONTRACT
 __version__ = "0.1.0"
 
 __all__ = [
+    "BESTFOLIO_CONTRACT",
     "EndpointContract",
     "ExtractedResponse",
     "ProviderContract",
@@ -36,6 +41,7 @@ __all__ = [
     "SessionEnvelope",
     "WebContractError",
     "canonical_extraction",
+    "extract_bestfolio_har",
     "extract_har",
     "extract_quantbase_har",
 ]
