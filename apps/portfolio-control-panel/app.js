@@ -776,7 +776,7 @@
   function renderDependence() {
     const dependence = currentDependence();
     const corrOne = data.dependence_analysis.correlation_one;
-    const centralCase = data.dependence_analysis.central_case;
+    const centralCase = dependence.central_case;
     const clusterBudget = data.dependence_analysis.economic_driver_cluster_budget;
     const unavailable = dependence.pair_count - dependence.available_pair_count;
     const combined = selectedEvidenceMode === "LIVE_PLUS_BACKTEST";

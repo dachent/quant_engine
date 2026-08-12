@@ -582,15 +582,13 @@ def _correlation() -> dict[str, object]:
                     }
                     for series_id in STRATEGY_NAMES
                 ],
-                "dependence_matrix": {
-                    "missing_pair_rule": "CORRELATION_ONE_NO_DIVERSIFICATION_CREDIT"
-                },
+                "dependence_matrix": {"missing_pair_rule": "GOVERNED_CONCEPTUAL_PRIOR"},
                 "governs_readiness": False,
                 "loss": "0.2",
                 "measured_component_count": 9,
                 "measured_pair_count": 10,
                 "method": "SQRT_V_TRANSPOSE_CORRELATION_V",
-                "missing_pair_count": 26,
+                "prior_pair_count": 26,
                 "prior_component_count": 0,
                 "status": "AVAILABLE_NOT_A_PROBABILITY_FORECAST",
             },
@@ -2444,6 +2442,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert "0.00x" not in renderer
     assert "data.panel_schema_version !== 17" in renderer
     assert "corrOne.expected_loss" not in renderer
+    assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
     assert "Descriptive only" in renderer
 

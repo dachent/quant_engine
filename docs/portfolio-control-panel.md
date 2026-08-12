@@ -75,9 +75,10 @@ without preserving stale calculations or hard-coded operator conclusions.
   the hybrid view cannot change readiness, allocation, or risk-control conclusions.
 - Dependence separately displays a measured-path central case and the
   correlation-one conservative bound. The central case uses accepted-path
-  maximum drawdowns, measured exact-date Pearson dependence, correlation 1.0
-  for missing pairs, and PSD projection. It is descriptive only; the
-  correlation-one bound remains the explicit readiness governor.
+  maximum drawdowns, measured exact-date Pearson dependence, governed
+  conceptual priors for unavailable pairs, and PSD projection. It is
+  descriptive only; the correlation-one bound remains the explicit readiness
+  governor.
 - Weekly returns come only from the accepted
   `<portfolio-root>/analytics/weekly-returns` generation. Every row uses an ISO
   Monday-through-Sunday week and compounds accepted daily returns as

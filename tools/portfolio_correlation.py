@@ -35,7 +35,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
 
-BUILDER_VERSION: Final = "1.5.0"
+BUILDER_VERSION: Final = "1.5.1"
 TRADING_OBSERVATION_HORIZONS: Final = (5, 21, 22, 63, 126, 130, 252, 260)
 RETURN_HEADERS: Final = ("series_id", "date", "return", "evidence_layer")
 RETURN_HEADERS_V2: Final = (*RETURN_HEADERS, "strategy_version")
@@ -1412,7 +1412,12 @@ def _dependence_payload(
         for right_index in range(left_index + 1, size):
             right = spec.series_ids[right_index]
             observed_text = cell_index[(left, right)]["pearson"]
-            value = 1.0 if observed_text is None else float(cast(str, observed_text))
+            prior = prior_index[cast(tuple[str, str], tuple(sorted((left, right))))]
+            value = (
+                prior.value
+                if observed_text is None
+                else float(cast(str, observed_text))
+            )
             if observed_text is not None:
                 measured_pair_count += 1
             central_pre[left_index, right_index] = value
@@ -1487,13 +1492,14 @@ def _dependence_payload(
         "blend_cells": blend_cells,
         "central_case": {
             "classification": (
-                "MEASURED_MAX_DRAWDOWN_WITH_NO_CREDIT_FOR_MISSING_PAIRS_PSD_PROJECTED"
+                "MEASURED_MAX_DRAWDOWN_WITH_GOVERNED_PAIR_PRIORS_PSD_PROJECTED"
             ),
             "components": central_components,
             "dependence_matrix": {
-                "missing_pair_rule": "CORRELATION_ONE_NO_DIVERSIFICATION_CREDIT",
+                "input_values": _matrix(central_pre),
+                "missing_pair_rule": "GOVERNED_CONCEPTUAL_PRIOR",
                 "projection": _matrix_summary(central_pre, central_matrix),
-                "source": "observed_cells.pearson",
+                "source": "OBSERVED_PEARSON_ELSE_GOVERNED_CONCEPTUAL_PRIOR",
                 "values": _matrix(central_matrix),
             },
             "governs_readiness": False,
@@ -1503,7 +1509,7 @@ def _dependence_payload(
             ),
             "measured_pair_count": measured_pair_count,
             "method": "SQRT_V_TRANSPOSE_CORRELATION_V",
-            "missing_pair_count": len(observed_cells) - measured_pair_count,
+            "prior_pair_count": len(observed_cells) - measured_pair_count,
             "prior_component_count": sum(
                 item["status"] == "PRIOR_NO_ACCEPTED_OBSERVATIONS"
                 for item in central_components

@@ -61,16 +61,17 @@ does not represent it as an expectation.
 
 The central case uses each accepted evidence path's measured maximum drawdown
 as its loss scale. It applies measured exact-date Pearson dependence where
-available, sets missing pairs to correlation 1.0, projects that matrix to a
-positive-semidefinite correlation matrix, and calculates
-`sqrt(v transpose C v)`, where each element of `v` is allocation weight times
-loss scale. A series with no accepted observations uses its named conservative
-component as an explicit conceptual prior. Every component records its method,
-evidence layer, authority, observation window, and count.
+available, uses the specification's governed conceptual pair prior where it is
+not, projects that matrix to a positive-semidefinite correlation matrix, and
+calculates `sqrt(v transpose C v)`, where each element of `v` is allocation
+weight times loss scale. A series with no accepted observations uses its named
+conservative component as an explicit conceptual prior. Every component records
+its method, evidence layer, authority, observation window, and count.
 
 This central case is a descriptive scenario, not an expected return, a
 probability forecast, or a readiness governor. Readiness remains governed by
-the separately labeled correlation-one conservative bound.
+the separately labeled correlation-one conservative bound, whose decision view
+continues to grant no diversification credit to missing pair evidence.
 
 ## Evidence modes
 

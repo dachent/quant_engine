@@ -39,7 +39,7 @@ from quant_engine.portfolio_ledger import (
 
 
 PANEL_SCHEMA_VERSION: Final = 17
-BUILDER_VERSION: Final = "2.9.0"
+BUILDER_VERSION: Final = "2.9.1"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -2099,7 +2099,7 @@ def _dependence_analysis(
             "measured_component_count": 0,
             "measured_pair_count": 0,
             "method": "UNAVAILABLE_LEGACY_ACCEPTED_GENERATION",
-            "missing_pair_count": expected_cells,
+            "prior_pair_count": expected_cells,
             "prior_component_count": 0,
             "status": "UNAVAILABLE_LEGACY_ACCEPTED_GENERATION",
         }
@@ -2120,13 +2120,15 @@ def _dependence_analysis(
             )
         _finite_float(central_case.get("loss"), "central_case.loss")
         measured_pairs = central_case.get("measured_pair_count")
-        missing_pairs = central_case.get("missing_pair_count")
+        prior_pairs = central_case.get(
+            "prior_pair_count", central_case.get("missing_pair_count")
+        )
         if (
             not isinstance(measured_pairs, int)
             or isinstance(measured_pairs, bool)
-            or not isinstance(missing_pairs, int)
-            or isinstance(missing_pairs, bool)
-            or measured_pairs + missing_pairs != expected_cells
+            or not isinstance(prior_pairs, int)
+            or isinstance(prior_pairs, bool)
+            or measured_pairs + prior_pairs != expected_cells
         ):
             raise ControlPanelValidationError("central-case pair coverage differs")
     cluster_contract = _load_json(
