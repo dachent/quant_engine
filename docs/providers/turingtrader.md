@@ -32,10 +32,6 @@ The rejection is fail-closed:
 All observed provider routes and derived outputs are therefore unaccepted. In
 particular, redaction does not turn private profile data into an authorized
 input.
-The rejection manifest is a sanitized derivative constrained by
-`schemas/providers/turingtrader-source-rejection.schema.json`; unknown fields,
-including any source locator or private profile field, fail the offline
-governance test.
 
 ## Portfolio boundary
 

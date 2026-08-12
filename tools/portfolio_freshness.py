@@ -36,9 +36,7 @@ def _text(value: object, field: str) -> str:
     return value.strip()
 
 
-def _load_catalog(
-    root: Path, generation_id: str
-) -> tuple[Mapping[str, Any], dict[str, object]]:
+def _load_catalog(root: Path, generation_id: str) -> Mapping[str, Any]:
     accepted_manifest = read_generation(root, generation_id)
     generation = root / "generations" / accepted_manifest.generation_id
     expected = next(
@@ -58,16 +56,7 @@ def _load_catalog(
     if (digest, size) != (expected.sha256, expected.size_bytes):
         raise PortfolioFreshnessError("provider ledger catalog differs from manifest")
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    manifest_path = generation / "generation.json"
-    manifest_sha256, manifest_size_bytes = hash_file(manifest_path)
-    return _object(catalog, "provider ledger catalog"), {
-        "as_of_date": accepted_manifest.as_of_date.isoformat(),
-        "catalog_sha256": digest,
-        "catalog_size_bytes": size,
-        "generation_id": accepted_manifest.generation_id,
-        "manifest_sha256": manifest_sha256,
-        "manifest_size_bytes": manifest_size_bytes,
-    }
+    return _object(catalog, "provider ledger catalog")
 
 
 _CANONICAL_FACTS = (
@@ -167,7 +156,7 @@ def build_health(
     provider_ledger_generation_id: str,
     evaluation_date: date | None = None,
 ) -> dict[str, object]:
-    catalog, ledger_identity = _load_catalog(
+    catalog = _load_catalog(
         provider_ledger_root.resolve(), provider_ledger_generation_id
     )
     ledger_as_of = date.fromisoformat(_text(catalog.get("as_of_date"), "as_of_date"))
@@ -280,7 +269,6 @@ def build_health(
             ),
         ),
         "policies": [policies[key].to_dict() for key in sorted(policies)],
-        "provider_ledger": ledger_identity,
     }
 
 

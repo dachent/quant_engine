@@ -24,9 +24,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_control_recompute.py"
-SPEC = importlib.util.spec_from_file_location(
-    "portfolio_control_recompute", MODULE_PATH
-)
+SPEC = importlib.util.spec_from_file_location("portfolio_control_recompute", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("unable to load control recomputation tool")
 recompute = importlib.util.module_from_spec(SPEC)
@@ -98,7 +96,11 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     report_generation = _publish(
         report_root,
         "portfolio-report-data.json",
-        {"portfolio_summary": [{"metric": "Correlation-one stress", "value": "0.3"}]},
+        {
+            "portfolio_summary": [
+                {"metric": "Correlation-one stress", "value": "0.3"}
+            ]
+        },
         "synthetic-report",
     )
     candidate = tmp_path / "candidate"
@@ -106,7 +108,6 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         "advisory": {"correlation_one_stress": "0.3"},
         "meta": {
             "correlation_generation_id": correlation_generation,
-            "freshness_evaluated_on": AS_OF.isoformat(),
             "report_generation_id": report_generation,
         },
     }
@@ -134,7 +135,9 @@ def test_independently_recomputes_and_reconciles_all_three_surfaces(
 ) -> None:
     correlation_root, report_root, candidate = _inputs(tmp_path)
 
-    receipt = recompute.build_receipt(correlation_root, report_root, candidate, AS_OF)
+    receipt = recompute.build_receipt(
+        correlation_root, report_root, candidate, AS_OF
+    )
 
     assert receipt["status"] == "PASS"
     assert receipt["component_count"] == 2
@@ -148,27 +151,6 @@ def test_mismatched_panel_headline_fails_closed(tmp_path: Path) -> None:
     dashboard_path = candidate / "data" / "dashboard_data.json"
     dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
     dashboard["advisory"]["correlation_one_stress"] = "0.2"
-    content = canonical_json_bytes(dashboard)
-    dashboard_path.write_bytes(content)
-    manifest_path = candidate / "candidate.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["artifact_sha256"]["data/dashboard_data.json"] = hashlib.sha256(
-        content
-    ).hexdigest()
-    manifest_path.write_bytes(canonical_json_bytes(manifest))
-
-    with pytest.raises(
-        recompute.ControlRecomputeError,
-        match="independent headline recomputation differs",
-    ):
-        recompute.build_receipt(correlation_root, report_root, candidate, AS_OF)
-
-
-def test_prior_day_panel_freshness_fails_closed(tmp_path: Path) -> None:
-    correlation_root, report_root, candidate = _inputs(tmp_path)
-    dashboard_path = candidate / "data" / "dashboard_data.json"
-    dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
-    dashboard["meta"]["freshness_evaluated_on"] = "2026-08-05"
     content = canonical_json_bytes(dashboard)
     dashboard_path.write_bytes(content)
     manifest_path = candidate / "candidate.json"

@@ -76,16 +76,14 @@ also emit the full dated exposure path, exposure-change diagnostics, exact
 smoothness sensitivity, training-only leave-one-out predictions, and causal
 walk-forward holdout forecasts.
 
-For `DYNAMIC_FLS`, every candidate smoothness value is evaluated with exact
-leave-one-out predictions from the fitted linear smoother's leverage and the
-PRESS identity. This is mathematically identical to omitting each training
-observation and refitting the connected state path, but avoids one full block
-solve per omitted observation. A unit proof compares the optimized predictions
-with direct omission-and-refit predictions. The largest smoothness value within
-the declared tolerance of the best score is selected, favoring the smoother
-path without using holdout data. Holdout forecasts use only the prior filtered
-state. A holdout observation can update a later filtered state but cannot
-change the factor set, smoothing parameter, ridge, intercept, or training path.
+For `DYNAMIC_FLS`, every candidate smoothness value is evaluated by literally
+omitting each training observation in turn, refitting the connected state path,
+and calculating Predicted R-squared from those omitted-observation forecasts.
+The largest smoothness value within the declared tolerance of the best score is
+selected, favoring the smoother path without using holdout data. Holdout
+forecasts use only the prior filtered state. A holdout observation can update a
+later filtered state but cannot change the factor set, smoothing parameter,
+ridge, intercept, or training path.
 
 Every dynamic result is compared with a static unconstrained benchmark using
 the same factors, training boundary, state ridge, and holdout. The comparison
@@ -130,38 +128,17 @@ every candidate and whether it was selected by the training-only model rule,
 requested but not selected, or outside the requested model sets.
 
 Each new specification also declares one closed `analysis_lens`:
-`ECONOMIC_FACTOR`, `ETF_STYLE`, `RETURN_SECTOR`, or `RETURN_INDUSTRY`. Legacy specifications
+`ECONOMIC_FACTOR`, `ETF_STYLE`, or `RETURN_INDUSTRY`. Legacy specifications
 without the field remain explicitly labeled `HISTORICAL_MINIMUM_PROOF`. The
 lens is hash-bound into the analytics result and generation so factor, style,
-sector, and industry models can be stored and rendered separately; no consumer may
+and industry models can be stored and rendered separately; no consumer may
 concatenate them into a single exposure model.
-
-Every exposure record publishes `beta` as the primary coefficient name and
-retains `exposure` as a backwards-compatible alias with the identical numeric
-value. For unconstrained economic-factor, sector, and industry models, beta is
-conditional return sensitivity holding the other selected regressors constant.
-For long-only simplex ETF-style models, beta is a fitted non-negative proxy
-loading and the vector sums to one. Dynamic paths publish an effective-dated
-`betas` map alongside the legacy `exposures` alias.
-
-Sealed-holdout predicted R-squared is
-`1 - SSE_holdout / sum((y_holdout - mean(y_train))^2)`. The model and all
-regularization or smoothness choices are fixed using training evidence before
-this period is scored. A value above zero means the model predicts the withheld
-period better than repeatedly forecasting the training-period mean; zero or a
-negative value fails the portfolio-manager-use gate. It is predictive evidence,
-not the ordinary in-sample R-squared and not proof that alpha is causal.
 
 Supported evidence layers are `ACCOUNT_LIVE`, `PROVIDER_LIVE`,
 `OFFICIAL_VEHICLE`, `PREDECESSOR`, `SHADOW_OOS`, `BACKTEST`, and
-`CONCEPTUAL_STRESS`. A `LIVE_ONLY` series has exactly one accepted live layer
-and rejects backtest rows. The current portfolio consumer may select
-`ACCOUNT_LIVE` results; other live layers remain separate evidence.
-`LIVE_PLUS_BACKTEST` accepts at most one live layer plus version-matched
-`BACKTEST` rows, admits only dates before live inception, and publishes
-per-series counts, rejected overlap counts, and a composition disposition. A
-hybrid row with zero accepted backtest observations remains explicitly
-live-only in substance.
+`CONCEPTUAL_STRESS`. One series may have only one layer. The current portfolio
+consumer may select `ACCOUNT_LIVE` results; other layers remain separate
+evidence.
 
 Existing specifications without `estimator` remain `STATIC_RBSA`. A dynamic
 model adds:
@@ -203,11 +180,7 @@ The overlay contract is
 `schemas/portfolio/strategy-provider-evidence.schema.json`.
 
 The roll-forward CLI takes explicit paths and provider identities from local
-configuration; none is hard-coded or committed. A separately verified
-strategy-history bundle supplies version-bound GrizzlyBears, QSI,
-TuringTrader, and Volatis histories. The Portfolio123 live-simulation twin
-supplies AI Factor. History compatibility never asserts that the brokerage
-account executed the model correctly; trade reconciliation remains separate.
+configuration; none is hard-coded or committed:
 
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_target_series.py `
@@ -221,7 +194,7 @@ uv run --frozen --no-sync python tools/portfolio_target_series.py `
   --quantbase-activity "<Quantbase-account-activity.csv>" `
   --quantbase-fund-id "<local-fund-id>" `
   --quantbase-series-id "Volatis Strategy" `
-  --portfolio123-manifest "<dataPortfolio123-generation.json>" `
+  --portfolio123-manifest "<data_Portfolio123-generation.json>" `
   --portfolio123-equity "<har_equity_curve.parquet>" `
   --portfolio123-metadata "<har_account_metadata.parquet>" `
   --portfolio123-returns "<returns_daily.parquet>" `
@@ -231,8 +204,6 @@ uv run --frozen --no-sync python tools/portfolio_target_series.py `
   --portfolio123-account-entity-id "<local-account-id>" `
   --portfolio123-strategy-id "p123-ai-factor" `
   --portfolio123-account-series-id "AI Factor [P123]" `
-  --strategy-history-manifest "<strategy-history-manifest.json>" `
-  --strategy-history-returns "<strategy-history-returns.csv>" `
   --output-root "<private-roll-forward-input-root>"
 ```
 
@@ -242,13 +213,10 @@ manifest. The simulation must be the accepted generation's unique
 `live_sim_twin` for the provider-live entity, and that provider path must have
 accepted exact-date reconciliation to the account-live series. Its indexed
 model path is converted to consecutive returns and bound to the same
-generation-derived strategy-version reference as the account-live series. The
-dependence builder uses all admitted history only before the first account-live
-observation. The current contract admits long history for AI Factor,
-GrizzlyBears, QSI, TuringTrader, and Volatis. EU remains unavailable because
-the exact connected model was omitted from the HAR export; other long EU
-curves are not interchangeable. EchoTrade is deprecated with no history and
-Composer is immaterial with unconnected history. Omitting all
+generation-derived strategy-version reference as the account-live series. The dependence builder
+uses those rows only before the first account-live observation. Other
+strategies remain available in the hybrid view with their live evidence and
+zero backtest observations; absent strategies remain unavailable. Omitting all
 three arguments preserves the replay-compatible schema-v1 output. Supplying a
 partial set fails closed.
 

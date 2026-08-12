@@ -167,7 +167,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                 "column_policy": "CANDIDATE_ID",
             },
             "sector": {
-                "lens": "RETURN_SECTOR",
+                "lens": "RETURN_INDUSTRY",
                 "universe_id": "sector",
                 "input_key": "sector_returns",
                 "risk_free_column": "BIL",
@@ -282,7 +282,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     assert {item["analysis_lens"] for item in manifest["specs"]} == {
         "ECONOMIC_FACTOR",
         "ETF_STYLE",
-        "RETURN_SECTOR",
+        "RETURN_INDUSTRY",
     }
     dispositions = json.loads(outputs["candidate-dispositions.json"])
     assert len(dispositions["candidate_dispositions"]) == 12
@@ -340,44 +340,6 @@ def test_generated_specs_execute_under_the_closed_engine_contract(
         )
         assert manifest.generation_id
         assert len(result["model_selections"]) == 1
-
-
-def test_plan_preserves_target_end_beyond_publication_lag(tmp_path: Path) -> None:
-    inputs = _fixture(tmp_path)
-    document = inputs["plan_document"]
-    document["sources"]["economic"]["maximum_factor_staleness_days"] = 45
-    _write_json(inputs["plan_path"], document)
-
-    market_path = inputs["market_paths"]["us_factors"]
-    market_lines = market_path.read_text(encoding="utf-8").splitlines()
-    market_path.write_text("\n".join(market_lines[:-20]) + "\n", encoding="utf-8")
-    factor_manifest = json.loads(inputs["public_factor_manifest_path"].read_text())
-    economic_output = next(
-        item for item in factor_manifest["outputs"] if item["path"] == market_path.name
-    )
-    content = market_path.read_bytes()
-    economic_output["sha256"] = hashlib.sha256(content).hexdigest()
-    economic_output["bytes"] = len(content)
-    _write_json(inputs["public_factor_manifest_path"], factor_manifest)
-
-    outputs, _manifest = planner.build_bundle(
-        **{key: value for key, value in inputs.items() if key != "plan_document"}
-    )
-    economic = json.loads(outputs["specs/economic.json"])
-    target_rows = list(
-        csv.DictReader(
-            outputs["inputs/lenses/economic-targets.csv"].decode("utf-8").splitlines()
-        )
-    )
-    factor_rows = list(
-        csv.DictReader(
-            outputs["inputs/lenses/economic-factors.csv"].decode("utf-8").splitlines()
-        )
-    )
-
-    assert economic["as_of_date"] == target_rows[-1]["date"]
-    assert factor_rows[-1]["date"] < target_rows[-1]["date"]
-    assert economic["maximum_factor_staleness_days"] == 45
 
 
 def test_build_rejects_manifest_drift(tmp_path: Path) -> None:

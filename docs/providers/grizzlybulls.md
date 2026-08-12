@@ -10,10 +10,6 @@ The audited candidate is `REJECTED_NO_ACCEPTED_PROVIDER_ROUTE`. Its original
 branch remains unmerged. The private source remains outside Git and is bound by
 the aggregate inventory and artifact hashes in
 `contracts/providers/grizzlybulls/source-rejection.v1.json`.
-The committed `inventory_sha256` is reproducible from each sanitized
-`artifact_id`, byte count, and artifact SHA-256. The separate
-`private_source_inventory_sha256` preserves the original locator-based
-outside-Git evidence anchor without disclosing those private locators.
 
 The rejection is fail-closed:
 

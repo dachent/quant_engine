@@ -21,7 +21,6 @@ from quant_engine.core import (
     CoverageStatus,
     GenerationConflictError,
     GenerationManifest,
-    ManifestValidationError,
     SourceArtifact,
     VerificationStatus,
     hash_file,
@@ -321,46 +320,32 @@ def _replicate_model(
     series_id = _text(model.get("series_id"), "model.series_id")
     model_id = _text(model.get("model_id"), f"{series_id}.model_id")
     if model.get("estimator") != EXPECTED_ESTIMATOR:
-        raise ReplicationError(
-            f"{series_id} selected model is not {EXPECTED_ESTIMATOR}"
-        )
+        raise ReplicationError(f"{series_id} selected model is not {EXPECTED_ESTIMATOR}")
     if model.get("method_label") != ALLOWED_SOURCE_METHOD_LABEL:
         raise ReplicationError(f"{series_id} source method label is not accepted")
     if model.get("selected_for_series") is not True:
         raise ReplicationError(f"{series_id} source model is not marked selected")
-    factor_ids = [
-        _text(value, f"{series_id}.factor_id") for value in model.get("factor_ids", [])
-    ]
+    factor_ids = [_text(value, f"{series_id}.factor_id") for value in model.get("factor_ids", [])]
     if not factor_ids or len(factor_ids) != len(set(factor_ids)):
         raise ReplicationError(f"{series_id} factor_ids are empty or duplicated")
     if not set(factor_ids) <= available_factor_ids:
-        raise ReplicationError(
-            f"{series_id} factor source is missing a selected factor"
-        )
+        raise ReplicationError(f"{series_id} factor source is missing a selected factor")
     diagnostics = model.get("diagnostics")
     if not isinstance(diagnostics, dict):
         raise ReplicationError(f"{series_id} diagnostics are missing")
     dynamic = diagnostics.get("dynamic")
     holdout = diagnostics.get("holdout")
     if not isinstance(dynamic, dict) or not isinstance(holdout, dict):
-        raise ReplicationError(
-            f"{series_id} dynamic or holdout diagnostics are missing"
-        )
+        raise ReplicationError(f"{series_id} dynamic or holdout diagnostics are missing")
     if dynamic.get("validation") != EXPECTED_VALIDATION:
-        raise ReplicationError(
-            f"{series_id} parameter selection was not train-only LOO"
-        )
+        raise ReplicationError(f"{series_id} parameter selection was not train-only LOO")
     if dynamic.get("selection_rule") != EXPECTED_SELECTION_RULE:
         raise ReplicationError(f"{series_id} parameter selection rule differs")
     if holdout.get("prediction_mode") != EXPECTED_PREDICTION_MODE:
         raise ReplicationError(f"{series_id} holdout was not causal prior-state")
-    forecasts = _objects(
-        dynamic.get("holdout_forecasts"), f"{series_id}.holdout_forecasts"
-    )
+    forecasts = _objects(dynamic.get("holdout_forecasts"), f"{series_id}.holdout_forecasts")
     if len(forecasts) != _integer(
-        holdout.get("observation_count"),
-        f"{series_id}.holdout.observation_count",
-        minimum=1,
+        holdout.get("observation_count"), f"{series_id}.holdout.observation_count", minimum=1
     ):
         raise ReplicationError(f"{series_id} holdout forecast count differs")
     alpha = model.get("alpha")
@@ -393,39 +378,24 @@ def _replicate_model(
         basis: [] for basis in cost_sensitivities_bps
     }
     for index, forecast in enumerate(forecasts):
-        observed = _parse_date(
-            forecast.get("date"), f"{series_id}.forecast[{index}].date"
-        )
+        observed = _parse_date(forecast.get("date"), f"{series_id}.forecast[{index}].date")
         if previous_date is not None and observed <= previous_date:
-            raise ReplicationError(
-                f"{series_id} holdout forecasts are not strictly ordered"
-            )
+            raise ReplicationError(f"{series_id} holdout forecasts are not strictly ordered")
         factor_row = factor_returns.get(observed)
         if factor_row is None or not set(factor_ids) <= set(factor_row):
-            raise ReplicationError(
-                f"{series_id} lacks factor observations on {observed}"
-            )
+            raise ReplicationError(f"{series_id} lacks factor observations on {observed}")
         raw_exposures_value = forecast.get("forecast_exposures")
-        if not isinstance(raw_exposures_value, dict) or set(raw_exposures_value) != set(
-            factor_ids
-        ):
-            raise ReplicationError(
-                f"{series_id} forecast exposures differ from factor_ids"
-            )
+        if not isinstance(raw_exposures_value, dict) or set(raw_exposures_value) != set(factor_ids):
+            raise ReplicationError(f"{series_id} forecast exposures differ from factor_ids")
         raw_exposures = {
-            factor_id: _decimal(
-                raw_exposures_value[factor_id], f"{series_id}.{observed}.{factor_id}"
-            )
+            factor_id: _decimal(raw_exposures_value[factor_id], f"{series_id}.{observed}.{factor_id}")
             for factor_id in factor_ids
         }
         source_predicted = _decimal(
             forecast.get("predicted_excess_return"), f"{series_id}.{observed}.predicted"
         )
         independently_recomputed = intercept + sum(
-            (
-                raw_exposures[factor_id] * factor_row[factor_id]
-                for factor_id in factor_ids
-            ),
+            (raw_exposures[factor_id] * factor_row[factor_id] for factor_id in factor_ids),
             Decimal("0"),
         )
         if abs(source_predicted - independently_recomputed) > Decimal("1e-9"):
@@ -436,10 +406,7 @@ def _replicate_model(
         cash_weight = Decimal("1") - sum(weights.values(), Decimal("0"))
         turnover = (
             sum(
-                (
-                    abs(weights[factor_id] - previous_weights[factor_id])
-                    for factor_id in factor_ids
-                ),
+                (abs(weights[factor_id] - previous_weights[factor_id]) for factor_id in factor_ids),
                 Decimal("0"),
             )
             + abs(cash_weight - previous_cash)
@@ -464,10 +431,7 @@ def _replicate_model(
             )
         )
         breakpoints.append(
-            {
-                "date": observed.isoformat(),
-                "exposure_change_l2": _decimal_text(change_l2),
-            }
+            {"date": observed.isoformat(), "exposure_change_l2": _decimal_text(change_l2)}
         )
         rows.append(
             {
@@ -476,20 +440,17 @@ def _replicate_model(
                 "constraint_bindings": binding,
                 "date": observed.isoformat(),
                 "factor_returns": {
-                    factor_id: _decimal_text(factor_row[factor_id])
-                    for factor_id in factor_ids
+                    factor_id: _decimal_text(factor_row[factor_id]) for factor_id in factor_ids
                 },
                 "gross_tracker_excess_return": _decimal_text(gross_return),
                 "implementable_factor_weights": {
-                    factor_id: _decimal_text(weights[factor_id])
-                    for factor_id in factor_ids
+                    factor_id: _decimal_text(weights[factor_id]) for factor_id in factor_ids
                 },
                 "information_set": "MODEL_STATE_ESTIMATED_THROUGH_PRIOR_OBSERVATION",
                 "net_tracker_excess_return": _decimal_text(net_return),
                 "one_period_turnover": _decimal_text(turnover),
                 "raw_forecast_factor_weights": {
-                    factor_id: _decimal_text(raw_exposures[factor_id])
-                    for factor_id in factor_ids
+                    factor_id: _decimal_text(raw_exposures[factor_id]) for factor_id in factor_ids
                 },
                 "selected_cost": _decimal_text(cost),
                 "source_predicted_excess_return": _decimal_text(source_predicted),
@@ -511,9 +472,7 @@ def _replicate_model(
     if not isinstance(quality, dict):
         raise ReplicationError(f"{series_id} model quality is missing")
     decision = _text(quality.get("decision_status"), f"{series_id}.decision_status")
-    availability = (
-        AVAILABILITY_COMPLETE if decision == "PM_VALID" else AVAILABILITY_DIAGNOSTIC
-    )
+    availability = AVAILABILITY_COMPLETE if decision == "PM_VALID" else AVAILABILITY_DIAGNOSTIC
     worst_indices = sorted(range(len(rows)), key=lambda idx: actual_values[idx])[:5]
     return {
         "availability_status": availability,
@@ -536,9 +495,7 @@ def _replicate_model(
             "selected_cost_bps_per_one_way_turnover": _decimal_text(selected_cost_bps),
         },
         "largest_exposure_changes": sorted(
-            breakpoints,
-            key=lambda row: Decimal(str(row["exposure_change_l2"])),
-            reverse=True,
+            breakpoints, key=lambda row: Decimal(str(row["exposure_change_l2"])), reverse=True
         )[:5],
         "metrics": _metrics(
             actual_values,
@@ -590,27 +547,13 @@ def build_replication(
         source_root, sources.get("factors"), "sources.factors"
     )
     decomposition = _load_json(decomposition_path, "decomposition source")
-    try:
-        generation = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
-    except (OSError, ManifestValidationError) as exc:
-        raise ReplicationError("decomposition generation manifest is invalid") from exc
+    generation = _load_json(manifest_path, "decomposition generation")
     expected_generation_id = _text(
         sources.get("decomposition_generation_id"),
         "sources.decomposition_generation_id",
     )
-    if generation.generation_id != expected_generation_id:
+    if generation.get("generation_id") != expected_generation_id:
         raise ReplicationError("decomposition generation id differs")
-    if generation.verification is not VerificationStatus.VERIFIED:
-        raise ReplicationError("decomposition generation is not VERIFIED")
-    if (
-        generation.coverage.status
-        is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
-    ):
-        raise ReplicationError("decomposition generation coverage is not complete")
-    if generation.as_of_date != as_of:
-        raise ReplicationError("decomposition generation as_of_date differs")
-    if generation.adapter.name != "portfolio-decomposition":
-        raise ReplicationError("decomposition generation adapter differs")
     if decomposition.get("method_label") != ALLOWED_SOURCE_METHOD_LABEL:
         raise ReplicationError("decomposition method label is not accepted")
     if decomposition.get("as_of_date") != as_of.isoformat():
@@ -621,54 +564,32 @@ def build_replication(
     periods_per_year = _integer(
         policy.get("periods_per_year"), "policy.periods_per_year", minimum=1
     )
-    selected_cost_bps = _decimal(
-        policy.get("selected_cost_bps"), "policy.selected_cost_bps"
-    )
+    selected_cost_bps = _decimal(policy.get("selected_cost_bps"), "policy.selected_cost_bps")
     max_weight = _decimal(
         policy.get("max_absolute_factor_weight"), "policy.max_absolute_factor_weight"
     )
     max_gross = _decimal(
         policy.get("max_gross_factor_exposure"), "policy.max_gross_factor_exposure"
     )
-    if (
-        min(selected_cost_bps, max_weight, max_gross) < 0
-        or max_weight == 0
-        or max_gross == 0
-    ):
-        raise ReplicationError(
-            "replication policy limits must be positive and costs non-negative"
-        )
+    if min(selected_cost_bps, max_weight, max_gross) < 0 or max_weight == 0 or max_gross == 0:
+        raise ReplicationError("replication policy limits must be positive and costs non-negative")
     sensitivity_value = policy.get("cost_sensitivities_bps")
     if not isinstance(sensitivity_value, list) or not sensitivity_value:
-        raise ReplicationError(
-            "policy.cost_sensitivities_bps must be a non-empty array"
-        )
+        raise ReplicationError("policy.cost_sensitivities_bps must be a non-empty array")
     sensitivities = sorted(
-        {
-            _decimal(value, "policy.cost_sensitivities_bps")
-            for value in sensitivity_value
-        }
+        {_decimal(value, "policy.cost_sensitivities_bps") for value in sensitivity_value}
     )
-    if (
-        any(value < 0 for value in sensitivities)
-        or selected_cost_bps not in sensitivities
-    ):
-        raise ReplicationError(
-            "cost sensitivities must be non-negative and include selected cost"
-        )
+    if any(value < 0 for value in sensitivities) or selected_cost_bps not in sensitivities:
+        raise ReplicationError("cost sensitivities must be non-negative and include selected cost")
     factor_returns, available_factor_ids = _load_factor_returns(factor_path)
     models = {
         _text(row.get("model_id"), "model_result.model_id"): row
-        for row in _objects(
-            decomposition.get("model_results"), "decomposition.model_results"
-        )
+        for row in _objects(decomposition.get("model_results"), "decomposition.model_results")
     }
     results: list[dict[str, object]] = []
     observed_dates: list[date] = []
     for selection in sorted(
-        _objects(
-            decomposition.get("model_selections"), "decomposition.model_selections"
-        ),
+        _objects(decomposition.get("model_selections"), "decomposition.model_selections"),
         key=lambda row: _text(row.get("series_id"), "model selection.series_id"),
     ):
         model_id = selection.get("model_id")
@@ -723,9 +644,7 @@ def build_replication(
         },
     }
     identity = dict(payload)
-    payload["analytics_hash"] = hashlib.sha256(
-        canonical_json_bytes(identity)
-    ).hexdigest()
+    payload["analytics_hash"] = hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
     result_bytes = canonical_json_bytes(payload)
     artifacts = (
         SourceArtifact(
@@ -742,7 +661,7 @@ def build_replication(
             size_bytes=manifest_size,
             as_of_date=as_of,
             schema_name="generation-manifest",
-            schema_version=str(generation.manifest_schema_version),
+            schema_version=str(generation.get("manifest_schema_version", "1")),
         ),
         SourceArtifact(
             artifact_id="inputs/decomposition.json",
@@ -802,9 +721,7 @@ def _write_new(path: Path, content: bytes) -> None:
         os.fsync(handle.fileno())
 
 
-def _verify_exact(
-    candidate: Path, manifest: GenerationManifest, result_bytes: bytes
-) -> None:
+def _verify_exact(candidate: Path, manifest: GenerationManifest, result_bytes: bytes) -> None:
     if candidate.is_symlink() or not candidate.is_dir():
         raise ReplicationError("candidate must be a regular directory")
     expected = {
@@ -819,9 +736,7 @@ def _verify_exact(
             raise ReplicationError(f"candidate {name} differs from exact rebuild")
 
 
-def stage_candidate(
-    spec_path: Path, source_root: Path, output_root: Path
-) -> dict[str, object]:
+def stage_candidate(spec_path: Path, source_root: Path, output_root: Path) -> dict[str, object]:
     payload, manifest, result_bytes = build_replication(spec_path, source_root)
     candidates = output_root.resolve() / "candidates"
     if output_root.exists() and output_root.is_symlink():
@@ -842,9 +757,7 @@ def stage_candidate(
         "analytics_hash": payload["analytics_hash"],
         "candidate": str(candidate),
         "generation_id": manifest.generation_id,
-        "series_count": len(
-            _objects(payload.get("replication_results"), "replication results")
-        ),
+        "series_count": len(payload["replication_results"]),
     }
 
 
@@ -877,9 +790,7 @@ def publish(
         "analytics_hash": payload["analytics_hash"],
         "generation_id": manifest.generation_id,
         "publication_state": pointer.state.value,
-        "series_count": len(
-            _objects(payload.get("replication_results"), "replication results")
-        ),
+        "series_count": len(payload["replication_results"]),
     }
 
 

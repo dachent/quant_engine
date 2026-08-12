@@ -16,18 +16,17 @@ without preserving stale calculations or hard-coded operator conclusions.
 - Every strategy row also projects the effective-dated v2 strategy-version
   registry: overall disposition, design/configuration/backtest/live-boundary
   status, cost and benchmark evidence, source route, compatibility, and named
-  gaps. QSI, GrizzlyBears, TuringTrader, and Volatis have admitted version-bound
-  history. EU is a named exact-model HAR export defect; long EU curves from
-  different books are retained but rejected as substitutes. EchoTrade is
-  deprecated with no history, and Composer is immaterial with unconnected
-  history. Return evidence does not manufacture a design or backtest version.
+  gaps. QSI and EchoTrade remain unresolved where no authoritative producing
+  artifact is admitted; the GrizzlyBears and TuringTrader rejected-provider
+  dispositions remain visible. Return evidence does not manufacture a design
+  or backtest version.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
   contribution reconciliation, and each dated dynamic exposure path come only
   from accepted analytics generations. The clean-room dynamic FLS lens remains
-  under `<portfolio-root>/analytics/decomposition`; the current strategy views bind five
+  under `<portfolio-root>/analytics/decomposition`; the current strategy views bind six
   independently published generations under
   `<portfolio-root>/analytics/decomposition-lenses` for U.S./European economic
-  factors, U.S. equity ETF style, U.S. sector returns, and U.S. 49-industry
+  factors, U.S./multi-asset ETF style, U.S. sector returns, and U.S. 49-industry
   returns. These lenses are selectable but never concatenated. Static
   RBSA and clean-room dynamic FLS results are both labeled
   `MPI_INFORMED_NON_EQUIVALENT`; neither is proprietary MPI output nor a claim
@@ -45,34 +44,19 @@ without preserving stale calculations or hard-coded operator conclusions.
 - Portfolio123 provider-live evidence is displayed alongside, but never joined
   to, the IBKR account-live TWR. Provider history, current account snapshot,
   exact-date overlap, and implementation-gap dates remain separately labeled.
-  The implementation-reconciliation artifact also separates provider/model
-  instructions, connected live books, temporary P123 books, broker executions,
-  and account returns for AI Factor, GrizzlyBears, and TuringTrader. It reports
-  exact-common-date beta, correlation, tracking error, capture, relative
-  drawdown, trade-event coverage, and confirmed root causes without treating
-  unmatched events as automatically manual. The interpretation and corrective
-  actions are documented in
-  `docs/analytics/model-to-actual-rcca.md`; event coverage is one-to-one and
-  remains explicitly quantity/notional-unverified where the model source does
-  not provide account-sized orders. The separate causal return-attribution
-  artifact is also a mandatory hash-bound vertical input. For AI Factor it
-  corrects the primary-only benchmark to the inferred effective connected-model
-  mix; for GrizzlyBears and TuringTrader it renders every supported ordered
-  counterfactual category and any explicit residual. The report contract proves
-  that each displayed waterfall closes to the exact model/account endpoint.
 - Observed Pearson/Spearman cells, 5/21/22/63/126/130/252/260-observation
   matrices, true pair drawdown-regime matrices, conceptual priors, posterior/stress
   matrices, the decision-only no-credit view, and correlation-one loss come
   only from the accepted `<portfolio-root>/analytics/correlation` generation and
   remain separately labeled.
 - Dependence defaults to `LIVE_ONLY`. When the accepted correlation generation
-  also contains `LIVE_PLUS_BACKTEST`, the operator may switch to the explicitly
-  labeled hybrid view only when every current effective-dated strategy registry
-  row is `PROVEN_COMPATIBLE`. Otherwise the hybrid payload is suppressed and the
-  selector remains visible but disabled with the named compatibility blockers.
-  An admitted hybrid uses only version-matched backtest observations before live
-  inception; live observations remain authoritative from inception onward, and
-  the hybrid view cannot change readiness, allocation, or risk-control conclusions.
+  also contains `LIVE_PLUS_BACKTEST`, the operator may switch to an explicitly
+  labeled hybrid view. It uses only version-matched backtest observations before
+  live inception; live observations remain authoritative from inception onward,
+  and the hybrid view cannot change readiness, allocation, or risk-control
+  conclusions. Individual series without eligible backtest prehistory remain
+  live-only inside the hybrid view and report zero backtest rows. A schema-v1
+  generation without the evidence-mode contract disables the hybrid selector.
 - Weekly returns come only from the accepted
   `<portfolio-root>/analytics/weekly-returns` generation. Every row uses an ISO
   Monday-through-Sunday week and compounds accepted daily returns as
@@ -82,19 +66,6 @@ without preserving stale calculations or hard-coded operator conclusions.
   pre-inception backtest boundary as Dependence. Factor rows remain labeled as
   excess or long-short returns; strategy, ETF style, sector, industry, and core
   benchmark rows retain their declared total-return or proxy basis.
-- Layered strategy underwriting is recomputed for all nine current strategies
-  under `PORT-UNDERWRITE-1`. Authoritative design, exact-version backtest,
-  provider/model live, account live, and implementation reconciliation remain
-  separate. The result combines long-history statistical membership,
-  model-versus-account diagnostics, pre-live-defined regime checks,
-  correlation-one leave-one-out stress, and economic-driver cluster budgets.
-  It is advisory only: automatic drop, allocation, readiness, execution, and
-  order authority are all `NONE`.
-- Data health renders the complete `fact_coverage_matrix`,
-  `observation_windows`, and `attribution_dispositions` payloads. A
-  `NO_ACCEPTED_FACT_PATH` row means no admitted account/fact source exists; it
-  never means zero balance or zero activity. The Factors view renders the
-  governed `selection_boundary` beside the lens methodology.
 - The Candidates view is the hash-locked 2026-07-17 audit appendix. Its 33 rows
   are not `Strategy` identities and cannot update current totals, rank a new
   candidate, authorize diligence, or allocate capital.
@@ -130,7 +101,6 @@ $legacy = Join-Path $engine "_strategy_allocation_audit\model_harness_baseline\c
 $lensRoot = Join-Path $portfolioRoot 'analytics\decomposition-lenses'
 $planBundle = "<hash-bound decomposition planning bundle>"
 $weekly = Join-Path $portfolioRoot 'analytics\weekly-returns'
-$replication = Join-Path $portfolioRoot 'analytics\replication'
 $freshness = "<exact hash-bound release freshness-health.json>"
 
 uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
@@ -138,7 +108,6 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `
-  --replication-root $replication `
   --freshness-health $freshness
 ```
 
@@ -182,7 +151,6 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `
-  --replication-root $replication `
   --freshness-health $freshness
 ```
 
@@ -194,15 +162,7 @@ to the analytics generations, dynamic
 estimator disclosures when present, measured/unavailable dependence counts
 derived exactly from the accepted generation, live-only default authority,
 optional version-matched backtest composition, explicit unavailable facts, and
-frozen-appendix isolation. It also proves that all four previously passive
-evidence sections are consumed by the renderer and that the nine-strategy
-underwriting ledger reconciles without fabricated causal components or any
-automatic decision authority.
-
-The Windows-first end-to-end operator procedure, including the full evidence
-stack, non-duplication rules, visual QA, Candidate interaction QA last, and
-coordinated publication, is in
-[`portfolio-underwriting-rollforward.md`](portfolio-underwriting-rollforward.md).
+frozen-appendix isolation.
 
 The Weekly returns view exposes all accepted strategies, U.S. and European
 economic factors, U.S. equity and multi-asset ETF styles, sectors, 49
@@ -319,7 +279,6 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `
-  --replication-root $replication `
   --freshness-health $freshness
 ```
 

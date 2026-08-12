@@ -13,7 +13,6 @@
     "accounts",
     "capital_pools",
     "strategies",
-    "strategy_version_catalog",
     "assignments",
     "allocations",
     "securities",

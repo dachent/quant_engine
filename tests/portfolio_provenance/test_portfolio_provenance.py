@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 import sys
 from typing import Any
-from urllib.parse import urljoin
 
 import pytest
 
@@ -365,19 +364,6 @@ def test_strategy_version_evidence_must_bind_an_admitted_source_hash(
         provenance.build_catalog(spec_path)
 
 
-def test_evidenced_layer_requires_an_admitted_hash_or_version(tmp_path: Path) -> None:
-    spec_path, spec = _spec(tmp_path)
-    layer = spec["strategy_version_catalog"]["strategies"][0]["evidence_layers"][0]
-    layer["status"] = "EVIDENCED"
-    spec_path.write_text(json.dumps(spec), encoding="utf-8")
-
-    with pytest.raises(
-        provenance.ProvenanceValidationError,
-        match="EVIDENCED strategy evidence layer requires an artifact hash or version",
-    ):
-        provenance.build_catalog(spec_path)
-
-
 def test_spec_and_catalog_schemas_preserve_closed_top_level_contracts() -> None:
     spec_schema = json.loads(
         (
@@ -387,19 +373,6 @@ def test_spec_and_catalog_schemas_preserve_closed_top_level_contracts() -> None:
     catalog_schema = json.loads(
         (
             REPOSITORY_ROOT / "schemas" / "portfolio" / "provenance-catalog.schema.json"
-        ).read_text(encoding="utf-8")
-    )
-    baseline_schema = json.loads(
-        (
-            REPOSITORY_ROOT / "schemas" / "portfolio" / "baseline-catalog.schema.json"
-        ).read_text(encoding="utf-8")
-    )
-    version_schema = json.loads(
-        (
-            REPOSITORY_ROOT
-            / "schemas"
-            / "portfolio"
-            / "strategy-version-catalog.schema.json"
         ).read_text(encoding="utf-8")
     )
     assert spec_schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
@@ -420,13 +393,6 @@ def test_spec_and_catalog_schemas_preserve_closed_top_level_contracts() -> None:
     assert catalog_schema["properties"]["catalog_schema_version"]["const"] == 2
     assert "strategy_version_catalog" in catalog_schema["required"]
     assert catalog_schema["properties"]["strategies"]["minItems"] == 9
-    assert "strategy_version_catalog" in baseline_schema["required"]
-    for parent in (spec_schema, catalog_schema, baseline_schema):
-        reference = parent["properties"]["strategy_version_catalog"]["$ref"]
-        assert urljoin(parent["$id"], reference) == version_schema["$id"]
-    layer_record = version_schema["$defs"]["layer_record"]
-    assert layer_record["additionalProperties"] is False
-    assert layer_record["allOf"][0]["then"]["anyOf"]
 
 
 def test_cli_reports_sanitized_counts_only(

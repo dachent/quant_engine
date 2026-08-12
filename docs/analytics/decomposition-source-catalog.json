@@ -196,7 +196,7 @@
     },
     {
       "universe_id": "us-sector-return",
-      "lens": "RETURN_SECTOR",
+      "lens": "RETURN_INDUSTRY",
       "regions": ["US_LARGE_CAP"],
       "strategy_archetypes": ["US_EQUITY", "US_SMALL_MICROCAP_EQUITY", "TACTICAL_MULTI_ASSET"],
       "model_constraint": "SPARSE_UNCONSTRAINED",

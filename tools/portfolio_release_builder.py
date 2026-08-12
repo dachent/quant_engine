@@ -12,13 +12,7 @@ import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 
-from quant_engine.core import (
-    GenerationManifest,
-    VerificationStatus,
-    hash_file,
-    publish_generation,
-    read_current,
-)
+from quant_engine.core import hash_file, publish_generation, read_current
 from quant_engine.core.contracts import canonical_json_bytes
 
 
@@ -103,105 +97,9 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
     }
 
 
-def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
-    if path.is_symlink() or not path.is_dir():
-        raise VerticalBuildError("reusable provider-ledger generation is unavailable")
-    if len(path.name) != 64 or any(
-        character not in "0123456789abcdef" for character in path.name
-    ):
-        raise VerticalBuildError("reusable provider-ledger generation id is invalid")
-    files = {
-        item.relative_to(path).as_posix(): item
-        for item in path.rglob("*")
-        if item.is_file()
-    }
-    if set(files) != {"generation.json", "provider-ledger.json"}:
-        raise VerticalBuildError("reusable provider-ledger file boundary differs")
-    if any(item.is_symlink() for item in files.values()):
-        raise VerticalBuildError("reusable provider-ledger contains a link")
-    try:
-        manifest = GenerationManifest.from_json_bytes(
-            files["generation.json"].read_bytes()
-        )
-    except (OSError, ValueError) as exc:
-        raise VerticalBuildError(
-            "reusable provider-ledger manifest is invalid"
-        ) from exc
-    if manifest.generation_id != path.name:
-        raise VerticalBuildError("reusable provider-ledger generation id differs")
-    if manifest.verification is not VerificationStatus.VERIFIED:
-        raise VerticalBuildError("reusable provider-ledger is not verified")
-    if (
-        manifest.adapter.name != "quant-engine-provider-ledger"
-        or manifest.adapter.version != "1"
-    ):
-        raise VerticalBuildError("reusable provider-ledger adapter differs")
-    artifact = next(
-        (
-            item
-            for item in manifest.artifacts
-            if item.artifact_id == "normalized/provider-ledger.json"
-        ),
-        None,
-    )
-    if artifact is None:
-        raise VerticalBuildError("reusable provider-ledger artifact is absent")
-    catalog_sha256, catalog_size = _sha(files["provider-ledger.json"])
-    if artifact.sha256 != catalog_sha256 or artifact.size_bytes != catalog_size:
-        raise VerticalBuildError("reusable provider-ledger artifact identity differs")
-    catalog = _load(files["provider-ledger.json"], "reusable provider-ledger")
-    if (
-        catalog.get("as_of_date") != manifest.as_of_date.isoformat()
-        or catalog.get("catalog_schema_version") != 1
-    ):
-        raise VerticalBuildError("reusable provider-ledger catalog contract differs")
-    return manifest.generation_id, files["provider-ledger.json"]
-
-
-def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
-    correlation_root = _path(
-        recipe["correlation_source_root"]["path"], "correlation source root"
-    )
-    proof_path = correlation_root / "evidence-proof.json"
-    proof = _load(proof_path, "strategy history compatibility contract")
-    if proof.get("builder") != "portfolio-target-series/layered-correlation-1":
-        raise VerticalBuildError("strategy history contract builder differs")
-    if proof.get("evidence_mode_policy") != {
-        "default": "LIVE_ONLY",
-        "hybrid": "BACKTEST_STRICTLY_BEFORE_FIRST_LIVE_THEN_LIVE",
-        "post_inception_backtest_fill": False,
-    }:
-        raise VerticalBuildError("strategy history evidence policy differs")
-    mappings = proof.get("series_mappings")
-    if not isinstance(mappings, list) or len(mappings) != 9:
-        raise VerticalBuildError("strategy history contract boundary differs")
-    names = []
-    for row in mappings:
-        if not isinstance(row, dict):
-            raise VerticalBuildError("strategy history contract row is invalid")
-        names.append(_text(row.get("series_id"), "history series_id"))
-        observations = row.get("backtest_observations")
-        status = _text(row.get("history_status"), "history status")
-        _text(row.get("strategy_version"), "history strategy_version")
-        if not isinstance(observations, int) or observations < 0:
-            raise VerticalBuildError("strategy history observations are invalid")
-        if status.startswith("ACCEPTED_") != (observations > 0):
-            raise VerticalBuildError("strategy history status and observations differ")
-    if len(set(names)) != len(names):
-        raise VerticalBuildError("strategy history contract duplicates a series")
-    target_sha, target_size = _sha(correlation_root / "returns.csv")
-    if (
-        proof.get("target_sha256") != target_sha
-        or proof.get("target_size_bytes") != target_size
-    ):
-        raise VerticalBuildError("strategy history contract target identity differs")
-    return proof_path
-
-
 def _recipe(path: Path) -> dict[str, Any]:
     recipe = _load(path, "vertical-build recipe")
-    schema_version = recipe.get("schema_version")
-    if schema_version not in {6, 7}:
+    if recipe.get("schema_version") != 3:
         raise VerticalBuildError("vertical-build recipe schema is unsupported")
     required = {
         "as_of_date",
@@ -209,25 +107,19 @@ def _recipe(path: Path) -> dict[str, Any]:
         "baseline_spec",
         "correlation_source_root",
         "decomposition_plan_bundle",
-        "implementation_reconciliation",
-        "implementation_return_attribution",
         "legacy_panel",
         "pipeline_id",
+        "provider_ledger_spec",
         "release_commit",
         "schema_version",
-        "strategy_attribution_root",
     }
-    required.add(
-        "provider_ledger_spec" if schema_version == 6 else "provider_ledger_generation"
-    )
     if set(recipe) != required:
         raise VerticalBuildError("vertical-build recipe keys differ")
     date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
     for key in (
+        "provider_ledger_spec",
         "baseline_spec",
         "base_factor_file",
-        "implementation_reconciliation",
-        "implementation_return_attribution",
     ):
         definition = recipe[key]
         if not isinstance(definition, dict) or set(definition) != {
@@ -240,23 +132,10 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError(f"{key} identity differs")
-    if schema_version == 6:
-        definition = recipe["provider_ledger_spec"]
-        if not isinstance(definition, dict) or set(definition) != {
-            "path",
-            "sha256",
-            "size_bytes",
-        }:
-            raise VerticalBuildError("provider_ledger_spec definition differs")
-        artifact = _path(definition["path"], "provider_ledger_spec.path")
-        sha256, size = _sha(artifact)
-        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
-            raise VerticalBuildError("provider_ledger_spec identity differs")
     for key in (
         "decomposition_plan_bundle",
         "correlation_source_root",
         "legacy_panel",
-        "strategy_attribution_root",
     ):
         definition = recipe[key]
         if not isinstance(definition, dict) or set(definition) != {
@@ -271,23 +150,6 @@ def _recipe(path: Path) -> dict[str, Any]:
             "inventory_sha256": definition["inventory_sha256"],
         }:
             raise VerticalBuildError(f"{key} inventory differs")
-    if schema_version == 7:
-        definition = recipe["provider_ledger_generation"]
-        if not isinstance(definition, dict) or set(definition) != {
-            "file_count",
-            "inventory_sha256",
-            "path",
-        }:
-            raise VerticalBuildError("provider_ledger_generation definition differs")
-        generation = _path(definition["path"], "provider_ledger_generation.path")
-        actual = _directory_inventory(generation)
-        if actual != {
-            "file_count": definition["file_count"],
-            "inventory_sha256": definition["inventory_sha256"],
-        }:
-            raise VerticalBuildError("provider_ledger_generation inventory differs")
-        _validated_reusable_provider_ledger(generation)
-    _history_contract_path(recipe)
     return recipe
 
 
@@ -302,13 +164,9 @@ def _file_definition(path: Path) -> dict[str, object]:
 
 def create_recipe(
     *,
-    provider_ledger_spec: Path | None,
-    provider_ledger_generation: Path | None,
+    provider_ledger_spec: Path,
     baseline_spec: Path,
     base_factor_file: Path,
-    implementation_reconciliation: Path,
-    implementation_return_attribution: Path,
-    strategy_attribution_root: Path,
     decomposition_plan_bundle: Path,
     correlation_source_root: Path,
     legacy_panel: Path,
@@ -320,18 +178,10 @@ def create_recipe(
     date.fromisoformat(as_of_date)
     if len(release_commit) != 40:
         raise VerticalBuildError("release commit differs")
-    if (provider_ledger_spec is None) == (provider_ledger_generation is None):
-        raise VerticalBuildError("exactly one provider-ledger source must be supplied")
-    payload: dict[str, Any] = {
+    payload = {
         "as_of_date": as_of_date,
         "base_factor_file": _file_definition(base_factor_file.resolve()),
         "baseline_spec": _file_definition(baseline_spec.resolve()),
-        "implementation_reconciliation": _file_definition(
-            implementation_reconciliation.resolve()
-        ),
-        "implementation_return_attribution": _file_definition(
-            implementation_return_attribution.resolve()
-        ),
         "correlation_source_root": {
             "path": str(correlation_source_root.resolve()),
             **_directory_inventory(correlation_source_root.resolve()),
@@ -345,26 +195,10 @@ def create_recipe(
             **_directory_inventory(legacy_panel.resolve()),
         },
         "pipeline_id": pipeline_id,
+        "provider_ledger_spec": _file_definition(provider_ledger_spec.resolve()),
         "release_commit": release_commit,
-        "strategy_attribution_root": {
-            "path": str(strategy_attribution_root.resolve()),
-            **_directory_inventory(strategy_attribution_root.resolve()),
-        },
+        "schema_version": 3,
     }
-    if provider_ledger_spec is not None:
-        payload["provider_ledger_spec"] = _file_definition(
-            provider_ledger_spec.resolve()
-        )
-        payload["schema_version"] = 6
-    else:
-        assert provider_ledger_generation is not None
-        generation = provider_ledger_generation.resolve()
-        _validated_reusable_provider_ledger(generation)
-        payload["provider_ledger_generation"] = {
-            "path": str(generation),
-            **_directory_inventory(generation),
-        }
-        payload["schema_version"] = 7
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
     return {"pipeline_id": pipeline_id, "recipe": str(output)}
@@ -547,34 +381,21 @@ def _published_generation(root: Path) -> tuple[str, Path]:
 
 def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
-    if recipe["schema_version"] == 6:
-        source_spec = _path(recipe["provider_ledger_spec"]["path"], "provider spec")
-        spec = _load(source_spec, "provider-ledger specification")
-        spec["output_root"] = str(output_root.resolve())
-        derived = output_root / "config" / "provider-ledger-spec.json"
-        _write_exact(derived, canonical_json_bytes(spec))
-        staged = _tool("provider_ledger.py", "stage", "--spec", str(derived))
-        generation_id = _text(staged.get("generation_id"), "ledger generation_id")
-        _tool(
-            "provider_ledger.py",
-            "verify",
-            "--spec",
-            str(derived),
-            "--generation-id",
-            generation_id,
-        )
-        source_mode = "REBUILT_FROM_BOUND_SPEC"
-    else:
-        source = _path(
-            recipe["provider_ledger_generation"]["path"],
-            "provider-ledger generation",
-        )
-        generation_id, _ = _validated_reusable_provider_ledger(source)
-        destination = output_root / "generations" / generation_id
-        for artifact in sorted(source.iterdir(), key=lambda item: item.name):
-            _write_exact(destination / artifact.name, artifact.read_bytes())
-        _validated_reusable_provider_ledger(destination)
-        source_mode = "REUSED_VERIFIED_IMMUTABLE_GENERATION"
+    source_spec = _path(recipe["provider_ledger_spec"]["path"], "provider spec")
+    spec = _load(source_spec, "provider-ledger specification")
+    spec["output_root"] = str(output_root.resolve())
+    derived = output_root / "config" / "provider-ledger-spec.json"
+    _write_exact(derived, canonical_json_bytes(spec))
+    staged = _tool("provider_ledger.py", "stage", "--spec", str(derived))
+    generation_id = _text(staged.get("generation_id"), "ledger generation_id")
+    _tool(
+        "provider_ledger.py",
+        "verify",
+        "--spec",
+        str(derived),
+        "--generation-id",
+        generation_id,
+    )
     pointer = publish_generation(output_root, generation_id)
     freshness = output_root / "freshness-health.json"
     _tool(
@@ -593,7 +414,6 @@ def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
         "generation_id": generation_id,
         "publication_state": pointer.state.value,
         "root": str(output_root),
-        "source_mode": source_mode,
     }
 
 
@@ -714,62 +534,6 @@ def build_attribution(recipe_path: Path, output_root: Path) -> dict[str, Any]:
     }
 
 
-def _build_hybrid_decomposition(
-    *,
-    base_spec: Path,
-    base_source: Path,
-    correlation_source: Path,
-    bundle_root: Path,
-    output_root: Path,
-) -> dict[str, Any]:
-    """Publish one version-bound hybrid decomposition from the shared history contract."""
-
-    bundle = _tool(
-        "portfolio_decomposition_evidence_modes.py",
-        "--base-spec",
-        str(base_spec),
-        "--base-source-root",
-        str(base_source),
-        "--layered-returns",
-        str(correlation_source / "returns.csv"),
-        "--correlation-spec",
-        str(correlation_source / "spec.json"),
-        "--output-root",
-        str(bundle_root),
-        timeout=7200,
-    )
-    source_root = _path(bundle.get("destination"), "hybrid decomposition bundle")
-    hybrid_spec = source_root / "base-spec.json"
-    _tool(
-        "portfolio_decomposition.py",
-        "stage",
-        "--spec",
-        str(hybrid_spec),
-        "--source-root",
-        str(source_root),
-        "--output-root",
-        str(output_root),
-        timeout=7200,
-    )
-    published = _tool(
-        "portfolio_decomposition.py",
-        "publish",
-        "--spec",
-        str(hybrid_spec),
-        "--source-root",
-        str(source_root),
-        "--output-root",
-        str(output_root),
-        timeout=7200,
-    )
-    return {
-        "bundle_id": _text(bundle.get("bundle_id"), "hybrid bundle_id"),
-        "bundle_root": str(source_root),
-        "generation_id": _text(published.get("generation_id"), "hybrid generation_id"),
-        "root": str(output_root),
-    }
-
-
 def build_analytics(
     recipe_path: Path,
     attribution_bundle: Path,
@@ -833,28 +597,8 @@ def build_analytics(
         str(decomposition_root),
         timeout=7200,
     )
-    correlation_source = _path(
-        recipe["correlation_source_root"]["path"], "correlation source root"
-    )
     lenses_root = output_root / "decomposition-lenses"
     lenses: dict[str, str] = {}
-    hybrid_lenses: dict[str, str] = {}
-    hybrid_bundles: dict[str, str] = {}
-    hybrid_root = lenses_root / "LIVE_PLUS_BACKTEST"
-    # Keep this private staging name short. The content-addressed bundle adds a
-    # 64-character directory plus nested provenance names, and the authoritative
-    # Windows runtime may still enforce the legacy 260-character path ceiling.
-    evidence_mode_root = output_root / "hybrid-inputs"
-    hybrid_dynamic = _build_hybrid_decomposition(
-        base_spec=base_spec,
-        base_source=base_source,
-        correlation_source=correlation_source,
-        bundle_root=evidence_mode_root / "dynamic-style",
-        output_root=hybrid_root / "dynamic-style",
-    )
-    hybrid_bundles["dynamic-style"] = _text(
-        hybrid_dynamic.get("bundle_id"), "hybrid dynamic bundle_id"
-    )
     plan = _load(attribution_bundle / "plan-manifest.json", "attribution plan")
     specs = plan.get("specs")
     if not isinstance(specs, list) or not specs:
@@ -888,19 +632,9 @@ def build_analytics(
             timeout=7200,
         )
         lenses[source_key] = _text(result.get("generation_id"), "lens generation_id")
-        hybrid = _build_hybrid_decomposition(
-            base_spec=lens_spec,
-            base_source=attribution_bundle,
-            correlation_source=correlation_source,
-            bundle_root=evidence_mode_root / source_key,
-            output_root=hybrid_root / source_key,
-        )
-        hybrid_lenses[source_key] = _text(
-            hybrid.get("generation_id"), "hybrid lens generation_id"
-        )
-        hybrid_bundles[source_key] = _text(
-            hybrid.get("bundle_id"), "hybrid lens bundle_id"
-        )
+    correlation_source = _path(
+        recipe["correlation_source_root"]["path"], "correlation source root"
+    )
     correlation_root = output_root / "correlation"
     _tool(
         "portfolio_correlation.py",
@@ -971,9 +705,6 @@ def build_analytics(
         "correlation_generation_id": correlation.get("generation_id"),
         "correlation_root": str(correlation_root),
         "decomposition_generation_id": decomposition.get("generation_id"),
-        "hybrid_decomposition_bundle_ids": hybrid_bundles,
-        "hybrid_dynamic_generation_id": hybrid_dynamic.get("generation_id"),
-        "hybrid_lens_generations": hybrid_lenses,
         "decomposition_lenses_root": str(lenses_root),
         "decomposition_root": str(decomposition_root),
         "lens_generations": lenses,
@@ -986,10 +717,6 @@ def build_report_candidate(
     baseline_root: Path,
     provider_ledger_root: Path,
     freshness_health: Path,
-    history_contract: Path,
-    implementation_reconciliation: Path,
-    implementation_return_attribution: Path,
-    attribution_root: Path,
     output_root: Path,
 ) -> dict[str, Any]:
     built = _tool(
@@ -1001,14 +728,6 @@ def build_report_candidate(
         str(provider_ledger_root),
         "--freshness-health",
         str(freshness_health),
-        "--history-contract",
-        str(history_contract),
-        "--implementation-reconciliation",
-        str(implementation_reconciliation),
-        "--implementation-return-attribution",
-        str(implementation_return_attribution),
-        "--attribution-root",
-        str(attribution_root),
         "--output-root",
         str(output_root),
         timeout=7200,
@@ -1021,10 +740,6 @@ def build_workbook(
     baseline_root: Path,
     provider_ledger_root: Path,
     freshness_health: Path,
-    history_contract: Path,
-    implementation_reconciliation: Path,
-    implementation_return_attribution: Path,
-    attribution_root: Path,
     candidate: Path,
     output_root: Path,
 ) -> dict[str, Any]:
@@ -1098,14 +813,6 @@ def build_workbook(
         str(excel_workbook),
         "--freshness-health",
         str(freshness_health),
-        "--history-contract",
-        str(history_contract),
-        "--implementation-reconciliation",
-        str(implementation_reconciliation),
-        "--implementation-return-attribution",
-        str(implementation_return_attribution),
-        "--attribution-root",
-        str(attribution_root),
     )
     published = _tool(
         "portfolio_report.py",
@@ -1126,14 +833,6 @@ def build_workbook(
         str(output_root),
         "--freshness-health",
         str(freshness_health),
-        "--history-contract",
-        str(history_contract),
-        "--implementation-reconciliation",
-        str(implementation_reconciliation),
-        "--implementation-return-attribution",
-        str(implementation_return_attribution),
-        "--attribution-root",
-        str(attribution_root),
         timeout=7200,
     )
     return {
@@ -1149,30 +848,15 @@ def build_report(
     baseline_root: Path,
     provider_ledger_root: Path,
     freshness_health: Path,
-    history_contract: Path,
-    implementation_reconciliation: Path,
-    implementation_return_attribution: Path,
-    attribution_root: Path,
     output_root: Path,
 ) -> dict[str, Any]:
     candidate = build_report_candidate(
-        baseline_root,
-        provider_ledger_root,
-        freshness_health,
-        history_contract,
-        implementation_reconciliation,
-        implementation_return_attribution,
-        attribution_root,
-        output_root,
+        baseline_root, provider_ledger_root, freshness_health, output_root
     )
     return build_workbook(
         baseline_root,
         provider_ledger_root,
         freshness_health,
-        history_contract,
-        implementation_reconciliation,
-        implementation_return_attribution,
-        attribution_root,
         Path(_text(candidate.get("candidate_dir"), "report candidate")),
         output_root,
     )
@@ -1311,20 +995,6 @@ def build_stage(
     """Build exactly one source-to-panel stage from its predecessor outputs."""
 
     stages = output_root / "stages"
-    recipe = _recipe(recipe_path)
-    history_contract = _history_contract_path(recipe)
-    implementation_reconciliation = _path(
-        recipe["implementation_reconciliation"]["path"],
-        "implementation reconciliation",
-    )
-    implementation_return_attribution = _path(
-        recipe["implementation_return_attribution"]["path"],
-        "implementation return attribution",
-    )
-    strategy_attribution_root = _path(
-        recipe["strategy_attribution_root"]["path"],
-        "strategy attribution root",
-    )
     if role == "ledger":
         result = build_ledger(recipe_path, stages / "ledger")
     elif role == "baseline":
@@ -1347,10 +1017,6 @@ def build_stage(
             stages / "baseline",
             stages / "ledger",
             _path(ledger.get("freshness_health"), "freshness health"),
-            history_contract,
-            implementation_reconciliation,
-            implementation_return_attribution,
-            strategy_attribution_root,
             stages / "report-candidate",
         )
     elif role == "workbook":
@@ -1360,10 +1026,6 @@ def build_stage(
             stages / "baseline",
             stages / "ledger",
             _path(ledger.get("freshness_health"), "freshness health"),
-            history_contract,
-            implementation_reconciliation,
-            implementation_return_attribution,
-            strategy_attribution_root,
             _path(report.get("candidate_dir"), "report candidate"),
             stages / "report",
         )
@@ -1440,14 +1102,9 @@ def _parser() -> argparse.ArgumentParser:
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--path", type=Path, required=True)
     recipe = commands.add_parser("recipe")
-    provider = recipe.add_mutually_exclusive_group(required=True)
-    provider.add_argument("--provider-ledger-spec", type=Path)
-    provider.add_argument("--provider-ledger-generation", type=Path)
+    recipe.add_argument("--provider-ledger-spec", type=Path, required=True)
     recipe.add_argument("--baseline-spec", type=Path, required=True)
     recipe.add_argument("--base-factor-file", type=Path, required=True)
-    recipe.add_argument("--implementation-reconciliation", type=Path, required=True)
-    recipe.add_argument("--implementation-return-attribution", type=Path, required=True)
-    recipe.add_argument("--strategy-attribution-root", type=Path, required=True)
     recipe.add_argument("--decomposition-plan-bundle", type=Path, required=True)
     recipe.add_argument("--correlation-source-root", type=Path, required=True)
     recipe.add_argument("--legacy-panel", type=Path, required=True)
@@ -1486,14 +1143,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "recipe":
             result = create_recipe(
                 provider_ledger_spec=args.provider_ledger_spec,
-                provider_ledger_generation=args.provider_ledger_generation,
                 baseline_spec=args.baseline_spec,
                 base_factor_file=args.base_factor_file,
-                implementation_reconciliation=args.implementation_reconciliation,
-                implementation_return_attribution=(
-                    args.implementation_return_attribution
-                ),
-                strategy_attribution_root=args.strategy_attribution_root,
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 correlation_source_root=args.correlation_source_root,
                 legacy_panel=args.legacy_panel,

@@ -24,17 +24,10 @@ from quant_engine.core.contracts import (
     VerificationStatus,
     canonical_json_bytes,
 )
-from quant_engine.core.publication import (
-    CurrentPointer,
-    generation_inventory_sha256,
-    read_current,
-    read_generation,
-)
+from quant_engine.core.publication import read_current
 from quant_engine.core.release import (
     CompanionInput,
     GateEvidence,
-    ReleaseAuthorityPointer,
-    ReleaseState,
     commit_release,
     prepare_release,
     read_release,
@@ -48,7 +41,6 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PORTFOLIO_CONTRACT_GATE: Final = "portfolio-orchestration-contract"
 _POST_BUILD_SEMANTIC_GATE: Final = "post-build-semantic"
-_PREDECESSOR_REPAIR_GATE: Final = "predecessor-authority-repair"
 _PORTFOLIO_PROFILE: Final = "PORTFOLIO_SOURCE_TO_PANEL_V1"
 _PORTFOLIO_STAGE_ORDER: Final = (
     "ledger",
@@ -1764,94 +1756,13 @@ def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
     }
 
 
-def _verify_freshness_provider_ledger(
-    spec: PipelineSpec,
-    value: object,
-    evaluation_date: date,
-) -> None:
-    ledger = _object(value, "freshness provider ledger")
-    _strict(
-        ledger,
-        {
-            "as_of_date",
-            "catalog_sha256",
-            "catalog_size_bytes",
-            "generation_id",
-            "manifest_sha256",
-            "manifest_size_bytes",
-        },
-        "freshness provider ledger",
-    )
-    ledger_as_of = date.fromisoformat(str(ledger.get("as_of_date")))
-    if ledger_as_of > evaluation_date:
-        raise PipelineValidationError(
-            "freshness provider ledger postdates the evaluation"
-        )
-    generation_id = _hash(
-        ledger.get("generation_id"), "freshness provider ledger generation_id"
-    )
-    for field in ("catalog_sha256", "manifest_sha256"):
-        _hash(ledger.get(field), f"freshness provider ledger {field}")
-    for field in ("catalog_size_bytes", "manifest_size_bytes"):
-        size = ledger.get(field)
-        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
-            raise PipelineValidationError(
-                f"freshness provider ledger {field} must be a positive integer"
-            )
-    root_id = "provider-ledger"
-    if root_id not in spec.roots or root_id not in spec.release_generations:
-        raise PipelineValidationError(
-            "freshness provider ledger is absent from the release"
-        )
-    if generation_id != spec.release_generations[root_id]:
-        raise PipelineValidationError(
-            "freshness provider ledger generation differs from the release"
-        )
-    root = spec.roots[root_id]
-    manifest = read_generation(root, generation_id)
-    artifacts = [
-        artifact
-        for artifact in manifest.artifacts
-        if artifact.artifact_id == "normalized/provider-ledger.json"
-    ]
-    if len(artifacts) != 1:
-        raise PipelineValidationError(
-            "freshness provider ledger catalog artifact is absent or ambiguous"
-        )
-    generation = root / "generations" / generation_id
-    catalog_sha256, catalog_size = _file_hash(generation / "provider-ledger.json")
-    expected_catalog = artifacts[0]
-    if (catalog_sha256, catalog_size) != (
-        expected_catalog.sha256,
-        expected_catalog.size_bytes,
-    ):
-        raise PipelineValidationError(
-            "freshness provider ledger catalog differs from its manifest"
-        )
-    manifest_sha256, manifest_size = _file_hash(generation / "generation.json")
-    observed = {
-        "as_of_date": manifest.as_of_date.isoformat(),
-        "catalog_sha256": catalog_sha256,
-        "catalog_size_bytes": catalog_size,
-        "generation_id": manifest.generation_id,
-        "manifest_sha256": manifest_sha256,
-        "manifest_size_bytes": manifest_size,
-    }
-    if ledger != observed:
-        raise PipelineValidationError(
-            "freshness provider ledger identity differs from the release"
-        )
-
-
-def _verify_freshness_gate(
-    path: Path, evaluation_date: date, spec: PipelineSpec
-) -> None:
+def _verify_freshness_gate(path: Path, evaluation_date: date) -> None:
     try:
         payload = _object(
             json.loads(path.read_text(encoding="utf-8")), "freshness gate"
         )
         schema_version = payload.get("assessment_schema_version")
-        base_keys = (
+        expected_keys = (
             {
                 "assessment_schema_version",
                 "as_of_date",
@@ -1868,19 +1779,12 @@ def _verify_freshness_gate(
             if schema_version == 3
             else set()
         )
-        accepted_keys = {frozenset(base_keys)}
-        if schema_version == 3:
-            accepted_keys.add(frozenset(base_keys | {"provider_ledger"}))
-        if frozenset(payload) not in accepted_keys:
+        if set(payload) != expected_keys:
             raise PipelineValidationError("freshness gate schema differs")
         assessed_on = date.fromisoformat(str(payload.get("as_of_date")))
         if assessed_on != evaluation_date:
             raise PipelineValidationError(
                 "freshness gate was not evaluated on the operational date"
-            )
-        if "provider_ledger" in payload:
-            _verify_freshness_provider_ledger(
-                spec, payload.get("provider_ledger"), assessed_on
             )
         if schema_version == 2:
             parsed = FreshnessPolicy.from_dict(_object(payload.get("policy"), "policy"))
@@ -1943,147 +1847,8 @@ def _verify_freshness_gate(
         raise PipelineValidationError("freshness gate is invalid") from exc
 
 
-def _recorded_pointer(root: Path) -> CurrentPointer:
-    path = root / "CURRENT.json"
-    if path.is_symlink() or not path.is_file():
-        raise PipelineValidationError("predecessor CURRENT pointer is unavailable")
-    try:
-        return CurrentPointer.from_json_bytes(path.read_bytes())
-    except (OSError, ValueError) as exc:
-        raise PipelineValidationError("predecessor CURRENT pointer is invalid") from exc
-
-
-def _verify_predecessor_repair_gate(spec: PipelineSpec, path: Path) -> None:
-    """Bind the exact artifact-inventory drift of one invalid predecessor graph."""
-
-    try:
-        payload = _object(
-            json.loads(path.read_text(encoding="utf-8")),
-            "predecessor repair gate",
-        )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PipelineValidationError("predecessor repair gate is invalid") from exc
-    _strict(
-        payload,
-        {
-            "authority_sha256",
-            "disposition",
-            "expected_inventory_drifts",
-            "release_id",
-            "release_manifest_sha256",
-            "schema_version",
-        },
-        "predecessor repair gate",
-    )
-    if payload["schema_version"] != 1 or payload["disposition"] != (
-        "SUPERSEDE_WITH_VERIFIED_GENERATIONS"
-    ):
-        raise PipelineValidationError("predecessor repair disposition differs")
-    authority_path = spec.coordination_root / "CURRENT_RELEASE.json"
-    if authority_path.is_symlink() or not authority_path.is_file():
-        raise PipelineValidationError("predecessor authority is unavailable")
-    authority_bytes = authority_path.read_bytes()
-    authority_sha256 = hashlib.sha256(authority_bytes).hexdigest()
-    if authority_sha256 != _hash(
-        payload["authority_sha256"], "predecessor authority_sha256"
-    ):
-        raise PipelineValidationError("predecessor authority bytes differ")
-    authority = ReleaseAuthorityPointer.from_json_bytes(authority_bytes)
-    if authority.release_id != _hash(payload["release_id"], "predecessor release_id"):
-        raise PipelineValidationError("predecessor release identity differs")
-    if authority.release_manifest_sha256 != _hash(
-        payload["release_manifest_sha256"],
-        "predecessor release_manifest_sha256",
-    ):
-        raise PipelineValidationError("predecessor manifest identity differs")
-    manifest, journal = read_release(spec.coordination_root, authority.release_id)
-    if journal.state is not ReleaseState.COMMITTED:
-        raise PipelineValidationError("predecessor release is not COMMITTED")
-    targets = {item.root_id: item for item in manifest.targets}
-    if set(targets) != set(spec.release_generations):
-        raise PipelineValidationError("predecessor release root graph differs")
-    actual_drifts: list[dict[str, str]] = []
-    for root_id, target in sorted(targets.items()):
-        root = spec.roots[root_id]
-        pointer = _recorded_pointer(root)
-        if pointer.to_dict() != {
-            "artifact_inventory_sha256": target.proposed_inventory_sha256,
-            "generation_id": target.proposed_generation_id,
-            "manifest_sha256": target.proposed_manifest_sha256,
-            "pointer_schema_version": 2,
-            "state": "PUBLISHED",
-        }:
-            raise PipelineValidationError(
-                f"predecessor pointer graph differs: {root_id}"
-            )
-        generation = read_generation(root, target.proposed_generation_id)
-        if hashlib.sha256(generation.to_json_bytes()).hexdigest() != (
-            target.proposed_manifest_sha256
-        ):
-            raise PipelineValidationError(
-                f"predecessor generation manifest differs: {root_id}"
-            )
-        observed = generation_inventory_sha256(root, target.proposed_generation_id)
-        if observed != target.proposed_inventory_sha256:
-            actual_drifts.append(
-                {
-                    "generation_id": target.proposed_generation_id,
-                    "observed_inventory_sha256": observed,
-                    "recorded_inventory_sha256": str(target.proposed_inventory_sha256),
-                    "root_id": root_id,
-                }
-            )
-    if not actual_drifts:
-        raise PipelineValidationError(
-            "predecessor repair gate found no artifact inventory drift"
-        )
-    for drift in actual_drifts:
-        root_id = drift["root_id"]
-        if spec.release_generations[root_id] == drift["generation_id"]:
-            raise PipelineValidationError(
-                f"predecessor repair reuses drifted generation: {root_id}"
-            )
-    expected_rows = _objects(
-        payload["expected_inventory_drifts"],
-        "expected predecessor inventory drifts",
-    )
-    expected_drifts: list[dict[str, str]] = []
-    for row in expected_rows:
-        _strict(
-            row,
-            {
-                "generation_id",
-                "observed_inventory_sha256",
-                "recorded_inventory_sha256",
-                "root_id",
-            },
-            "expected predecessor inventory drift",
-        )
-        expected_drifts.append(
-            {
-                "generation_id": _hash(
-                    row["generation_id"], "expected predecessor generation_id"
-                ),
-                "observed_inventory_sha256": _hash(
-                    row["observed_inventory_sha256"],
-                    "expected predecessor observed inventory",
-                ),
-                "recorded_inventory_sha256": _hash(
-                    row["recorded_inventory_sha256"],
-                    "expected predecessor recorded inventory",
-                ),
-                "root_id": _identifier(row["root_id"], "expected predecessor root_id"),
-            }
-        )
-    if sorted(expected_drifts, key=lambda item: item["root_id"]) != actual_drifts:
-        raise PipelineValidationError("predecessor inventory drift set differs")
-
-
 def _verify_gates(
-    spec: PipelineSpec,
-    evaluation_date: date,
-    *,
-    verify_predecessor_repair: bool = True,
+    spec: PipelineSpec, evaluation_date: date
 ) -> tuple[GateEvidence, ...]:
     _validate_portfolio_orchestration(spec, verify_runtime=True)
     result = []
@@ -2092,11 +1857,9 @@ def _verify_gates(
         if digest != gate.sha256:
             raise PipelineValidationError(f"pipeline gate differs: {gate.gate_id}")
         if gate.gate_id == "freshness-health":
-            _verify_freshness_gate(gate.path, evaluation_date, spec)
+            _verify_freshness_gate(gate.path, evaluation_date)
         elif gate.gate_id == _POST_BUILD_SEMANTIC_GATE:
             _verify_post_build_semantic_gate(spec, gate.path)
-        elif gate.gate_id == _PREDECESSOR_REPAIR_GATE and verify_predecessor_repair:
-            _verify_predecessor_repair_gate(spec, gate.path)
         result.append(GateEvidence(gate.gate_id, gate.sha256))
     return tuple(result)
 
@@ -2158,10 +1921,6 @@ def execute_pipeline(
 
     _validate_portfolio_orchestration(spec, verify_runtime=True)
     existing_release = _read_prepared(spec)
-    existing_state = None
-    if existing_release is not None:
-        _, existing_journal = read_release(spec.coordination_root, existing_release)
-        existing_state = existing_journal.state
     for node in spec.ordered_nodes:
         _execute_node(
             spec,
@@ -2170,11 +1929,7 @@ def execute_pipeline(
             command_runner=command_runner,
         )
     operational_date = evaluation_date or datetime.now().astimezone().date()
-    gate_evidence = _verify_gates(
-        spec,
-        operational_date,
-        verify_predecessor_repair=existing_state is not ReleaseState.COMMITTED,
-    )
+    gate_evidence = _verify_gates(spec, operational_date)
     _evidence_path, evidence_hash = _pipeline_evidence(spec)
     if any(item.gate_id == "pipeline-evidence" for item in gate_evidence):
         raise PipelineValidationError("pipeline-evidence gate ID is reserved")
@@ -2202,9 +1957,6 @@ def execute_pipeline(
             created_at=spec.created_at,
             gates=(*gate_evidence, GateEvidence("pipeline-evidence", evidence_hash)),
             companions=tuple(companions),
-            allow_invalid_previous_artifact_inventory=any(
-                item.gate_id == _PREDECESSOR_REPAIR_GATE for item in gate_evidence
-            ),
         )
         _create_exact(
             _prepared_path(spec),

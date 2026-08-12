@@ -1,10 +1,5 @@
 # Governed data rollforward
 
-For the Windows operator sequence that rolls forward the expanded per-strategy
-underwriting, all analysis lenses, the control panel, Candidate interaction QA
-last, and the coordinated release, use
-[`portfolio-underwriting-rollforward.md`](portfolio-underwriting-rollforward.md).
-
 `DATA-PIPE-001` turns an accepted private source-to-panel dependency graph into
 one explicit, resumable release. The pipeline specification is private because
 it contains absolute data paths. It names every source artifact, immutable
@@ -176,13 +171,8 @@ the browser-QA evidence, repository commit, locked Python runtime, and stable
 panel launcher into the core pipeline specification used by
 `tools/data_pipeline.py`.
 
-No stage copies a prior report or panel or substitutes a marker for computation.
-When provider facts changed, the recipe uses `--provider-ledger-spec` and
-rebuilds the ledger. When a frozen analysis plan is bound to an unchanged,
-already-published ledger, `--provider-ledger-generation` may reuse only that
-exact VERIFIED generation after validating its manifest, adapter, catalog
-artifact, schema, date, and full directory inventory. The semantic command
-calculates six bridges from the resulting artifacts:
+No stage copies a prior release or substitutes a marker for computation. The
+semantic command calculates six bridges from the newly built artifacts:
 financial identities, current strategy mappings, ledger-to-baseline-to-report
 lineage, analytics/report/panel equality (including HWM), freshness, and exact
 generation/release evidence. Quantitative details are retained beside the
@@ -197,7 +187,7 @@ specification from the new root.
 
 ```powershell
 $env:QE_PIPELINE_PYTHON = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
-python tools/portfolio_release_builder.py recipe --provider-ledger-generation <exact-verified-generation-directory> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --implementation-reconciliation <exact-implementation-reconciliation.json> --implementation-return-attribution <exact-return-attribution.json> --strategy-attribution-root <exact-strategy-attribution-root> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
+python tools/portfolio_release_builder.py recipe --provider-ledger-spec <new-root-provider-ledger-spec.json> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
 python tools/portfolio_release_builder.py build --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot
 <run browser and interaction QA against the emitted panel candidate>
 python tools/portfolio_release_builder.py stage --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot --role panel --qa-dir $qaRoot
@@ -206,10 +196,6 @@ python tools/portfolio_pipeline_materialize.py spec --recipe (Join-Path $cycleRo
 python tools/data_pipeline.py plan --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py execute --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py status --spec (Join-Path $runRoot 'pipeline-spec.json')
-python tools/portfolio_pipeline_materialize.py production-spec --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') --prepared-root $runRoot --semantic-gate (Join-Path $runRoot 'evidence\post-build-semantic.json') --portfolio-root $portfolioRoot --state-root (Join-Path $cycleRoot 'production-state') --spec (Join-Path $cycleRoot 'production-spec.json')
-python tools/data_pipeline.py plan --spec (Join-Path $cycleRoot 'production-spec.json')
-python tools/data_pipeline.py execute --spec (Join-Path $cycleRoot 'production-spec.json')
-python tools/data_pipeline.py execute --spec (Join-Path $cycleRoot 'production-spec.json') --commit
 ```
 
 Before removing an old storage root, require exact source/destination inventories,
