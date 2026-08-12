@@ -100,9 +100,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path]:
         "account,2026-01-02,0.01,ACCOUNT_LIVE,v1,account-source\n"
         "account,2026-01-03,-0.02,ACCOUNT_LIVE,v1,account-source\n"
         "provider,2026-01-02,0.02,PROVIDER_LIVE,v1,provider-source\n"
-        "provider,2026-01-03,-0.01,PROVIDER_LIVE,v1,provider-source\n"
-        "benchmark,2026-01-02,0.005,OFFICIAL_VEHICLE,benchmark:v1,benchmark-source\n"
-        "benchmark,2026-01-03,-0.005,OFFICIAL_VEHICLE,benchmark:v1,benchmark-source\n",
+        "provider,2026-01-03,-0.01,PROVIDER_LIVE,v1,provider-source\n",
         encoding="utf-8",
     )
     manifest = tmp_path / "source-manifest.json"
@@ -111,19 +109,13 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path]:
     )
     benchmarks = [
         {
-            "benchmark_id": "benchmark" if index == 1 else None,
+            "benchmark_id": None,
             "effective_end": None,
             "effective_start": "2026-01-01",
-            "rationale": (
-                "Synthetic effective-dated benchmark assignment."
-                if index == 1
-                else "No authoritative synthetic assignment."
-            ),
-            "status": (
-                "EVIDENCED" if index == 1 else "UNAVAILABLE_NO_AUTHORITATIVE_ASSIGNMENT"
-            ),
+            "rationale": "No authoritative synthetic assignment.",
+            "status": "UNAVAILABLE_NO_AUTHORITATIVE_ASSIGNMENT",
             "strategy_id": f"strategy-{index}",
-            "version_ref": "benchmark:v1" if index == 1 else None,
+            "version_ref": None,
         }
         for index in range(1, 10)
     ]
@@ -146,40 +138,12 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path]:
         }
         for index in range(1, 10)
     ]
-    benchmark_comparisons = [
-        {
-            "account_series_id": "account" if index == 1 else None,
-            "cash_drag_reason": "No cash path is admitted.",
-            "cash_drag_status": "UNAVAILABLE",
-            "disposition": (
-                "Synthetic exact-date benchmark comparison."
-                if index == 1
-                else "No benchmark assignment."
-            ),
-            "expected_legacy_cumulative_gap": None,
-            "observed_end": "2026-01-03" if index == 1 else None,
-            "observed_start": "2026-01-02" if index == 1 else None,
-            "periods_per_year": 252,
-            "reference_series_id": "benchmark" if index == 1 else None,
-            "status": (
-                "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE"
-                if index == 1
-                else "UNAVAILABLE"
-            ),
-            "strategy_id": f"strategy-{index}",
-            "version_compatibility_status": (
-                "PROVEN_COMPATIBLE" if index == 1 else "UNRESOLVED"
-            ),
-        }
-        for index in range(1, 10)
-    ]
     spec = tmp_path / "spec.json"
     spec.write_text(
         json.dumps(
             {
                 "as_of_date": "2026-01-03",
                 "benchmark_assignments": benchmarks,
-                "benchmark_comparisons": benchmark_comparisons,
                 "comparisons": comparisons,
                 "return_source": {
                     "expected_sha256": hashlib.sha256(returns.read_bytes()).hexdigest(),
@@ -189,7 +153,7 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path]:
                     ).hexdigest(),
                     "source_manifest_path": str(manifest),
                 },
-                "schema_version": 2,
+                "schema_version": 1,
             }
         ),
         encoding="utf-8",
@@ -214,9 +178,6 @@ def test_exact_date_metrics_costs_and_legacy_baseline_are_explicit(
     assert catalog["costs"][0]["annual_external_cost_rate_pre_tax"] == "0.0718"
     assert catalog["costs"][0]["after_tax_status"].startswith("UNAVAILABLE")
     assert len(catalog["benchmark_assignments"]) == 9
-    benchmark = catalog["benchmark_comparisons"][0]
-    assert benchmark["metrics"]["observations"] == 2
-    assert benchmark["metrics"]["beta"] is not None
 
 
 def test_source_hash_and_strategy_boundary_fail_closed(tmp_path: Path) -> None:

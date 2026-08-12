@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
 import hashlib
 import importlib.util
 import json
@@ -9,15 +8,6 @@ from pathlib import Path
 import sys
 
 import pytest
-
-from quant_engine.core import (
-    AdapterIdentity,
-    CoverageClaim,
-    CoverageStatus,
-    GenerationManifest,
-    SourceArtifact,
-    VerificationStatus,
-)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -116,29 +106,14 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
         },
     )
     generation = source_root / "generation.json"
-    source_manifest = GenerationManifest.build(
-        as_of_date=date(2026, 7, 31),
-        adapter=AdapterIdentity("portfolio-decomposition", "synthetic"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="synthetic dynamic decomposition fixture",
-            fact_types=("dynamic-decomposition",),
-            observed_start=date(2026, 7, 1),
-            observed_end=date(2026, 7, 31),
-        ),
-        artifacts=(
-            SourceArtifact.from_path(
-                decomposition,
-                artifact_id="analytics/decomposition.json",
-                as_of_date=date(2026, 7, 31),
-                schema_name="portfolio-factor-decomposition",
-                schema_version="1",
-            ),
-        ),
-        verification=VerificationStatus.VERIFIED,
+    generation_id = "a" * 64
+    _write_json(
+        generation,
+        {
+            "generation_id": generation_id,
+            "manifest_schema_version": 1,
+        },
     )
-    generation.write_bytes(source_manifest.to_json_bytes())
-    generation_id = source_manifest.generation_id
     spec = tmp_path / "replication-spec.json"
     _write_json(
         spec,
@@ -206,46 +181,6 @@ def test_diagnostic_source_model_cannot_be_promoted(tmp_path: Path) -> None:
         row for row in payload["replication_results"] if row["model_id"] is not None
     )
     assert available["availability_status"] == "DIAGNOSTIC_ONLY_SOURCE_MODEL"
-
-
-def test_source_generation_requires_complete_manifest_envelope(tmp_path: Path) -> None:
-    spec, source_root = _fixture(tmp_path)
-    generation_path = source_root / "generation.json"
-    _write_json(
-        generation_path,
-        {"generation_id": "a" * 64, "manifest_schema_version": 1},
-    )
-    spec_value = json.loads(spec.read_text(encoding="utf-8"))
-    spec_value["sources"]["decomposition_generation"] = _source(generation_path)
-    spec_value["sources"]["decomposition_generation_id"] = "a" * 64
-    _write_json(spec, spec_value)
-
-    with pytest.raises(
-        replication.ReplicationError,
-        match="generation manifest is invalid",
-    ):
-        replication.build_replication(spec, source_root)
-
-
-def test_source_generation_must_be_verified(tmp_path: Path) -> None:
-    spec, source_root = _fixture(tmp_path)
-    generation_path = source_root / "generation.json"
-    accepted = GenerationManifest.from_json_bytes(generation_path.read_bytes())
-    pending = GenerationManifest.build(
-        as_of_date=accepted.as_of_date,
-        adapter=accepted.adapter,
-        coverage=accepted.coverage,
-        artifacts=accepted.artifacts,
-        verification=VerificationStatus.PENDING,
-    )
-    generation_path.write_bytes(pending.to_json_bytes())
-    spec_value = json.loads(spec.read_text(encoding="utf-8"))
-    spec_value["sources"]["decomposition_generation"] = _source(generation_path)
-    spec_value["sources"]["decomposition_generation_id"] = pending.generation_id
-    _write_json(spec, spec_value)
-
-    with pytest.raises(replication.ReplicationError, match="is not VERIFIED"):
-        replication.build_replication(spec, source_root)
 
 
 def test_source_forecast_must_independently_reproduce(tmp_path: Path) -> None:

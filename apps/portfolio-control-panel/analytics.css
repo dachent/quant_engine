@@ -465,13 +465,6 @@ section[data-view="capital"] .callout-neutral {
   color: var(--text-soft);
 }
 
-#factor-detail,
-#factor-detail .callout {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
 #factor-detail .badge-positive {
   border-color: #367a65;
   background: #173d33;
@@ -491,7 +484,7 @@ section[data-view="capital"] .callout-neutral {
 
 .weekly-toggle {
   display: flex;
-  min-height: 44px;
+  min-height: 38px;
   align-items: center;
   gap: 8px;
   color: var(--text-soft);
@@ -544,7 +537,7 @@ section[data-view="capital"] .callout-neutral {
 
 .weekly-cell {
   width: 100%;
-  min-height: 44px;
+  min-height: 42px;
   border: 1px solid rgb(255 255 255 / 8%);
   border-radius: 5px;
   color: var(--text);
@@ -807,209 +800,4 @@ section[data-view="capital"] .callout-neutral {
   .context-bar,
   .table-pagination,
   .text-action { display: none !important; }
-}
-
-/* PORT-A11Y-001: durable keyboard, touch, reflow, and reduced-motion contracts. */
-:where(a, button, input, select, summary, [tabindex]):focus-visible {
-  outline: 3px solid var(--accent);
-  outline-offset: 3px;
-}
-
-.nav-item,
-.segment,
-.ghost-button,
-.strategy-chip,
-.text-action,
-.weekly-cell,
-.weekly-toggle,
-.disclosure-panel summary,
-.search-control input,
-.context-bar select {
-  min-inline-size: 44px;
-  min-height: 44px;
-}
-
-.text-action {
-  align-items: center;
-  padding-inline: 4px;
-}
-
-#factor-model-table,
-#underwriting-table,
-#performance-table,
-#historical-gap-table,
-#coverage-table,
-#fact-coverage-matrix-table,
-#observation-windows-table,
-#attribution-dispositions-table,
-#remediation-table,
-#source-table {
-  min-width: 760px;
-}
-
-#underwriting-table {
-  min-width: 1900px;
-}
-
-#fact-coverage-matrix-table {
-  min-width: 1320px;
-}
-
-#observation-windows-table,
-#attribution-dispositions-table {
-  min-width: 980px;
-}
-
-.compact-kpis {
-  margin-bottom: 14px;
-}
-
-.evidence-line,
-.regime-line {
-  display: grid;
-  gap: 3px;
-  margin-bottom: 9px;
-}
-
-.evidence-line:last-child,
-.regime-line:last-child {
-  margin-bottom: 0;
-}
-
-.evidence-line strong,
-.regime-line strong {
-  color: var(--text-soft);
-  font-size: 11px;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-
-.evidence-line small,
-.regime-line small {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.glossary-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0;
-  margin: 18px 20px 20px;
-}
-
-.glossary-list > div {
-  border-bottom: 1px solid var(--border);
-  padding: 14px 16px;
-}
-
-.glossary-list dt {
-  color: var(--text);
-  font-weight: 850;
-}
-
-.glossary-list dd {
-  margin: 5px 0 0;
-  color: var(--text-soft);
-  line-height: 1.55;
-}
-
-@media (max-width: 760px) {
-  .nav-item,
-  .segment,
-  .ghost-button,
-  .strategy-chip,
-  .text-action {
-    min-height: 44px;
-  }
-
-  .glossary-list {
-    grid-template-columns: 1fr;
-  }
-
-  .table-wrap,
-  .matrix-shell,
-  .weekly-table-shell {
-    overscroll-behavior-inline: contain;
-    scrollbar-gutter: stable;
-  }
-
-  #underwriting-table,
-  #fact-coverage-matrix-table,
-  #observation-windows-table,
-  #attribution-dispositions-table {
-    display: block;
-    min-width: 0;
-    width: 100%;
-  }
-
-  #underwriting-table thead,
-  #fact-coverage-matrix-table thead,
-  #observation-windows-table thead,
-  #attribution-dispositions-table thead {
-    display: none;
-  }
-
-  #underwriting-table tbody,
-  #fact-coverage-matrix-table tbody,
-  #observation-windows-table tbody,
-  #attribution-dispositions-table tbody {
-    display: grid;
-    gap: 12px;
-  }
-
-  #underwriting-table tr,
-  #fact-coverage-matrix-table tr,
-  #observation-windows-table tr,
-  #attribution-dispositions-table tr {
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    display: block;
-    overflow: hidden;
-  }
-
-  #underwriting-table :is(th, td),
-  #fact-coverage-matrix-table :is(th, td),
-  #observation-windows-table :is(th, td),
-  #attribution-dispositions-table :is(th, td) {
-    border-bottom: 1px solid var(--border);
-    display: block;
-    min-width: 0;
-    padding: 12px;
-    position: static;
-    white-space: normal;
-    width: 100%;
-  }
-
-  #underwriting-table :is(th, td):last-child,
-  #fact-coverage-matrix-table :is(th, td):last-child,
-  #observation-windows-table :is(th, td):last-child,
-  #attribution-dispositions-table :is(th, td):last-child {
-    border-bottom: 0;
-  }
-
-  #underwriting-table [data-label]::before,
-  #fact-coverage-matrix-table [data-label]::before,
-  #observation-windows-table [data-label]::before,
-  #attribution-dispositions-table [data-label]::before {
-    color: var(--muted);
-    content: attr(data-label);
-    display: block;
-    font-size: 10px;
-    font-weight: 850;
-    letter-spacing: .08em;
-    margin-bottom: 7px;
-    text-transform: uppercase;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-  }
 }

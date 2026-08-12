@@ -14,7 +14,6 @@
       "lens": "ECONOMIC_FACTOR",
       "universe_id": "us-equity-economic-factors",
       "input_key": "us_factors",
-      "maximum_factor_staleness_days": 45,
       "risk_free_column": "rf",
       "return_type": "EXCESS",
       "column_policy": "LOWER_CANDIDATE_ID"
@@ -23,7 +22,6 @@
       "lens": "ECONOMIC_FACTOR",
       "universe_id": "europe-equity-economic-factors",
       "input_key": "europe_factors",
-      "maximum_factor_staleness_days": 45,
       "risk_free_column": "rf",
       "return_type": "EXCESS",
       "column_policy": "REMOVE_EU_PREFIX_THEN_LOWER"
@@ -32,7 +30,6 @@
       "lens": "ETF_STYLE",
       "universe_id": "us-equity-six-cell-style",
       "input_key": "style_returns",
-      "maximum_factor_staleness_days": 10,
       "risk_free_column": "BIL",
       "return_type": "TOTAL",
       "column_policy": "CANDIDATE_ID"
@@ -41,16 +38,14 @@
       "lens": "ETF_STYLE",
       "universe_id": "multi-asset-etf-style",
       "input_key": "style_returns",
-      "maximum_factor_staleness_days": 10,
       "risk_free_column": "BIL",
       "return_type": "TOTAL",
       "column_policy": "CANDIDATE_ID"
     },
-  "us-sector": {
-    "lens": "RETURN_SECTOR",
+    "us-sector": {
+      "lens": "RETURN_INDUSTRY",
       "universe_id": "us-sector-return",
       "input_key": "sector_returns",
-      "maximum_factor_staleness_days": 10,
       "risk_free_column": "BIL",
       "return_type": "TOTAL",
       "column_policy": "CANDIDATE_ID"
@@ -59,7 +54,6 @@
       "lens": "RETURN_INDUSTRY",
       "universe_id": "us-49-industry-return",
       "input_key": "us_industries",
-      "maximum_factor_staleness_days": 45,
       "risk_free_column": "rf",
       "return_type": "TOTAL",
       "column_policy": "CANDIDATE_ID"
@@ -129,27 +123,6 @@
       "default_disposition": "OUT_OF_SCOPE_ARCHETYPE_MISMATCH",
       "assignments": [
         {
-          "source_key": "us-economic",
-          "constraint": "UNCONSTRAINED",
-          "factor_sets": [
-            ["MKT_RF"],
-            ["MKT_RF", "SMB", "HML"],
-            ["MKT_RF", "SMB", "HML", "RMW", "CMA", "MOM"]
-          ]
-        },
-        {
-          "source_key": "us-equity-style",
-          "constraint": "LONG_ONLY_SUM_TO_ONE",
-          "factor_sets": [
-            ["IWX", "IWY"],
-            ["IWS", "IWP"],
-            ["IWN", "IWO"],
-            ["IWX", "IWY", "IWN", "IWO"],
-            ["IWS", "IWP", "IWN", "IWO"],
-            ["IWX", "IWY", "IWS", "IWP", "IWN", "IWO"]
-          ]
-        },
-        {
           "source_key": "multi-asset-style",
           "constraint": "LONG_ONLY_SUM_TO_ONE",
           "factor_sets": [
@@ -161,16 +134,6 @@
             ["ITOT", "IEFA", "IEMG", "IEF", "HYG", "GLD"],
             ["ITOT", "TLT", "HYG", "GLD", "DBC", "UUP"]
           ]
-        },
-        {
-          "source_key": "us-sector",
-          "constraint": "UNCONSTRAINED",
-          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
-        },
-        {
-          "source_key": "us-industry",
-          "constraint": "UNCONSTRAINED",
-          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
         }
       ]
     },

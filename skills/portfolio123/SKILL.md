@@ -53,7 +53,7 @@ ranking-system XML. The schema and rank direction are not safely guessable.
   or create a repository `.env` file.
 - Keep HARs, cookies, sessions, provider identifiers, strategy/account values,
   CSV exports, Parquet data, and databases outside Git.
-- Use the configured sibling `dataPortfolio123` root for immutable source runs,
+- Use the configured sibling `data_Portfolio123` root for immutable source runs,
   normalized generations, manifests, and `CURRENT.json`.
 - Do not concatenate account-live, provider-live, predecessor, shadow/OOS,
   backtest, or conceptual evidence.

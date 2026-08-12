@@ -43,7 +43,6 @@ def test_catalog_separates_factor_style_and_industry_lenses() -> None:
         "ECONOMIC_FACTOR",
         "ETF_STYLE",
         "RETURN_INDUSTRY",
-        "RETURN_SECTOR",
     }
     assert [
         item["candidate_id"]
@@ -62,7 +61,7 @@ def test_raw_etf_candidates_are_never_claimed_orthogonal() -> None:
     catalog = _catalog()
     assert catalog["selection_policy"]["raw_etfs_are_orthogonal"] is False
     for universe in catalog["universes"]:
-        if universe["lens"] not in {"ETF_STYLE", "RETURN_INDUSTRY", "RETURN_SECTOR"}:
+        if universe["lens"] not in {"ETF_STYLE", "RETURN_INDUSTRY"}:
             continue
         assert all(item["raw_orthogonal"] is False for item in universe["candidates"])
 

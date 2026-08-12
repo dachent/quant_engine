@@ -1,6 +1,6 @@
 # Factor, style, and industry decomposition
 
-Issue [ANL-DECOMP-002](https://github.com/dachent/quant_engine/issues/231)
+Issue [ANL-DECOMP-002](https://github.com/dachent/quant_engine/issues/130)
 governs the replacement of the original three-proxy proof. The production
 design has three separate lenses because they answer different questions and
 have different statistical and authority constraints.
@@ -73,36 +73,6 @@ return lenses use Kenneth French's 49 daily industry portfolios and State
 Street's 11 Select Sector SPDRs. They must be labeled `RETURN_BASED_INFERENTIAL`
 and may not be presented as observed holdings.
 
-Sector and industry use the same validation discipline but answer at different
-resolutions. The sector lens jointly regresses strategy returns on a
-dimension-controlled subset of 11 traded sector-ETF return proxies. The
-industry lens jointly regresses on a dimension-controlled subset of 49 Kenneth
-French industry-portfolio returns. Sector ETF returns are investable proxy
-returns; French industry returns are research portfolio returns. In both cases,
-the reported beta is the marginal return sensitivity to that proxy conditional
-on the other selected proxies. It is not a holdings weight, and a one-proxy
-correlation or R-squared is only a separately labeled similarity diagnostic.
-
-The ETF-style lens is intentionally different: its long-only simplex constraint
-makes fitted betas behave like non-negative replicating-portfolio weights that
-sum to one. Economic-factor, sector, and industry betas are unconstrained
-conditional sensitivities and may be negative or sum to a value other than one.
-Keeping these estimands separate is standard returns-based-analysis practice;
-the panel states the question, return source, constraint, beta meaning, and
-holdings-inference boundary for each lens.
-
-### Evidence modes
-
-Every factor, ETF-style, sector, industry, and dynamic-style result declares one
-evidence mode. `LIVE_ONLY` excludes all backtest rows and is the authoritative
-default. `LIVE_PLUS_BACKTEST` may prepend only an accepted strategy version's
-backtest observations strictly before live inception; live observations remain
-authoritative from inception forward. If no accepted version-matched prehistory
-exists, the strategy remains visible with zero backtest observations and the
-explicit status `AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY`. Such a row
-is not described as a full-history result merely because the hybrid control was
-selected.
-
 ## Selection and validation
 
 Every strategy is evaluated separately within each eligible lens. The initial
@@ -154,14 +124,6 @@ compatible with the decomposition engine: date, risk-free return, then factor
 or industry returns. It never fills, interpolates, or treats missing values as
 zero.
 
-Coverage is reported as three separate intervals: the complete retained
-strategy target, the complete model-specific factor source, and their
-exact-common-date aligned regression sample. A model-source publication lag
-must never truncate or relabel the retained strategy interval. Kenneth French
-daily files are monthly-published public sources and use a declared 45-calendar-
-day lag allowance; the aligned end still stops at the last available provider
-observation and names the factor source as the limiting input.
-
 `tools/portfolio_public_style_sources.py` independently verifies the governed
 Yahoo adjusted-history artifact and its sibling source manifest, derives the
 exact requested ETF candidate universe from the catalog, and publishes
@@ -180,10 +142,10 @@ retained as a cash/risk-free proxy and is not eligible for a fitted weight.
 strategy-to-lens routing decision. It prevents a broad source catalog from
 becoming an indiscriminate mega-model. The first current-book assignments are:
 
-- P123 AI Factor, QSI, TT, Volatis, and GrizzlyBears: U.S. economic factors,
-  the Russell six-cell ETF style box, joint 11-sector decomposition, and joint
-  dimension-controlled 49-industry decomposition;
+- P123 AI Factor: U.S. economic factors, the Russell six-cell ETF style box,
+  and one-factor-at-a-time U.S. sector and industry similarity;
 - P123 EU: European economic factors only;
+- QSI, TT, Volatis, and GrizzlyBears: declared multi-asset ETF style sets;
 - Robuxio: unavailable until an accepted crypto candidate source exists;
 - EchoTrade: unavailable because the current target history is insufficient;
   and
@@ -192,8 +154,7 @@ becoming an indiscriminate mega-model. The first current-book assignments are:
 `tools/portfolio_current_decomposition_plan.py` verifies the plan, candidate
 catalog, target evidence, provider provenance, and market-source manifests. It
 then copies every input into a content-addressed local planning bundle and
-emits separate `ECONOMIC_FACTOR`, `ETF_STYLE`, `RETURN_SECTOR`, and
-`RETURN_INDUSTRY`
+emits separate `ECONOMIC_FACTOR`, `ETF_STYLE`, and `RETURN_INDUSTRY`
 specifications. Every strategy/candidate pair receives an explicit disposition.
 Every emitted factor definition also carries its economic family, source and
 return-source identities, observed effective interval, raw-orthogonality flag,
