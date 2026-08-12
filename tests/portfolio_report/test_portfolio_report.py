@@ -6,7 +6,6 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-import re
 import shutil
 import sys
 from typing import Any
@@ -37,22 +36,6 @@ if SPEC is None or SPEC.loader is None:
 reporter = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = reporter
 SPEC.loader.exec_module(reporter)
-
-
-def test_public_report_value_redacts_portfolio123_entity_identifiers() -> None:
-    value = {
-        "provider": {"entity_id": "1853536", "provider_id": "portfolio123"},
-        "version_ref": "p123-entity:1832531",
-        "reason": "No exact return series reconciles entity 1832531.",
-        "unchanged": "13 accepted holdings",
-    }
-
-    assert reporter._public_report_value(value) == {
-        "provider": {"entity_id": "[redacted]", "provider_id": "portfolio123"},
-        "version_ref": "p123-entity:[redacted]",
-        "reason": "No exact return series reconciles connected entity.",
-        "unchanged": "13 accepted holdings",
-    }
 
 
 def _excel_saved_package(
@@ -1112,123 +1095,6 @@ def test_report_schema_is_closed_and_keeps_mwr_unavailable() -> None:
         schema["$defs"]["performance"]["properties"]["mwr_status"]["const"]
         == "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE"
     )
-
-
-def _published_provider_ledger(
-    tmp_path: Path,
-) -> tuple[Path, dict[str, object]]:
-    root = tmp_path / "provider-ledger"
-    content = canonical_json_bytes({"reconciliation_checks": []})
-    artifact = SourceArtifact(
-        artifact_id="normalized/provider-ledger.json",
-        sha256=hashlib.sha256(content).hexdigest(),
-        size_bytes=len(content),
-        as_of_date=date(2026, 8, 3),
-        schema_name="provider-ledger-catalog",
-        schema_version="1",
-    )
-    manifest = GenerationManifest.build(
-        as_of_date=date(2026, 8, 3),
-        adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="SYNTHETIC provider ledger",
-            fact_types=("provider-ledger",),
-            observed_start=date(2026, 8, 3),
-            observed_end=date(2026, 8, 3),
-        ),
-        artifacts=(artifact,),
-        verification=VerificationStatus.VERIFIED,
-    )
-    manifest_path = stage_generation(root, manifest)
-    (manifest_path.parent / "provider-ledger.json").write_bytes(content)
-    publish_generation(root, manifest.generation_id)
-    manifest_sha256, manifest_size = reporter.hash_file(manifest_path)
-    return root, {
-        "as_of_date": "2026-08-03",
-        "catalog_sha256": artifact.sha256,
-        "catalog_size_bytes": artifact.size_bytes,
-        "generation_id": manifest.generation_id,
-        "manifest_sha256": manifest_sha256,
-        "manifest_size_bytes": manifest_size,
-    }
-
-
-def _bound_freshness_payload(identity: dict[str, object]) -> dict[str, object]:
-    return {
-        "assessment_schema_version": 3,
-        "as_of_date": "2026-08-07",
-        "assessments": [{"evaluated_on": "2026-08-07"}],
-        "policies": [],
-        "provider_ledger": identity,
-    }
-
-
-def test_freshness_assessments_accept_bound_provider_ledger(tmp_path: Path) -> None:
-    provider_root, identity = _published_provider_ledger(tmp_path)
-    freshness = tmp_path / "freshness-health.json"
-    freshness.write_text(
-        json.dumps(_bound_freshness_payload(identity)), encoding="utf-8"
-    )
-    baseline_catalog = {
-        "source_artifacts": [
-            {
-                "schema_name": "provider-ledger-catalog",
-                "sha256": identity["catalog_sha256"],
-                "source_key": "provider-ledger-generation",
-            },
-            {
-                "schema_name": "generation-manifest",
-                "sha256": identity["manifest_sha256"],
-                "source_key": "provider-ledger-generation",
-            },
-        ]
-    }
-
-    assessments, as_of, sha256 = reporter._freshness_assessments(
-        freshness,
-        date(2026, 8, 3),
-        provider_root,
-        baseline_catalog,
-    )
-
-    assert assessments == [{"evaluated_on": "2026-08-07"}]
-    assert as_of == date(2026, 8, 7)
-    assert re.fullmatch(r"[0-9a-f]{64}", sha256)
-
-
-def test_freshness_assessments_reject_future_provider_ledger(tmp_path: Path) -> None:
-    _provider_root, identity = _published_provider_ledger(tmp_path)
-    payload = _bound_freshness_payload(identity)
-    ledger = payload["provider_ledger"]
-    assert isinstance(ledger, dict)
-    ledger["as_of_date"] = "2026-08-08"
-    freshness = tmp_path / "freshness-health.json"
-    freshness.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(
-        reporter.ReportValidationError,
-        match="provider ledger postdates the evaluation",
-    ):
-        reporter._freshness_assessments(freshness, date(2026, 8, 3))
-
-
-def test_freshness_assessments_reject_different_selected_ledger(
-    tmp_path: Path,
-) -> None:
-    provider_root, identity = _published_provider_ledger(tmp_path)
-    payload = _bound_freshness_payload(identity)
-    ledger = payload["provider_ledger"]
-    assert isinstance(ledger, dict)
-    ledger["catalog_sha256"] = "f" * 64
-    freshness = tmp_path / "freshness-health.json"
-    freshness.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(
-        reporter.ReportValidationError,
-        match="identity differs from the selected ledger",
-    ):
-        reporter._freshness_assessments(freshness, date(2026, 8, 3), provider_root)
 
 
 def test_cli_output_contains_only_sanitized_counts(

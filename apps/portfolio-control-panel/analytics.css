@@ -835,60 +835,12 @@ section[data-view="capital"] .callout-neutral {
 }
 
 #factor-model-table,
-#underwriting-table,
 #performance-table,
 #historical-gap-table,
 #coverage-table,
-#fact-coverage-matrix-table,
-#observation-windows-table,
-#attribution-dispositions-table,
 #remediation-table,
 #source-table {
   min-width: 760px;
-}
-
-#underwriting-table {
-  min-width: 1900px;
-}
-
-#fact-coverage-matrix-table {
-  min-width: 1320px;
-}
-
-#observation-windows-table,
-#attribution-dispositions-table {
-  min-width: 980px;
-}
-
-.compact-kpis {
-  margin-bottom: 14px;
-}
-
-.evidence-line,
-.regime-line {
-  display: grid;
-  gap: 3px;
-  margin-bottom: 9px;
-}
-
-.evidence-line:last-child,
-.regime-line:last-child {
-  margin-bottom: 0;
-}
-
-.evidence-line strong,
-.regime-line strong {
-  color: var(--text-soft);
-  font-size: 11px;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-
-.evidence-line small,
-.regime-line small {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.45;
 }
 
 .glossary-list {
@@ -932,74 +884,6 @@ section[data-view="capital"] .callout-neutral {
   .weekly-table-shell {
     overscroll-behavior-inline: contain;
     scrollbar-gutter: stable;
-  }
-
-  #underwriting-table,
-  #fact-coverage-matrix-table,
-  #observation-windows-table,
-  #attribution-dispositions-table {
-    display: block;
-    min-width: 0;
-    width: 100%;
-  }
-
-  #underwriting-table thead,
-  #fact-coverage-matrix-table thead,
-  #observation-windows-table thead,
-  #attribution-dispositions-table thead {
-    display: none;
-  }
-
-  #underwriting-table tbody,
-  #fact-coverage-matrix-table tbody,
-  #observation-windows-table tbody,
-  #attribution-dispositions-table tbody {
-    display: grid;
-    gap: 12px;
-  }
-
-  #underwriting-table tr,
-  #fact-coverage-matrix-table tr,
-  #observation-windows-table tr,
-  #attribution-dispositions-table tr {
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    display: block;
-    overflow: hidden;
-  }
-
-  #underwriting-table :is(th, td),
-  #fact-coverage-matrix-table :is(th, td),
-  #observation-windows-table :is(th, td),
-  #attribution-dispositions-table :is(th, td) {
-    border-bottom: 1px solid var(--border);
-    display: block;
-    min-width: 0;
-    padding: 12px;
-    position: static;
-    white-space: normal;
-    width: 100%;
-  }
-
-  #underwriting-table :is(th, td):last-child,
-  #fact-coverage-matrix-table :is(th, td):last-child,
-  #observation-windows-table :is(th, td):last-child,
-  #attribution-dispositions-table :is(th, td):last-child {
-    border-bottom: 0;
-  }
-
-  #underwriting-table [data-label]::before,
-  #fact-coverage-matrix-table [data-label]::before,
-  #observation-windows-table [data-label]::before,
-  #attribution-dispositions-table [data-label]::before {
-    color: var(--muted);
-    content: attr(data-label);
-    display: block;
-    font-size: 10px;
-    font-weight: 850;
-    letter-spacing: .08em;
-    margin-bottom: 7px;
-    text-transform: uppercase;
   }
 }
 

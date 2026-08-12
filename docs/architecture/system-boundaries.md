@@ -37,7 +37,7 @@ worktree; the coordinated portfolio authority lives at the durable local path
 _quant_engine/
   repo/                        # this repository
   xBin/                        # source specifications
-  dataPortfolio123/
+  data_Portfolio123/
   dataMatrixport/
   dataQuantbase/
   dataSchwab/

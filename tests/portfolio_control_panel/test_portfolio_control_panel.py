@@ -652,9 +652,9 @@ def _correlation_v2() -> dict[str, object]:
             "observed_start": "2026-01-02",
             "series_id": series_id,
             "status": "AVAILABLE_LIVE_ONLY",
-            "strategy_version": f"synthetic-version:strategy-{index}",
+            "strategy_version": "v1",
         }
-        for index, series_id in enumerate(STRATEGY_NAMES)
+        for series_id in STRATEGY_NAMES
     }
     combined = json.loads(json.dumps(live))
     combined["evidence_mode"] = "LIVE_PLUS_BACKTEST"
@@ -748,7 +748,7 @@ def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
         "us-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[0]}),
         "us-equity-style": ("ETF_STYLE", {STRATEGY_NAMES[2]}),
         "us-industry": ("RETURN_INDUSTRY", {STRATEGY_NAMES[8]}),
-        "us-sector": ("RETURN_SECTOR", {STRATEGY_NAMES[7]}),
+        "us-sector": ("RETURN_INDUSTRY", {STRATEGY_NAMES[7]}),
     }
     for source_key, (analysis_lens, selected_names) in assignments.items():
         value = _decomposition()
@@ -1048,107 +1048,6 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
     )
     assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 9
-    assert data["hybrid_mode_gate"]["eligible_strategies"] == []
-    underwriting = data["strategy_underwriting"]
-    assert underwriting["policy_id"] == "PORT-UNDERWRITE-1"
-    assert underwriting["counts"]["strategies"] == 9
-    assert underwriting["authority_boundary"] == {
-        "allocation_authority": "NONE",
-        "automatic_drop_authority": "NONE",
-        "execution_authority": "NONE",
-        "readiness_gate_effect": "NONE",
-        "use": "ADVISORY_UNDERWRITING_AND_EVIDENCE_PRIORITIZATION",
-    }
-    assert all(
-        set(row["evidence_layers"])
-        == {
-            "account_live",
-            "backtest",
-            "design",
-            "implementation_reconciliation",
-            "provider_or_model_live",
-        }
-        for row in underwriting["rows"]
-    )
-
-
-def test_underwriting_gap_signatures_are_diagnostic_not_fabricated() -> None:
-    policy = json.loads(
-        Path("contracts/portfolio-strategy-underwriting-v1.json").read_text(
-            encoding="utf-8"
-        )
-    )["model_account_gap"]
-    aligned = panel._model_account_gap_underwriting(
-        {
-            "strategy_name": "TT Portfolio",
-            "provider_comparison_status": "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
-            "provider_cumulative_gap": "-0.05124933645",
-            "provider_reference_cumulative_return": "0.049011",
-            "provider_account_cumulative_return": "-0.002239",
-            "provider_beta": "0.9713",
-            "provider_correlation": "0.9847",
-            "provider_tracking_error_annualized": "0.0297",
-            "provider_comparison_version_compatibility": "UNRESOLVED",
-            "cash_drag_status": "UNAVAILABLE",
-            "fees_status": "PARTIAL",
-        },
-        policy,
-    )
-    divergent = panel._model_account_gap_underwriting(
-        {
-            "strategy_name": "AI Factor [P123]",
-            "provider_comparison_status": "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
-            "provider_cumulative_gap": "-0.168283912268",
-            "provider_reference_cumulative_return": "0.175664",
-            "provider_account_cumulative_return": "0.00738",
-            "provider_beta": "0.9864",
-            "provider_correlation": "0.8293",
-            "provider_tracking_error_annualized": "0.11785",
-            "provider_comparison_version_compatibility": "UNRESOLVED",
-            "cash_drag_status": "UNAVAILABLE",
-            "fees_status": "PARTIAL",
-        },
-        policy,
-    )
-
-    assert aligned["signature"] == "PATH_ALIGNED_PERSISTENT_LEVEL_DIFFERENCE"
-    assert divergent["signature"] == "PARTIAL_PATH_DIVERGENCE"
-    for result in (aligned, divergent):
-        assert result["causally_bound_components"] == []
-        assert result["unresolved_residual"] == result["total_gap"]
-        assert result["reconciliation_error"] == "0"
-        assert (
-            "COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE"
-            in result["unresolved_causes"]
-        )
-
-
-def test_renderer_exposes_underwriting_and_all_orphaned_evidence_sections() -> None:
-    renderer = Path("apps/portfolio-control-panel/app.js").read_text(encoding="utf-8")
-    template = Path("apps/portfolio-control-panel/index.html").read_text(
-        encoding="utf-8"
-    )
-
-    for payload_key in (
-        "fact_coverage_matrix",
-        "attribution_dispositions",
-        "observation_windows",
-        "selection_boundary",
-    ):
-        assert payload_key in renderer
-    assert "data.strategy_underwriting" in renderer
-    assert "causally_bound_components" in renderer
-    assert "return_attribution" in renderer
-    assert "Causal return waterfall" in renderer
-    assert "Correct connected-model comparator" in renderer
-    assert "NO_AUTOMATIC_DROP_AUTHORITY" not in renderer
-    for element_id in (
-        "underwriting-table",
-        "fact-coverage-matrix-table",
-        "observation-windows-table",
-        "attribution-dispositions-table",
-    ):
-        assert f'id="{element_id}"' in template
 
 
 def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
@@ -1217,7 +1116,6 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
                 "live_plus_backtest_status": "ELIGIBLE_PROVEN_COMPATIBLE",
                 "version_compatibility_reason": "Synthetic compatibility is proven.",
                 "version_compatibility_status": "PROVEN_COMPATIBLE",
-                "version_ref": f"synthetic-version:{strategy['strategy_id']}",
             }
         )
     report_root = tmp_path / "compatible-reporting"
@@ -1254,172 +1152,6 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
     )
     assert data["advisory"]["correlation_one_stress"] == "0.37249726899852387"
     assert data["hybrid_mode_gate"]["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
-    assert len(data["hybrid_mode_gate"]["eligible_strategies"]) == 9
-
-
-def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
-    inputs: dict[str, Path],
-    tmp_path: Path,
-) -> None:
-    partially_compatible_report = _report()
-    eligible = partially_compatible_report["strategy_summary"][0]
-    eligible.update(
-        {
-            "live_plus_backtest_reason": (
-                "Effective-dated registry proves the current strategy version compatible."
-            ),
-            "live_plus_backtest_status": "ELIGIBLE_PROVEN_COMPATIBLE",
-            "version_compatibility_reason": "Synthetic compatibility is proven.",
-            "version_compatibility_status": "PROVEN_COMPATIBLE",
-            "version_ref": "synthetic-version:strategy-0",
-        }
-    )
-    report_root = tmp_path / "partially-compatible-reporting"
-    _publish_report(
-        report_root,
-        tmp_path / "partially-compatible-portfolio-report-data.json",
-        partially_compatible_report,
-    )
-    correlation = _correlation_v2()
-    hybrid_composition = correlation["dependence_modes"]["LIVE_PLUS_BACKTEST"][
-        "series_composition"
-    ]
-    for strategy_name in STRATEGY_NAMES[1:]:
-        row = hybrid_composition[strategy_name]
-        row["backtest_observations_used"] = 0
-        row["observed_start"] = row["live_inception"]
-        row["status"] = "AVAILABLE_LIVE_ONLY_NO_COMPATIBLE_BACKTEST"
-    _publish_analytics(
-        inputs["correlation"],
-        "correlation.json",
-        correlation,
-        "synthetic-correlation-v2-partial",
-    )
-
-    result = panel.build_candidate(
-        report_root,
-        inputs["legacy"],
-        inputs["output"],
-        freshness_health_path=inputs["freshness"],
-    )
-    candidate = Path(result["candidate_dir"])
-    verification = panel.verify_candidate(
-        report_root,
-        inputs["legacy"],
-        candidate,
-        freshness_health_path=inputs["freshness"],
-    )
-    assert verification["all_passed"] is True
-    data = json.loads(
-        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
-    )
-    gate = data["hybrid_mode_gate"]
-    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
-    assert [row["strategy_name"] for row in gate["eligible_strategies"]] == [
-        STRATEGY_NAMES[0]
-    ]
-    assert len(gate["blocked_strategies"]) == 8
-    assert set(data["dependence_modes"]) == {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}
-    assert data["weekly_returns"]["hybrid_mode_status"] == (
-        "UNAVAILABLE_NOT_CONFIGURED"
-    )
-    governed_weekly = panel._govern_weekly_hybrid_modes(
-        {
-            "generation_id": "a" * 64,
-            "series": [
-                {
-                    "calendar_basis_by_mode": {
-                        "LIVE_ONLY": "NYSE",
-                        "LIVE_PLUS_BACKTEST": "NYSE",
-                    },
-                    "display_name": strategy_name,
-                    "mode_coverage": {
-                        "LIVE_ONLY": {
-                            "strategy_version": f"synthetic-version:strategy-{index}"
-                        },
-                        "LIVE_PLUS_BACKTEST": {
-                            "strategy_version": f"synthetic-version:strategy-{index}"
-                        },
-                    },
-                    "observation_meta_by_mode": {
-                        "LIVE_ONLY": {"2026-01-05": [5]},
-                        "LIVE_PLUS_BACKTEST": {"2026-01-05": [5]},
-                    },
-                    "primary_group": "STRATEGY",
-                    "series_id": strategy_name,
-                    "values_by_mode": {
-                        "LIVE_ONLY": {"2026-01-05": "0.01"},
-                        "LIVE_PLUS_BACKTEST": {"2026-01-05": "0.01"},
-                    },
-                }
-                for index, strategy_name in enumerate(STRATEGY_NAMES)
-            ],
-            "strategy_evidence_modes": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
-        },
-        gate,
-    )
-    assert governed_weekly["strategy_evidence_modes"] == [
-        "LIVE_ONLY",
-        "LIVE_PLUS_BACKTEST",
-    ]
-    weekly_by_id = {
-        row["series_id"]: row
-        for row in governed_weekly["series"]
-        if row["primary_group"] == "STRATEGY"
-    }
-    assert "LIVE_PLUS_BACKTEST" in weekly_by_id[STRATEGY_NAMES[0]]["values_by_mode"]
-    assert list(weekly_by_id[STRATEGY_NAMES[1]]["values_by_mode"]) == ["LIVE_ONLY"]
-    assert list(weekly_by_id[STRATEGY_NAMES[1]]["mode_coverage"]) == ["LIVE_ONLY"]
-
-
-def test_weekly_hybrid_rejects_a_registry_version_mismatch() -> None:
-    gate = {
-        "blocked_strategies": [],
-        "eligible_strategies": [
-            {
-                "compatibility_status": "PROVEN_COMPATIBLE",
-                "reason": "Synthetic compatibility is proven.",
-                "strategy_id": "strategy-0",
-                "strategy_name": STRATEGY_NAMES[0],
-                "version_ref": "registry-version",
-            }
-        ],
-        "reason": "Synthetic compatibility is proven.",
-        "status": "ELIGIBLE_PROVEN_COMPATIBLE",
-    }
-    weekly = {
-        "generation_id": "a" * 64,
-        "series": [
-            {
-                "calendar_basis_by_mode": {
-                    "LIVE_ONLY": "NYSE",
-                    "LIVE_PLUS_BACKTEST": "NYSE",
-                },
-                "display_name": STRATEGY_NAMES[0],
-                "mode_coverage": {
-                    "LIVE_ONLY": {"strategy_version": "registry-version"},
-                    "LIVE_PLUS_BACKTEST": {"strategy_version": "different-version"},
-                },
-                "observation_meta_by_mode": {
-                    "LIVE_ONLY": {"2026-01-05": [5]},
-                    "LIVE_PLUS_BACKTEST": {"2026-01-05": [5]},
-                },
-                "primary_group": "STRATEGY",
-                "series_id": f"strategy:{STRATEGY_NAMES[0]}",
-                "values_by_mode": {
-                    "LIVE_ONLY": {"2026-01-05": "0.01"},
-                    "LIVE_PLUS_BACKTEST": {"2026-01-05": "0.01"},
-                },
-            }
-        ],
-        "strategy_evidence_modes": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
-    }
-
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="eligible weekly hybrid version differs from registry",
-    ):
-        panel._govern_weekly_hybrid_modes(weekly, gate)
 
 
 def test_unresolved_versions_suppress_layered_hybrid_analytics(
@@ -1449,7 +1181,6 @@ def test_unresolved_versions_suppress_layered_hybrid_analytics(
         "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
     )
     assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 9
-    assert data["hybrid_mode_gate"]["eligible_strategies"] == []
 
 
 def test_template_line_endings_do_not_change_identity(
@@ -1559,46 +1290,6 @@ def test_source_drift_fails_closed(inputs: dict[str, Path]) -> None:
             inputs["output"],
             freshness_health_path=inputs["freshness"],
         )
-
-
-def test_governed_panel_rollforward_reuses_verified_frozen_appendix(
-    inputs: dict[str, Path], tmp_path: Path
-) -> None:
-    contract = json.loads(panel.SOURCE_CONTRACT.read_text(encoding="utf-8"))
-    raw = json.loads(
-        (inputs["legacy"] / "data" / "dashboard_data.json").read_text(encoding="utf-8")
-    )
-    candidate_appendix = {
-        "as_of_date": contract["frozen_appendix"]["as_of_date"],
-        "providers": raw["providers"],
-        "source_sha256": contract["frozen_appendix"]["data_sha256"],
-        "status": contract["frozen_appendix"]["status"],
-        "tier_counts": {},
-    }
-    contract["frozen_appendix"]["normalized_sha256"] = hashlib.sha256(
-        canonical_json_bytes(candidate_appendix)
-    ).hexdigest()
-    panel.SOURCE_CONTRACT.write_bytes(canonical_json_bytes(contract))
-
-    rolled = tmp_path / "rolled-panel"
-    payload_path = rolled / "data" / "dashboard_data.json"
-    _write_json(
-        payload_path,
-        {
-            "candidate_appendix": candidate_appendix,
-            "meta": {"source_shell_hashes": contract["source_files"]},
-        },
-    )
-    _write_json(
-        rolled / "candidate.json",
-        {"artifact_sha256": {"data/dashboard_data.json": _sha(payload_path)}},
-    )
-
-    accepted, source = panel._source_inputs(rolled)
-
-    assert accepted == candidate_appendix
-    assert source["source_mode"] == "GOVERNED_PANEL_ROLLFORWARD"
-    assert source["observed_hashes"] == contract["source_files"]
 
 
 def test_freshness_health_is_visible_with_dates_and_reason(
@@ -1744,14 +1435,6 @@ def test_schema_v3_nonrequired_stale_lane_does_not_block_panel(
                 }
             ],
             "policies": [policy],
-            "provider_ledger": {
-                "as_of_date": "2026-08-03",
-                "catalog_sha256": "a" * 64,
-                "catalog_size_bytes": 100,
-                "generation_id": "b" * 64,
-                "manifest_sha256": "c" * 64,
-                "manifest_size_bytes": 200,
-            },
         },
     )
 
@@ -1766,16 +1449,6 @@ def test_schema_v3_nonrequired_stale_lane_does_not_block_panel(
     assert rows[0]["grace_days"] == 2
     assert rows[0]["stale_after_days"] == 5
     assert rows[0]["reconciled_on"] == "2026-08-03"
-
-    replay = json.loads(health.read_text(encoding="utf-8"))
-    replay["provider_ledger"]["as_of_date"] = "2026-08-04"
-    invalid = tmp_path / "freshness-v3-future-ledger.json"
-    _write_json(invalid, replay)
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="ledger postdates the evaluation",
-    ):
-        panel._freshness_health(invalid, "2026-08-03")
 
 
 def test_current_panel_fails_closed_without_freshness(inputs: dict[str, Path]) -> None:
@@ -2387,7 +2060,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 16" in renderer
+    assert "data.panel_schema_version !== 13" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -2456,19 +2129,6 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     ):
         assert f'  "{group}",' in qa
     assert "All five production decomposition lenses are rendered and exercised" in qa
-    assert (
-        "Factor analyses expose live-only and compatible-history modes without "
-        "inventing prehistory"
-    ) in qa
-    assert (
-        'const requiredFactorEvidenceModes = ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]' in qa
-    )
-    assert '/[1-9][0-9,]* backtest/.test(row.evidence ?? "")' in qa
-    assert "const disabled = await button.isDisabled();" in qa
-    assert (
-        "item.requested_beta_rows.every((row) => row.beta_visible || "
-        "row.model_unavailable)" in qa
-    )
     assert "Clean-room dynamic FLS path and same-factor validation are rendered" in qa
     assert "All observed windows and both true drawdown regimes are exercised" in qa
     assert "Every weekly display group is rendered and exercised" in qa
@@ -2494,32 +2154,16 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     )
     assert "canonical_strategy_series" in schema["required"]
     assert "hybrid_mode_gate" in schema["required"]
-    assert "strategy_underwriting" in schema["required"]
-    assert "underwriting_policy_sha256" in schema["properties"]["meta"]["required"]
     blocked = schema["properties"]["hybrid_mode_gate"]["properties"][
         "blocked_strategies"
     ]["items"]
     assert blocked["additionalProperties"] is False
-    eligible = schema["properties"]["hybrid_mode_gate"]["properties"][
-        "eligible_strategies"
-    ]["items"]
-    assert eligible["additionalProperties"] is False
-    assert eligible["properties"]["compatibility_status"] == {
-        "const": "PROVEN_COMPATIBLE"
-    }
     assert schema["properties"]["weekly_returns"]["properties"][
         "strategy_evidence_modes"
     ]["oneOf"] == [
         {"const": ["LIVE_ONLY"]},
         {"const": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]},
     ]
-    decomposition = schema["properties"]["decomposition_lenses"]
-    assert decomposition["properties"]["default_evidence_mode"] == {
-        "const": "LIVE_ONLY"
-    }
-    assert decomposition["properties"]["evidence_modes"]["items"] == {
-        "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]
-    }
     assert "replication_analysis" in schema["required"]
     canonical = schema["properties"]["canonical_strategy_series"]["items"]
     assert canonical["additionalProperties"] is False
@@ -2667,56 +2311,6 @@ def test_factor_surface_separates_source_availability_from_model_acceptance() ->
     assert "clean-room dynamic FLS path" in template
 
 
-def test_replication_surface_discloses_simple_rule_without_claiming_provider_logic() -> (
-    None
-):
-    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
-
-    assert "Replication rule:" in renderer
-    assert "SPY excess return" in renderer
-    assert "IWM excess return" in renderer
-    assert "HYG excess return" in renderer
-    assert "use only the prior model state" in renderer
-    assert "clip each factor" in renderer
-    assert "cap gross factor exposure" in renderer
-    assert "zero-excess-return cash" in renderer
-    assert "not a recovered copy of the provider's hidden trading rules" in renderer
-
-
-def test_regime_weekly_values_exclude_partial_boundaries_in_every_mode() -> None:
-    complete = [
-        5,
-        "2026-07-06",
-        "2026-07-10",
-        "COMPLETE_WITHIN_ACCEPTED_CALENDAR",
-        [],
-    ]
-    partial = [
-        3,
-        "2026-07-13",
-        "2026-07-15",
-        "PARTIAL_BOUNDARY",
-        ["CURRENT_AS_OF"],
-    ]
-    row = {
-        "values": {"2026-07-06": "0.01", "2026-07-13": "0.25"},
-        "observation_meta": {
-            "2026-07-06": complete,
-            "2026-07-13": partial,
-        },
-        "values_by_mode": {"LIVE_ONLY": {"2026-07-06": "0.02", "2026-07-13": "0.50"}},
-        "observation_meta_by_mode": {
-            "LIVE_ONLY": {
-                "2026-07-06": complete,
-                "2026-07-13": partial,
-            }
-        },
-    }
-
-    assert panel._weekly_values(row) == {"2026-07-06": 0.01}
-    assert panel._weekly_values(row, evidence_mode="LIVE_ONLY") == {"2026-07-06": 0.02}
-
-
 def test_context_and_material_exceptions_have_operator_routes() -> None:
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
@@ -2731,9 +2325,7 @@ def test_context_and_material_exceptions_have_operator_routes() -> None:
     assert 'row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE"' in renderer
     assert "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH" in renderer
     assert 'id="remediation-table"' in template
-    assert "TTL / reconciled" in renderer
-    assert "Escalation required" in renderer
-    assert 'item.category === "DATA_FRESHNESS"' in renderer
+<<<<<<< HEAD
 
 
 def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> None:
@@ -2764,10 +2356,6 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
     assert "#factor-detail .callout" in styles
     assert "#performance-table" in styles
     assert "#coverage-table" in styles
-    assert "#underwriting-table [data-label]::before" in styles
-    assert "#fact-coverage-matrix-table [data-label]::before" in styles
-    assert 'data-label="Long-history statistical membership"' in renderer
-    assert 'data-label="Named missing interval"' in renderer
     assert "@media (prefers-reduced-motion: reduce)" in styles
     assert ":focus-visible" in styles
     assert 'button.setAttribute("aria-controls", view.id)' in renderer
@@ -2786,3 +2374,8 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
     assert (
         "All eight non-Candidate mobile surfaces meet the 44px target" in interaction_qa
     )
+=======
+    assert "TTL / reconciled" in renderer
+    assert "Escalation required" in renderer
+    assert 'item.category === "DATA_FRESHNESS"' in renderer
+>>>>>>> 1d53021 (feat(data): govern rollforward monitoring cycle)

@@ -218,86 +218,6 @@ def _freshness_gate_with_optional_gap(path: Path, evaluated_on: date) -> Path:
     return path
 
 
-def _provider_ledger_generation(
-    tmp_path: Path,
-) -> tuple[Path, GenerationManifest, dict[str, object]]:
-    root = tmp_path / "provider-ledger"
-    source = tmp_path / "provider-ledger.json"
-    source.write_bytes(canonical_json_bytes({"reconciliation_checks": []}))
-    manifest = GenerationManifest.build(
-        as_of_date=AS_OF,
-        adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="synthetic provider ledger",
-            fact_types=("portfolio-facts",),
-            observed_start=AS_OF,
-            observed_end=AS_OF,
-        ),
-        artifacts=(
-            SourceArtifact.from_path(
-                source,
-                artifact_id="normalized/provider-ledger.json",
-                as_of_date=AS_OF,
-                schema_name="provider-ledger-catalog",
-                schema_version="1",
-            ),
-        ),
-        verification=VerificationStatus.VERIFIED,
-    )
-    manifest_path = stage_generation(root, manifest)
-    catalog_path = manifest_path.parent / "provider-ledger.json"
-    catalog_path.write_bytes(source.read_bytes())
-    publish_generation(root, manifest.generation_id)
-    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    return (
-        root,
-        manifest,
-        {
-            "as_of_date": manifest.as_of_date.isoformat(),
-            "catalog_sha256": hashlib.sha256(catalog_path.read_bytes()).hexdigest(),
-            "catalog_size_bytes": catalog_path.stat().st_size,
-            "generation_id": manifest.generation_id,
-            "manifest_sha256": manifest_sha256,
-            "manifest_size_bytes": manifest_path.stat().st_size,
-        },
-    )
-
-
-def _bound_freshness_spec(
-    tmp_path: Path,
-) -> tuple[dict[str, object], GenerationManifest, Path]:
-    raw, previous, _, target = _spec_dict(tmp_path)
-    ledger_root, ledger, identity = _provider_ledger_generation(tmp_path)
-    inventory = inventory_generation(ledger_root / "generations" / ledger.generation_id)
-    raw["roots"]["provider-ledger"] = str(ledger_root)
-    raw["nodes"].append(
-        {
-            "depends_on": [],
-            "files": inventory["files"],
-            "generation_id": ledger.generation_id,
-            "kind": "GENERATION",
-            "manifest_sha256": inventory["manifest_sha256"],
-            "node_id": "provider-ledger",
-            "release_target": True,
-            "root_id": "provider-ledger",
-            "source_dir": None,
-        }
-    )
-    gate = _freshness_gate_with_optional_gap(tmp_path / "freshness.json", AS_OF)
-    payload = json.loads(gate.read_text(encoding="utf-8"))
-    payload["provider_ledger"] = identity
-    gate.write_bytes(canonical_json_bytes(payload))
-    raw["gates"].append(
-        {
-            "gate_id": "freshness-health",
-            "path": str(gate),
-            "sha256": hashlib.sha256(gate.read_bytes()).hexdigest(),
-        }
-    )
-    return raw, previous, target
-
-
 def test_plan_is_exact_and_non_mutating(tmp_path: Path) -> None:
     raw, previous, proposed, target = _spec_dict(tmp_path)
     spec = _parse(raw)
@@ -513,30 +433,6 @@ def test_freshness_gate_preserves_optional_nonblocking_gaps(tmp_path: Path) -> N
     prepared = execute_pipeline(_parse(raw), evaluation_date=AS_OF)
 
     assert prepared["release_state"] == "PREPARED"
-    assert read_current(target).generation_id == previous.generation_id
-
-
-def test_freshness_gate_accepts_release_bound_provider_ledger(tmp_path: Path) -> None:
-    raw, previous, target = _bound_freshness_spec(tmp_path)
-
-    prepared = execute_pipeline(_parse(raw), evaluation_date=AS_OF)
-
-    assert prepared["release_state"] == "PREPARED"
-    assert read_current(target).generation_id == previous.generation_id
-
-
-def test_freshness_gate_rejects_different_provider_ledger_identity(
-    tmp_path: Path,
-) -> None:
-    raw, previous, target = _bound_freshness_spec(tmp_path)
-    gate = Path(raw["gates"][-1]["path"])
-    payload = json.loads(gate.read_text(encoding="utf-8"))
-    payload["provider_ledger"]["catalog_sha256"] = "f" * 64
-    gate.write_bytes(canonical_json_bytes(payload))
-    raw["gates"][-1]["sha256"] = hashlib.sha256(gate.read_bytes()).hexdigest()
-
-    with pytest.raises(PipelineValidationError, match="identity differs"):
-        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
     assert read_current(target).generation_id == previous.generation_id
 
 

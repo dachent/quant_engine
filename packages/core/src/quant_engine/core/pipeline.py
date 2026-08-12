@@ -1764,94 +1764,13 @@ def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
     }
 
 
-def _verify_freshness_provider_ledger(
-    spec: PipelineSpec,
-    value: object,
-    evaluation_date: date,
-) -> None:
-    ledger = _object(value, "freshness provider ledger")
-    _strict(
-        ledger,
-        {
-            "as_of_date",
-            "catalog_sha256",
-            "catalog_size_bytes",
-            "generation_id",
-            "manifest_sha256",
-            "manifest_size_bytes",
-        },
-        "freshness provider ledger",
-    )
-    ledger_as_of = date.fromisoformat(str(ledger.get("as_of_date")))
-    if ledger_as_of > evaluation_date:
-        raise PipelineValidationError(
-            "freshness provider ledger postdates the evaluation"
-        )
-    generation_id = _hash(
-        ledger.get("generation_id"), "freshness provider ledger generation_id"
-    )
-    for field in ("catalog_sha256", "manifest_sha256"):
-        _hash(ledger.get(field), f"freshness provider ledger {field}")
-    for field in ("catalog_size_bytes", "manifest_size_bytes"):
-        size = ledger.get(field)
-        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
-            raise PipelineValidationError(
-                f"freshness provider ledger {field} must be a positive integer"
-            )
-    root_id = "provider-ledger"
-    if root_id not in spec.roots or root_id not in spec.release_generations:
-        raise PipelineValidationError(
-            "freshness provider ledger is absent from the release"
-        )
-    if generation_id != spec.release_generations[root_id]:
-        raise PipelineValidationError(
-            "freshness provider ledger generation differs from the release"
-        )
-    root = spec.roots[root_id]
-    manifest = read_generation(root, generation_id)
-    artifacts = [
-        artifact
-        for artifact in manifest.artifacts
-        if artifact.artifact_id == "normalized/provider-ledger.json"
-    ]
-    if len(artifacts) != 1:
-        raise PipelineValidationError(
-            "freshness provider ledger catalog artifact is absent or ambiguous"
-        )
-    generation = root / "generations" / generation_id
-    catalog_sha256, catalog_size = _file_hash(generation / "provider-ledger.json")
-    expected_catalog = artifacts[0]
-    if (catalog_sha256, catalog_size) != (
-        expected_catalog.sha256,
-        expected_catalog.size_bytes,
-    ):
-        raise PipelineValidationError(
-            "freshness provider ledger catalog differs from its manifest"
-        )
-    manifest_sha256, manifest_size = _file_hash(generation / "generation.json")
-    observed = {
-        "as_of_date": manifest.as_of_date.isoformat(),
-        "catalog_sha256": catalog_sha256,
-        "catalog_size_bytes": catalog_size,
-        "generation_id": manifest.generation_id,
-        "manifest_sha256": manifest_sha256,
-        "manifest_size_bytes": manifest_size,
-    }
-    if ledger != observed:
-        raise PipelineValidationError(
-            "freshness provider ledger identity differs from the release"
-        )
-
-
-def _verify_freshness_gate(
-    path: Path, evaluation_date: date, spec: PipelineSpec
-) -> None:
+def _verify_freshness_gate(path: Path, evaluation_date: date) -> None:
     try:
         payload = _object(
             json.loads(path.read_text(encoding="utf-8")), "freshness gate"
         )
         schema_version = payload.get("assessment_schema_version")
-        base_keys = (
+        expected_keys = (
             {
                 "assessment_schema_version",
                 "as_of_date",
@@ -1868,19 +1787,12 @@ def _verify_freshness_gate(
             if schema_version == 3
             else set()
         )
-        accepted_keys = {frozenset(base_keys)}
-        if schema_version == 3:
-            accepted_keys.add(frozenset(base_keys | {"provider_ledger"}))
-        if frozenset(payload) not in accepted_keys:
+        if set(payload) != expected_keys:
             raise PipelineValidationError("freshness gate schema differs")
         assessed_on = date.fromisoformat(str(payload.get("as_of_date")))
         if assessed_on != evaluation_date:
             raise PipelineValidationError(
                 "freshness gate was not evaluated on the operational date"
-            )
-        if "provider_ledger" in payload:
-            _verify_freshness_provider_ledger(
-                spec, payload.get("provider_ledger"), assessed_on
             )
         if schema_version == 2:
             parsed = FreshnessPolicy.from_dict(_object(payload.get("policy"), "policy"))
@@ -2092,7 +2004,7 @@ def _verify_gates(
         if digest != gate.sha256:
             raise PipelineValidationError(f"pipeline gate differs: {gate.gate_id}")
         if gate.gate_id == "freshness-health":
-            _verify_freshness_gate(gate.path, evaluation_date, spec)
+            _verify_freshness_gate(gate.path, evaluation_date)
         elif gate.gate_id == _POST_BUILD_SEMANTIC_GATE:
             _verify_post_build_semantic_gate(spec, gate.path)
         elif gate.gate_id == _PREDECESSOR_REPAIR_GATE and verify_predecessor_repair:
