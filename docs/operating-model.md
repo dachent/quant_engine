@@ -116,6 +116,14 @@ and Folded separately from graph readiness; Ready and execution views contain
 only unblocked Active issues. State labels control disposition, while `Blocked
 by` remains the sole ordering authority.
 
+An empty or fully blocked Active view is not evidence that the backlog has no
+ready work. It triggers a scheduler refresh of the complete open issue tracker.
+Evaluate `backlog:next` in priority order using live `Blocked by` state, recorded
+scope/effects/evidence/recovery, and current owner authority. When the active cap
+permits, promote the highest-priority decision-complete, unblocked item covered
+by that authority. Only after recording the concrete ineligibility of every
+remaining Next item may the scheduler conclude that no work is ready.
+
 ### Dependency semantics
 
 - The issue body's `Blocked by` list is the authoritative dependency
@@ -356,8 +364,15 @@ integration.
 At sprint close, update the issue and route exactly:
 
 - Plan complete → Phase 8c.
-- Ready, approved work remains within current limits → select the next item.
-- No item is ready → mark blocked and stop.
+- Ready, approved work remains within current limits → retain any required
+  CI/review/integration monitor and select the next independent item.
+- Active work is empty or blocked → refresh all open issues, evaluate
+  `backlog:next` in priority order, and promote the highest-priority eligible
+  item within the active cap. Empty `backlog:active`, a routine phase boundary,
+  or pending CI alone is never a stop condition.
+- No item is ready after that refresh → record each remaining item's concrete
+  dependency, authority, scope, effect, limit, or external-state blocker; mark
+  the task blocked and stop.
 - Limit, blocker, changed authority, or reapproval trigger → hand off and stop.
 
 ## Phase 8c — Integrated verification and handoff

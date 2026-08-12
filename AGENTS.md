@@ -78,6 +78,19 @@ and hand off the blocker.
 - After each sprint, update the governing issue with outcome, evidence,
   decisions, Dead Ends, blockers, and dependencies, then follow the routing in
   the operating model.
+- An empty or fully blocked `backlog:active` query is scheduler input, not proof
+  that no work is ready. Before declaring a no-ready-work stop, refresh the
+  complete open issue tracker, evaluate `backlog:next` in priority order against
+  live `Blocked by` state, decision-complete scope/effects/evidence/recovery, and
+  current owner authority, and promote the highest-priority eligible item when
+  the three-item active cap permits. Record the concrete reason every remaining
+  `backlog:next` item is ineligible; routine phase boundaries and missing active
+  labels are not blockers.
+- Waiting for CI, review, or integration is not a terminal condition. Retain an
+  explicit monitor/integration owner for the exact candidate and continue any
+  independent eligible work. Stop the overall task only when the refreshed
+  tracker proves that every remaining outcome has a real dependency, authority,
+  scope, effect, limit, or external-state blocker.
 
 ## Hard approval boundaries
 
