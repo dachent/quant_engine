@@ -11,6 +11,7 @@
     "attribution_dispositions",
     "blocking_items",
     "candidate_appendix",
+    "candidate_driver_map",
     "canonical_strategy_series",
     "capital",
     "counts",
@@ -40,13 +41,14 @@
     "weekly_returns"
   ],
   "properties": {
-    "panel_schema_version": { "const": 17 },
+    "panel_schema_version": { "const": 18 },
     "meta": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["baseline_generation_id", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "freshness_evaluated_on", "hwm_policy_sha256", "hwm_status_code_version", "hwm_status_semantics", "panel_mode", "portfolio_as_of", "replication_generation_id", "replication_sha256", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "strategy_evidence_source", "template_hashes", "underwriting_policy_sha256", "weekly_returns_generation_id", "weekly_returns_sha256"],
+      "required": ["baseline_generation_id", "candidate_driver_map_sha256", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "freshness_evaluated_on", "hwm_policy_sha256", "hwm_status_code_version", "hwm_status_semantics", "panel_mode", "portfolio_as_of", "replication_generation_id", "replication_sha256", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "strategy_evidence_source", "template_hashes", "underwriting_policy_sha256", "weekly_returns_generation_id", "weekly_returns_sha256"],
       "properties": {
         "baseline_generation_id": { "$ref": "#/$defs/hash" },
+        "candidate_driver_map_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "correlation_generation_id": { "$ref": "#/$defs/hash" },
         "correlation_sha256": { "$ref": "#/$defs/hash" },
         "decomposition_generation_id": { "$ref": "#/$defs/hash" },
@@ -111,6 +113,12 @@
         "status": { "const": "FROZEN_AUDIT_APPENDIX" },
         "tier_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }
       }
+    },
+    "candidate_driver_map": {
+      "anyOf": [
+        { "type": "object" },
+        { "type": "null" }
+      ]
     },
     "hybrid_mode_gate": {
       "type": "object",
