@@ -708,6 +708,29 @@ def _summary_value(summary: Mapping[str, Mapping[str, Any]], metric: str) -> str
     return _text(row.get("value"), f"portfolio_summary.{metric}")
 
 
+def _report_panel_expectations(report: Mapping[str, Any]) -> dict[str, Any]:
+    summary = _summary(report)
+    counts = {
+        "accounts": len(_objects(report.get("account_summary"), "account_summary")),
+        "allocations": len(
+            _objects(report.get("allocation_history"), "allocation_history")
+        ),
+        "strategies": len(_objects(report.get("strategy_summary"), "strategy_summary")),
+    }
+    if any(count == 0 for count in counts.values()):
+        raise ControlPanelValidationError(
+            "accepted report portfolio dimensions must be non-empty"
+        )
+    return {
+        "capital": {
+            "reserve": _summary_value(summary, "Reserve"),
+            "systematic": _summary_value(summary, "Systematic capital"),
+            "total_liquid": _summary_value(summary, "Total liquid"),
+        },
+        "counts": counts,
+    }
+
+
 def _fact_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
     return _objects(report.get("coverage_data_quality"), "coverage_data_quality")
 
@@ -3353,12 +3376,7 @@ def _panel_data(
     )
     if not fact_coverage_matrix:
         raise ControlPanelValidationError("fact coverage matrix is unavailable")
-    if len(strategies) != 9 or len(allocations) != 10:
-        raise ControlPanelValidationError(
-            "current strategy/allocation boundary differs"
-        )
-    if len(accounts) != 19:
-        raise ControlPanelValidationError("current account boundary differs")
+    _report_panel_expectations(report)
     account_ids = [
         _text(row.get("account_id"), "account_summary.account_id") for row in accounts
     ]
@@ -4595,25 +4613,32 @@ def verify_candidate(
             "static embedded renderer",
         )
     )
+    report, _, _ = _current_report(report_root)
+    report_expectations = _report_panel_expectations(report)
     checks.append(
         _check(
             "Accepted capital replay",
-            data["capital"]
-            == {
-                "reserve": "100043.62",
-                "systematic": "410272.39",
-                "total_liquid": "510316.01",
+            data["capital"] == report_expectations["capital"],
+            {
+                "actual": data["capital"],
+                "expected": report_expectations["capital"],
             },
-            data["capital"],
         )
     )
     checks.append(
         _check(
             "Current strategy boundary",
-            data["counts"]["strategies"] == 9
-            and len(data["allocations"]) == 10
-            and data["counts"]["accounts"] == 19,
-            data["counts"],
+            data["counts"]["strategies"] == report_expectations["counts"]["strategies"]
+            and len(data["allocations"]) == report_expectations["counts"]["allocations"]
+            and data["counts"]["accounts"] == report_expectations["counts"]["accounts"],
+            {
+                "actual": {
+                    "accounts": data["counts"]["accounts"],
+                    "allocations": len(data["allocations"]),
+                    "strategies": data["counts"]["strategies"],
+                },
+                "expected": report_expectations["counts"],
+            },
         )
     )
     account_rows = _objects(data.get("account_summary"), "account_summary")
@@ -4631,8 +4656,8 @@ def verify_candidate(
     checks.append(
         _check(
             "Privacy-safe account dimension is complete",
-            len(account_rows) == 19
-            and len(set(account_ids)) == 19
+            len(account_rows) == report_expectations["counts"]["accounts"]
+            and len(set(account_ids)) == len(account_rows)
             and account_reference_ids <= set(account_ids)
             and all(
                 row.get("provider_id") or row.get("provider") for row in account_rows
@@ -4655,7 +4680,6 @@ def verify_candidate(
             },
         )
     )
-    report, _, _ = _current_report(report_root)
     report_position_rows = _objects(report.get("positions", []), "report.positions")
     strategy_names = {
         _text(row.get("strategy_id"), "strategy.strategy_id"): _text(
