@@ -40,9 +40,6 @@ def _body(blocked_by: str, *, heading: str = "## Blocked by") -> str:
             "",
             "## Acceptance evidence",
             "Synthetic offline evidence.",
-            "",
-            "## Final evidence and handoff",
-            "Synthetic accepted evidence.",
         )
     )
 
@@ -473,53 +470,6 @@ class ParserAndGraphTests(unittest.TestCase):
         self.assertEqual(report.issues[0].status, "CLOSED")
         self.assertIsNone(report.issues[0].backlog_state)
 
-    def test_closed_non_folded_issue_requires_completed_final_handoff(self) -> None:
-        accepted = _body("None")
-        pending = accepted.replace("Synthetic accepted evidence.", "Pending.")
-        pending_detail = accepted.replace(
-            "Synthetic accepted evidence.", "Pending hosted validation."
-        )
-        missing = accepted.split("\n## Final evidence and handoff", maxsplit=1)[0]
-        empty = accepted.replace("Synthetic accepted evidence.", "")
-        duplicate = accepted + "\n\n## Final evidence and handoff\nSecond."
-        cases = {
-            "pending": (pending, "FINAL_HANDOFF_PENDING"),
-            "pending_detail": (pending_detail, "FINAL_HANDOFF_PENDING"),
-            "missing": (missing, "FINAL_HANDOFF_SECTION_MISSING"),
-            "empty": (empty, "FINAL_HANDOFF_PENDING"),
-            "duplicate": (duplicate, "FINAL_HANDOFF_SECTION_DUPLICATE"),
-        }
-        for name, (body, expected) in cases.items():
-            with self.subTest(name=name):
-                report = guard.audit(
-                    FakeClient([_issue(1, "A-001", state="closed", body=body)]),
-                    OWNER,
-                    REPO,
-                )
-                self.assertFalse(report.ok)
-                self.assertIn(expected, _diagnostic_codes(report))
-                self.assertEqual(report.issues[0].status, "ILLEGAL_CLOSED")
-
-    def test_closed_folded_issue_is_exempt_from_independent_handoff(self) -> None:
-        body = _body("None").replace("Synthetic accepted evidence.", "Pending.")
-        report = guard.audit(
-            FakeClient(
-                [
-                    _issue(
-                        1,
-                        "A-001",
-                        state="closed",
-                        body=body,
-                        labels=["backlog:folded"],
-                    )
-                ]
-            ),
-            OWNER,
-            REPO,
-        )
-        self.assertTrue(report.ok)
-        self.assertEqual(report.issues[0].status, "CLOSED")
-
 
 class ReconciliationTests(unittest.TestCase):
     def test_exact_mirror_has_no_writes(self) -> None:
@@ -543,14 +493,6 @@ class ReconciliationTests(unittest.TestCase):
         report = guard.reconcile(client, OWNER, REPO)
         self.assertTrue(report.ok)
         self.assertEqual(client.calls, [("reopen", 2), ("reopen", 1)])
-
-    def test_reconcile_reopens_pending_final_handoff(self) -> None:
-        body = _body("None").replace("Synthetic accepted evidence.", "Pending.")
-        client = FakeClient([_issue(1, "A-001", state="closed", body=body)])
-        report = guard.reconcile(client, OWNER, REPO)
-        self.assertTrue(report.ok)
-        self.assertEqual(client.calls, [("reopen", 1)])
-        self.assertEqual(report.issues[0].status, "GRAPH_READY")
 
     def test_reopen_order_honors_blockers_in_a_shortcut_graph(self) -> None:
         issues = [

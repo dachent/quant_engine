@@ -6,7 +6,6 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-import shutil
 import sys
 from typing import Any
 
@@ -500,8 +499,6 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
             "schema_name": f"synthetic-{source_key}",
             "schema_version": "1",
         }
-    sources["component-decision-table"]["as_of_date"] = "2026-07-25"
-    sources["current-portfolio-summary"]["as_of_date"] = "2026-07-25"
 
     provenance_root, generation_id, catalog_hash = _published_provenance(tmp_path)
     spec: dict[str, Any] = {
@@ -655,26 +652,6 @@ def test_stage_is_deterministic_reconciled_and_coverage_aware(tmp_path: Path) ->
     assert catalog["evidence_layer_metrics"][0]["status"] == "UNAVAILABLE_UNLABELED"
     assert catalog["replay"]["total_liquid_usd"] == "125"
     assert catalog["replay"]["nav_coverage"] == "0.6"
-    assert {item["role"] for item in catalog["capital_pools"]} == {
-        "SYSTEMATIC",
-        "RESERVE",
-    }
-    assert {item["as_of_date"] for item in catalog["allocations"]} == {"2026-07-25"}
-    assert {item["publication_date"] for item in catalog["allocations"]} == {
-        "2026-07-30"
-    }
-    assignment_coverage = next(
-        item for item in catalog["fact_coverage"] if item["fact_type"] == "assignments"
-    )
-    assert assignment_coverage == {
-        "fact_type": "assignments",
-        "known_gaps": [],
-        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
-    }
-    assert {item["exception_id"] for item in catalog["reconciliation_exceptions"]} >= {
-        "current-strategy-attribution-partial",
-        "historical-strategy-attribution-unresolved",
-    }
     assert {item["status"] for item in catalog["calendar_coverage"]} >= {
         "NON_BUSINESS_WEEKEND",
         "MISSING_ON_PROVIDER_OBSERVED_DATE",
@@ -691,146 +668,6 @@ def test_stage_is_deterministic_reconciled_and_coverage_aware(tmp_path: Path) ->
     )
     assert first["catalog_sha256"] == hashlib.sha256(catalog_bytes).hexdigest()
     assert not (output_root / "CURRENT.json").exists()
-
-
-def test_generation_identity_uses_logical_not_physical_root_bindings(
-    tmp_path: Path,
-) -> None:
-    spec_path, spec = _spec(tmp_path)
-    first_catalog, first_manifest, first_bytes = baseline.build_catalog(spec_path)
-
-    relocated_source = tmp_path / "relocated-source"
-    relocated_provenance = tmp_path / "relocated-provenance"
-    shutil.copytree(Path(spec["roots"]["synthetic"]), relocated_source)
-    shutil.copytree(Path(spec["provenance"]["root"]), relocated_provenance)
-    relocated = json.loads(json.dumps(spec))
-    relocated["roots"]["synthetic"] = str(relocated_source)
-    relocated["provenance"]["root"] = str(relocated_provenance)
-    relocated_path = tmp_path / "relocated-spec.json"
-    relocated_path.write_text(json.dumps(relocated), encoding="utf-8")
-
-    second_catalog, second_manifest, second_bytes = baseline.build_catalog(
-        relocated_path
-    )
-    assert second_catalog == first_catalog
-    assert second_bytes == first_bytes
-    assert second_manifest.generation_id == first_manifest.generation_id
-    assert second_manifest.to_json_bytes() == first_manifest.to_json_bytes()
-
-
-def test_reserve_pool_intervals_are_not_strategy_attribution_gaps() -> None:
-    claims, exceptions = baseline._fact_coverage(
-        accounts=[{"account_id": "reserve-account", "role": "INVESTMENT"}],
-        assignments=[
-            {
-                "account_id": "reserve-account",
-                "effective_end": None,
-                "effective_start": "2026-01-01",
-                "mapping_status": "UNMAPPED",
-                "pool_id": "reserve-capital",
-                "strategy_id": None,
-                "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
-            }
-        ],
-        transactions=[],
-        flows=[],
-        positions=[],
-        schwab_known_gaps=[],
-        missing_strategy_nav_count=0,
-        as_of_date=date(2026, 8, 3),
-    )
-
-    current_claim = next(
-        row for row in claims if row["fact_type"] == "current_strategy_attribution"
-    )
-    current_exception = next(
-        row
-        for row in exceptions
-        if row["exception_id"] == "current-strategy-attribution-partial"
-    )
-    assert current_claim["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
-    assert current_claim["known_gaps"] == []
-    assert current_exception["record_count"] == 0
-    assert current_exception["status"] == "PASS"
-
-
-def test_coverage_evidence_never_invents_fact_missing_intervals() -> None:
-    matrix, windows, attribution = baseline._coverage_evidence(
-        accounts=[
-            {
-                "account_id": "account-a",
-                "base_currency": "USD",
-                "provider": "provider-a",
-                "role": "INVESTMENT",
-            }
-        ],
-        assignments=[
-            {
-                "account_id": "account-a",
-                "effective_end": "2026-07-31",
-                "effective_start": "2026-01-01",
-                "mapping_status": "UNMAPPED",
-                "pool_id": "systematic-capital",
-                "source_id": "assignment-authority",
-                "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
-            }
-        ],
-        provider_admissions=[
-            {
-                "account_id": "account-a",
-                "disposition": "AUTHORITATIVE",
-                "effective_end": "2026-08-03",
-                "effective_start": "2026-07-31",
-                "fact_type": "transactions",
-            }
-        ],
-        provider_coverage=[
-            {
-                "coverage": {
-                    "boundary": "provider package only",
-                    "observed_end": "2026-08-03",
-                    "observed_start": "2026-07-31",
-                    "status": "PARTIAL",
-                },
-                "provider_id": "provider-a",
-            }
-        ],
-        nav=[],
-        positions=[],
-        transactions=[],
-        flows=[],
-        as_of_date=date(2026, 8, 3),
-    )
-
-    transaction = next(row for row in matrix if row["fact_type"] == "transactions")
-    assert transaction["boundary_basis"] == (
-        "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS"
-    )
-    assert transaction["status"] == "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
-    assert transaction["admission_effective_start"] == "2026-07-31"
-    assert transaction["admission_effective_end"] == "2026-08-03"
-    assert transaction["declared_start"] is None
-    assert transaction["declared_end"] is None
-    assert transaction["missing_interval_start"] is None
-    assert transaction["missing_interval_end"] is None
-    assert transaction["missing_intervals"] == []
-    assert (
-        next(row for row in windows if row["window_type"] == "PROVIDER_SOURCE")[
-            "observed_start"
-        ]
-        == "2026-07-31"
-    )
-    assert attribution == [
-        {
-            "account_id": "account-a",
-            "authority": "assignment-authority",
-            "disposition": "POOL_ONLY_UNALLOCATED",
-            "effective_end": "2026-07-31",
-            "effective_start": "2026-01-01",
-            "period": "HISTORICAL",
-            "provider_id": "provider-a",
-        }
-    ]
 
 
 def test_publish_requires_exact_current_candidate(tmp_path: Path) -> None:
@@ -856,9 +693,6 @@ def test_accepted_schwab_generation_adds_positions_and_transactions(
     catalog, manifest, _ = baseline.build_catalog(spec_path)
     assert manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
     assert len(catalog["positions"]) == 1
-    assert catalog["positions"][0]["mapping_status"] == "MAPPED"
-    assert catalog["positions"][0]["strategy_id"] == "strategy-1"
-    assert catalog["positions"][0]["market_value"]["value"] == "30"
     assert len(catalog["transactions"]) == 2
     assert len(catalog["source_artifacts"]) == 19
     position_coverage = next(
@@ -873,83 +707,6 @@ def test_accepted_schwab_generation_adds_positions_and_transactions(
         )["status"]
         == "PASS_WITH_DECLARED_VARIANCE"
     )
-    assert next(
-        item
-        for item in catalog["reconciliation_checks"]
-        if item["check_id"] == "current-position-strategy-attribution"
-    ) == {
-        "check_id": "current-position-strategy-attribution",
-        "mapped_count": 1,
-        "market_value_usd": "30",
-        "position_count": 1,
-        "status": "PASS",
-        "unmapped_count": 0,
-    }
-
-
-def test_strategy_for_date_is_effective_dated_and_fails_on_overlap() -> None:
-    assignments = [
-        {
-            "account_id": "account-a",
-            "effective_end": "2026-01-31",
-            "effective_start": "2026-01-01",
-            "mapping_status": "MAPPED",
-            "strategy_id": "strategy-old",
-        },
-        {
-            "account_id": "account-a",
-            "effective_end": None,
-            "effective_start": "2026-02-01",
-            "mapping_status": "MAPPED",
-            "strategy_id": "strategy-current",
-        },
-    ]
-
-    assert baseline._strategy_for_date(assignments, "account-a", date(2026, 1, 31)) == (
-        baseline.MappingStatus.MAPPED,
-        "strategy-old",
-    )
-    assert baseline._strategy_for_date(assignments, "account-a", date(2026, 2, 1)) == (
-        baseline.MappingStatus.MAPPED,
-        "strategy-current",
-    )
-    assert baseline._strategy_for_date(
-        assignments, "account-missing", date(2026, 2, 1)
-    ) == (baseline.MappingStatus.UNMAPPED, None)
-
-    overlapping = [
-        *assignments,
-        {
-            "account_id": "account-a",
-            "effective_end": None,
-            "effective_start": "2026-02-01",
-            "mapping_status": "MAPPED",
-            "strategy_id": "strategy-overlap",
-        },
-    ]
-    with pytest.raises(
-        baseline.BaselineValidationError,
-        match="multiple mapped strategies overlap",
-    ):
-        baseline._strategy_for_date(overlapping, "account-a", date(2026, 2, 1))
-
-    with pytest.raises(
-        baseline.BaselineValidationError,
-        match="explicit effective_start",
-    ):
-        baseline._strategy_for_date(
-            [
-                {
-                    "account_id": "account-a",
-                    "effective_end": None,
-                    "effective_start": None,
-                    "mapping_status": "MAPPED",
-                    "strategy_id": "strategy-unknown-start",
-                }
-            ],
-            "account-a",
-            date(2026, 2, 1),
-        )
 
 
 def test_source_drift_nav_divergence_and_replay_difference_fail_closed(
@@ -998,7 +755,7 @@ def test_spec_and_catalog_schemas_are_closed_and_preserve_yagni_boundary() -> No
     )
     assert catalog_schema["additionalProperties"] is False
     assert catalog_schema["properties"]["positions"]["items"] == {"type": "object"}
-    assert spec_schema["properties"]["schema_version"] == {"enum": [1, 2, 3]}
+    assert spec_schema["properties"]["schema_version"] == {"enum": [1, 2]}
     assert catalog_schema["properties"]["strategies"]["minItems"] == 9
     assert catalog_schema["properties"]["strategies"]["maxItems"] == 9
 

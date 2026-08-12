@@ -23,14 +23,6 @@ def test_supported_python_and_installed_ci_controls() -> None:
     assert distribution.metadata["Requires-Python"].replace(" ", "") == ">=3.11,<3.14"
 
 
-def test_example_config_keeps_portfolio_authority_off_synced_storage() -> None:
-    config = _toml(REPOSITORY_ROOT / "config.example.toml")
-    paths = config["paths"]
-    assert isinstance(paths, dict)
-    assert paths["portfolio"] == "C:/Tools/quant-engine/data"
-    assert paths["portfolio123"] == "../dataPortfolio123"
-
-
 def test_virtual_root_has_only_accepted_workspace_members() -> None:
     root = _toml(REPOSITORY_ROOT / "pyproject.toml")
     tool = root["tool"]
@@ -41,43 +33,17 @@ def test_virtual_root_has_only_accepted_workspace_members() -> None:
     assert uv["workspace"] == {
         "members": [
             "apps/schwab-trading",
-            "packages/alpaca",
             "packages/ci-controls",
             "packages/core",
             "packages/fidelity",
             "packages/ibkr",
             "packages/matrixport",
             "packages/portfolio-ledger",
-            "packages/portfolio123",
             "packages/schwab",
             "packages/web-contracts",
         ]
     }
     assert root["project"]["requires-python"] == ">=3.11,<3.14"  # type: ignore[index]
-
-
-def test_alpaca_package_is_private_and_method_allowlisted() -> None:
-    member_root = REPOSITORY_ROOT / "packages" / "alpaca"
-    member = _toml(member_root / "pyproject.toml")
-    project = member["project"]
-    assert isinstance(project, dict)
-    assert project["requires-python"] == ">=3.11,<3.14"
-    assert project["dependencies"] == [
-        "quant-engine-core",
-        "quant-engine-portfolio-ledger",
-    ]
-    assert project["classifiers"] == ["Private :: Do Not Upload"]
-    assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
-        "quant_engine.alpaca"
-    )
-    assert not (member_root / "src" / "quant_engine" / "__init__.py").exists()
-    assert (member_root / "src" / "quant_engine" / "alpaca" / "py.typed").is_file()
-    quality = (REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "packages/alpaca/src" in quality
-    assert "tests/alpaca" in quality
-    assert "tools/alpaca_generation.py" in quality
 
 
 def test_ci_controls_package_is_private_namespaced_and_non_product() -> None:
@@ -126,32 +92,6 @@ def test_portfolio_ledger_package_is_private_and_depends_only_on_core() -> None:
     assert (
         member_root / "src" / "quant_engine" / "portfolio_ledger" / "py.typed"
     ).is_file()
-
-
-def test_portfolio123_package_is_private_and_har_first() -> None:
-    member_root = REPOSITORY_ROOT / "packages" / "portfolio123"
-    member = _toml(member_root / "pyproject.toml")
-    project = member["project"]
-    assert isinstance(project, dict)
-    assert project["requires-python"] == ">=3.11,<3.14"
-    assert project["dependencies"] == [
-        "pyarrow==23.0.1",
-        "quant-engine-core",
-        "quant-engine-web-contract-harvester",
-    ]
-    assert project["classifiers"] == ["Private :: Do Not Upload"]
-    assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
-        "quant_engine.portfolio123"
-    )
-    assert not (member_root / "src" / "quant_engine" / "__init__.py").exists()
-    assert (
-        member_root / "src" / "quant_engine" / "portfolio123" / "py.typed"
-    ).is_file()
-    quality = (REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "packages/portfolio123/src" in quality
-    assert "tests/portfolio123" in quality
 
 
 def test_ibkr_package_is_private_and_read_side_only() -> None:

@@ -123,14 +123,14 @@ by` remains the sole ordering authority.
 After each sprint, update the current issue—not a local recap—with outcome,
 exact evidence, decisions, Dead Ends, blockers, and changed dependencies.
 
-## Private GitHub repository control boundary
+## Private GitHub Free repository control boundary
 
-`main` is protected by GitHub. It requires pull requests and the configured
-strict status checks, applies to administrators, resolves conversations before
-merge, and denies force pushes and deletion. Required approving reviews,
-signed commits, and linear history are not enabled and must not be implied.
-Project policy, CI, templates, issue automation, and local hooks supplement the
-server control; they are not substitutes for it.
+The user selected a private personal GitHub Free repository in `GOV-002`.
+GitHub therefore does not server-enforce protected `main`, required pull
+requests, required status checks or reviews, CODEOWNERS approval, signed or
+linear history, force-push denial, or branch-deletion denial. Project policy,
+CI, templates, issue automation, repository settings, and local hooks must never
+be described as equivalent enforcement.
 
 While this boundary remains in effect:
 
@@ -144,9 +144,9 @@ While this boundary remains in effect:
    request. Direct, forced, deletion, or repointing updates to `main` are
    prohibited, including through an API or administrative bypass.
 3. Immediately before merge, the operator records the exact pull-request head
-   SHA and verifies every configured required check completed successfully for
-   that unchanged SHA. Missing, pending, cancelled, unexpectedly skipped, or
-   failed evidence stops the merge.
+   SHA and verifies that Quality, Security, Data boundary, and Issue guard all
+   completed successfully for that unchanged SHA. Missing, pending, cancelled,
+   unexpectedly skipped, or failed evidence stops the merge.
 4. GitHub Actions defaults remain read-only and unable to approve pull
    requests. Only the selected, full-SHA-pinned actions may run. Merge commit is
    the sole enabled GitHub UI merge method so provenance-preserving imports are
@@ -159,8 +159,8 @@ While this boundary remains in effect:
    recover through a governed corrective or revert pull request, and resume
    only after reconciliation is accepted. Never rewrite history as recovery.
 
-Reopen governance before adding a writer or write-capable app, when such an app
-is discovered, weakening branch protection, changing repository visibility, enabling live
+Reopen `GOV-002` before adding a writer or write-capable app, when such an app
+is discovered, changing the plan or repository visibility, enabling live
 trading, or accepting a release that requires independently enforced controls.
 The full decision and residual risk are recorded in
 [ADR 0001](decisions/0001-github-free-main-governance.md).

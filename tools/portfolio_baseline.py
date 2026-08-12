@@ -9,7 +9,6 @@ walks a directory or calls a provider.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 import csv
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -46,10 +45,10 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-SPEC_SCHEMA_VERSION: Final = 3
-SUPPORTED_SPEC_SCHEMA_VERSIONS: Final = frozenset({1, 2, 3})
+SPEC_SCHEMA_VERSION: Final = 2
+SUPPORTED_SPEC_SCHEMA_VERSIONS: Final = frozenset({1, 2})
 CATALOG_SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.2.0"
+BUILDER_VERSION: Final = "1.1.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 CURRENT_STRATEGY_COUNT: Final = 9
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -333,10 +332,8 @@ def _load_spec(spec_path: Path) -> dict[str, Any]:
         "schema_version",
         "sources",
     }
-    if version == 2:
+    if version == SPEC_SCHEMA_VERSION:
         keys.add("provider_generations")
-    elif version == SPEC_SCHEMA_VERSION:
-        keys.add("provider_ledger")
     _strict_keys(
         spec,
         keys,
@@ -450,103 +447,6 @@ def _schwab_generation(
     return catalog, artifacts, links
 
 
-def _provider_ledger(
-    value: object,
-    roots: Mapping[str, Path],
-    baseline_as_of: date,
-) -> tuple[dict[str, Any], tuple[SourceArtifact, ...], list[dict[str, Any]]]:
-    ref = _object(value, "provider_ledger")
-    _strict_keys(
-        ref,
-        {"catalog_sha256", "generation_id", "manifest_sha256", "root_id"},
-        "provider_ledger",
-    )
-    root_id = _identifier(ref["root_id"], "provider_ledger.root_id")
-    if root_id not in roots:
-        raise BaselineValidationError("provider-ledger root is unknown")
-    generation_id = _text(ref["generation_id"], "provider_ledger.generation_id")
-    catalog_sha256 = _text(ref["catalog_sha256"], "provider_ledger.catalog_sha256")
-    manifest_sha256 = _text(ref["manifest_sha256"], "provider_ledger.manifest_sha256")
-    if any(
-        _SHA256.fullmatch(item) is None
-        for item in (generation_id, catalog_sha256, manifest_sha256)
-    ):
-        raise BaselineValidationError("provider-ledger identity is invalid")
-    generation_root = roots[root_id] / "generations" / generation_id
-    catalog_path = generation_root / "provider-ledger.json"
-    manifest_path = generation_root / "generation.json"
-    if any(
-        path.is_symlink() or not path.is_file()
-        for path in (catalog_path, manifest_path)
-    ):
-        raise BaselineValidationError("provider-ledger generation is incomplete")
-    actual_catalog_hash, catalog_size = hash_file(catalog_path)
-    actual_manifest_hash, manifest_size = hash_file(manifest_path)
-    if actual_catalog_hash != catalog_sha256 or actual_manifest_hash != manifest_sha256:
-        raise BaselineValidationError("provider-ledger generation hash differs")
-    try:
-        manifest = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
-    except ValueError as exc:
-        raise BaselineValidationError("provider-ledger manifest is invalid") from exc
-    if (
-        manifest.generation_id != generation_id
-        or manifest.verification.value != "VERIFIED"
-    ):
-        raise BaselineValidationError("provider-ledger generation is not verified")
-    catalog = _load_json(catalog_path, "provider-ledger catalog")
-    if catalog.get("catalog_schema_version") != 1:
-        raise BaselineValidationError("provider-ledger catalog schema is unsupported")
-    provider_as_of = _date(catalog.get("as_of_date"), "provider-ledger as_of_date")
-    if provider_as_of > baseline_as_of:
-        raise BaselineValidationError("provider-ledger is newer than baseline")
-    provider_ids = {
-        _text(item.get("provider_id"), "provider-ledger provider_id")
-        for item in _objects(
-            catalog.get("provider_generations"), "provider-ledger generations"
-        )
-    }
-    if provider_ids != {
-        "alpaca",
-        "fidelity",
-        "ibkr",
-        "matrixport",
-        "portfolio123",
-        "quantbase",
-        "schwab",
-    }:
-        raise BaselineValidationError("provider-ledger provider scope differs")
-    artifacts = (
-        SourceArtifact(
-            artifact_id="providers/provider-ledger/generation.json",
-            sha256=actual_manifest_hash,
-            size_bytes=manifest_size,
-            as_of_date=provider_as_of,
-            schema_name="generation-manifest",
-            schema_version="1",
-        ),
-        SourceArtifact(
-            artifact_id="providers/provider-ledger/provider-ledger.json",
-            sha256=actual_catalog_hash,
-            size_bytes=catalog_size,
-            as_of_date=provider_as_of,
-            schema_name="provider-ledger-catalog",
-            schema_version="1",
-        ),
-    )
-    links = [
-        {
-            "artifact_id": item.artifact_id,
-            "as_of_date": provider_as_of.isoformat(),
-            "schema_name": item.schema_name,
-            "schema_version": item.schema_version,
-            "sha256": item.sha256,
-            "source_key": "provider-ledger-generation",
-        }
-        for item in artifacts
-    ]
-    return catalog, artifacts, links
-
-
 def _roots(value: object) -> dict[str, Path]:
     roots = _object(value, "roots")
     if not roots:
@@ -647,8 +547,6 @@ def _sources(
 
 def _provenance(
     value: object,
-    *,
-    require_current: bool = True,
 ) -> tuple[dict[str, Any], SourceArtifact, dict[str, Any]]:
     ref = _object(value, "provenance")
     _strict_keys(ref, {"catalog_sha256", "generation_id", "root"}, "provenance")
@@ -664,15 +562,12 @@ def _provenance(
         or _SHA256.fullmatch(expected_hash) is None
     ):
         raise BaselineValidationError("provenance identity is invalid")
-    if require_current:
-        try:
-            pointer = read_current(root)
-        except (OSError, ValueError) as exc:
-            raise BaselineValidationError("provenance pointer is not accepted") from exc
-        if pointer.generation_id != generation_id:
-            raise BaselineValidationError(
-                "provenance generation is not current authority"
-            )
+    try:
+        pointer = read_current(root)
+    except (OSError, ValueError) as exc:
+        raise BaselineValidationError("provenance pointer is not accepted") from exc
+    if pointer.generation_id != generation_id:
+        raise BaselineValidationError("provenance generation is not current authority")
     path = root / "generations" / generation_id / "portfolio-provenance.json"
     if path.is_symlink() or not path.is_file():
         raise BaselineValidationError("provenance catalog is missing or linked")
@@ -680,22 +575,15 @@ def _provenance(
     if actual_hash != expected_hash:
         raise BaselineValidationError("provenance catalog hash differs")
     catalog = _load_json(path, "provenance catalog")
-    provenance_schema_version = catalog.get("catalog_schema_version")
-    if provenance_schema_version not in {1, 2}:
+    if catalog.get("catalog_schema_version") != 1:
         raise BaselineValidationError("provenance catalog schema is unsupported")
-    if provenance_schema_version == 2 and not isinstance(
-        catalog.get("strategy_version_catalog"), dict
-    ):
-        raise BaselineValidationError(
-            "provenance v2 requires a strategy version catalog"
-        )
     artifact = SourceArtifact(
         artifact_id="provenance/portfolio-provenance.json",
         sha256=actual_hash,
         size_bytes=size,
         as_of_date=_date(catalog.get("as_of_date"), "provenance.as_of_date"),
         schema_name="portfolio-provenance-catalog",
-        schema_version=str(provenance_schema_version),
+        schema_version="1",
     )
     return (
         catalog,
@@ -793,10 +681,6 @@ def _strategy_for_date(
             continue
         start_value = assignment.get("effective_start")
         end_value = assignment.get("effective_end")
-        if assignment.get("mapping_status") == "MAPPED" and start_value is None:
-            raise BaselineValidationError(
-                "mapped assignment requires an explicit effective_start"
-            )
         if start_value is not None and event_date < _date(
             start_value, "assignment.start"
         ):
@@ -1137,14 +1021,12 @@ def _normalize_transactions(
 def _schwab_facts(
     catalog: Mapping[str, Any],
     accounts: Sequence[Mapping[str, Any]],
-    assignments: Sequence[Mapping[str, Any]],
     baseline_nav: Sequence[Mapping[str, Any]],
     baseline_as_of: date,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
     list[dict[str, Any]],
-    dict[str, Any],
     dict[str, Any],
     list[str],
 ]:
@@ -1171,15 +1053,7 @@ def _schwab_facts(
             "symbol": symbol,
         }
         record = dict(item)
-        mapping_status, strategy_id = _strategy_for_date(assignments, account_id, as_of)
-        record.update(
-            {
-                "mapping_status": mapping_status.value,
-                "provider": "SCHWAB",
-                "source_key": "schwab-generation",
-                "strategy_id": strategy_id,
-            }
-        )
+        record.update({"provider": "SCHWAB", "source_key": "schwab-generation"})
         positions.append(record)
     for item in _objects(catalog.get("transactions"), "Schwab transactions"):
         account_id = _text(item.get("account_id"), "Schwab transaction account_id")
@@ -1241,32 +1115,6 @@ def _schwab_facts(
         "shared_count": len(shared),
         "status": "PASS_WITH_DECLARED_VARIANCE",
     }
-    mapped_position_count = sum(
-        item.get("mapping_status") == MappingStatus.MAPPED.value for item in positions
-    )
-    position_market_value = sum(
-        (
-            _decimal(
-                _object(item.get("market_value"), "position.market_value").get("value"),
-                "position.market_value.value",
-            )
-            or Decimal("0")
-            for item in positions
-        ),
-        Decimal("0"),
-    )
-    position_reconciliation = {
-        "check_id": "current-position-strategy-attribution",
-        "mapped_count": mapped_position_count,
-        "market_value_usd": decimal_text(position_market_value),
-        "position_count": len(positions),
-        "status": (
-            "PASS"
-            if mapped_position_count == len(positions)
-            else "PASS_WITH_EXPLICIT_UNMAPPED"
-        ),
-        "unmapped_count": len(positions) - mapped_position_count,
-    }
     coverage = _object(catalog.get("coverage"), "Schwab coverage")
     known_gaps = [
         _text(item, "Schwab coverage known_gap")
@@ -1283,167 +1131,12 @@ def _schwab_facts(
         ),
         sorted(securities.values(), key=lambda item: str(item["security_id"])),
         reconciliation,
-        position_reconciliation,
-        known_gaps,
-    )
-
-
-def _provider_ledger_facts(
-    catalog: Mapping[str, Any],
-    accounts: Sequence[Mapping[str, Any]],
-    legacy_nav: Sequence[Mapping[str, Any]],
-    legacy_flows: Sequence[Mapping[str, Any]],
-    legacy_transactions: Sequence[Mapping[str, Any]],
-    legacy_securities: Sequence[Mapping[str, Any]],
-    baseline_as_of: date,
-) -> tuple[
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-    dict[str, Any],
-    list[str],
-]:
-    """Select admitted account facts while retaining legacy-only observations."""
-
-    accepted_accounts = {str(item["account_id"]) for item in accounts}
-
-    def admitted(name: str) -> list[dict[str, Any]]:
-        accepted: list[dict[str, Any]] = []
-        for item in _objects(catalog.get(name), f"provider-ledger.{name}"):
-            account_id = _text(item.get("account_id"), f"{name}.account_id")
-            if (
-                account_id not in accepted_accounts
-                or item.get("mapping_status") != "MAPPED"
-            ):
-                continue
-            day_value = item.get("as_of_date") or item.get("event_date")
-            if _date(day_value, f"{name}.date") > baseline_as_of:
-                raise BaselineValidationError(
-                    "provider-ledger fact is newer than baseline"
-                )
-            record = dict(item)
-            record.update(
-                {
-                    "provider": _text(
-                        item.get("provider_id"), f"{name}.provider_id"
-                    ).upper(),
-                    "source_key": "provider-ledger",
-                }
-            )
-            accepted.append(record)
-        return accepted
-
-    provider_nav = admitted("nav_observations")
-    provider_flows = admitted("flows")
-    provider_transactions = admitted("transactions")
-    provider_positions = admitted("positions")
-
-    nav_by_key = {
-        (str(item["account_id"]), str(item["as_of_date"])): dict(item)
-        for item in legacy_nav
-    }
-    conflicts = 0
-    for item in provider_nav:
-        key = (str(item["account_id"]), str(item["as_of_date"]))
-        prior = nav_by_key.get(key)
-        if prior is not None and prior.get("nav") != item.get("nav"):
-            conflicts += 1
-        nav_by_key[key] = item
-
-    def replace_accounts(
-        legacy: Sequence[Mapping[str, Any]], provider: Sequence[Mapping[str, Any]]
-    ) -> list[dict[str, Any]]:
-        provider_accounts = {str(item["account_id"]) for item in provider}
-        combined = [
-            dict(item)
-            for item in legacy
-            if str(item["account_id"]) not in provider_accounts
-        ]
-        combined.extend(dict(item) for item in provider)
-        identifiers = [str(item["record_id"]) for item in combined]
-        if len(identifiers) != len(set(identifiers)):
-            raise BaselineValidationError("provider-ledger fact identifiers collide")
-        return combined
-
-    flows = replace_accounts(legacy_flows, provider_flows)
-    transactions = replace_accounts(legacy_transactions, provider_transactions)
-
-    latest_position: dict[tuple[str, str], dict[str, Any]] = {}
-    for item in provider_positions:
-        security_id = _text(item.get("security_id"), "position.security_id")
-        key = (str(item["account_id"]), security_id)
-        prior = latest_position.get(key)
-        if prior is None or str(prior["as_of_date"]) < str(item["as_of_date"]):
-            latest_position[key] = item
-
-    used_securities = {
-        str(item["security_id"])
-        for item in (*transactions, *latest_position.values())
-        if item.get("security_id") is not None
-    }
-    securities: dict[str, dict[str, Any]] = {
-        str(item["security_id"]): dict(item) for item in legacy_securities
-    }
-    for item in _objects(catalog.get("securities"), "provider-ledger.securities"):
-        security_id = str(item.get("security_id") or "")
-        if security_id in used_securities and security_id not in securities:
-            securities[security_id] = dict(item)
-
-    known_gaps = sorted(
-        {
-            _text(gap, "provider coverage known_gap")
-            for item in _objects(
-                catalog.get("provider_coverage"), "provider-ledger.provider_coverage"
-            )
-            for gap in _object(item.get("coverage"), "provider coverage").get(
-                "known_gaps", []
-            )
-        }
-    )
-    quality_findings = _objects(
-        catalog.get("quality_findings"), "provider-ledger.quality_findings"
-    )
-    reconciliation = {
-        "admitted_flow_count": len(provider_flows),
-        "admitted_nav_count": len(provider_nav),
-        "admitted_position_count": len(latest_position),
-        "admitted_transaction_count": len(provider_transactions),
-        "check_id": "provider-ledger-to-portfolio-baseline",
-        "nav_conflict_count": conflicts,
-        "quality_finding_count": len(quality_findings),
-        "status": "PASS_WITH_EXPLICIT_RECONCILIATION",
-    }
-    return (
-        sorted(
-            nav_by_key.values(),
-            key=lambda item: (str(item["account_id"]), str(item["as_of_date"])),
-        ),
-        sorted(
-            flows, key=lambda item: (str(item["event_date"]), str(item["record_id"]))
-        ),
-        sorted(
-            transactions,
-            key=lambda item: (str(item["event_date"]), str(item["record_id"])),
-        ),
-        sorted(
-            latest_position.values(),
-            key=lambda item: (str(item["account_id"]), str(item["security_id"])),
-        ),
-        sorted(securities.values(), key=lambda item: str(item["security_id"])),
-        quality_findings,
-        reconciliation,
         known_gaps,
     )
 
 
 def _allocations_and_coverage(
-    paths: Mapping[str, Path],
-    strategy_aliases: Mapping[str, str],
-    source_effective_date: date,
-    publication_date: date,
+    paths: Mapping[str, Path], strategy_aliases: Mapping[str, str], as_of: date
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -1460,20 +1153,16 @@ def _allocations_and_coverage(
         assert value is not None and weight is not None
         by_strategy[strategy_id] = (value, weight)
         payload = {
-            "as_of_date": source_effective_date.isoformat(),
+            "as_of_date": as_of.isoformat(),
             "current_value": {
                 "currency": "USD",
                 "status": "AVAILABLE",
                 "value": decimal_text(value),
             },
-            "pool_id": "systematic-capital",
-            "publication_date": publication_date.isoformat(),
             "scope": "SYSTEMATIC",
             "source_key": "component-decision-table",
-            "source_effective_date": source_effective_date.isoformat(),
             "strategy_id": strategy_id,
             "systematic_weight": decimal_text(weight),
-            "valuation_date": source_effective_date.isoformat(),
         }
         allocations.append(
             {"allocation_id": _record_id("allocation", payload), **payload}
@@ -1715,30 +1404,11 @@ def _fact_coverage(
     positions: Sequence[Mapping[str, Any]],
     schwab_known_gaps: Sequence[str],
     missing_strategy_nav_count: int,
-    as_of_date: date,
-    *,
-    nav: Sequence[Mapping[str, Any]] = (),
-    costs: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     investment_count = sum(1 for item in accounts if item["role"] == "INVESTMENT")
     unmapped = [
         item for item in assignments if item.get("mapping_status") == "UNMAPPED"
     ]
-    attribution_unmapped = [
-        item
-        for item in unmapped
-        if item.get("pool_id") != "reserve-capital"
-        and item.get("strategy_mapping_disposition") != "RESERVE_NOT_APPLICABLE"
-    ]
-    current_unmapped: list[Mapping[str, Any]] = []
-    historical_unmapped: list[Mapping[str, Any]] = []
-    for item in attribution_unmapped:
-        start = item.get("effective_start")
-        end = item.get("effective_end")
-        active = (
-            start is None or _date(start, "assignment.effective_start") <= as_of_date
-        ) and (end is None or _date(end, "assignment.effective_end") >= as_of_date)
-        (current_unmapped if active else historical_unmapped).append(item)
     claims: list[dict[str, Any]] = [
         {
             "fact_type": "accounts",
@@ -1757,113 +1427,29 @@ def _fact_coverage(
         },
         {
             "fact_type": "assignments",
-            "known_gaps": [],
-            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
-        },
-        {
-            "fact_type": "current_strategy_attribution",
-            "known_gaps": (
-                [
-                    f"{len(current_unmapped)} current intervals are mapped to the systematic pool but not a strategy"
-                ]
-                if current_unmapped
-                else []
-            ),
-            "status": "PARTIAL"
-            if current_unmapped
-            else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
-            "disposition": {
-                "authority": "effective-dated account assignment registry",
-                "code": (
-                    "POOL_ONLY_UNALLOCATED_RETAINED" if current_unmapped else "COMPLETE"
-                ),
-                "effect": (
-                    "Current pool-only intervals remain unassigned; no holding-based strategy inference is permitted."
-                    if current_unmapped
-                    else "Every current systematic interval has an accepted strategy assignment."
-                ),
-            },
-            "record_count": len(current_unmapped),
-        },
-        {
-            "fact_type": "historical_strategy_attribution",
-            "known_gaps": (
-                [f"{len(historical_unmapped)} historical intervals remain pool-only"]
-                if historical_unmapped
-                else []
-            ),
-            "status": "PARTIAL"
-            if historical_unmapped
-            else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
-            "disposition": {
-                "authority": "effective-dated account assignment registry",
-                "code": (
-                    "POOL_ONLY_UNALLOCATED_RETAINED"
-                    if historical_unmapped
-                    else "COMPLETE"
-                ),
-                "effect": (
-                    "Historical pool-only intervals remain visible and are excluded from strategy attribution."
-                    if historical_unmapped
-                    else "Every historical systematic interval has an accepted strategy assignment."
-                ),
-            },
-            "record_count": len(historical_unmapped),
+            "known_gaps": [f"{len(unmapped)} legacy General assignments are UNMAPPED"],
+            "status": "PARTIAL",
         },
         {
             "fact_type": "nav",
-            "known_gaps": (
-                [
-                    f"{missing_strategy_nav_count} current strategies lack account-specific daily series"
-                ]
-                if missing_strategy_nav_count
-                else []
-            ),
-            "status": (
-                "PARTIAL"
-                if missing_strategy_nav_count
-                else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
-            ),
-            "disposition": {
-                "authority": "accepted account NAV plus governed HWM qualification",
-                "code": "RETAINED_UNQUALIFIED_HWM_NAV",
-                "effect": "Automated HWM remains unavailable for every included sleeve without qualified fresh daily NAV evidence.",
-            },
-            "record_count": len(nav),
+            "known_gaps": [
+                f"{missing_strategy_nav_count} current strategies lack account-specific daily series"
+            ],
+            "status": "PARTIAL",
         },
         {
             "fact_type": "flows",
             "known_gaps": [
-                (
-                    f"{len(flows)} accepted flow records across "
-                    f"{', '.join(sorted({str(item['provider']) for item in flows if item.get('provider')})) or 'no providers'}; "
-                    "providers without an admitted flow path remain explicit in the account fact matrix"
-                )
+                "coverage is limited to accepted Schwab, IBKR, and Alpaca evidence"
             ],
             "status": "PARTIAL",
-            "disposition": {
-                "authority": "accepted provider-ledger and legacy flow evidence",
-                "code": "RETAINED_PROVIDER_INTERVAL_BOUNDARY",
-                "effect": "MWR remains unavailable outside accounts and intervals with complete admitted external-flow evidence.",
-            },
-            "record_count": len(flows),
         },
         {
             "fact_type": "transactions",
             "known_gaps": [
-                (
-                    f"{len(transactions)} accepted transaction records across "
-                    f"{', '.join(sorted({str(item['provider']) for item in transactions if item.get('provider')})) or 'no providers'}; "
-                    "providers without an admitted transaction path remain explicit in the account fact matrix"
-                )
+                "coverage is limited to accepted Alpaca fills and Schwab history"
             ],
             "status": "PARTIAL",
-            "disposition": {
-                "authority": "accepted provider-ledger and legacy transaction evidence",
-                "code": "RETAINED_PROVIDER_INTERVAL_BOUNDARY",
-                "effect": "Transaction analysis is limited to the named account/provider intervals; absence is never converted to zero activity.",
-            },
-            "record_count": len(transactions),
         },
         {
             "fact_type": "positions",
@@ -1873,22 +1459,13 @@ def _fact_coverage(
                 else ["no accepted position source exists for this baseline"]
             ),
             "status": "PARTIAL" if positions else "FAILED",
-            "disposition": {
-                "authority": "accepted current provider position snapshots",
-                "code": (
-                    "RETAINED_PROVIDER_SNAPSHOT_BOUNDARY"
-                    if positions
-                    else "RETAINED_NO_ACCEPTED_POSITION_SOURCE"
-                ),
-                "effect": "Only accepted current position rows are reported; accounts without reported rows remain unavailable.",
-            },
-            "record_count": len(positions),
         },
         {
             "fact_type": "fx",
-            "known_gaps": [],
+            "known_gaps": [
+                "no accepted FX observation source exists for this baseline"
+            ],
             "status": "FAILED",
-            "disposition": {},
         },
         {
             "fact_type": "costs",
@@ -1896,50 +1473,8 @@ def _fact_coverage(
                 "several current strategy costs remain unknown or conditional"
             ],
             "status": "PARTIAL",
-            "disposition": {
-                "authority": "strategy cost-economics register",
-                "code": "RETAINED_UNKNOWN_OR_CONDITIONAL_COSTS",
-                "effect": "Gross-to-net and after-tax conclusions remain unavailable where a sleeve cost is unknown or conditional.",
-            },
-            "record_count": len(costs),
         },
     ]
-    non_usd_records = [
-        item
-        for item in (*transactions, *flows)
-        if isinstance(item.get("amount"), Mapping)
-        and item["amount"].get("currency") not in {None, "USD"}
-    ]
-    unavailable_non_usd = [
-        item
-        for item in non_usd_records
-        if isinstance(item.get("amount"), Mapping)
-        and item["amount"].get("status") != "AVAILABLE"
-    ]
-    non_usd_currencies = sorted(
-        {
-            str(item["amount"]["currency"])
-            for item in non_usd_records
-            if isinstance(item.get("amount"), Mapping)
-        }
-    )
-    fx_claim = next(item for item in claims if item["fact_type"] == "fx")
-    fx_claim["known_gaps"] = [
-        "no accepted independent FX observation source exists; "
-        f"{len(non_usd_records)} non-USD transaction/flow records "
-        f"({', '.join(non_usd_currencies) or 'no currencies'}) are FX-affected, "
-        f"including {len(unavailable_non_usd)} with unavailable accepted USD amounts; "
-        "account NAV, current positions, allocations, and HWM current values remain provider-reported USD authority"
-    ]
-    fx_claim["disposition"] = {
-        "authority": "provider-reported USD account facts; no independent FX series",
-        "code": "RETAINED_NO_ACCEPTED_FX_SOURCE",
-        "effect": "Independent non-USD transaction/flow recomputation is unavailable; provider-reported USD current values are not retranslated.",
-        "fx_affected_record_count": len(non_usd_records),
-        "unavailable_usd_amount_count": len(unavailable_non_usd),
-        "currencies": non_usd_currencies,
-    }
-    fx_claim["record_count"] = 0
     exceptions: list[dict[str, Any]] = [
         {
             "exception_id": (
@@ -1950,310 +1485,44 @@ def _fact_coverage(
             "severity": (
                 "DISCLOSED_GAP" if positions else "BLOCKING_FOR_POSITION_ANALYSIS"
             ),
-            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
-            "authority": "accepted current provider position snapshots",
-            "disposition": "REPORT_ACCEPTED_ROWS_ONLY_NO_INFERENCE",
+            "status": "PARTIAL" if positions else "UNAVAILABLE",
         },
         {
             "exception_id": "full-systematic-hwm-unavailable",
             "fact_type": "nav",
             "severity": "BLOCKING_FOR_AUTOMATED_HWM",
             "status": "UNAVAILABLE",
-            "authority": "governed HWM policy and qualified daily NAV evidence",
-            "disposition": "FAIL_CLOSED_UNTIL_EVERY_INCLUDED_SLEEVE_IS_QUALIFIED",
         },
         {
-            "exception_id": "current-strategy-attribution-partial",
-            "fact_type": "current_strategy_attribution",
-            "record_count": len(current_unmapped),
+            "exception_id": "assignment-mapping-partial",
+            "fact_type": "assignments",
+            "record_count": len(unmapped),
             "severity": "BLOCKING_FOR_FULL_ATTRIBUTION",
-            "status": (
-                "RETAINED_WITH_EXPLICIT_DISPOSITION" if current_unmapped else "PASS"
-            ),
-            "authority": "effective-dated account assignment registry",
-            "disposition": "POOL_ONLY_UNALLOCATED",
-        },
-        {
-            "exception_id": "historical-strategy-attribution-unresolved",
-            "fact_type": "historical_strategy_attribution",
-            "record_count": len(historical_unmapped),
-            "severity": "DISCLOSED_HISTORICAL_GAP",
-            "status": (
-                "RETAINED_WITH_EXPLICIT_DISPOSITION" if historical_unmapped else "PASS"
-            ),
-            "authority": "effective-dated account assignment registry",
-            "disposition": "POOL_ONLY_UNALLOCATED",
+            "status": "UNMAPPED",
         },
         {
             "exception_id": "account-nav-coverage-partial",
             "fact_type": "nav",
             "investment_account_count": investment_count,
             "severity": "BLOCKING_FOR_FULL_ATTRIBUTION",
-            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
-            "authority": "governed HWM qualification and account NAV coverage",
-            "disposition": "HWM_REMAINS_FAIL_CLOSED_FOR_UNQUALIFIED_SLEEVES",
+            "status": "PARTIAL",
         },
         {
             "exception_id": "transaction-coverage-partial",
             "fact_type": "transactions",
             "record_count": len(transactions),
             "severity": "DISCLOSED_GAP",
-            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
-            "authority": "account fact coverage matrix",
-            "disposition": "ACCEPT_ONLY_NAMED_PROVIDER_ACCOUNT_INTERVALS",
+            "status": "PARTIAL",
         },
         {
             "exception_id": "flow-coverage-partial",
             "fact_type": "flows",
             "record_count": len(flows),
             "severity": "DISCLOSED_GAP",
-            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
-            "authority": "account fact coverage matrix",
-            "disposition": "MWR_UNAVAILABLE_OUTSIDE_COMPLETE_FLOW_INTERVALS",
+            "status": "PARTIAL",
         },
     ]
     return claims, exceptions
-
-
-def _coverage_evidence(
-    accounts: Sequence[Mapping[str, Any]],
-    assignments: Sequence[Mapping[str, Any]],
-    provider_admissions: Sequence[Mapping[str, Any]],
-    provider_coverage: Sequence[Mapping[str, Any]],
-    nav: Sequence[Mapping[str, Any]],
-    positions: Sequence[Mapping[str, Any]],
-    transactions: Sequence[Mapping[str, Any]],
-    flows: Sequence[Mapping[str, Any]],
-    as_of_date: date,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build value-free account/fact evidence without inventing completeness."""
-
-    fact_specs = {
-        "nav": (nav, "as_of_date", "nav_observations", "nav", "DAILY"),
-        "positions": (
-            positions,
-            "as_of_date",
-            "positions",
-            "market_value",
-            "SNAPSHOT",
-        ),
-        "transactions": (
-            transactions,
-            "event_date",
-            "transactions",
-            "amount",
-            "EVENT_STREAM",
-        ),
-        "flows": (flows, "event_date", "flows", "amount", "EVENT_STREAM"),
-    }
-    coverage_by_provider = {
-        str(item.get("provider_id", "")).upper(): _object(
-            item.get("coverage"), "provider coverage"
-        )
-        for item in provider_coverage
-    }
-    admissions: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
-    for item in provider_admissions:
-        account_id = item.get("account_id")
-        fact_type = item.get("fact_type")
-        if account_id is not None and fact_type is not None:
-            admissions[(str(account_id), str(fact_type))].append(item)
-
-    matrix: list[dict[str, Any]] = []
-    observation_windows: list[dict[str, Any]] = []
-    for provider_id, coverage in sorted(coverage_by_provider.items()):
-        observation_windows.append(
-            {
-                "boundary": coverage.get("boundary"),
-                "observed_end": coverage.get("observed_end"),
-                "observed_start": coverage.get("observed_start"),
-                "provider_id": provider_id,
-                "status": coverage.get("status"),
-                "window_type": "PROVIDER_SOURCE",
-            }
-        )
-
-    for fact_type, (
-        records,
-        date_field,
-        admission_type,
-        amount_field,
-        cadence,
-    ) in fact_specs.items():
-        fact_dates = sorted(
-            str(item[date_field]) for item in records if item.get(date_field)
-        )
-        observation_windows.append(
-            {
-                "fact_type": fact_type,
-                "boundary_basis": "OBSERVED_RECORDS_ONLY",
-                "cadence": cadence,
-                "declared_end": None,
-                "declared_start": None,
-                "observed_end": fact_dates[-1] if fact_dates else None,
-                "observed_start": fact_dates[0] if fact_dates else None,
-                "record_count": len(records),
-                "status": (
-                    "OBSERVED_NOT_COMPLETENESS_PROOF"
-                    if fact_dates
-                    else "NO_ACCEPTED_OBSERVATION"
-                ),
-                "window_type": "ACCEPTED_FACT",
-            }
-        )
-        records_by_account: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-        for item in records:
-            records_by_account[str(item.get("account_id"))].append(item)
-        for account in sorted(accounts, key=lambda item: str(item.get("account_id"))):
-            if account.get("role") != "INVESTMENT":
-                continue
-            account_id = _text(account.get("account_id"), "account.account_id")
-            provider_id = _text(account.get("provider"), "account.provider").upper()
-            accepted = records_by_account.get(account_id, [])
-            accepted_dates = sorted(
-                str(item[date_field]) for item in accepted if item.get(date_field)
-            )
-            admitted = admissions.get((account_id, admission_type), [])
-            authoritative = [
-                item for item in admitted if item.get("disposition") == "AUTHORITATIVE"
-            ]
-            authority_rows = authoritative or admitted
-            authority_starts = sorted(
-                str(item["effective_start"])
-                for item in authority_rows
-                if item.get("effective_start")
-            )
-            authority_ends = sorted(
-                str(item["effective_end"])
-                for item in authority_rows
-                if item.get("effective_end")
-            )
-            unavailable_amount_count = sum(
-                1
-                for item in accepted
-                if isinstance(item.get(amount_field), Mapping)
-                and item[amount_field].get("status") != "AVAILABLE"
-            )
-            if accepted:
-                status = (
-                    "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF"
-                    if unavailable_amount_count
-                    else "OBSERVED_NOT_COMPLETENESS_PROOF"
-                )
-                disposition = "RETAINED_ACCEPTED_REPORTED_FACTS_ONLY"
-                missing_reason = (
-                    "fact-specific completeness boundary is not declared; "
-                    "observed records establish observations, not complete intervals"
-                )
-                authority = (
-                    "PROVIDER_ADMISSION_AND_ACCEPTED_FACTS"
-                    if admitted
-                    else "LEGACY_ACCEPTED_FACTS"
-                )
-                boundary_basis = "OBSERVED_RECORDS_ONLY"
-            elif admitted:
-                status = (
-                    "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"
-                    if cadence == "EVENT_STREAM"
-                    else "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF"
-                )
-                disposition = (
-                    "RETAINED_UNATTESTED_EVENT_INTERVAL"
-                    if cadence == "EVENT_STREAM"
-                    else "RETAINED_NO_REPORTED_FACT"
-                )
-                missing_reason = (
-                    "an effective-dated provider admission exists, but it is not a "
-                    "fact completeness declaration"
-                )
-                authority = "PROVIDER_ADMISSION"
-                boundary_basis = "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS"
-            else:
-                status = "NO_ACCEPTED_FACT_PATH"
-                disposition = "RETAINED_NO_ACCEPTED_PROVIDER_PATH"
-                missing_reason = (
-                    "no admitted provider/account path or fact-specific completeness "
-                    "declaration exists for this fact"
-                )
-                authority = "ACCOUNT_REGISTRY_NO_PROVIDER_SOURCE"
-                boundary_basis = "NO_ACCEPTED_SOURCE"
-            matrix.append(
-                {
-                    "account_id": account_id,
-                    "admission_effective_end": (
-                        authority_ends[-1] if authority_ends else None
-                    ),
-                    "admission_effective_start": (
-                        authority_starts[0] if authority_starts else None
-                    ),
-                    "authority": authority,
-                    "boundary_basis": boundary_basis,
-                    "cadence": cadence,
-                    "declared_end": None,
-                    "declared_start": None,
-                    "disposition": disposition,
-                    "fact_type": fact_type,
-                    "missing_interval_end": None,
-                    "missing_interval_reason": missing_reason,
-                    "missing_interval_start": None,
-                    "missing_intervals": [],
-                    "observed_end": accepted_dates[-1] if accepted_dates else None,
-                    "observed_start": accepted_dates[0] if accepted_dates else None,
-                    "provider_id": provider_id,
-                    "record_count": len(accepted),
-                    "status": status,
-                    "unavailable_amount_count": unavailable_amount_count,
-                }
-            )
-
-    attribution: list[dict[str, Any]] = []
-    provider_by_account = {
-        str(item.get("account_id")): str(item.get("provider")) for item in accounts
-    }
-    for item in assignments:
-        if (
-            item.get("mapping_status") != "UNMAPPED"
-            or item.get("pool_id") == "reserve-capital"
-            or item.get("strategy_mapping_disposition") == "RESERVE_NOT_APPLICABLE"
-        ):
-            continue
-        start = item.get("effective_start")
-        end = item.get("effective_end")
-        current = (
-            start is None or _date(start, "assignment.effective_start") <= as_of_date
-        ) and (end is None or _date(end, "assignment.effective_end") >= as_of_date)
-        account_id = _text(item.get("account_id"), "assignment.account_id")
-        attribution.append(
-            {
-                "account_id": account_id,
-                "authority": item.get("source_id") or item.get("source_classification"),
-                "disposition": "POOL_ONLY_UNALLOCATED",
-                "effective_end": end,
-                "effective_start": start,
-                "period": "CURRENT" if current else "HISTORICAL",
-                "provider_id": provider_by_account.get(account_id),
-            }
-        )
-    return (
-        sorted(
-            matrix, key=lambda item: (str(item["fact_type"]), str(item["account_id"]))
-        ),
-        sorted(
-            observation_windows,
-            key=lambda item: (
-                str(item["window_type"]),
-                str(item.get("fact_type") or item.get("provider_id")),
-            ),
-        ),
-        sorted(
-            attribution,
-            key=lambda item: (
-                str(item["period"]),
-                str(item.get("effective_start")),
-                str(item["account_id"]),
-            ),
-        ),
-    )
 
 
 def build_catalog(
@@ -2265,13 +1534,7 @@ def build_catalog(
     as_of = _date(spec["as_of_date"], "spec.as_of_date")
     roots = _roots(spec["roots"])
     paths, source_artifacts, source_links = _sources(spec["sources"], roots, as_of)
-    source_dates = {
-        str(item["source_key"]): _date(item["as_of_date"], "source.as_of_date")
-        for item in source_links
-    }
-    provenance, provenance_artifact, provenance_ref = _provenance(
-        spec["provenance"], require_current=spec["schema_version"] < 3
-    )
+    provenance, provenance_artifact, provenance_ref = _provenance(spec["provenance"])
     accounts, account_aliases = _account_index(provenance)
     strategies, strategy_aliases = _strategy_index(provenance)
     assignments = _objects(provenance.get("assignments"), "provenance.assignments")
@@ -2285,18 +1548,11 @@ def build_catalog(
         paths["alpaca-events"], account_aliases, assignments
     )
     positions: list[dict[str, Any]] = []
-    provider_known_gaps: list[str] = []
+    schwab_known_gaps: list[str] = []
     schwab_reconciliation: dict[str, Any] | None = None
-    position_reconciliation: dict[str, Any] | None = None
     provider_artifacts: tuple[SourceArtifact, ...] = ()
     provider_links: list[dict[str, Any]] = []
-    provider_admissions: list[dict[str, Any]] = []
-    provider_coverage: list[dict[str, Any]] = []
-    provider_unmapped: list[dict[str, Any]] = []
-    strategy_provider_evidence: list[dict[str, Any]] = []
-    strategy_returns: list[dict[str, Any]] = []
-    provider_strategy_returns: list[dict[str, Any]] = []
-    if spec["schema_version"] == 2:
+    if spec["schema_version"] == SPEC_SCHEMA_VERSION:
         schwab_catalog, provider_artifacts, provider_links = _schwab_generation(
             spec["provider_generations"], roots, accounts, as_of
         )
@@ -2305,9 +1561,8 @@ def build_catalog(
             schwab_transactions,
             schwab_securities,
             schwab_reconciliation,
-            position_reconciliation,
-            provider_known_gaps,
-        ) = _schwab_facts(schwab_catalog, accounts, assignments, nav, as_of)
+            schwab_known_gaps,
+        ) = _schwab_facts(schwab_catalog, accounts, nav, as_of)
         transactions.extend(schwab_transactions)
         transactions.sort(
             key=lambda item: (str(item["event_date"]), str(item["record_id"]))
@@ -2326,76 +1581,8 @@ def build_catalog(
         securities = sorted(
             by_security.values(), key=lambda item: str(item["security_id"])
         )
-    elif spec["schema_version"] == SPEC_SCHEMA_VERSION:
-        provider_catalog, provider_artifacts, provider_links = _provider_ledger(
-            spec["provider_ledger"], roots, as_of
-        )
-        (
-            nav,
-            flows,
-            transactions,
-            positions,
-            securities,
-            raw_provider_unmapped,
-            schwab_reconciliation,
-            provider_known_gaps,
-        ) = _provider_ledger_facts(
-            provider_catalog,
-            accounts,
-            nav,
-            flows,
-            transactions,
-            securities,
-            as_of,
-        )
-        provider_admissions = _objects(
-            provider_catalog.get("admissions"), "provider-ledger.admissions"
-        )
-        provider_coverage = _objects(
-            provider_catalog.get("provider_coverage"),
-            "provider-ledger.provider_coverage",
-        )
-        strategy_provider_evidence = _objects(
-            provider_catalog.get("strategy_evidence"),
-            "provider-ledger.strategy_evidence",
-        )
-        strategy_returns = _objects(
-            provider_catalog.get("strategy_returns"),
-            "provider-ledger.strategy_returns",
-        )
-        provider_strategy_returns = _objects(
-            provider_catalog.get("provider_strategy_returns"),
-            "provider-ledger.provider_strategy_returns",
-        )
-        grouped_unmapped: dict[tuple[str, str], int] = {}
-        for item in raw_provider_unmapped:
-            key = (
-                _text(item.get("provider_id"), "quality provider_id"),
-                _text(item.get("fact_type"), "quality fact_type"),
-            )
-            grouped_unmapped[key] = grouped_unmapped.get(key, 0) + 1
-        provider_unmapped = [
-            {
-                "fact_type": fact_type,
-                "provider_id": provider_id,
-                "record_count": count,
-                "source_key": "provider-ledger",
-                "status": "UNMAPPED",
-            }
-            for (provider_id, fact_type), count in sorted(grouped_unmapped.items())
-        ]
-        for record in nav:
-            provider_dates.setdefault(
-                str(record.get("provider", "UNKNOWN")), set()
-            ).add(_date(record["as_of_date"], "nav.as_of_date"))
-        calendar = _calendar_statuses(accounts, nav, provider_dates)
     allocations, strategy_nav_coverage, costs, systematic_total, nav_covered = (
-        _allocations_and_coverage(
-            paths,
-            strategy_aliases,
-            source_dates["component-decision-table"],
-            as_of,
-        )
+        _allocations_and_coverage(paths, strategy_aliases, as_of)
     )
     layer_metrics, live_metrics, implementation_gaps = _normalize_strategy_evidence(
         paths, strategy_aliases
@@ -2405,21 +1592,17 @@ def build_catalog(
         str(item["account_id"]) for item in accounts if item["role"] == "RESERVE"
     )
     reserve_payload = {
-        "as_of_date": source_dates["current-portfolio-summary"].isoformat(),
+        "as_of_date": as_of.isoformat(),
         "current_value": {
             "currency": "USD",
             "status": "AVAILABLE",
             "value": decimal_text(reserve),
         },
-        "pool_id": "reserve-capital",
-        "publication_date": as_of.isoformat(),
         "scope": "RESERVE",
         "source_key": "current-portfolio-summary",
-        "source_effective_date": source_dates["current-portfolio-summary"].isoformat(),
         "strategy_id": None,
         "systematic_weight": None,
         "account_id": reserve_id,
-        "valuation_date": source_dates["current-portfolio-summary"].isoformat(),
     }
     allocations.append(
         {"allocation_id": _record_id("allocation", reserve_payload), **reserve_payload}
@@ -2436,32 +1619,13 @@ def build_catalog(
         transactions,
         flows,
         positions,
-        provider_known_gaps,
+        schwab_known_gaps,
         missing_strategy_nav_count,
-        as_of,
-        nav=nav,
-        costs=costs,
     )
-    fact_coverage_matrix, observation_windows, attribution_dispositions = (
-        _coverage_evidence(
-            accounts,
-            assignments,
-            provider_admissions,
-            provider_coverage,
-            nav,
-            positions,
-            transactions,
-            flows,
-            as_of,
-        )
+    unmapped = sorted(
+        [item for item in assignments if item.get("mapping_status") == "UNMAPPED"],
+        key=lambda item: str(item.get("assignment_id")),
     )
-    unmapped = [
-        *sorted(
-            [item for item in assignments if item.get("mapping_status") == "UNMAPPED"],
-            key=lambda item: str(item.get("assignment_id")),
-        ),
-        *provider_unmapped,
-    ]
     evidence_links = [
         {
             "evidence_layer": route["evidence_layer"],
@@ -2484,21 +1648,6 @@ def build_catalog(
         "assumptions": provenance.get("assumptions", []),
         "baseline_schema_version": CATALOG_SCHEMA_VERSION,
         "calendar_coverage": calendar,
-        "capital_pools": provenance.get("capital_pools")
-        or [
-            {
-                "base_currency": "USD",
-                "name": "Systematic capital",
-                "pool_id": "systematic-capital",
-                "role": "SYSTEMATIC",
-            },
-            {
-                "base_currency": "USD",
-                "name": "Reserve capital",
-                "pool_id": "reserve-capital",
-                "role": "RESERVE",
-            },
-        ],
         "corrections": provenance.get("corrections", []),
         "costs": costs,
         "evidence_layer_metrics": layer_metrics,
@@ -2511,16 +1660,11 @@ def build_catalog(
             ),
         ),
         "fact_coverage": fact_coverage,
-        "fact_coverage_matrix": fact_coverage_matrix,
         "flows": flows,
         "implementation_gaps": implementation_gaps,
         "nav_observations": nav,
-        "observation_windows": observation_windows,
         "policy_version": POLICY_VERSION,
         "positions": positions,
-        "provider_admissions": provider_admissions,
-        "provider_coverage": provider_coverage,
-        "provider_strategy_returns": provider_strategy_returns,
         "provenance": provenance_ref,
         "reconciliation_checks": [
             nav_reconciliation,
@@ -2535,7 +1679,6 @@ def build_catalog(
                 "value_usd": replay["total_liquid_usd"],
             },
             *([schwab_reconciliation] if schwab_reconciliation is not None else []),
-            *([position_reconciliation] if position_reconciliation is not None else []),
         ],
         "reconciliation_exceptions": exceptions,
         "replay": replay,
@@ -2544,14 +1687,9 @@ def build_catalog(
         "strategies": strategies,
         "strategy_live_metrics": live_metrics,
         "strategy_nav_coverage": strategy_nav_coverage,
-        "strategy_provider_evidence": strategy_provider_evidence,
-        "strategy_returns": strategy_returns,
         "transactions": transactions,
         "unmapped_records": unmapped,
-        "attribution_dispositions": attribution_dispositions,
     }
-    if provenance.get("strategy_version_catalog") is not None:
-        catalog["strategy_version_catalog"] = provenance["strategy_version_catalog"]
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
         artifact_id="normalized/portfolio-baseline.json",
@@ -2561,25 +1699,13 @@ def build_catalog(
         schema_name="portfolio-baseline-catalog",
         schema_version=str(CATALOG_SCHEMA_VERSION),
     )
-    # Physical root bindings are runtime locators, not financial evidence.  The
-    # same hash-identified inputs must therefore produce the same generation
-    # when a governed pipeline stages them under a different private root.
-    # Retain every semantic field while replacing machine-specific locators
-    # with their logical registry identities for the manifest artifact.
-    semantic_spec = json.loads(canonical_json_bytes(spec))
-    semantic_spec["roots"] = {
-        root_id: f"root-id:{root_id}" for root_id in sorted(roots)
-    }
-    semantic_provenance = semantic_spec.get("provenance")
-    if isinstance(semantic_provenance, dict) and "root" in semantic_provenance:
-        semantic_provenance["root"] = "root-id:provenance"
-    semantic_spec_bytes = canonical_json_bytes(semantic_spec)
+    spec_hash, spec_size = hash_file(spec_path)
     spec_artifact = SourceArtifact(
-        artifact_id="config/portfolio-baseline-semantic-spec.json",
-        sha256=hashlib.sha256(semantic_spec_bytes).hexdigest(),
-        size_bytes=len(semantic_spec_bytes),
+        artifact_id="config/portfolio-baseline-spec.json",
+        sha256=spec_hash,
+        size_bytes=spec_size,
         as_of_date=as_of,
-        schema_name="portfolio-baseline-semantic-spec",
+        schema_name="portfolio-baseline-spec",
         schema_version=str(spec["schema_version"]),
     )
     observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]

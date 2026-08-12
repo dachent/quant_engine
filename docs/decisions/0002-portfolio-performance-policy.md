@@ -200,45 +200,7 @@ calculation cannot advance the accepted report or generation pointer.
    `ELIGIBLE_FOR_REVIEW`, which still requires a new allocation decision and
    does not authorize capital movement or trading.
 
-### 10. Material HWM perimeter amendments
-
-The repository owner amended the HWM perimeter on 2026-08-01. The governed
-machine-readable historical policy is `contracts/portfolio-hwm-policy-v2.json`
-(`PORT-HWM-2`). On 2026-08-06 the owner added an independently named $0.19
-EchoTrade de-minimis disposition. The current policy is
-`contracts/portfolio-hwm-policy-v3.json` (`PORT-HWM-3`); v2 remains immutable
-for reproduction of earlier generations.
-
-1. Composer Holy Grail remains in capital, allocation, and consolidated-value
-   reporting, but is excluded de minimis from the material HWM denominator.
-   This is a named exception, not a general materiality threshold.
-2. Growth at Market Pivot Points [EchoTrade] remains in capital, allocation,
-   and consolidated-value reporting, but is excluded de minimis from the
-   material HWM denominator effective 2026-08-06. This is a named $0.19
-   disposition, not a general materiality threshold.
-3. Every other current systematic strategy remains in the material perimeter.
-4. Hash-verified provider-custodied account NAV is acceptable HWM evidence when
-   it is tied to exactly one positive live holding and normalized without
-   interpolation or evidence-layer substitution.
-5. Robuxio meets that rule through the accepted Matrixport generation. Volatis
-   meets it through the accepted Quantbase generation after non-rebalance cash
-   additions reconcile to observed cost-basis increases. Their account-live
-   paths contribute to material HWM coverage. Full-material HWM remains
-   unavailable while any other included strategy lacks accepted daily evidence
-   through its declared boundary. Account-live strategies use account-lane
-   freshness; permitted provider-live strategies use provider-lane freshness.
-   `STALE` or `UNAVAILABLE` blocks the HWM path, while `LATE` escalates without
-   being silently relabeled stale.
-
-The HWM summary always states exact covered, governed, uncovered, and excluded
-dollars. While any included sleeve is unqualified, the numerical
-full-systematic HWM remains unavailable rather than displaying a zero multiple.
-
-This amendment changes HWM coverage only. It does not change reported capital,
-the 15% systematic drawdown limit, the distinction between sleeve and composite
-drawdown, or any trading authority.
-
-### 11. Reproducibility
+### 10. Reproducibility
 
 The synthetic conformance vectors in
 `contracts/portfolio-performance-policy-v1.json` are normative examples for

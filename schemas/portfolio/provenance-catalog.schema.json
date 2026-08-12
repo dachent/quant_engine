@@ -11,71 +11,23 @@
     "acquisition_date",
     "source_artifacts",
     "accounts",
-    "capital_pools",
     "strategies",
-    "strategy_version_catalog",
     "assignments",
     "corrections",
     "open_gaps",
     "assumptions"
   ],
   "properties": {
-    "catalog_schema_version": {"const": 2},
+    "catalog_schema_version": {"const": 1},
     "policy_version": {"const": "PORT-PERF-1"},
     "as_of_date": {"type": "string", "format": "date"},
     "acquisition_date": {"type": "string", "format": "date"},
     "source_artifacts": {"type": "array", "minItems": 1},
     "accounts": {"type": "array", "minItems": 1},
-    "capital_pools": {
-      "type": "array",
-      "minItems": 2,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["base_currency", "name", "pool_id", "role"],
-        "properties": {
-          "base_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
-          "name": {"type": "string", "minLength": 1},
-          "pool_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
-          "role": {"enum": ["SYSTEMATIC", "RESERVE"]}
-        }
-      }
-    },
-    "strategies": {
-      "type": "array",
-      "minItems": 9,
-      "maxItems": 9,
-      "items": {"$ref": "#/$defs/strategy"}
-    },
-    "strategy_version_catalog": {
-      "$ref": "strategy-version-catalog.schema.json"
-    },
+    "strategies": {"type": "array", "minItems": 9, "maxItems": 9},
     "assignments": {"type": "array"},
     "corrections": {"type": "array"},
     "open_gaps": {"type": "array"},
     "assumptions": {"type": "array"}
-  },
-  "$defs": {
-    "strategy": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "aliases", "cost_status", "coverage_status", "economic_family",
-        "evidence_routes", "gaps", "name", "strategy_id",
-        "version_disposition", "version_ref"
-      ],
-      "properties": {
-        "aliases": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-        "cost_status": {"enum": ["KNOWN", "PARTIAL", "UNAVAILABLE"]},
-        "coverage_status": {"enum": ["COMPLETE_WITHIN_DECLARED_BOUNDARY", "PARTIAL", "FAILED"]},
-        "economic_family": {"type": "string", "minLength": 1},
-        "evidence_routes": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-        "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
-        "name": {"type": "string", "minLength": 1},
-        "strategy_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
-        "version_disposition": {"enum": ["EVIDENCED", "REFERENCE_ONLY", "UNRESOLVED"]},
-        "version_ref": {"type": ["string", "null"]}
-      }
-    }
   }
 }

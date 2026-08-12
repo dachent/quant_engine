@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 import sys
 from typing import Any
-from urllib.parse import urljoin
 
 import pytest
 
@@ -80,27 +79,6 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
         "open_gaps.csv",
     ]
     strategies = []
-    strategy_versions = []
-    unavailable_slot = {
-        "artifact_sha256": None,
-        "disposition": "SYNTHETIC evidence is deliberately unavailable.",
-        "evidence_layer": None,
-        "observed_end": None,
-        "observed_start": None,
-        "source_ids": ["synthetic-source"],
-        "status": "UNAVAILABLE",
-        "version_ref": None,
-    }
-    source_route_slot = {
-        "artifact_sha256": None,
-        "disposition": "SYNTHETIC hash-bound source route only.",
-        "evidence_layer": "ACCOUNT_LIVE",
-        "observed_end": None,
-        "observed_start": None,
-        "source_ids": ["synthetic-source"],
-        "status": "REFERENCE_ONLY",
-        "version_ref": None,
-    }
     for index in range(1, 10):
         strategies.append(
             {
@@ -126,48 +104,6 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
                 "version_ref": None,
             }
         )
-        strategy_versions.append(
-            {
-                "backtest": dict(unavailable_slot),
-                "benchmark": dict(unavailable_slot),
-                "compatibility_reason": "SYNTHETIC version is unresolved.",
-                "compatibility_status": "UNRESOLVED",
-                "configuration": dict(unavailable_slot),
-                "costs": dict(unavailable_slot),
-                "design": dict(unavailable_slot),
-                "disposition": "UNRESOLVED",
-                "disposition_reason": "SYNTHETIC authoritative version is absent.",
-                "effective_end": None,
-                "effective_start": "2026-07-30",
-                "evidence_layers": [
-                    {
-                        "artifact_sha256": None,
-                        "disposition": "SYNTHETIC account-live route is reference only.",
-                        "evidence_layer": "ACCOUNT_LIVE",
-                        "observed_end": None,
-                        "observed_start": None,
-                        "source_id": "synthetic-source",
-                        "status": "REFERENCE_ONLY",
-                        "version_ref": None,
-                    },
-                    {
-                        "artifact_sha256": None,
-                        "disposition": "SYNTHETIC backtest is unavailable.",
-                        "evidence_layer": "BACKTEST",
-                        "observed_end": None,
-                        "observed_start": None,
-                        "source_id": "synthetic-source",
-                        "status": "UNAVAILABLE",
-                        "version_ref": None,
-                    },
-                ],
-                "gaps": ["SYNTHETIC authoritative version is absent."],
-                "live_boundary": dict(unavailable_slot),
-                "source_route": dict(source_route_slot),
-                "strategy_id": f"strategy-{index}",
-                "version_ref": None,
-            }
-        )
     spec: dict[str, Any] = {
         "acquisition_date": "2026-07-30",
         "as_of_date": "2026-07-30",
@@ -187,7 +123,7 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
             "source_routes": ["synthetic-source"],
         },
         "roots": {"synthetic-root": str(source_root)},
-        "schema_version": 2,
+        "schema_version": 1,
         "source_groups": [
             {
                 "as_of_date": "2026-07-30",
@@ -201,11 +137,6 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
             }
         ],
         "strategies": strategies,
-        "strategy_version_catalog": {
-            "as_of_date": "2026-07-30",
-            "catalog_schema_version": 2,
-            "strategies": strategy_versions,
-        },
         "tracker_imports": {
             "assignments": {
                 "relative_path": "assignments.csv",
@@ -249,16 +180,6 @@ def test_stage_is_deterministic_private_and_imports_explicit_tracker_evidence(
         "INVESTMENT",
         "RESERVE",
     }
-    assert {item["role"] for item in catalog["capital_pools"]} == {
-        "SYSTEMATIC",
-        "RESERVE",
-    }
-    assert {item["pool_mapping_status"] for item in catalog["assignments"]} == {
-        "MAPPED"
-    }
-    assert {
-        item["strategy_mapping_disposition"] for item in catalog["assignments"]
-    } == {"STRATEGY_MAPPED", "HISTORICAL_POOL_ONLY"}
     assert {item["mapping_status"] for item in catalog["assignments"]} == {
         "MAPPED",
         "UNMAPPED",
@@ -267,14 +188,6 @@ def test_stage_is_deterministic_private_and_imports_explicit_tracker_evidence(
         catalog["strategies"][0]["evidence_routes"][0]["evidence_layer"]
         != (catalog["strategies"][0]["evidence_routes"][1]["evidence_layer"])
     )
-    assert {item["version_disposition"] for item in catalog["strategies"]} == {
-        "UNRESOLVED"
-    }
-    assert len(catalog["strategy_version_catalog"]["strategies"]) == 9
-    assert {
-        item["compatibility_status"]
-        for item in catalog["strategy_version_catalog"]["strategies"]
-    } == {"UNRESOLVED"}
     assert first["catalog_sha256"] == hashlib.sha256(catalog_bytes).hexdigest()
     assert not (output_root / "CURRENT.json").exists()
 
@@ -284,7 +197,6 @@ def test_input_order_does_not_change_generation_identity(tmp_path: Path) -> None
     original = provenance.build_catalog(spec_path)
     spec["source_groups"][0]["relative_paths"].reverse()
     spec["strategies"].reverse()
-    spec["strategy_version_catalog"]["strategies"].reverse()
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     reordered = provenance.build_catalog(spec_path)
 
@@ -333,51 +245,6 @@ def test_hash_drift_unknown_labels_and_strategy_count_fail_closed(
         provenance.build_catalog(spec_path)
 
 
-def test_strategy_version_catalog_requires_one_row_per_current_strategy(
-    tmp_path: Path,
-) -> None:
-    spec_path, spec = _spec(tmp_path)
-    spec["strategy_version_catalog"]["strategies"].pop()
-    spec_path.write_text(json.dumps(spec), encoding="utf-8")
-
-    with pytest.raises(provenance.ProvenanceValidationError, match="exactly 9"):
-        provenance.build_catalog(spec_path)
-
-
-def test_strategy_version_evidence_must_bind_an_admitted_source_hash(
-    tmp_path: Path,
-) -> None:
-    spec_path, spec = _spec(tmp_path)
-    design = spec["strategy_version_catalog"]["strategies"][0]["design"]
-    design.update(
-        {
-            "artifact_sha256": "0" * 64,
-            "evidence_layer": "BACKTEST",
-            "status": "EVIDENCED",
-        }
-    )
-    spec_path.write_text(json.dumps(spec), encoding="utf-8")
-
-    with pytest.raises(
-        provenance.ProvenanceValidationError,
-        match="not an admitted source artifact",
-    ):
-        provenance.build_catalog(spec_path)
-
-
-def test_evidenced_layer_requires_an_admitted_hash_or_version(tmp_path: Path) -> None:
-    spec_path, spec = _spec(tmp_path)
-    layer = spec["strategy_version_catalog"]["strategies"][0]["evidence_layers"][0]
-    layer["status"] = "EVIDENCED"
-    spec_path.write_text(json.dumps(spec), encoding="utf-8")
-
-    with pytest.raises(
-        provenance.ProvenanceValidationError,
-        match="EVIDENCED strategy evidence layer requires an artifact hash or version",
-    ):
-        provenance.build_catalog(spec_path)
-
-
 def test_spec_and_catalog_schemas_preserve_closed_top_level_contracts() -> None:
     spec_schema = json.loads(
         (
@@ -389,23 +256,8 @@ def test_spec_and_catalog_schemas_preserve_closed_top_level_contracts() -> None:
             REPOSITORY_ROOT / "schemas" / "portfolio" / "provenance-catalog.schema.json"
         ).read_text(encoding="utf-8")
     )
-    baseline_schema = json.loads(
-        (
-            REPOSITORY_ROOT / "schemas" / "portfolio" / "baseline-catalog.schema.json"
-        ).read_text(encoding="utf-8")
-    )
-    version_schema = json.loads(
-        (
-            REPOSITORY_ROOT
-            / "schemas"
-            / "portfolio"
-            / "strategy-version-catalog.schema.json"
-        ).read_text(encoding="utf-8")
-    )
     assert spec_schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert spec_schema["additionalProperties"] is False
-    assert spec_schema["properties"]["schema_version"]["const"] == 2
-    assert "strategy_version_catalog" in spec_schema["required"]
     assert spec_schema["properties"]["strategies"]["minItems"] == 9
     assert spec_schema["properties"]["strategies"]["maxItems"] == 9
     assert (
@@ -417,16 +269,7 @@ def test_spec_and_catalog_schemas_preserve_closed_top_level_contracts() -> None:
         == provenance._EVIDENCE_LAYERS
     )
     assert catalog_schema["additionalProperties"] is False
-    assert catalog_schema["properties"]["catalog_schema_version"]["const"] == 2
-    assert "strategy_version_catalog" in catalog_schema["required"]
     assert catalog_schema["properties"]["strategies"]["minItems"] == 9
-    assert "strategy_version_catalog" in baseline_schema["required"]
-    for parent in (spec_schema, catalog_schema, baseline_schema):
-        reference = parent["properties"]["strategy_version_catalog"]["$ref"]
-        assert urljoin(parent["$id"], reference) == version_schema["$id"]
-    layer_record = version_schema["$defs"]["layer_record"]
-    assert layer_record["additionalProperties"] is False
-    assert layer_record["allOf"][0]["then"]["anyOf"]
 
 
 def test_cli_reports_sanitized_counts_only(

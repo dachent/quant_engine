@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping
 import csv
-from datetime import UTC, date, datetime
+from datetime import date
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -26,8 +26,8 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 SPEC_SCHEMA_VERSION = 1
-CATALOG_SCHEMA_VERSION = 2
-ADAPTER_VERSION = "0.2.1"
+CATALOG_SCHEMA_VERSION = 1
+ADAPTER_VERSION = "0.2.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REQUIRED_REPORTS = {
     "reports/coverage.json",
@@ -233,7 +233,7 @@ def _strings(value: object, name: str) -> list[str]:
 
 def _report_contract(
     paths: Mapping[str, Path], *, run_id: str, baseline: Mapping[str, Any]
-) -> tuple[list[dict[str, object]], dict[str, int], list[str], date]:
+) -> tuple[list[dict[str, object]], dict[str, int], list[str]]:
     _strict(
         baseline,
         {
@@ -278,15 +278,6 @@ def _report_contract(
         or extraction.get("request_count") != request_count
     ):
         raise MatrixportGenerationError("extraction summary differs")
-    run_end_ms = _integer(extraction.get("run_end_ms"), "run_end_ms")
-    if run_end_ms == 0:
-        raise MatrixportGenerationError("run_end_ms must be positive")
-    try:
-        observed_boundary = datetime.fromtimestamp(run_end_ms / 1000, tz=UTC).date()
-    except (OSError, OverflowError, ValueError) as exc:
-        raise MatrixportGenerationError(
-            "run_end_ms is outside the supported range"
-        ) from exc
     extraction_counts = _expected_counts(
         extraction.get("dataset_counts"), "dataset_counts"
     )
@@ -383,7 +374,7 @@ def _report_contract(
     )
     if request_lines != request_count:
         raise MatrixportGenerationError("request manifest count differs")
-    return datasets, coverage, actual_gaps, observed_boundary
+    return datasets, coverage, actual_gaps
 
 
 def build_generation(
@@ -404,13 +395,9 @@ def build_generation(
         as_of=as_of,
         expected_count=_integer(baseline.get("artifact_count"), "artifact_count"),
     )
-    datasets, coverage_counts, known_gaps, observed_boundary = _report_contract(
+    datasets, coverage_counts, known_gaps = _report_contract(
         artifacts, run_id=run_id, baseline=baseline
     )
-    if observed_boundary != as_of:
-        raise MatrixportGenerationError(
-            "as_of_date must equal the extraction run_end_ms UTC date"
-        )
     catalog: dict[str, object] = {
         "aliases": ["BIT", "BIT.com"],
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
@@ -418,7 +405,6 @@ def build_generation(
         "coverage_status_counts": coverage_counts,
         "datasets": datasets,
         "known_gaps": known_gaps,
-        "observed_boundary_date": observed_boundary.isoformat(),
         "provider_id": "matrixport",
         "request_count": baseline["request_count"],
         "source_run_id": run_id,
@@ -444,87 +430,12 @@ def build_generation(
                 "provider lifetime retention is not claimed."
             ),
             fact_types=tuple(str(item["dataset"]) for item in datasets),
-            observed_start=observed_boundary,
-            observed_end=observed_boundary,
             known_gaps=tuple(known_gaps),
         ),
         artifacts=(*source_artifacts, catalog_artifact),
         verification=VerificationStatus.VERIFIED,
     )
     return catalog, manifest, catalog_bytes
-
-
-def draft_generation_spec(run_root: Path, as_of_date: date) -> bytes:
-    """Build the exact acceptance spec for one completed, verified export."""
-
-    root = run_root.expanduser().resolve(strict=True)
-    if root.is_symlink() or not root.is_dir():
-        raise MatrixportGenerationError("run_root must be a real directory")
-    run_id = root.name
-    required = tuple(sorted(_REQUIRED_REPORTS))
-    for relative in required:
-        _source_path(root, relative)
-    extraction = _object(
-        _json(root / "reports" / "extraction_summary.json", "extraction_summary"),
-        "extraction_summary",
-    )
-    verification = _object(
-        _json(root / "reports" / "verification.json", "verification"),
-        "verification",
-    )
-    checks = _object(verification.get("checks"), "verification.checks")
-    coverage_check = _object(checks.get("coverage"), "checks.coverage")
-    valuation_check = _object(checks.get("valuation"), "checks.valuation")
-    coverage_rows = _json(root / "reports" / "coverage.json", "coverage")
-    dataset_rows = _dataset_manifest(root / "reports" / "dataset_manifest.csv")
-    artifacts: list[dict[str, object]] = []
-    paths = [
-        *sorted((root / "csv").glob("*.csv")),
-        *(root.joinpath(*PurePosixPath(relative).parts) for relative in required),
-    ]
-    for path in paths:
-        relative = path.relative_to(root).as_posix()
-        digest, size = hash_file(path)
-        if relative.startswith("csv/"):
-            schema_name = "matrixport-canonical-csv"
-        elif relative.endswith(".csv"):
-            schema_name = "matrixport-acceptance-csv"
-        elif relative.endswith(".jsonl"):
-            schema_name = "matrixport-acceptance-jsonl"
-        else:
-            schema_name = "matrixport-acceptance-json"
-        artifacts.append(
-            {
-                "artifact_id": relative,
-                "expected_sha256": digest,
-                "expected_size_bytes": size,
-                "relative_path": relative,
-                "schema_name": schema_name,
-                "schema_version": "1",
-            }
-        )
-    known_gaps = sorted(
-        _strings(
-            coverage_check.get("source_limited_reasons", []),
-            "source_limited_reasons",
-        )
-        + _strings(valuation_check.get("reasons", []), "valuation.reasons")
-    )
-    payload = {
-        "artifacts": artifacts,
-        "as_of_date": as_of_date.isoformat(),
-        "baseline": {
-            "artifact_count": len(artifacts),
-            "coverage_status_counts": _coverage_counts(coverage_rows),
-            "dataset_count": len(dataset_rows),
-            "known_gaps": known_gaps,
-            "request_count": _integer(extraction.get("request_count"), "request_count"),
-        },
-        "run_id": run_id,
-        "run_root": str(root),
-        "schema_version": SPEC_SCHEMA_VERSION,
-    }
-    return canonical_json_bytes(payload)
 
 
 def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, object]:

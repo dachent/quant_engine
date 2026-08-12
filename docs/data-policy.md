@@ -2,7 +2,7 @@
 
 This document is the normative project policy for classifying, storing,
 processing, transmitting, quarantining, and releasing `quant_engine` data. It
-applies to the repository, governed external data roots, local tooling, GitHub, CI,
+applies to the repository, sibling data roots, local tooling, GitHub, CI,
 provider access, generated reports, and future broker integrations. A governing
 issue may make the boundary stricter but may not silently weaken it.
 
@@ -16,7 +16,7 @@ documented review establishes otherwise.
 |---|---|---|---|---|
 | `PUBLIC` | Public project descriptions, public upstream citations, non-sensitive schemas | Repository or approved public destination | Allowed when the governing issue authorizes the write | Only to the destination and purpose named by the issue |
 | `INTERNAL` | Source code, architecture, tests, runbooks, wholly invented fixtures | Repository and approved local work areas | Allowed after repository-boundary checks | Only to approved engineering systems; minimize content |
-| `RESTRICTED_FINANCIAL` | Real research data, holdings, transactions, balances, NAV, allocations, reports, provider responses, external account identifiers and crosswalks | Governed external data roots, including `C:\Tools\quant-engine\data`, or another explicitly approved restricted store | Prohibited | No egress without a current issue naming destination, fields, purpose, retention, entitlement, and recovery |
+| `RESTRICTED_FINANCIAL` | Real research data, holdings, transactions, balances, NAV, allocations, reports, provider responses, external account identifiers and crosswalks | Governed sibling data roots or another explicitly approved restricted store | Prohibited | No egress without a current issue naming destination, fields, purpose, retention, entitlement, and recovery |
 | `SECRET_AUTH` | Passwords, API/Flex tokens, private keys, authorization headers, cookies, browser storage, authenticated HAR/session material | Issue-approved operating-system credential store or restricted temporary quarantine outside Git | Prohibited | Only to the exact authorized provider authentication surface; never to models, logs, GitHub, CI, or reports |
 
 `SYNTHETIC` is a fixture provenance marker, not a fifth sensitivity class. A
@@ -30,7 +30,7 @@ cannot receive that marker.
 
 The Git worktree contains code, contracts, schemas, runbooks, and exact
 allowlisted synthetic fixtures. Real specifications and provider data live in
-the governed roots documented in the system architecture. They are not mounted,
+the sibling roots documented in the system architecture. They are not mounted,
 linked, junctioned, copied, cached, or published inside the repository.
 
 - Configuration uses normalized paths and local credential references. It does
@@ -228,10 +228,10 @@ generation or report unchanged.
   are `SECRET_AUTH`, must be invalidated or quarantined under its security
   issue, and cannot be committed even if redacted. Expired or ambiguous
   sessions fail closed.
-- **Alpaca:** plaintext reports are quarantined. The accepted evidence contains
-  a key identifier but no authenticating key pair; no provider mutation was
-  performed. The maintained adapter is method-allowlisted and semantically
-  read-only; execution is a separate future initiative.
+- **Alpaca:** suspected plaintext keys and reports remain quarantined. The
+  affected key is revoked or rotated only through its approved security issue,
+  followed by lineage scanning before any content import. The maintained
+  adapter is semantically read-only; execution is a separate future initiative.
 - **IBKR:** Flex uses a least-privilege query and token reference in the
   approved credential store. Flex is finalized historical authority; TWS is
   current/intraday authority. Historical market bars are not account history,
@@ -271,4 +271,4 @@ A failed check does not loosen policy. Keep the candidate unmerged, remove only
 disposable test artifacts, preserve the accepted predecessor, diagnose the
 failure, and rerun only after a relevant change. A merged defect is corrected
 through a governed revert or corrective pull request; do not rewrite history or
-touch governed external data roots as an improvised recovery.
+touch sibling data roots as an improvised recovery.

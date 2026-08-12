@@ -5,9 +5,8 @@ into interchangeable evidence:
 
 - the Developer API is the preferred recurring source for current balances and
   positions when an authenticated local client is available;
-- reviewed Web Contract Harvester capture outputs are the historical fact
-  authority for daily balances and all-time transactions, and provide a bounded
-  current-position snapshot;
+- reviewed Web Contract Harvester responses provide historical daily balances,
+  all-time transactions, and a bounded current-position snapshot;
 - frozen manual exports and the legacy workbook are reconciliation and semantic
   references only.
 
@@ -17,43 +16,6 @@ captured, hash-bound response. Cash and money-market rows are excluded as sweep
 vehicles. External account identifiers are mapped to internal IDs and are not
 written to the normalized snapshot. If current account balances are absent,
 they remain `UNAVAILABLE`.
-
-## Web capture methods and boundaries
-
-Passive CDP/HAR capture remains the discovery method for an unknown site. It
-records the browser's network traffic so routes, pagination, schemas, and
-redaction rules can be reviewed before a recurring extractor is trusted.
-
-The accepted recurring Schwab history capture uses Playwright over CDP against
-the normal Schwab client portal session. The portal is an Angular single-page
-application that sends a Bearer authorization header and Schwab-specific
-headers to its REST backend. After the application has authenticated normally,
-the local capture process observes those request headers and uses Playwright's
-request context to perform the known, read-only REST requests for each selected
-account. Transaction responses are paginated using the response `bookmark`.
-The process captures:
-
-- historical daily balances; and
-- all-time transactions.
-
-This is not a general browser-authentication technique. It applies only to the
-validated Angular-SPA and reusable-Bearer-header contract. It must not be
-assumed to work for server-rendered sites, httpOnly-cookie-only sessions,
-CSRF-bound forms, WebSocket-only feeds, or per-request signed or rotating
-headers. Those architectures require their own discovery and validation; they
-must not silently route through this Schwab method.
-
-Current positions and current balances should come from the Schwab Developer
-API when that local authenticated client is available. The Playwright capture
-does not replace that authority and is not an order or account-mutation path.
-Bearer tokens, cookies, browser profiles, external account identifiers, and
-raw financial responses remain outside Git.
-
-The operator runbook retained during the governed source cutover is
-`dataSchwab\source-runs\legacy-20260731\schwab_har\RUNBOOK_SCHWAB_CAPTURE.md`.
-That path is a private data-root reference, not a repository dependency. The
-former Playground workspace was dissolved and must not be recreated as a
-second authority.
 
 ## Normalize and stage
 

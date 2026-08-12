@@ -7,22 +7,13 @@ strategy-intelligence package.
 ## Boundaries
 
 - The private specification and generated catalog stay outside Git under the
-  configured portfolio-data boundary (`C:\Tools\quant-engine\data` on this workstation).
+  configured `dataPortfolio` boundary.
 - Source roots exist only in the private input specification. Generated output
   keeps root IDs and relative paths, never absolute workstation paths.
 - Every source file is listed explicitly. The builder never walks a directory,
   expands a glob, calls a provider, or copies source content.
 - Exactly nine current strategies are required. Candidate/provider research may
   be hash-anchored as evidence but cannot become a strategy record.
-- The v2 specification also requires exactly one current, effective-dated
-  strategy-version row for each of those nine strategies. Design,
-  configuration, backtest, live-boundary, cost, benchmark, and source-route
-  evidence are separate slots; an admitted return-series hash is not silently
-  relabeled as a design or backtest version.
-- `EVIDENCED` version slots must bind an admitted source hash or explicit
-  version reference. `REFERENCE_ONLY` retains its source route, while
-  `UNAVAILABLE` and `UNRESOLVED` remain explicit. Compatibility is never
-  inferred across evidence layers or provider vintages.
 - Evidence routes retain one `PORT-PERF-1` layer each. The catalog does not join
   or concatenate layers.
 - Tracker label `General` or another deliberately named legacy label may be
@@ -40,7 +31,7 @@ The local output follows
 
 The initial tracker and allocation evidence has completed the governed
 single-authority cutover. The configured roots now resolve only to the exact,
-hash-identified source-run copy under the private portfolio-data boundary.
+hash-identified source-run copy under the private `dataPortfolio` boundary.
 The former external working roots are absent. Read-only recovery copies and
 cutover parity manifests are retained outside Git, but they are not writable
 authority and must never be configured as live inputs.
@@ -57,7 +48,7 @@ Run from the repository with the frozen workspace:
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_provenance.py stage `
   --spec <private-spec.json> `
-  --output-root <portfolio-root>\provenance
+  --output-root <dataPortfolio-provenance-root>
 ```
 
 The command hashes each exact source, checks optional expected hashes, imports
@@ -73,8 +64,7 @@ internal account IDs, validates the strategy catalog, and stages:
 
 Repeated staging is idempotent only for identical bytes. A missing source,
 hash mismatch, unknown tracker label, invalid interval, ambiguous strategy
-alias, missing reserve, non-nine strategy set, missing version row, or
-unadmitted version-evidence hash fails before publication.
+alias, missing reserve, or non-nine strategy set fails before publication.
 
 ## Publish
 
@@ -85,7 +75,7 @@ candidate:
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_provenance.py publish `
   --spec <private-spec.json> `
-  --output-root <portfolio-root>\provenance `
+  --output-root <dataPortfolio-provenance-root> `
   --generation-id <accepted-generation-id>
 ```
 

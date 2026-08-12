@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -183,10 +183,6 @@ class AccountStrategyAssignment:
                 self, field_name, _text(getattr(self, field_name), field_name)
             )
         _decimal(self.weight, "assignment.weight")
-        if not isinstance(self.effective_start, date):
-            raise LedgerValidationError(
-                "assignment.effective_start must be an explicit date"
-            )
         if self.weight <= 0 or self.weight > 1:
             raise LedgerValidationError(
                 "assignment.weight must be greater than 0 and at most 1"
@@ -446,41 +442,25 @@ def _validate_assignment_intervals(
             if record.effective_end is not None and record.effective_end < date.max:
                 boundaries.add(record.effective_end + timedelta(days=1))
         for strategy_records in by_strategy.values():
-            ordered = sorted(
-                strategy_records,
-                key=lambda item: item.effective_start,
-            )
+            ordered = sorted(strategy_records, key=lambda item: item.effective_start)
             for previous, current in zip(ordered, ordered[1:], strict=False):
                 if (
                     previous.effective_end is None
-                    or (current.effective_start) <= previous.effective_end
+                    or current.effective_start <= previous.effective_end
                 ):
                     raise LedgerValidationError(
                         f"overlapping assignment intervals for account {account_id}"
                     )
-        coverage_end = (
-            date.max
-            if any(record.effective_end is None for record in records)
-            else max(
-                record.effective_end
-                for record in records
-                if record.effective_end is not None
-            )
-        )
         for boundary in sorted(boundaries):
-            if boundary > coverage_end:
-                continue
             active = [
                 record
                 for record in records
-                if (record.effective_start <= boundary)
+                if record.effective_start <= boundary
                 and (record.effective_end is None or boundary <= record.effective_end)
             ]
-            if not active:
-                raise LedgerValidationError(
-                    f"assignment timeline gap for account {account_id}"
-                )
-            if sum((record.weight for record in active), Decimal("0")) != Decimal("1"):
+            if active and sum(
+                (record.weight for record in active), Decimal("0")
+            ) != Decimal("1"):
                 raise LedgerValidationError(
                     f"active assignment weights for account {account_id} must sum to 1"
                 )
@@ -594,46 +574,6 @@ class LedgerSlice:
                 )
         _validate_assignment_intervals(account_map, accepted_assignments)
 
-        assignments_by_account: dict[str, tuple[AccountStrategyAssignment, ...]] = {}
-        for account_id in account_map:
-            assignments_by_account[account_id] = tuple(
-                item for item in accepted_assignments if item.account_id == account_id
-            )
-
-        def reconcile_mapping(
-            account: Account,
-            day: date,
-            mapping_status: MappingStatus,
-            strategy_id: str | None,
-        ) -> tuple[MappingStatus, str | None]:
-            validate_mapping(account, mapping_status, strategy_id)
-            if account.role is AccountRole.RESERVE:
-                return MappingStatus.NOT_APPLICABLE, None
-
-            active = tuple(
-                item
-                for item in assignments_by_account[account.account_id]
-                if item.effective_start <= day
-                and (item.effective_end is None or day <= item.effective_end)
-            )
-            active_ids = {item.strategy_id for item in active}
-            if mapping_status is MappingStatus.MAPPED:
-                if strategy_id not in active_ids:
-                    raise LedgerValidationError(
-                        "MAPPED fact does not match an effective assignment"
-                    )
-                return MappingStatus.MAPPED, strategy_id
-
-            if len(active) == 1 and active[0].weight == Decimal("1"):
-                return MappingStatus.MAPPED, active[0].strategy_id
-            return MappingStatus.UNMAPPED, None
-
-        _logical_unique(
-            accepted_positions,
-            key=lambda item: (item.account_id, item.security_id, item.as_of_date),
-            object_name="account/security/date position",
-        )
-        normalized_positions: list[PositionSnapshot] = []
         for position in accepted_positions:
             account = require_account(position.account_id)
             if position.security_id not in security_ids:
@@ -644,25 +584,20 @@ class LedgerSlice:
                 raise LedgerValidationError(
                     "position market value currency must equal account base currency"
                 )
+            validate_mapping(account, position.mapping_status, position.strategy_id)
             if position.as_of_date > as_of_date:
                 raise LedgerValidationError("position is later than ledger as_of_date")
-            mapping_status, strategy_id = reconcile_mapping(
-                account,
-                position.as_of_date,
-                position.mapping_status,
-                position.strategy_id,
-            )
-            normalized_positions.append(
-                replace(
-                    position,
-                    mapping_status=mapping_status,
-                    strategy_id=strategy_id,
-                )
-            )
-        accepted_positions = tuple(normalized_positions)
-        normalized_transactions: list[Transaction] = []
+        _logical_unique(
+            accepted_positions,
+            key=lambda item: (item.account_id, item.security_id, item.as_of_date),
+            object_name="account/security/date position",
+        )
+
         for transaction in accepted_transactions:
             account = require_account(transaction.account_id)
+            validate_mapping(
+                account, transaction.mapping_status, transaction.strategy_id
+            )
             if (
                 transaction.security_id is not None
                 and transaction.security_id not in security_ids
@@ -674,37 +609,16 @@ class LedgerSlice:
                 raise LedgerValidationError(
                     "transaction is later than ledger as_of_date"
                 )
-            mapping_status, strategy_id = reconcile_mapping(
-                account,
-                transaction.event_date,
-                transaction.mapping_status,
-                transaction.strategy_id,
-            )
-            normalized_transactions.append(
-                replace(
-                    transaction,
-                    mapping_status=mapping_status,
-                    strategy_id=strategy_id,
-                )
-            )
-        accepted_transactions = tuple(normalized_transactions)
 
-        normalized_flows: list[CashFlow] = []
         for flow in accepted_flows:
             account = require_account(flow.account_id)
+            validate_mapping(account, flow.mapping_status, flow.strategy_id)
             if flow.event_date > as_of_date:
                 raise LedgerValidationError("cash flow is later than ledger as_of_date")
-            mapping_status, strategy_id = reconcile_mapping(
-                account, flow.event_date, flow.mapping_status, flow.strategy_id
-            )
-            normalized_flows.append(
-                replace(flow, mapping_status=mapping_status, strategy_id=strategy_id)
-            )
-        accepted_flows = tuple(normalized_flows)
 
-        normalized_actions: list[CorporateAction] = []
         for action in accepted_actions:
             account = require_account(action.account_id)
+            validate_mapping(account, action.mapping_status, action.strategy_id)
             if (
                 action.security_id is not None
                 and action.security_id not in security_ids
@@ -716,13 +630,6 @@ class LedgerSlice:
                 raise LedgerValidationError(
                     "corporate action is later than ledger as_of_date"
                 )
-            mapping_status, strategy_id = reconcile_mapping(
-                account, action.event_date, action.mapping_status, action.strategy_id
-            )
-            normalized_actions.append(
-                replace(action, mapping_status=mapping_status, strategy_id=strategy_id)
-            )
-        accepted_actions = tuple(normalized_actions)
 
         for nav in accepted_nav:
             account = require_account(nav.account_id)

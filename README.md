@@ -25,25 +25,21 @@ adapters, not as a collection of unrelated scripts.
 
 ## Target layout
 
-The Git worktree is `repo`. Real provider data and source specifications remain
-in governed folders outside the repository. Provider roots stay beside the
-workspace; the coordinated portfolio authority uses the durable local tools
-boundary so high-churn generations are not stored in OneDrive:
+The Git worktree is `repo`. Real provider data and source specifications live in
+sibling folders outside the repository:
 
 ```text
 _quant_engine/
   repo/
   xBin/
-  dataPortfolio123/
+  data_Portfolio123/
   dataMatrixport/
   dataQuantbase/
   dataSchwab/
   dataIBKR/
   dataFidelity/
   dataAlpaca/
-
-C:\Tools\quant-engine\
-  data\
+  dataPortfolio/
 ```
 
 The target Python workspace contains shared domain packages, provider packages,
@@ -74,10 +70,11 @@ Read these before contributing:
 
 ## Foundation status
 
-The repository uses protected `main`: changes require a pull request and the
-configured required checks must pass at the exact head SHA. CODEOWNERS and
-local push controls remain defense-in-depth. Historical plan limitations and
-their reapproval triggers remain recorded in the
+The repository uses a private personal GitHub Free account. Its pull-request,
+exact-SHA CI, CODEOWNERS, and local push controls are procedural and
+defense-in-depth; GitHub does not server-enforce protected `main` or required
+checks for this private repository. The accepted residual risk and mandatory
+reapproval triggers are recorded in the
 [Free-plan governance decision](docs/decisions/0001-github-free-main-governance.md).
 
 Interfaces described in the architecture document remain target contracts until
@@ -106,45 +103,15 @@ readiness behavior without creating an automated risk or execution subsystem.
 Private tracker and current-strategy provenance is built with the
 [portfolio provenance runbook](docs/portfolio-provenance.md). Only the generic
 validator, schemas, and synthetic tests live in Git; real specifications,
-account aliases, strategy details, hashes, and catalogs remain under the
-configured portfolio-data boundary.
+account aliases, strategy details, hashes, and catalogs remain under the local
+`dataPortfolio` boundary.
 
 The dated, read-only portfolio baseline is built with the
 [portfolio baseline runbook](docs/portfolio-baseline.md). It normalizes the
-accepted tracker, audit, and pinned provider slices into accounts, current
-allocations, available NAV/flows/transactions/positions, strategy evidence,
-explicit coverage, reconciliation, and frozen-control replay. Current
-positions inherit a strategy only from one exact effective-dated account
-assignment. Missing provider facts, FX, history, or mappings remain
+accepted tracker and audit slice into accounts, current allocations, available
+NAV/flows/Alpaca fills, strategy evidence, explicit coverage, reconciliation,
+and frozen-control replay. Missing positions, FX, history, or mappings remain
 `UNAVAILABLE`, `PARTIAL`, or `UNMAPPED`; the builder does not infer them.
-
-Legacy Portfolio123 authenticated artifacts are handled only through the
-[checksummed security-quarantine control](docs/p123-security-quarantine.md).
-Quarantine is reversible and does not substitute for provider-side credential
-rotation or authorize a Portfolio123 data/API call.
-
-The repository-authoritative [Portfolio123 capability](docs/providers/portfolio123.md)
-combines deterministic browser capture plans, a deny-by-default WCH route contract,
-HAR-first transport decisions, metered API authorization evidence, and one
-formula/ranking-system skill. Authentication or extraction failure never causes
-automatic API fallback, and provider mutations require separate exact approval.
-
-Quantbase authenticated captures and account evidence use the same move/hash
-engine through a [narrow Quantbase profile](docs/quantbase-security-quarantine.md).
-The normalized CSV baseline remains outside that security quarantine and is
-not published until the separate integration issue passes.
-
-The accepted [Quantbase provider contract and generation runbook](docs/providers/quantbase.md)
-defines the HAR-only routes, the 55-file dated baseline, deterministic replay,
-and the verified single-authority cutover into `dataQuantbase`.
-
-Legacy Alpaca plaintext reports use the bounded, reversible
-[Alpaca security quarantine](docs/alpaca-security-quarantine.md) before any
-code or data integration.
-
-The accepted replacement surface is the [read-only Alpaca integration](docs/alpaca-integration.md),
-with hash-bound legacy-code disposition recorded in
-[Alpaca prototype provenance](provenance/alpaca/legacy-prototypes.md).
 
 The baseline's coverage-aware performance tables and independent unified
 workbook are built with the [portfolio report runbook](docs/portfolio-report.md).
@@ -155,9 +122,7 @@ machine-readable contract validates the saved copy before publication.
 The accepted report feeds the existing local visual shell through the
 [portfolio control-panel runbook](docs/portfolio-control-panel.md). Current
 capital, strategy, performance, gap, and coverage views derive only from the
-accepted report generation. Factor/alpha and dependence views separately bind
-the accepted analytics generations, preserve unavailable states, and expose
-their sample boundaries. The Candidates view is a separate, hash-identified
+accepted report generation. The Candidates view is a separate, hash-identified
 frozen audit appendix; it has no refresh, selection, allocation, provider,
 broker, or execution authority.
 
@@ -168,16 +133,3 @@ history. The useful Yahoo workbook-lineage behavior and the flattened endpoint
 gist are absorbed as provenance into that single capability rather than kept as
 duplicate products. Generated market data remains outside Git and every Yahoo
 artifact receives hash-bound request and coverage evidence.
-
-The factor-composition and alpha-decomposition capability is a clean-room,
-coverage-aware implementation with static RBSA and dynamic FLS estimators. It
-uses exact-date alignment, training-only selection, sealed walk-forward
-holdouts, immutable generations, and explicit gross/net cost gates; it does not
-claim MPI/DSA equivalence. See the
-[factor and alpha runbook](docs/analytics/factor-alpha-decomposition.md).
-
-Coverage-aware portfolio dependence is built separately from factor
-decomposition. Measured Pearson/Spearman cells, conceptual priors, posterior and
-stress matrices, implementation coincidence, and correlation-one loss remain
-distinct. See the
-[correlation and dependence runbook](docs/analytics/correlation-dependence.md).

@@ -29,22 +29,12 @@ const launchOptions = {
     ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH }
     : {}),
 };
-const excludeCandidates = options["exclude-candidates"] === "true";
-const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"]
-  .filter((view) => !excludeCandidates || view !== "candidates");
-const viewports = [
-  { name: "desktop", viewport: { width: 1440, height: 900 } },
-  { name: "tablet", viewport: { width: 1024, height: 768 } },
-  { name: "mobile", viewport: { width: 390, height: 844 } },
-];
 const captures = [
-  ...viewports.flatMap(({ name, viewport }) => views.map((view) => ({
-    name: `${name}-${view}`,
-    view,
-    viewport,
-    lint: true,
-    pdf: name === "desktop" && view === "command",
-  }))),
+  { name: "desktop-command", view: "command", viewport: { width: 1440, height: 900 }, lint: true, pdf: true },
+  { name: "desktop-risk", view: "risk", viewport: { width: 1440, height: 900 } },
+  { name: "desktop-candidates", view: "candidates", viewport: { width: 1440, height: 900 } },
+  { name: "desktop-data", view: "data", viewport: { width: 1440, height: 900 } },
+  { name: "mobile-command", view: "command", viewport: { width: 390, height: 844 }, lint: true },
   { name: "direct-file", view: "", viewport: { width: 1280, height: 800 } },
 ];
 
@@ -95,13 +85,11 @@ async function visualLint(page) {
     const findings = [];
     for (const element of Array.from(document.querySelectorAll("body *"))) {
       if (!isVisible(element)) continue;
-      if (element.matches("caption, .sr-only")) continue;
       const text = (element.innerText || "").trim().replace(/\s+/g, " ");
       const selector = selectorFor(element);
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
-      const intentionalScroll = element.matches("#app, .workspace, main, .view, .grid, .table-wrap, .matrix-shell, .weekly-table-shell, .scenario-row");
-      if (text && !intentionalScroll && (element.scrollWidth > element.clientWidth + 3 || element.scrollHeight > element.clientHeight + 3)) {
+      if (text && (element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1)) {
         findings.push({ rule: "text_overflow", severity: "major", selector, message: "Element text appears clipped or scrollable.", sample: text.slice(0, 120), bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
       }
       const fontSize = Number.parseFloat(style.fontSize);
@@ -150,10 +138,8 @@ try {
       request_failures_path: path.join(folder, "request-failures.json"),
       screenshot_path: path.join(folder, "screenshot.png"),
       target,
-      final_url: page.url(),
       title: await page.title(),
       tool: "portfolio_control_panel_browser_qa",
-      scope: excludeCandidates ? "NON_CANDIDATE" : "FULL",
       viewport: capture.viewport,
     };
     await writeFile(path.join(folder, "console-events.json"), `${JSON.stringify(consoleEvents, null, 2)}\n`, "utf8");

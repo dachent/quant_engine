@@ -1,17 +1,11 @@
 # ADR 0001: GitHub Free main-branch governance
 
-- **Status:** Superseded on 2026-08-06 by live branch protection (#208)
+- **Status:** Accepted
 - **Date:** 2026-07-28
 - **Governing issue:** [GOV-002](https://github.com/dachent/quant_engine/issues/6)
 - **Decision owner:** Repository owner
 
 ## Context
-
-> [!NOTE]
-> This ADR preserves the historical Free-plan decision. It no longer describes
-> current enforcement: `main` now requires pull requests and 11 strict status
-> checks, applies protection to administrators, and denies force pushes and
-> deletion. Current operations follow `docs/operating-model.md`.
 
 `quant_engine` is private and owned by a personal GitHub account. The original
 Foundation plan required protected `main` and GitHub-required checks. The live

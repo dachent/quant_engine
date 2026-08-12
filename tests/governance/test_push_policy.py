@@ -86,7 +86,6 @@ def test_hook_does_not_forward_remote_name_or_url() -> None:
     assert "check_push_policy.py" in hook
     assert ".venv/Scripts/python.exe" in hook
     assert ".venv/bin/python" in hook
-    assert "C:/Tools/quant-engine/.venv/Scripts/python.exe" in hook
     assert "QE_PUSH_RUNTIME_UNAVAILABLE" in hook
     assert "UV_PYTHON=" not in hook
 

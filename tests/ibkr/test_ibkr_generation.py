@@ -12,12 +12,10 @@ from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
     CoverageStatus,
-    CurrentPointer,
     GenerationManifest,
     PublicationRejectedError,
     SourceArtifact,
     VerificationStatus,
-    generation_inventory_sha256,
     publish_generation,
     stage_generation,
 )
@@ -490,18 +488,6 @@ def test_crosswalk_ambiguity_fails_closed(tmp_path: Path) -> None:
         catalog["nav_observations"].append(copied)
     tampered = canonical_json_bytes(catalog)
     baseline_path.write_bytes(tampered)
-    pointer_path = baseline_root / "CURRENT.json"
-    pointer = CurrentPointer.from_json_bytes(pointer_path.read_bytes())
-    pointer_path.write_bytes(
-        CurrentPointer(
-            generation_id=pointer.generation_id,
-            manifest_sha256=pointer.manifest_sha256,
-            artifact_inventory_sha256=generation_inventory_sha256(
-                baseline_root, pointer.generation_id
-            ),
-            pointer_schema_version=2,
-        ).to_json_bytes()
-    )
     spec["baseline"]["catalog_sha256"] = hashlib.sha256(tampered).hexdigest()
     spec_path.write_bytes(canonical_json_bytes(spec))
     with pytest.raises(IbkrGenerationError, match="lacks one unique exact match"):

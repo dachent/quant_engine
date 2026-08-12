@@ -3,7 +3,7 @@ name = "quant-engine-workspace"
 version = "0.0.0"
 description = "Private governed workspace for quant_engine."
 requires-python = ">=3.11,<3.14"
-dependencies = ["numpy>=2.0,<2.5", "xlsxwriter>=3.2,<4"]
+dependencies = ["xlsxwriter>=3.2,<4"]
 
 [project.optional-dependencies]
 market-data = [
@@ -19,12 +19,10 @@ dev = [
   "pytest-socket>=0.7,<0.8",
   "quant-engine-ci-controls",
   "quant-engine-core",
-  "quant-engine-alpaca",
   "quant-engine-fidelity",
   "quant-engine-ibkr",
   "quant-engine-matrixport",
   "quant-engine-portfolio-ledger",
-  "quant-engine-portfolio123",
   "quant-engine-schwab",
   "quant-engine-web-contract-harvester",
   "ruff==0.15.22",
@@ -36,17 +34,15 @@ package = false
 required-version = ">=0.11.28,<0.12"
 
 [tool.uv.workspace]
-members = ["apps/schwab-trading", "packages/alpaca", "packages/ci-controls", "packages/core", "packages/fidelity", "packages/ibkr", "packages/matrixport", "packages/portfolio-ledger", "packages/portfolio123", "packages/schwab", "packages/web-contracts"]
+members = ["apps/schwab-trading", "packages/ci-controls", "packages/core", "packages/fidelity", "packages/ibkr", "packages/matrixport", "packages/portfolio-ledger", "packages/schwab", "packages/web-contracts"]
 
 [tool.uv.sources]
 quant-engine-ci-controls = { workspace = true }
 quant-engine-core = { workspace = true }
-quant-engine-alpaca = { workspace = true }
 quant-engine-fidelity = { workspace = true }
 quant-engine-ibkr = { workspace = true }
 quant-engine-matrixport = { workspace = true }
 quant-engine-portfolio-ledger = { workspace = true }
-quant-engine-portfolio123 = { workspace = true }
 quant-engine-schwab = { workspace = true }
 quant-engine-web-contract-harvester = { workspace = true }
 
@@ -72,7 +68,7 @@ select = ["E4", "E7", "E9", "F"]
 python_version = "3.11"
 strict = true
 explicit_package_bases = true
-mypy_path = ["packages/alpaca/src", "packages/ci-controls/src", "packages/core/src", "packages/fidelity/src", "packages/ibkr/src", "packages/matrixport/src", "packages/portfolio-ledger/src", "packages/portfolio123/src", "packages/schwab/src", "packages/web-contracts/src", "tools"]
+mypy_path = ["packages/ci-controls/src", "packages/core/src", "packages/fidelity/src", "packages/ibkr/src", "packages/matrixport/src", "packages/portfolio-ledger/src", "packages/schwab/src", "packages/web-contracts/src"]
 incremental = false
 pretty = true
 show_error_codes = true

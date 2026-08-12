@@ -7,16 +7,12 @@ from collections import defaultdict
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
-import io
 import json
-import math
 import os
 from pathlib import Path
-import re
 import shutil
 import sys
 import tempfile
-import time as time_module
 from typing import Any, Final, Mapping, Sequence
 from xml.etree import ElementTree as ET
 import zipfile
@@ -34,29 +30,17 @@ from quant_engine.core import (
     hash_file,
     publish_generation,
     read_current,
-    read_generation,
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.portfolio_ledger import (
-    HwmCoverageError,
-    decimal_text,
-    governed_hwm_coverage,
-)
+from quant_engine.portfolio_ledger import decimal_text
 
 
 REPORT_SCHEMA_VERSION: Final = 1
-_CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
-BUILDER_VERSION: Final = "1.3.0"
+BUILDER_VERSION: Final = "1.1.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
-HWM_POLICY: Final = (
-    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
-)
-_P123_ENTITY_REF_RE: Final = re.compile(r"\bp123-entity:\d+\b", re.IGNORECASE)
-_P123_ENTITY_TEXT_RE: Final = re.compile(r"\bPortfolio123 entity \d+\b", re.IGNORECASE)
-_PROVIDER_ENTITY_TEXT_RE: Final = re.compile(r"\bentity \d{5,}\b", re.IGNORECASE)
 SHEET_NAMES: Final = (
     "Portfolio Summary",
     "Account Summary",
@@ -86,28 +70,6 @@ TABLE_NAMES: Final = (
     "tblCorrections",
     "tblMethodology",
     "tblProvenance",
-)
-WORKBOOK_CANONICALIZATION_VERSION: Final = "1"
-XLSX_RESULT_CANONICALIZATION_VERSION: Final = "1"
-_CANONICAL_ZIP_TIMESTAMP: Final = (1980, 1, 1, 0, 0, 0)
-_CORE_CREATED = re.compile(
-    rb"(<(?:[A-Za-z_][\w.-]*:)?created\b[^>]*>)([^<]+)"
-    rb"(</(?:[A-Za-z_][\w.-]*:)?created>)"
-)
-_CORE_MODIFIED = re.compile(
-    rb"(<(?:[A-Za-z_][\w.-]*:)?modified\b[^>]*>)([^<]+)"
-    rb"(</(?:[A-Za-z_][\w.-]*:)?modified>)"
-)
-_CHART_UNIQUE_ID = re.compile(
-    rb'(<(?:[A-Za-z_][\w.-]*:)?uniqueId\b[^>]*\bval=")'
-    rb'\{[0-9A-Fa-f-]{36}\}(?=")'
-)
-_WORKBOOK_ABS_PATH = re.compile(
-    rb'(<(?:[A-Za-z_][\w.-]*:)?absPath\b[^>]*\burl=")[^"]*(?=")'
-)
-_WORKBOOK_REVISION_ID = re.compile(
-    rb'(<(?:[A-Za-z_][\w.-]*:)?revisionPtr\b[^>]*\bdocumentId=")'
-    rb'8_\{[0-9A-Fa-f-]{36}\}(?=")'
 )
 
 
@@ -144,15 +106,6 @@ def _decimal(value: object, field_name: str) -> Decimal:
     return accepted
 
 
-def _finite_number(value: object, field_name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ReportValidationError(f"{field_name} must be a finite number")
-    accepted = float(value)
-    if not math.isfinite(accepted):
-        raise ReportValidationError(f"{field_name} must be a finite number")
-    return accepted
-
-
 def _object(value: object, field_name: str) -> dict[str, Any]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ReportValidationError(f"{field_name} must be an object")
@@ -165,26 +118,6 @@ def _objects(value: object, field_name: str) -> list[dict[str, Any]]:
     return [_object(item, field_name) for item in value]
 
 
-def _public_report_value(value: object) -> object:
-    """Remove raw Portfolio123 entity identifiers from operator-facing output."""
-    if isinstance(value, dict):
-        return {
-            key: (
-                "[redacted]"
-                if key == "entity_id" and item is not None
-                else _public_report_value(item)
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_public_report_value(item) for item in value]
-    if isinstance(value, str):
-        sanitized = _P123_ENTITY_TEXT_RE.sub("Portfolio123 connected entity", value)
-        sanitized = _PROVIDER_ENTITY_TEXT_RE.sub("connected entity", sanitized)
-        return _P123_ENTITY_REF_RE.sub("p123-entity:[redacted]", sanitized)
-    return value
-
-
 def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     try:
         decoded = json.loads(path.read_text(encoding="utf-8"))
@@ -193,24 +126,11 @@ def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     return _object(decoded, field_name)
 
 
-def _canonical_json_array_bytes(value: Sequence[Mapping[str, Any]]) -> bytes:
-    return (
-        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        + "\n"
-    ).encode("utf-8")
-
-
 def _baseline(root: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
-    for attempt in range(len(_CURRENT_READ_RETRY_DELAYS) + 1):
-        try:
-            pointer = read_current(root)
-            break
-        except OSError as exc:
-            if attempt == len(_CURRENT_READ_RETRY_DELAYS):
-                raise ReportValidationError("baseline pointer is not accepted") from exc
-            time_module.sleep(_CURRENT_READ_RETRY_DELAYS[attempt])
-        except (ValueError, RuntimeError) as exc:
-            raise ReportValidationError("baseline pointer is not accepted") from exc
+    try:
+        pointer = read_current(root)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ReportValidationError("baseline pointer is not accepted") from exc
     catalog_path = (
         root / "generations" / pointer.generation_id / "portfolio-baseline.json"
     )
@@ -227,177 +147,6 @@ def _baseline(root: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
         {"catalog_sha256": sha256, "generation_id": pointer.generation_id},
         catalog_path,
     )
-
-
-def _attribution(
-    root: Path, baseline_ref: Mapping[str, Any]
-) -> tuple[dict[str, Any], dict[str, str], Path]:
-    pointer = read_current(root)
-    catalog_path = (
-        root / "generations" / pointer.generation_id / "strategy-attribution.json"
-    )
-    if catalog_path.is_symlink() or not catalog_path.is_file():
-        raise ReportValidationError("strategy attribution catalog is missing or linked")
-    catalog = _load_json(catalog_path, "strategy attribution catalog")
-    if catalog.get("catalog_schema_version") not in {1, 2}:
-        raise ReportValidationError("strategy attribution schema is unsupported")
-    attribution_baseline = _object(catalog.get("baseline"), "attribution.baseline")
-    if attribution_baseline != dict(baseline_ref):
-        raise ReportValidationError("strategy attribution baseline identity differs")
-    sha256, _ = hash_file(catalog_path)
-    return (
-        catalog,
-        {"catalog_sha256": sha256, "generation_id": pointer.generation_id},
-        catalog_path,
-    )
-
-
-def _merge_attribution(
-    strategies: Sequence[Mapping[str, Any]], attribution: Mapping[str, Any]
-) -> list[dict[str, Any]]:
-    benchmarks = {
-        str(item.get("strategy_id")): item
-        for item in _objects(
-            attribution.get("benchmark_assignments"),
-            "attribution.benchmark_assignments",
-        )
-    }
-    comparisons = {
-        str(item.get("strategy_id")): item
-        for item in _objects(attribution.get("comparisons"), "attribution.comparisons")
-    }
-    raw_benchmark_comparisons = attribution.get("benchmark_comparisons", [])
-    benchmark_comparisons = {
-        str(item.get("strategy_id")): item
-        for item in _objects(
-            raw_benchmark_comparisons,
-            "attribution.benchmark_comparisons",
-        )
-    }
-    costs = {
-        str(item.get("strategy_id")): item
-        for item in _objects(attribution.get("costs"), "attribution.costs")
-    }
-    strategy_ids = {str(item.get("strategy_id")) for item in strategies}
-    if (
-        set(benchmarks) != strategy_ids
-        or set(comparisons) != strategy_ids
-        or set(costs) != strategy_ids
-        or (benchmark_comparisons and set(benchmark_comparisons) != strategy_ids)
-    ):
-        raise ReportValidationError("strategy attribution boundary differs")
-    result = []
-    for item in strategies:
-        strategy_id = str(item["strategy_id"])
-        benchmark = benchmarks[strategy_id]
-        comparison = comparisons[strategy_id]
-        benchmark_comparison = benchmark_comparisons.get(strategy_id, {})
-        cost = costs[strategy_id]
-        metrics_value = comparison.get("metrics")
-        metrics = (
-            {}
-            if metrics_value is None
-            else _object(metrics_value, "attribution.comparison.metrics")
-        )
-        benchmark_metrics_value = benchmark_comparison.get("metrics")
-        benchmark_metrics = (
-            {}
-            if benchmark_metrics_value is None
-            else _object(
-                benchmark_metrics_value,
-                "attribution.benchmark_comparison.metrics",
-            )
-        )
-        result.append(
-            {
-                **item,
-                "benchmark_assignment_status": benchmark.get("status"),
-                "benchmark_id": benchmark.get("benchmark_id"),
-                "benchmark_effective_start": benchmark.get("effective_start"),
-                "benchmark_effective_end": benchmark.get("effective_end"),
-                "benchmark_version_ref": benchmark.get("version_ref"),
-                "benchmark_rationale": benchmark.get("rationale"),
-                "benchmark_comparison_status": benchmark_comparison.get(
-                    "status", "UNAVAILABLE"
-                ),
-                "benchmark_comparison_disposition": benchmark_comparison.get(
-                    "disposition",
-                    "No exact-date benchmark-relative comparison is admitted.",
-                ),
-                "benchmark_comparison_observations": benchmark_metrics.get(
-                    "observations"
-                ),
-                "benchmark_comparison_observed_start": benchmark_metrics.get(
-                    "observed_start"
-                ),
-                "benchmark_comparison_observed_end": benchmark_metrics.get(
-                    "observed_end"
-                ),
-                "benchmark_account_cumulative_return": benchmark_metrics.get(
-                    "account_cumulative_return"
-                ),
-                "benchmark_reference_cumulative_return": benchmark_metrics.get(
-                    "reference_cumulative_return"
-                ),
-                "benchmark_cumulative_gap": benchmark_metrics.get("cumulative_gap"),
-                "benchmark_active_return_annualized": benchmark_metrics.get(
-                    "active_return_annualized"
-                ),
-                "benchmark_tracking_error_annualized": benchmark_metrics.get(
-                    "tracking_error_annualized"
-                ),
-                "benchmark_information_ratio": benchmark_metrics.get(
-                    "information_ratio"
-                ),
-                "benchmark_beta": benchmark_metrics.get("beta"),
-                "benchmark_correlation": benchmark_metrics.get("correlation"),
-                "benchmark_upside_capture": benchmark_metrics.get("upside_capture"),
-                "benchmark_downside_capture": benchmark_metrics.get("downside_capture"),
-                "benchmark_relative_drawdown": benchmark_metrics.get(
-                    "relative_drawdown"
-                ),
-                "provider_comparison_status": comparison.get("status"),
-                "provider_comparison_disposition": comparison.get("disposition"),
-                "provider_comparison_version_compatibility": comparison.get(
-                    "version_compatibility_status"
-                ),
-                "provider_comparison_observations": metrics.get("observations"),
-                "provider_comparison_observed_start": metrics.get("observed_start"),
-                "provider_comparison_observed_end": metrics.get("observed_end"),
-                "provider_account_cumulative_return": metrics.get(
-                    "account_cumulative_return"
-                ),
-                "provider_reference_cumulative_return": metrics.get(
-                    "reference_cumulative_return"
-                ),
-                "provider_cumulative_gap": metrics.get("cumulative_gap"),
-                "provider_active_return_annualized": metrics.get(
-                    "active_return_annualized"
-                ),
-                "provider_tracking_error_annualized": metrics.get(
-                    "tracking_error_annualized"
-                ),
-                "provider_information_ratio": metrics.get("information_ratio"),
-                "provider_beta": metrics.get("beta"),
-                "provider_correlation": metrics.get("correlation"),
-                "provider_upside_capture": metrics.get("upside_capture"),
-                "provider_downside_capture": metrics.get("downside_capture"),
-                "provider_relative_drawdown": metrics.get("relative_drawdown"),
-                "cash_drag_status": comparison.get("cash_drag_status"),
-                "cash_drag_reason": comparison.get("cash_drag_reason"),
-                "legacy_baseline_disposition": comparison.get(
-                    "legacy_baseline_disposition"
-                ),
-                "annual_external_cost_rate_pre_tax": cost.get(
-                    "annual_external_cost_rate_pre_tax"
-                ),
-                "annual_external_cost_usd": cost.get("annual_external_cost_usd"),
-                "after_tax_annual_cost_rate": cost.get("after_tax_annual_cost_rate"),
-                "after_tax_status": cost.get("after_tax_status"),
-                "fees_status": cost.get("fees_status"),
-            }
-        )
-    return result
 
 
 def _amount(record: Mapping[str, Any], field_name: str) -> Decimal:
@@ -429,77 +178,6 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
 
     rows: list[dict[str, Any]] = []
     assignments = _objects(catalog.get("assignments"), "assignments")
-    current_assignments_by_strategy: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for assignment in assignments:
-        if (
-            assignment.get("mapping_status") == "MAPPED"
-            and assignment.get("strategy_id") is not None
-            and assignment.get("effective_end") is None
-        ):
-            current_assignments_by_strategy[
-                _text(assignment.get("strategy_id"), "assignment.strategy_id")
-            ].append(assignment)
-    account_live_paths: dict[tuple[str, str], dict[str, Any]] = {}
-    canonical_live = _account_live_return_series(catalog)
-    for evidence in _objects(
-        catalog.get("strategy_provider_evidence", []),
-        "strategy_provider_evidence",
-    ):
-        if evidence.get("evidence_layer") != "ACCOUNT_LIVE":
-            continue
-        strategy_id = _text(evidence.get("strategy_id"), "evidence.strategy_id")
-        canonical = canonical_live.get(strategy_id)
-        if canonical is None:
-            continue
-        account = _object(evidence.get("account"), "evidence.account")
-        account_scopes = _objects(account.get("account_scopes", []), "account_scopes")
-        scoped_accounts: list[tuple[str, str, str | None]] = [
-            (
-                _text(scope.get("account_id"), "account_scope.account_id"),
-                "EVIDENCE_ACCOUNT_SCOPE",
-                None,
-            )
-            for scope in account_scopes
-        ]
-        if not scoped_accounts:
-            current_assignments = current_assignments_by_strategy.get(strategy_id, [])
-            if len(current_assignments) == 1:
-                assignment = current_assignments[0]
-                assignment_start = assignment.get("effective_start")
-                observed_start = account.get("observed_start")
-                if (
-                    assignment_start is not None
-                    and observed_start is not None
-                    and _date(observed_start, "evidence.account.observed_start")
-                    >= _date(assignment_start, "assignment.effective_start")
-                ):
-                    scoped_accounts = [
-                        (
-                            _text(
-                                assignment.get("account_id"),
-                                "assignment.account_id",
-                            ),
-                            "UNIQUE_CURRENT_EFFECTIVE_DATED_ASSIGNMENT",
-                            _text(
-                                assignment.get("assignment_id"),
-                                "assignment.assignment_id",
-                            ),
-                        )
-                    ]
-        for account_id, binding, assignment_id in scoped_accounts:
-            account_live_paths[(account_id, strategy_id)] = {
-                "return_path_account_binding": binding,
-                "return_path_assignment_id": assignment_id,
-                "return_path_authority": "CANONICAL_ACCOUNT_LIVE_STRATEGY_RETURNS",
-                "return_path_cumulative_return": canonical["cumulative_return"],
-                "return_path_evidence_layer": "ACCOUNT_LIVE",
-                "return_path_generation_id": evidence.get("generation_id"),
-                "return_path_observations": canonical["return_observations"],
-                "return_path_observed_end": canonical["observed_end"],
-                "return_path_observed_start": canonical["observed_start"],
-                "return_path_series_sha256": canonical["return_series_sha256"],
-                "return_path_status": "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH",
-            }
     for assignment in assignments:
         account_id = _text(assignment.get("account_id"), "assignment.account_id")
         mapping_status = _text(
@@ -527,11 +205,6 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             "mwr_status": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
             "mwr_xirr": None,
             "nav_observations": 0,
-            "pool_id": assignment.get("pool_id"),
-            "pool_mapping_status": assignment.get("pool_mapping_status"),
-            "strategy_mapping_disposition": assignment.get(
-                "strategy_mapping_disposition"
-            ),
             "strategy_id": assignment.get("strategy_id"),
             "twr": None,
             "twr_status": "UNAVAILABLE",
@@ -541,7 +214,6 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             rows.append(base)
             continue
         strategy_id = _text(assignment.get("strategy_id"), "assignment.strategy_id")
-        base.update(account_live_paths.get((account_id, strategy_id), {}))
         nav = [
             item
             for item in nav_by_account.get(account_id, [])
@@ -577,13 +249,6 @@ def _account_strategy_performance(catalog: Mapping[str, Any]) -> list[dict[str, 
             for item in flows
         ):
             base["twr_status"] = "UNAVAILABLE_FLOW_WITHOUT_SAME_DATE_NAV"
-            rows.append(base)
-            continue
-        if any(
-            _object(item.get("amount"), "flow.amount").get("status") != "AVAILABLE"
-            for item in flows
-        ):
-            base["twr_status"] = "UNAVAILABLE_FLOW_AMOUNT"
             rows.append(base)
             continue
         flow_by_date: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
@@ -627,9 +292,7 @@ def _latest_nav(catalog: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
     return latest
 
 
-def _portfolio_summary(
-    catalog: Mapping[str, Any], hwm_summary: Mapping[str, Any] | None = None
-) -> list[dict[str, Any]]:
+def _portfolio_summary(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     replay = _object(catalog.get("replay"), "replay")
     return [
         {
@@ -658,17 +321,9 @@ def _portfolio_summary(
         },
         {
             "metric": "NAV coverage",
-            "status": (
-                "COMPLETE_WITHIN_DECLARED_BOUNDARY"
-                if hwm_summary is not None and hwm_summary.get("nav_coverage") == "1"
-                else "PARTIAL"
-            ),
+            "status": "PARTIAL",
             "unit": "ratio",
-            "value": (
-                hwm_summary.get("nav_coverage")
-                if hwm_summary is not None
-                else replay.get("nav_coverage")
-            ),
+            "value": replay.get("nav_coverage"),
         },
         {
             "metric": "Correlation-one stress",
@@ -678,15 +333,9 @@ def _portfolio_summary(
         },
         {
             "metric": "Full-systematic HWM",
-            "status": (
-                hwm_summary.get("status") if hwm_summary is not None else "UNAVAILABLE"
-            ),
+            "status": "UNAVAILABLE",
             "unit": "status",
-            "value": (
-                hwm_summary.get("status")
-                if hwm_summary is not None
-                else replay.get("full_systematic_hwm_status")
-            ),
+            "value": replay.get("full_systematic_hwm_status"),
         },
         {
             "metric": "Advisory readiness",
@@ -731,415 +380,9 @@ def _accounts(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: str(item["account_id"]))
 
 
-def _account_live_return_series(
-    catalog: Mapping[str, Any],
-) -> dict[str, dict[str, Any]]:
-    """Hash and summarize each canonical account-live strategy return path."""
-
-    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
-    providers: dict[str, set[str]] = defaultdict(set)
-    for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
-        if row.get("evidence_layer") != "ACCOUNT_LIVE":
-            continue
-        strategy_id = _text(row.get("strategy_id"), "strategy return.strategy_id")
-        day = _date(row.get("date"), "strategy return.date").isoformat()
-        value = decimal_text(_decimal(row.get("return"), "strategy return.return"))
-        grouped[strategy_id].append({"date": day, "return": value})
-        providers[strategy_id].add(
-            _text(row.get("provider_id"), "strategy return.provider_id")
-        )
-
-    result: dict[str, dict[str, Any]] = {}
-    for strategy_id, rows in grouped.items():
-        rows.sort(key=lambda item: item["date"])
-        dates = [item["date"] for item in rows]
-        if len(dates) != len(set(dates)):
-            raise ReportValidationError(
-                f"account-live strategy returns repeat a date for {strategy_id}"
-            )
-        with localcontext() as context:
-            context.prec = 34
-            wealth = Decimal("1")
-            peak = wealth
-            maximum_drawdown = Decimal("0")
-            for item in rows:
-                wealth *= Decimal("1") + _decimal(
-                    item["return"], "canonical strategy return"
-                )
-                peak = max(peak, wealth)
-                drawdown = (wealth / peak) - Decimal("1")
-                maximum_drawdown = min(maximum_drawdown, drawdown)
-            cumulative_return = wealth - Decimal("1")
-            current_drawdown = (wealth / peak) - Decimal("1")
-        result[strategy_id] = {
-            "cumulative_return": decimal_text(cumulative_return),
-            "current_drawdown": decimal_text(current_drawdown),
-            "maximum_drawdown": decimal_text(maximum_drawdown),
-            "observed_end": dates[-1],
-            "observed_start": dates[0],
-            "provider_ids": sorted(providers[strategy_id]),
-            "return_observations": len(rows),
-            "return_series_schema": "ordered-date-return/1",
-            "return_series_sha256": hashlib.sha256(
-                _canonical_json_array_bytes(rows)
-            ).hexdigest(),
-        }
-    return result
-
-
-def _close_decimal(left: object, right: object, field_name: str) -> None:
-    difference = abs(_decimal(left, field_name) - _decimal(right, field_name))
-    if difference > Decimal("0.000000000000000000000001"):
-        raise ReportValidationError(
-            f"{field_name} differs from canonical return series"
-        )
-
-
-def _cagr(cumulative_return: str, observed_start: str, observed_end: str) -> str | None:
-    start = _date(observed_start, "account-live observed_start")
-    end = _date(observed_end, "account-live observed_end")
-    elapsed_days = (end - start).days
-    cumulative = _decimal(cumulative_return, "account-live cumulative_return")
-    if elapsed_days <= 0 or cumulative <= Decimal("-1"):
-        return None
-    with localcontext() as context:
-        context.prec = 34
-        annualized = context.power(
-            Decimal("1") + cumulative, Decimal("365") / Decimal(elapsed_days)
-        ) - Decimal("1")
-    return decimal_text(annualized)
-
-
-def _strategy_provider_evidence(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
-    series = _account_live_return_series(catalog)
-    rows: list[dict[str, Any]] = []
-    for original in _objects(
-        catalog.get("strategy_provider_evidence", []),
-        "strategy_provider_evidence",
-    ):
-        row = dict(original)
-        strategy_id = _text(row.get("strategy_id"), "provider evidence.strategy_id")
-        if row.get("evidence_layer") == "ACCOUNT_LIVE":
-            canonical = series.get(strategy_id)
-            if canonical is None:
-                raise ReportValidationError(
-                    f"account-live evidence has no canonical return series for {strategy_id}"
-                )
-            account = _object(row.get("account"), "provider evidence account")
-            for field_name in (
-                "cumulative_return",
-                "current_drawdown",
-                "maximum_drawdown",
-            ):
-                _close_decimal(
-                    account.get(field_name),
-                    canonical[field_name],
-                    f"{strategy_id}.{field_name}",
-                )
-            for field_name in ("observed_start", "observed_end", "return_observations"):
-                if account.get(field_name) != canonical[field_name]:
-                    raise ReportValidationError(
-                        f"{strategy_id}.{field_name} differs from canonical return series"
-                    )
-            provider_id = _text(account.get("provider_id"), "account.provider_id")
-            if provider_id not in canonical["provider_ids"]:
-                raise ReportValidationError(
-                    f"{strategy_id}.provider_id differs from canonical return series"
-                )
-            row["account"] = {
-                **account,
-                "cumulative_return": canonical["cumulative_return"],
-                "current_drawdown": canonical["current_drawdown"],
-                "maximum_drawdown": canonical["maximum_drawdown"],
-                "return_series_schema": canonical["return_series_schema"],
-                "return_series_sha256": canonical["return_series_sha256"],
-            }
-        rows.append(row)
-    return rows
-
-
-def _history_contract(
-    path: Path,
-    *,
-    portfolio_as_of: str,
-    strategy_names: set[str],
-) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    payload = _load_json(path, "strategy history compatibility contract")
-    if payload.get("builder") != "portfolio-target-series/layered-correlation-1":
-        raise ReportValidationError("strategy history contract builder differs")
-    contract_as_of = _date(payload.get("as_of_date"), "history contract as_of_date")
-    if contract_as_of > _date(portfolio_as_of, "portfolio as_of_date"):
-        raise ReportValidationError("strategy history contract is future-dated")
-    policy = _object(
-        payload.get("evidence_mode_policy"),
-        "history contract evidence_mode_policy",
-    )
-    if policy != {
-        "default": "LIVE_ONLY",
-        "hybrid": "BACKTEST_STRICTLY_BEFORE_FIRST_LIVE_THEN_LIVE",
-        "post_inception_backtest_fill": False,
-    }:
-        raise ReportValidationError("strategy history evidence policy differs")
-    rows = _objects(payload.get("series_mappings"), "history contract series_mappings")
-    by_name: dict[str, dict[str, Any]] = {}
-    for raw in rows:
-        name = _text(raw.get("series_id"), "history contract series_id")
-        if name in by_name:
-            raise ReportValidationError(
-                f"strategy history contract duplicates series: {name}"
-            )
-        history_status = _text(raw.get("history_status"), f"history status {name}")
-        _text(raw.get("strategy_version"), f"history version {name}")
-        observations = raw.get("backtest_observations")
-        if not isinstance(observations, int) or observations < 0:
-            raise ReportValidationError(
-                f"strategy history observations are invalid: {name}"
-            )
-        accepted = history_status.startswith("ACCEPTED_")
-        if accepted != (observations > 0):
-            raise ReportValidationError(
-                f"strategy history status and observations differ: {name}"
-            )
-        compatibility_basis = raw.get("compatibility_basis")
-        if accepted:
-            _text(compatibility_basis, f"history compatibility basis {name}")
-            _date(raw.get("backtest_observed_start"), f"history start {name}")
-            _date(raw.get("backtest_observed_end"), f"history end {name}")
-        elif compatibility_basis is not None:
-            raise ReportValidationError(
-                f"unavailable strategy has a compatibility basis: {name}"
-            )
-        _text(
-            raw.get("implementation_reconciliation_status"),
-            f"implementation reconciliation status {name}",
-        )
-        by_name[name] = dict(raw)
-    if set(by_name) != strategy_names:
-        raise ReportValidationError("strategy history contract boundary differs")
-    sha256, size = hash_file(path)
-    return by_name, {
-        "as_of_date": contract_as_of.isoformat(),
-        "evidence_mode_policy": dict(policy),
-        "series_count": len(by_name),
-        "sha256": sha256,
-        "size_bytes": size,
-    }
-
-
-def _implementation_reconciliation_contract(
-    path: Path,
-    *,
-    portfolio_as_of: str,
-) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    payload = _load_json(path, "implementation reconciliation contract")
-    if (
-        payload.get("schema_version") != 1
-        or payload.get("builder") != "portfolio-implementation-reconciliation"
-        or payload.get("verification") != "VERIFIED"
-    ):
-        raise ReportValidationError("implementation reconciliation contract differs")
-    contract_as_of = _date(
-        payload.get("as_of_date"), "implementation reconciliation as_of_date"
-    )
-    if contract_as_of > _date(portfolio_as_of, "portfolio as_of_date"):
-        raise ReportValidationError("implementation reconciliation is future-dated")
-    rows = _objects(
-        payload.get("strategies"), "implementation reconciliation strategies"
-    )
-    expected = {"grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"}
-    by_id: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        strategy_id = _text(
-            row.get("strategy_id"), "implementation reconciliation strategy_id"
-        )
-        if strategy_id in by_id:
-            raise ReportValidationError(
-                "implementation reconciliation duplicates a strategy"
-            )
-        if row.get("verification") != "VERIFIED":
-            raise ReportValidationError(
-                "implementation reconciliation strategy is not verified"
-            )
-        metrics = _object(
-            row.get("return_reconciliation"),
-            f"implementation return reconciliation {strategy_id}",
-        )
-        observations = metrics.get("observations")
-        if not isinstance(observations, int) or observations < 2:
-            raise ReportValidationError(
-                "implementation reconciliation observations are invalid"
-            )
-        _date(metrics.get("observed_start"), "implementation observed_start")
-        _date(metrics.get("observed_end"), "implementation observed_end")
-        causes = _objects(row.get("root_causes"), "implementation root causes")
-        if not causes:
-            raise ReportValidationError(
-                "implementation reconciliation lacks root-cause dispositions"
-            )
-        by_id[strategy_id] = dict(row)
-    if set(by_id) != expected:
-        raise ReportValidationError(
-            "implementation reconciliation strategy boundary differs"
-        )
-    sha256, size = hash_file(path)
-    return by_id, {
-        "as_of_date": contract_as_of.isoformat(),
-        "reconciliation_id": _text(
-            payload.get("reconciliation_id"),
-            "implementation reconciliation identity",
-        ),
-        "schema_version": payload["schema_version"],
-        "sha256": sha256,
-        "size_bytes": size,
-        "strategy_count": len(by_id),
-    }
-
-
-def _implementation_return_attribution_contract(
-    path: Path,
-    *,
-    portfolio_as_of: str,
-) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    payload = _load_json(path, "implementation return attribution contract")
-    if (
-        payload.get("schema_version") != 1
-        or payload.get("builder") != "portfolio-implementation-return-attribution"
-        or payload.get("verification")
-        != "VERIFIED_WITH_DECLARED_PARTIAL_CAUSAL_BOUNDARIES"
-    ):
-        raise ReportValidationError(
-            "implementation return attribution contract differs"
-        )
-    contract_as_of = _date(
-        payload.get("as_of_date"), "implementation return attribution as_of_date"
-    )
-    portfolio_boundary = _date(portfolio_as_of, "portfolio as_of_date")
-    rows = _objects(
-        payload.get("strategies"), "implementation return attribution strategies"
-    )
-    expected = {"grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"}
-    by_id: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        strategy_id = _text(
-            row.get("strategy_id"), "implementation return attribution strategy_id"
-        )
-        if strategy_id in by_id:
-            raise ReportValidationError(
-                "implementation return attribution duplicates a strategy"
-            )
-        verification = _text(
-            row.get("verification"),
-            f"implementation return attribution verification {strategy_id}",
-        )
-        if verification not in {
-            "PARTIAL_EXACT_ACTUAL_PNL_PARTIAL_COUNTERFACTUAL_GAP",
-            "VERIFIED_WITH_DECLARED_PROXY",
-            "VERIFIED_WITH_DECLARED_PUBLIC_PRICE_PROXY",
-        }:
-            raise ReportValidationError(
-                "implementation return attribution strategy is not accepted"
-            )
-        observed_start = _date(
-            row.get("observed_start"),
-            f"implementation return attribution observed_start {strategy_id}",
-        )
-        observed_end = _date(
-            row.get("observed_end"),
-            f"implementation return attribution observed_end {strategy_id}",
-        )
-        if observed_end < observed_start or observed_end > portfolio_boundary:
-            raise ReportValidationError(
-                "implementation return attribution observation boundary differs"
-            )
-        if contract_as_of < observed_end:
-            raise ReportValidationError(
-                "implementation return attribution predates its evidence"
-            )
-        bridge = _object(
-            row.get("bridge"), f"implementation return attribution bridge {strategy_id}"
-        )
-        model_return = _finite_number(
-            bridge.get("model_return"),
-            f"implementation return attribution model return {strategy_id}",
-        )
-        account_return = _finite_number(
-            bridge.get("account_return"),
-            f"implementation return attribution account return {strategy_id}",
-        )
-        gap_pp = _finite_number(
-            bridge.get("gap_pp"),
-            f"implementation return attribution gap {strategy_id}",
-        )
-        categories = _objects(
-            bridge.get("categories"),
-            f"implementation return attribution categories {strategy_id}",
-        )
-        if not categories:
-            raise ReportValidationError(
-                "implementation return attribution categories are empty"
-            )
-        category_total = sum(
-            _finite_number(
-                category.get("effect_pp"),
-                f"implementation return attribution effect {strategy_id}",
-            )
-            for category in categories
-        )
-        if not math.isclose(
-            gap_pp, (account_return - model_return) * 100.0, abs_tol=1e-10
-        ) or not math.isclose(gap_pp, category_total, abs_tol=1e-8):
-            raise ReportValidationError(
-                "implementation return attribution bridge does not reconcile"
-            )
-        by_id[strategy_id] = dict(row)
-    if set(by_id) != expected:
-        raise ReportValidationError(
-            "implementation return attribution strategy boundary differs"
-        )
-    sha256, size = hash_file(path)
-    return by_id, {
-        "as_of_date": contract_as_of.isoformat(),
-        "attribution_id": _text(
-            payload.get("attribution_id"),
-            "implementation return attribution identity",
-        ),
-        "schema_version": payload["schema_version"],
-        "sha256": sha256,
-        "size_bytes": size,
-        "strategy_count": len(by_id),
-    }
-
-
 def _strategies(
-    catalog: Mapping[str, Any],
-    performance: Sequence[Mapping[str, Any]],
-    history_contract: Mapping[str, Mapping[str, Any]] | None = None,
-    implementation_contract: Mapping[str, Mapping[str, Any]] | None = None,
-    implementation_return_attribution_contract: Mapping[str, Mapping[str, Any]]
-    | None = None,
+    catalog: Mapping[str, Any], performance: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
-    raw_version_catalog = catalog.get("strategy_version_catalog")
-    strategy_versions: dict[str, dict[str, Any]] = {}
-    if raw_version_catalog is not None:
-        version_catalog = _object(raw_version_catalog, "strategy_version_catalog")
-        if version_catalog.get("catalog_schema_version") != 2:
-            raise ReportValidationError(
-                "strategy version catalog schema is unsupported"
-            )
-        if version_catalog.get("as_of_date") != catalog.get("as_of_date"):
-            raise ReportValidationError(
-                "strategy version catalog as_of_date differs from baseline"
-            )
-        strategy_versions = {
-            _text(item.get("strategy_id"), "strategy version strategy_id"): item
-            for item in _objects(
-                version_catalog.get("strategies"), "strategy version catalog"
-            )
-        }
-        if len(strategy_versions) != 9:
-            raise ReportValidationError(
-                "strategy version catalog must contain exactly 9 strategies"
-            )
     allocations = {
         str(item["strategy_id"]): item
         for item in _objects(catalog.get("allocations"), "allocations")
@@ -1166,19 +409,6 @@ def _strategies(
         )
         if item.get("strategy_id") is not None
     }
-    provider_evidence = {
-        str(item["strategy_id"]): item for item in _strategy_provider_evidence(catalog)
-    }
-    live_source = next(
-        (
-            item
-            for item in _objects(
-                catalog.get("source_artifacts", []), "source_artifacts"
-            )
-            if item.get("source_key") == "strategy-live-metrics"
-        ),
-        {},
-    )
     performance_count: dict[str, tuple[int, int]] = {}
     for strategy_id in allocations:
         items = [item for item in performance if item.get("strategy_id") == strategy_id]
@@ -1196,189 +426,9 @@ def _strategies(
         allocation = allocations[strategy_id]
         live_row = live.get(strategy_id)
         metrics = _object(live_row.get("metrics"), "live.metrics") if live_row else {}
-        provider_row = provider_evidence.get(strategy_id)
-        account_path = (
-            _object(provider_row["account"], "provider evidence account")
-            if provider_row and provider_row.get("account") is not None
-            else {}
-        )
-        provider_path = (
-            _object(provider_row["provider"], "provider evidence provider")
-            if provider_row and provider_row.get("provider") is not None
-            else {}
-        )
-        admitted_account_nav = bool(
-            provider_row
-            and provider_row.get("evidence_layer") == "ACCOUNT_LIVE"
-            and account_path.get("observed_start") is not None
-            and account_path.get("observed_end") is not None
-            and account_path.get("return_observations") is not None
-        )
-        admitted_provider_nav = bool(
-            provider_row
-            and provider_row.get("evidence_layer") == "PROVIDER_LIVE"
-            and provider_path.get("observed_start") is not None
-            and provider_path.get("observed_end") is not None
-            and provider_path.get("return_observations") is not None
-        )
-        canonical_account = account_path if admitted_account_nav else {}
-        legacy_account = metrics if provider_row is None and live_row else {}
-        account_authority = (
-            "CANONICAL_STRATEGY_RETURNS"
-            if canonical_account
-            else "AUDIT_STRATEGY_LIVE_METRICS"
-            if legacy_account
-            else None
-        )
-        account_metrics = canonical_account or legacy_account
-        strategy_path = canonical_account if canonical_account else provider_path
-        observed_start = account_metrics.get("observed_start") or account_metrics.get(
-            "first_date"
-        )
-        observed_end = account_metrics.get("observed_end") or account_metrics.get(
-            "last_date"
-        )
-        cumulative_return = account_metrics.get("cumulative_return")
-        account_cagr = (
-            _cagr(cumulative_return, observed_start, observed_end)
-            if canonical_account
-            and cumulative_return is not None
-            and observed_start is not None
-            and observed_end is not None
-            else account_metrics.get("cagr")
-        )
         cost_row = costs.get(strategy_id, {})
         gap_row = gaps.get(strategy_id, {})
         coverage_row = coverage.get(strategy_id, {})
-        version = strategy_versions.get(strategy_id, {})
-        if strategy_versions and not version:
-            raise ReportValidationError(
-                f"strategy version catalog is missing {strategy_id}"
-            )
-        design = (
-            _object(version.get("design"), "strategy version design") if version else {}
-        )
-        configuration = (
-            _object(version.get("configuration"), "strategy version configuration")
-            if version
-            else {}
-        )
-        backtest = (
-            _object(version.get("backtest"), "strategy version backtest")
-            if version
-            else {}
-        )
-        live_boundary = (
-            _object(version.get("live_boundary"), "strategy version live boundary")
-            if version
-            else {}
-        )
-        version_costs = (
-            _object(version.get("costs"), "strategy version costs") if version else {}
-        )
-        benchmark = (
-            _object(version.get("benchmark"), "strategy version benchmark")
-            if version
-            else {}
-        )
-        source_route = (
-            _object(version.get("source_route"), "strategy version source route")
-            if version
-            else {}
-        )
-        layer_inventory = (
-            [
-                {
-                    "artifact_sha256": item.get("artifact_sha256"),
-                    "disposition": item.get("disposition"),
-                    "evidence_layer": item.get("evidence_layer"),
-                    "observed_end": item.get("observed_end"),
-                    "observed_start": item.get("observed_start"),
-                    "source_id": item.get("source_id"),
-                    "status": item.get("status"),
-                    "version_ref": item.get("version_ref"),
-                }
-                for item in _objects(
-                    version.get("evidence_layers"),
-                    "strategy version evidence layers",
-                )
-            ]
-            if version
-            else []
-        )
-        compatibility_status = version.get("compatibility_status", "UNRESOLVED")
-        compatibility_reason = version.get(
-            "compatibility_reason",
-            "Compatibility is unavailable without an effective-dated registry row.",
-        )
-        history = (
-            dict(history_contract.get(str(strategy.get("name")), {}))
-            if history_contract is not None
-            else {}
-        )
-        implementation = (
-            dict(implementation_contract.get(strategy_id, {}))
-            if implementation_contract is not None
-            else {}
-        )
-        implementation_return_attribution = (
-            dict(implementation_return_attribution_contract.get(strategy_id, {}))
-            if implementation_return_attribution_contract is not None
-            else {}
-        )
-        history_observations = history.get("backtest_observations")
-        history_accepted = bool(
-            history
-            and str(history.get("history_status", "")).startswith("ACCEPTED_")
-            and isinstance(history_observations, int)
-            and history_observations > 0
-        )
-        if history_contract is not None:
-            history_compatibility_status = (
-                "ACCEPTED_FOR_ECONOMIC_INFERENCE"
-                if history_accepted
-                else "UNAVAILABLE_NO_ACCEPTED_HISTORY"
-            )
-            history_compatibility_reason = (
-                _text(
-                    history.get("compatibility_basis"),
-                    f"history compatibility basis {strategy_id}",
-                )
-                if history_accepted
-                else str(
-                    history.get("history_disposition_reason")
-                    or history.get("status")
-                    or history.get("history_status")
-                )
-            )
-            live_plus_backtest_status = (
-                "ELIGIBLE_ACCEPTED_HISTORY"
-                if history_accepted
-                else "BLOCKED_NO_ACCEPTED_HISTORY"
-            )
-            live_plus_backtest_reason = (
-                "History is accepted for economic inference under "
-                f"{history_compatibility_reason}; live implementation reconciliation "
-                "remains a separate control."
-                if history_accepted
-                else (
-                    "No accepted strategy history is routed: "
-                    f"{str(history_compatibility_reason).rstrip('.')}."
-                )
-            )
-        else:
-            history_compatibility_status = None
-            history_compatibility_reason = None
-            live_plus_backtest_status = (
-                "ELIGIBLE_PROVEN_COMPATIBLE"
-                if compatibility_status == "PROVEN_COMPATIBLE"
-                else "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
-            )
-            live_plus_backtest_reason = (
-                "Effective-dated registry marks the current strategy version PROVEN_COMPATIBLE."
-                if compatibility_status == "PROVEN_COMPATIBLE"
-                else f"{compatibility_status}: {compatibility_reason}"
-            )
         available_segments, total_segments = performance_count[strategy_id]
         rows.append(
             {
@@ -1389,110 +439,14 @@ def _strategies(
                 "systematic_weight": allocation.get("systematic_weight"),
                 "available_twr_segments": available_segments,
                 "total_assignment_segments": total_segments,
-                "account_live_status": (
-                    "AVAILABLE" if account_metrics else "UNAVAILABLE"
-                ),
-                "account_live_cagr": account_cagr,
-                "account_live_cagr_status": (
-                    "AVAILABLE_DERIVED_SAME_CANONICAL_PATH"
-                    if canonical_account and account_cagr is not None
-                    else "AVAILABLE_SOURCE_REPORTED_SAME_AUDIT_VINTAGE"
-                    if legacy_account and account_cagr is not None
-                    else "UNAVAILABLE"
-                ),
-                "account_live_cumulative_return": cumulative_return,
-                "account_live_max_drawdown": account_metrics.get("maximum_drawdown")
-                or account_metrics.get("max_drawdown"),
-                "account_live_observed_end": observed_end,
-                "account_live_observed_start": observed_start,
-                "account_live_return_authority": account_authority,
-                "account_live_return_observations": account_metrics.get(
-                    "return_observations"
-                ),
-                "account_live_return_series_schema": account_metrics.get(
-                    "return_series_schema"
-                ),
-                "account_live_return_series_sha256": account_metrics.get(
-                    "return_series_sha256"
-                ),
-                "account_live_source_generation": (
-                    account_path.get("generation_id") if canonical_account else None
-                ),
-                "account_live_source_generation_as_of_date": (
-                    account_path.get("generation_as_of_date")
-                    if canonical_account
-                    else live_source.get("as_of_date")
-                ),
-                "account_live_source_provider": (
-                    account_path.get("provider_id") if canonical_account else None
-                ),
-                "account_live_source_sha256": (
-                    None if canonical_account else live_source.get("sha256")
-                ),
-                "nav_status": (
-                    "AVAILABLE"
-                    if admitted_account_nav or admitted_provider_nav
-                    else coverage_row.get("status", "UNAVAILABLE")
-                ),
-                "nav_observed_start": strategy_path.get("observed_start"),
-                "nav_observed_end": strategy_path.get("observed_end"),
-                "nav_return_observations": strategy_path.get("return_observations"),
-                "hwm_current_drawdown": strategy_path.get("current_drawdown"),
-                "hwm_max_drawdown": strategy_path.get("maximum_drawdown"),
-                "nav_evidence_layer": (
-                    provider_row.get("evidence_layer") if provider_row else None
-                ),
+                "account_live_status": "AVAILABLE" if live_row else "UNAVAILABLE",
+                "account_live_cagr": metrics.get("cagr"),
+                "account_live_cumulative_return": metrics.get("cumulative_return"),
+                "account_live_max_drawdown": metrics.get("max_drawdown"),
+                "nav_status": coverage_row.get("status", "UNAVAILABLE"),
                 "cost_status": cost_row.get("cost_status", "UNAVAILABLE"),
                 "implementation_gap_status": gap_row.get("status", "UNAVAILABLE"),
-                "version_ref": version.get("version_ref", strategy.get("version_ref")),
-                "version_disposition": version.get(
-                    "disposition", strategy.get("version_disposition", "UNRESOLVED")
-                ),
-                "version_disposition_reason": version.get(
-                    "disposition_reason",
-                    "Legacy provenance has no effective-dated strategy version row.",
-                ),
-                "version_effective_start": version.get("effective_start"),
-                "version_effective_end": version.get("effective_end"),
-                "version_compatibility_status": compatibility_status,
-                "version_compatibility_reason": compatibility_reason,
-                "history_compatibility_status": history_compatibility_status,
-                "history_compatibility_reason": history_compatibility_reason,
-                "history_version_ref": history.get("strategy_version"),
-                "history_observations": history_observations,
-                "history_observed_start": history.get("backtest_observed_start"),
-                "history_observed_end": history.get("backtest_observed_end"),
-                "implementation_lineage": history.get("implementation_lineage"),
-                "implementation_reconciliation_status": history.get(
-                    "implementation_reconciliation_status"
-                )
-                if not implementation
-                else (
-                    "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
-                    if implementation_return_attribution
-                    else "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION"
-                ),
-                "implementation_reconciliation": implementation or None,
-                "implementation_return_attribution": (
-                    implementation_return_attribution or None
-                ),
-                "live_plus_backtest_status": live_plus_backtest_status,
-                "live_plus_backtest_reason": live_plus_backtest_reason,
-                "design_status": design.get("status", "UNAVAILABLE"),
-                "design_version_ref": design.get("version_ref"),
-                "configuration_status": configuration.get("status", "UNAVAILABLE"),
-                "configuration_version_ref": configuration.get("version_ref"),
-                "backtest_status": backtest.get("status", "UNAVAILABLE"),
-                "backtest_version_ref": backtest.get("version_ref"),
-                "live_boundary_status": live_boundary.get("status", "UNAVAILABLE"),
-                "live_boundary_observed_start": live_boundary.get("observed_start"),
-                "live_boundary_observed_end": live_boundary.get("observed_end"),
-                "cost_evidence_status": version_costs.get("status", "UNAVAILABLE"),
-                "benchmark_evidence_status": benchmark.get("status", "UNAVAILABLE"),
-                "source_route_status": source_route.get("status", "UNAVAILABLE"),
-                "source_route_ids": source_route.get("source_ids", []),
-                "strategy_evidence_layers": layer_inventory,
-                "version_gaps": version.get("gaps", strategy.get("gaps", [])),
+                "version_ref": strategy.get("version_ref"),
             }
         )
     return sorted(rows, key=lambda item: str(item["strategy_id"]))
@@ -1572,19 +526,8 @@ def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "symbol": None,
             }
         ]
-    latest_by_account: dict[str, str] = {}
-    for item in rows:
-        account_id = _text(item.get("account_id"), "position.account_id")
-        as_of_date = _text(item.get("as_of_date"), "position.as_of_date")
-        if (
-            account_id not in latest_by_account
-            or as_of_date > latest_by_account[account_id]
-        ):
-            latest_by_account[account_id] = as_of_date
     accepted: list[dict[str, Any]] = []
     for item in rows:
-        account_id = _text(item.get("account_id"), "position.account_id")
-        as_of_date = _text(item.get("as_of_date"), "position.as_of_date")
         amount = _object(item.get("market_value"), "position.market_value")
         status = _text(amount.get("status"), "position.market_value.status")
         accepted.append(
@@ -1599,11 +542,6 @@ def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 ),
                 "quantity": item.get("quantity"),
                 "security_id": item.get("security_id"),
-                "snapshot_status": (
-                    "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
-                    if as_of_date == latest_by_account[account_id]
-                    else "HISTORICAL_ACCEPTED_ACCOUNT_SNAPSHOT"
-                ),
                 "status": (
                     "AVAILABLE_UNMAPPED"
                     if item.get("mapping_status") == "UNMAPPED"
@@ -1615,11 +553,7 @@ def _positions(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
         )
     return sorted(
         accepted,
-        key=lambda item: (
-            str(item["account_id"]),
-            str(item["as_of_date"]),
-            str(item["security_id"]),
-        ),
+        key=lambda item: (str(item["account_id"]), str(item["security_id"])),
     )
 
 
@@ -1629,12 +563,7 @@ def _flow_reconciliation(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
         groups[(str(flow.get("provider")), str(flow.get("flow_type")))].append(flow)
     rows = []
     for (provider, flow_type), values in sorted(groups.items()):
-        available = [
-            item
-            for item in values
-            if _object(item.get("amount"), "flow.amount").get("status") == "AVAILABLE"
-        ]
-        total = sum((_amount(item, "amount") for item in available), Decimal("0"))
+        total = sum((_amount(item, "amount") for item in values), Decimal("0"))
         rows.append(
             {
                 "flow_type": flow_type,
@@ -1644,12 +573,7 @@ def _flow_reconciliation(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "net_amount_usd": decimal_text(total),
                 "provider": provider,
                 "record_count": len(values),
-                "status": (
-                    "PARTIAL_UNAVAILABLE_AMOUNTS"
-                    if len(available) != len(values)
-                    else "PARTIAL_SOURCE_COVERAGE"
-                ),
-                "unavailable_amount_count": len(values) - len(available),
+                "status": "PARTIAL_SOURCE_COVERAGE",
             }
         )
     return rows
@@ -1691,30 +615,7 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                     str(item) for item in claim.get("known_gaps", [])
                 ),
                 "status": claim.get("status"),
-                "value": claim.get("record_count"),
-                **(
-                    {
-                        "disposition": claim.get("disposition"),
-                        "evidence_authority": claim.get("disposition", {}).get(
-                            "authority"
-                        ),
-                    }
-                    if isinstance(claim.get("disposition"), Mapping)
-                    else {}
-                ),
-            }
-        )
-    for detail in _objects(
-        catalog.get("fact_coverage_matrix", []), "fact_coverage_matrix"
-    ):
-        rows.append(
-            {
-                **detail,
-                "category": "FACT_COVERAGE_DETAIL",
-                "evidence_authority": detail.get("authority"),
-                "item": (f"{detail.get('fact_type')}:{detail.get('account_id')}"),
-                "known_gap": detail.get("missing_interval_reason"),
-                "value": detail.get("record_count"),
+                "value": None,
             }
         )
     counts: dict[str, int] = defaultdict(int)
@@ -1740,38 +641,6 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "known_gap": item.get("severity"),
                 "status": item.get("status"),
                 "value": item.get("record_count"),
-                **(
-                    {
-                        "disposition": item.get("disposition"),
-                        "resolution_authority": item.get("authority"),
-                    }
-                    if item.get("disposition") is not None
-                    or item.get("authority") is not None
-                    else {}
-                ),
-            }
-        )
-    for item in _objects(catalog.get("provider_coverage", []), "provider_coverage"):
-        claim = _object(item.get("coverage"), "provider coverage")
-        limitations = [
-            *claim.get("known_gaps", []),
-            *claim.get("out_of_boundary", []),
-        ]
-        rows.append(
-            {
-                "category": "PROVIDER_COVERAGE",
-                "item": item.get("provider_id"),
-                "known_gap": "; ".join(str(gap) for gap in limitations),
-                "status": claim.get("status"),
-                "value": item.get("qualification"),
-                **(
-                    {
-                        "observed_end": claim.get("observed_end"),
-                        "observed_start": claim.get("observed_start"),
-                    }
-                    if "observed_end" in claim or "observed_start" in claim
-                    else {}
-                ),
             }
         )
     return rows
@@ -1794,494 +663,20 @@ def _corrections(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: str(item["correction_id"]))
 
 
-def _provider_ledger_exceptions(
-    catalog: Mapping[str, Any],
-    baseline_root: Path,
-    provider_ledger_root: Path | None = None,
-) -> list[dict[str, Any]]:
-    references = [
-        item
-        for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
-        if item.get("source_key") == "provider-ledger-generation"
-        and item.get("schema_name") == "provider-ledger-catalog"
-    ]
-    if not references:
-        return []
-    if len(references) != 1:
-        raise ReportValidationError(
-            "baseline provider-ledger catalog reference is ambiguous"
-        )
-    reference = references[0]
-    expected_sha256 = _text(reference.get("sha256"), "provider-ledger sha256")
-    candidates: list[tuple[Path, str]] = []
-    generations_root = (
-        provider_ledger_root
-        if provider_ledger_root is not None
-        else baseline_root.parent / "provider-ledger"
-    ) / "generations"
-    if generations_root.is_dir():
-        for path in sorted(generations_root.glob("*/provider-ledger.json")):
-            if path.is_symlink() or not path.is_file():
-                continue
-            observed_sha256, _ = hash_file(path)
-            if observed_sha256 == expected_sha256:
-                candidates.append((path, observed_sha256))
-    if len(candidates) != 1:
-        raise ReportValidationError(
-            "hash-bound provider-ledger catalog is missing or ambiguous"
-        )
-    path, observed_sha256 = candidates[0]
-    generation_id = path.parent.name
-    if len(generation_id) != 64 or any(
-        character not in "0123456789abcdef" for character in generation_id
-    ):
-        raise ReportValidationError("provider-ledger generation identity is invalid")
-    provider_catalog = _load_json(path, "provider-ledger catalog")
-    exceptions = [
-        item
-        for item in _objects(
-            provider_catalog.get("reconciliation_checks"),
-            "provider-ledger reconciliation_checks",
-        )
-        if item.get("status") == "EXCEPTION"
-    ]
-    return [
-        {
-            "authority_effect": item.get("authority_effect"),
-            "check_id": _text(item.get("check_id"), "provider check.check_id"),
-            "details_json": canonical_json_bytes(item).decode("utf-8"),
-            "exception_date_count": item.get("exception_date_count"),
-            "maximum_absolute_difference": item.get("maximum_absolute_difference"),
-            "source_artifact_id": reference.get("artifact_id"),
-            "source_as_of_date": reference.get("as_of_date"),
-            "source_catalog_sha256": observed_sha256,
-            "source_generation_id": generation_id,
-            "source_layer": "PROVIDER_LEDGER",
-            "status": "EXCEPTION",
-            "strategy_id": item.get("strategy_id"),
-            "tolerance": item.get("tolerance"),
-        }
-        for item in exceptions
-    ]
-
-
-def _reconciliation_checks(
-    catalog: Mapping[str, Any],
-    baseline_root: Path,
-    baseline_ref: Mapping[str, Any],
-    provider_ledger_root: Path | None = None,
-) -> list[dict[str, Any]]:
-    rows = [
-        {
-            "authority_effect": item.get("authority_effect"),
-            "check_id": _text(item.get("check_id"), "reconciliation check.check_id"),
-            "details_json": canonical_json_bytes(item).decode("utf-8"),
-            "exception_date_count": item.get("exception_date_count"),
-            "maximum_absolute_difference": item.get("maximum_absolute_difference"),
-            "source_artifact_id": "normalized/portfolio-baseline.json",
-            "source_as_of_date": catalog.get("as_of_date"),
-            "source_catalog_sha256": baseline_ref["catalog_sha256"],
-            "source_generation_id": baseline_ref["generation_id"],
-            "source_layer": "PORTFOLIO_BASELINE",
-            "status": item.get("status"),
-            "strategy_id": item.get("strategy_id"),
-            "tolerance": item.get("tolerance"),
-        }
-        for item in _objects(
-            catalog.get("reconciliation_checks"), "reconciliation_checks"
-        )
-    ]
-    rows.extend(
-        _provider_ledger_exceptions(catalog, baseline_root, provider_ledger_root)
-    )
-    check_ids = [str(item["check_id"]) for item in rows]
-    if len(check_ids) != len(set(check_ids)):
-        raise ReportValidationError("report reconciliation check identifiers repeat")
-    return rows
-
-
-def _provider_ledger_identity(root: Path, generation_id: str) -> dict[str, object]:
-    try:
-        manifest = read_generation(root, generation_id)
-    except (OSError, ValueError, RuntimeError) as exc:
-        raise ReportValidationError(
-            "freshness provider ledger generation is not accepted"
-        ) from exc
-    expected = next(
-        (
-            artifact
-            for artifact in manifest.artifacts
-            if artifact.artifact_id == "normalized/provider-ledger.json"
-        ),
-        None,
-    )
-    if expected is None:
-        raise ReportValidationError("freshness provider ledger catalog is absent")
-    generation = root / "generations" / manifest.generation_id
-    catalog_path = generation / "provider-ledger.json"
-    if catalog_path.is_symlink() or not catalog_path.is_file():
-        raise ReportValidationError("freshness provider ledger catalog is unavailable")
-    catalog_sha256, catalog_size = hash_file(catalog_path)
-    if (catalog_sha256, catalog_size) != (expected.sha256, expected.size_bytes):
-        raise ReportValidationError(
-            "freshness provider ledger catalog differs from its manifest"
-        )
-    manifest_sha256, manifest_size = hash_file(generation / "generation.json")
-    return {
-        "as_of_date": manifest.as_of_date.isoformat(),
-        "catalog_sha256": catalog_sha256,
-        "catalog_size_bytes": catalog_size,
-        "generation_id": manifest.generation_id,
-        "manifest_sha256": manifest_sha256,
-        "manifest_size_bytes": manifest_size,
-    }
-
-
-def _baseline_provider_ledger_identity(
-    catalog: Mapping[str, Any],
-) -> dict[str, str]:
-    references = [
-        item
-        for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
-        if item.get("source_key") == "provider-ledger-generation"
-        and item.get("schema_name")
-        in {"generation-manifest", "provider-ledger-catalog"}
-    ]
-    by_schema = {
-        _text(item.get("schema_name"), "provider-ledger schema_name"): _text(
-            item.get("sha256"), "provider-ledger sha256"
-        )
-        for item in references
-    }
-    if len(references) != 2 or set(by_schema) != {
-        "generation-manifest",
-        "provider-ledger-catalog",
-    }:
-        raise ReportValidationError(
-            "baseline provider-ledger identity is missing or ambiguous"
-        )
-    return by_schema
-
-
-def _freshness_assessments(
-    path: Path,
-    portfolio_as_of: date,
-    provider_ledger_root: Path | None = None,
-    baseline_catalog: Mapping[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], date, str]:
-    payload = _load_json(path, "freshness health")
-    schema_version = payload.get("assessment_schema_version")
-    expected = {
-        "assessment_schema_version",
-        "as_of_date",
-        "assessments",
-        "policy" if schema_version == 2 else "policies",
-    }
-    accepted = {frozenset(expected)}
-    if schema_version == 3:
-        accepted.add(frozenset(expected | {"provider_ledger"}))
-    if schema_version not in {2, 3} or frozenset(payload) not in accepted:
-        raise ReportValidationError("freshness health contract differs")
-    as_of = _date(payload.get("as_of_date"), "freshness health as_of_date")
-    if as_of < portfolio_as_of:
-        raise ReportValidationError("freshness health predates the portfolio")
-    if "provider_ledger" in payload:
-        ledger = _object(payload.get("provider_ledger"), "freshness provider ledger")
-        if set(ledger) != {
-            "as_of_date",
-            "catalog_sha256",
-            "catalog_size_bytes",
-            "generation_id",
-            "manifest_sha256",
-            "manifest_size_bytes",
-        }:
-            raise ReportValidationError("freshness provider ledger keys differ")
-        ledger_as_of = _date(
-            ledger.get("as_of_date"), "freshness provider ledger as_of_date"
-        )
-        if ledger_as_of > as_of:
-            raise ReportValidationError(
-                "freshness provider ledger postdates the evaluation"
-            )
-        for field in ("catalog_sha256", "generation_id", "manifest_sha256"):
-            if not re.fullmatch(
-                r"[0-9a-f]{64}",
-                _text(ledger.get(field), f"freshness provider ledger {field}"),
-            ):
-                raise ReportValidationError(
-                    f"freshness provider ledger {field} differs"
-                )
-        for field in ("catalog_size_bytes", "manifest_size_bytes"):
-            value = ledger.get(field)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ReportValidationError(
-                    f"freshness provider ledger {field} differs"
-                )
-        if provider_ledger_root is None:
-            raise ReportValidationError(
-                "freshness provider ledger root is required for identity binding"
-            )
-        observed_identity = _provider_ledger_identity(
-            provider_ledger_root.resolve(), str(ledger["generation_id"])
-        )
-        if dict(ledger) != observed_identity:
-            raise ReportValidationError(
-                "freshness provider ledger identity differs from the selected ledger"
-            )
-        if baseline_catalog is not None:
-            baseline_identity = _baseline_provider_ledger_identity(baseline_catalog)
-            if (
-                ledger["catalog_sha256"] != baseline_identity["provider-ledger-catalog"]
-                or ledger["manifest_sha256"] != baseline_identity["generation-manifest"]
-            ):
-                raise ReportValidationError(
-                    "freshness provider ledger identity differs from the baseline"
-                )
-    assessments = _objects(payload.get("assessments"), "freshness assessments")
-    if not assessments:
-        raise ReportValidationError("freshness assessments are empty")
-    evaluated = {
-        _date(item.get("evaluated_on"), "freshness evaluated_on")
-        for item in assessments
-    }
-    if evaluated != {as_of}:
-        raise ReportValidationError("freshness evaluation date is inconsistent")
-    sha256, _size = hash_file(path)
-    return assessments, as_of, sha256
-
-
-def _hwm_policy(evaluation_date: date) -> tuple[dict[str, Any], str]:
-    policy = _load_json(HWM_POLICY, "HWM policy")
-    if policy.get("schema_version") != 2 or policy.get("policy_id") != "PORT-HWM-3":
-        raise ReportValidationError("HWM policy identity is unsupported")
-    perimeter = _object(policy.get("material_perimeter"), "material_perimeter")
-    exclusions = _objects(perimeter.get("exclusions"), "material_perimeter.exclusions")
-    excluded_ids: set[str] = set()
-    for item in exclusions:
-        strategy_id = _text(item.get("strategy_id"), "HWM exclusion strategy_id")
-        if strategy_id in excluded_ids:
-            raise ReportValidationError("HWM exclusion is duplicated")
-        if item.get("classification") != "EXCLUDED_DE_MINIMIS":
-            raise ReportValidationError("HWM exclusion classification differs")
-        effective_date = _date(item.get("effective_date"), "HWM exclusion date")
-        if effective_date <= evaluation_date:
-            excluded_ids.add(strategy_id)
-    accepted_evidence = policy.get("accepted_daily_nav_evidence")
-    accepted_provider_live = policy.get("accepted_provider_live_strategy_ids")
-    if not isinstance(accepted_evidence, list) or not all(
-        isinstance(item, str) and item for item in accepted_evidence
-    ):
-        raise ReportValidationError("HWM accepted evidence differs")
-    if not isinstance(accepted_provider_live, list) or not all(
-        isinstance(item, str) and item for item in accepted_provider_live
-    ):
-        raise ReportValidationError("HWM provider-live allowlist differs")
-    policy["excluded_strategy_ids"] = sorted(excluded_ids)
-    policy["evaluation_date"] = evaluation_date.isoformat()
-    sha256, _size = hash_file(HWM_POLICY)
-    return policy, sha256
-
-
-def _reconcile_hwm_coverage(
-    coverage: Sequence[Mapping[str, Any]], hwm_summary: Mapping[str, Any]
-) -> list[dict[str, Any]]:
-    normalized = [dict(row) for row in coverage]
-    missing = [str(name) for name in hwm_summary["uncovered_strategies"]]
-    details = [
-        dict(item)
-        for item in hwm_summary.get("uncovered_details", [])
-        if isinstance(item, Mapping)
-    ]
-    detail_by_name = {str(item.get("strategy_name")): item for item in details}
-    gap_details = ", ".join(
-        f"{name} (${detail_by_name.get(name, {}).get('current_value_usd', 'UNKNOWN')}; "
-        f"{detail_by_name.get(name, {}).get('qualification_gap', 'UNQUALIFIED')}; "
-        f"last accepted {detail_by_name.get(name, {}).get('last_accepted_date') or 'unavailable'}; "
-        f"{detail_by_name.get(name, {}).get('freshness_reason') or 'no freshness reason'})"
-        for name in missing
-    )
-    excluded = [
-        dict(item)
-        for item in hwm_summary.get("excluded_details", [])
-        if isinstance(item, Mapping)
-    ]
-    exclusion_text = (
-        "explicit policy exclusions: "
-        + ", ".join(
-            f"{item.get('strategy_name')} (${item.get('current_value_usd')}; {item.get('reason')})"
-            for item in excluded
-        )
-        if excluded
-        else (
-            f"{len(hwm_summary['excluded_strategies'])} strateg"
-            f"{'y is' if len(hwm_summary['excluded_strategies']) == 1 else 'ies are'} "
-            "explicitly excluded de minimis by policy"
-        )
-    )
-    for row in normalized:
-        if row.get("category") == "FACT_COVERAGE" and row.get("item") == "nav":
-            row["known_gap"] = (
-                (
-                    f"{len(missing)} included HWM-perimeter strateg"
-                    f"{'y is' if len(missing) == 1 else 'ies are'} not HWM-qualified"
-                    + (f": {gap_details}" if gap_details else "")
-                )
-                if missing
-                else "Every included HWM-perimeter strategy is qualified"
-            )
-            row["known_gap"] += f"; {exclusion_text}"
-            row["disposition"] = (
-                "RETAINED_UNCOVERED_PENDING_FRESH_DAILY_NAV" if missing else "COMPLETE"
-            )
-            row["status"] = (
-                "PARTIAL" if missing else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
-            )
-    hwm_rows = [
-        row
-        for row in normalized
-        if row.get("category") == "RECONCILIATION_EXCEPTION"
-        and row.get("item") == "full-systematic-hwm-unavailable"
-    ]
-    if not missing:
-        return [row for row in normalized if row not in hwm_rows]
-    gap = (
-        "BLOCKING_FOR_AUTOMATED_HWM: included HWM-perimeter strategies are not "
-        f"qualified; exact uncovered value ${hwm_summary.get('uncovered_value_usd', 'UNKNOWN')}: "
-        + gap_details
-    )
-    if hwm_rows:
-        for row in hwm_rows:
-            row["known_gap"] = gap
-            row["disposition"] = "RETAINED_UNCOVERED_PENDING_FRESH_DAILY_NAV"
-            row["resolution_authority"] = (
-                "PORT-HWM-3 policy and admitted-lane daily NAV freshness evidence"
-            )
-            row["status"] = "UNAVAILABLE"
-            row["uncovered_details"] = details
-            row["value"] = hwm_summary.get("uncovered_value_usd")
-    else:
-        normalized.append(
-            {
-                "category": "RECONCILIATION_EXCEPTION",
-                "item": "full-systematic-hwm-unavailable",
-                "known_gap": gap,
-                "disposition": "RETAINED_UNCOVERED_PENDING_FRESH_DAILY_NAV",
-                "resolution_authority": (
-                    "PORT-HWM-3 policy and admitted-lane daily NAV freshness evidence"
-                ),
-                "status": "UNAVAILABLE",
-                "uncovered_details": details,
-                "value": hwm_summary.get("uncovered_value_usd"),
-            }
-        )
-    return normalized
-
-
 def build_report_data(
     baseline_root: Path,
-    freshness_health_path: Path | None = None,
-    provider_ledger_root: Path | None = None,
-    attribution_root: Path | None = None,
-    history_contract_path: Path | None = None,
-    implementation_reconciliation_path: Path | None = None,
-    implementation_return_attribution_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
     catalog, baseline_ref, baseline_catalog_path = _baseline(baseline_root)
     performance = _account_strategy_performance(catalog)
-    strategy_provider_evidence = _strategy_provider_evidence(catalog)
-    strategy_names = {
-        _text(item.get("name"), "strategy.name")
-        for item in _objects(catalog.get("strategies"), "strategies")
-    }
-    history_contract: dict[str, dict[str, Any]] | None = None
-    history_contract_ref: dict[str, Any] | None = None
-    if history_contract_path is not None:
-        history_contract, history_contract_ref = _history_contract(
-            history_contract_path,
-            portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
-            strategy_names=strategy_names,
-        )
-    implementation_contract: dict[str, dict[str, Any]] | None = None
-    implementation_contract_ref: dict[str, Any] | None = None
-    if implementation_reconciliation_path is not None:
-        implementation_contract, implementation_contract_ref = (
-            _implementation_reconciliation_contract(
-                implementation_reconciliation_path,
-                portfolio_as_of=_text(
-                    catalog.get("as_of_date"), "portfolio as_of_date"
-                ),
-            )
-        )
-    implementation_return_attribution_contract: dict[str, dict[str, Any]] | None = None
-    implementation_return_attribution_ref: dict[str, Any] | None = None
-    if implementation_return_attribution_path is not None:
-        (
-            implementation_return_attribution_contract,
-            implementation_return_attribution_ref,
-        ) = _implementation_return_attribution_contract(
-            implementation_return_attribution_path,
-            portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
-        )
-    strategy_summary = _strategies(
-        catalog,
-        performance,
-        history_contract,
-        implementation_contract,
-        implementation_return_attribution_contract,
-    )
-    attribution_catalog: dict[str, Any] | None = None
-    attribution_ref: dict[str, str] | None = None
-    if attribution_root is not None:
-        attribution_catalog, attribution_ref, _ = _attribution(
-            attribution_root, baseline_ref
-        )
-        strategy_summary = _merge_attribution(strategy_summary, attribution_catalog)
-    coverage = _coverage(catalog)
-    hwm_summary: dict[str, Any] | None = None
-    hwm_provenance: list[dict[str, Any]] = []
-    if freshness_health_path is not None:
-        portfolio_as_of = _date(catalog.get("as_of_date"), "portfolio as_of_date")
-        freshness, evaluation_date, freshness_sha256 = _freshness_assessments(
-            freshness_health_path,
-            portfolio_as_of,
-            provider_ledger_root,
-            catalog,
-        )
-        hwm_policy, hwm_policy_sha256 = _hwm_policy(evaluation_date)
-        try:
-            strategy_summary, hwm_summary = governed_hwm_coverage(
-                strategy_summary,
-                hwm_policy,
-                freshness,
-                require_freshness=True,
-            )
-        except HwmCoverageError as exc:
-            raise ReportValidationError(str(exc)) from exc
-        coverage = _reconcile_hwm_coverage(coverage, hwm_summary)
-        hwm_provenance = [
-            {
-                "artifact": "portfolio-hwm-policy",
-                "as_of_date": evaluation_date.isoformat(),
-                "schema": "portfolio-hwm-policy/2",
-                "sha256": hwm_policy_sha256,
-            },
-            {
-                "artifact": "freshness-health",
-                "as_of_date": evaluation_date.isoformat(),
-                "schema": "freshness-assessment",
-                "sha256": freshness_sha256,
-            },
-        ]
     report: dict[str, Any] = {
         "account_summary": _accounts(catalog),
         "allocation_history": _allocations(catalog),
         "as_of_date": catalog.get("as_of_date"),
         "baseline": baseline_ref,
         "corrections": _corrections(catalog),
-        "coverage_data_quality": coverage,
-        "fact_coverage_matrix": catalog.get("fact_coverage_matrix", []),
+        "coverage_data_quality": _coverage(catalog),
         "flow_reconciliation": _flow_reconciliation(catalog),
         "methodology": [
             {"item": "Policy", "value": POLICY_VERSION},
@@ -2298,10 +693,6 @@ def build_report_data(
                 "value": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate.",
             },
             {
-                "item": "Account-live return authority",
-                "value": "Canonical strategy-return rows govern cumulative return, drawdown, CAGR vintage, and the ordered date/return series hash; legacy audit metrics are used only as one internally consistent fallback when no provider-ledger evidence exists.",
-            },
-            {
                 "item": "Missing data",
                 "value": "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, PARTIAL, FAILED, or UNMAPPED; no interpolation.",
             },
@@ -2313,17 +704,9 @@ def build_report_data(
                 "item": "Workbook authority",
                 "value": "Workbook formulas are display/reconciliation checks. Canonical JSON and tested code are calculation authority.",
             },
-            {
-                "item": "Strategy attribution",
-                "value": "Provider/model comparisons use exact common dates only. Version-unresolved results remain descriptive; benchmark, cash-drag, fee, or after-tax gaps stay unavailable rather than becoming zero.",
-            },
         ],
-        "portfolio_summary": _portfolio_summary(catalog, hwm_summary),
-        "observation_windows": catalog.get("observation_windows", []),
+        "portfolio_summary": _portfolio_summary(catalog),
         "positions": _positions(catalog),
-        "provider_admissions": catalog.get("provider_admissions", []),
-        "provider_coverage": catalog.get("provider_coverage", []),
-        "provider_strategy_returns": catalog.get("provider_strategy_returns", []),
         "provenance": [
             {
                 "artifact": "baseline-generation",
@@ -2348,90 +731,13 @@ def build_report_data(
                     catalog.get("source_artifacts"), "source_artifacts"
                 )
             ],
-            *hwm_provenance,
-            *(
-                [
-                    {
-                        "artifact": "strategy-history-compatibility-contract",
-                        "as_of_date": history_contract_ref["as_of_date"],
-                        "schema": "portfolio-target-series-evidence-proof/1",
-                        "sha256": history_contract_ref["sha256"],
-                    }
-                ]
-                if history_contract_ref is not None
-                else []
-            ),
-            *(
-                [
-                    {
-                        "artifact": "strategy-implementation-return-attribution",
-                        "as_of_date": implementation_return_attribution_ref[
-                            "as_of_date"
-                        ],
-                        "schema": "portfolio-implementation-return-attribution/1",
-                        "sha256": implementation_return_attribution_ref["sha256"],
-                    }
-                ]
-                if implementation_return_attribution_ref is not None
-                else []
-            ),
-            *(
-                [
-                    {
-                        "artifact": "strategy-implementation-reconciliation",
-                        "as_of_date": implementation_contract_ref["as_of_date"],
-                        "schema": "portfolio-implementation-reconciliation/1",
-                        "sha256": implementation_contract_ref["sha256"],
-                    }
-                ]
-                if implementation_contract_ref is not None
-                else []
-            ),
-            *(
-                [
-                    {
-                        "artifact": "strategy-attribution",
-                        "as_of_date": attribution_catalog.get("as_of_date"),
-                        "schema": "strategy-attribution/1",
-                        "sha256": attribution_ref["catalog_sha256"],
-                    }
-                ]
-                if attribution_catalog is not None and attribution_ref is not None
-                else []
-            ),
         ],
-        "reconciliation_checks": _reconciliation_checks(
-            catalog, baseline_root, baseline_ref, provider_ledger_root
-        ),
+        "reconciliation_checks": catalog.get("reconciliation_checks", []),
         "report_schema_version": REPORT_SCHEMA_VERSION,
-        "strategy_summary": strategy_summary,
-        "attribution_dispositions": catalog.get("attribution_dispositions", []),
-        "strategy_provider_evidence": strategy_provider_evidence,
-        "strategy_returns": catalog.get("strategy_returns", []),
+        "strategy_summary": _strategies(catalog, performance),
         "transactions_and_flows": _transactions_and_flows(catalog),
         "twr_mwr": performance,
     }
-    if history_contract_ref is not None:
-        report["strategy_history_contract"] = history_contract_ref
-    if implementation_contract_ref is not None:
-        report["implementation_reconciliation_contract"] = implementation_contract_ref
-    if implementation_return_attribution_ref is not None:
-        report["implementation_return_attribution_contract"] = (
-            implementation_return_attribution_ref
-        )
-    if hwm_summary is not None:
-        report["hwm_summary"] = hwm_summary
-    if attribution_catalog is not None and attribution_ref is not None:
-        report["strategy_attribution"] = {
-            "benchmark_assignments": attribution_catalog["benchmark_assignments"],
-            "benchmark_comparisons": attribution_catalog.get(
-                "benchmark_comparisons", []
-            ),
-            "comparisons": attribution_catalog["comparisons"],
-            "costs": attribution_catalog["costs"],
-            "generation_id": attribution_ref["generation_id"],
-        }
-    report = _object(_public_report_value(report), "public report")
     return report, canonical_json_bytes(report), baseline_catalog_path
 
 
@@ -2553,7 +859,7 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
             "subject": "Read-only coverage-aware portfolio baseline",
             "author": "quant_engine",
             "company": "quant_engine",
-            "comments": "Generated from an accepted configured portfolio-data baseline.",
+            "comments": "Generated from an accepted private dataPortfolio baseline.",
             "created": datetime.combine(
                 date.fromisoformat(str(report["as_of_date"])), time.min
             ),
@@ -2799,25 +1105,8 @@ def _build_workbook_exact(report: Mapping[str, Any], path: Path) -> dict[str, An
         temporary.unlink(missing_ok=True)
 
 
-def build_candidate(
-    baseline_root: Path,
-    output_root: Path,
-    freshness_health_path: Path | None = None,
-    provider_ledger_root: Path | None = None,
-    attribution_root: Path | None = None,
-    history_contract_path: Path | None = None,
-    implementation_reconciliation_path: Path | None = None,
-    implementation_return_attribution_path: Path | None = None,
-) -> dict[str, Any]:
-    report, report_bytes, _ = build_report_data(
-        baseline_root,
-        freshness_health_path,
-        provider_ledger_root,
-        attribution_root,
-        history_contract_path,
-        implementation_reconciliation_path,
-        implementation_return_attribution_path,
-    )
+def build_candidate(baseline_root: Path, output_root: Path) -> dict[str, Any]:
+    report, report_bytes, _ = build_report_data(baseline_root)
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
     data_path = candidate / REPORT_DATA_NAME
@@ -2941,262 +1230,10 @@ def verify_workbook(path: Path) -> dict[str, Any]:
     }
 
 
-def _canonical_guid(scope: str, index: int, *, zero_prefix: bool = False) -> bytes:
-    digest = hashlib.sha256(f"{scope}:{index}".encode("utf-8")).hexdigest().upper()
-    if zero_prefix:
-        value = f"00000000-{digest[:4]}-{digest[4:8]}-{digest[8:12]}-{digest[12:24]}"
-    else:
-        value = (
-            f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-"
-            f"{digest[16:20]}-{digest[20:32]}"
-        )
-    return value.encode("ascii")
-
-
-def _canonicalize_ooxml_part(
-    name: str, content: bytes, counts: dict[str, int]
-) -> bytes:
-    if name == "docProps/core.xml":
-        created = _CORE_CREATED.search(content)
-        if created is None:
-            raise ReportValidationError("workbook core created timestamp is missing")
-
-        def modified(match: re.Match[bytes]) -> bytes:
-            counts["modified_timestamp"] += 1
-            return match.group(1) + created.group(2) + match.group(3)
-
-        return _CORE_MODIFIED.sub(modified, content)
-    if name == "xl/workbook.xml":
-
-        def abs_path(match: re.Match[bytes]) -> bytes:
-            counts["absolute_path"] += 1
-            return match.group(1) + b"."
-
-        def revision_id(match: re.Match[bytes]) -> bytes:
-            counts["revision_document_id"] += 1
-            return (
-                match.group(1)
-                + b"8_{"
-                + _canonical_guid(name, counts["revision_document_id"])
-                + b"}"
-            )
-
-        content = _WORKBOOK_ABS_PATH.sub(abs_path, content)
-        return _WORKBOOK_REVISION_ID.sub(revision_id, content)
-    if name.startswith("xl/charts/chart") and name.endswith(".xml"):
-
-        def unique_id(match: re.Match[bytes]) -> bytes:
-            counts["chart_unique_id"] += 1
-            return (
-                match.group(1)
-                + b"{"
-                + _canonical_guid(name, counts["chart_unique_id"], zero_prefix=True)
-                + b"}"
-            )
-
-        return _CHART_UNIQUE_ID.sub(unique_id, content)
-    return content
-
-
-def _volatile_field_counts(name: str, content: bytes) -> dict[str, int]:
-    counts = {
-        "absolute_path": 0,
-        "chart_unique_id": 0,
-        "modified_timestamp": 0,
-        "revision_document_id": 0,
-    }
-    if not (
-        name == "docProps/core.xml"
-        or name == "xl/workbook.xml"
-        or (name.startswith("xl/charts/chart") and name.endswith(".xml"))
-    ):
-        return counts
-    root = ET.fromstring(content)
-    for item in root.iter():
-        local_name = _local_name(item.tag)
-        if name == "docProps/core.xml" and local_name == "modified":
-            counts["modified_timestamp"] += 1
-        elif name == "xl/workbook.xml" and local_name == "absPath":
-            counts["absolute_path"] += 1
-        elif name == "xl/workbook.xml" and local_name == "revisionPtr":
-            counts["revision_document_id"] += 1
-        elif name.startswith("xl/charts/chart") and local_name == "uniqueId":
-            counts["chart_unique_id"] += 1
-    return counts
-
-
-def canonicalize_workbook(
-    path: Path, evidence_path: Path | None = None
-) -> dict[str, Any]:
-    """Normalize only native-Excel package fields proven volatile across runs."""
-    if path.is_symlink() or not path.is_file():
-        raise ReportValidationError("Excel workbook is missing or linked")
-    counts = {
-        "absolute_path": 0,
-        "chart_unique_id": 0,
-        "modified_timestamp": 0,
-        "revision_document_id": 0,
-    }
-    discovered = {key: 0 for key in counts}
-    try:
-        with zipfile.ZipFile(path) as source:
-            entries = source.infolist()
-            names = [item.filename for item in entries]
-            if len(names) != len(set(names)):
-                raise ReportValidationError("workbook contains duplicate ZIP entries")
-            output = io.BytesIO()
-            with zipfile.ZipFile(
-                output,
-                mode="w",
-                compression=zipfile.ZIP_DEFLATED,
-                compresslevel=9,
-                allowZip64=True,
-            ) as destination:
-                for item in entries:
-                    source_content = source.read(item.filename)
-                    for key, value in _volatile_field_counts(
-                        item.filename, source_content
-                    ).items():
-                        discovered[key] += value
-                    content = _canonicalize_ooxml_part(
-                        item.filename, source_content, counts
-                    )
-                    canonical = zipfile.ZipInfo(item.filename, _CANONICAL_ZIP_TIMESTAMP)
-                    canonical.compress_type = zipfile.ZIP_DEFLATED
-                    canonical.create_system = 0
-                    canonical.external_attr = 0
-                    destination.writestr(canonical, content, compresslevel=9)
-    except (zipfile.BadZipFile, ET.ParseError, KeyError, OSError) as exc:
-        raise ReportValidationError("workbook cannot be canonicalized") from exc
-    if discovered["modified_timestamp"] != 1:
-        raise ReportValidationError("workbook core modified timestamp count differs")
-    if counts != discovered:
-        raise ReportValidationError(
-            "workbook volatile-field canonicalization is incomplete: "
-            f"discovered={discovered!r}, normalized={counts!r}"
-        )
-    canonical_bytes = output.getvalue()
-    if path.read_bytes() != canonical_bytes:
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".canonical-", suffix=".xlsx", dir=path.parent
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(canonical_bytes)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
-    result = {
-        "canonicalization_version": WORKBOOK_CANONICALIZATION_VERSION,
-        "normalized_fields": counts,
-        "workbook_sha256": hashlib.sha256(canonical_bytes).hexdigest(),
-        "zip_entry_count": len(entries),
-    }
-    if evidence_path is not None:
-        _write_exact(evidence_path, canonical_json_bytes(result))
-    return result
-
-
-def canonicalize_xlsx_result(
-    path: Path, evidence_path: Path | None = None
-) -> dict[str, Any]:
-    """Normalize random xlsx-win run telemetry while retaining every outcome."""
-    payload = _load_json(path, "xlsx-win result")
-    if payload.get("schema_version") != "2.0":
-        raise ReportValidationError("xlsx-win result schema differs")
-    idempotency_key = _text(
-        payload.get("idempotency_key"), "xlsx-win result idempotency_key"
-    )
-    run_id = _text(payload.get("run_id"), "xlsx-win result run_id")
-    if re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
-        raise ReportValidationError("xlsx-win result run_id is invalid")
-    steps = payload.get("steps")
-    if not isinstance(steps, list) or len(steps) != 3:
-        raise ReportValidationError("xlsx-win result steps differ")
-    expected = (
-        (0, "open", "Opened canonical staged workbook."),
-        (1, "recalc", "Calculation reached xlDone."),
-        (2, "save_as", "Saved canonical staged workbook."),
-    )
-    for step, (index, step_type, message) in zip(steps, expected, strict=True):
-        if not isinstance(step, dict):
-            raise ReportValidationError("xlsx-win result step is invalid")
-        if (
-            step.get("step_index") != index
-            or step.get("type") != step_type
-            or step.get("status") != "succeeded"
-        ):
-            raise ReportValidationError("xlsx-win result step outcome differs")
-        step["message"] = message
-    if payload.get("final_state") != "SUCCEEDED" or payload.get("ok") is not True:
-        raise ReportValidationError("xlsx-win result is not successful")
-    invariants = payload.get("invariants")
-    if not isinstance(invariants, list):
-        raise ReportValidationError("xlsx-win result invariants are invalid")
-    payload["run_id"] = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
-    content = canonical_json_bytes(payload)
-    if path.read_bytes() != content:
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".canonical-xlsx-result-", suffix=".json", dir=path.parent
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
-    result = {
-        "canonicalization_version": XLSX_RESULT_CANONICALIZATION_VERSION,
-        "normalized_message_count": 2,
-        "normalized_run_id": True,
-        "xlsx_result_sha256": hashlib.sha256(content).hexdigest(),
-    }
-    if evidence_path is not None:
-        _write_exact(evidence_path, canonical_json_bytes(result))
-    return result
-
-
-def _validate_canonicalization_evidence(candidate_dir: Path, workbook: Path) -> None:
-    evidence = _load_json(
-        candidate_dir / "workbook-canonicalization.json",
-        "workbook canonicalization evidence",
-    )
-    if evidence.get("canonicalization_version") != WORKBOOK_CANONICALIZATION_VERSION:
-        raise ReportValidationError("workbook canonicalization version differs")
-    sha256, _ = hash_file(workbook)
-    if evidence.get("workbook_sha256") != sha256:
-        raise ReportValidationError("workbook canonicalization hash differs")
-    fields = evidence.get("normalized_fields")
-    if not isinstance(fields, dict) or fields.get("modified_timestamp") != 1:
-        raise ReportValidationError("workbook canonicalization evidence is incomplete")
-
-
 def verify_candidate(
-    baseline_root: Path,
-    candidate_dir: Path,
-    excel_workbook: Path,
-    freshness_health_path: Path | None = None,
-    provider_ledger_root: Path | None = None,
-    attribution_root: Path | None = None,
-    history_contract_path: Path | None = None,
-    implementation_reconciliation_path: Path | None = None,
-    implementation_return_attribution_path: Path | None = None,
+    baseline_root: Path, candidate_dir: Path, excel_workbook: Path
 ) -> dict[str, Any]:
-    report, report_bytes, _ = build_report_data(
-        baseline_root,
-        freshness_health_path,
-        provider_ledger_root,
-        attribution_root,
-        history_contract_path,
-        implementation_reconciliation_path,
-        implementation_return_attribution_path,
-    )
+    report, report_bytes, _ = build_report_data(baseline_root)
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:
         raise ReportValidationError("candidate directory identity differs")
@@ -3251,45 +1288,20 @@ def publish_report(
     xlsx_result: Path,
     validation_result: Path,
     output_root: Path,
-    freshness_health_path: Path | None = None,
-    provider_ledger_root: Path | None = None,
-    attribution_root: Path | None = None,
-    history_contract_path: Path | None = None,
-    implementation_reconciliation_path: Path | None = None,
-    implementation_return_attribution_path: Path | None = None,
 ) -> dict[str, Any]:
-    _validate_canonicalization_evidence(candidate_dir, excel_workbook)
-    verification = verify_candidate(
-        baseline_root,
-        candidate_dir,
-        excel_workbook,
-        freshness_health_path,
-        provider_ledger_root,
-        attribution_root,
-        history_contract_path,
-        implementation_reconciliation_path,
-        implementation_return_attribution_path,
-    )
+    verification = verify_candidate(baseline_root, candidate_dir, excel_workbook)
     run = _load_json(xlsx_result, "xlsx-win run result")
     validation = _load_json(validation_result, "xlsx-win validation result")
     if run.get("ok") is not True:
         raise ReportValidationError("xlsx-win top-level result is not ok")
     if validation.get("all_passed") is not True:
         raise ReportValidationError("xlsx-win workbook invariants did not all pass")
-    report, report_bytes, baseline_catalog_path = build_report_data(
-        baseline_root,
-        freshness_health_path,
-        provider_ledger_root,
-        attribution_root,
-        history_contract_path,
-        implementation_reconciliation_path,
-        implementation_return_attribution_path,
-    )
+    report, report_bytes, baseline_catalog_path = build_report_data(baseline_root)
     as_of = _date(report.get("as_of_date"), "report.as_of_date")
     verification_bytes = canonical_json_bytes(verification)
     contract_path = candidate_dir / "workbook-contract.json"
     artifacts = []
-    artifact_specs = [
+    artifact_specs = (
         (
             baseline_catalog_path,
             "input/portfolio-baseline.json",
@@ -3316,80 +1328,12 @@ def publish_report(
             "1",
         ),
         (
-            candidate_dir / "workbook-canonicalization.json",
-            "evidence/workbook-canonicalization.json",
-            "portfolio-report-workbook-canonicalization",
-            WORKBOOK_CANONICALIZATION_VERSION,
-        ),
-        (
-            candidate_dir / "xlsx-result-canonicalization.json",
-            "evidence/xlsx-result-canonicalization.json",
-            "xlsx-win-result-canonicalization",
-            XLSX_RESULT_CANONICALIZATION_VERSION,
-        ),
-        (
             contract_path,
             "evidence/workbook-contract.json",
             "xlsx-win-validation-contract",
             "1",
         ),
-    ]
-    if attribution_root is not None:
-        _attribution_catalog, _attribution_ref, attribution_catalog_path = _attribution(
-            attribution_root, report["baseline"]
-        )
-        artifact_specs.append(
-            (
-                attribution_catalog_path,
-                "input/strategy-attribution.json",
-                "strategy-attribution",
-                "1",
-            )
-        )
-    if history_contract_path is not None:
-        artifact_specs.append(
-            (
-                history_contract_path,
-                "input/strategy-history-compatibility-contract.json",
-                "portfolio-target-series-evidence-proof",
-                "1",
-            )
-        )
-    if implementation_reconciliation_path is not None:
-        artifact_specs.append(
-            (
-                implementation_reconciliation_path,
-                "input/strategy-implementation-reconciliation.json",
-                "portfolio-implementation-reconciliation",
-                "1",
-            )
-        )
-    if implementation_return_attribution_path is not None:
-        artifact_specs.append(
-            (
-                implementation_return_attribution_path,
-                "input/strategy-implementation-return-attribution.json",
-                "portfolio-implementation-return-attribution",
-                "1",
-            )
-        )
-    if freshness_health_path is not None:
-        artifact_specs.extend(
-            [
-                (
-                    freshness_health_path,
-                    "input/freshness-health.json",
-                    "freshness-assessment",
-                    "3",
-                ),
-                (
-                    HWM_POLICY,
-                    "input/portfolio-hwm-policy.json",
-                    "portfolio-hwm-policy",
-                    "2",
-                ),
-            ]
-        )
+    )
     for path, artifact_id, schema_name, schema_version in artifact_specs:
         artifacts.append(
             SourceArtifact.from_path(
@@ -3434,14 +1378,6 @@ def publish_report(
     _copy_exact(excel_workbook, generation_dir / WORKBOOK_NAME)
     _copy_exact(xlsx_result, generation_dir / "xlsx-win-result.json")
     _copy_exact(validation_result, generation_dir / "workbook-validation.json")
-    _copy_exact(
-        candidate_dir / "workbook-canonicalization.json",
-        generation_dir / "workbook-canonicalization.json",
-    )
-    _copy_exact(
-        candidate_dir / "xlsx-result-canonicalization.json",
-        generation_dir / "xlsx-result-canonicalization.json",
-    )
     _copy_exact(contract_path, generation_dir / "workbook-contract.json")
     _write_exact(generation_dir / "report-verification.json", verification_bytes)
     pointer = publish_generation(output_root, manifest.generation_id)
@@ -3461,29 +1397,11 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
     build.add_argument("--baseline-root", type=Path, required=True)
-    build.add_argument("--freshness-health", type=Path)
-    build.add_argument("--provider-ledger-root", type=Path)
-    build.add_argument("--attribution-root", type=Path)
-    build.add_argument("--history-contract", type=Path)
-    build.add_argument("--implementation-reconciliation", type=Path)
-    build.add_argument("--implementation-return-attribution", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
     verify.add_argument("--candidate-dir", type=Path, required=True)
     verify.add_argument("--excel-workbook", type=Path, required=True)
-    verify.add_argument("--freshness-health", type=Path)
-    verify.add_argument("--provider-ledger-root", type=Path)
-    verify.add_argument("--attribution-root", type=Path)
-    verify.add_argument("--history-contract", type=Path)
-    verify.add_argument("--implementation-reconciliation", type=Path)
-    verify.add_argument("--implementation-return-attribution", type=Path)
-    canonicalize = commands.add_parser("canonicalize")
-    canonicalize.add_argument("--workbook", type=Path, required=True)
-    canonicalize.add_argument("--evidence", type=Path, required=True)
-    canonicalize_result = commands.add_parser("canonicalize-xlsx-result")
-    canonicalize_result.add_argument("--result", type=Path, required=True)
-    canonicalize_result.add_argument("--evidence", type=Path, required=True)
     publish = commands.add_parser("publish")
     publish.add_argument("--baseline-root", type=Path, required=True)
     publish.add_argument("--candidate-dir", type=Path, required=True)
@@ -3491,12 +1409,6 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--xlsx-result", type=Path, required=True)
     publish.add_argument("--validation-result", type=Path, required=True)
     publish.add_argument("--output-root", type=Path, required=True)
-    publish.add_argument("--freshness-health", type=Path)
-    publish.add_argument("--provider-ledger-root", type=Path)
-    publish.add_argument("--attribution-root", type=Path)
-    publish.add_argument("--history-contract", type=Path)
-    publish.add_argument("--implementation-reconciliation", type=Path)
-    publish.add_argument("--implementation-return-attribution", type=Path)
     return parser
 
 
@@ -3504,32 +1416,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "build":
-            result = build_candidate(
-                args.baseline_root,
-                args.output_root,
-                args.freshness_health,
-                args.provider_ledger_root,
-                args.attribution_root,
-                args.history_contract,
-                args.implementation_reconciliation,
-                args.implementation_return_attribution,
-            )
+            result = build_candidate(args.baseline_root, args.output_root)
         elif args.command == "verify":
             result = verify_candidate(
-                args.baseline_root,
-                args.candidate_dir,
-                args.excel_workbook,
-                args.freshness_health,
-                args.provider_ledger_root,
-                args.attribution_root,
-                args.history_contract,
-                args.implementation_reconciliation,
-                args.implementation_return_attribution,
+                args.baseline_root, args.candidate_dir, args.excel_workbook
             )
-        elif args.command == "canonicalize":
-            result = canonicalize_workbook(args.workbook, args.evidence)
-        elif args.command == "canonicalize-xlsx-result":
-            result = canonicalize_xlsx_result(args.result, args.evidence)
         else:
             result = publish_report(
                 args.baseline_root,
@@ -3538,12 +1429,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.xlsx_result,
                 args.validation_result,
                 args.output_root,
-                args.freshness_health,
-                args.provider_ledger_root,
-                args.attribution_root,
-                args.history_contract,
-                args.implementation_reconciliation,
-                args.implementation_return_attribution,
             )
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         print(f"portfolio-report: FAIL: {exc}", file=sys.stderr)

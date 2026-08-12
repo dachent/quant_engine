@@ -29,31 +29,25 @@ meaning and provenance.
 
 The repository worktree contains code, contracts, schemas, runbooks, and
 synthetic/redacted test fixtures. Source specifications and real provider data
-remain governed folders outside Git. Provider roots remain siblings of the
-worktree; the coordinated portfolio authority lives at the durable local path
-`C:\Tools\quant-engine\data`:
+remain sibling folders outside Git:
 
 ```text
 _quant_engine/
   repo/                        # this repository
   xBin/                        # source specifications
-  dataPortfolio123/
+  data_Portfolio123/
   dataMatrixport/
   dataQuantbase/
   dataSchwab/
   dataIBKR/
   dataFidelity/
   dataAlpaca/
-
-C:\Tools\quant-engine\
-  data\
+  dataPortfolio/
 ```
 
 Packages receive these locations through configuration. They must not embed
-user-specific or provider-specific absolute paths; an approved non-user-specific
-durable root may be declared by operator configuration. External account
-identifiers are resolved through a restricted local crosswalk; canonical
-records use stable internal keys.
+absolute workstation paths. External account identifiers are resolved through
+a restricted local crosswalk; canonical records use stable internal keys.
 
 ## Target workspace
 
@@ -148,20 +142,6 @@ account, fact type, effective interval, and finalization state. Overlap produces
 `ReconciliationEvent` records. It never silently deletes non-authoritative
 evidence.
 
-The implemented core contract is documented in
-[Data authority and admission](../data-authority.md). Schema-v1 generation
-manifests remain readable; hash-bound operational sidecars add acquisition,
-revision, publication-disposition, evidence-layer, and freshness semantics.
-Consumers must obtain exactly one matching rule before a fact can enter a
-ledger or derived control surface.
-
-Cross-root publication uses the journaled coordination contract in
-[Coordinated release publication](../release-publication.md). A release binds
-the exact code commit, gate evidence, all proposed and predecessor pointers,
-and companion-file hashes. Partial commit failure restores the complete
-predecessor graph rather than leaving individually valid but mutually
-inconsistent `CURRENT.json` authorities.
-
 ## Public interaction surfaces
 
 The target CLI is one `quant-engine` command family:
@@ -226,18 +206,6 @@ A controlled workbook may be an allocation-intake interface, but validated,
 immutable ledger records become authority. Re-import is idempotent; a correction
 supersedes rather than mutates an accepted decision. Performance reports are
 derived outputs and cannot become accounting authority.
-
-Current strategy identity is paired with the effective-dated contract in
-[Strategy version authority](../strategy-version-authority.md). Backtest,
-provider-live, account-live, predecessor, shadow/OOS, and conceptual evidence
-retain their layer and version; mismatched or unresolved vintages cannot be
-silently joined.
-
-Account-to-strategy lineage passes through the effective-dated capital-pool
-contract in [Allocation lineage](../allocation-lineage.md). Reserve is a pool,
-not a strategy; an unknown `General` interval remains pool-only rather than
-being guessed into a strategy. Source-effective, valuation, and publication
-dates remain separately queryable.
 
 ## Broker boundary
 

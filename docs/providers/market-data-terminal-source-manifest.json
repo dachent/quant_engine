@@ -15,17 +15,11 @@
     },
     {
       "authority": "absorbed_provenance",
-      "commit": "29ac0f3da93a6fee42a1dc4a675ca734b356acc5",
+      "commit": "a009e963d50b8bd6140ee44e0944088302b2bfaa",
       "commit_count": 5,
       "license_file": null,
       "name": "dachent/yf_marketdata",
-      "removed_from_all_revisions": [
-        ".vendor"
-      ],
       "retained_path": "skills/agent-market-data-terminal/scripts/fetch_yfinance.py",
-      "sanitized_head_tree": "d549d6cca6f696d490bfb583735fd85830842fe4",
-      "source_commit": "a009e963d50b8bd6140ee44e0944088302b2bfaa",
-      "source_head_tree": "d549d6cca6f696d490bfb583735fd85830842fe4",
       "source_url": "https://github.com/dachent/yf_marketdata",
       "tree_anchor": "yf_marketdata/transform.py",
       "tree_anchor_blob": "204d11dd4ce5bfdbd3297c66fd893cf66dd0f0de"

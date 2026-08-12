@@ -90,7 +90,6 @@ build/
 coverage.xml
 .coverage
 htmlcov/
-.validation/
 
 # Python and tool caches
 __pycache__/

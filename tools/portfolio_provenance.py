@@ -33,14 +33,11 @@ from quant_engine.core import (
 )
 
 
-SPEC_SCHEMA_VERSION: Final = 2
-CATALOG_SCHEMA_VERSION: Final = 2
-STRATEGY_VERSION_CATALOG_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "2.0.0"
+SPEC_SCHEMA_VERSION: Final = 1
+CATALOG_SCHEMA_VERSION: Final = 1
+BUILDER_VERSION: Final = "1.0.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 CURRENT_STRATEGY_COUNT: Final = 9
-SYSTEMATIC_POOL_ID: Final = "systematic-capital"
-RESERVE_POOL_ID: Final = "reserve-capital"
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -71,23 +68,6 @@ _COVERAGE_STATUSES = frozenset(
     {"COMPLETE_WITHIN_DECLARED_BOUNDARY", "PARTIAL", "FAILED"}
 )
 _ASSUMPTION_STATUSES = frozenset({"ACCEPTED", "INFERRED", "UNRESOLVED"})
-_VERSION_DISPOSITIONS = frozenset({"EVIDENCED", "REFERENCE_ONLY", "UNRESOLVED"})
-_SLOT_STATUSES = frozenset(
-    {"EVIDENCED", "REFERENCE_ONLY", "UNAVAILABLE", "NOT_APPLICABLE"}
-)
-_LAYER_STATUSES = frozenset({"EVIDENCED", "REFERENCE_ONLY", "UNAVAILABLE"})
-_COMPATIBILITY_STATUSES = frozenset(
-    {"PROVEN_COMPATIBLE", "VERSION_MISMATCH", "UNRESOLVED", "NOT_APPLICABLE"}
-)
-_VERSION_SLOT_NAMES = (
-    "backtest",
-    "benchmark",
-    "configuration",
-    "costs",
-    "design",
-    "live_boundary",
-    "source_route",
-)
 
 _ASSIGNMENT_FIELDS = (
     "institution",
@@ -155,21 +135,6 @@ def _date(value: object, field_name: str) -> date:
     return parsed
 
 
-def _optional_text(value: object, field_name: str) -> str | None:
-    return None if value is None else _text(value, field_name)
-
-
-def _optional_date(value: object, field_name: str) -> date | None:
-    return None if value is None else _date(value, field_name)
-
-
-def _optional_hash(value: object, field_name: str) -> str | None:
-    parsed = _optional_text(value, field_name)
-    if parsed is not None and _SHA256.fullmatch(parsed) is None:
-        raise ProvenanceValidationError(f"{field_name} must be lower-case SHA-256")
-    return parsed
-
-
 def _object(value: object, field_name: str) -> dict[str, Any]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ProvenanceValidationError(f"{field_name} must be an object")
@@ -214,7 +179,6 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "schema_version",
             "source_groups",
             "strategies",
-            "strategy_version_catalog",
             "tracker_imports",
         },
         "spec",
@@ -476,9 +440,6 @@ def _validate_strategies(
         version_ref = strategy["version_ref"]
         if version_ref is not None:
             version_ref = _text(version_ref, "strategy.version_ref")
-        version_disposition = (
-            "REFERENCE_ONLY" if version_ref is not None else "UNRESOLVED"
-        )
         accepted.append(
             {
                 "aliases": list(aliases),
@@ -498,359 +459,11 @@ def _validate_strategies(
                 "gaps": list(gaps),
                 "name": name,
                 "strategy_id": strategy_id,
-                "version_disposition": version_disposition,
                 "version_ref": version_ref,
             }
         )
     accepted.sort(key=lambda item: str(item["strategy_id"]))
     return accepted, alias_map
-
-
-def _validate_strategy_version_catalog(
-    value: object,
-    *,
-    generation_as_of: date,
-    source_ids: set[str],
-    source_hashes: set[str],
-    strategies: Sequence[Mapping[str, Any]],
-) -> dict[str, Any]:
-    """Validate one current, effective-dated version disposition per strategy."""
-
-    catalog = _object(value, "strategy_version_catalog")
-    _strict_keys(
-        catalog,
-        {"as_of_date", "catalog_schema_version", "strategies"},
-        "strategy_version_catalog",
-    )
-    if catalog["catalog_schema_version"] != STRATEGY_VERSION_CATALOG_SCHEMA_VERSION:
-        raise ProvenanceValidationError(
-            "strategy version catalog schema_version is unsupported"
-        )
-    catalog_as_of = _date(catalog["as_of_date"], "strategy_version_catalog.as_of_date")
-    if catalog_as_of != generation_as_of:
-        raise ProvenanceValidationError(
-            "strategy version catalog as_of_date differs from provenance"
-        )
-    expected_ids = {str(item["strategy_id"]) for item in strategies}
-    spec_versions = {
-        str(item["strategy_id"]): item.get("version_ref") for item in strategies
-    }
-    rows = _objects(catalog["strategies"], "strategy_version_catalog.strategies")
-    if len(rows) != CURRENT_STRATEGY_COUNT:
-        raise ProvenanceValidationError(
-            f"strategy version catalog requires exactly {CURRENT_STRATEGY_COUNT} rows"
-        )
-
-    def slot(value: object, field_name: str) -> dict[str, Any]:
-        accepted = _object(value, field_name)
-        _strict_keys(
-            accepted,
-            {
-                "artifact_sha256",
-                "disposition",
-                "evidence_layer",
-                "observed_end",
-                "observed_start",
-                "source_ids",
-                "status",
-                "version_ref",
-            },
-            field_name,
-        )
-        status = _text(accepted["status"], f"{field_name}.status")
-        if status not in _SLOT_STATUSES:
-            raise ProvenanceValidationError(f"unknown strategy evidence slot: {status}")
-        version_ref = _optional_text(
-            accepted["version_ref"], f"{field_name}.version_ref"
-        )
-        artifact_sha256 = _optional_hash(
-            accepted["artifact_sha256"], f"{field_name}.artifact_sha256"
-        )
-        if artifact_sha256 is not None and artifact_sha256 not in source_hashes:
-            raise ProvenanceValidationError(
-                f"{field_name}.artifact_sha256 is not an admitted source artifact"
-            )
-        routes = _strings(accepted["source_ids"], f"{field_name}.source_ids")
-        if not set(routes) <= source_ids:
-            raise ProvenanceValidationError(f"{field_name} references unknown source")
-        evidence_layer = _optional_text(
-            accepted["evidence_layer"], f"{field_name}.evidence_layer"
-        )
-        if evidence_layer is not None and evidence_layer not in _EVIDENCE_LAYERS:
-            raise ProvenanceValidationError(
-                f"{field_name} has unknown evidence layer: {evidence_layer}"
-            )
-        observed_start = _optional_date(
-            accepted["observed_start"], f"{field_name}.observed_start"
-        )
-        observed_end = _optional_date(
-            accepted["observed_end"], f"{field_name}.observed_end"
-        )
-        if (observed_start is None) != (observed_end is None):
-            raise ProvenanceValidationError(
-                f"{field_name} must declare both observation bounds or neither"
-            )
-        if observed_start is not None and observed_end is not None:
-            if observed_end < observed_start or observed_end > generation_as_of:
-                raise ProvenanceValidationError(
-                    f"{field_name} observation interval is invalid"
-                )
-        if status == "EVIDENCED" and artifact_sha256 is None and version_ref is None:
-            raise ProvenanceValidationError(
-                f"{field_name} EVIDENCED requires an artifact hash or version"
-            )
-        if status == "REFERENCE_ONLY" and not routes:
-            raise ProvenanceValidationError(
-                f"{field_name} REFERENCE_ONLY requires a source route"
-            )
-        if status in {"UNAVAILABLE", "NOT_APPLICABLE"} and any(
-            item is not None
-            for item in (artifact_sha256, version_ref, observed_start, observed_end)
-        ):
-            raise ProvenanceValidationError(
-                f"{field_name} {status} cannot carry asserted evidence"
-            )
-        return {
-            "artifact_sha256": artifact_sha256,
-            "disposition": _text(accepted["disposition"], f"{field_name}.disposition"),
-            "evidence_layer": evidence_layer,
-            "observed_end": observed_end.isoformat() if observed_end else None,
-            "observed_start": observed_start.isoformat() if observed_start else None,
-            "source_ids": list(routes),
-            "status": status,
-            "version_ref": version_ref,
-        }
-
-    accepted_rows: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    for row in rows:
-        _strict_keys(
-            row,
-            {
-                *_VERSION_SLOT_NAMES,
-                "compatibility_reason",
-                "compatibility_status",
-                "disposition",
-                "disposition_reason",
-                "effective_end",
-                "effective_start",
-                "evidence_layers",
-                "gaps",
-                "strategy_id",
-                "version_ref",
-            },
-            "strategy_version",
-        )
-        strategy_id = _identifier(row["strategy_id"], "strategy_version.strategy_id")
-        if strategy_id in seen_ids:
-            raise ProvenanceValidationError(
-                f"duplicate strategy version row: {strategy_id}"
-            )
-        seen_ids.add(strategy_id)
-        if strategy_id not in expected_ids:
-            raise ProvenanceValidationError(
-                f"strategy version references unknown strategy: {strategy_id}"
-            )
-        effective_start = _date(
-            row["effective_start"], "strategy_version.effective_start"
-        )
-        effective_end = _optional_date(
-            row["effective_end"], "strategy_version.effective_end"
-        )
-        if effective_start > generation_as_of or (
-            effective_end is not None
-            and (effective_end < effective_start or effective_end < generation_as_of)
-        ):
-            raise ProvenanceValidationError(
-                f"strategy version is not current at as_of_date: {strategy_id}"
-            )
-        disposition = _text(row["disposition"], "strategy_version.disposition")
-        if disposition not in _VERSION_DISPOSITIONS:
-            raise ProvenanceValidationError(
-                f"unknown strategy version disposition: {disposition}"
-            )
-        version_ref = _optional_text(row["version_ref"], "strategy_version.version_ref")
-        if spec_versions[strategy_id] != version_ref:
-            raise ProvenanceValidationError(
-                f"strategy version_ref differs from strategy registry: {strategy_id}"
-            )
-        gaps = _strings(row["gaps"], "strategy_version.gaps")
-        if disposition == "EVIDENCED" and version_ref is None:
-            raise ProvenanceValidationError(
-                f"EVIDENCED strategy version requires a version_ref: {strategy_id}"
-            )
-        if disposition == "REFERENCE_ONLY" and (version_ref is None or not gaps):
-            raise ProvenanceValidationError(
-                f"REFERENCE_ONLY strategy version requires a reference and gaps: {strategy_id}"
-            )
-        if disposition == "UNRESOLVED" and (version_ref is not None or not gaps):
-            raise ProvenanceValidationError(
-                f"UNRESOLVED strategy version requires a null reference and gaps: {strategy_id}"
-            )
-        accepted_slots = {
-            name: slot(row[name], f"strategy_version.{strategy_id}.{name}")
-            for name in _VERSION_SLOT_NAMES
-        }
-        if (
-            accepted_slots["source_route"]["status"]
-            not in {
-                "EVIDENCED",
-                "REFERENCE_ONLY",
-            }
-            or not accepted_slots["source_route"]["source_ids"]
-        ):
-            raise ProvenanceValidationError(
-                f"strategy version requires an admitted source route: {strategy_id}"
-            )
-        compatibility = _text(
-            row["compatibility_status"], "strategy_version.compatibility_status"
-        )
-        if compatibility not in _COMPATIBILITY_STATUSES:
-            raise ProvenanceValidationError(
-                f"unknown compatibility status: {compatibility}"
-            )
-        if disposition == "UNRESOLVED" and compatibility == "PROVEN_COMPATIBLE":
-            raise ProvenanceValidationError(
-                f"unresolved strategy cannot assert compatibility: {strategy_id}"
-            )
-        layers: list[dict[str, Any]] = []
-        layer_keys: set[tuple[str, str]] = set()
-        for layer in _objects(
-            row["evidence_layers"], f"strategy_version.{strategy_id}.evidence_layers"
-        ):
-            _strict_keys(
-                layer,
-                {
-                    "artifact_sha256",
-                    "disposition",
-                    "evidence_layer",
-                    "observed_end",
-                    "observed_start",
-                    "source_id",
-                    "status",
-                    "version_ref",
-                },
-                "strategy evidence layer",
-            )
-            evidence_layer = _text(
-                layer["evidence_layer"], "strategy evidence layer.evidence_layer"
-            )
-            if evidence_layer not in _EVIDENCE_LAYERS:
-                raise ProvenanceValidationError(
-                    f"unknown strategy evidence layer: {evidence_layer}"
-                )
-            source_id = _identifier(
-                layer["source_id"], "strategy evidence layer.source_id"
-            )
-            if source_id not in source_ids:
-                raise ProvenanceValidationError(
-                    f"strategy evidence layer references unknown source: {source_id}"
-                )
-            key = (evidence_layer, source_id)
-            if key in layer_keys:
-                raise ProvenanceValidationError(
-                    f"duplicate strategy evidence layer route: {strategy_id}/{evidence_layer}/{source_id}"
-                )
-            layer_keys.add(key)
-            status = _text(layer["status"], "strategy evidence layer.status")
-            if status not in _LAYER_STATUSES:
-                raise ProvenanceValidationError(
-                    f"unknown strategy evidence layer status: {status}"
-                )
-            layer_hash = _optional_hash(
-                layer["artifact_sha256"], "strategy evidence layer.artifact_sha256"
-            )
-            if layer_hash is not None and layer_hash not in source_hashes:
-                raise ProvenanceValidationError(
-                    "strategy evidence layer hash is not an admitted source artifact"
-                )
-            layer_version = _optional_text(
-                layer["version_ref"], "strategy evidence layer.version_ref"
-            )
-            if status == "EVIDENCED" and layer_hash is None and layer_version is None:
-                raise ProvenanceValidationError(
-                    "EVIDENCED strategy evidence layer requires an artifact hash or version"
-                )
-            observed_start = _optional_date(
-                layer["observed_start"], "strategy evidence layer.observed_start"
-            )
-            observed_end = _optional_date(
-                layer["observed_end"], "strategy evidence layer.observed_end"
-            )
-            if (observed_start is None) != (observed_end is None):
-                raise ProvenanceValidationError(
-                    "strategy evidence layer requires both observation bounds or neither"
-                )
-            if (
-                observed_start
-                and observed_end
-                and (observed_end < observed_start or observed_end > generation_as_of)
-            ):
-                raise ProvenanceValidationError(
-                    "strategy evidence layer observation interval is invalid"
-                )
-            if status == "UNAVAILABLE" and any(
-                item is not None
-                for item in (layer_hash, layer_version, observed_start, observed_end)
-            ):
-                raise ProvenanceValidationError(
-                    "UNAVAILABLE strategy evidence layer cannot assert evidence"
-                )
-            layers.append(
-                {
-                    "artifact_sha256": layer_hash,
-                    "disposition": _text(
-                        layer["disposition"], "strategy evidence layer.disposition"
-                    ),
-                    "evidence_layer": evidence_layer,
-                    "observed_end": observed_end.isoformat() if observed_end else None,
-                    "observed_start": (
-                        observed_start.isoformat() if observed_start else None
-                    ),
-                    "source_id": source_id,
-                    "status": status,
-                    "version_ref": layer_version,
-                }
-            )
-        if not layers:
-            raise ProvenanceValidationError(
-                f"strategy version has no evidence-layer inventory: {strategy_id}"
-            )
-        accepted_rows.append(
-            {
-                **accepted_slots,
-                "compatibility_reason": _text(
-                    row["compatibility_reason"],
-                    "strategy_version.compatibility_reason",
-                ),
-                "compatibility_status": compatibility,
-                "disposition": disposition,
-                "disposition_reason": _text(
-                    row["disposition_reason"], "strategy_version.disposition_reason"
-                ),
-                "effective_end": effective_end.isoformat() if effective_end else None,
-                "effective_start": effective_start.isoformat(),
-                "evidence_layers": sorted(
-                    layers,
-                    key=lambda item: (
-                        str(item["evidence_layer"]),
-                        str(item["source_id"]),
-                    ),
-                ),
-                "gaps": list(gaps),
-                "strategy_id": strategy_id,
-                "version_ref": version_ref,
-            }
-        )
-    if seen_ids != expected_ids:
-        raise ProvenanceValidationError(
-            "strategy version catalog membership differs from current strategies"
-        )
-    return {
-        "as_of_date": catalog_as_of.isoformat(),
-        "catalog_schema_version": STRATEGY_VERSION_CATALOG_SCHEMA_VERSION,
-        "strategies": sorted(accepted_rows, key=lambda item: str(item["strategy_id"])),
-    }
 
 
 def _import_ref(
@@ -913,7 +526,6 @@ def _import_tracker(
     strategies: Sequence[Mapping[str, Any]],
     alias_map: Mapping[str, str],
     reserve_value: object,
-    generation_as_of: date,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -956,17 +568,14 @@ def _import_tracker(
     strategy_ids = {str(item["strategy_id"]) for item in strategies}
     for row in assignment_rows:
         institution = _text(row["institution"], "assignment.institution")
-        account_label = row["account"].strip()
-        source_alias = (
-            institution if not account_label else f"{institution} | {account_label}"
-        )
+        account = row["account"].strip()
+        source_alias = institution if not account else f"{institution} | {account}"
         account_id = (
             f"account-{hashlib.sha256(source_alias.encode('utf-8')).hexdigest()[:16]}"
         )
         accounts_by_alias[source_alias] = {
             "account_id": account_id,
             "aliases": [source_alias],
-            "current_pool_id": SYSTEMATIC_POOL_ID,
             "name": source_alias,
             "role": "INVESTMENT",
             "source_routes": [assignment_source],
@@ -981,10 +590,6 @@ def _import_tracker(
             raise ProvenanceValidationError("tracker alias maps to an unknown strategy")
         period_start = row["period_start"].strip()
         period_end = row["period_end"].strip()
-        if strategy_id is not None and not period_start:
-            raise ProvenanceValidationError(
-                f"mapped tracker assignment requires period_start: {observed_label}"
-            )
         if period_start:
             _date(period_start, "assignment.period_start")
         if period_end:
@@ -995,73 +600,19 @@ def _import_tracker(
             and date.fromisoformat(period_end) < date.fromisoformat(period_start)
         ):
             raise ProvenanceValidationError("assignment interval is reversed")
-        is_current = (
-            not period_start or date.fromisoformat(period_start) <= generation_as_of
-        ) and (not period_end or date.fromisoformat(period_end) >= generation_as_of)
-        strategy_disposition = (
-            "STRATEGY_MAPPED"
-            if strategy_id is not None
-            else ("CURRENT_POOL_ONLY" if is_current else "HISTORICAL_POOL_ONLY")
-        )
         payload: dict[str, Any] = {
             "account_id": account_id,
             "effective_end": period_end or None,
             "effective_start": period_start or None,
             "mapping_status": "MAPPED" if strategy_id is not None else "UNMAPPED",
             "observed_label": observed_label,
-            "pool_id": SYSTEMATIC_POOL_ID,
-            "pool_mapping_status": "MAPPED",
             "source_classification": _text(row["source"], "assignment.source"),
             "source_id": assignment_source,
             "strategy_id": strategy_id,
-            "strategy_mapping_disposition": strategy_disposition,
         }
         assignments.append(
             {"assignment_id": _record_id("assignment", payload), **payload}
         )
-
-    # A current legacy ``General`` row is the account-level implementation of
-    # the reserve pool, not a missing systematic strategy.  Keep historical
-    # General intervals on systematic accounts explicitly unmapped, but route
-    # accounts whose current state is only General to reserve capital.
-    active_by_account: dict[str, list[dict[str, Any]]] = {}
-    for assignment in assignments:
-        start_value = assignment.get("effective_start")
-        end_value = assignment.get("effective_end")
-        if (
-            start_value is not None
-            and date.fromisoformat(str(start_value)) > generation_as_of
-        ):
-            continue
-        if (
-            end_value is not None
-            and date.fromisoformat(str(end_value)) < generation_as_of
-        ):
-            continue
-        active_by_account.setdefault(str(assignment["account_id"]), []).append(
-            assignment
-        )
-    for account_id, active in active_by_account.items():
-        if not active or any(item["mapping_status"] == "MAPPED" for item in active):
-            continue
-        if not all(
-            str(item["observed_label"]).casefold() in unmapped_labels for item in active
-        ):
-            continue
-        account_row = next(
-            item
-            for item in accounts_by_alias.values()
-            if item["account_id"] == account_id
-        )
-        account_row["current_pool_id"] = RESERVE_POOL_ID
-        for assignment in active:
-            assignment["pool_id"] = RESERVE_POOL_ID
-            assignment["strategy_mapping_disposition"] = "RESERVE_NOT_APPLICABLE"
-    for assignment in assignments:
-        payload = {
-            key: value for key, value in assignment.items() if key != "assignment_id"
-        }
-        assignment["assignment_id"] = _record_id("assignment", payload)
 
     accounts = sorted(
         accounts_by_alias.values(), key=lambda item: str(item["account_id"])
@@ -1070,7 +621,6 @@ def _import_tracker(
         {
             "account_id": reserve_id,
             "aliases": list(_strings(reserve["aliases"], "reserve_account.aliases")),
-            "current_pool_id": RESERVE_POOL_ID,
             "name": _text(reserve["name"], "reserve_account.name"),
             "role": "RESERVE",
             "source_routes": list(reserve_routes),
@@ -1144,29 +694,7 @@ def build_catalog(
         spec["source_groups"], roots, generation_as_of
     )
     source_ids = {str(item["source_id"]) for item in source_records}
-    source_hashes = {
-        str(file["sha256"])
-        for source in source_records
-        for file in _objects(source.get("files"), "source_artifacts.files")
-    }
     strategies, alias_map = _validate_strategies(spec["strategies"], source_ids)
-    strategy_version_catalog = _validate_strategy_version_catalog(
-        spec["strategy_version_catalog"],
-        generation_as_of=generation_as_of,
-        source_ids=source_ids,
-        source_hashes=source_hashes,
-        strategies=strategies,
-    )
-    versions_by_strategy = {
-        str(item["strategy_id"]): item
-        for item in _objects(
-            strategy_version_catalog["strategies"], "strategy version catalog"
-        )
-    }
-    for strategy in strategies:
-        version = versions_by_strategy[str(strategy["strategy_id"])]
-        strategy["version_disposition"] = version["disposition"]
-        strategy["version_ref"] = version["version_ref"]
     accounts, assignments, corrections, open_gaps = _import_tracker(
         spec["tracker_imports"],
         roots=roots,
@@ -1174,7 +702,6 @@ def build_catalog(
         strategies=strategies,
         alias_map=alias_map,
         reserve_value=spec["reserve_account"],
-        generation_as_of=generation_as_of,
     )
     assumptions = _validate_assumptions(spec["assumptions"], source_ids)
     catalog: dict[str, Any] = {
@@ -1186,26 +713,11 @@ def build_catalog(
         "assignments": assignments,
         "assumptions": assumptions,
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
-        "capital_pools": [
-            {
-                "base_currency": "USD",
-                "name": "Systematic capital",
-                "pool_id": SYSTEMATIC_POOL_ID,
-                "role": "SYSTEMATIC",
-            },
-            {
-                "base_currency": "USD",
-                "name": "Reserve capital",
-                "pool_id": RESERVE_POOL_ID,
-                "role": "RESERVE",
-            },
-        ],
         "corrections": corrections,
         "open_gaps": open_gaps,
         "policy_version": POLICY_VERSION,
         "source_artifacts": source_records,
         "strategies": strategies,
-        "strategy_version_catalog": strategy_version_catalog,
     }
     catalog_bytes = _canonical_bytes(catalog)
     catalog_artifact = SourceArtifact(
@@ -1232,7 +744,6 @@ def build_catalog(
                 "corrections",
                 "source artifacts",
                 "strategies",
-                "strategy versions",
             ),
             observed_start=generation_as_of,
             observed_end=generation_as_of,

@@ -74,9 +74,9 @@ def _headers(value: object) -> dict[str, str]:
         if not isinstance(name, str) or not isinstance(header_value, str):
             raise WebContractError("request header names and values must be text")
         lowered = name.casefold()
-        if lowered in result and lowered in {"authorization", "jwt", "cookie"}:
-            raise WebContractError("duplicate sensitive request header")
-        result.setdefault(lowered, header_value)
+        if lowered in result:
+            raise WebContractError("duplicate request header")
+        result[lowered] = header_value
     return result
 
 
@@ -152,17 +152,9 @@ def extract_har(
             raise WebContractError("response status must be an integer")
         endpoint = provider.route(method, url)
         headers = _headers(request.get("headers"))
-        if endpoint.authentication_header is not None:
-            auth_value = headers.get(endpoint.authentication_header, "")
-            if len(auth_value.strip()) < 16:
-                raise WebContractError("authenticated session evidence is missing")
-            if (
-                endpoint.authentication_header == "authorization"
-                and not auth_value.casefold().startswith("bearer ")
-            ):
-                raise WebContractError("authenticated session evidence is missing")
-        if endpoint.validate_query is not None:
-            endpoint.validate_query(endpoint.query(url))
+        auth_value = headers.get("authorization", "")
+        if not auth_value.casefold().startswith("bearer ") or len(auth_value) < 16:
+            raise WebContractError("authenticated session evidence is missing")
         if endpoint.validate_request is not None:
             endpoint.validate_request(_request_body(request))
         if status < 200 or status >= 300:

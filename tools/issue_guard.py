@@ -473,50 +473,6 @@ def parse_blocked_by(
     return tuple(references), _sorted_diagnostics(diagnostics)
 
 
-def _final_handoff_diagnostics(
-    issues: Mapping[int, IssueRecord],
-) -> tuple[Diagnostic, ...]:
-    """Reject closed, independently executable work with a pending handoff."""
-
-    diagnostics: list[Diagnostic] = []
-    for number in sorted(issues):
-        issue = issues[number]
-        if issue.state != "closed" or issue.backlog_state == "folded":
-            continue
-        visible = _visible_markdown_lines(issue.body)
-        headings: list[tuple[int, int]] = []
-        for index, (_, line) in enumerate(visible):
-            parsed = _heading(line)
-            if parsed is None:
-                continue
-            level, text = parsed
-            if level in {2, 3} and text == "Final evidence and handoff":
-                headings.append((index, level))
-        if not headings:
-            diagnostics.append(
-                Diagnostic("FINAL_HANDOFF_SECTION_MISSING", issue_number=number)
-            )
-            continue
-        if len(headings) != 1:
-            diagnostics.append(
-                Diagnostic("FINAL_HANDOFF_SECTION_DUPLICATE", issue_number=number)
-            )
-            continue
-
-        start_index, level = headings[0]
-        content: list[str] = []
-        for _, line in visible[start_index + 1 :]:
-            parsed = _heading(line)
-            if parsed is not None and parsed[0] <= level:
-                break
-            if line.strip():
-                content.append(line.strip())
-        normalized = re.sub(r"[\s.*_`~\-]+", "", "\n".join(content).casefold())
-        if not normalized or normalized.startswith(("pending", "tbd", "todo")):
-            diagnostics.append(Diagnostic("FINAL_HANDOFF_PENDING", issue_number=number))
-    return _sorted_diagnostics(diagnostics)
-
-
 def _cycle_diagnostics(
     adjacency: Mapping[int, tuple[int, ...]],
 ) -> tuple[Diagnostic, ...]:
@@ -889,26 +845,16 @@ def _effective_open_depths(issues: Mapping[int, IssueRecord]) -> dict[int, int]:
     return depths
 
 
-def _illegal_closed_numbers(issues: Mapping[int, IssueRecord]) -> frozenset[int]:
-    depths = _effective_open_depths(issues)
+def _illegal_reopen_order(
+    issues: Mapping[int, IssueRecord], depths: Mapping[int, int]
+) -> tuple[int, ...]:
+    """Order illegal closures so every illegal blocker reopens first."""
+
     illegal = {
         number
         for number, issue in issues.items()
         if issue.state == "closed" and number in depths
     }
-    illegal.update(
-        diagnostic.issue_number
-        for diagnostic in _final_handoff_diagnostics(issues)
-        if diagnostic.issue_number is not None
-    )
-    return frozenset(illegal)
-
-
-def _illegal_reopen_order(
-    issues: Mapping[int, IssueRecord], illegal: frozenset[int]
-) -> tuple[int, ...]:
-    """Order illegal closures so every illegal blocker reopens first."""
-
     indegree = {number: 0 for number in illegal}
     dependents: dict[int, list[int]] = {number: [] for number in illegal}
     for number in illegal:
@@ -958,7 +904,6 @@ def _issue_results(
     invalid_all: bool = False,
 ) -> tuple[IssueResult, ...]:
     depths = _effective_open_depths(snapshot.issues)
-    illegal_closed = _illegal_closed_numbers(snapshot.issues)
     mirror_invalid = {
         diagnostic.issue_number
         for diagnostic in snapshot.mirror_diagnostics
@@ -976,7 +921,7 @@ def _issue_results(
         )
         if invalid_all or number in mirror_invalid:
             status: IssueStatus = "INVALID"
-        elif issue.state == "closed" and number in illegal_closed:
+        elif issue.state == "closed" and number in depths:
             status = "ILLEGAL_CLOSED"
         elif issue.state == "closed":
             status = "CLOSED"
@@ -1004,24 +949,10 @@ def _issue_results(
 
 def _illegal_closure_diagnostics(snapshot: Snapshot) -> tuple[Diagnostic, ...]:
     depths = _effective_open_depths(snapshot.issues)
-    blocker_diagnostics = tuple(
+    return tuple(
         Diagnostic("ILLEGAL_CLOSED", issue_number=number)
         for number in sorted(snapshot.issues)
         if snapshot.issues[number].state == "closed" and number in depths
-    )
-    handoff_diagnostics = _final_handoff_diagnostics(snapshot.issues)
-    handoff_illegal = tuple(
-        Diagnostic("ILLEGAL_CLOSED", issue_number=number)
-        for number in sorted(
-            {
-                diagnostic.issue_number
-                for diagnostic in handoff_diagnostics
-                if diagnostic.issue_number is not None
-            }
-        )
-    )
-    return _sorted_diagnostics(
-        blocker_diagnostics + handoff_diagnostics + handoff_illegal
     )
 
 
@@ -1177,9 +1108,8 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
         )
 
     mutations: list[Mutation] = []
-    illegal_closed = _illegal_reopen_order(
-        current.issues, _illegal_closed_numbers(current.issues)
-    )
+    depths = _effective_open_depths(current.issues)
+    illegal_closed = _illegal_reopen_order(current.issues, depths)
     for number in illegal_closed:
         try:
             client.reopen_issue(number)
@@ -1315,7 +1245,11 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
         mutations.append(Mutation("remove", issue_number, blocker_number, database_id))
 
     post = load_snapshot(client, owner, repo)
-    illegal_after = bool(_illegal_closed_numbers(post.issues))
+    post_depths = _effective_open_depths(post.issues)
+    illegal_after = any(
+        issue.state == "closed" and number in post_depths
+        for number, issue in post.issues.items()
+    )
     if post.all_diagnostics or illegal_after:
         post_diagnostics = list(post.all_diagnostics)
         post_diagnostics.append(Diagnostic("POSTCONDITION_FAILED"))

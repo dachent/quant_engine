@@ -185,7 +185,6 @@ _REQUIRED_PROVIDER_ROOTS = frozenset(
     {
         "xbin",
         "data_portfolio123",
-        "dataportfolio123",
         "datamatrixport",
         "dataquantbase",
         "dataschwab",
@@ -592,7 +591,7 @@ def _assert_boundary_coverage(
         raise PolicyLoadError(
             "POLICY_BOUNDARY_INCOMPLETE",
             "repository.forbidden_root_names",
-            "must cover every governed external data root and xBin",
+            "must cover every governed sibling data root and xBin",
         )
     if not _REQUIRED_FORBIDDEN_SEGMENTS.issubset(repository.forbidden_path_segments):
         raise PolicyLoadError(
