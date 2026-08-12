@@ -35,7 +35,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
 
-BUILDER_VERSION: Final = "1.3.0"
+BUILDER_VERSION: Final = "1.4.0"
 TRADING_OBSERVATION_HORIZONS: Final = (5, 21, 22, 63, 126, 130, 252, 260)
 RETURN_HEADERS: Final = ("series_id", "date", "return", "evidence_layer")
 RETURN_HEADERS_V2: Final = (*RETURN_HEADERS, "strategy_version")
@@ -776,6 +776,46 @@ def _number(value: float | np.floating[Any] | None) -> str | None:
     return format(accepted, ".12g")
 
 
+def _performance_summary(rows: Sequence[ReturnRow]) -> dict[str, object]:
+    """Compound one accepted evidence-mode path into reproducible statistics."""
+
+    accepted = sorted(rows, key=lambda item: item.day)
+    if not accepted:
+        return {
+            "annualization_basis": "ACTUAL_DAYS_365_25",
+            "cagr": None,
+            "cumulative_return": None,
+            "maximum_drawdown": None,
+            "observed_end": None,
+            "observed_start": None,
+            "return_observations": 0,
+            "status": "UNAVAILABLE_NO_ACCEPTED_OBSERVATIONS",
+        }
+    wealth = 1.0
+    peak = 1.0
+    maximum_drawdown = 0.0
+    for row in accepted:
+        if row.value <= -1.0:
+            raise CorrelationError("period return must be greater than -1")
+        wealth *= 1.0 + row.value
+        peak = max(peak, wealth)
+        maximum_drawdown = min(maximum_drawdown, wealth / peak - 1.0)
+    elapsed_days = (accepted[-1].day - accepted[0].day).days
+    cagr = None if elapsed_days <= 0 else math.pow(wealth, 365.25 / elapsed_days) - 1.0
+    return {
+        "annualization_basis": "ACTUAL_DAYS_365_25",
+        "cagr": _number(cagr),
+        "cumulative_return": _number(wealth - 1.0),
+        "maximum_drawdown": _number(maximum_drawdown),
+        "observed_end": accepted[-1].day.isoformat(),
+        "observed_start": accepted[0].day.isoformat(),
+        "return_observations": len(accepted),
+        "status": (
+            "AVAILABLE" if cagr is not None else "UNAVAILABLE_ZERO_DAY_INTERVAL"
+        ),
+    }
+
+
 def _pearson(left: FloatArray, right: FloatArray) -> float | None:
     if len(left) < 2 or float(np.std(left)) <= 1e-15 or float(np.std(right)) <= 1e-15:
         return None
@@ -1416,6 +1456,10 @@ def _dependence_payload(
             },
         },
         "observed_cells": observed_cells,
+        "performance": {
+            series_id: _performance_summary(returns.get(series_id, []))
+            for series_id in spec.series_ids
+        },
         "series_ids": list(spec.series_ids),
     }
     if evidence_mode is not None and series_composition is not None:

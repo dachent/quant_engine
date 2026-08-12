@@ -79,6 +79,15 @@ interval. The no-missing-diversification-credit matrix is rebuilt separately
 for both modes; a longer hybrid history does not change the authority of the
 live-only readiness decision.
 
+Each mode also emits a `performance` row for every requested strategy. It
+compounds exactly the same accepted rows used by that mode and records
+cumulative return, CAGR, maximum drawdown, observation count, and start/end
+dates. CAGR uses actual elapsed calendar days divided by 365.25; maximum
+drawdown is the most negative wealth-to-prior-peak return. These statistics are
+replay evidence on the declared source basis, not expected returns. Fee, tax,
+cash, and implementation adjustments are not invented when the source does not
+contain them.
+
 Schema version 1 remains supported for replay of accepted historical
 generations and preserves its one-layer-per-series rule.
 
