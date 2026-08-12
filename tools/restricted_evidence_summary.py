@@ -5,14 +5,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import sys
 from typing import Final, Sequence
 
 
 _LABEL: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _OPERATIONS: Final = frozenset({"count", "hash", "present", "type"})
+_REPARSE_POINT_ATTRIBUTE: Final = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class EvidenceSummaryError(RuntimeError):
@@ -26,10 +29,44 @@ def _canonical_json(value: object) -> bytes:
 
 
 def _file_evidence(path: Path) -> tuple[bytes, str]:
-    if path.is_symlink() or not path.is_file():
+    candidate = Path(path.anchor) if path.is_absolute() else Path.cwd()
+    parts = path.parts[1:] if path.is_absolute() else path.parts
+    metadata: os.stat_result | None = None
+    for part in parts:
+        candidate /= part
+        try:
+            metadata = os.lstat(candidate)
+        except OSError as exc:
+            raise EvidenceSummaryError("INPUT_READ_FAILED") from exc
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT_ATTRIBUTE
+        ):
+            raise EvidenceSummaryError("INPUT_LINK_FORBIDDEN")
+    if metadata is None or not stat.S_ISREG(metadata.st_mode):
         raise EvidenceSummaryError("INPUT_NOT_REGULAR_FILE")
-    content = path.read_bytes()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(candidate, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (metadata.st_dev, metadata.st_ino):
+            raise EvidenceSummaryError("INPUT_CHANGED_DURING_OPEN")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            content = handle.read()
+    finally:
+        os.close(descriptor)
     return content, hashlib.sha256(content).hexdigest()
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise EvidenceSummaryError("INPUT_JSON_DUPLICATE_KEY")
+        result[key] = value
+    return result
 
 
 def _decode_pointer(pointer: str) -> tuple[str, ...]:
@@ -99,8 +136,8 @@ def summarize(path: Path, queries: Sequence[str]) -> dict[str, object]:
         raise EvidenceSummaryError("QUERY_LABEL_DUPLICATE")
     content, digest = _file_evidence(path)
     try:
-        document = json.loads(content)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        document = json.loads(content, object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise EvidenceSummaryError("INPUT_JSON_INVALID") from exc
 
     results: dict[str, object] = {}

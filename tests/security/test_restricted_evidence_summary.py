@@ -94,3 +94,38 @@ def test_query_is_required_before_input_is_read(tmp_path: Path) -> None:
         summary.summarize(path, ())
 
     assert all(value not in "QUERY_REQUIRED" for value in restricted)
+
+
+def test_duplicate_keys_are_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate.json"
+    path.write_text('{"generation":{"items":[]},"generation":{"items":[1]}}')
+
+    with pytest.raises(summary.EvidenceSummaryError, match="INPUT_JSON_DUPLICATE_KEY"):
+        summary.summarize(path, ("items:/generation/items:count",))
+
+
+def test_decoder_depth_failure_has_stable_value_free_code(tmp_path: Path) -> None:
+    path = tmp_path / "deep.json"
+    path.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
+    stderr = io.StringIO()
+
+    with redirect_stderr(stderr):
+        exit_code = summary.main(("--input", str(path), "--query", "shape:/0:type"))
+
+    assert exit_code == 1
+    assert "INPUT_JSON_INVALID" in stderr.getvalue()
+    assert str(path) not in stderr.getvalue()
+
+
+def test_linked_parent_is_rejected(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "private.json").write_text('{"items":[]}', encoding="utf-8")
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory links are unavailable")
+
+    with pytest.raises(summary.EvidenceSummaryError, match="INPUT_LINK_FORBIDDEN"):
+        summary.summarize(linked / "private.json", ("items:/items:count",))
