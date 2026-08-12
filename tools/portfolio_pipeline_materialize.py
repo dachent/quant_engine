@@ -47,6 +47,27 @@ PRODUCTION_ROOTS = {
     "correlation": Path("analytics/correlation"),
     "europe-economic": Path("analytics/decomposition-lenses/europe-economic"),
     "factor-decomposition": Path("analytics/decomposition"),
+    "hybrid-dynamic-style": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/dynamic-style"
+    ),
+    "hybrid-europe-economic": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/europe-economic"
+    ),
+    "hybrid-multi-asset-style": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/multi-asset-style"
+    ),
+    "hybrid-us-economic": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-economic"
+    ),
+    "hybrid-us-equity-style": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-equity-style"
+    ),
+    "hybrid-us-industry": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-industry"
+    ),
+    "hybrid-us-sector": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-sector"
+    ),
     "multi-asset-style": Path("analytics/decomposition-lenses/multi-asset-style"),
     "portfolio-baseline": Path("baseline"),
     "portfolio-panel": Path("control-panel"),
@@ -62,6 +83,27 @@ PRODUCTION_STAGE_ROOTS = {
     "correlation": Path("stages/analytics/correlation"),
     "europe-economic": Path("stages/analytics/decomposition-lenses/europe-economic"),
     "factor-decomposition": Path("stages/analytics/decomposition"),
+    "hybrid-dynamic-style": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/dynamic-style"
+    ),
+    "hybrid-europe-economic": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/europe-economic"
+    ),
+    "hybrid-multi-asset-style": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/multi-asset-style"
+    ),
+    "hybrid-us-economic": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-economic"
+    ),
+    "hybrid-us-equity-style": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-equity-style"
+    ),
+    "hybrid-us-industry": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-industry"
+    ),
+    "hybrid-us-sector": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-sector"
+    ),
     "multi-asset-style": Path(
         "stages/analytics/decomposition-lenses/multi-asset-style"
     ),
@@ -74,6 +116,14 @@ PRODUCTION_STAGE_ROOTS = {
     "us-industry": Path("stages/analytics/decomposition-lenses/us-industry"),
     "us-sector": Path("stages/analytics/decomposition-lenses/us-sector"),
     "weekly-returns": Path("stages/analytics/weekly-returns"),
+}
+HYBRID_PANEL_ROOT_IDS = {
+    "dynamic-style": "hybrid-dynamic-style",
+    "europe-economic": "hybrid-europe-economic",
+    "us-economic": "hybrid-us-economic",
+    "us-equity-style": "hybrid-us-equity-style",
+    "us-industry": "hybrid-us-industry",
+    "us-sector": "hybrid-us-sector",
 }
 GENERATION_STAGE = {
     "ledger": "ledger",
@@ -107,6 +157,56 @@ def _text(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise MaterializationError(f"{label} must be non-empty text")
     return value.strip()
+
+
+def _panel_hybrid_generation_ids(panel_payload: Mapping[str, Any]) -> dict[str, str]:
+    lenses = panel_payload.get("decomposition_lenses")
+    modes = lenses.get("modes") if isinstance(lenses, dict) else None
+    hybrid = modes.get("LIVE_PLUS_BACKTEST") if isinstance(modes, dict) else None
+    if not isinstance(hybrid, list):
+        raise MaterializationError("prepared panel hybrid analytics authority differs")
+
+    source_ids: dict[str, str] = {}
+    for lens in hybrid:
+        if not isinstance(lens, dict):
+            raise MaterializationError(
+                "prepared panel hybrid analytics authority differs"
+            )
+        if lens.get("lens_id") == "DYNAMIC_STYLE":
+            if "dynamic-style" in source_ids:
+                raise MaterializationError(
+                    "prepared panel hybrid analytics authority differs"
+                )
+            source_ids["dynamic-style"] = _text(
+                lens.get("generation_id"), "hybrid dynamic generation_id"
+            )
+        sources = lens.get("sources")
+        if not isinstance(sources, list):
+            continue
+        for source in sources:
+            if not isinstance(source, dict):
+                raise MaterializationError(
+                    "prepared panel hybrid analytics authority differs"
+                )
+            source_key = source.get("source_key")
+            if (
+                not isinstance(source_key, str)
+                or source_key not in HYBRID_PANEL_ROOT_IDS
+            ):
+                continue
+            if source_key in source_ids:
+                raise MaterializationError(
+                    "prepared panel hybrid analytics authority differs"
+                )
+            source_ids[source_key] = _text(
+                source.get("generation_id"), f"hybrid {source_key} generation_id"
+            )
+    if set(source_ids) != set(HYBRID_PANEL_ROOT_IDS):
+        raise MaterializationError("prepared panel hybrid analytics authority differs")
+    return {
+        HYBRID_PANEL_ROOT_IDS[source_key]: generation_id
+        for source_key, generation_id in source_ids.items()
+    }
 
 
 def _absolute(value: object, label: str) -> Path:
@@ -1313,6 +1413,10 @@ def build_production_spec(
         panel_meta.get(key) != value for key, value in expected_panel_analytics.items()
     ):
         raise MaterializationError("prepared panel analytics authority differs")
+    if _panel_hybrid_generation_ids(panel_payload) != {
+        root_id: generation_ids[root_id] for root_id in HYBRID_PANEL_ROOT_IDS.values()
+    }:
+        raise MaterializationError("prepared panel hybrid analytics authority differs")
 
     expected_semantic = canonical_json_bytes(_semantic_gate_payload(recipe))
     if semantic_path.read_bytes() != expected_semantic:
