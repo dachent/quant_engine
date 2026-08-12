@@ -45,6 +45,28 @@ STRATEGY_NAMES = (
 )
 
 
+def test_report_panel_expectations_follow_accepted_rollforward() -> None:
+    report = {
+        "account_summary": [{}, {}],
+        "allocation_history": [{}, {}, {}, {}],
+        "portfolio_summary": [
+            {"metric": "Reserve", "value": "125000.00"},
+            {"metric": "Systematic capital", "value": "480000.00"},
+            {"metric": "Total liquid", "value": "605000.00"},
+        ],
+        "strategy_summary": [{}, {}, {}],
+    }
+
+    assert panel._report_panel_expectations(report) == {
+        "capital": {
+            "reserve": "125000.00",
+            "systematic": "480000.00",
+            "total_liquid": "605000.00",
+        },
+        "counts": {"accounts": 2, "allocations": 4, "strategies": 3},
+    }
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")

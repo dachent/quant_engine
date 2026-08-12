@@ -187,8 +187,9 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
 ```
 
 The verifier proves all nine views, local-only assets, lack of network or
-trade code, accepted capital/risk replay, the exact nine-strategy boundary, 19
-account identities, five separate decomposition lenses with nine explicit
+trade code, accepted capital/risk replay, the strategy, allocation, and account
+identity boundaries derived from the accepted report, five separate
+decomposition lenses with nine explicit
 strategy dispositions each, the available and unavailable factor counts bound
 to the analytics generations, dynamic
 estimator disclosures when present, measured/unavailable dependence counts
@@ -196,7 +197,8 @@ derived exactly from the accepted generation, live-only default authority,
 optional version-matched backtest composition, explicit unavailable facts, and
 frozen-appendix isolation. It also proves that all four previously passive
 evidence sections are consumed by the renderer and that the nine-strategy
-underwriting ledger reconciles without fabricated causal components or any
+underwriting ledger for the accepted report reconciles without fabricated
+causal components or any
 automatic decision authority.
 
 The Windows-first end-to-end operator procedure, including the full evidence
