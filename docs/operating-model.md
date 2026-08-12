@@ -32,6 +32,9 @@ handoff requirements. It deliberately changes:
 5. This repository copy is the sole canon for this project. Upstream changes
    have no effect until adopted through a governed issue with a new provenance
    and delta record.
+6. A current, bounded owner mandate may satisfy multiple phase transitions and
+   routine execution steps without repeated prompts, while material changes and
+   hard boundaries still require a fresh explicit decision.
 
 ## Non-negotiable operating rules
 
@@ -45,6 +48,9 @@ handoff requirements. It deliberately changes:
   issue update; never create a shadow tracker.
 - Use the issue's `Blocked by` relationships to determine readiness. Sub-issues
   represent decomposition, not execution order.
+- Keep no more than three issues in `backlog:active`. An owner review recorded
+  in the issue must confirm scope, dependencies, effects, evidence, and recovery
+  immediately before promotion.
 - Make declared checks and evidence proportional to impact. A check is evidence,
   not truth; a deterministic pass cannot expand authority.
 - Preserve Dead Ends in the issue whenever a path is rejected. Rejected paths
@@ -80,16 +86,22 @@ A work item is ready only when every hard blocker is closed, required approvals
 are current, scope and evidence are decision-complete, and necessary systems
 are safely reachable. Missing references, dependency cycles, or an open blocker
 make it not ready. Closing a blocked issue is invalid and must be reversed.
+An issue also cannot close with pending final evidence. Unfinished acceptance
+scope stays on the original issue; creating a successor key merely to close the
+original is prohibited. A successor is valid only for a genuinely independent
+outcome with its own consumer and acceptance evidence.
 
 ### Backlog states
 
 Every open issue has exactly one authoritative backlog-state label:
 
 - `backlog:active` — approved current tranche. Only active issues can appear in
-  Ready views or enter Phase 8 execution.
+  Ready views or enter Phase 8 execution. At most three issues may carry this
+  label at once.
 - `backlog:next` — legitimate outcome awaiting a named predecessor or explicit
-  prioritization. New issues default here; promotion to active requires current
-  user approval recorded in the issue.
+  prioritization. New issues default here; promotion to active requires a
+  current owner review recorded in the issue after its scope, dependencies,
+  effects, evidence, and recovery are decision-complete.
 - `backlog:deferred` — no current consumer. The issue body must name an
   observable activation trigger; no implementation writes are allowed until it
   is promoted through a governed decision.
@@ -202,8 +214,9 @@ governing issue may strengthen them but may not silently omit or weaken them.
 
 ## Approval semantics
 
-After Phases 0, 1, 2b, 3, 4, 5, 6, and 7, stop for explicit user approval. The
-approval is a new comment on the governing issue in this form:
+After Phases 0, 1, 2b, 3, 4, 5, 6, and 7, record the phase outcome and confirm
+current owner authority before continuing. The narrow form is a new comment on
+the governing issue:
 
 ```text
 PROCEED: Phase <completed> -> Phase <next>
@@ -216,19 +229,30 @@ Approval is not transferable to another issue or candidate and expires when a
 material target, scope, criterion, architecture, authority, effect, or
 irreversible risk changes.
 
+An owner may instead issue a standing mandate for one bounded governing issue
+or explicitly named backlog program. The governing issue must record the
+covered candidate, writes, effects, limits, stop conditions, and owner
+direction. While that mandate remains current, routine in-scope edits, focused
+checks, commits, pushes, pull-request updates, and issue evidence proceed
+without duplicate step-level approval prompts. It is not blanket autonomy and
+does not survive ambiguity, a material change, a new issue or candidate outside
+the mandate, or a hard boundary.
+
 Phase approval never implicitly authorizes an external write, destructive
-action, credential operation, source-data removal, live trade, compensating
-order, or expansion beyond read-only/dry-run/PAPER behavior. The governing issue
-must contain a separate approval comment that unambiguously names the exact
-effect, target, and recovery or reconciliation procedure immediately before the
-action. If that approval is absent or stale, stop.
+action, any operation on a credential-shaped file, deletion of worktree or
+data-root content, source-data removal, live trade, compensating order, or
+expansion beyond read-only/dry-run/PAPER behavior. The governing issue must
+contain a separate approval comment that unambiguously names the exact effect,
+target, and recovery or reconciliation procedure immediately before the action.
+If that approval is absent or stale, stop.
 
 ## Phase 0 — Criteria and boundaries
 
 Sharpen the draft goal with the user and relevant project evidence. Record
 measurable success criteria, failure criteria, out-of-scope boundaries,
 complexity, context needs, external/irreversible risks, applicable prior lessons,
-and known Dead Ends. Do not invent product intent. Stop for `PROCEED`.
+and known Dead Ends. Do not invent product intent. Record the phase result and
+apply Approval semantics.
 
 ## Phase 1 — Catalog
 
@@ -239,7 +263,7 @@ Catalog relevant code, files, logs, inputs, outputs, systems, and dependencies a
 ```
 
 Include source identity and current authority where data or financial facts are
-involved. Stop for `PROCEED`.
+involved. Record the phase result and apply Approval semantics.
 
 ## Phase 2a — Evidence review
 
@@ -253,35 +277,36 @@ policy gate is satisfied.
 For existing or failed work, establish root causes, wrong decision points,
 partial state, actual accomplishments, and evidence gaps. Create or update the
 issue's Dead Ends with failure mechanisms and the condition required to revisit
-each path. Stop for `PROCEED`.
+each path. Record the phase result and apply Approval semantics.
 
 ## Phase 3 — Adversarial clarification
 
 Stress-test the synthesis against project terminology and evidence. Expose
 missing assumptions, boundary cases, unsafe authority expansion, data-coverage
 claims, calculation ambiguity, and failure/recovery gaps. Add eliminated paths
-to Dead Ends. Stop for `PROCEED`.
+to Dead Ends. Record the phase result and apply Approval semantics.
 
 ## Phase 4 — Targeted probes
 
 Run only low-cost, high-impact probes within the issue boundary. Before each
 probe, state the observation that would support or eliminate the path. Record
-the actual result without retrofitting the expectation. Update Dead Ends and
-stop for `PROCEED`.
+the actual result without retrofitting the expectation. Update Dead Ends,
+record the phase result, and apply Approval semantics.
 
 ## Phase 5 — Design
 
 Develop viable approaches for the product/change, evidence package, workfolder,
 and handoff. Compare tradeoffs and reject designs that conflict with Dead Ends
 or the system boundaries. Record the selected design and why; do not yet turn it
-into an execution checklist. Stop for `PROCEED`.
+into an execution checklist. Record the phase result and apply Approval
+semantics.
 
 ## Phase 6 — Architecture and sequence
 
 Resolve the selected path's architecture, interfaces, dependency direction,
 sequence, data authority, risks, recovery, compatibility, and remaining open
 questions. A named planning tool may help but does not replace the outcome.
-Stop for `PROCEED`.
+Record the phase result and apply Approval semantics.
 
 ## Phase 7 — Decision-complete issue plan
 
@@ -289,7 +314,7 @@ Write the execution plan into the governing issue and its governed sub-issues.
 Every work item receives a stable key, outcome, material dependencies, approved
 scope, acceptance evidence, allowed writes/effects, stop triggers, and recovery.
 Add validation checkpoints and rollback/reconciliation triggers. Do not create a
-parallel Markdown plan. Stop for `PROCEED`.
+parallel Markdown plan. Record the phase result and apply Approval semantics.
 
 ## Phase 8a — Readiness and authority preflight
 
@@ -298,8 +323,8 @@ checks, and non-destructive reachability of required systems. Record material
 pre-existing failures. Verify that worker context, writes, authority, and
 external effects can be bounded. Set observable attempt, time, cost, context,
 and fan-out limits. If readiness cannot be proven, mark the issue blocked and
-stop. Otherwise record the readiness evidence and stop for the Phase 8a
-`PROCEED`.
+stop. Otherwise record the readiness evidence and apply Approval semantics for
+the Phase 8a to 8b transition.
 
 ## Phase 8b — Bounded execution loop
 
