@@ -24,7 +24,9 @@ uv run --frozen --no-sync python tools/restricted_evidence_summary.py `
 The tool never emits the input path, selected value, object keys below the
 selector, or parser details. Missing/unknown fields, unsupported operations,
 duplicate labels, non-collection counts, invalid JSON, links, and read failures
-produce stable reason codes only. Start with file hash, shape, and counts; add a
+produce stable reason codes only. JSON nesting deeper than 256 levels is
+rejected consistently across supported Python versions. Start with file hash,
+shape, and counts; add a
 selector only when deleting it would leave the governing issue unproven.
 
 The rejected method is unrestricted search or serialization over a private

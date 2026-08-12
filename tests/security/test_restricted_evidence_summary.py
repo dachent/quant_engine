@@ -104,7 +104,7 @@ def test_duplicate_keys_are_rejected(tmp_path: Path) -> None:
         summary.summarize(path, ("items:/generation/items:count",))
 
 
-def test_decoder_depth_failure_has_stable_value_free_code(tmp_path: Path) -> None:
+def test_depth_limit_has_stable_value_free_code(tmp_path: Path) -> None:
     path = tmp_path / "deep.json"
     path.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
     stderr = io.StringIO()
@@ -113,7 +113,7 @@ def test_decoder_depth_failure_has_stable_value_free_code(tmp_path: Path) -> Non
         exit_code = summary.main(("--input", str(path), "--query", "shape:/0:type"))
 
     assert exit_code == 1
-    assert "INPUT_JSON_INVALID" in stderr.getvalue()
+    assert "INPUT_JSON_DEPTH_EXCEEDED" in stderr.getvalue()
     assert str(path) not in stderr.getvalue()
 
 

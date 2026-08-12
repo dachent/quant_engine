@@ -15,6 +15,7 @@ from typing import Final, Sequence
 
 _LABEL: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _OPERATIONS: Final = frozenset({"count", "hash", "present", "type"})
+_MAX_JSON_DEPTH: Final = 256
 _REPARSE_POINT_ATTRIBUTE: Final = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
@@ -67,6 +68,18 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise EvidenceSummaryError("INPUT_JSON_DUPLICATE_KEY")
         result[key] = value
     return result
+
+
+def _require_bounded_depth(value: object) -> None:
+    pending: list[tuple[object, int]] = [(value, 1)]
+    while pending:
+        current, depth = pending.pop()
+        if depth > _MAX_JSON_DEPTH:
+            raise EvidenceSummaryError("INPUT_JSON_DEPTH_EXCEEDED")
+        if isinstance(current, dict):
+            pending.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            pending.extend((item, depth + 1) for item in current)
 
 
 def _decode_pointer(pointer: str) -> tuple[str, ...]:
@@ -137,8 +150,11 @@ def summarize(path: Path, queries: Sequence[str]) -> dict[str, object]:
     content, digest = _file_evidence(path)
     try:
         document = json.loads(content, object_pairs_hook=_unique_object)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    except RecursionError as exc:
+        raise EvidenceSummaryError("INPUT_JSON_DEPTH_EXCEEDED") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise EvidenceSummaryError("INPUT_JSON_INVALID") from exc
+    _require_bounded_depth(document)
 
     results: dict[str, object] = {}
     for label, pointer, operation in parsed:
