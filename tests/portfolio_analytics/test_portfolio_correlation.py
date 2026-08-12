@@ -448,6 +448,31 @@ def test_live_and_backtest_modes_are_separate_and_live_wins_overlap(
         combined_cell["left_evidence_composition"]["status"]
         == "AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE"
     )
+    live_performance = modes["LIVE_ONLY"]["performance"]["a"]
+    combined_performance = modes["LIVE_PLUS_BACKTEST"]["performance"]["a"]
+    assert live_performance["return_observations"] == 9
+    assert combined_performance["return_observations"] == 19
+    assert live_performance["observed_start"] == days[10].isoformat()
+    assert combined_performance["observed_start"] == days[0].isoformat()
+    assert live_performance["annualization_basis"] == "ACTUAL_DAYS_365_25"
+    assert live_performance["cagr"] is not None
+    assert combined_performance["maximum_drawdown"] is not None
+
+
+def test_performance_summary_compounds_and_fails_closed_on_invalid_returns() -> None:
+    rows = [
+        correlation.ReturnRow(date(2025, 1, 1), 0.1, "BACKTEST", "v1", "0.1"),
+        correlation.ReturnRow(date(2026, 1, 1), -0.1, "BACKTEST", "v1", "-0.1"),
+    ]
+    summary = correlation._performance_summary(rows)
+    assert float(cast(str, summary["cumulative_return"])) == pytest.approx(-0.01)
+    assert float(cast(str, summary["maximum_drawdown"])) == pytest.approx(-0.1)
+    assert float(cast(str, summary["cagr"])) == pytest.approx(-0.0100068, rel=1e-5)
+
+    with pytest.raises(correlation.CorrelationError, match="greater than -1"):
+        correlation._performance_summary(
+            [correlation.ReturnRow(date(2025, 1, 1), -1.0, "BACKTEST")]
+        )
 
 
 def test_canonical_live_series_digest_detects_value_mutation() -> None:

@@ -348,7 +348,87 @@ def test_generation_date_rule_allows_dated_ledger_only() -> None:
     assert not materializer._generation_as_of_allowed("ledger", date(2026, 8, 4), AS_OF)
 
 
-def test_production_spec_binds_stable_thirteen_root_authority(
+def _hybrid_panel_lenses(analytics_ids: dict[str, str]) -> dict[str, object]:
+    return {
+        "modes": {
+            "LIVE_PLUS_BACKTEST": [
+                {
+                    "generation_id": analytics_ids["hybrid-dynamic-style"],
+                    "lens_id": "DYNAMIC_STYLE",
+                },
+                {
+                    "lens_id": "ECONOMIC_FACTOR",
+                    "sources": [
+                        {
+                            "generation_id": analytics_ids["hybrid-europe-economic"],
+                            "source_key": "europe-economic",
+                        },
+                        {
+                            "generation_id": analytics_ids["hybrid-us-economic"],
+                            "source_key": "us-economic",
+                        },
+                    ],
+                },
+                {
+                    "lens_id": "ETF_STYLE",
+                    "sources": [
+                        {
+                            "generation_id": analytics_ids["hybrid-us-equity-style"],
+                            "source_key": "us-equity-style",
+                        }
+                    ],
+                },
+                {
+                    "lens_id": "RETURN_INDUSTRY",
+                    "sources": [
+                        {
+                            "generation_id": analytics_ids["hybrid-us-industry"],
+                            "source_key": "us-industry",
+                        }
+                    ],
+                },
+                {
+                    "lens_id": "RETURN_SECTOR",
+                    "sources": [
+                        {
+                            "generation_id": analytics_ids["hybrid-us-sector"],
+                            "source_key": "us-sector",
+                        }
+                    ],
+                },
+            ]
+        }
+    }
+
+
+def test_panel_hybrid_authority_requires_every_consumed_generation() -> None:
+    analytics_ids = {
+        root_id: str(index) * 64
+        for index, root_id in enumerate(
+            materializer.HYBRID_PANEL_ROOT_IDS.values(), start=1
+        )
+    }
+    lenses = _hybrid_panel_lenses(analytics_ids)
+    payload = {"decomposition_lenses": lenses}
+
+    assert materializer._panel_hybrid_generation_ids(payload) == {
+        root_id: analytics_ids[root_id]
+        for root_id in materializer.HYBRID_PANEL_ROOT_IDS.values()
+    }
+
+    modes = lenses["modes"]
+    assert isinstance(modes, dict)
+    hybrid = modes["LIVE_PLUS_BACKTEST"]
+    assert isinstance(hybrid, list)
+    hybrid.pop()
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="prepared panel hybrid analytics authority differs",
+    ):
+        materializer._panel_hybrid_generation_ids(payload)
+
+
+def test_production_spec_binds_stable_twenty_root_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     short_stage_roots = dict(materializer.PRODUCTION_STAGE_ROOTS)
@@ -374,15 +454,22 @@ def test_production_spec_binds_stable_thirteen_root_authority(
         _write_json(staged_root / "CURRENT.json", {"generation_id": generation.name})
         analytics_ids[root_id] = generation.name
     panel = next((prepared_root / "stages" / "panel" / "generations").iterdir())
-    _mutate_json(
-        panel / "data" / "dashboard_data.json",
-        lambda payload: payload["meta"].update(
+
+    def bind_panel_analytics(payload: dict[str, object]) -> None:
+        meta = payload["meta"]
+        assert isinstance(meta, dict)
+        meta.update(
             {
                 "correlation_generation_id": analytics_ids["correlation"],
                 "decomposition_generation_id": analytics_ids["factor-decomposition"],
                 "weekly_returns_generation_id": analytics_ids["weekly-returns"],
             }
-        ),
+        )
+        payload["decomposition_lenses"] = _hybrid_panel_lenses(analytics_ids)
+
+    _mutate_json(
+        panel / "data" / "dashboard_data.json",
+        bind_panel_analytics,
     )
     _refresh_expected_generation(recipe_path, prepared_root, "panel")
     _write_json(
@@ -411,7 +498,7 @@ def test_production_spec_binds_stable_thirteen_root_authority(
     )
 
     spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
-    assert result["root_count"] == 13
+    assert result["root_count"] == 20
     assert set(spec.roots) == set(materializer.PRODUCTION_ROOTS)
     assert spec.coordination_root == production_root / "releases"
     assert (
@@ -419,6 +506,10 @@ def test_production_spec_binds_stable_thirteen_root_authority(
         == next((prepared_root / "stages" / "panel" / "generations").iterdir()).name
     )
     assert spec.release_generations["correlation"] == analytics_ids["correlation"]
+    assert (
+        spec.release_generations["hybrid-dynamic-style"]
+        == analytics_ids["hybrid-dynamic-style"]
+    )
     semantic_gate = next(
         gate for gate in spec.gates if gate.gate_id == "post-build-semantic"
     )
