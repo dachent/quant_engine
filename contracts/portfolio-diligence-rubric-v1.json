@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "rubric_id": "PORT-RUBRIC-1",
+  "authority": "ADVISORY_RESEARCH_ONLY",
+  "current_portfolio_series_count": 9,
+  "gate_statuses": ["PASS", "FAIL", "UNAVAILABLE"],
+  "gates": [
+    {
+      "gate_id": "record_lineage",
+      "question": "When did the current ruleset go live, and what changed?",
+      "evidence_block": "record_lineage",
+      "required_fields": [
+        "ruleset_version",
+        "effective_date",
+        "immutable_version_sha256",
+        "signal_archive_sha256",
+        "version_matches_return_evidence"
+      ]
+    },
+    {
+      "gate_id": "subscriber_realism",
+      "question": "Can actual subscriber or fund NAV returns be reconstructed?",
+      "evidence_block": "subscriber_realism",
+      "required_fields": [
+        "return_series_sha256",
+        "return_observations",
+        "observed_start",
+        "observed_end",
+        "evidence_layer",
+        "net_of_all_strategy_costs",
+        "accepted_evidence_layers_for_verdict",
+        "minimum_overlap_days_for_verdict",
+        "evidence_threshold_authority"
+      ]
+    },
+    {
+      "gate_id": "tail_boundary",
+      "question": "What is the worst evidenced loss under gap, limit, assignment, or early close?",
+      "evidence_block": "tail_boundary",
+      "required_fields": [
+        "position_risk_cube_sha256",
+        "payoff_reproduction_sha256",
+        "worst_loss_fraction",
+        "stated_loss_limit_fraction"
+      ]
+    },
+    {
+      "gate_id": "portfolio_hwm",
+      "question": "Does the candidate keep systematic portfolio loss inside the current limit?",
+      "evidence_block": "scenario",
+      "required_fields": [
+        "mode",
+        "funding_source",
+        "systematic_weight",
+        "conservative_loss_fraction",
+        "central_loss_fraction",
+        "economic_driver_cluster_id",
+        "economic_driver_cluster_authority",
+        "projection_eigenvalue_floor",
+        "projection_authority"
+      ]
+    },
+    {
+      "gate_id": "net_economics",
+      "question": "What is the all-in annual cost at the modeled sleeve size?",
+      "evidence_block": "net_economics",
+      "required_fields": [
+        "sleeve_notional",
+        "subscription_annual",
+        "expense_ratio",
+        "spread_fraction",
+        "commissions_annual",
+        "tax_cost_annual",
+        "tax_character"
+      ]
+    },
+    {
+      "gate_id": "operational_fit",
+      "question": "Can every time-sensitive trade be executed and reconciled?",
+      "evidence_block": "operational_fit",
+      "required_fields": [
+        "supported_broker",
+        "order_protocol_evidenced",
+        "reconciliation_evidenced",
+        "kill_switch_evidenced"
+      ]
+    },
+    {
+      "gate_id": "independence",
+      "question": "Which economic shock pays the candidate, and which shocks break it?",
+      "evidence_block": "independence",
+      "required_fields": [
+        "economic_shock_map",
+        "maximum_downside_correlation_for_pass",
+        "minimum_worst_decile_return_for_pass",
+        "decision_threshold_authority"
+      ]
+    },
+    {
+      "gate_id": "capacity_liquidity",
+      "question": "Can the account enter and exit at the modeled size?",
+      "evidence_block": "capacity_liquidity",
+      "required_fields": [
+        "modeled_position",
+        "maximum_position",
+        "daily_dollar_volume",
+        "open_interest",
+        "bid_ask_spread",
+        "market_impact",
+        "liquidation_days",
+        "maximum_liquidation_days"
+      ]
+    }
+  ],
+  "threshold_authority": {
+    "observation_counts": "SOURCE_DEPENDENCE_POLICY",
+    "central_projection": "CANDIDATE_EVIDENCE_BOUND_TO_DEPENDENCE_SPEC",
+    "economic_decision_thresholds": "CANDIDATE_EVIDENCE_WITH_NAMED_AUTHORITY",
+    "portfolio_loss_limit": "SOURCE_ECONOMIC_DRIVER_CLUSTER_BUDGET"
+  },
+  "decision_boundary": {
+    "allocation_effect": "NONE",
+    "execution_effect": "NONE",
+    "readiness_effect": "NONE",
+    "automatic_add_drop_resize_authority": "NONE"
+  }
+}
