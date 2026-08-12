@@ -947,22 +947,52 @@
   let candidateSearch = "";
   function renderCandidateTable() {
     const query = candidateSearch.toLowerCase();
-    const accepted = data.candidate_appendix.providers.filter((row) => (tierFilter === "all" || row.tier === tierFilter) && (!query || `${row.candidate} ${row.portfolio_role} ${row.category}`.toLowerCase().includes(query)));
-    const rows = accepted.map((row) => `<tr><td><span class="cell-primary">${safe(row.candidate)}</span><span class="cell-secondary">${safe(row.ticker || row.category)}</span></td><td>${statusText(row.tier)}</td><td><span class="cell-primary">${safe(row.portfolio_role)}</span><span class="cell-secondary">${safe(row.philosophy_module)}</span></td><td>${safe(row.execution)}<span class="cell-secondary">${safe(row.cadence)}</span></td><td>${safe(row.principal_gap)}</td></tr>`);
+    const driverMap = data.candidate_driver_map;
+    const sourceRows = driverMap?.candidates || data.candidate_appendix.providers;
+    const accepted = sourceRows.filter((row) => (tierFilter === "all" || row.tier === tierFilter) && (!query || `${row.candidate_id || row.candidate} ${row.portfolio_role} ${row.category}`.toLowerCase().includes(query)));
+    const rows = driverMap
+      ? accepted.map((row) => {
+        const tactical = row.cluster_scores.find((item) => item.cluster_id === "TACTICAL_TIMING_MULTI_ASSET");
+        const metricWindow = row.live_metrics.status.startsWith("AVAILABLE") ? `${formatDate(row.live_metrics.start_date)}–${formatDate(row.live_metrics.end_date)} · ${integer.format(row.live_metrics.observations)} obs` : humanStatus(row.live_metrics.reason);
+        const scoreDetail = tactical.downside_correlation_mean == null ? humanStatus(tactical.status) : `rank ${integer.format(tactical.descriptive_rank)} · downside ${decimal(tactical.downside_correlation_mean)} · Pearson ${decimal(tactical.pearson_mean)} · worst-decile ${pct(tactical.worst_decile_candidate_return_minimum)}`;
+        const missing = tactical.missing_members.length ? `Missing: ${tactical.missing_members.join(", ")}` : "All cluster members measured";
+        const cost = `expense ${pct(row.cost.expense_ratio)} · fixed ${row.cost.annual_fixed_cost == null ? "—" : `$${decimal(row.cost.annual_fixed_cost, 2)}`}`;
+        return `<tr><td><span class="cell-primary">${safe(row.candidate_id)}</span><span class="cell-secondary">${safe(row.ticker || row.category)}</span></td><td>${statusText(row.tier)}</td><td>${statusText(tactical.status)}<span class="cell-secondary">${safe(scoreDetail)}</span><span class="cell-secondary">${safe(missing)} · ${safe(tactical.window_start || "—")}–${safe(tactical.window_end || "—")}</span></td><td>${statusText(row.cost.status)}<span class="cell-secondary">${safe(cost)}</span><span class="cell-secondary">All-in cost unavailable without a modeled notional</span></td><td>${statusText(row.live_metrics.status)}<span class="cell-secondary">${safe(metricWindow)}</span></td><td><span class="cell-primary">${safe(row.portfolio_role)}</span><span class="cell-secondary">Allocation / execution authority NONE</span></td></tr>`;
+      })
+      : accepted.map((row) => `<tr><td><span class="cell-primary">${safe(row.candidate)}</span><span class="cell-secondary">${safe(row.ticker || row.category)}</span></td><td>${statusText(row.tier)}</td><td><span class="cell-primary">${safe(row.portfolio_role)}</span><span class="cell-secondary">${safe(row.philosophy_module)}</span></td><td>${safe(row.execution)}<span class="cell-secondary">${safe(row.cadence)}</span></td><td>${safe(row.principal_gap)}</td></tr>`);
     const table = $("#candidate-table");
     table.dataset.visibleRows = String(accepted.length);
-    table.innerHTML = tableMarkup([["Candidate"], ["Frozen tier"], ["Role / module"], ["Implementation"], ["Principal gap"]], rows.length ? rows : [emptyRow(5)]);
+    const headers = driverMap ? [["Candidate"], ["Tier"], ["Tactical-cluster evidence"], ["Cost evidence"], ["Live-vehicle window"], ["Role / boundary"]] : [["Candidate"], ["Frozen tier"], ["Role / module"], ["Implementation"], ["Principal gap"]];
+    table.innerHTML = tableMarkup(headers, rows.length ? rows : [emptyRow(headers.length)]);
   }
 
   function renderCandidates() {
     const appendix = data.candidate_appendix;
-    $("#candidate-boundary").textContent = `Frozen ${appendix.as_of_date} audit appendix · source ${appendix.source_sha256.slice(0, 14)}… · no refresh or capital authority.`;
-    renderKpis("#candidate-kpis", [
-      ["Appendix status", appendix.status, "Dated research evidence", "warning"],
-      ["Candidates", String(appendix.providers.length), "Not Strategy identities"],
-      ["Tier 1", String(appendix.tier_counts["Tier 1"] || 0), "Diligence priority only"],
-      ["Capital authority", "NONE", "No selection or allocation", "reserve"],
-    ]);
+    const driverMap = data.candidate_driver_map;
+    if (driverMap) {
+      const coverage = driverMap.coverage;
+      $("#candidate-boundary").textContent = `Frozen evidence through ${driverMap.as_of_date} · driver map ${data.meta.candidate_driver_map_sha256.slice(0, 14)}… · ${humanStatus(coverage.refresh_status)}. Descriptive ordering only; no capital authority.`;
+      renderKpis("#candidate-kpis", [
+        ["Research status", humanStatus(driverMap.research_status), "Dated evidence, not current", "warning"],
+        ["Candidates", String(coverage.candidate_count), `${integer.format(coverage.measured_candidate_count)} measured · ${integer.format(coverage.unavailable_candidate_count)} unavailable`],
+        ["Tactical loss budget", pct(driverMap.driver_clusters.find((row) => row.cluster_id === "TACTICAL_TIMING_MULTI_ASSET").adverse_loss_budget), `Systematic limit ${pct(driverMap.portfolio.systematic_loss_limit)}`, "danger"],
+        ["Capital authority", "NONE", "No automatic add, drop, or allocation", "reserve"],
+      ]);
+      const clusterRows = driverMap.driver_clusters.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(humanStatus(row.cluster_id))}</span><span class="cell-secondary">${safe(row.members.join(" · "))}</span></th><td>${pct(row.allocation_weight)}</td><td>${pct(row.adverse_loss_budget)}<span class="cell-secondary">${safe(humanStatus(row.budget_status))}</span></td><td>${row.observed_pair_count ? `${decimal(row.observed_pair_correlation_minimum)}–${decimal(row.observed_pair_correlation_maximum)}<span class="cell-secondary">${integer.format(row.observed_pair_count)} measured pairs</span>` : "UNAVAILABLE"}</td></tr>`);
+      $("#candidate-driver-table").innerHTML = tableMarkup([["Driver cluster / members"], ["Systematic weight"], ["Adverse-loss budget"], ["Observed pair range"]], clusterRows);
+      const leaveRows = driverMap.tactical_leave_one_out.map((row) => `<tr><th scope="row">${safe(row.series_id)}</th><td>${pct(row.correlation_one_loss_reduction)}</td><td>${pct(row.central_case_loss_reduction)}</td><td>${pct(row.cluster_loss_without)}<span class="cell-secondary">${safe(humanStatus(row.cluster_budget_status_without))}</span></td></tr>`);
+      $("#candidate-leave-one-out-table").innerHTML = tableMarkup([["Tactical sleeve"], ["Conservative reduction"], ["Central reduction"], ["Cluster loss without"]], leaveRows);
+      $("#candidate-driver-grid").hidden = false;
+    } else {
+      $("#candidate-boundary").textContent = `Frozen ${appendix.as_of_date} audit appendix · source ${appendix.source_sha256.slice(0, 14)}… · no refresh or capital authority.`;
+      renderKpis("#candidate-kpis", [
+        ["Appendix status", appendix.status, "Dated research evidence", "warning"],
+        ["Candidates", String(appendix.providers.length), "Not Strategy identities"],
+        ["Tier 1", String(appendix.tier_counts["Tier 1"] || 0), "Diligence priority only"],
+        ["Capital authority", "NONE", "No selection or allocation", "reserve"],
+      ]);
+      $("#candidate-driver-grid").hidden = true;
+    }
     renderCandidateTable();
   }
 
@@ -1188,7 +1218,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 17) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 18) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;

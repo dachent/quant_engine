@@ -2440,11 +2440,65 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 17" in renderer
+    assert "data.panel_schema_version !== 18" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
     assert "Descriptive only" in renderer
+
+
+def test_candidate_driver_map_requires_fixed_cardinality_and_no_authority(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "driver-map.json"
+    payload = {
+        "schema_version": 1,
+        "as_of_date": "2026-07-24",
+        "coverage": {"candidate_count": 33},
+        "candidates": [{"candidate_id": f"candidate-{index}"} for index in range(33)],
+        "driver_clusters": [{"cluster_id": f"cluster-{index}"} for index in range(5)],
+        "tactical_leave_one_out": [
+            {"series_id": f"strategy-{index}"} for index in range(4)
+        ],
+        "authority_boundary": {
+            "allocation_effect": "NONE",
+            "execution_effect": "NONE",
+            "readiness_effect": "NONE",
+            "automatic_add_drop_authority": "NONE",
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    accepted, identity = panel._candidate_driver_map(path)
+
+    assert accepted == payload
+    assert identity is not None
+    assert identity["as_of_date"] == "2026-07-24"
+    assert len(identity["sha256"]) == 64
+
+    payload["authority_boundary"]["allocation_effect"] = "SUGGEST"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="driver-map authority differs"
+    ):
+        panel._candidate_driver_map(path)
+
+    payload["authority_boundary"]["allocation_effect"] = "NONE"
+    payload["authority_boundary"]["unexpected_effect"] = "NONE"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="driver-map authority differs"
+    ):
+        panel._candidate_driver_map(path)
+
+
+def test_published_panel_files_include_optional_driver_map() -> None:
+    without_driver_map = panel._published_panel_files(None)
+    with_driver_map = panel._published_panel_files(Path("driver-map.json"))
+
+    assert panel.DRIVER_MAP_PANEL_FILE not in without_driver_map
+    assert panel.DRIVER_MAP_PANEL_FILE in with_driver_map
+    assert with_driver_map[-1] == "candidate.json"
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -2478,6 +2532,8 @@ def test_mobile_layout_retains_dates_and_single_column_hwm() -> None:
 
     assert ".topbar-meta {\n    display: grid;" in css
     assert ".validation-card { grid-template-columns: 1fr; }" in css
+    assert ".metric-block .metric-note" in css
+    assert "overflow-wrap: anywhere;" in css
     assert "Mobile header retains portfolio date, freshness date, and coverage" in qa
     assert "Mobile HWM governor uses one readable column" in qa
 

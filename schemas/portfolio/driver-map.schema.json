@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/driver-map.schema.json",
+  "title": "Portfolio economic-driver candidate map",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "as_of_date",
+    "research_status",
+    "source",
+    "authority_boundary",
+    "ranking_method",
+    "coverage",
+    "portfolio",
+    "driver_clusters",
+    "tactical_leave_one_out",
+    "candidates"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "as_of_date": { "type": "string", "format": "date" },
+    "research_status": { "const": "FROZEN_EVIDENCE_NOT_CURRENT" },
+    "source": {
+      "type": "object",
+      "minProperties": 5,
+      "additionalProperties": { "$ref": "#/$defs/hash" }
+    },
+    "authority_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allocation_effect",
+        "execution_effect",
+        "readiness_effect",
+        "automatic_add_drop_authority"
+      ],
+      "properties": {
+        "allocation_effect": { "const": "NONE" },
+        "execution_effect": { "const": "NONE" },
+        "readiness_effect": { "const": "NONE" },
+        "automatic_add_drop_authority": { "const": "NONE" }
+      }
+    },
+    "ranking_method": { "type": "string", "minLength": 1 },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_count",
+        "measured_candidate_count",
+        "unavailable_candidate_count",
+        "retained_dependence_row_count",
+        "cluster_dependence_row_count",
+        "out_of_scope_dependence_row_count",
+        "dependence_scope_status",
+        "refresh_status"
+      ],
+      "properties": {
+        "candidate_count": { "const": 33 },
+        "measured_candidate_count": { "type": "integer", "minimum": 0, "maximum": 33 },
+        "unavailable_candidate_count": { "type": "integer", "minimum": 0, "maximum": 33 },
+        "retained_dependence_row_count": { "type": "integer", "minimum": 0 },
+        "cluster_dependence_row_count": { "type": "integer", "minimum": 0 },
+        "out_of_scope_dependence_row_count": { "type": "integer", "minimum": 0 },
+        "dependence_scope_status": {
+          "const": "CLUSTER_SCORING_EXCLUDES_NON_CLUSTER_CURRENT_COMPONENTS"
+        },
+        "refresh_status": { "type": "string", "minLength": 1 }
+      }
+    },
+    "portfolio": { "type": "object" },
+    "driver_clusters": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": { "type": "object" }
+    },
+    "tactical_leave_one_out": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "type": "object" }
+    },
+    "candidates": {
+      "type": "array",
+      "minItems": 33,
+      "maxItems": 33,
+      "items": { "type": "object" }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

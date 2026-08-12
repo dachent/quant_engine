@@ -101,9 +101,11 @@ without preserving stale calculations or hard-coded operator conclusions.
   `NO_ACCEPTED_FACT_PATH` row means no admitted account/fact source exists; it
   never means zero balance or zero activity. The Factors view renders the
   governed `selection_boundary` beside the lens methodology.
-- The Candidates view is the hash-locked 2026-07-17 audit appendix. Its 33 rows
-  are not `Strategy` identities and cannot update current totals, rank a new
-  candidate, authorize diligence, or allocate capital.
+- The Candidates view retains the hash-locked appendix and can consume a
+  hash-bound `portfolio-driver-map/1` artifact. The map publishes the five
+  current economic-driver clusters, tactical leave-one-out effects, and dated
+  measured/unavailable states for all 33 candidates. The rows are not
+  `Strategy` identities and cannot update current totals, readiness, or capital.
 - The application uses embedded local data and relative assets. It contains no
   network, provider, broker, order, deployment, or live-refresh path.
 - Missing or unmapped positions, FX, flows, NAV, mappings, costs, or performance
