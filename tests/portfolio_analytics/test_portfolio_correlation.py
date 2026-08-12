@@ -238,6 +238,52 @@ def test_observed_dependence_coverage_and_no_credit_are_explicit(
         _dependence(result)["correlation_one"]["status"]
         == "AVAILABLE_RECONCILED_SEPARATE_CONSERVATIVE_BOUND"
     )
+    corr_one = _dependence(result)["correlation_one"]
+    assert corr_one["declared_loss"] == "0.3"
+    assert corr_one["governs_readiness"] is True
+    assert all(
+        component["classification"] == "CONCEPTUAL_STRESS_BOUND_NOT_EXPECTATION"
+        and component["conservative_loss_fraction"] == "0.3"
+        for component in corr_one["components"]
+    )
+
+    central = _dependence(result)["central_case"]
+    assert central["governs_readiness"] is False
+    assert central["status"] == "AVAILABLE_NOT_A_PROBABILITY_FORECAST"
+    assert central["measured_component_count"] == 8
+    assert central["prior_component_count"] == 1
+    assert central["measured_pair_count"] + central["prior_pair_count"] == 36
+    missing_component = next(
+        item for item in central["components"] if item["series_id"] == "missing"
+    )
+    base_component = next(
+        item for item in central["components"] if item["series_id"] == "base"
+    )
+    assert base_component["evidence_layer"] == "ACCOUNT_LIVE"
+    assert base_component["method"] == "ACCEPTED_PATH_MAXIMUM_DRAWDOWN"
+    assert missing_component["status"] == "PRIOR_NO_ACCEPTED_OBSERVATIONS"
+    assert missing_component["authority"].endswith("correlation_one.components")
+    assert (
+        central["dependence_matrix"]["missing_pair_rule"] == "GOVERNED_CONCEPTUAL_PRIOR"
+    )
+    base_index = SERIES.index("base")
+    missing_index = SERIES.index("missing")
+    assert float(
+        central["dependence_matrix"]["input_values"][base_index][missing_index]
+    ) == pytest.approx(0.2)
+    central_values = np.asarray(
+        [
+            [float(item) for item in row]
+            for row in central["dependence_matrix"]["values"]
+        ]
+    )
+    central_vector = np.asarray(
+        [float(item["loss_scale_contribution"]) for item in central["components"]]
+    )
+    assert float(central["loss"]) == pytest.approx(
+        math.sqrt(float(central_vector @ central_values @ central_vector)), abs=1e-12
+    )
+    assert float(np.min(np.linalg.eigvalsh(central_values))) >= -1e-10
 
 
 def test_matrices_are_symmetric_and_posterior_stress_are_psd(tmp_path: Path) -> None:

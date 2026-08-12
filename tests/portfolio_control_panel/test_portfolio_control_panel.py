@@ -573,11 +573,30 @@ def _correlation() -> dict[str, object]:
         "builder_version": "synthetic",
         "dependence": {
             "blend_cells": blends,
+            "central_case": {
+                "classification": "MEASURED_MAX_DRAWDOWN_PSD_PROJECTED",
+                "components": [
+                    {
+                        "series_id": series_id,
+                        "status": "MEASURED",
+                    }
+                    for series_id in STRATEGY_NAMES
+                ],
+                "dependence_matrix": {"missing_pair_rule": "GOVERNED_CONCEPTUAL_PRIOR"},
+                "governs_readiness": False,
+                "loss": "0.2",
+                "measured_component_count": 9,
+                "measured_pair_count": 10,
+                "method": "SQRT_V_TRANSPOSE_CORRELATION_V",
+                "prior_pair_count": 26,
+                "prior_component_count": 0,
+                "status": "AVAILABLE_NOT_A_PROBABILITY_FORECAST",
+            },
             "correlation_one": {
                 "components": [
                     {
-                        "adverse_loss_fraction": "0.37249726899852387",
                         "allocation_weight": str(1 / 9),
+                        "conservative_loss_fraction": "0.37249726899852387",
                         "loss_contribution": str(
                             Decimal("0.37249726899852387") / Decimal(9)
                         ),
@@ -585,8 +604,10 @@ def _correlation() -> dict[str, object]:
                     }
                     for series_id in STRATEGY_NAMES
                 ],
-                "expected_loss": "0.37249726899852387",
+                "declared_loss": "0.37249726899852387",
+                "governs_readiness": True,
                 "loss": "0.37249726899852387",
+                "method": "SUM_WEIGHT_TIMES_GOVERNED_CONSERVATIVE_BOUND_INPUT",
                 "reconciliation_difference": "0",
                 "status": "AVAILABLE_RECONCILED_SEPARATE_CONSERVATIVE_BOUND",
             },
@@ -1056,7 +1077,17 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     assert data["factor_analysis"]["unavailable_count"] == 4
     assert data["dependence_analysis"]["available_pair_count"] == 10
     assert data["dependence_analysis"]["pair_count"] == 36
+    assert data["dependence_analysis"]["central_case"]["loss"] == "0.2"
+    assert data["advisory"]["central_case_loss"] == "0.2"
+    assert data["advisory"]["readiness_loss_measure"] == (
+        "CORRELATION_ONE_CONSERVATIVE_BOUND"
+    )
+    assert "central case is descriptive" in data["advisory"]["reason"]
     cluster_budget = data["dependence_analysis"]["economic_driver_cluster_budget"]
+    assert cluster_budget["central_case_loss"] == "0.2"
+    assert cluster_budget["governing_loss_measure"] == (
+        "CORRELATION_ONE_CONSERVATIVE_BOUND"
+    )
     assert cluster_budget["systematic_loss_limit"] == "0.15"
     assert cluster_budget["status"] == "BREACHES_SYSTEMATIC_LOSS_LIMIT"
     assert float(cluster_budget["limit_breach"]) == pytest.approx(0.22249726899852387)
@@ -2409,7 +2440,11 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 16" in renderer
+    assert "data.panel_schema_version !== 17" in renderer
+    assert "corrOne.expected_loss" not in renderer
+    assert "const centralCase = dependence.central_case" in renderer
+    assert "Central case" in renderer
+    assert "Descriptive only" in renderer
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -2517,6 +2552,8 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     assert "canonical_strategy_series" in schema["required"]
     assert "hybrid_mode_gate" in schema["required"]
     assert "strategy_underwriting" in schema["required"]
+    assert "central_case" in schema["properties"]["dependence_analysis"]["required"]
+    assert "central_case_loss" in schema["properties"]["advisory"]["required"]
     assert "underwriting_policy_sha256" in schema["properties"]["meta"]["required"]
     blocked = schema["properties"]["hybrid_mode_gate"]["properties"][
         "blocked_strategies"

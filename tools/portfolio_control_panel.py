@@ -38,8 +38,8 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-PANEL_SCHEMA_VERSION: Final = 16
-BUILDER_VERSION: Final = "2.8.0"
+PANEL_SCHEMA_VERSION: Final = 17
+BUILDER_VERSION: Final = "2.9.1"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -2088,6 +2088,49 @@ def _dependence_analysis(
         )
     )
     correlation_one = _object(dependence.get("correlation_one"), "correlation_one")
+    raw_central_case = dependence.get("central_case")
+    if raw_central_case is None:
+        central_case: dict[str, Any] = {
+            "classification": "UNAVAILABLE_LEGACY_ACCEPTED_GENERATION",
+            "components": [],
+            "dependence_matrix": {},
+            "governs_readiness": False,
+            "loss": None,
+            "measured_component_count": 0,
+            "measured_pair_count": 0,
+            "method": "UNAVAILABLE_LEGACY_ACCEPTED_GENERATION",
+            "prior_pair_count": expected_cells,
+            "prior_component_count": 0,
+            "status": "UNAVAILABLE_LEGACY_ACCEPTED_GENERATION",
+        }
+    else:
+        central_case = _object(raw_central_case, "central_case")
+        if central_case.get("governs_readiness") is not False:
+            raise ControlPanelValidationError("central case must not govern readiness")
+        central_components = _objects(
+            central_case.get("components"), "central_case.components"
+        )
+        central_component_ids = {
+            _text(item.get("series_id"), "central-case component series_id")
+            for item in central_components
+        }
+        if central_component_ids != set(series_ids):
+            raise ControlPanelValidationError(
+                "central-case components differ from the current strategy boundary"
+            )
+        _finite_float(central_case.get("loss"), "central_case.loss")
+        measured_pairs = central_case.get("measured_pair_count")
+        prior_pairs = central_case.get(
+            "prior_pair_count", central_case.get("missing_pair_count")
+        )
+        if (
+            not isinstance(measured_pairs, int)
+            or isinstance(measured_pairs, bool)
+            or not isinstance(prior_pairs, int)
+            or isinstance(prior_pairs, bool)
+            or measured_pairs + prior_pairs != expected_cells
+        ):
+            raise ControlPanelValidationError("central-case pair coverage differs")
     cluster_contract = _load_json(
         ECONOMIC_DRIVER_CLUSTERS, "economic driver cluster contract"
     )
@@ -2127,6 +2170,11 @@ def _dependence_analysis(
     )
     correlation_one_loss = _finite_float(
         correlation_one.get("loss"), "correlation_one.loss"
+    )
+    central_case_loss = (
+        None
+        if central_case.get("loss") is None
+        else _finite_float(central_case.get("loss"), "central_case.loss")
     )
     economic_driver_clusters: list[dict[str, Any]] = []
     for cluster in cluster_definitions:
@@ -2191,7 +2239,11 @@ def _dependence_analysis(
         "budget_rule": _text(cluster_contract.get("budget_rule"), "budget_rule"),
         "clusters": economic_driver_clusters,
         "contract_sha256": _hash(ECONOMIC_DRIVER_CLUSTERS),
+        "central_case_loss": (
+            None if central_case_loss is None else _number_text(central_case_loss)
+        ),
         "correlation_one_loss": _number_text(correlation_one_loss),
+        "governing_loss_measure": "CORRELATION_ONE_CONSERVATIVE_BOUND",
         "historical_audit_reference": _object(
             cluster_contract.get("historical_audit_reference"),
             "historical_audit_reference",
@@ -2229,6 +2281,7 @@ def _dependence_analysis(
             item.get("status") == "AVAILABLE" for item in observed
         ),
         "cells": cells,
+        "central_case": central_case,
         "correlation_one": correlation_one,
         "economic_driver_cluster_budget": cluster_budget,
         "evidence_mode": evidence_mode,
@@ -4029,6 +4082,7 @@ def _panel_data(
     return {
         "account_summary": accounts,
         "advisory": {
+            "central_case_loss": dependence_analysis["central_case"].get("loss"),
             "correlation_one_stress": _summary_value(summary, "Correlation-one stress"),
             "hwm_limit": "0.15",
             "hwm_status": hwm_summary["status"],
@@ -4036,7 +4090,10 @@ def _panel_data(
             "hwm_status_semantics": hwm_summary["status_semantics"],
             "nav_coverage": hwm_summary["nav_coverage"],
             "readiness": _summary_value(summary, "Advisory readiness"),
+            "readiness_loss_measure": "CORRELATION_ONE_CONSERVATIVE_BOUND",
             "reason": (
+                "Readiness is governed by the correlation-one conservative bound; "
+                "the measured-dependence central case is descriptive and does not govern readiness. "
                 "Canonical report admitted NAV now covers "
                 + (", ".join(admitted_nav_names) or "no included-perimeter sleeves")
                 + "; explicit de-minimis exclusions remain reported: "
