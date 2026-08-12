@@ -16,6 +16,9 @@ the governing GitHub Issue, or `docs/operating-model.md`.
 - Record material decisions, phase evidence, approvals, Dead Ends, blockers,
   and the final handoff in the governing issue. If GitHub is unavailable, stop
   or arrange a human-mediated update; do not substitute another tracker.
+- Keep the approved current tranche to at most three `backlog:active` issues.
+  Promotion requires an owner review recorded in the issue after scope,
+  dependencies, effects, evidence, and recovery are decision-complete.
 
 ## Required preflight
 
@@ -23,8 +26,11 @@ Before mutating repository or external state:
 
 1. Identify the governing issue by number and stable key.
 2. Confirm its `Blocked by` references are resolved and the item is ready.
-3. Identify the current Phase 0–8c state and verify that its required
-   issue-recorded `PROCEED` approval is current.
+3. Identify the current Phase 0–8c state and verify that its issue-recorded
+   authority is current. This may be an exact phase `PROCEED` or a current owner
+   mandate that explicitly covers the bounded issue, candidate, writes,
+   effects, and stop conditions. Do not request another approval for a routine
+   step already inside that authority.
 4. Bound the intended files, systems, external effects, checks, retries, time,
    cost, and integration owner.
 5. Inspect the working tree and preserve unrelated user or agent changes.
@@ -36,10 +42,12 @@ and hand off the blocker.
 
 - Make the smallest coherent, preferably reversible change within the approved
   issue scope. Do not weaken acceptance criteria to obtain a pass.
-- This repository is private on a personal GitHub Free account. GitHub does not
-  enforce protected `main`, required checks, reviews, CODEOWNERS, force-push
-  denial, or branch-deletion denial. These are project operating rules, not
-  server guarantees.
+- This repository is private and GitHub currently enforces protected `main`,
+  strict required checks, administrator enforcement, conversation resolution,
+  force-push denial, and branch-deletion denial. Required approving reviews,
+  signed commits, and linear history are not enabled. The live protection is a
+  server control; its historical billing-plan attribution is not independently
+  established.
 - Never update, force-update, delete, or repoint `main` directly. Work on a
   non-main branch and use a pull request. Before merge, record the exact PR head
   SHA and prove that Quality, Security, Data boundary, and Issue guard all
@@ -62,6 +70,11 @@ and hand off the blocker.
   Never loop until pass.
 - Run each declared gate once per unchanged candidate. Rerun only after a
   relevant change. Treat a passing check as evidence, not infallible proof.
+- A current bounded mandate authorizes the routine repository and GitHub steps
+  it names, including edits, focused checks, commits, pushes, pull-request
+  updates, and issue evidence. Do not interrupt execution with step-level
+  approval prompts. Stop when the candidate, authority, scope, effects, or
+  irreversible risk materially changes or is ambiguous.
 - After each sprint, update the governing issue with outcome, evidence,
   decisions, Dead Ends, blockers, and dependencies, then follow the routing in
   the operating model.
@@ -73,8 +86,10 @@ A general phase `PROCEED` does not authorize any of the following:
 - writes to GitHub, provider accounts, cloud resources, broker systems, or
   other external destinations not already explicit in the issue;
 - credential creation, rotation, revocation, or persistence;
-- deletion, overwriting authoritative data, archive/removal of a legacy source,
-  or another action that is hard to recover;
+- any operation on a credential-shaped file, even when believed stale or
+  revoked;
+- deletion of worktree or data-root content, overwriting authoritative data,
+  archive/removal of a legacy source, or another action that is hard to recover;
 - live trading, compensating orders, account-setting changes, or expansion from
   read-only/dry-run/PAPER behavior.
 
@@ -103,3 +118,7 @@ Before claiming completion, verify the integrated candidate against the issue's
 success, failure, and out-of-scope criteria. Confirm the dependency graph is
 still valid, list exact checks and results, document recovery state and known
 gaps, and complete the issue's `Final evidence and handoff` section.
+Never close with pending final evidence, and never move unfinished acceptance
+scope to a successor key merely to close the governing issue. A successor is
+valid only for a genuinely independent outcome; otherwise the original issue
+stays open.
