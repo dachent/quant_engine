@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import csv
 from datetime import date
+from decimal import Decimal
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import sys
+
+import pytest
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -225,6 +228,16 @@ def test_weekly_generation_compounds_and_keeps_evidence_modes_separate(
     assert strategy["values_by_mode"]["LIVE_PLUS_BACKTEST"]["2026-07-20"] == "0.02"
     assert payload["week_policy"]["absent_value"] == "UNAVAILABLE_NOT_ZERO"
     assert payload["current_week"]["default_visible"] is False
+    assert payload["observation_meta_fields"] == [
+        "daily_observation_count",
+        "actual_observed_start",
+        "actual_observed_end",
+        "coverage_status",
+        "boundary_reasons",
+    ]
+    assert set(strategy["values_by_mode"]["LIVE_ONLY"]) == set(
+        strategy["observation_meta_by_mode"]["LIVE_ONLY"]
+    )
     assert (
         sum("CORE_BENCHMARK" in row["display_groups"] for row in payload["series"]) == 9
     )
@@ -250,3 +263,70 @@ def test_weekly_generation_rejects_strategy_source_hash_drift(tmp_path: Path) ->
         assert "hash differs" in str(exc)
     else:
         raise AssertionError("strategy source drift was accepted")
+
+
+def test_weekly_calendar_metadata_handles_year_weekend_and_leap_boundaries() -> None:
+    values, metadata, calendar = weekly._weekly_series(
+        [
+            (date(2025, 12, 29), Decimal("0.01")),
+            (date(2025, 12, 31), Decimal("0.02")),
+            (date(2026, 1, 2), Decimal("-0.01")),
+            (date(2026, 1, 3), Decimal("0.03")),
+            (date(2026, 1, 4), Decimal("0.01")),
+        ],
+        as_of=date(2026, 1, 4),
+    )
+    assert calendar == "CALENDAR_7_DAY"
+    assert list(values) == ["2025-12-29"]
+    assert metadata["2025-12-29"] == [
+        5,
+        "2025-12-29",
+        "2026-01-04",
+        "COMPLETE_WITHIN_ACCEPTED_CALENDAR",
+        [],
+    ]
+
+    _, leap_metadata, _ = weekly._weekly_series(
+        [
+            (date(2024, 2, 26), Decimal("0.01")),
+            (date(2024, 2, 29), Decimal("0.01")),
+            (date(2024, 3, 1), Decimal("0.01")),
+        ],
+        as_of=date(2024, 3, 3),
+    )
+    assert leap_metadata["2024-02-26"][2] == "2024-03-01"
+    assert leap_metadata["2024-02-26"][3] == "COMPLETE_WITHIN_ACCEPTED_CALENDAR"
+
+
+def test_weekly_metadata_marks_partial_boundaries_without_filling_missing_weeks() -> (
+    None
+):
+    values, metadata, calendar = weekly._weekly_series(
+        [
+            (date(2026, 7, 1), Decimal("0.01")),
+            (date(2026, 7, 2), Decimal("0.02")),
+            (date(2026, 7, 6), Decimal("0.03")),
+            (date(2026, 7, 8), Decimal("-0.01")),
+        ],
+        as_of=date(2026, 7, 8),
+    )
+    assert calendar == "WEEKDAY"
+    assert list(values) == ["2026-06-29", "2026-07-06"]
+    assert metadata["2026-06-29"][3:] == ["PARTIAL_BOUNDARY", ["SOURCE_START"]]
+    assert metadata["2026-07-06"][3] == "PARTIAL_BOUNDARY"
+    assert "CURRENT_AS_OF" in metadata["2026-07-06"][4]
+    assert "2026-07-13" not in values
+
+
+def test_weekly_rejects_duplicate_dates_and_total_loss_or_worse() -> None:
+    with pytest.raises(weekly.WeeklyReturnError, match="duplicate daily observation"):
+        weekly._weekly_series(
+            [
+                (date(2026, 7, 27), Decimal("0.01")),
+                (date(2026, 7, 27), Decimal("0.02")),
+            ],
+            as_of=date(2026, 7, 31),
+        )
+    for invalid in ("-1", "-1.01"):
+        with pytest.raises(weekly.WeeklyReturnError, match="greater than -1"):
+            weekly._decimal(invalid, "synthetic return")
