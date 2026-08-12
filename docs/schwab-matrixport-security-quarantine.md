@@ -24,7 +24,10 @@ uv run --frozen --no-sync python tools/provider_security_quarantine.py plan-matr
   --quarantine-root <absolute-quarantine-root>
 ```
 
-Run `apply`, then `verify`, against the returned `plan.json`. Verification
+Planning is read-only. Run `apply` only after the governing issue records a
+current approval naming the exact credential-shaped targets, destination, and
+restore procedure; a general implementation approval is insufficient. Then run
+`verify` against the returned `plan.json`. Verification
 persists `verify.json` containing only plan identity, artifact count, byte count,
 and state. `scan` records indicator names and affected relative paths without
 credential values. `restore` reverses hash-matched moves to their original
