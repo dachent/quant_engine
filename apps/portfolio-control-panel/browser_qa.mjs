@@ -29,9 +29,7 @@ const launchOptions = {
     ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH }
     : {}),
 };
-const excludeCandidates = options["exclude-candidates"] === "true";
-const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"]
-  .filter((view) => !excludeCandidates || view !== "candidates");
+const views = ["command", "capital", "risk", "signals", "attribution", "dependence", "weekly", "candidates", "data"];
 const viewports = [
   { name: "desktop", viewport: { width: 1440, height: 900 } },
   { name: "tablet", viewport: { width: 1024, height: 768 } },
@@ -153,7 +151,6 @@ try {
       final_url: page.url(),
       title: await page.title(),
       tool: "portfolio_control_panel_browser_qa",
-      scope: excludeCandidates ? "NON_CANDIDATE" : "FULL",
       viewport: capture.viewport,
     };
     await writeFile(path.join(folder, "console-events.json"), `${JSON.stringify(consoleEvents, null, 2)}\n`, "utf8");

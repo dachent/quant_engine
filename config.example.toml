@@ -12,7 +12,7 @@ allow_external_writes = false
 
 [paths]
 source_specifications = "../xBin"
-portfolio123 = "../dataPortfolio123"
+portfolio123 = "../data_Portfolio123"
 matrixport = "../dataMatrixport"
 quantbase = "../dataQuantbase"
 schwab = "../dataSchwab"

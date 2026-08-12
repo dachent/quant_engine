@@ -1,10 +1,5 @@
 # Governed data rollforward
 
-For the Windows operator sequence that rolls forward the expanded per-strategy
-underwriting, all analysis lenses, the control panel, Candidate interaction QA
-last, and the coordinated release, use
-[`portfolio-underwriting-rollforward.md`](portfolio-underwriting-rollforward.md).
-
 `DATA-PIPE-001` turns an accepted private source-to-panel dependency graph into
 one explicit, resumable release. The pipeline specification is private because
 it contains absolute data paths. It names every source artifact, immutable
@@ -137,35 +132,6 @@ plan, receipts, pipeline-evidence hash, release manifest/journal, gate files,
 and post-commit pointer/companion verification. Recovery rehearsal is performed
 under `DATA-RECOVERY-001` before this workflow is accepted for perpetual use.
 
-## Manual monitoring cycle and headline recomputation
-
-A manual cycle may evaluate accepted immutable evidence without authorizing a
-provider call or advancing a pointer. First build freshness for the local
-operational date. Then independently recompute the headline correlation-one
-control from each component's allocation weight and adverse-loss fraction and
-reconcile it to the accepted correlation generation, portfolio report, and
-staged panel. The recomputation tolerance is `1e-12`.
-
-```powershell
-python tools/portfolio_freshness.py --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'freshness-health.json')
-python tools/portfolio_control_recompute.py --correlation-root 'C:\Tools\quant-engine\data\analytics\correlation' --report-root <accepted-report-root> --panel-candidate <staged-panel-candidate> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'control-recomputation.json')
-python tools/portfolio_rollforward_cycle.py --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --freshness (Join-Path $cycleRoot 'freshness-health.json') --recomputation (Join-Path $cycleRoot 'control-recomputation.json') --evaluation-date <yyyy-mm-dd> --previous-cycle-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'cycle-receipt.json')
-```
-
-The cycle receipt is deliberately not a provider execution receipt. Every
-required stale or late read is assigned a stable request identity, zero external
-retry, and `NOT_AUTHORIZED_NOT_EXECUTED`. Portfolio123 remains HAR-first; an API
-read is permitted only for a declared HAR gap with explicit approval. The local
-notification receipt routes required escalations into the next panel's operator
-queue and records that no external notification was sent. A monitoring cycle
-never advances release pointers.
-
-The Data health view shows the governing freshness mode, calendar, cadence,
-grace period, stale boundary, and reconciliation date for every freshness row.
-Required `LATE`, `STALE`, or `UNAVAILABLE` rows also enter the Command and Data
-health remediation queues. Non-required historical/provider lanes remain
-visible but do not become false blockers.
-
 ## Private portfolio source-to-panel materialization
 
 `tools/portfolio_release_builder.py` executes the real ledger, baseline,
@@ -176,13 +142,8 @@ the browser-QA evidence, repository commit, locked Python runtime, and stable
 panel launcher into the core pipeline specification used by
 `tools/data_pipeline.py`.
 
-No stage copies a prior report or panel or substitutes a marker for computation.
-When provider facts changed, the recipe uses `--provider-ledger-spec` and
-rebuilds the ledger. When a frozen analysis plan is bound to an unchanged,
-already-published ledger, `--provider-ledger-generation` may reuse only that
-exact VERIFIED generation after validating its manifest, adapter, catalog
-artifact, schema, date, and full directory inventory. The semantic command
-calculates six bridges from the resulting artifacts:
+No stage copies a prior release or substitutes a marker for computation. The
+semantic command calculates six bridges from the newly built artifacts:
 financial identities, current strategy mappings, ledger-to-baseline-to-report
 lineage, analytics/report/panel equality (including HWM), freshness, and exact
 generation/release evidence. Quantitative details are retained beside the
@@ -197,7 +158,7 @@ specification from the new root.
 
 ```powershell
 $env:QE_PIPELINE_PYTHON = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
-python tools/portfolio_release_builder.py recipe --provider-ledger-generation <exact-verified-generation-directory> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --implementation-reconciliation <exact-implementation-reconciliation.json> --implementation-return-attribution <exact-return-attribution.json> --strategy-attribution-root <exact-strategy-attribution-root> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
+python tools/portfolio_release_builder.py recipe --provider-ledger-spec <new-root-provider-ledger-spec.json> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
 python tools/portfolio_release_builder.py build --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot
 <run browser and interaction QA against the emitted panel candidate>
 python tools/portfolio_release_builder.py stage --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot --role panel --qa-dir $qaRoot
@@ -206,10 +167,6 @@ python tools/portfolio_pipeline_materialize.py spec --recipe (Join-Path $cycleRo
 python tools/data_pipeline.py plan --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py execute --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py status --spec (Join-Path $runRoot 'pipeline-spec.json')
-python tools/portfolio_pipeline_materialize.py production-spec --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') --prepared-root $runRoot --semantic-gate (Join-Path $runRoot 'evidence\post-build-semantic.json') --portfolio-root $portfolioRoot --state-root (Join-Path $cycleRoot 'production-state') --spec (Join-Path $cycleRoot 'production-spec.json')
-python tools/data_pipeline.py plan --spec (Join-Path $cycleRoot 'production-spec.json')
-python tools/data_pipeline.py execute --spec (Join-Path $cycleRoot 'production-spec.json')
-python tools/data_pipeline.py execute --spec (Join-Path $cycleRoot 'production-spec.json') --commit
 ```
 
 Before removing an old storage root, require exact source/destination inventories,

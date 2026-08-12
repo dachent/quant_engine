@@ -198,7 +198,7 @@ def test_build_supports_a_closed_sector_return_universe(tmp_path: Path) -> None:
     document = json.loads(catalog.read_text(encoding="utf-8"))
     universe = document["universes"][0]
     universe["universe_id"] = "us-sector-return"
-    universe["lens"] = "RETURN_SECTOR"
+    universe["lens"] = "RETURN_INDUSTRY"
     for candidate in universe["candidates"]:
         candidate["source_id"] = "ssga-select-sector"
         candidate["return_source_id"] = "yahoo-adjusted-etf-daily"

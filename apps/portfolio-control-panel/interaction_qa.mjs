@@ -27,7 +27,6 @@ const { chromium } = await import(moduleUrl);
 const html = path.resolve(options.html);
 const output = path.resolve(options.output);
 const panelId = path.basename(path.dirname(html));
-const includeCandidates = options["exclude-candidates"] !== "true";
 const browser = await chromium.launch({
   headless: true,
   ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH
@@ -68,14 +67,6 @@ const requiredFactorLenses = [
   "RETURN_SECTOR",
   "DYNAMIC_STYLE",
 ];
-const requiredFactorEvidenceModes = ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"];
-const requiredAttributedStrategies = [
-  "AI Factor [P123]",
-  "GrizzlyBears VTMA",
-  "QSI",
-  "TT Portfolio",
-  "Volatis Strategy",
-];
 const requiredCorrelationWindows = ["5", "21", "22", "63", "126", "130", "252", "260"];
 const requiredDrawdownRegimes = ["either_drawdown", "both_drawdown"];
 const requiredWeeklyGroups = [
@@ -96,72 +87,18 @@ for (const view of views) {
   if (active) visited.push(view);
 }
 checks.push(check("All seven operator surfaces activate", visited.length === views.length, visited));
-await page.locator('[data-nav="command"]').click();
-await page.locator('[data-open-view="signals"]').first().click();
-const signalsActive = await page.locator('[data-view="signals"]').evaluate((node) => !node.hidden && node.classList.contains("is-active"));
-checks.push(check("Signals appendix activates from the governed operator route", signalsActive, { active: signalsActive }));
 
 await page.locator('[data-nav="attribution"]').click();
-const factorModeEvidence = [];
-for (const mode of requiredFactorEvidenceModes) {
-  const button = page.locator(`[data-factor-evidence-mode="${mode}"]`);
-  const disabled = await button.isDisabled();
-  if (disabled) {
-    factorModeEvidence.push({ active: "false", disabled, mode, strategy_rows: [], table: null });
-    continue;
-  }
-  await button.click();
-  const strategyRows = await page.locator("#factor-model-table tbody tr").evaluateAll(
-    (nodes, strategies) => strategies.map((strategy) => ({
-      beta_visible: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("β") ?? false,
-      evidence: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.trim() ?? null,
-      strategy,
-    })),
-    requiredAttributedStrategies,
-  );
-  factorModeEvidence.push({
-    active: await button.getAttribute("aria-pressed"),
-    boundary: (await page.locator("#factor-lens-boundary").textContent())?.trim(),
-    disabled,
-    mode,
-    strategy_rows: strategyRows,
-    table: (await page.locator("#factor-model-table").textContent())?.trim(),
-  });
-}
-const hybridFactorEvidence = factorModeEvidence.find((item) => item.mode === "LIVE_PLUS_BACKTEST");
-checks.push(check(
-  "Factor analyses expose live-only and compatible-history modes without inventing prehistory",
-  factorModeEvidence.length === requiredFactorEvidenceModes.length
-    && factorModeEvidence.every((item) => item.active === "true"
-      && item.disabled === false
-      && item.boundary?.includes(item.mode)
-      && item.table?.includes("Beta / loading")
-      && item.table.includes("Evidence composition")
-      && item.strategy_rows.every((row) => row.evidence))
-    && hybridFactorEvidence?.strategy_rows.every((row) => /[1-9][0-9,]* backtest/.test(row.evidence ?? "")
-      && !row.evidence?.includes("no version-matched backtest prehistory")),
-  factorModeEvidence,
-));
-await page.locator('[data-factor-evidence-mode="LIVE_ONLY"]').click();
 const factorLensButtons = await page.locator("[data-factor-lens]").count();
 const factorLensEvidence = [];
 for (const lens of requiredFactorLenses) {
   const button = page.locator(`[data-factor-lens="${lens}"]`);
   await button.click();
-  const requestedBetaRows = await page.locator("#factor-model-table tbody tr").evaluateAll(
-    (nodes, strategies) => strategies.map((strategy) => ({
-      beta_visible: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("β") ?? false,
-      model_unavailable: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("NO ACCEPTED MODEL") ?? false,
-      strategy,
-    })),
-    requiredAttributedStrategies,
-  );
   factorLensEvidence.push({
     active: await page.locator(`[data-factor-lens="${lens}"]`).getAttribute("aria-pressed"),
     boundary: (await page.locator("#factor-lens-boundary").textContent())?.trim(),
     chips: await page.locator("[data-factor-strategy]").count(),
     lens,
-    requested_beta_rows: requestedBetaRows,
     rows: await page.locator("#factor-model-table tbody tr").count(),
   });
 }
@@ -169,12 +106,7 @@ checks.push(check(
   "All five production decomposition lenses are rendered and exercised",
   factorLensButtons === requiredFactorLenses.length
     && factorLensEvidence.length === requiredFactorLenses.length
-    && factorLensEvidence.every((item) => item.active === "true"
-      && item.boundary?.includes("Beta:")
-      && item.boundary.includes("never concatenated")
-      && item.chips === 9
-      && item.rows === 9
-      && item.requested_beta_rows.every((row) => row.beta_visible || row.model_unavailable)),
+    && factorLensEvidence.every((item) => item.active === "true" && item.boundary?.includes("never concatenated") && item.chips === 9 && item.rows === 9),
   factorLensEvidence,
 ));
 await page.locator('[data-factor-lens="DYNAMIC_STYLE"]').click();
@@ -307,39 +239,25 @@ await page.locator('[data-weekly-group="STRATEGY"]').click();
 await page.locator('[data-weekly-mode="LIVE_ONLY"]').click();
 await page.locator("[data-weekly-series]").first().click();
 const weeklyLiveDetail = await page.locator("#weekly-detail").textContent();
-const weeklyLivePressed = await page.locator('[data-weekly-mode="LIVE_ONLY"]').getAttribute("aria-pressed");
-const weeklyHybridMode = page.locator('[data-weekly-mode="LIVE_PLUS_BACKTEST"]');
-const weeklyHybridDisabled = await weeklyHybridMode.isDisabled();
-const weeklyHybridTitle = await weeklyHybridMode.getAttribute("title");
-let weeklyModePressed = await weeklyHybridMode.getAttribute("aria-pressed");
-let weeklyHybridDetail = null;
-if (!weeklyHybridDisabled) {
-  await weeklyHybridMode.click();
-  weeklyModePressed = await weeklyHybridMode.getAttribute("aria-pressed");
-  await page.locator("[data-weekly-series]").first().click();
-  weeklyHybridDetail = await page.locator("#weekly-detail").textContent();
-}
+await page.locator('[data-weekly-mode="LIVE_PLUS_BACKTEST"]').click();
+const weeklyModePressed = await page.locator('[data-weekly-mode="LIVE_PLUS_BACKTEST"]').getAttribute("aria-pressed");
+await page.locator("[data-weekly-series]").first().click();
+const weeklyHybridDetail = await page.locator("#weekly-detail").textContent();
 checks.push(check(
   "Weekly returns disclose live and hybrid strategy evidence without enabling the partial week",
   weeklyRows === 9
     && benchmarkRows === 9
     && currentWeekIncluded === false
-    && weeklyLivePressed === "true"
+    && weeklyModePressed === "true"
     && weeklyLiveDetail?.includes("Live only")
     && weeklyLiveDetail.includes("Accepted observations")
-    && (weeklyHybridDisabled
-      ? weeklyModePressed === "false" && weeklyHybridTitle?.includes("not PROVEN_COMPATIBLE")
-      : weeklyModePressed === "true"
-        && weeklyHybridDetail?.includes("Live plus backtest")
-        && weeklyHybridDetail.includes("Accepted observations")),
+    && weeklyHybridDetail?.includes("Live plus backtest")
+    && weeklyHybridDetail.includes("Accepted observations"),
   {
     benchmark_rows: benchmarkRows,
-    hybrid_available: !weeklyHybridDisabled,
     hybrid_detail_visible: weeklyHybridDetail?.includes("Live plus backtest"),
     hybrid_pressed: weeklyModePressed,
-    hybrid_title: weeklyHybridTitle,
     live_detail_visible: weeklyLiveDetail?.includes("Live only"),
-    live_pressed: weeklyLivePressed,
     partial_week_enabled: currentWeekIncluded,
     strategy_rows: weeklyRows,
   },
@@ -455,20 +373,18 @@ checks.push(check(
     && remediationFocus.active_item === remediationItem,
   { requested_item: remediationItem, ...remediationFocus },
 ));
-if (includeCandidates) {
-  await page.locator("#candidate-appendix-button").click();
-  const candidateActive = await page.locator('[data-view="candidates"]').evaluate((node) => !node.hidden && node.classList.contains("is-active"));
-  await page.locator('[data-tier-filter="Tier 1"]').click();
-  const tier1Rows = Number(await page.locator("#candidate-table").getAttribute("data-visible-rows"));
-  await page.locator("#candidate-search").fill("CAOS");
-  const caosRows = Number(await page.locator("#candidate-table").getAttribute("data-visible-rows"));
-  await page.locator("#candidate-search").fill("");
-  await page.locator('[data-tier-filter="all"]').click();
-  const allCandidateRows = Number(await page.locator("#candidate-table").getAttribute("data-visible-rows"));
-  checks.push(check("Frozen candidate tier filter is stable", tier1Rows === 5, { tier1: tier1Rows }));
-  checks.push(check("Frozen candidate search is stable", caosRows === 1, { query: "CAOS", rows: caosRows }));
-  checks.push(check("Frozen candidate appendix remains separate from primary navigation", candidateActive && allCandidateRows === 33 && await page.locator('[data-nav="candidates"]').count() === 0, { active_from_appendix_link: candidateActive, primary_nav_buttons: await page.locator('[data-nav="candidates"]').count(), rows: allCandidateRows }));
-}
+await page.locator("#candidate-appendix-button").click();
+const candidateActive = await page.locator('[data-view="candidates"]').evaluate((node) => !node.hidden && node.classList.contains("is-active"));
+await page.locator('[data-tier-filter="Tier 1"]').click();
+const tier1Rows = Number(await page.locator("#candidate-table").getAttribute("data-visible-rows"));
+await page.locator("#candidate-search").fill("CAOS");
+const caosRows = Number(await page.locator("#candidate-table").getAttribute("data-visible-rows"));
+await page.locator("#candidate-search").fill("");
+await page.locator('[data-tier-filter="all"]').click();
+const allCandidateRows = Number(await page.locator("#candidate-table").getAttribute("data-visible-rows"));
+checks.push(check("Frozen candidate tier filter is stable", tier1Rows === 5, { tier1: tier1Rows }));
+checks.push(check("Frozen candidate search is stable", caosRows === 1, { query: "CAOS", rows: caosRows }));
+checks.push(check("Frozen candidate appendix remains separate from primary navigation", candidateActive && allCandidateRows === 33 && await page.locator('[data-nav="candidates"]').count() === 0, { active_from_appendix_link: candidateActive, primary_nav_buttons: await page.locator('[data-nav="candidates"]').count(), rows: allCandidateRows }));
 
 await page.locator("#snapshot-button").click();
 const toast = await page.locator("#toast").textContent();
@@ -505,50 +421,6 @@ checks.push(check(
   "Mobile header retains portfolio date, freshness date, and coverage",
   mobileFacts.length === 3 && mobileFacts.every((item) => item.visible && item.text && item.text !== "Loading…"),
   mobileFacts,
-));
-const touchSelector = '.nav-item, .segment, .ghost-button, .strategy-chip, .text-action, .weekly-cell, .weekly-toggle, .disclosure-panel summary, .search-control input, .context-bar select';
-const mobileTouchEvidence = [];
-for (const view of views) {
-  await page.locator(`[data-nav="${view}"]`).click();
-  const undersized = await page.locator(touchSelector).evaluateAll((nodes) => nodes.filter((node) => {
-    const style = getComputedStyle(node);
-    const bounds = node.getBoundingClientRect();
-    const visible = style.display !== "none" && style.visibility !== "hidden" && bounds.width > 0 && bounds.height > 0;
-    return visible && (bounds.height < 44 || bounds.width < 44);
-  }).map((node) => ({
-    class_name: node.className,
-    height: node.getBoundingClientRect().height,
-    text: node.textContent?.trim(),
-    width: node.getBoundingClientRect().width,
-  })));
-  mobileTouchEvidence.push({ undersized, view });
-}
-await page.locator('[data-nav="command"]').click();
-await page.locator('[data-open-view="signals"]').first().click();
-const undersizedSignals = await page.locator(touchSelector).evaluateAll((nodes) => nodes.filter((node) => {
-  const style = getComputedStyle(node);
-  const bounds = node.getBoundingClientRect();
-  const visible = style.display !== "none" && style.visibility !== "hidden" && bounds.width > 0 && bounds.height > 0;
-  return visible && (bounds.height < 44 || bounds.width < 44);
-}).map((node) => ({
-  class_name: node.className,
-  height: node.getBoundingClientRect().height,
-  text: node.textContent?.trim(),
-  width: node.getBoundingClientRect().width,
-})));
-mobileTouchEvidence.push({ undersized: undersizedSignals, view: "signals" });
-checks.push(check(
-  "All eight non-Candidate mobile surfaces meet the 44px target",
-  mobileTouchEvidence.every((item) => item.undersized.length === 0),
-  mobileTouchEvidence,
-));
-await page.locator('[data-nav="data"]').click();
-await page.locator("#operator-glossary summary").click();
-const glossaryText = await page.locator("#operator-glossary").textContent();
-checks.push(check(
-  "Operator glossary defines the governed control and methodology terms",
-  ["HWM", "TWR / MWR", "Evidence state", "Model state", "Gate state", "MPI-informed, non-equivalent"].every((term) => glossaryText?.includes(term)),
-  glossaryText,
 ));
 await page.locator('[data-nav="data"]').click();
 const mobileRemediation = page.locator("#remediation-table [data-focus-coverage]").first();
@@ -591,7 +463,6 @@ const result = {
   browser_version: browser.version(),
   checks,
   panel_id: panelId,
-  scope: includeCandidates ? "FULL" : "NON_CANDIDATE",
 };
 await browser.close();
 await writeFile(output, `${JSON.stringify(result, null, 2)}\n`, "utf8");

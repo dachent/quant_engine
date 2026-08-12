@@ -7,13 +7,12 @@
   "required": [
     "as_of_date",
     "benchmark_assignments",
-    "benchmark_comparisons",
     "comparisons",
     "return_source",
     "schema_version"
   ],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 1},
     "as_of_date": {"type": "string", "format": "date"},
     "return_source": {
       "type": "object",
@@ -33,12 +32,6 @@
       "items": {"$ref": "#/$defs/benchmark"}
     },
     "comparisons": {
-      "type": "array",
-      "minItems": 9,
-      "maxItems": 9,
-      "items": {"$ref": "#/$defs/comparison"}
-    },
-    "benchmark_comparisons": {
       "type": "array",
       "minItems": 9,
       "maxItems": 9,
@@ -89,7 +82,7 @@
         "observed_start": {"type": ["string", "null"], "format": "date"},
         "periods_per_year": {"type": "integer", "minimum": 1, "maximum": 366},
         "reference_series_id": {"type": ["string", "null"]},
-        "status": {"enum": ["DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE", "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED", "UNAVAILABLE"]},
+        "status": {"enum": ["DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED", "UNAVAILABLE"]},
         "strategy_id": {"$ref": "#/$defs/id"},
         "version_compatibility_status": {"enum": ["PROVEN_COMPATIBLE", "VERSION_MISMATCH", "UNRESOLVED"]}
       }

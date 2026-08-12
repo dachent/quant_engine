@@ -21,7 +21,6 @@ from quant_engine.core import (
     SourceArtifact,
     VerificationStatus,
     execute_pipeline,
-    generation_inventory_sha256,
     inventory_generation,
     plan_pipeline,
     publish_generation,
@@ -218,86 +217,6 @@ def _freshness_gate_with_optional_gap(path: Path, evaluated_on: date) -> Path:
     return path
 
 
-def _provider_ledger_generation(
-    tmp_path: Path,
-) -> tuple[Path, GenerationManifest, dict[str, object]]:
-    root = tmp_path / "provider-ledger"
-    source = tmp_path / "provider-ledger.json"
-    source.write_bytes(canonical_json_bytes({"reconciliation_checks": []}))
-    manifest = GenerationManifest.build(
-        as_of_date=AS_OF,
-        adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="synthetic provider ledger",
-            fact_types=("portfolio-facts",),
-            observed_start=AS_OF,
-            observed_end=AS_OF,
-        ),
-        artifacts=(
-            SourceArtifact.from_path(
-                source,
-                artifact_id="normalized/provider-ledger.json",
-                as_of_date=AS_OF,
-                schema_name="provider-ledger-catalog",
-                schema_version="1",
-            ),
-        ),
-        verification=VerificationStatus.VERIFIED,
-    )
-    manifest_path = stage_generation(root, manifest)
-    catalog_path = manifest_path.parent / "provider-ledger.json"
-    catalog_path.write_bytes(source.read_bytes())
-    publish_generation(root, manifest.generation_id)
-    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    return (
-        root,
-        manifest,
-        {
-            "as_of_date": manifest.as_of_date.isoformat(),
-            "catalog_sha256": hashlib.sha256(catalog_path.read_bytes()).hexdigest(),
-            "catalog_size_bytes": catalog_path.stat().st_size,
-            "generation_id": manifest.generation_id,
-            "manifest_sha256": manifest_sha256,
-            "manifest_size_bytes": manifest_path.stat().st_size,
-        },
-    )
-
-
-def _bound_freshness_spec(
-    tmp_path: Path,
-) -> tuple[dict[str, object], GenerationManifest, Path]:
-    raw, previous, _, target = _spec_dict(tmp_path)
-    ledger_root, ledger, identity = _provider_ledger_generation(tmp_path)
-    inventory = inventory_generation(ledger_root / "generations" / ledger.generation_id)
-    raw["roots"]["provider-ledger"] = str(ledger_root)
-    raw["nodes"].append(
-        {
-            "depends_on": [],
-            "files": inventory["files"],
-            "generation_id": ledger.generation_id,
-            "kind": "GENERATION",
-            "manifest_sha256": inventory["manifest_sha256"],
-            "node_id": "provider-ledger",
-            "release_target": True,
-            "root_id": "provider-ledger",
-            "source_dir": None,
-        }
-    )
-    gate = _freshness_gate_with_optional_gap(tmp_path / "freshness.json", AS_OF)
-    payload = json.loads(gate.read_text(encoding="utf-8"))
-    payload["provider_ledger"] = identity
-    gate.write_bytes(canonical_json_bytes(payload))
-    raw["gates"].append(
-        {
-            "gate_id": "freshness-health",
-            "path": str(gate),
-            "sha256": hashlib.sha256(gate.read_bytes()).hexdigest(),
-        }
-    )
-    return raw, previous, target
-
-
 def test_plan_is_exact_and_non_mutating(tmp_path: Path) -> None:
     raw, previous, proposed, target = _spec_dict(tmp_path)
     spec = _parse(raw)
@@ -345,119 +264,6 @@ def test_execute_prepares_without_pointer_change_then_commits_atomically(
 
     resumed = execute_pipeline(spec)
     assert resumed["release_state"] == "COMMITTED"
-
-
-def test_pipeline_repairs_only_the_exact_bound_predecessor_inventory_drift(
-    tmp_path: Path,
-) -> None:
-    raw, _, accepted, target = _spec_dict(tmp_path)
-    first = _parse(raw)
-    execute_pipeline(first, commit=True)
-    drift = target / "generations" / accepted.generation_id / "drift.bin"
-    drift.write_bytes(b"known predecessor drift\n")
-
-    replacement_source = tmp_path / "replacement-source"
-    replacement = _manifest("replacement")
-    replacement_manifest = stage_generation(replacement_source, replacement)
-    replacement_raw = json.loads(json.dumps(raw))
-    replacement_raw["pipeline_id"] = "test-repair-rollforward"
-    replacement_raw["created_at"] = datetime(2026, 8, 2, 13, tzinfo=UTC).isoformat()
-    replacement_raw["state_root"] = str(tmp_path / "repair-state")
-    generation_node = replacement_raw["nodes"][-1]
-    generation_node.update(
-        {
-            "files": [_file(replacement_manifest)],
-            "generation_id": replacement.generation_id,
-            "manifest_sha256": hashlib.sha256(replacement.to_json_bytes()).hexdigest(),
-            "source_dir": str(replacement_manifest.parent),
-        }
-    )
-    authority_path = Path(replacement_raw["coordination_root"]) / (
-        "CURRENT_RELEASE.json"
-    )
-    authority_bytes = authority_path.read_bytes()
-    authority = json.loads(authority_bytes)
-    release_path = (
-        authority_path.parent / "releases" / authority["release_id"] / "release.json"
-    )
-    predecessor = json.loads(release_path.read_bytes())
-    predecessor_target = predecessor["targets"][0]
-    repair_gate = tmp_path / "predecessor-repair.json"
-    repair_gate.write_bytes(
-        canonical_json_bytes(
-            {
-                "authority_sha256": hashlib.sha256(authority_bytes).hexdigest(),
-                "disposition": "SUPERSEDE_WITH_VERIFIED_GENERATIONS",
-                "expected_inventory_drifts": [
-                    {
-                        "generation_id": accepted.generation_id,
-                        "observed_inventory_sha256": generation_inventory_sha256(
-                            target, accepted.generation_id
-                        ),
-                        "recorded_inventory_sha256": predecessor_target[
-                            "proposed_inventory_sha256"
-                        ],
-                        "root_id": "reporting",
-                    }
-                ],
-                "release_id": authority["release_id"],
-                "release_manifest_sha256": authority["release_manifest_sha256"],
-                "schema_version": 1,
-            }
-        )
-    )
-    replacement_raw["gates"].append(
-        {
-            "gate_id": "predecessor-authority-repair",
-            "path": str(repair_gate),
-            "sha256": hashlib.sha256(repair_gate.read_bytes()).hexdigest(),
-        }
-    )
-    wrong_gate = tmp_path / "wrong-predecessor-repair.json"
-    wrong_payload = json.loads(repair_gate.read_bytes())
-    wrong_payload["expected_inventory_drifts"][0]["observed_inventory_sha256"] = (
-        "f" * 64
-    )
-    wrong_gate.write_bytes(canonical_json_bytes(wrong_payload))
-    wrong_raw = json.loads(json.dumps(replacement_raw))
-    wrong_raw["pipeline_id"] = "test-wrong-repair-rollforward"
-    wrong_raw["state_root"] = str(tmp_path / "wrong-repair-state")
-    wrong_raw["gates"][-1].update(
-        {
-            "path": str(wrong_gate),
-            "sha256": hashlib.sha256(wrong_gate.read_bytes()).hexdigest(),
-        }
-    )
-    with pytest.raises(PipelineValidationError, match="drift set differs"):
-        execute_pipeline(_parse(wrong_raw))
-    reuse_raw = json.loads(json.dumps(replacement_raw))
-    reuse_raw["pipeline_id"] = "test-reused-repair-rollforward"
-    reuse_raw["state_root"] = str(tmp_path / "reused-repair-state")
-    reused_inventory = inventory_generation(
-        target / "generations" / accepted.generation_id
-    )
-    reuse_raw["nodes"][-1].update(
-        {
-            "files": reused_inventory["files"],
-            "generation_id": accepted.generation_id,
-            "manifest_sha256": reused_inventory["manifest_sha256"],
-            "source_dir": None,
-        }
-    )
-    with pytest.raises(PipelineValidationError, match="reuses drifted generation"):
-        execute_pipeline(_parse(reuse_raw))
-    repair = _parse(replacement_raw)
-
-    prepared = execute_pipeline(repair)
-
-    assert prepared["release_state"] == "PREPARED"
-    assert json.loads((target / "CURRENT.json").read_bytes())["generation_id"] == (
-        accepted.generation_id
-    )
-    committed = execute_pipeline(repair, commit=True)
-    assert committed["release_state"] == "COMMITTED"
-    assert read_current(target).generation_id == replacement.generation_id
-    assert execute_pipeline(repair)["release_state"] == "COMMITTED"
 
 
 def test_freshness_gate_is_reaged_on_prepare_and_commit(tmp_path: Path) -> None:
@@ -513,30 +319,6 @@ def test_freshness_gate_preserves_optional_nonblocking_gaps(tmp_path: Path) -> N
     prepared = execute_pipeline(_parse(raw), evaluation_date=AS_OF)
 
     assert prepared["release_state"] == "PREPARED"
-    assert read_current(target).generation_id == previous.generation_id
-
-
-def test_freshness_gate_accepts_release_bound_provider_ledger(tmp_path: Path) -> None:
-    raw, previous, target = _bound_freshness_spec(tmp_path)
-
-    prepared = execute_pipeline(_parse(raw), evaluation_date=AS_OF)
-
-    assert prepared["release_state"] == "PREPARED"
-    assert read_current(target).generation_id == previous.generation_id
-
-
-def test_freshness_gate_rejects_different_provider_ledger_identity(
-    tmp_path: Path,
-) -> None:
-    raw, previous, target = _bound_freshness_spec(tmp_path)
-    gate = Path(raw["gates"][-1]["path"])
-    payload = json.loads(gate.read_text(encoding="utf-8"))
-    payload["provider_ledger"]["catalog_sha256"] = "f" * 64
-    gate.write_bytes(canonical_json_bytes(payload))
-    raw["gates"][-1]["sha256"] = hashlib.sha256(gate.read_bytes()).hexdigest()
-
-    with pytest.raises(PipelineValidationError, match="identity differs"):
-        execute_pipeline(_parse(raw), evaluation_date=AS_OF)
     assert read_current(target).generation_id == previous.generation_id
 
 

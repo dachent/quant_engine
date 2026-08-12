@@ -9,7 +9,7 @@ data.
 
 The plan is content-addressed and private. It records absolute source paths,
 relative paths, byte counts, categories, and SHA-256 hashes under the governed
-`dataPortfolio123` quarantine root; it must never enter GitHub. Application
+`data_Portfolio123` quarantine root; it must never enter GitHub. Application
 preflights every source and destination before moving anything, writes an
 fsynced per-file journal, and rolls back completed moves if the process raises
 an error. Verification requires every source to be absent and every quarantined
