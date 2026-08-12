@@ -179,9 +179,7 @@ def test_schwab_profile_quarantines_cookie_jsons_and_persists_verify(
     (staging / "capture" / "schwab_cookies.json").write_bytes(b"cookie material")
     (staging / "capture" / "summary.json").write_bytes(b"keep summary")
 
-    result = quarantine.plan_schwab(
-        recovery, staging, tmp_path / "quarantine"
-    )
+    result = quarantine.plan_schwab(recovery, staging, tmp_path / "quarantine")
     assert result["artifact_count"] == 2
     plan_path = Path(str(result["plan_path"]))
     quarantine.apply_plan(plan_path)
@@ -207,9 +205,7 @@ def test_matrixport_profile_quarantines_helpers_and_recovery_environments(
         (root / "src" / "credentials.py").write_bytes(b"credential helper")
         (root / "src" / "client.py").write_bytes(b"keep client")
 
-    result = quarantine.plan_matrixport(
-        recovery, snapshot, tmp_path / "quarantine"
-    )
+    result = quarantine.plan_matrixport(recovery, snapshot, tmp_path / "quarantine")
     assert result["artifact_count"] == 4
     plan_path = Path(str(result["plan_path"]))
     quarantine.apply_plan(plan_path)
@@ -218,6 +214,4 @@ def test_matrixport_profile_quarantines_helpers_and_recovery_environments(
     assert (plan_path.parent / "verify.json").is_file()
     assert (recovery / "src" / "client.py").is_file()
     assert not (snapshot / "src" / "credentials.py").exists()
-    assert not (
-        recovery / ".codex-bootstrap" / "venv" / "Lib" / "module.py"
-    ).exists()
+    assert not (recovery / ".codex-bootstrap" / "venv" / "Lib" / "module.py").exists()
