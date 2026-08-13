@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from typing import Any, Final, Mapping, Sequence
 
 
@@ -320,6 +320,9 @@ def compute_full_systematic_hwm_index(
 
     with localcontext() as ctx:
         ctx.prec = 34
+        # Pin the rounding mode too: a caller's thread-local rounding mode
+        # otherwise leaks through and changes reported drawdowns.
+        ctx.rounding = ROUND_HALF_EVEN
         index = Decimal("1.0")
         hwm = index
         max_drawdown = Decimal("0")

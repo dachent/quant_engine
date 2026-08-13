@@ -336,6 +336,28 @@ def test_hwm_index_is_context_independent() -> None:
     assert ref == polluted
     assert polluted["maximum_drawdown"] == Decimal("0.145")
 
+    # Non-terminating divisions diverge under caller rounding modes unless the
+    # function pins its own (review probe: forty Decimal("0.01") returns).
+    probe_returns = [Decimal("0.01")] * 40
+    ref_probe = compute_full_systematic_hwm_index(
+        probe_returns, full_systematic_coverage=True
+    )
+    try:
+        getcontext().prec = 28
+        getcontext().rounding = ROUND_UP
+        up_probe = compute_full_systematic_hwm_index(
+            probe_returns, full_systematic_coverage=True
+        )
+        getcontext().rounding = ROUND_DOWN
+        down_probe = compute_full_systematic_hwm_index(
+            probe_returns, full_systematic_coverage=True
+        )
+    finally:
+        getcontext().prec = saved_prec
+        getcontext().rounding = saved_rounding
+
+    assert ref_probe == up_probe == down_probe
+
     # Rounding-up context must also match.
     try:
         getcontext().prec = 5
