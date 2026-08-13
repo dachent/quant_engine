@@ -39,3 +39,37 @@ uv run --frozen --no-sync python tools/portfolio_attribution.py publish `
   --output-root <portfolio-root>\analytics\attribution `
   --generation-id <accepted-generation-id>
 ```
+
+## Strategy return-source attribution contract
+
+`contracts/strategy-return-sources-v1.json` records the per-strategy economic
+return-source attribution for all nine current strategies. The contract is the
+single authoritative record of what economic source of excess return (if any)
+each strategy is deemed to exploit, grounded in the analysis at
+[issue #269 content-phase record](https://github.com/dachent/quant_engine/issues/269).
+
+Each strategy entry contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `strategy_id` | string | Registry strategy identifier |
+| `sources.primary` | enum or null | Admitted primary economic source (`service_intermediation`, `risk_premium`, `information_edge`, `structural_edge`, `behavioral_constraint`) |
+| `sources.secondary` | enum or null | Admitted secondary economic source |
+| `no_identified_source` | boolean | True iff `sources.primary` is null |
+| `mechanism` | string | Description of the economic mechanism |
+| `persistence` | string | Persistence / arbitrage barriers assessment |
+| `alternative_explanation` | string | Alternative explanations for observed returns |
+| `falsification` | string[] | Testable falsification/measurement criteria |
+| `confidence` | enum | Attribution confidence (`strong`, `moderate`, `weak`, `none`) |
+
+The schema at `schemas/portfolio/strategy-return-sources.schema.json` validates
+required fields, enum validity, and the consistency constraint
+`no_identified_source == (sources.primary == null)`. The tests at
+`tests/portfolio_attribution/test_strategy_return_sources.py` enforce exact
+strategy coverage (all nine registry strategies, in registry order) and
+text-field quality (non-placeholder, minimum length) against the registry.
+
+All nine strategies currently have `no_identified_source: true` — no admitted
+economic source of excess return has been established. Six carry `weak`
+confidence (hypotheses pending admitted evidence); three out-of-scope or dropped
+strategies carry `none`.
