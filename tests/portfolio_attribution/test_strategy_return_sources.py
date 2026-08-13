@@ -10,16 +10,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 CONTRACT_PATH = REPOSITORY_ROOT / "contracts" / "strategy-return-sources-v1.json"
 REGISTRY_PATH = (
-    REPOSITORY_ROOT
-    / "docs"
-    / "analytics"
-    / "current-strategy-decomposition-plan.json"
+    REPOSITORY_ROOT / "docs" / "analytics" / "current-strategy-decomposition-plan.json"
 )
 SCHEMA_PATH = (
-    REPOSITORY_ROOT
-    / "schemas"
-    / "portfolio"
-    / "strategy-return-sources.schema.json"
+    REPOSITORY_ROOT / "schemas" / "portfolio" / "strategy-return-sources.schema.json"
 )
 
 VALID_SOURCE_TYPES = {
@@ -66,6 +60,7 @@ TEXT_FIELDS = ["mechanism", "persistence", "alternative_explanation"]
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _registry_strategy_ids() -> list[str]:
     registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
@@ -116,9 +111,7 @@ def _assert_text_fields_valid(contract: dict) -> None:
 
         for field in TEXT_FIELDS:
             val = strategy[field]
-            assert isinstance(val, str), (
-                f"strategy {sid} field {field} is not a string"
-            )
+            assert isinstance(val, str), f"strategy {sid} field {field} is not a string"
             stripped = val.strip()
             assert len(stripped) > 0, (
                 f"strategy {sid} field {field} is empty or whitespace-only"
@@ -146,13 +139,9 @@ def _assert_confidence_valid(contract: dict) -> None:
             f"strategy {sid} confidence {conf!r} not in {VALID_CONFIDENCE}"
         )
         if sid in ANALYZABLE_STRATEGIES:
-            assert conf == "weak", (
-                f"strategy {sid} should be 'weak', got {conf!r}"
-            )
+            assert conf == "weak", f"strategy {sid} should be 'weak', got {conf!r}"
         else:
-            assert conf == "none", (
-                f"strategy {sid} should be 'none', got {conf!r}"
-            )
+            assert conf == "none", f"strategy {sid} should be 'none', got {conf!r}"
 
 
 def _assert_sources_valid(contract: dict) -> None:
@@ -223,6 +212,7 @@ def _assert_valid_contract(contract: dict) -> None:
 # Positive assertions (real contract)
 # ---------------------------------------------------------------------------
 
+
 def test_contract_and_schema_exist() -> None:
     assert CONTRACT_PATH.is_file(), f"contract not found at {CONTRACT_PATH}"
     assert SCHEMA_PATH.is_file(), f"schema not found at {SCHEMA_PATH}"
@@ -244,6 +234,7 @@ def test_positive_full_validity() -> None:
 # Schema alignment checks
 # ---------------------------------------------------------------------------
 
+
 def test_schema_is_valid_json_and_matches_contract_conventions() -> None:
     schema = _schema()
     assert schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema"
@@ -259,8 +250,7 @@ def test_schema_strategy_ids_enum_matches_registry() -> None:
     schema = _schema()
     schema_ids = set(schema["$defs"]["strategy_id"]["enum"])
     assert schema_ids == registry_ids, (
-        f"schema enum {schema_ids ^ registry_ids} "
-        f"differ from registry IDs"
+        f"schema enum {schema_ids ^ registry_ids} differ from registry IDs"
     )
 
 
@@ -280,6 +270,7 @@ def test_schema_enforces_no_identified_source_consistency() -> None:
 # ---------------------------------------------------------------------------
 # Negative fixtures
 # ---------------------------------------------------------------------------
+
 
 def test_contract_with_missing_strategy_fails() -> None:
     contract = copy.deepcopy(_contract())
