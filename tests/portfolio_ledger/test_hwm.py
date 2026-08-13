@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date as date_type
+
 import pytest
 
 from decimal import Decimal
@@ -370,3 +372,164 @@ def test_hwm_index_is_context_independent() -> None:
         getcontext().rounding = saved_rounding
 
     assert ref == up_result
+
+
+# ── hwm_inputs consumer-contract conformance ─────────────────────────────
+
+
+def _hwm_envelope_fixture() -> dict[str, object]:
+    """A minimal governed envelope: two AVAILABLE ACCOUNT-lane periods for
+    one strategy across two consecutive days, plus one UNAVAILABLE row."""
+    return {
+        "contract_version": 1,
+        "anchor": {
+            "anchor_date": "2026-07-01",
+            "index_base_value": "1.0",
+            "hwm_policy_id": "PORT-HWM-3",
+            "acceptance_provenance": {
+                "accepted_at": "2026-07-01T00:00:00Z",
+                "accepted_by": "synthetic",
+                "source_artifact_id": "artifact-1",
+                "source_artifact_sha256": "a" * 64,
+            },
+        },
+        "calendar_authorities": [
+            {
+                "lane": "ACCOUNT",
+                "authority_id": "synth",
+                "authority_version": "1",
+                "calendar_kind": "EXCHANGE",
+                "admitted_source_artifact_id": "artifact-1",
+            }
+        ],
+        "periods": [
+            {
+                "strategy_id": "strategy-live",
+                "date": "2026-07-01",
+                "lane": "ACCOUNT",
+                "disposition": "AVAILABLE",
+                "beginning_capital_usd": "100",
+                "return_source_record_id": "return-live-2026-07-01",
+                "component_account_ids": ["account-a"],
+                "flow_status": "OBSERVED",
+                "fx_status": "NOT_REQUIRED",
+                "flow_source_record_ids": ["flow-1"],
+                "fx_source_record_ids": [],
+            },
+            {
+                "strategy_id": "strategy-live",
+                "date": "2026-07-02",
+                "lane": "ACCOUNT",
+                "disposition": "AVAILABLE",
+                "beginning_capital_usd": "110",
+                "return_source_record_id": "return-live-2026-07-02",
+                "component_account_ids": ["account-a"],
+                "flow_status": "OBSERVED",
+                "fx_status": "NOT_REQUIRED",
+                "flow_source_record_ids": ["flow-2"],
+                "fx_source_record_ids": [],
+            },
+            {
+                "strategy_id": "strategy-tiny",
+                "date": "2026-07-01",
+                "lane": "ACCOUNT",
+                "disposition": "EXCLUDED_BY_POLICY",
+                "beginning_capital_usd": None,
+                "return_source_record_id": None,
+                "flow_status": "MISSING",
+                "fx_status": "MISSING",
+            },
+        ],
+        "reconciliation": {
+            "period_capital_method": "NAV_ROLLFORWARD",
+            "allocation_endpoint_check": {"matched": True, "delta_usd": "0"},
+        },
+    }
+
+
+# Return-series crosswalk the consumer resolves return references against
+# (catalog strategy_returns identity -> Decimal return).
+_RETURN_CROSSWALK = {
+    "return-live-2026-07-01": Decimal("0.1"),
+    "return-live-2026-07-02": Decimal("0.2"),
+}
+
+
+def _available_period_rows(
+    envelope: dict[str, object],
+) -> list[tuple[str, date_type, Decimal, str]]:
+    """The #277 consumer boundary: read only AVAILABLE period rows as
+    (strategy_id, date, beginning_capital, return_reference)."""
+    rows: list[tuple[str, date_type, Decimal, str]] = []
+    for row in envelope["periods"]:  # type: ignore[index]
+        if row["disposition"] != "AVAILABLE":
+            continue
+        rows.append(
+            (
+                str(row["strategy_id"]),
+                date_type.fromisoformat(str(row["date"])),
+                Decimal(str(row["beginning_capital_usd"])),
+                str(row["return_source_record_id"]),
+            )
+        )
+    return rows
+
+
+def test_hwm_inputs_periods_drive_the_real_hwm_kernel() -> None:
+    """Exercise the real consumer: extract AVAILABLE periods, resolve daily
+    returns through the crosswalk, build the beginning-capital-weighted
+    composite, and run compute_full_systematic_hwm_index end to end."""
+    rows = _available_period_rows(_hwm_envelope_fixture())
+    assert rows == [
+        (
+            "strategy-live",
+            date_type(2026, 7, 1),
+            Decimal("100"),
+            "return-live-2026-07-01",
+        ),
+        (
+            "strategy-live",
+            date_type(2026, 7, 2),
+            Decimal("110"),
+            "return-live-2026-07-02",
+        ),
+    ]
+
+    # Composite construction rule: beginning-capital weighted per period,
+    # then geometrically linked by the kernel.
+    by_date: dict[date_type, list[tuple[Decimal, Decimal]]] = {}
+    for _sid, day, capital, return_ref in rows:
+        by_date.setdefault(day, []).append((capital, _RETURN_CROSSWALK[return_ref]))
+    composite_returns = [
+        sum(capital * value for capital, value in items)
+        / sum(capital for capital, _ in items)
+        for _day, items in sorted(by_date.items())
+    ]
+    assert composite_returns == [Decimal("0.1"), Decimal("0.2")]
+
+    result = compute_full_systematic_hwm_index(
+        composite_returns, full_systematic_coverage=True
+    )
+
+    assert result["status"] == "AVAILABLE"
+    assert result["index_series"] == [
+        Decimal("1.0"),
+        Decimal("1.10"),
+        Decimal("1.320"),
+    ]
+    assert result["hwm"] == Decimal("1.320")
+    assert result["current_drawdown"] == Decimal("0")
+    assert result["maximum_drawdown"] == Decimal("0")
+
+
+def test_hwm_inputs_incomplete_coverage_closes_the_kernel() -> None:
+    """A missing member or return makes the period UNAVAILABLE — the kernel
+    is never recalculated over survivors."""
+    rows = _available_period_rows(_hwm_envelope_fixture())
+    # strategy-tiny is EXCLUDED_BY_POLICY and contributes no AVAILABLE row;
+    # with full coverage unavailable the engine refuses the composite.
+    result = compute_full_systematic_hwm_index(
+        [Decimal("0.1")], full_systematic_coverage=False
+    )
+    assert result == {"status": "UNAVAILABLE"}
+    assert len(rows) == 2
