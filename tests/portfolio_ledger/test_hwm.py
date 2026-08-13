@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from quant_engine.portfolio_ledger import HwmCoverageError, governed_hwm_coverage
+from decimal import Decimal
+
+from quant_engine.portfolio_ledger import (
+    HwmCoverageError,
+    compute_full_systematic_hwm_index,
+    governed_hwm_coverage,
+)
 
 
 def _policy() -> dict[str, object]:
@@ -213,3 +219,154 @@ def test_governed_hwm_rejects_unknown_policy_exclusion() -> None:
 
     with pytest.raises(HwmCoverageError, match="unknown strategy"):
         governed_hwm_coverage(_strategies(), policy)
+
+
+# ---------------------------------------------------------------------------
+# compute_full_systematic_hwm_index
+# ---------------------------------------------------------------------------
+
+
+def test_complete_hwm_index_reproduces_conformance_vector() -> None:
+    """Exact reproduction of the normative complete_hwm_index case.
+
+    Index path: 1.0 -> 1.10 -> 1.045 -> 0.9405
+    HWM = 1.10, drawdown = 1 - 0.9405 / 1.10 = 0.145
+    """
+    daily_returns = [Decimal("0.10"), Decimal("-0.05"), Decimal("-0.10")]
+    result = compute_full_systematic_hwm_index(
+        daily_returns, full_systematic_coverage=True
+    )
+
+    assert result["status"] == "AVAILABLE"
+    assert result["index_series"] == [
+        Decimal("1.0"),
+        Decimal("1.10"),
+        Decimal("1.045"),
+        Decimal("0.9405"),
+    ]
+    assert result["hwm"] == Decimal("1.10")
+    assert result["current_drawdown"] == Decimal("0.145")
+    assert result["maximum_drawdown"] == Decimal("0.145")
+
+
+def test_missing_full_hwm_fails_closed() -> None:
+    """Incomplete coverage yields UNAVAILABLE with no numeric output."""
+    result = compute_full_systematic_hwm_index(
+        [Decimal("0.10")], full_systematic_coverage=False
+    )
+
+    assert result == {"status": "UNAVAILABLE"}
+
+
+def test_empty_series_is_unavailable() -> None:
+    """An empty daily-returns sequence yields UNAVAILABLE."""
+    result = compute_full_systematic_hwm_index([], full_systematic_coverage=True)
+
+    assert result == {"status": "UNAVAILABLE"}
+
+
+def test_single_day_edge() -> None:
+    """A single daily return produces a valid two-point index series."""
+    result = compute_full_systematic_hwm_index(
+        [Decimal("0.02")], full_systematic_coverage=True
+    )
+
+    assert result["status"] == "AVAILABLE"
+    assert result["index_series"] == [Decimal("1.0"), Decimal("1.02")]
+    assert result["hwm"] == Decimal("1.02")
+    assert result["current_drawdown"] == Decimal("0")
+    assert result["maximum_drawdown"] == Decimal("0")
+
+
+def test_all_gains_drawdown_zero() -> None:
+    """When the index never retreats, drawdown is exactly 0."""
+    daily_returns = [Decimal("0.03"), Decimal("0.015")]
+    result = compute_full_systematic_hwm_index(
+        daily_returns, full_systematic_coverage=True
+    )
+
+    assert result["status"] == "AVAILABLE"
+    assert result["hwm"] == result["index_series"][-1]
+    assert result["current_drawdown"] == Decimal("0")
+    assert result["maximum_drawdown"] == Decimal("0")
+
+
+def test_hwm_uses_decimal_exclusively() -> None:
+    """Every numeric field in the result is Decimal — no float anywhere."""
+    daily_returns = [
+        Decimal("0.01"),
+        Decimal("-0.02"),
+        Decimal("0.005"),
+    ]
+    result = compute_full_systematic_hwm_index(
+        daily_returns, full_systematic_coverage=True
+    )
+
+    assert isinstance(result["hwm"], Decimal)
+    assert isinstance(result["current_drawdown"], Decimal)
+    assert isinstance(result["maximum_drawdown"], Decimal)
+    assert all(isinstance(v, Decimal) for v in result["index_series"])
+
+
+def test_hwm_index_is_context_independent() -> None:
+    """Identical inputs produce bit-exact outputs regardless of the
+    caller's decimal context precision or rounding settings."""
+    from decimal import getcontext, ROUND_DOWN, ROUND_UP
+
+    daily_returns = [Decimal("0.10"), Decimal("-0.05"), Decimal("-0.10")]
+
+    # Run once with default context → capture reference.
+    ref = compute_full_systematic_hwm_index(
+        daily_returns, full_systematic_coverage=True
+    )
+
+    # Change global context and run again — must still match exactly.
+    saved_prec = getcontext().prec
+    saved_rounding = getcontext().rounding
+    try:
+        getcontext().prec = 8
+        getcontext().rounding = ROUND_DOWN
+        polluted = compute_full_systematic_hwm_index(
+            daily_returns, full_systematic_coverage=True
+        )
+    finally:
+        getcontext().prec = saved_prec
+        getcontext().rounding = saved_rounding
+
+    assert ref == polluted
+    assert polluted["maximum_drawdown"] == Decimal("0.145")
+
+    # Non-terminating divisions diverge under caller rounding modes unless the
+    # function pins its own (review probe: forty Decimal("0.01") returns).
+    probe_returns = [Decimal("0.01")] * 40
+    ref_probe = compute_full_systematic_hwm_index(
+        probe_returns, full_systematic_coverage=True
+    )
+    try:
+        getcontext().prec = 28
+        getcontext().rounding = ROUND_UP
+        up_probe = compute_full_systematic_hwm_index(
+            probe_returns, full_systematic_coverage=True
+        )
+        getcontext().rounding = ROUND_DOWN
+        down_probe = compute_full_systematic_hwm_index(
+            probe_returns, full_systematic_coverage=True
+        )
+    finally:
+        getcontext().prec = saved_prec
+        getcontext().rounding = saved_rounding
+
+    assert ref_probe == up_probe == down_probe
+
+    # Rounding-up context must also match.
+    try:
+        getcontext().prec = 5
+        getcontext().rounding = ROUND_UP
+        up_result = compute_full_systematic_hwm_index(
+            daily_returns, full_systematic_coverage=True
+        )
+    finally:
+        getcontext().prec = saved_prec
+        getcontext().rounding = saved_rounding
+
+    assert ref == up_result

@@ -32,6 +32,7 @@ from quant_engine.portfolio_ledger.hwm import (
     HWM_STATUS_CODE_VERSION,
     HWM_STATUS_SEMANTICS,
     HwmCoverageError,
+    compute_full_systematic_hwm_index,
     governed_hwm_coverage,
 )
 from quant_engine.portfolio_ledger.reconciliation import (
@@ -108,6 +109,7 @@ __all__ = [
     "ValueStatus",
     "VersionMatchStatus",
     "compare_strategy_evidence",
+    "compute_full_systematic_hwm_index",
     "decimal_text",
     "governed_hwm_coverage",
     "reconcile_position_values",
