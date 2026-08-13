@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "strategies": [
+    {
+      "strategy_id": "p123-ai-factor",
+      "sources": {
+        "primary": null,
+        "secondary": null
+      },
+      "no_identified_source": true,
+      "mechanism": "No admitted economic source of excess return is established. Hypothesis: if the underlying factor model selects small/micro-cap equities with value, quality, and momentum characteristics, investors would earn compensation for bearing systematic risks in a capacity-constrained universe. The live account is a leveraged changing mix of multiple models (Primary AI, Andreas, High Octane, Long Short); a primary-only benchmark is structurally wrong. Without authoritative design artifacts and the effective connected-model mix, the mechanism is undetermined — multi-factor risk premium, behavioral exploitation, or leverage are all consistent.",
+      "persistence": "Hypothesis: if microcap factor premia are the source, capacity limits — wide spreads, illiquidity, small position sizes (Shleifer-Vishny limits of arbitrage) — constrain institutional replication. Net-of-costs evidence (Novy-Marx-Velikov) tests whether premia survive realistic execution. This hypothesis requires admitted design evidence and the connected-model mix; it is not established.",
+      "alternative_explanation": "The leveraged multi-model account structure means apparent returns may reflect leverage, dynamic beta, and model mixing. The registry's decomposition lenses (us-economic FF5+MOM, us-equity-style 6-cell grid, sector, industry) may absorb returns into factor exposures. Post-publication decay (McLean-Pontiff) is a risk.",
+      "falsification": [
+        "Decomposition against the effective connected-model mix across all registry lenses.",
+        "Net-of-trading-costs: premia vanishing after microcap execution costs are not exploitable.",
+        "Post-publication decay versus McLean-Pontiff.",
+        "Predeclared OOS walk-forward on the connected-model series."
+      ],
+      "confidence": "weak"
+    },
+    {
+      "strategy_id": "p123-eu",
+      "sources": {
+        "primary": null,
+        "secondary": null
+      },
+      "no_identified_source": true,
+      "mechanism": "N/A — out of scope. Known exact-model HAR export defect; connected model omitted from HAR export.",
+      "persistence": "N/A — out of scope.",
+      "alternative_explanation": "N/A — decomposition unavailable without the connected model.",
+      "falsification": [
+        "N/A — not testable without the exact HAR export."
+      ],
+      "confidence": "none"
+    },
+    {
+      "strategy_id": "qsi",
+      "sources": {
+        "primary": null,
+        "secondary": null
+      },
+      "no_identified_source": true,
+      "mechanism": "Tactical multi-asset timing — rotates across equities, fixed income, commodities, and currencies via quantitative rules. Under the governing standard, a trading rule is not a return source: no intermediation service, no risk insured, no structural informational advantage, and no capacity barrier preventing replication in liquid public ETF markets.",
+      "persistence": "None identified. The strategy trades liquid ETFs in public markets. Any predictable timing rule applied to public, liquid assets should be arbitraged away by marginal capital unless it exploits a genuine structural or behavioral constraint — and no such constraint has been identified for broad multi-asset tactical timing.",
+      "alternative_explanation": "Apparent alpha is most likely conditional beta — dynamic factor exposure that performed well in-sample — or factor timing luck or data mining. The registry's multi-lens decomposition (us-economic, us-equity-style, multi-asset-style, us-sector, us-industry) should absorb most return variation into time-varying factor exposures.",
+      "falsification": [
+        "Run the full registry decomposition across all five lenses.",
+        "Positive sealed-holdout Predicted R² plus negligible net-of-cost residual alpha supports conditional-beta/factor-timing attribution.",
+        "Zero or negative Predicted R² leaves the source unresolved: the factor model fails the PM-use gate but does not validate an independent economic edge.",
+        "Net-of-cost residual-alpha stability and predeclared out-of-sample walk-forward tests are required before any positive economic-source claim."
+      ],
+      "confidence": "weak"
+    },
+    {
+      "strategy_id": "tt-portfolio",
+      "sources": {
+        "primary": null,
+        "secondary": null
+      },
+      "no_identified_source": true,
+      "mechanism": "Inherits QSI's tactical multi-asset rules across liquid multi-asset ETFs. The TuringTrader provider route was explicitly rejected (REJECTED_NO_ACCEPTED_PROVIDER_ROUTE). Tactical rules do not constitute a return source.",
+      "persistence": "None identified. See qsi.",
+      "alternative_explanation": "Conditional beta, factor timing luck, data mining. The registry decomposition lenses inherited from qsi apply symmetrically.",
+      "falsification": [
+        "Same multi-lens decomposition bar as qsi: positive holdout Predicted R² with negligible residual alpha supports factor-timing attribution.",
+        "Nonpositive fit leaves the source unresolved.",
+        "Predeclared OOS tests required."
+      ],
+      "confidence": "weak"
+    },
+    {
+      "strategy_id": "volatis-strategy",
+      "sources": {
+        "primary": null,
+        "secondary": null
+      },
+      "no_identified_source": true,
+      "mechanism": "Hypothesis: if admitted evidence shows systematic short-vol exposure, the mechanism would be risk-premium harvesting — hedgers pay to offload tail risk, the strategy is the counterparty. The TACTICAL_VOLATILITY archetype is consistent with this hypothesis but does not establish it.",
+      "persistence": "Hypothesis: if VRP holds, barriers include negative-skew compensation (premia earned in calm regimes, reversed in vol-spike events), margin/collateral requirements, and institutional blow-up risk. The tactical timing component has no independent barrier.",
+      "alternative_explanation": "Apparent returns may be equity beta, dynamic timing luck, leverage effects, or data mining over a limited live period. Without position evidence, the strategy cannot be distinguished from leveraged equity timing labeled 'volatility'.",
+      "falsification": [
+        "If admitted holdings prove persistent short-VRP exposure, regression against equity factors plus VIX futures term-structure returns should isolate the premium.",
+        "Compare tactical-entry returns vs. a passive short-VRP benchmark — if the timing overlay detracts, the source is purely risk premium.",
+        "Drawdown-regime analysis to distinguish VRP harvesting from equity tail beta."
+      ],
+      "confidence": "weak"
+    },
+    {
+      "strategy_id": "grizzlybears-vtma",
+      "sources": {
+        "primary": null,
+        "secondary": null
+      },
+      "no_identified_source": true,
+      "mechanism": "The strategy times leveraged equity exposure (SPXL) using SPX-based signals. Registry archetype is TACTICAL_VOLATILITY (inferred, non-authoritative) — the implemented strategy is SPXL timing. Account-live evidence only; provider route rejected.",
+      "persistence": "None identified. SPXL is a liquid, public, leveraged ETF — predictable timing rules should be arbitraged away by marginal capital.",
+      "alternative_explanation": "SPXL beta (leveraged equity), dynamic timing luck, drawdown convexity from leverage, data mining. Account-live decomposition is authoritative but the causal mechanism remains unresolved without admitted design evidence.",
+      "falsification": [
+        "Regression against SPXL beta — high R² with zero intercept implies leveraged equity timing, not alpha.",
+        "Decomposition against multi-asset factor lenses to absorb any non-equity exposures.",
+        "Predeclared OOS walk-forward tests.",
+        "If future admitted evidence proves short-VRP exposure, the volatis falsification framework applies."
+      ],
+      "confidence": "weak"
+    },
+    {
+      "strategy_id": "robuxio-crypto",
+      "sources": {
+        "primary": null,
+        "secondary": null
+      },
+      "no_identified_source": true,
+      "mechanism": "Crypto tactical/directional — no established economic mechanism has been demonstrated. Behavioral exploitation (retail-driven momentum, slow information diffusion) is a plausible but untested hypothesis for this specific strategy.",
+      "persistence": "Unestablished. Crypto institutional barriers (custody, regulation, exchange fragmentation) are real but eroding. Without admitted evidence, it is unknown whether any apparent edge survives institutionalization.",
+      "alternative_explanation": "BTC/ETH beta, leverage effects, well-documented crypto momentum (not necessarily exploitable), survivorship bias, dynamic timing luck, data mining.",
+      "falsification": [
+        "BTC/ETH regression — zero intercept implies high-beta crypto exposure, not alpha.",
+        "Drawdown-regime performance: bull-market alpha reversed in bear markets is directional beta.",
+        "Predeclared OOS walk-forward with net-of-cost and exposure controls.",
+        "Capacity sensitivity: as crypto infrastructure matures, retail-inefficiency returns should contract (McLean-Pontiff)."
+      ],
+      "confidence": "weak"
+    },
+    {
+      "strategy_id": "echotrade-growth-pivots",
+      "sources": {
+        "primary": null,
+        "secondary": null
+      },
+      "no_identified_source": true,
+      "mechanism": "N/A — out of scope. Registry: UNAVAILABLE_INSUFFICIENT_TARGET_HISTORY, archetype UNVERIFIED_SIGNAL. Deprecated with no history; excluded de minimis from HWM perimeter.",
+      "persistence": "N/A — out of scope.",
+      "alternative_explanation": "N/A — insufficient history for any analysis.",
+      "falsification": [
+        "N/A — not testable without target history."
+      ],
+      "confidence": "none"
+    },
+    {
+      "strategy_id": "composer-holy-grail",
+      "sources": {
+        "primary": null,
+        "secondary": null
+      },
+      "no_identified_source": true,
+      "mechanism": "N/A — dropped. Registry: DROPPED_IMMATERIAL_CURRENT_SCOPE, archetype DROPPED_IMMATERIAL. Immaterial, unconnected history; excluded de minimis from HWM perimeter.",
+      "persistence": "N/A — dropped.",
+      "alternative_explanation": "N/A — immaterial, dropped.",
+      "falsification": [
+        "N/A — not in scope."
+      ],
+      "confidence": "none"
+    }
+  ]
+}
