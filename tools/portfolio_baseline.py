@@ -74,6 +74,64 @@ _SOURCE_KEYS: Final = {
     "strategy-live-metrics",
 }
 
+# Optional governed HWM evidence sources.  Each key, when present, is admitted
+# as a hash-bound source artifact whose schema_name MUST equal the key — the
+# schema_name is the artifact role the hwm_inputs envelope resolves against.
+_HWM_INPUTS_SOURCE_KEY: Final = "hwm-inputs"
+_HWM_GOVERNED_SOURCE_KEYS: Final = frozenset(
+    {
+        "hwm-anchor-acceptance",
+        "hwm-calendar-authority-account",
+        "hwm-calendar-authority-provider",
+        "hwm-calendar-authority-legacy",
+        "hwm-flow-attestation",
+        "hwm-fx-attestation",
+    }
+)
+_HWM_ANCHOR_ACCEPTANCE_ROLE: Final = "hwm-anchor-acceptance"
+_HWM_CALENDAR_AUTHORITY_ROLES: Final = {
+    "ACCOUNT": "hwm-calendar-authority-account",
+    "PROVIDER": "hwm-calendar-authority-provider",
+    "LEGACY": "hwm-calendar-authority-legacy",
+}
+_HWM_VALID_LANES: Final = frozenset({"ACCOUNT", "PROVIDER", "LEGACY"})
+_HWM_VALID_CALENDAR_KINDS: Final = frozenset(
+    {"EXCHANGE", "ALWAYS_ON", "PROVIDER_PUBLICATION"}
+)
+_HWM_VALID_DISPOSITIONS: Final = frozenset(
+    {
+        "AVAILABLE",
+        "UNAVAILABLE",
+        "NOT_ADMITTED",
+        "EXPECTED_NON_TRADING",
+        "EXCLUDED_BY_POLICY",
+    }
+)
+_HWM_VALID_FLOW_STATUSES: Final = frozenset({"OBSERVED", "CONFIRMED_ZERO", "MISSING"})
+_HWM_VALID_FX_STATUSES: Final = frozenset(
+    {"OBSERVED", "CONFIRMED_ONE", "NOT_REQUIRED", "MISSING"}
+)
+_HWM_PERIOD_REQUIRED_KEYS: Final = frozenset(
+    {
+        "strategy_id",
+        "date",
+        "lane",
+        "disposition",
+        "beginning_capital_usd",
+        "return_source_record_id",
+        "flow_status",
+        "fx_status",
+    }
+)
+_HWM_PERIOD_KEYS: Final = _HWM_PERIOD_REQUIRED_KEYS | {
+    "component_account_ids",
+    "flow_source_record_ids",
+    "fx_source_record_ids",
+}
+_ISO_DATETIME = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+)
+
 _CSV_FIELDS: Final[dict[str, tuple[str, ...]]] = {
     "alpaca-events": (
         "date",
@@ -574,15 +632,22 @@ def _sources(
     value: object, roots: Mapping[str, Path], generation_as_of: date
 ) -> tuple[dict[str, Path], tuple[SourceArtifact, ...], list[dict[str, Any]]]:
     values = _object(value, "sources")
-    if set(values) != _SOURCE_KEYS:
+    actual = set(values)
+    if not _SOURCE_KEYS.issubset(actual):
         raise BaselineValidationError(
-            f"source keys differ: missing={sorted(_SOURCE_KEYS - set(values))}, "
-            f"unexpected={sorted(set(values) - _SOURCE_KEYS)}"
+            f"source keys missing: {sorted(_SOURCE_KEYS - actual)}"
         )
+    unknown = (
+        actual - _SOURCE_KEYS - {_HWM_INPUTS_SOURCE_KEY} - _HWM_GOVERNED_SOURCE_KEYS
+    )
+    if unknown:
+        raise BaselineValidationError(f"source keys unexpected: {sorted(unknown)}")
     paths: dict[str, Path] = {}
     artifacts: list[SourceArtifact] = []
     links: list[dict[str, Any]] = []
     for source_key in sorted(values):
+        if source_key == _HWM_INPUTS_SOURCE_KEY:
+            continue  # optional, processed separately in _load_hwm_inputs_envelope
         ref = _object(values[source_key], f"sources.{source_key}")
         _strict_keys(
             ref,
@@ -620,6 +685,11 @@ def _sources(
         schema_version = _text(
             ref["schema_version"], f"sources.{source_key}.schema_version"
         )
+        if source_key in _HWM_GOVERNED_SOURCE_KEYS and schema_name != source_key:
+            raise BaselineValidationError(
+                f"source {source_key} schema_name must equal the governed role "
+                f"{source_key!r}"
+            )
         paths[source_key] = path
         artifact_id = f"sources/{source_key}/{hashlib.sha256(relative_path.encode()).hexdigest()[:16]}"
         artifacts.append(
@@ -2256,6 +2326,716 @@ def _coverage_evidence(
     )
 
 
+def _iso_datetime(value: object, field_name: str) -> str:
+    accepted = _text(value, field_name)
+    if _ISO_DATETIME.fullmatch(accepted) is None:
+        raise BaselineValidationError(f"{field_name} must be an ISO datetime")
+    return accepted
+
+
+def _hwm_expected_keyspace(
+    assignments: Sequence[Mapping[str, Any]],
+    anchor: date,
+    as_of: date,
+) -> set[tuple[str, str]]:
+    """Derive the complete expected (strategy_id, date) keyspace.
+
+    A strategy enters the keyspace through every MAPPED account assignment
+    whose effective interval intersects the anchor-to-as-of window; the
+    expected dates run from the anchor (or a later assignment start) through
+    the catalog as-of date.  Every expected key must appear exactly once in
+    the envelope so omission cannot masquerade as exclusion.
+    """
+    strategy_starts: dict[str, list[date]] = defaultdict(list)
+    for assignment in assignments:
+        if assignment.get("mapping_status") != "MAPPED":
+            continue
+        strategy_id = assignment.get("strategy_id")
+        start_value = assignment.get("effective_start")
+        if start_value is None:
+            raise BaselineValidationError(
+                "mapped assignment requires an explicit effective_start"
+            )
+        if strategy_id is None:
+            raise BaselineValidationError("mapped assignment requires a strategy_id")
+        start = _date(start_value, "assignment.effective_start")
+        end_value = assignment.get("effective_end")
+        if (
+            end_value is not None
+            and _date(end_value, "assignment.effective_end") < anchor
+        ):
+            continue
+        if start > as_of:
+            continue
+        strategy_starts[_text(strategy_id, "assignment.strategy_id")].append(start)
+    expected: set[tuple[str, str]] = set()
+    for strategy_id, starts in sorted(strategy_starts.items()):
+        current = max(anchor, min(starts))
+        while current <= as_of:
+            expected.add((strategy_id, current.isoformat()))
+            current += timedelta(days=1)
+    return expected
+
+
+def _hwm_strategy_account_windows(
+    assignments: Sequence[Mapping[str, Any]],
+) -> dict[str, list[tuple[str, date, date | None]]]:
+    """Index MAPPED assignments as (account_id, start, end) per strategy."""
+    windows: dict[str, list[tuple[str, date, date | None]]] = defaultdict(list)
+    for assignment in assignments:
+        if assignment.get("mapping_status") != "MAPPED":
+            continue
+        strategy_id = assignment.get("strategy_id")
+        start_value = assignment.get("effective_start")
+        if start_value is None:
+            raise BaselineValidationError(
+                "mapped assignment requires an explicit effective_start"
+            )
+        if strategy_id is None:
+            raise BaselineValidationError("mapped assignment requires a strategy_id")
+        end_value = assignment.get("effective_end")
+        windows[_text(strategy_id, "assignment.strategy_id")].append(
+            (
+                _text(assignment.get("account_id"), "assignment.account_id"),
+                _date(start_value, "assignment.effective_start"),
+                _date(end_value, "assignment.effective_end")
+                if end_value is not None
+                else None,
+            )
+        )
+    return windows
+
+
+def _load_hwm_inputs_envelope(
+    spec_sources: Mapping[str, Any],
+    roots: Mapping[str, Path],
+    as_of: date,
+    final_source_links: Sequence[Mapping[str, Any]],
+    strategies: Sequence[Mapping[str, Any]],
+    accounts: Sequence[Mapping[str, Any]],
+    assignments: Sequence[Mapping[str, Any]],
+    strategy_returns: Sequence[Mapping[str, Any]],
+    allocations: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], SourceArtifact, dict[str, Any]] | None:
+    """Load and semantically validate the optional hwm_inputs envelope.
+
+    When the spec declares an ``hwm-inputs`` source, load the JSON file,
+    validate every cross-reference and disposition rule against the complete
+    catalog context, and return the validated envelope together with its
+    source artifact and evidence link.  When absent the function returns
+    ``None`` and the catalog omits the ``hwm_inputs`` key entirely.
+
+    Enforcement is fail-closed: the expected (strategy, date) keyspace is
+    derived from MAPPED assignments bounded by the anchor and as-of dates and
+    must equal the envelope's period keys exactly; the anchor must equal the
+    admitted ``hwm-anchor-acceptance`` record on the governed fields; every
+    artifact reference resolves against the complete final source-artifact
+    set with a required schema role and a verified hash; ACCOUNT-lane capital
+    is verified against the hash-bound NAV-rollforward rows in
+    ``strategy_returns`` (never the allocation snapshot); PROVIDER- and
+    LEGACY-lane AVAILABLE periods are rejected until hash-bound provider or
+    legacy capital evidence is admitted; and the allocation endpoint check is
+    recomputed independently.
+    """
+    if _HWM_INPUTS_SOURCE_KEY not in spec_sources:
+        return None
+    ref = _object(spec_sources[_HWM_INPUTS_SOURCE_KEY], "sources.hwm-inputs")
+    _strict_keys(
+        ref,
+        {
+            "as_of_date",
+            "expected_sha256",
+            "relative_path",
+            "root_id",
+            "schema_name",
+            "schema_version",
+        },
+        "sources.hwm-inputs",
+    )
+    if _text(ref["schema_name"], "sources.hwm-inputs.schema_name") != (
+        _HWM_INPUTS_SOURCE_KEY
+    ):
+        raise BaselineValidationError(
+            "sources.hwm-inputs schema_name must equal the governed role "
+            f"{_HWM_INPUTS_SOURCE_KEY!r}"
+        )
+    root_id = _identifier(ref["root_id"], "sources.hwm-inputs.root_id")
+    if root_id not in roots:
+        raise BaselineValidationError("hwm-inputs source has unknown root")
+    relative_path = _portable_relative(
+        ref["relative_path"], "sources.hwm-inputs.relative_path"
+    )
+    expected_hash = _text(ref["expected_sha256"], "sources.hwm-inputs.expected_sha256")
+    if _SHA256.fullmatch(expected_hash) is None:
+        raise BaselineValidationError("hwm-inputs source hash is invalid")
+    source_as_of = _date(ref["as_of_date"], "sources.hwm-inputs.as_of_date")
+    if source_as_of > as_of:
+        raise BaselineValidationError("hwm-inputs source is newer than the baseline")
+    path = _source_path(roots[root_id], relative_path)
+    actual_hash, _size = hash_file(path)
+    if actual_hash != expected_hash:
+        raise BaselineValidationError("hwm-inputs source hash differs")
+    envelope = _load_json(path, "hwm-inputs envelope")
+
+    # --- typed registry over the COMPLETE final source-artifact set ---
+    # Provider artifacts are admitted before this validation runs, so
+    # references resolve against the final artifact set, not a partial one.
+    artifact_registry: dict[str, tuple[str, str]] = {}
+    for link in final_source_links:
+        artifact_id = _text(link.get("artifact_id"), "source_artifact.artifact_id")
+        artifact_registry[artifact_id] = (
+            _text(link.get("schema_name"), "source_artifact.schema_name"),
+            _text(link.get("sha256"), "source_artifact.sha256"),
+        )
+
+    def _resolve_typed_artifact(
+        artifact_id: str, allowed_roles: set[str], field_name: str
+    ) -> None:
+        entry = artifact_registry.get(artifact_id)
+        if entry is None:
+            raise BaselineValidationError(
+                f"{field_name} {artifact_id!r} does not resolve to an admitted "
+                "source artifact"
+            )
+        if entry[0] not in allowed_roles:
+            raise BaselineValidationError(
+                f"{field_name} {artifact_id!r} has schema role {entry[0]!r}; "
+                f"required one of {sorted(allowed_roles)}"
+            )
+
+    # --- contract_version ---
+    _strict_keys(
+        envelope,
+        {
+            "contract_version",
+            "anchor",
+            "calendar_authorities",
+            "periods",
+            "reconciliation",
+        },
+        "hwm_inputs",
+    )
+    if envelope["contract_version"] != 1:
+        raise BaselineValidationError("hwm_inputs contract_version must be 1")
+
+    # --- anchor ---
+    anchor = _object(envelope["anchor"], "hwm_inputs.anchor")
+    _strict_keys(
+        anchor,
+        {
+            "anchor_date",
+            "index_base_value",
+            "hwm_policy_id",
+            "acceptance_provenance",
+        },
+        "hwm_inputs.anchor",
+    )
+    anchor_date = _date(anchor["anchor_date"], "hwm_inputs.anchor.anchor_date")
+    if anchor_date > as_of:
+        raise BaselineValidationError(
+            "hwm_inputs anchor_date must not be after catalog as_of_date"
+        )
+    if _text(anchor["index_base_value"], "hwm_inputs.anchor.index_base_value") != "1.0":
+        raise BaselineValidationError("hwm_inputs anchor index_base_value must be 1.0")
+    if (
+        _text(anchor["hwm_policy_id"], "hwm_inputs.anchor.hwm_policy_id")
+        != "PORT-HWM-3"
+    ):
+        raise BaselineValidationError(
+            "hwm_inputs anchor hwm_policy_id must be PORT-HWM-3"
+        )
+
+    # --- acceptance_provenance: typed, hash-bound, ISO-typed timestamp ---
+    prov = _object(
+        anchor["acceptance_provenance"],
+        "hwm_inputs.anchor.acceptance_provenance",
+    )
+    _strict_keys(
+        prov,
+        {
+            "accepted_at",
+            "accepted_by",
+            "source_artifact_id",
+            "source_artifact_sha256",
+        },
+        "hwm_inputs.anchor.acceptance_provenance",
+    )
+    _iso_datetime(prov["accepted_at"], "hwm_inputs.acceptance_provenance.accepted_at")
+    _text(prov["accepted_by"], "hwm_inputs.acceptance_provenance.accepted_by")
+    prov_artifact_id = _text(
+        prov["source_artifact_id"],
+        "hwm_inputs.acceptance_provenance.source_artifact_id",
+    )
+    prov_sha256 = _text(
+        prov["source_artifact_sha256"],
+        "hwm_inputs.acceptance_provenance.source_artifact_sha256",
+    )
+    if _SHA256.fullmatch(prov_sha256) is None:
+        raise BaselineValidationError(
+            "hwm_inputs acceptance_provenance source_artifact_sha256 is invalid"
+        )
+    _resolve_typed_artifact(
+        prov_artifact_id,
+        {_HWM_ANCHOR_ACCEPTANCE_ROLE},
+        "hwm_inputs acceptance_provenance source_artifact_id",
+    )
+    if artifact_registry[prov_artifact_id][1] != prov_sha256:
+        raise BaselineValidationError(
+            "hwm_inputs acceptance_provenance sha256 does not match catalog "
+            "source_artifact"
+        )
+
+    # --- anchor content cross-check: the envelope's anchor must equal the
+    # admitted acceptance record byte-for-byte on the governed fields, so a
+    # fabricated later anchor cannot truncate the derived keyspace.  The
+    # acceptance record must be the admitted hwm-anchor-acceptance governed
+    # source (the only role the builder can open and hash-verify). ---
+    acceptance_key = _HWM_ANCHOR_ACCEPTANCE_ROLE
+    if acceptance_key not in spec_sources:
+        raise BaselineValidationError(
+            "hwm_inputs anchor requires an admitted hwm-anchor-acceptance source"
+        )
+    acceptance_ref = _object(spec_sources[acceptance_key], f"sources.{acceptance_key}")
+    acceptance_relative = _portable_relative(
+        acceptance_ref["relative_path"], f"sources.{acceptance_key}.relative_path"
+    )
+    acceptance_artifact_id = (
+        f"sources/{acceptance_key}/"
+        f"{hashlib.sha256(acceptance_relative.encode()).hexdigest()[:16]}"
+    )
+    if prov_artifact_id != acceptance_artifact_id:
+        raise BaselineValidationError(
+            "hwm_inputs acceptance_provenance must resolve to the admitted "
+            "hwm-anchor-acceptance source artifact"
+        )
+    acceptance_root_id = _identifier(
+        acceptance_ref["root_id"], f"sources.{acceptance_key}.root_id"
+    )
+    acceptance_doc = _load_json(
+        _source_path(roots[acceptance_root_id], acceptance_relative),
+        "hwm-anchor-acceptance record",
+    )
+    for field in ("anchor_date", "index_base_value", "hwm_policy_id"):
+        if acceptance_doc.get(field) != anchor[field]:
+            raise BaselineValidationError(
+                f"hwm_inputs anchor {field} disagrees with the admitted "
+                "hwm-anchor-acceptance record"
+            )
+
+    # --- calendar_authorities: one typed admitted authority per lane ---
+    cal_authorities = _objects(
+        envelope["calendar_authorities"], "hwm_inputs.calendar_authorities"
+    )
+    if not cal_authorities:
+        raise BaselineValidationError(
+            "hwm_inputs calendar_authorities must have at least one entry"
+        )
+    authority_lanes: set[str] = set()
+    for item in cal_authorities:
+        _strict_keys(
+            item,
+            {
+                "lane",
+                "authority_id",
+                "authority_version",
+                "calendar_kind",
+                "admitted_source_artifact_id",
+            },
+            "hwm_inputs.calendar_authorities[*]",
+        )
+        lane = _text(item["lane"], "calendar_authorities.lane")
+        if lane not in _HWM_VALID_LANES:
+            raise BaselineValidationError(
+                f"calendar_authorities lane {lane!r} is invalid"
+            )
+        if lane in authority_lanes:
+            raise BaselineValidationError(
+                f"duplicate calendar_authorities lane {lane!r}"
+            )
+        authority_lanes.add(lane)
+        _text(item["authority_id"], "calendar_authorities.authority_id")
+        _text(
+            item["authority_version"],
+            "calendar_authorities.authority_version",
+        )
+        kind = _text(item["calendar_kind"], "calendar_authorities.calendar_kind")
+        if kind not in _HWM_VALID_CALENDAR_KINDS:
+            raise BaselineValidationError(
+                f"calendar_authorities calendar_kind {kind!r} is invalid"
+            )
+        _resolve_typed_artifact(
+            _text(
+                item["admitted_source_artifact_id"],
+                "calendar_authorities.admitted_source_artifact_id",
+            ),
+            {_HWM_CALENDAR_AUTHORITY_ROLES[lane]},
+            "calendar_authorities admitted_source_artifact_id",
+        )
+
+    # --- catalog evidence indexes ---
+    strategy_ids = {_text(s["strategy_id"], "strategy.strategy_id") for s in strategies}
+    known_accounts = {_text(a["account_id"], "account.account_id") for a in accounts}
+    account_windows = _hwm_strategy_account_windows(assignments)
+
+    def _mapped_account(strategy_id: str, account_id: str, day: date) -> bool:
+        return any(
+            candidate == account_id and start <= day and (end is None or day <= end)
+            for candidate, start, end in account_windows.get(strategy_id, [])
+        )
+
+    # Provider lane: the current catalog shapes carry no hash-bound provider
+    # capital evidence (provider-live rows have no beginning_capital, no
+    # component account set, and no reconciliation hash), so every PROVIDER
+    # AVAILABLE period is rejected fail-closed.  Deferred admission
+    # requirement: a hash-bound provider rollforward/capital schedule must be
+    # admitted before PROVIDER-lane AVAILABLE periods can validate.
+
+    # Hash-bound NAV-rollforward rows (the daily capital authority for the
+    # ACCOUNT lane; the allocation snapshot is never a capital source).
+    rollforward: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for row in strategy_returns:
+        if row.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        if row.get("beginning_capital") is None:
+            continue
+        key = (
+            _text(row.get("strategy_id"), "strategy_returns.strategy_id"),
+            _text(row.get("date"), "strategy_returns.date"),
+        )
+        rollforward[key] = row
+
+    # --- periods ---
+    periods = _objects(envelope["periods"], "hwm_inputs.periods")
+    if not periods:
+        raise BaselineValidationError("hwm_inputs periods must have at least one row")
+    seen_keys: set[tuple[str, str]] = set()
+    for row in periods:
+        actual_keys = set(row)
+        if not _HWM_PERIOD_REQUIRED_KEYS.issubset(actual_keys):
+            raise BaselineValidationError(
+                f"periods row missing required keys: "
+                f"{sorted(_HWM_PERIOD_REQUIRED_KEYS - actual_keys)}"
+            )
+        if actual_keys - _HWM_PERIOD_KEYS:
+            raise BaselineValidationError(
+                f"periods row has unexpected keys: "
+                f"{sorted(actual_keys - _HWM_PERIOD_KEYS)}"
+            )
+        sid = _text(row["strategy_id"], "periods.strategy_id")
+        if sid not in strategy_ids:
+            raise BaselineValidationError(
+                f"periods strategy_id {sid!r} is not a known strategy"
+            )
+        day = _date(row["date"], "periods.date")
+        if day > as_of:
+            raise BaselineValidationError(
+                "periods date must not be after catalog as_of_date"
+            )
+        lane = _text(row["lane"], "periods.lane")
+        if lane not in _HWM_VALID_LANES:
+            raise BaselineValidationError(f"periods lane {lane!r} is invalid")
+        if lane not in authority_lanes:
+            raise BaselineValidationError(
+                f"periods lane {lane!r} has no admitted calendar authority"
+            )
+        disp = _text(row["disposition"], "periods.disposition")
+        if disp not in _HWM_VALID_DISPOSITIONS:
+            raise BaselineValidationError(f"periods disposition {disp!r} is invalid")
+        flow_status = _text(row["flow_status"], "periods.flow_status")
+        if flow_status not in _HWM_VALID_FLOW_STATUSES:
+            raise BaselineValidationError(
+                f"periods flow_status {flow_status!r} is invalid"
+            )
+        fx_status = _text(row["fx_status"], "periods.fx_status")
+        if fx_status not in _HWM_VALID_FX_STATUSES:
+            raise BaselineValidationError(f"periods fx_status {fx_status!r} is invalid")
+
+        key = (sid, day.isoformat())
+        if key in seen_keys:
+            raise BaselineValidationError(
+                f"duplicate period for strategy {sid!r} on {day.isoformat()}"
+            )
+        seen_keys.add(key)
+
+        capital_val = row["beginning_capital_usd"]
+        return_ref = row["return_source_record_id"]
+        component_ids = row.get("component_account_ids")
+        if component_ids is not None:
+            if not isinstance(component_ids, list) or any(
+                not isinstance(item, str) or not item.strip() for item in component_ids
+            ):
+                raise BaselineValidationError(
+                    "periods component_account_ids must be non-empty text"
+                )
+            for component_id in component_ids:
+                if component_id not in known_accounts:
+                    raise BaselineValidationError(
+                        f"periods component account {component_id!r} is not a "
+                        "known account"
+                    )
+
+        if disp == "AVAILABLE":
+            if (
+                capital_val is None
+                or not isinstance(capital_val, str)
+                or not capital_val.strip()
+            ):
+                raise BaselineValidationError(
+                    "AVAILABLE period must have non-null beginning_capital_usd"
+                )
+            capital = _decimal(capital_val, "beginning_capital_usd")
+            assert capital is not None
+            if (
+                return_ref is None
+                or not isinstance(return_ref, str)
+                or not return_ref.strip()
+            ):
+                raise BaselineValidationError(
+                    "AVAILABLE period must have non-null return_source_record_id"
+                )
+            if flow_status == "MISSING":
+                raise BaselineValidationError(
+                    "AVAILABLE period must not have MISSING flow_status"
+                )
+            if fx_status == "MISSING":
+                raise BaselineValidationError(
+                    "AVAILABLE period must not have MISSING fx_status"
+                )
+            if lane == "ACCOUNT":
+                if not component_ids:
+                    raise BaselineValidationError(
+                        "ACCOUNT lane AVAILABLE period requires non-empty "
+                        "component_account_ids"
+                    )
+                for component_id in component_ids:
+                    if not _mapped_account(sid, component_id, day):
+                        raise BaselineValidationError(
+                            f"component account {component_id!r} is not mapped to "
+                            f"strategy {sid!r} on {day.isoformat()}"
+                        )
+                evidence = rollforward.get((sid, day.isoformat()))
+                if evidence is None:
+                    raise BaselineValidationError(
+                        "ACCOUNT lane AVAILABLE period lacks hash-bound NAV "
+                        f"rollforward evidence for strategy {sid!r} on "
+                        f"{day.isoformat()}"
+                    )
+                evidence_capital = _decimal(
+                    evidence.get("beginning_capital"),
+                    "strategy_returns.beginning_capital",
+                )
+                if evidence_capital != capital:
+                    raise BaselineValidationError(
+                        "beginning_capital_usd does not match the hash-bound NAV "
+                        f"rollforward evidence for strategy {sid!r} on "
+                        f"{day.isoformat()}"
+                    )
+                if sorted(
+                    str(item) for item in evidence.get("component_account_ids", [])
+                ) != sorted(component_ids):
+                    raise BaselineValidationError(
+                        "component_account_ids differ from the NAV rollforward "
+                        f"evidence for strategy {sid!r} on {day.isoformat()}"
+                    )
+                if (
+                    _text(
+                        evidence.get("account_reconciliation_sha256"),
+                        "strategy_returns.account_reconciliation_sha256",
+                    )
+                    != return_ref
+                ):
+                    raise BaselineValidationError(
+                        "return_source_record_id does not match the hash-bound "
+                        f"NAV rollforward evidence for strategy {sid!r} on "
+                        f"{day.isoformat()}"
+                    )
+            elif lane == "PROVIDER":
+                raise BaselineValidationError(
+                    "PROVIDER lane AVAILABLE period requires hash-bound provider "
+                    "capital evidence; none is admitted by the current catalog "
+                    "(deferred admission requirement) — the period must be "
+                    "UNAVAILABLE"
+                )
+            else:
+                raise BaselineValidationError(
+                    "LEGACY lane has no admitted effective-dated capital "
+                    "schedule; the period must be UNAVAILABLE"
+                )
+        else:
+            # UNAVAILABLE, NOT_ADMITTED, EXPECTED_NON_TRADING, and
+            # EXCLUDED_BY_POLICY all carry null capital and a null return
+            # reference — an unavailable period must never carry capital.
+            if capital_val is not None:
+                raise BaselineValidationError(
+                    f"{disp} period must have null beginning_capital_usd"
+                )
+            if return_ref is not None:
+                raise BaselineValidationError(
+                    f"{disp} period must have null return_source_record_id"
+                )
+
+        # Attestation: CONFIRMED_* statuses resolve every reference to an
+        # admitted, hash-verified artifact of the matching attestation role.
+        flow_src_ids = row.get("flow_source_record_ids", [])
+        if not isinstance(flow_src_ids, list) or any(
+            not isinstance(item, str) or not item.strip() for item in flow_src_ids
+        ):
+            raise BaselineValidationError("periods flow_source_record_ids must be text")
+        if flow_status == "CONFIRMED_ZERO":
+            if not flow_src_ids:
+                raise BaselineValidationError(
+                    "CONFIRMED_ZERO flow_status requires non-empty "
+                    "flow_source_record_ids"
+                )
+            for source_id in flow_src_ids:
+                _resolve_typed_artifact(
+                    source_id,
+                    {"hwm-flow-attestation"},
+                    "periods flow_source_record_ids",
+                )
+        fx_src_ids = row.get("fx_source_record_ids", [])
+        if not isinstance(fx_src_ids, list) or any(
+            not isinstance(item, str) or not item.strip() for item in fx_src_ids
+        ):
+            raise BaselineValidationError("periods fx_source_record_ids must be text")
+        if fx_status == "CONFIRMED_ONE":
+            if not fx_src_ids:
+                raise BaselineValidationError(
+                    "CONFIRMED_ONE fx_status requires non-empty fx_source_record_ids"
+                )
+            for source_id in fx_src_ids:
+                _resolve_typed_artifact(
+                    source_id,
+                    {"hwm-fx-attestation"},
+                    "periods fx_source_record_ids",
+                )
+
+    # --- expected-keyspace completeness ---
+    expected_keys = _hwm_expected_keyspace(assignments, anchor_date, as_of)
+    if seen_keys != expected_keys:
+        raise BaselineValidationError(
+            "hwm_inputs period keyspace differs from the expected assignment "
+            f"keyspace: missing={sorted(expected_keys - seen_keys)[:5]}, "
+            f"unexpected={sorted(seen_keys - expected_keys)[:5]}"
+        )
+
+    # --- reconciliation: recompute the allocation endpoint check ---
+    rec = _object(envelope["reconciliation"], "hwm_inputs.reconciliation")
+    _strict_keys(
+        rec,
+        {"period_capital_method", "allocation_endpoint_check"},
+        "hwm_inputs.reconciliation",
+    )
+    if (
+        _text(rec["period_capital_method"], "reconciliation.period_capital_method")
+        != "NAV_ROLLFORWARD"
+    ):
+        raise BaselineValidationError(
+            "hwm_inputs reconciliation period_capital_method must be NAV_ROLLFORWARD"
+        )
+    endpoint = _object(
+        rec["allocation_endpoint_check"],
+        "hwm_inputs.reconciliation.allocation_endpoint_check",
+    )
+    _strict_keys(
+        endpoint,
+        {"matched", "delta_usd"},
+        "hwm_inputs.reconciliation.allocation_endpoint_check",
+    )
+    if not isinstance(endpoint["matched"], bool):
+        raise BaselineValidationError(
+            "reconciliation.allocation_endpoint_check.matched must be boolean"
+        )
+    declared_delta = _decimal(
+        endpoint["delta_usd"],
+        "reconciliation.allocation_endpoint_check.delta_usd",
+    )
+    assert declared_delta is not None
+
+    snapshot_dates = {
+        _date(item["as_of_date"], "allocation.as_of_date")
+        for item in allocations
+        if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id") is not None
+    }
+    if not snapshot_dates:
+        raise BaselineValidationError(
+            "no systematic allocation snapshot exists for endpoint reconciliation"
+        )
+    snapshot_date = max(snapshot_dates)
+    verified_endpoints: dict[str, Decimal] = {}
+    for row in periods:
+        if row["disposition"] != "AVAILABLE" or row["lane"] != "ACCOUNT":
+            continue
+        day = _date(row["date"], "periods.date")
+        if day != snapshot_date:
+            continue
+        evidence = rollforward[(str(row["strategy_id"]), day.isoformat())]
+        capital = _decimal(row["beginning_capital_usd"], "beginning_capital_usd")
+        period_return = _decimal(evidence.get("return"), "strategy_returns.return")
+        assert capital is not None and period_return is not None
+        verified_endpoints[str(row["strategy_id"])] = capital * (
+            Decimal(1) + period_return
+        )
+    envelope_total = sum(verified_endpoints.values(), Decimal(0))
+    allocation_total = Decimal(0)
+    for allocation in allocations:
+        if (
+            allocation.get("scope") != "SYSTEMATIC"
+            or allocation.get("strategy_id") not in verified_endpoints
+            or _date(allocation["as_of_date"], "allocation.as_of_date") != snapshot_date
+        ):
+            continue
+        allocation_value = _decimal(
+            _object(allocation["current_value"], "allocation.current_value").get(
+                "value"
+            ),
+            "allocation.current_value",
+        )
+        assert allocation_value is not None
+        allocation_total += allocation_value
+    recomputed_delta = envelope_total - allocation_total
+    if recomputed_delta != 0:
+        raise BaselineValidationError(
+            "allocation endpoint check does not reconcile: recomputed delta "
+            f"{decimal_text(recomputed_delta)} between rollforward endpoint "
+            "capital and the systematic allocation snapshot"
+        )
+    if decimal_text(declared_delta) != decimal_text(recomputed_delta):
+        raise BaselineValidationError(
+            "reconciliation.allocation_endpoint_check.delta_usd differs from the "
+            f"recomputed delta {decimal_text(recomputed_delta)}"
+        )
+    if endpoint["matched"] is not True:
+        raise BaselineValidationError(
+            "reconciliation.allocation_endpoint_check.matched must be true for a "
+            "reconciled endpoint"
+        )
+
+    # Build source artifact and evidence link for the hwm-inputs source.
+    schema_name = _text(ref["schema_name"], "sources.hwm-inputs.schema_name")
+    schema_version = _text(ref["schema_version"], "sources.hwm-inputs.schema_version")
+    artifact_id = (
+        f"sources/hwm-inputs/{hashlib.sha256(relative_path.encode()).hexdigest()[:16]}"
+    )
+    hwm_artifact = SourceArtifact(
+        artifact_id=artifact_id,
+        sha256=actual_hash,
+        size_bytes=_size,
+        as_of_date=source_as_of,
+        schema_name=schema_name,
+        schema_version=schema_version,
+    )
+    hwm_link: dict[str, Any] = {
+        "artifact_id": artifact_id,
+        "as_of_date": source_as_of.isoformat(),
+        "schema_name": schema_name,
+        "schema_version": schema_version,
+        "sha256": actual_hash,
+        "source_key": "hwm-inputs",
+    }
+    return envelope, hwm_artifact, hwm_link
+
+
 def build_catalog(
     spec_path: Path,
 ) -> tuple[dict[str, Any], GenerationManifest, bytes]:
@@ -2397,6 +3177,25 @@ def build_catalog(
             as_of,
         )
     )
+    # The envelope resolves attestations and provenance against the COMPLETE
+    # final artifact set, so it is validated only after provider artifacts and
+    # the allocation snapshot exist.
+    hwm_inputs_result = _load_hwm_inputs_envelope(
+        spec["sources"],
+        roots,
+        as_of,
+        [*source_links, *provider_links],
+        strategies,
+        accounts,
+        assignments,
+        strategy_returns,
+        allocations,
+    )
+    hwm_inputs_envelope: dict[str, Any] | None = None
+    hwm_inputs_artifact: SourceArtifact | None = None
+    hwm_inputs_link: dict[str, Any] | None = None
+    if hwm_inputs_result is not None:
+        hwm_inputs_envelope, hwm_inputs_artifact, hwm_inputs_link = hwm_inputs_result
     layer_metrics, live_metrics, implementation_gaps = _normalize_strategy_evidence(
         paths, strategy_aliases
     )
@@ -2540,7 +3339,11 @@ def build_catalog(
         "reconciliation_exceptions": exceptions,
         "replay": replay,
         "securities": securities,
-        "source_artifacts": [*source_links, *provider_links],
+        "source_artifacts": [
+            *source_links,
+            *([hwm_inputs_link] if hwm_inputs_link is not None else []),
+            *provider_links,
+        ],
         "strategies": strategies,
         "strategy_live_metrics": live_metrics,
         "strategy_nav_coverage": strategy_nav_coverage,
@@ -2550,6 +3353,8 @@ def build_catalog(
         "unmapped_records": unmapped,
         "attribution_dispositions": attribution_dispositions,
     }
+    if hwm_inputs_envelope is not None:
+        catalog["hwm_inputs"] = hwm_inputs_envelope
     if provenance.get("strategy_version_catalog") is not None:
         catalog["strategy_version_catalog"] = provenance["strategy_version_catalog"]
     catalog_bytes = canonical_json_bytes(catalog)
@@ -2606,6 +3411,7 @@ def build_catalog(
         ),
         artifacts=(
             *source_artifacts,
+            *([hwm_inputs_artifact] if hwm_inputs_artifact is not None else []),
             *provider_artifacts,
             provenance_artifact,
             spec_artifact,

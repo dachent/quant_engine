@@ -85,6 +85,231 @@
     "fact_coverage_matrix": {"type": "array", "items": {"$ref": "#/$defs/fact_coverage_detail"}},
     "observation_windows": {"type": "array", "items": {"type": "object"}},
     "attribution_dispositions": {"type": "array", "items": {"type": "object"}},
+    "hwm_inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "anchor",
+        "calendar_authorities",
+        "periods",
+        "reconciliation"
+      ],
+      "properties": {
+        "contract_version": {"const": 1},
+        "anchor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "anchor_date",
+            "index_base_value",
+            "hwm_policy_id",
+            "acceptance_provenance"
+          ],
+          "properties": {
+            "anchor_date": {"type": "string", "format": "date"},
+            "index_base_value": {"const": "1.0"},
+            "hwm_policy_id": {"const": "PORT-HWM-3"},
+            "acceptance_provenance": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "accepted_at",
+                "accepted_by",
+                "source_artifact_id",
+                "source_artifact_sha256"
+              ],
+              "properties": {
+                "accepted_at": {"type": "string", "format": "date-time"},
+                "accepted_by": {"type": "string", "minLength": 1},
+                "source_artifact_id": {"type": "string", "minLength": 1},
+                "source_artifact_sha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          }
+        },
+        "calendar_authorities": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "lane",
+              "authority_id",
+              "authority_version",
+              "calendar_kind",
+              "admitted_source_artifact_id"
+            ],
+            "properties": {
+              "lane": {"enum": ["ACCOUNT", "PROVIDER", "LEGACY"]},
+              "authority_id": {"type": "string", "minLength": 1},
+              "authority_version": {"type": "string", "minLength": 1},
+              "calendar_kind": {
+                "enum": ["EXCHANGE", "ALWAYS_ON", "PROVIDER_PUBLICATION"]
+              },
+              "admitted_source_artifact_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "periods": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "strategy_id",
+              "date",
+              "lane",
+              "disposition",
+              "beginning_capital_usd",
+              "return_source_record_id",
+              "flow_status",
+              "fx_status"
+            ],
+            "properties": {
+              "strategy_id": {"type": "string", "minLength": 1},
+              "date": {"type": "string", "format": "date"},
+              "lane": {"enum": ["ACCOUNT", "PROVIDER", "LEGACY"]},
+              "disposition": {
+                "enum": [
+                  "AVAILABLE",
+                  "UNAVAILABLE",
+                  "NOT_ADMITTED",
+                  "EXPECTED_NON_TRADING",
+                  "EXCLUDED_BY_POLICY"
+                ]
+              },
+              "beginning_capital_usd": {
+                "oneOf": [
+                  {"type": "string", "minLength": 1},
+                  {"type": "null"}
+                ]
+              },
+              "return_source_record_id": {
+                "oneOf": [
+                  {"type": "string", "minLength": 1},
+                  {"type": "null"}
+                ]
+              },
+              "component_account_ids": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "minLength": 1}
+              },
+              "flow_status": {
+                "enum": [
+                  "OBSERVED",
+                  "CONFIRMED_ZERO",
+                  "MISSING"
+                ]
+              },
+              "fx_status": {
+                "enum": [
+                  "OBSERVED",
+                  "CONFIRMED_ONE",
+                  "NOT_REQUIRED",
+                  "MISSING"
+                ]
+              },
+              "flow_source_record_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1}
+              },
+              "fx_source_record_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1}
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "disposition": {"const": "AVAILABLE"}
+                  },
+                  "required": ["disposition"]
+                },
+                "then": {
+                  "properties": {
+                    "beginning_capital_usd": {"type": "string", "minLength": 1},
+                    "return_source_record_id": {"type": "string", "minLength": 1}
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "disposition": {
+                      "enum": [
+                        "UNAVAILABLE",
+                        "NOT_ADMITTED",
+                        "EXPECTED_NON_TRADING",
+                        "EXCLUDED_BY_POLICY"
+                      ]
+                    }
+                  },
+                  "required": ["disposition"]
+                },
+                "then": {
+                  "properties": {
+                    "beginning_capital_usd": {"type": "null"},
+                    "return_source_record_id": {"type": "null"}
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {"flow_status": {"const": "CONFIRMED_ZERO"}},
+                  "required": ["flow_status"]
+                },
+                "then": {
+                  "properties": {
+                    "flow_source_record_ids": {"type": "array", "minItems": 1}
+                  },
+                  "required": ["flow_source_record_ids"]
+                }
+              },
+              {
+                "if": {
+                  "properties": {"fx_status": {"const": "CONFIRMED_ONE"}},
+                  "required": ["fx_status"]
+                },
+                "then": {
+                  "properties": {
+                    "fx_source_record_ids": {"type": "array", "minItems": 1}
+                  },
+                  "required": ["fx_source_record_ids"]
+                }
+              }
+            ]
+          }
+        },
+        "reconciliation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "period_capital_method",
+            "allocation_endpoint_check"
+          ],
+          "properties": {
+            "period_capital_method": {"const": "NAV_ROLLFORWARD"},
+            "allocation_endpoint_check": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["matched", "delta_usd"],
+              "properties": {
+                "matched": {"type": "boolean"},
+                "delta_usd": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      }
+    },
     "reconciliation_checks": {"type": "array", "minItems": 3, "items": {"type": "object"}},
     "reconciliation_exceptions": {"type": "array", "minItems": 1, "items": {"type": "object"}},
     "replay": {

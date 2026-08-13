@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import importlib.util
 import json
@@ -981,6 +981,190 @@ def test_source_drift_nav_divergence_and_replay_difference_fail_closed(
         baseline.build_catalog(spec_path)
 
 
+def _artifacts_from_sources(
+    sources: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Compute catalog source-artifact identities from spec source refs."""
+    result: dict[str, dict[str, Any]] = {}
+    for source_key, ref in sources.items():
+        artifact_id = (
+            f"sources/{source_key}/"
+            f"{hashlib.sha256(ref['relative_path'].encode()).hexdigest()[:16]}"
+        )
+        result[source_key] = {
+            "artifact_id": artifact_id,
+            "sha256": ref["expected_sha256"],
+        }
+    return result
+
+
+def _add_governed_source(
+    spec: dict[str, Any], source_root: Path, source_key: str, payload: dict[str, Any]
+) -> None:
+    """Write a governed HWM evidence file and bind it into the spec sources.
+
+    The governed roles require ``schema_name == source_key`` (the builder
+    enforces the binding); the artifact hash is the admitted evidence hash.
+    """
+    content = canonical_json_bytes(payload)
+    relative_path = f"{source_key}.json"
+    (source_root / relative_path).write_bytes(content)
+    spec["sources"][source_key] = {
+        "as_of_date": "2026-07-30",
+        "expected_sha256": hashlib.sha256(content).hexdigest(),
+        "relative_path": relative_path,
+        "root_id": "synthetic",
+        "schema_name": source_key,
+        "schema_version": "1",
+    }
+
+
+def _governed_hwm_sources(spec: dict[str, Any], source_root: Path) -> None:
+    """Admit the anchor-acceptance and per-lane calendar authority artifacts."""
+    _add_governed_source(
+        spec,
+        source_root,
+        "hwm-anchor-acceptance",
+        {
+            "anchor_date": "2026-07-01",
+            "hwm_policy_id": "PORT-HWM-3",
+            "index_base_value": "1.0",
+        },
+    )
+    for lane in ("account", "provider", "legacy"):
+        _add_governed_source(
+            spec,
+            source_root,
+            f"hwm-calendar-authority-{lane}",
+            {
+                "authority_id": f"synthetic-{lane}-calendar",
+                "authority_version": "1",
+                "days": "SYNTHETIC admitted calendar expectation",
+            },
+        )
+
+
+def _hwm_inputs_valid_envelope(
+    artifacts: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Return a synthetic, fully valid hwm_inputs envelope for testing.
+
+    The v1 fixture has MAPPED assignments for strategy-1 (ACCOUNT),
+    strategy-2 (PROVIDER), and strategy-3 (LEGACY), all effective from
+    2026-01-01.  The expected keyspace is therefore those three strategies
+    over 2026-07-01..2026-07-30; every row is UNAVAILABLE because no
+    hash-bound NAV-rollforward evidence or admitted provider capital
+    schedule exists in the fixture.
+    """
+    anchor_artifact = artifacts["hwm-anchor-acceptance"]
+    periods: list[dict[str, Any]] = []
+    lanes = {
+        "strategy-1": "ACCOUNT",
+        "strategy-2": "PROVIDER",
+        "strategy-3": "LEGACY",
+    }
+    day = date(2026, 7, 1)
+    while day <= date(2026, 7, 30):
+        for strategy_id, lane in sorted(lanes.items()):
+            periods.append(
+                {
+                    "strategy_id": strategy_id,
+                    "date": day.isoformat(),
+                    "lane": lane,
+                    "disposition": "UNAVAILABLE",
+                    "beginning_capital_usd": None,
+                    "return_source_record_id": None,
+                    "flow_status": "MISSING",
+                    "fx_status": "MISSING",
+                }
+            )
+        day += timedelta(days=1)
+    return {
+        "contract_version": 1,
+        "anchor": {
+            "anchor_date": "2026-07-01",
+            "index_base_value": "1.0",
+            "hwm_policy_id": "PORT-HWM-3",
+            "acceptance_provenance": {
+                "accepted_at": "2026-07-30T00:00:00Z",
+                "accepted_by": "synthetic-builder",
+                "source_artifact_id": anchor_artifact["artifact_id"],
+                "source_artifact_sha256": anchor_artifact["sha256"],
+            },
+        },
+        "calendar_authorities": [
+            {
+                "lane": "ACCOUNT",
+                "authority_id": "synthetic-account-calendar",
+                "authority_version": "1",
+                "calendar_kind": "EXCHANGE",
+                "admitted_source_artifact_id": artifacts[
+                    "hwm-calendar-authority-account"
+                ]["artifact_id"],
+            },
+            {
+                "lane": "PROVIDER",
+                "authority_id": "synthetic-provider-calendar",
+                "authority_version": "1",
+                "calendar_kind": "PROVIDER_PUBLICATION",
+                "admitted_source_artifact_id": artifacts[
+                    "hwm-calendar-authority-provider"
+                ]["artifact_id"],
+            },
+            {
+                "lane": "LEGACY",
+                "authority_id": "synthetic-legacy-calendar",
+                "authority_version": "1",
+                "calendar_kind": "ALWAYS_ON",
+                "admitted_source_artifact_id": artifacts[
+                    "hwm-calendar-authority-legacy"
+                ]["artifact_id"],
+            },
+        ],
+        "periods": periods,
+        "reconciliation": {
+            "period_capital_method": "NAV_ROLLFORWARD",
+            "allocation_endpoint_check": {
+                "matched": True,
+                "delta_usd": "0",
+            },
+        },
+    }
+
+
+def _write_envelope(
+    spec_path: Path, spec: dict[str, Any], envelope: dict[str, Any]
+) -> None:
+    """Persist an envelope mutation and re-bind its expected hash."""
+    source_root = Path(spec["roots"]["synthetic"])
+    envelope_bytes = canonical_json_bytes(envelope)
+    (source_root / "hwm_inputs.json").write_bytes(envelope_bytes)
+    spec["sources"]["hwm-inputs"]["expected_sha256"] = hashlib.sha256(
+        envelope_bytes
+    ).hexdigest()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+
+def _spec_with_hwm_inputs(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    """Build a spec with the optional hwm-inputs source wired in."""
+    spec_path, spec = _spec(tmp_path)
+    source_root = Path(spec["roots"]["synthetic"])
+    _governed_hwm_sources(spec, source_root)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope_bytes = canonical_json_bytes(envelope)
+    (source_root / "hwm_inputs.json").write_bytes(envelope_bytes)
+    spec["sources"]["hwm-inputs"] = {
+        "as_of_date": "2026-07-30",
+        "expected_sha256": hashlib.sha256(envelope_bytes).hexdigest(),
+        "relative_path": "hwm_inputs.json",
+        "root_id": "synthetic",
+        "schema_name": "hwm-inputs",
+        "schema_version": "1",
+    }
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    return spec_path, spec
+
+
 def test_spec_and_catalog_schemas_are_closed_and_preserve_yagni_boundary() -> None:
     spec_schema = json.loads(
         (
@@ -996,11 +1180,735 @@ def test_spec_and_catalog_schemas_are_closed_and_preserve_yagni_boundary() -> No
     assert (
         set(spec_schema["properties"]["sources"]["required"]) == baseline._SOURCE_KEYS
     )
+    # hwm-inputs and the governed HWM evidence roles must be optional.
+    source_properties = spec_schema["properties"]["sources"]["properties"]
+    for optional_key in sorted(baseline._HWM_GOVERNED_SOURCE_KEYS | {"hwm-inputs"}):
+        assert optional_key in source_properties
+        assert optional_key not in spec_schema["properties"]["sources"]["required"]
     assert catalog_schema["additionalProperties"] is False
     assert catalog_schema["properties"]["positions"]["items"] == {"type": "object"}
     assert spec_schema["properties"]["schema_version"] == {"enum": [1, 2, 3]}
     assert catalog_schema["properties"]["strategies"]["minItems"] == 9
     assert catalog_schema["properties"]["strategies"]["maxItems"] == 9
+    # The conditional disposition invariants must be encoded in the schema.
+    period_rules = catalog_schema["properties"]["hwm_inputs"]["properties"]["periods"][
+        "items"
+    ]["allOf"]
+    assert any(
+        rule.get("then", {}).get("properties", {}).get("beginning_capital_usd")
+        == {"type": "null"}
+        for rule in period_rules
+    )
+
+
+# ── hwm_inputs envelope tests ─────────────────────────────────────────────
+
+
+def test_hwm_inputs_present_populates_catalog_key(tmp_path: Path) -> None:
+    spec_path, _spec_data = _spec_with_hwm_inputs(tmp_path)
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    assert "hwm_inputs" in catalog
+    hwm = catalog["hwm_inputs"]
+    assert hwm["contract_version"] == 1
+    assert hwm["anchor"]["anchor_date"] == "2026-07-01"
+    assert hwm["anchor"]["hwm_policy_id"] == "PORT-HWM-3"
+    # 3 assigned strategies x 30 days (2026-07-01..2026-07-30).
+    assert len(hwm["periods"]) == 90
+    assert {row["disposition"] for row in hwm["periods"]} == {"UNAVAILABLE"}
+    assert hwm["reconciliation"]["period_capital_method"] == "NAV_ROLLFORWARD"
+    # The hwm-inputs source artifact must appear in source_artifacts.
+    artifact_ids = {item["artifact_id"] for item in catalog["source_artifacts"]}
+    hwm_artifacts = [
+        item
+        for item in catalog["source_artifacts"]
+        if item["source_key"] == "hwm-inputs"
+    ]
+    assert len(hwm_artifacts) == 1
+    assert hwm_artifacts[0]["artifact_id"] in artifact_ids
+
+
+def test_hwm_inputs_absent_omits_catalog_key(tmp_path: Path) -> None:
+    spec_path, _spec_data = _spec(tmp_path)
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    assert "hwm_inputs" not in catalog
+
+
+def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
+    tmp_path: Path,
+) -> None:
+    """Golden byte-identity regression: a spec without the hwm-inputs source
+    must produce a catalog and generation manifest byte-identical to the
+    pre-envelope builder (hashes captured from the pre-envelope code path)."""
+    spec_path, _spec_data = _spec(tmp_path)
+    output_root = tmp_path / "private-output"
+    evidence = baseline.stage_baseline(spec_path, output_root)
+    generation_dir = output_root / "generations" / evidence["generation_id"]
+    catalog_bytes = (generation_dir / "portfolio-baseline.json").read_bytes()
+    manifest_bytes = (generation_dir / "generation.json").read_bytes()
+    assert b'"hwm_inputs"' not in catalog_bytes
+    assert (
+        hashlib.sha256(catalog_bytes).hexdigest()
+        == "fde46f735538e0cce5246e32e9ce15e9e071ed0d0d992507c954969f8f8e61ce"
+    )
+    assert (
+        hashlib.sha256(manifest_bytes).hexdigest()
+        == "58a0fcf30bc5b21a09444b1fbdd19cc5d9c7f10a4f42d382472cbd8cfc8f8b39"
+    )
+
+
+def test_hwm_inputs_anchor_date_after_as_of_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["anchor"]["anchor_date"] = "2026-08-01"  # after as_of 2026-07-30
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="anchor_date must not be after catalog as_of_date",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_provenance_unresolved_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["anchor"]["acceptance_provenance"]["source_artifact_id"] = (
+        "nonexistent-artifact"
+    )
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="does not resolve to an admitted source artifact",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_provenance_sha256_mismatch_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    # Keep a valid artifact_id but change sha256.
+    envelope["anchor"]["acceptance_provenance"]["source_artifact_sha256"] = "a" * 64
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="sha256 does not match catalog source_artifact",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_provenance_observation_artifact_role_fails(
+    tmp_path: Path,
+) -> None:
+    """Acceptance provenance must resolve to the anchor-acceptance role, not
+    an arbitrary observation artifact."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    artifacts = _artifacts_from_sources(spec["sources"])
+    envelope = _hwm_inputs_valid_envelope(artifacts)
+    observation = artifacts["alpaca-events"]
+    envelope["anchor"]["acceptance_provenance"]["source_artifact_id"] = observation[
+        "artifact_id"
+    ]
+    envelope["anchor"]["acceptance_provenance"]["source_artifact_sha256"] = observation[
+        "sha256"
+    ]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="has schema role 'synthetic-alpaca-events'",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_accepted_at_not_iso_datetime_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["anchor"]["acceptance_provenance"]["accepted_at"] = "2026-07-30"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="must be an ISO datetime",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_duplicate_period_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"].append(envelope["periods"][0].copy())
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="duplicate period",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_available_period_null_capital_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["disposition"] = "AVAILABLE"
+    envelope["periods"][0]["beginning_capital_usd"] = None
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="AVAILABLE period must have non-null beginning_capital_usd",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_available_period_null_return_reference_fails(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["disposition"] = "AVAILABLE"
+    envelope["periods"][0]["beginning_capital_usd"] = "10"
+    envelope["periods"][0]["return_source_record_id"] = None
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="AVAILABLE period must have non-null return_source_record_id",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_not_admitted_period_has_null_capital_and_return(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["disposition"] = "NOT_ADMITTED"
+    _write_envelope(spec_path, spec, envelope)
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    row = catalog["hwm_inputs"]["periods"][0]
+    assert row["disposition"] == "NOT_ADMITTED"
+
+
+def test_hwm_inputs_not_admitted_with_non_null_capital_fails(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["disposition"] = "NOT_ADMITTED"
+    envelope["periods"][0]["beginning_capital_usd"] = "10"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="NOT_ADMITTED period must have null beginning_capital_usd",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_unavailable_with_non_null_capital_fails(tmp_path: Path) -> None:
+    """An UNAVAILABLE row must never carry capital (disposition invariant)."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["beginning_capital_usd"] = "10"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="UNAVAILABLE period must have null beginning_capital_usd",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_unavailable_with_non_null_return_reference_fails(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["return_source_record_id"] = "return-ghost"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="UNAVAILABLE period must have null return_source_record_id",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_confirmed_zero_flow_without_source_records_fails(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["flow_status"] = "CONFIRMED_ZERO"
+    envelope["periods"][0]["flow_source_record_ids"] = []
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="CONFIRMED_ZERO flow_status requires non-empty",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_confirmed_one_fx_without_source_records_fails(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["fx_status"] = "CONFIRMED_ONE"
+    envelope["periods"][0]["fx_source_record_ids"] = []
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="CONFIRMED_ONE fx_status requires non-empty fx_source_record_ids",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_confirmed_zero_fabricated_attestation_fails(
+    tmp_path: Path,
+) -> None:
+    """A non-empty but unresolvable attestation reference must fail closed."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["flow_status"] = "CONFIRMED_ZERO"
+    envelope["periods"][0]["flow_source_record_ids"] = [
+        "sources/hwm-flow-attestation/0000000000000000"
+    ]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="does not resolve to an admitted source artifact",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_confirmed_zero_wrong_role_attestation_fails(
+    tmp_path: Path,
+) -> None:
+    """An attestation must resolve to the flow-attestation role, not to an
+    arbitrary admitted observation artifact."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    artifacts = _artifacts_from_sources(spec["sources"])
+    envelope = _hwm_inputs_valid_envelope(artifacts)
+    envelope["periods"][0]["flow_status"] = "CONFIRMED_ZERO"
+    envelope["periods"][0]["flow_source_record_ids"] = [
+        artifacts["schwab-flows"]["artifact_id"]
+    ]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="has schema role 'synthetic-schwab-flows'",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_confirmed_zero_resolved_attestation_passes(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    source_root = Path(spec["roots"]["synthetic"])
+    _add_governed_source(
+        spec,
+        source_root,
+        "hwm-flow-attestation",
+        {
+            "account_id": "account-schwab-a",
+            "attested_zero_flow_dates": ["2026-07-01"],
+        },
+    )
+    artifacts = _artifacts_from_sources(spec["sources"])
+    envelope = _hwm_inputs_valid_envelope(artifacts)
+    envelope["periods"][0]["flow_status"] = "CONFIRMED_ZERO"
+    envelope["periods"][0]["flow_source_record_ids"] = [
+        artifacts["hwm-flow-attestation"]["artifact_id"]
+    ]
+    _write_envelope(spec_path, spec, envelope)
+    catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
+    assert catalog["hwm_inputs"]["periods"][0]["flow_status"] == "CONFIRMED_ZERO"
+
+
+def test_hwm_inputs_available_missing_flow_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["disposition"] = "AVAILABLE"
+    envelope["periods"][0]["beginning_capital_usd"] = "10"
+    envelope["periods"][0]["return_source_record_id"] = "return-1"
+    envelope["periods"][0]["flow_status"] = "MISSING"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="AVAILABLE period must not have MISSING flow_status",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_available_missing_fx_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["disposition"] = "AVAILABLE"
+    envelope["periods"][0]["beginning_capital_usd"] = "10"
+    envelope["periods"][0]["return_source_record_id"] = "return-1"
+    envelope["periods"][0]["flow_status"] = "OBSERVED"
+    envelope["periods"][0]["fx_status"] = "MISSING"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="AVAILABLE period must not have MISSING fx_status",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_hwm_policy_id_wrong_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["anchor"]["hwm_policy_id"] = "WRONG-POLICY"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="hwm_policy_id must be PORT-HWM-3",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_contract_version_not_one_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["contract_version"] = 2
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="contract_version must be 1",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_duplicate_calendar_authority_lane_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["calendar_authorities"].append(envelope["calendar_authorities"][0].copy())
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="duplicate calendar_authorities lane",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_calendar_authority_observation_artifact_fails(
+    tmp_path: Path,
+) -> None:
+    """A calendar authority must resolve to the per-lane calendar-authority
+    role, never to an observation artifact such as alpaca-events."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    artifacts = _artifacts_from_sources(spec["sources"])
+    envelope = _hwm_inputs_valid_envelope(artifacts)
+    envelope["calendar_authorities"][0]["admitted_source_artifact_id"] = artifacts[
+        "alpaca-events"
+    ]["artifact_id"]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="has schema role 'synthetic-alpaca-events'",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_period_lane_without_authority_fails(tmp_path: Path) -> None:
+    """Every lane used by a period must have an admitted calendar authority."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["calendar_authorities"] = [
+        item for item in envelope["calendar_authorities"] if item["lane"] != "PROVIDER"
+    ]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="periods lane 'PROVIDER' has no admitted calendar authority",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_incomplete_keyspace_fails(tmp_path: Path) -> None:
+    """Dropping an expected (strategy, date) row must fail closed — omission
+    cannot masquerade as exclusion."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"] = envelope["periods"][:-1]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="period keyspace differs from the expected assignment keyspace",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_unexpected_keyspace_row_fails(tmp_path: Path) -> None:
+    """A row outside the expected keyspace (an unassigned strategy) fails."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"].append(
+        {
+            "strategy_id": "strategy-4",
+            "date": "2026-07-01",
+            "lane": "LEGACY",
+            "disposition": "UNAVAILABLE",
+            "beginning_capital_usd": None,
+            "return_source_record_id": None,
+            "flow_status": "MISSING",
+            "fx_status": "MISSING",
+        }
+    )
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="period keyspace differs from the expected assignment keyspace",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_unknown_component_account_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["component_account_ids"] = ["account-ghost"]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="component account 'account-ghost' is not a known account",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_component_account_not_mapped_to_strategy_fails(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    row = envelope["periods"][0]  # strategy-1, ACCOUNT lane
+    row["disposition"] = "AVAILABLE"
+    row["beginning_capital_usd"] = "10"
+    row["return_source_record_id"] = "return-1"
+    row["flow_status"] = "OBSERVED"
+    row["fx_status"] = "NOT_REQUIRED"
+    row["component_account_ids"] = ["account-schwab-b"]  # known, but unassigned
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="'account-schwab-b' is not mapped to strategy 'strategy-1'",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_account_available_without_rollforward_evidence_fails(
+    tmp_path: Path,
+) -> None:
+    """Snapshot backfill is rejected: an ACCOUNT-lane AVAILABLE period needs
+    hash-bound NAV-rollforward evidence; the allocation snapshot is never a
+    capital source."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    row = envelope["periods"][0]  # strategy-1, ACCOUNT lane
+    row["disposition"] = "AVAILABLE"
+    row["beginning_capital_usd"] = "10"
+    row["return_source_record_id"] = "return-1"
+    row["flow_status"] = "OBSERVED"
+    row["fx_status"] = "NOT_REQUIRED"
+    row["component_account_ids"] = ["account-schwab-a"]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="lacks hash-bound NAV rollforward evidence",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_provider_available_without_capital_schedule_fails(
+    tmp_path: Path,
+) -> None:
+    """PROVIDER-lane AVAILABLE periods are rejected fail-closed: the current
+    catalog admits no hash-bound provider capital evidence (provider-live
+    rows carry no beginning_capital, component accounts, or reconciliation
+    hash), so arbitrary capital/return IDs can never validate."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    row = envelope["periods"][1]  # strategy-2, PROVIDER lane
+    assert row["lane"] == "PROVIDER"
+    row["disposition"] = "AVAILABLE"
+    row["beginning_capital_usd"] = "10"
+    row["return_source_record_id"] = "return-2"
+    row["flow_status"] = "OBSERVED"
+    row["fx_status"] = "NOT_REQUIRED"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="requires hash-bound provider capital evidence",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_anchor_disagrees_with_acceptance_record_fails(
+    tmp_path: Path,
+) -> None:
+    """A fabricated later anchor truncates the derived keyspace; the anchor
+    must equal the admitted hwm-anchor-acceptance record on every governed
+    field."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["anchor"]["anchor_date"] = "2026-07-02"  # acceptance says 2026-07-01
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="anchor anchor_date disagrees with the admitted "
+        "hwm-anchor-acceptance record",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_anchor_index_base_value_disagrees_with_record_fails(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    source_root = Path(spec["roots"]["synthetic"])
+    # The envelope policy id is pinned by the builder's own constant check,
+    # so exercise the cross-check through a drifted acceptance RECORD that
+    # still passes the pin but no longer matches the envelope.
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    _add_governed_source(
+        spec,
+        source_root,
+        "hwm-anchor-acceptance",
+        {
+            "anchor_date": "2026-07-01",
+            "hwm_policy_id": "PORT-HWM-3",
+            "index_base_value": "2.0",
+        },
+    )
+    artifacts = _artifacts_from_sources(spec["sources"])
+    envelope["anchor"]["acceptance_provenance"]["source_artifact_sha256"] = artifacts[
+        "hwm-anchor-acceptance"
+    ]["sha256"]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="anchor index_base_value disagrees with the admitted "
+        "hwm-anchor-acceptance record",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_anchor_policy_id_disagrees_with_acceptance_record_fails(
+    tmp_path: Path,
+) -> None:
+    """The acceptance record's hwm_policy_id drift is caught by the cross-check."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    source_root = Path(spec["roots"]["synthetic"])
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    _add_governed_source(
+        spec,
+        source_root,
+        "hwm-anchor-acceptance",
+        {
+            "anchor_date": "2026-07-01",
+            "hwm_policy_id": "PORT-HWM-DRIFTED",
+            "index_base_value": "1.0",
+        },
+    )
+    artifacts = _artifacts_from_sources(spec["sources"])
+    envelope["anchor"]["acceptance_provenance"]["source_artifact_sha256"] = artifacts[
+        "hwm-anchor-acceptance"
+    ]["sha256"]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="anchor hwm_policy_id disagrees with the admitted "
+        "hwm-anchor-acceptance record",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_envelope_source_role_binding_fails(tmp_path: Path) -> None:
+    """The hwm-inputs source itself is role-bound: schema_name must equal the
+    canonical governed role."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    spec["sources"]["hwm-inputs"]["schema_name"] = "WRONG-HWM-ROLE"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="sources.hwm-inputs schema_name must equal the governed role",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_legacy_available_fails_closed(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    row = envelope["periods"][2]  # strategy-3, LEGACY lane
+    assert row["lane"] == "LEGACY"
+    row["disposition"] = "AVAILABLE"
+    row["beginning_capital_usd"] = "10"
+    row["return_source_record_id"] = "return-3"
+    row["flow_status"] = "OBSERVED"
+    row["fx_status"] = "NOT_REQUIRED"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="LEGACY lane has no admitted effective-dated capital schedule",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_unreconciled_endpoint_delta_fails(tmp_path: Path) -> None:
+    """The declared delta is recomputed independently; a fabricated delta is
+    rejected."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["reconciliation"]["allocation_endpoint_check"]["delta_usd"] = "1"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="delta_usd differs from the recomputed delta",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_endpoint_matched_false_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["reconciliation"]["allocation_endpoint_check"]["matched"] = False
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="matched must be true for a reconciled endpoint",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_source_hash_differs_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    spec["sources"]["hwm-inputs"]["expected_sha256"] = "a" * 64
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="hwm-inputs source hash differs",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_stage_deterministic_with_envelope(tmp_path: Path) -> None:
+    spec_path, _spec_data = _spec_with_hwm_inputs(tmp_path)
+    output_root = tmp_path / "private-output"
+    first = baseline.stage_baseline(spec_path, output_root)
+    second = baseline.stage_baseline(spec_path, output_root)
+    assert first == second
+    generation_dir = output_root / "generations" / first["generation_id"]
+    catalog_bytes = (generation_dir / "portfolio-baseline.json").read_bytes()
+    catalog = json.loads(catalog_bytes)
+    assert "hwm_inputs" in catalog
+    assert catalog["hwm_inputs"]["contract_version"] == 1
+    # Existing stats must still hold.
+    assert first["strategy_count"] == 9
+
+
+def test_hwm_inputs_unknown_strategy_id_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["strategy_id"] = "unknown-strategy"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="not a known strategy",
+    ):
+        baseline.build_catalog(spec_path)
 
 
 def test_cli_output_is_sanitized(
