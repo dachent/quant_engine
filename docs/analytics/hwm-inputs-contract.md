@@ -34,8 +34,10 @@ breaking change.
 | `hwm_policy_id` | Exactly `"PORT-HWM-3"`. |
 | `acceptance_provenance` | Must resolve to a typed, hash-bound catalog `source_artifact`. |
 
-`acceptance_provenance` fields: `accepted_at` (valid ISO-8601 datetime with
-offset or `Z`; a bare date is rejected), `accepted_by`,
+`acceptance_provenance` fields: `accepted_at` (a real ISO-8601 datetime
+parsed with `datetime.fromisoformat` semantics, `Z` accepted; a timezone
+offset is required and impossible values such as `2026-99-99T25:61:61Z` are
+rejected), `accepted_by`,
 `source_artifact_id`, `source_artifact_sha256`.  The referenced artifact
 must BE the admitted `hwm-anchor-acceptance` governed spec source (the only
 role the builder can open and hash-verify), must appear in the catalog's
@@ -69,15 +71,16 @@ closed).
 ### `periods`
 
 One row per `(strategy_id, date)` in the expected keyspace — no more, no
-fewer.  The expected keyspace is derived by the builder from the MAPPED
-assignments (each strategy's assigned-account effective intervals),
-intersected with the anchor-to-as-of window: for every strategy with a
-MAPPED assignment overlapping `[anchor_date, as_of_date]`, every calendar
-date from `max(anchor_date, earliest effective_start)` through
-`as_of_date` is expected exactly once.  The envelope's period keys must
-EQUAL this set; omission cannot masquerade as exclusion.  (A MAPPED
-assignment without an explicit `effective_start` is itself a validation
-failure.)
+fewer.  The expected keyspace is derived by the builder from the GOVERNED
+PERIMETER — every strategy with a systematic allocation in the catalog,
+classified included/excluded by the admitted PORT-HWM-3 policy — over every
+calendar date from `anchor_date` through `as_of_date`.  Perimeter
+membership never depends on account assignments, so an allocated but
+unmapped (e.g. provider-only) sleeve cannot be silently omitted; provider
+lane membership is derived from the policy/admissions path and such sleeves
+appear as explicit rows.  Assignments are used only to validate
+account-lane evidence.  The envelope's period keys must EQUAL the expected
+set; omission cannot masquerade as exclusion.
 
 | Field | Meaning |
 |---|---|
@@ -106,8 +109,22 @@ failure.)
   corresponding `*_source_record_ids` array to resolve to an admitted,
   hash-verified artifact of the matching attestation role
   (`hwm-flow-attestation` / `hwm-fx-attestation`) in the final
-  `source_artifacts` set.  Non-empty-but-fabricated or wrong-role
-  references fail closed.
+  `source_artifacts` set.  Hash resolution proves admission, not content:
+  the builder additionally parses the attestation record and requires its
+  content to assert exactly the period under validation.  The attestation
+  record contract is a closed JSON object
+  `{"strategy_id", "date", "flow_status"}` (asserting `"CONFIRMED_ZERO"`)
+  or `{"strategy_id", "date", "fx_status"}` (asserting `"CONFIRMED_ONE"`);
+  the record's `strategy_id` and `date` must equal the period's, and the
+  status field must equal the asserted value.  Non-empty-but-fabricated,
+  wrong-role, or content-mismatched references all fail closed.  (One
+  attestation artifact asserts one (strategy, date); multiple attestations
+  require multiple admitted artifacts.)
+- `EXCLUDED_BY_POLICY` is accepted only for strategies named in the
+  admitted PORT-HWM-3 `material_perimeter.exclusions` whose
+  `effective_date` is on or before the period date; anything else is
+  rejected.  The builder loads the versioned contract
+  `contracts/portfolio-hwm-policy-v3.json` directly.
 
 **Membership:** every `component_account_ids` entry must be a known
 account; for `ACCOUNT`-lane `AVAILABLE` rows each entry must additionally
@@ -231,8 +248,9 @@ consumed by the admission pipeline.
 - Every artifact reference resolves against the catalog's FINAL
   `source_artifacts` set with the required schema role and a verified
   SHA-256.
-- The expected (strategy, date) keyspace is derived from assignments
-  bounded by anchor and as-of dates and must equal the period keys
+- The expected (strategy, date) keyspace is derived from the governed
+  perimeter (systematic allocations, classified by the admitted PORT-HWM-3
+  policy) over the anchor-to-as-of window and must equal the period keys
   exactly.
 - Any unknown key, invalid value, or rule violation raises
   `BaselineValidationError` and aborts catalog generation.

@@ -1049,19 +1049,19 @@ def _hwm_inputs_valid_envelope(
 ) -> dict[str, Any]:
     """Return a synthetic, fully valid hwm_inputs envelope for testing.
 
-    The v1 fixture has MAPPED assignments for strategy-1 (ACCOUNT),
-    strategy-2 (PROVIDER), and strategy-3 (LEGACY), all effective from
-    2026-01-01.  The expected keyspace is therefore those three strategies
-    over 2026-07-01..2026-07-30; every row is UNAVAILABLE because no
-    hash-bound NAV-rollforward evidence or admitted provider capital
-    schedule exists in the fixture.
+    The governed perimeter is the nine allocated systematic strategies, so
+    the expected keyspace is strategy-1..strategy-9 over
+    2026-07-01..2026-07-30 (270 rows).  strategy-1 rides the ACCOUNT lane
+    (mapped account-schwab-a), strategy-2 the PROVIDER lane, and the
+    remaining strategies the LEGACY lane; every row is UNAVAILABLE because
+    no hash-bound NAV-rollforward evidence or admitted provider/legacy
+    capital evidence exists in the fixture.
     """
     anchor_artifact = artifacts["hwm-anchor-acceptance"]
     periods: list[dict[str, Any]] = []
     lanes = {
-        "strategy-1": "ACCOUNT",
-        "strategy-2": "PROVIDER",
-        "strategy-3": "LEGACY",
+        **{"strategy-1": "ACCOUNT", "strategy-2": "PROVIDER"},
+        **{f"strategy-{index}": "LEGACY" for index in range(3, 10)},
     }
     day = date(2026, 7, 1)
     while day <= date(2026, 7, 30):
@@ -1212,8 +1212,8 @@ def test_hwm_inputs_present_populates_catalog_key(tmp_path: Path) -> None:
     assert hwm["contract_version"] == 1
     assert hwm["anchor"]["anchor_date"] == "2026-07-01"
     assert hwm["anchor"]["hwm_policy_id"] == "PORT-HWM-3"
-    # 3 assigned strategies x 30 days (2026-07-01..2026-07-30).
-    assert len(hwm["periods"]) == 90
+    # 9 perimeter strategies x 30 days (2026-07-01..2026-07-30).
+    assert len(hwm["periods"]) == 270
     assert {row["disposition"] for row in hwm["periods"]} == {"UNAVAILABLE"}
     assert hwm["reconciliation"]["period_capital_method"] == "NAV_ROLLFORWARD"
     # The hwm-inputs source artifact must appear in source_artifacts.
@@ -1321,11 +1321,43 @@ def test_hwm_inputs_provenance_observation_artifact_role_fails(
 def test_hwm_inputs_accepted_at_not_iso_datetime_fails(tmp_path: Path) -> None:
     spec_path, spec = _spec_with_hwm_inputs(tmp_path)
     envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
-    envelope["anchor"]["acceptance_provenance"]["accepted_at"] = "2026-07-30"
+    # Impossible calendar values must be rejected by real datetime parsing,
+    # not by digit-placement patterns.
+    envelope["anchor"]["acceptance_provenance"]["accepted_at"] = "2026-99-99T25:61:61Z"
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
         match="must be an ISO datetime",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_accepted_at_without_timezone_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["anchor"]["acceptance_provenance"]["accepted_at"] = (
+        "2026-07-30T00:00:00"  # naive: no offset
+    )
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="must be an ISO datetime with a timezone offset",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_excluded_by_policy_requires_policy_exclusion(
+    tmp_path: Path,
+) -> None:
+    """EXCLUDED_BY_POLICY is not a bare enum label: strategy-1 is included in
+    the admitted PORT-HWM-3 perimeter, so labeling it excluded must fail."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"][0]["disposition"] = "EXCLUDED_BY_POLICY"
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="is not named in the admitted PORT-HWM-3 exclusions",
     ):
         baseline.build_catalog(spec_path)
 
@@ -1493,20 +1525,15 @@ def test_hwm_inputs_confirmed_zero_wrong_role_attestation_fails(
         baseline.build_catalog(spec_path)
 
 
-def test_hwm_inputs_confirmed_zero_resolved_attestation_passes(
-    tmp_path: Path,
+def _envelope_with_flow_attestation(
+    spec_path: Path,
+    spec: dict[str, Any],
+    attestation: dict[str, Any],
 ) -> None:
-    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    """Admit an hwm-flow-attestation record and reference it from the first
+    period (strategy-1, 2026-07-01) with CONFIRMED_ZERO flow status."""
     source_root = Path(spec["roots"]["synthetic"])
-    _add_governed_source(
-        spec,
-        source_root,
-        "hwm-flow-attestation",
-        {
-            "account_id": "account-schwab-a",
-            "attested_zero_flow_dates": ["2026-07-01"],
-        },
-    )
+    _add_governed_source(spec, source_root, "hwm-flow-attestation", attestation)
     artifacts = _artifacts_from_sources(spec["sources"])
     envelope = _hwm_inputs_valid_envelope(artifacts)
     envelope["periods"][0]["flow_status"] = "CONFIRMED_ZERO"
@@ -1514,8 +1541,77 @@ def test_hwm_inputs_confirmed_zero_resolved_attestation_passes(
         artifacts["hwm-flow-attestation"]["artifact_id"]
     ]
     _write_envelope(spec_path, spec, envelope)
+
+
+def test_hwm_inputs_confirmed_zero_resolved_attestation_passes(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    _envelope_with_flow_attestation(
+        spec_path,
+        spec,
+        {
+            "strategy_id": "strategy-1",
+            "date": "2026-07-01",
+            "flow_status": "CONFIRMED_ZERO",
+        },
+    )
     catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
     assert catalog["hwm_inputs"]["periods"][0]["flow_status"] == "CONFIRMED_ZERO"
+
+
+def test_hwm_inputs_attestation_wrong_date_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    _envelope_with_flow_attestation(
+        spec_path,
+        spec,
+        {
+            "strategy_id": "strategy-1",
+            "date": "2026-07-02",  # period is 2026-07-01
+            "flow_status": "CONFIRMED_ZERO",
+        },
+    )
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="flow attestation date does not match the period",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_attestation_wrong_strategy_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    _envelope_with_flow_attestation(
+        spec_path,
+        spec,
+        {
+            "strategy_id": "strategy-2",  # period is strategy-1
+            "date": "2026-07-01",
+            "flow_status": "CONFIRMED_ZERO",
+        },
+    )
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="flow attestation strategy_id does not match the period",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_attestation_wrong_asserted_value_fails(tmp_path: Path) -> None:
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    _envelope_with_flow_attestation(
+        spec_path,
+        spec,
+        {
+            "strategy_id": "strategy-1",
+            "date": "2026-07-01",
+            "flow_status": "OBSERVED",  # must assert CONFIRMED_ZERO
+        },
+    )
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="flow attestation must assert flow_status CONFIRMED_ZERO",
+    ):
+        baseline.build_catalog(spec_path)
 
 
 def test_hwm_inputs_available_missing_flow_fails(tmp_path: Path) -> None:
@@ -1628,20 +1724,39 @@ def test_hwm_inputs_incomplete_keyspace_fails(tmp_path: Path) -> None:
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
-        match="period keyspace differs from the expected assignment keyspace",
+        match="period keyspace differs from the expected perimeter keyspace",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+def test_hwm_inputs_unmapped_allocated_strategy_rows_required(
+    tmp_path: Path,
+) -> None:
+    """Survivor-leak regression: strategy-4 has a systematic allocation but
+    no mapped account assignment.  The governed perimeter still expects its
+    rows; omitting them must fail closed."""
+    spec_path, spec = _spec_with_hwm_inputs(tmp_path)
+    envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
+    envelope["periods"] = [
+        row for row in envelope["periods"] if row["strategy_id"] != "strategy-4"
+    ]
+    _write_envelope(spec_path, spec, envelope)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="period keyspace differs from the expected perimeter keyspace",
     ):
         baseline.build_catalog(spec_path)
 
 
 def test_hwm_inputs_unexpected_keyspace_row_fails(tmp_path: Path) -> None:
-    """A row outside the expected keyspace (an unassigned strategy) fails."""
+    """A row outside the expected keyspace (a pre-anchor date) fails."""
     spec_path, spec = _spec_with_hwm_inputs(tmp_path)
     envelope = _hwm_inputs_valid_envelope(_artifacts_from_sources(spec["sources"]))
     envelope["periods"].append(
         {
-            "strategy_id": "strategy-4",
-            "date": "2026-07-01",
-            "lane": "LEGACY",
+            "strategy_id": "strategy-1",
+            "date": "2026-06-30",  # before the 2026-07-01 anchor
+            "lane": "ACCOUNT",
             "disposition": "UNAVAILABLE",
             "beginning_capital_usd": None,
             "return_source_record_id": None,
@@ -1652,7 +1767,7 @@ def test_hwm_inputs_unexpected_keyspace_row_fails(tmp_path: Path) -> None:
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
-        match="period keyspace differs from the expected assignment keyspace",
+        match="period keyspace differs from the expected perimeter keyspace",
     ):
         baseline.build_catalog(spec_path)
 

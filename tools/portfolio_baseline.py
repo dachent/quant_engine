@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import csv
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
@@ -128,8 +128,8 @@ _HWM_PERIOD_KEYS: Final = _HWM_PERIOD_REQUIRED_KEYS | {
     "flow_source_record_ids",
     "fx_source_record_ids",
 }
-_ISO_DATETIME = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+_HWM_POLICY_PATH: Final = (
+    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
 )
 
 _CSV_FIELDS: Final[dict[str, tuple[str, ...]]] = {
@@ -2328,49 +2328,59 @@ def _coverage_evidence(
 
 def _iso_datetime(value: object, field_name: str) -> str:
     accepted = _text(value, field_name)
-    if _ISO_DATETIME.fullmatch(accepted) is None:
-        raise BaselineValidationError(f"{field_name} must be an ISO datetime")
+    try:
+        parsed = datetime.fromisoformat(accepted.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise BaselineValidationError(f"{field_name} must be an ISO datetime") from exc
+    if parsed.tzinfo is None:
+        raise BaselineValidationError(
+            f"{field_name} must be an ISO datetime with a timezone offset"
+        )
     return accepted
 
 
+def _hwm_policy_exclusions() -> dict[str, date]:
+    """Load the admitted PORT-HWM-3 perimeter exclusions (strategy → effective
+    date) from the versioned repository contract."""
+    policy = _load_json(_HWM_POLICY_PATH, "hwm policy contract")
+    if policy.get("policy_id") != "PORT-HWM-3":
+        raise BaselineValidationError("hwm policy contract must be PORT-HWM-3")
+    perimeter = _object(policy.get("material_perimeter"), "hwm policy perimeter")
+    exclusions: dict[str, date] = {}
+    for item in _objects(perimeter.get("exclusions"), "hwm policy exclusions"):
+        strategy_id = _text(item.get("strategy_id"), "hwm policy exclusion")
+        exclusions[strategy_id] = _date(
+            item.get("effective_date"), "hwm policy exclusion effective_date"
+        )
+    return exclusions
+
+
 def _hwm_expected_keyspace(
-    assignments: Sequence[Mapping[str, Any]],
+    allocations: Sequence[Mapping[str, Any]],
     anchor: date,
     as_of: date,
 ) -> set[tuple[str, str]]:
     """Derive the complete expected (strategy_id, date) keyspace.
 
-    A strategy enters the keyspace through every MAPPED account assignment
-    whose effective interval intersects the anchor-to-as-of window; the
-    expected dates run from the anchor (or a later assignment start) through
-    the catalog as-of date.  Every expected key must appear exactly once in
-    the envelope so omission cannot masquerade as exclusion.
+    The expected strategy set is the governed perimeter: every strategy with
+    a systematic allocation in the catalog.  Perimeter membership never
+    depends on account assignments, so an allocated but unmapped (e.g.
+    provider-only) sleeve cannot be silently omitted.  Every perimeter
+    strategy is expected on every day from the anchor through the catalog
+    as-of date; the envelope's period keys must equal this set exactly so
+    omission cannot masquerade as exclusion.  Assignments are used only to
+    validate account-lane evidence, never to bound membership.
     """
-    strategy_starts: dict[str, list[date]] = defaultdict(list)
-    for assignment in assignments:
-        if assignment.get("mapping_status") != "MAPPED":
-            continue
-        strategy_id = assignment.get("strategy_id")
-        start_value = assignment.get("effective_start")
-        if start_value is None:
-            raise BaselineValidationError(
-                "mapped assignment requires an explicit effective_start"
-            )
-        if strategy_id is None:
-            raise BaselineValidationError("mapped assignment requires a strategy_id")
-        start = _date(start_value, "assignment.effective_start")
-        end_value = assignment.get("effective_end")
-        if (
-            end_value is not None
-            and _date(end_value, "assignment.effective_end") < anchor
-        ):
-            continue
-        if start > as_of:
-            continue
-        strategy_starts[_text(strategy_id, "assignment.strategy_id")].append(start)
+    strategy_ids = sorted(
+        {
+            _text(item["strategy_id"], "allocation.strategy_id")
+            for item in allocations
+            if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id") is not None
+        }
+    )
     expected: set[tuple[str, str]] = set()
-    for strategy_id, starts in sorted(strategy_starts.items()):
-        current = max(anchor, min(starts))
+    for strategy_id in strategy_ids:
+        current = anchor
         while current <= as_of:
             expected.add((strategy_id, current.isoformat()))
             current += timedelta(days=1)
@@ -2406,6 +2416,42 @@ def _hwm_strategy_account_windows(
     return windows
 
 
+def _hwm_governed_source_doc(
+    spec_sources: Mapping[str, Any],
+    roots: Mapping[str, Path],
+    source_key: str,
+    artifact_id: str,
+) -> dict[str, Any]:
+    """Open a governed HWM source record bound to an artifact identity.
+
+    The artifact id must be exactly the one derived from the admitted
+    ``source_key`` spec source (whose file hash the builder has already
+    verified), so the parsed content is hash-bound.  Anything else fails
+    closed.
+    """
+    if source_key not in spec_sources:
+        raise BaselineValidationError(
+            f"hwm_inputs reference {artifact_id!r} does not resolve to an "
+            f"admitted {source_key} source"
+        )
+    source_ref = _object(spec_sources[source_key], f"sources.{source_key}")
+    relative = _portable_relative(
+        source_ref["relative_path"], f"sources.{source_key}.relative_path"
+    )
+    expected_artifact_id = (
+        f"sources/{source_key}/{hashlib.sha256(relative.encode()).hexdigest()[:16]}"
+    )
+    if artifact_id != expected_artifact_id:
+        raise BaselineValidationError(
+            f"hwm_inputs reference {artifact_id!r} does not resolve to the "
+            f"admitted {source_key} source artifact"
+        )
+    root_id = _identifier(source_ref["root_id"], f"sources.{source_key}.root_id")
+    if root_id not in roots:
+        raise BaselineValidationError(f"source {source_key} has unknown root")
+    return _load_json(_source_path(roots[root_id], relative), f"{source_key} record")
+
+
 def _load_hwm_inputs_envelope(
     spec_sources: Mapping[str, Any],
     roots: Mapping[str, Path],
@@ -2426,16 +2472,20 @@ def _load_hwm_inputs_envelope(
     ``None`` and the catalog omits the ``hwm_inputs`` key entirely.
 
     Enforcement is fail-closed: the expected (strategy, date) keyspace is
-    derived from MAPPED assignments bounded by the anchor and as-of dates and
-    must equal the envelope's period keys exactly; the anchor must equal the
-    admitted ``hwm-anchor-acceptance`` record on the governed fields; every
-    artifact reference resolves against the complete final source-artifact
-    set with a required schema role and a verified hash; ACCOUNT-lane capital
-    is verified against the hash-bound NAV-rollforward rows in
+    derived from the governed perimeter (every systematic allocation in the
+    catalog) over the anchor-to-as-of window and must equal the envelope's
+    period keys exactly; the anchor must equal the admitted
+    ``hwm-anchor-acceptance`` record on the governed fields; every artifact
+    reference resolves against the complete final source-artifact set with a
+    required schema role and a verified hash; attestations must resolve to
+    hash-bound records whose content asserts the period's strategy, date,
+    and value; ``EXCLUDED_BY_POLICY`` rows must be named in the admitted
+    PORT-HWM-3 exclusions effective for the period date; ACCOUNT-lane
+    capital is verified against the hash-bound NAV-rollforward rows in
     ``strategy_returns`` (never the allocation snapshot); PROVIDER- and
     LEGACY-lane AVAILABLE periods are rejected until hash-bound provider or
-    legacy capital evidence is admitted; and the allocation endpoint check is
-    recomputed independently.
+    legacy capital evidence is admitted; and the allocation endpoint check
+    is recomputed independently.
     """
     if _HWM_INPUTS_SOURCE_KEY not in spec_sources:
         return None
@@ -2590,30 +2640,11 @@ def _load_hwm_inputs_envelope(
     # fabricated later anchor cannot truncate the derived keyspace.  The
     # acceptance record must be the admitted hwm-anchor-acceptance governed
     # source (the only role the builder can open and hash-verify). ---
-    acceptance_key = _HWM_ANCHOR_ACCEPTANCE_ROLE
-    if acceptance_key not in spec_sources:
-        raise BaselineValidationError(
-            "hwm_inputs anchor requires an admitted hwm-anchor-acceptance source"
-        )
-    acceptance_ref = _object(spec_sources[acceptance_key], f"sources.{acceptance_key}")
-    acceptance_relative = _portable_relative(
-        acceptance_ref["relative_path"], f"sources.{acceptance_key}.relative_path"
-    )
-    acceptance_artifact_id = (
-        f"sources/{acceptance_key}/"
-        f"{hashlib.sha256(acceptance_relative.encode()).hexdigest()[:16]}"
-    )
-    if prov_artifact_id != acceptance_artifact_id:
-        raise BaselineValidationError(
-            "hwm_inputs acceptance_provenance must resolve to the admitted "
-            "hwm-anchor-acceptance source artifact"
-        )
-    acceptance_root_id = _identifier(
-        acceptance_ref["root_id"], f"sources.{acceptance_key}.root_id"
-    )
-    acceptance_doc = _load_json(
-        _source_path(roots[acceptance_root_id], acceptance_relative),
-        "hwm-anchor-acceptance record",
+    acceptance_doc = _hwm_governed_source_doc(
+        spec_sources,
+        roots,
+        _HWM_ANCHOR_ACCEPTANCE_ROLE,
+        prov_artifact_id,
     )
     for field in ("anchor_date", "index_base_value", "hwm_policy_id"):
         if acceptance_doc.get(field) != anchor[field]:
@@ -2676,6 +2707,7 @@ def _load_hwm_inputs_envelope(
     strategy_ids = {_text(s["strategy_id"], "strategy.strategy_id") for s in strategies}
     known_accounts = {_text(a["account_id"], "account.account_id") for a in accounts}
     account_windows = _hwm_strategy_account_windows(assignments)
+    policy_exclusions = _hwm_policy_exclusions()
 
     def _mapped_account(strategy_id: str, account_id: str, day: date) -> bool:
         return any(
@@ -2756,6 +2788,15 @@ def _load_hwm_inputs_envelope(
                 f"duplicate period for strategy {sid!r} on {day.isoformat()}"
             )
         seen_keys.add(key)
+
+        if disp == "EXCLUDED_BY_POLICY":
+            effective = policy_exclusions.get(sid)
+            if effective is None or day < effective:
+                raise BaselineValidationError(
+                    f"EXCLUDED_BY_POLICY period for strategy {sid!r} on "
+                    f"{day.isoformat()} is not named in the admitted PORT-HWM-3 "
+                    "exclusions effective for that date"
+                )
 
         capital_val = row["beginning_capital_usd"]
         return_ref = row["return_source_record_id"]
@@ -2875,7 +2916,36 @@ def _load_hwm_inputs_envelope(
                 )
 
         # Attestation: CONFIRMED_* statuses resolve every reference to an
-        # admitted, hash-verified artifact of the matching attestation role.
+        # admitted, hash-verified artifact of the matching attestation role
+        # whose parsed CONTENT asserts exactly this (strategy, date, value).
+        def _check_attestation(
+            source_id: str,
+            role_key: str,
+            status_field: str,
+            asserted: str,
+            field_name: str,
+        ) -> None:
+            _resolve_typed_artifact(source_id, {role_key}, field_name)
+            doc = _hwm_governed_source_doc(spec_sources, roots, role_key, source_id)
+            _strict_keys(
+                doc,
+                {"strategy_id", "date", status_field},
+                f"{role_key} record",
+            )
+            kind = status_field.split("_", 1)[0]
+            if doc["strategy_id"] != sid:
+                raise BaselineValidationError(
+                    f"{kind} attestation strategy_id does not match the period"
+                )
+            if doc["date"] != day.isoformat():
+                raise BaselineValidationError(
+                    f"{kind} attestation date does not match the period"
+                )
+            if doc[status_field] != asserted:
+                raise BaselineValidationError(
+                    f"{kind} attestation must assert {status_field} {asserted}"
+                )
+
         flow_src_ids = row.get("flow_source_record_ids", [])
         if not isinstance(flow_src_ids, list) or any(
             not isinstance(item, str) or not item.strip() for item in flow_src_ids
@@ -2888,9 +2958,11 @@ def _load_hwm_inputs_envelope(
                     "flow_source_record_ids"
                 )
             for source_id in flow_src_ids:
-                _resolve_typed_artifact(
+                _check_attestation(
                     source_id,
-                    {"hwm-flow-attestation"},
+                    "hwm-flow-attestation",
+                    "flow_status",
+                    "CONFIRMED_ZERO",
                     "periods flow_source_record_ids",
                 )
         fx_src_ids = row.get("fx_source_record_ids", [])
@@ -2904,17 +2976,19 @@ def _load_hwm_inputs_envelope(
                     "CONFIRMED_ONE fx_status requires non-empty fx_source_record_ids"
                 )
             for source_id in fx_src_ids:
-                _resolve_typed_artifact(
+                _check_attestation(
                     source_id,
-                    {"hwm-fx-attestation"},
+                    "hwm-fx-attestation",
+                    "fx_status",
+                    "CONFIRMED_ONE",
                     "periods fx_source_record_ids",
                 )
 
     # --- expected-keyspace completeness ---
-    expected_keys = _hwm_expected_keyspace(assignments, anchor_date, as_of)
+    expected_keys = _hwm_expected_keyspace(allocations, anchor_date, as_of)
     if seen_keys != expected_keys:
         raise BaselineValidationError(
-            "hwm_inputs period keyspace differs from the expected assignment "
+            "hwm_inputs period keyspace differs from the expected perimeter "
             f"keyspace: missing={sorted(expected_keys - seen_keys)[:5]}, "
             f"unexpected={sorted(seen_keys - expected_keys)[:5]}"
         )
