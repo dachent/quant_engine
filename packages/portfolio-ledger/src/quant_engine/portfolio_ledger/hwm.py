@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, Final, Mapping, Sequence
 
 
@@ -283,3 +283,63 @@ def governed_hwm_coverage(
         "uncovered_strategies": sorted(uncovered),
         "uncovered_value_usd": format(uncovered_value, "f"),
     }
+
+
+def compute_full_systematic_hwm_index(
+    daily_returns: Sequence[Decimal],
+    *,
+    full_systematic_coverage: bool,
+) -> dict[str, Any]:
+    """Compute the full-systematic high-water-mark index and drawdown.
+
+    The full-systematic HWM index is a geometrically linked TWR index that
+    starts at ``1.0`` on the first covered day.  For each daily return *r_t*:
+
+        index_t = index_{t-1} * (1 + r_t)
+        HWM_t = max(index_0 … index_t)
+        drawdown_t = 1 - index_t / HWM_t
+
+    Returns a ``dict`` with the index series, running HWM, current drawdown,
+    maximum drawdown (exact ``Decimal``), and a ``status`` field.  When
+    ``full_systematic_coverage`` is ``False`` or ``daily_returns`` is empty,
+    ``status`` is ``"UNAVAILABLE"`` and no numeric fields are produced.
+
+    Composite construction rule for downstream wiring
+    -------------------------------------------------
+    Period returns are beginning-capital weighted across all included eligible
+    members and then geometrically linked.  A missing member, daily return,
+    or weight makes the period ``UNAVAILABLE`` — the composite is never
+    recalculated over survivors.
+    """
+
+    if not full_systematic_coverage:
+        return {"status": "UNAVAILABLE"}
+
+    if not daily_returns:
+        return {"status": "UNAVAILABLE"}
+
+    with localcontext() as ctx:
+        ctx.prec = 34
+        index = Decimal("1.0")
+        hwm = index
+        max_drawdown = Decimal("0")
+        index_series: list[Decimal] = [index]
+
+        for r in daily_returns:
+            index = index * (Decimal("1") + r)
+            index_series.append(index)
+            if index > hwm:
+                hwm = index
+            drawdown = Decimal("1") - index / hwm
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+
+        current_drawdown = Decimal("1") - index_series[-1] / hwm
+
+        return {
+            "status": "AVAILABLE",
+            "index_series": index_series,
+            "hwm": hwm,
+            "current_drawdown": current_drawdown,
+            "maximum_drawdown": max_drawdown,
+        }
