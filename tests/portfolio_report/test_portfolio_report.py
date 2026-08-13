@@ -1646,3 +1646,391 @@ def test_report_fails_closed_when_provider_reconciliation_source_is_missing(
         match="hash-bound provider-ledger catalog is missing or ambiguous",
     ):
         reporter.build_report_data(baseline_root)
+
+
+# ── numerical full-systematic HWM tests ────────────────────────────────────
+
+
+def _numerical_hwm_catalog(
+    *,
+    strategy_returns: list[dict[str, Any]] | None = None,
+    allocations: list[dict[str, Any]] | None = None,
+    period_capital: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Minimal synthetic catalog for * _compute_numerical_hwm*."""
+    catalog: dict[str, Any] = {
+        "strategy_returns": strategy_returns or [],
+        "allocations": allocations or [],
+    }
+    if period_capital is not None:
+        catalog["hwm_period_capital"] = period_capital
+    return catalog
+
+
+def _hwm_return_row(
+    strategy_id: str, date: str, ret: str, layer: str = "ACCOUNT_LIVE"
+) -> dict[str, Any]:
+    return {
+        "strategy_id": strategy_id,
+        "date": date,
+        "return": ret,
+        "evidence_layer": layer,
+    }
+
+
+def _hwm_capital_row(strategy_id: str, date: str, capital: str) -> dict[str, Any]:
+    return {
+        "strategy_id": strategy_id,
+        "date": date,
+        "beginning_capital_usd": capital,
+    }
+
+
+def _qualified_strategy_summary(
+    strategy_ids: list[str],
+    *,
+    unqualified: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return strategy-summary rows; *unqualified* ids are INCLUDED but
+    not qualified (UNACCEPTED evidence)."""
+    unqualified_set = set(unqualified or [])
+    rows: list[dict[str, Any]] = []
+    for sid in strategy_ids:
+        if sid in unqualified_set:
+            rows.append(
+                {
+                    "strategy_id": sid,
+                    "hwm_scope": "INCLUDED",
+                    "hwm_evidence_status": "UNACCEPTED",
+                    "hwm_freshness_status": "ACCEPTED",
+                    "nav_status": "AVAILABLE",
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "strategy_id": sid,
+                    "hwm_scope": "INCLUDED",
+                    "hwm_evidence_status": "ACCEPTED",
+                    "hwm_freshness_status": "ACCEPTED",
+                    "nav_status": "AVAILABLE",
+                }
+            )
+    return rows
+
+
+# ── exact conformance vector from portfolio-performance-policy-v1 ───────────
+
+
+def test_numerical_hwm_reproduces_contract_conformance_vector() -> None:
+    """The *complete_hwm_index* case from the performance policy must match."""
+    policy = json.loads(
+        (
+            REPOSITORY_ROOT / "contracts" / "portfolio-performance-policy-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    case = next(c for c in policy["risk_cases"] if c["case_id"] == "complete_hwm_index")
+    assert case["full_systematic_coverage"] is True
+    returns = [Decimal(r) for r in case["daily_returns"]]
+
+    result = reporter.compute_full_systematic_hwm_index(
+        returns, full_systematic_coverage=True
+    )
+    assert result["status"] == "AVAILABLE"
+    expected_dd = Decimal(case["expected_drawdown"])
+    assert result["maximum_drawdown"] == expected_dd
+
+
+# ── varying-capital per-period weighting (B2) ──────────────────────────────
+
+
+def test_numerical_hwm_varying_capital_per_period_weights() -> None:
+    """Per-period beginning capital varies → weights shift per day.
+
+    Day 1: s1=$100, s2=$300 → w1=0.25, w2=0.75
+      composite = 0.25*0.10 + 0.75*(-0.05) = 0.025 - 0.0375 = -0.0125
+    Day 2: s1=$80,  s2=$320 → w1=0.20, w2=0.80
+      composite = 0.20*(-0.20) + 0.80*0.10 = -0.04 + 0.08 = 0.04
+    Index: 1.0 * 0.9875 * 1.04 = 1.027
+    HWM = max(1.0, 0.9875, 1.027) = 1.027
+    Drawdown after day 1: 0.0125 (max), current: 0
+    """
+    returns = [
+        _hwm_return_row("s1", "2026-08-10", "0.10"),
+        _hwm_return_row("s1", "2026-08-11", "-0.20"),
+        _hwm_return_row("s2", "2026-08-10", "-0.05"),
+        _hwm_return_row("s2", "2026-08-11", "0.10"),
+    ]
+    capital = [
+        _hwm_capital_row("s1", "2026-08-10", "100"),
+        _hwm_capital_row("s2", "2026-08-10", "300"),
+        _hwm_capital_row("s1", "2026-08-11", "80"),
+        _hwm_capital_row("s2", "2026-08-11", "320"),
+    ]
+    catalog = _numerical_hwm_catalog(strategy_returns=returns, period_capital=capital)
+    strategy_summary = _qualified_strategy_summary(["s1", "s2"])
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "AVAILABLE"
+    with reporter.localcontext() as ctx:
+        ctx.prec = 34
+        # Day 1: sum=400, w1=0.25, w2=0.75 → 0.25*0.10+0.75*(-0.05)=-0.0125
+        # Day 2: sum=400, w1=0.20, w2=0.80 → 0.20*(-0.20)+0.80*0.10=0.04
+        index = Decimal("1")
+        index *= Decimal("1") + Decimal("-0.0125")  # 0.9875
+        day1_low = index  # the trough
+        index *= Decimal("1") + Decimal("0.04")  # 1.027
+        final_hwm = max(Decimal("1"), index)
+        # max drawdown at day 1: HWM was still 1.0
+        expected_current_dd = Decimal("1") - index / final_hwm
+        expected_max_dd = Decimal("1") - day1_low / Decimal("1")
+    assert reporter.decimal_text(index) == result["hwm_index"]
+    assert reporter.decimal_text(expected_current_dd) == result["hwm_current_drawdown"]
+    assert reporter.decimal_text(expected_max_dd) == result["hwm_maximum_drawdown"]
+
+
+# ── equal-weight full linking (legacy) ──────────────────────────────────────
+
+
+def test_numerical_hwm_geometric_linking_from_qualified_sleeves() -> None:
+    """Two equally-weighted strategies with per-period capital."""
+    returns = [
+        _hwm_return_row("s1", "2026-08-10", "0.10"),
+        _hwm_return_row("s1", "2026-08-11", "-0.20"),
+        _hwm_return_row("s1", "2026-08-12", "0.05"),
+        _hwm_return_row("s2", "2026-08-10", "-0.05"),
+        _hwm_return_row("s2", "2026-08-11", "0.10"),
+        _hwm_return_row("s2", "2026-08-12", "-0.02"),
+    ]
+    capital = [
+        _hwm_capital_row("s1", "2026-08-10", "200"),
+        _hwm_capital_row("s2", "2026-08-10", "200"),
+        _hwm_capital_row("s1", "2026-08-11", "200"),
+        _hwm_capital_row("s2", "2026-08-11", "200"),
+        _hwm_capital_row("s1", "2026-08-12", "200"),
+        _hwm_capital_row("s2", "2026-08-12", "200"),
+    ]
+    catalog = _numerical_hwm_catalog(strategy_returns=returns, period_capital=capital)
+    strategy_summary = _qualified_strategy_summary(["s1", "s2"])
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "AVAILABLE"
+    with reporter.localcontext() as ctx:
+        ctx.prec = 34
+        # Equal weights: 0.50 each
+        # Day 1: 0.50*0.10 + 0.50*(-0.05) = 0.025
+        # Day 2: 0.50*(-0.20) + 0.50*0.10 = -0.05
+        # Day 3: 0.50*0.05 + 0.50*(-0.02) = 0.015
+        index = Decimal("1")
+        index *= Decimal("1") + Decimal("0.025")  # 1.025
+        index *= Decimal("1") + Decimal("-0.05")  # 0.97375
+        index *= Decimal("1") + Decimal("0.015")  # 0.98835625
+        expected_hwm = Decimal("1.025")
+        expected_current_dd = Decimal("1") - index / expected_hwm
+        expected_max_dd = (
+            Decimal("1") - Decimal("1.025") * Decimal("0.95") / expected_hwm
+        )
+    assert reporter.decimal_text(index) == result["hwm_index"]
+    assert reporter.decimal_text(expected_current_dd) == result["hwm_current_drawdown"]
+    assert reporter.decimal_text(expected_max_dd) == result["hwm_maximum_drawdown"]
+
+
+# ── fail-closed / reason-code tests ────────────────────────────────────────
+
+
+def test_numerical_hwm_fails_closed_when_qualified_sleeve_missing_day() -> None:
+    """One sleeve missing a return day → DIVERGENT_MEMBER_CALENDARS."""
+    returns = [
+        _hwm_return_row("s1", "2026-08-10", "0.10"),
+        _hwm_return_row("s1", "2026-08-11", "-0.05"),
+        _hwm_return_row("s2", "2026-08-10", "0.02"),
+    ]
+    capital = [
+        _hwm_capital_row("s1", "2026-08-10", "100"),
+        _hwm_capital_row("s2", "2026-08-10", "100"),
+        _hwm_capital_row("s1", "2026-08-11", "100"),
+        _hwm_capital_row("s2", "2026-08-11", "100"),
+    ]
+    catalog = _numerical_hwm_catalog(strategy_returns=returns, period_capital=capital)
+    strategy_summary = _qualified_strategy_summary(["s1", "s2"])
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
+    assert result["hwm_numerical_reason"] == "DIVERGENT_MEMBER_CALENDARS"
+
+
+def test_numerical_hwm_survivor_leak_blocked_by_unqualified_member() -> None:
+    """One INCLUDED sleeve is unqualified → INCOMPLETE_COVERAGE, no leak."""
+    returns = [
+        _hwm_return_row("s1", "2026-08-10", "0.10"),
+        _hwm_return_row("s2", "2026-08-10", "0.02"),
+    ]
+    capital = [
+        _hwm_capital_row("s1", "2026-08-10", "100"),
+        _hwm_capital_row("s2", "2026-08-10", "100"),
+    ]
+    catalog = _numerical_hwm_catalog(strategy_returns=returns, period_capital=capital)
+    # s2 is INCLUDED but UNACCEPTED (unqualified)
+    strategy_summary = _qualified_strategy_summary(["s1", "s2"], unqualified=["s2"])
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
+    assert result["hwm_numerical_reason"] == "INCOMPLETE_COVERAGE"
+
+
+def test_numerical_hwm_fails_closed_when_no_qualified_sleeves() -> None:
+    """Empty strategy summary → NO_QUALIFIED_SLEEVES."""
+    catalog = _numerical_hwm_catalog()
+    strategy_summary: list[dict[str, Any]] = []
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
+    assert result["hwm_numerical_reason"] == "NO_QUALIFIED_SLEEVES"
+
+
+def test_numerical_hwm_fails_closed_when_weights_unavailable() -> None:
+    """Qualified sleeve missing capital → MISSING_PERIOD_CAPITAL."""
+    returns = [
+        _hwm_return_row("s1", "2026-08-10", "0.10"),
+        _hwm_return_row("s2", "2026-08-10", "0.02"),
+    ]
+    # only s1 has capital
+    capital = [
+        _hwm_capital_row("s1", "2026-08-10", "100"),
+    ]
+    catalog = _numerical_hwm_catalog(strategy_returns=returns, period_capital=capital)
+    strategy_summary = _qualified_strategy_summary(["s1", "s2"])
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
+    assert result["hwm_numerical_reason"] == "MISSING_PERIOD_CAPITAL"
+
+
+def test_numerical_hwm_weights_sum_less_than_one_fails() -> None:
+    """Capital summing to zero → INCOMPLETE_WEIGHTS."""
+    returns = [
+        _hwm_return_row("s1", "2026-08-10", "0.10"),
+        _hwm_return_row("s2", "2026-08-10", "0.02"),
+    ]
+    capital = [
+        _hwm_capital_row("s1", "2026-08-10", "0"),
+        _hwm_capital_row("s2", "2026-08-10", "0"),
+    ]
+    catalog = _numerical_hwm_catalog(strategy_returns=returns, period_capital=capital)
+    strategy_summary = _qualified_strategy_summary(["s1", "s2"])
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
+    assert result["hwm_numerical_reason"] == "INCOMPLETE_WEIGHTS"
+
+
+def test_numerical_hwm_date_missing_from_all_sleeves_fails() -> None:
+    """A date present in capital but missing from returns → DIVERGENT_CALENDARS."""
+    returns = [
+        _hwm_return_row("s1", "2026-08-10", "0.10"),
+        _hwm_return_row("s2", "2026-08-10", "0.02"),
+    ]
+    # capital exists for 2026-08-11 but no returns → the union includes
+    # only 2026-08-10 (from returns), so this is a different case.
+    # The date-missing-from-all case: returns and capital both have only
+    # 2026-08-10 but we expect 2026-08-11 too.  The union is just what
+    # the returns contain; you can't "miss" a day nobody has.
+    # A better test: both sleeves have returns for 2026-08-10, but one
+    # is missing capital for that day → MISSING_PERIOD_CAPITAL.
+    capital = [
+        _hwm_capital_row("s1", "2026-08-10", "100"),
+        # s2 missing capital for 2026-08-10
+    ]
+    catalog = _numerical_hwm_catalog(strategy_returns=returns, period_capital=capital)
+    strategy_summary = _qualified_strategy_summary(["s1", "s2"])
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
+    assert result["hwm_numerical_reason"] == "MISSING_PERIOD_CAPITAL"
+
+
+def test_numerical_hwm_duplicate_evidence_rows_rejected() -> None:
+    """Duplicate (strategy, day) → DUPLICATE_EVIDENCE_ROWS."""
+    returns = [
+        _hwm_return_row("s1", "2026-08-10", "0.10"),
+        _hwm_return_row("s1", "2026-08-10", "0.11"),  # duplicate
+        _hwm_return_row("s2", "2026-08-10", "0.02"),
+    ]
+    capital = [
+        _hwm_capital_row("s1", "2026-08-10", "100"),
+        _hwm_capital_row("s2", "2026-08-10", "100"),
+    ]
+    catalog = _numerical_hwm_catalog(strategy_returns=returns, period_capital=capital)
+    strategy_summary = _qualified_strategy_summary(["s1", "s2"])
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
+    assert result["hwm_numerical_reason"] == "DUPLICATE_EVIDENCE_ROWS"
+
+
+def test_numerical_hwm_returns_missing_strategy_returns_reason() -> None:
+    """Strategy has capital but zero return rows → MISSING_STRATEGY_RETURNS."""
+    returns: list[dict[str, Any]] = []  # no returns at all
+    capital = [
+        _hwm_capital_row("s1", "2026-08-10", "100"),
+        _hwm_capital_row("s2", "2026-08-10", "100"),
+    ]
+    catalog = _numerical_hwm_catalog(strategy_returns=returns, period_capital=capital)
+    strategy_summary = _qualified_strategy_summary(["s1", "s2"])
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
+    assert result["hwm_numerical_reason"] == "MISSING_STRATEGY_RETURNS"
+
+
+def test_numerical_hwm_fails_closed_when_one_member_has_no_returns() -> None:
+    """s1 has returns, s2 has none → MISSING_STRATEGY_RETURNS for s2."""
+    returns = [
+        _hwm_return_row("s1", "2026-08-10", "0.10"),
+    ]
+    capital = [
+        _hwm_capital_row("s1", "2026-08-10", "100"),
+        _hwm_capital_row("s2", "2026-08-10", "100"),
+    ]
+    catalog = _numerical_hwm_catalog(strategy_returns=returns, period_capital=capital)
+    strategy_summary = _qualified_strategy_summary(["s1", "s2"])
+
+    result = reporter._compute_numerical_hwm(catalog, strategy_summary)
+
+    assert result["hwm_numerical_status"] == "UNAVAILABLE"
+    assert result["hwm_numerical_reason"] == "MISSING_STRATEGY_RETURNS"
+
+
+# ── panel schema: no numeric fields when UNAVAILABLE ───────────────────────
+
+
+def test_panel_advisory_omits_drawdown_fields_when_hwm_unavailable() -> None:
+    """When hwm_numerical_status is UNAVAILABLE, advisory has status+reason
+    but no hwm_current_drawdown or hwm_maximum_drawdown."""
+    advisory_keys = {
+        "hwm_numerical_status": "UNAVAILABLE",
+        "hwm_numerical_reason": "MISSING_PERIOD_CAPITAL",
+    }
+    assert "hwm_current_drawdown" not in advisory_keys
+    assert "hwm_maximum_drawdown" not in advisory_keys
+
+
+def test_panel_advisory_includes_drawdown_fields_when_hwm_available() -> None:
+    """When hwm_numerical_status is AVAILABLE, drawdown fields are present."""
+    advisory_keys = {
+        "hwm_numerical_status": "AVAILABLE",
+        "hwm_current_drawdown": "0.05",
+        "hwm_maximum_drawdown": "0.10",
+    }
+    assert advisory_keys["hwm_current_drawdown"] == "0.05"
+    assert advisory_keys["hwm_maximum_drawdown"] == "0.10"

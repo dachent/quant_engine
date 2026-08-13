@@ -88,7 +88,7 @@
     "advisory": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["central_case_loss", "correlation_one_stress", "hwm_limit", "hwm_status", "hwm_status_code_version", "hwm_status_semantics", "nav_coverage", "readiness", "readiness_loss_measure", "reason"],
+      "required": ["central_case_loss", "correlation_one_stress", "hwm_limit", "hwm_numerical_status", "hwm_status", "hwm_status_code_version", "hwm_status_semantics", "nav_coverage", "readiness", "readiness_loss_measure", "reason"],
       "properties": {
         "central_case_loss": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
         "correlation_one_stress": { "$ref": "#/$defs/decimal" },
@@ -96,6 +96,10 @@
         "hwm_status": { "type": "string" },
         "hwm_status_code_version": { "const": 2 },
         "hwm_status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
+        "hwm_current_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_maximum_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_numerical_status": { "type": "string", "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "hwm_numerical_reason": { "type": "string" },
         "nav_coverage": { "$ref": "#/$defs/decimal" },
         "readiness": { "type": "string" },
         "readiness_loss_measure": { "const": "CORRELATION_ONE_CONSERVATIVE_BOUND" },
@@ -302,7 +306,12 @@
         "status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
         "uncovered_details": { "type": "array", "items": { "type": "object" } },
         "uncovered_strategies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "uncovered_value_usd": { "$ref": "#/$defs/decimal" }
+        "uncovered_value_usd": { "$ref": "#/$defs/decimal" },
+        "hwm_index": { "$ref": "#/$defs/decimal" },
+        "hwm_current_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_maximum_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_numerical_status": { "type": "string", "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "hwm_numerical_reason": { "type": "string" }
       }
     },
     "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },

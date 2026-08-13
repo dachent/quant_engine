@@ -40,6 +40,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
+    compute_full_systematic_hwm_index,
     decimal_text,
     governed_hwm_coverage,
 )
@@ -2082,6 +2083,202 @@ def _hwm_policy(evaluation_date: date) -> tuple[dict[str, Any], str]:
     return policy, sha256
 
 
+def _compute_numerical_hwm(
+    catalog: Mapping[str, Any],
+    strategy_summary: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Compute numerical full-systematic HWM from qualified sleeves' daily returns.
+
+    Returns a dict with *hwm_numerical_status*, *hwm_numerical_reason*, and
+    when AVAILABLE, *hwm_index*, *hwm_current_drawdown*, and
+    *hwm_maximum_drawdown*.
+
+    **Full-systematic coverage gate (B1).**  Every INCLUDED sleeve must
+    qualify; a single unqualified INCLUDED sleeve blocks the entire
+    composite — no survivor leak.  The ``full_systematic_coverage`` flag
+    passed to :func:`compute_full_systematic_hwm_index` is ``True`` only
+    when the complete INCLUDED perimeter is qualified.
+
+    **Per-period beginning-capital weights (B2).**  Weights are derived
+    per trading date from accepted beginning-of-period systematic
+    capital.  When the catalog provides ``hwm_period_capital`` rows the
+    function uses those directly; otherwise it falls back to the latest
+    allocation snapshot.  In every period the member-weight set must be
+    complete and sum to exactly ``Decimal("1")``; otherwise UNAVAILABLE.
+
+    **Calendar grid (B3).**  The union of all observed return dates
+    defines the required member × day grid.  Every member must have
+    exactly one admitted-layer return per required day; duplicate,
+    ambiguous, or missing rows are rejected.  A day missing from every
+    sleeve is still required — the grid is the union, not the
+    intersection.
+
+    **Reason codes.**  Every UNAVAILABLE path carries a structured
+    ``hwm_numerical_reason`` from the enumerated set below.
+    """
+
+    REASON_CODES: Final = (
+        "NO_QUALIFIED_SLEEVES",
+        "INCOMPLETE_COVERAGE",
+        "MISSING_STRATEGY_RETURNS",
+        "DIVERGENT_MEMBER_CALENDARS",
+        "DUPLICATE_EVIDENCE_ROWS",
+        "INCOMPLETE_WEIGHTS",
+        "MISSING_PERIOD_CAPITAL",
+    )
+
+    def _unavailable(reason: str) -> dict[str, Any]:
+        assert reason in REASON_CODES, f"unknown reason code: {reason}"
+        return {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": reason}
+
+    # ── B1: establish complete systematic membership ─────────────────────
+    included_ids: set[str] = set()
+    qualified_ids: set[str] = set()
+    for row in strategy_summary:
+        sid = row.get("strategy_id")
+        if sid is None:
+            continue
+        if row.get("hwm_scope") == "INCLUDED":
+            included_ids.add(str(sid))
+            if (
+                row.get("hwm_evidence_status") == "ACCEPTED"
+                and row.get("hwm_freshness_status") == "ACCEPTED"
+                and row.get("nav_status") == "AVAILABLE"
+            ):
+                qualified_ids.add(str(sid))
+
+    if not included_ids:
+        return _unavailable("NO_QUALIFIED_SLEEVES")
+
+    if not qualified_ids:
+        return _unavailable("NO_QUALIFIED_SLEEVES")
+
+    full_coverage = qualified_ids == included_ids
+    if not full_coverage:
+        return _unavailable("INCOMPLETE_COVERAGE")
+
+    # ── B3: daily returns grid (union of all observed dates) ─────────────
+    by_strategy_date: dict[str, dict[str, Decimal]] = defaultdict(dict)
+    seen_pairs: set[tuple[str, str]] = set()
+    for row in _objects(catalog.get("strategy_returns"), "strategy_returns"):
+        sid = str(row.get("strategy_id") or "")
+        if sid not in qualified_ids:
+            continue
+        evidence_layer = row.get("evidence_layer")
+        if evidence_layer not in ("ACCOUNT_LIVE", "PROVIDER_LIVE"):
+            continue
+        day = str(row.get("date") or "")
+        if not day:
+            continue
+        pair = (sid, day)
+        if pair in seen_pairs:
+            return _unavailable("DUPLICATE_EVIDENCE_ROWS")
+        seen_pairs.add(pair)
+        r = _decimal(row.get("return"), "strategy return.return")
+        by_strategy_date[sid][day] = r
+
+    for sid in qualified_ids:
+        if sid not in by_strategy_date:
+            return _unavailable("MISSING_STRATEGY_RETURNS")
+
+    all_dates: set[str] = set()
+    for sid in qualified_ids:
+        all_dates |= set(by_strategy_date[sid].keys())
+
+    if not all_dates:
+        return _unavailable("MISSING_STRATEGY_RETURNS")
+
+    sorted_dates = sorted(all_dates)
+
+    if not all(
+        all_dates.issubset(by_strategy_date[sid].keys()) for sid in qualified_ids
+    ):
+        return _unavailable("DIVERGENT_MEMBER_CALENDARS")
+
+    # ── B2: per-period beginning-capital weights ─────────────────────────
+    explicit_capital = catalog.get("hwm_period_capital")
+    period_capital_by_date: dict[str, dict[str, Decimal]] = defaultdict(dict)
+    if isinstance(explicit_capital, list) and explicit_capital:
+        for row in explicit_capital:
+            sid = str(row.get("strategy_id") or "")
+            day = str(row.get("date") or "")
+            capital = _decimal(
+                row.get("beginning_capital_usd"), "hwm_period_capital.capital"
+            )
+            period_capital_by_date[day][sid] = capital
+    else:
+        # Fallback: derive from allocations — use the latest snapshot for
+        # all dates.  This will produce UNAVAILABLE unless the allocation
+        # snapshot has exactly the right capital per strategy summing to 1.
+        allocations = sorted(
+            _objects(catalog.get("allocations"), "allocations"),
+            key=lambda item: str(item.get("as_of_date") or ""),
+            reverse=True,
+        )
+        if not allocations:
+            return _unavailable("MISSING_PERIOD_CAPITAL")
+        snapshot_date = str(allocations[0].get("as_of_date") or "")
+        if not snapshot_date:
+            return _unavailable("MISSING_PERIOD_CAPITAL")
+        for alloc in allocations:
+            if str(alloc.get("as_of_date")) != snapshot_date:
+                continue
+            sid = str(alloc.get("strategy_id") or "")
+            if sid not in qualified_ids:
+                continue
+            if alloc.get("scope") != "SYSTEMATIC":
+                continue
+            capital = _decimal(alloc.get("current_value"), "allocation.current_value")
+            for day in sorted_dates:
+                period_capital_by_date[day][sid] = capital
+
+    # ── verify complete member-weight sets per period, sum ≡ 1 ───────────
+    for day in sorted_dates:
+        day_capitals = period_capital_by_date.get(day, {})
+        day_sids = set(day_capitals.keys())
+        if day_sids != qualified_ids:
+            return _unavailable("MISSING_PERIOD_CAPITAL")
+        total = sum(day_capitals.values(), Decimal("0"))
+        if total <= Decimal("0"):
+            return _unavailable("INCOMPLETE_WEIGHTS")
+        # Derive weights and verify they sum to exactly 1.
+        with localcontext() as ctx:
+            ctx.prec = 34
+            total_weight = Decimal("0")
+            for sid in qualified_ids:
+                total_weight += day_capitals[sid] / total
+            if total_weight != Decimal("1"):
+                return _unavailable("INCOMPLETE_WEIGHTS")
+
+    # ── weighted composite daily returns ─────────────────────────────────
+    composite_returns: list[Decimal] = []
+    with localcontext() as ctx:
+        ctx.prec = 34
+        for day in sorted_dates:
+            day_capitals = period_capital_by_date[day]
+            total = sum(day_capitals.values(), Decimal("0"))
+            weighted_sum = Decimal("0")
+            for sid in qualified_ids:
+                weight = day_capitals[sid] / total
+                weighted_sum += weight * by_strategy_date[sid][day]
+            composite_returns.append(weighted_sum)
+
+    result = compute_full_systematic_hwm_index(
+        composite_returns,
+        full_systematic_coverage=full_coverage,
+    )
+
+    if result.get("status") != "AVAILABLE":
+        return _unavailable("INCOMPLETE_COVERAGE")
+
+    return {
+        "hwm_index": decimal_text(result["index_series"][-1]),
+        "hwm_current_drawdown": decimal_text(result["current_drawdown"]),
+        "hwm_maximum_drawdown": decimal_text(result["maximum_drawdown"]),
+        "hwm_numerical_status": "AVAILABLE",
+    }
+
+
 def _reconcile_hwm_coverage(
     coverage: Sequence[Mapping[str, Any]], hwm_summary: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
@@ -2259,6 +2456,8 @@ def build_report_data(
             )
         except HwmCoverageError as exc:
             raise ReportValidationError(str(exc)) from exc
+        hwm_numerical = _compute_numerical_hwm(catalog, strategy_summary)
+        hwm_summary = {**hwm_summary, **hwm_numerical}
         coverage = _reconcile_hwm_coverage(coverage, hwm_summary)
         hwm_provenance = [
             {

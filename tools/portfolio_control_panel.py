@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 import math
@@ -34,6 +35,7 @@ from quant_engine.portfolio_ledger import (
     HWM_STATUS_CODE_VERSION,
     HWM_STATUS_SEMANTICS,
     HwmCoverageError,
+    compute_full_systematic_hwm_index,
     governed_hwm_coverage,
 )
 
@@ -1072,6 +1074,192 @@ def _governed_hwm_coverage(
         )
     except HwmCoverageError as exc:
         raise ControlPanelValidationError(str(exc)) from exc
+
+
+def _compute_panel_numerical_hwm(
+    strategy_summary: Sequence[Mapping[str, Any]],
+    strategy_returns: Sequence[Mapping[str, Any]],
+    allocations: Sequence[Mapping[str, Any]],
+    period_capital: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compute numerical full-systematic HWM in the panel from report data.
+
+    Returns the same shape as ``_compute_numerical_hwm`` in the report
+    builder so the panel can independently reconcile the numeric fields.
+    """
+
+    REASON_CODES = (
+        "NO_QUALIFIED_SLEEVES",
+        "INCOMPLETE_COVERAGE",
+        "MISSING_STRATEGY_RETURNS",
+        "DIVERGENT_MEMBER_CALENDARS",
+        "DUPLICATE_EVIDENCE_ROWS",
+        "INCOMPLETE_WEIGHTS",
+        "MISSING_PERIOD_CAPITAL",
+    )
+
+    def _unavailable(reason: str) -> dict[str, Any]:
+        assert reason in REASON_CODES, f"unknown reason code: {reason}"
+        return {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": reason}
+
+    def _panel_str(value: object) -> str:
+        if not isinstance(value, str):
+            raise ControlPanelValidationError("expected string value")
+        return value
+
+    def _panel_decimal(value: object, field_name: str) -> Decimal:
+        try:
+            accepted = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise ControlPanelValidationError(f"{field_name} must be decimal") from exc
+        if not accepted.is_finite():
+            raise ControlPanelValidationError(f"{field_name} must be finite")
+        return accepted
+
+    # ── B1: establish complete systematic membership ─────────────────────
+    included_ids: set[str] = set()
+    qualified_ids: set[str] = set()
+    for row in strategy_summary:
+        sid = row.get("strategy_id")
+        if sid is None:
+            continue
+        if row.get("hwm_scope") == "INCLUDED":
+            included_ids.add(str(sid))
+            if (
+                row.get("hwm_evidence_status") == "ACCEPTED"
+                and row.get("hwm_freshness_status") == "ACCEPTED"
+                and row.get("nav_status") == "AVAILABLE"
+            ):
+                qualified_ids.add(str(sid))
+
+    if not included_ids:
+        return _unavailable("NO_QUALIFIED_SLEEVES")
+    if not qualified_ids:
+        return _unavailable("NO_QUALIFIED_SLEEVES")
+
+    full_coverage = qualified_ids == included_ids
+    if not full_coverage:
+        return _unavailable("INCOMPLETE_COVERAGE")
+
+    # ── B3: daily returns grid ───────────────────────────────────────────
+    by_strategy_date: dict[str, dict[str, Decimal]] = defaultdict(dict)
+    seen_pairs: set[tuple[str, str]] = set()
+    for row in strategy_returns:
+        sid = _panel_str(row.get("strategy_id") or "")
+        if sid not in qualified_ids:
+            continue
+        evidence_layer = row.get("evidence_layer")
+        if evidence_layer not in ("ACCOUNT_LIVE", "PROVIDER_LIVE"):
+            continue
+        day = _panel_str(row.get("date") or "")
+        if not day:
+            continue
+        pair = (sid, day)
+        if pair in seen_pairs:
+            return _unavailable("DUPLICATE_EVIDENCE_ROWS")
+        seen_pairs.add(pair)
+        r = _panel_decimal(row.get("return"), "strategy return.return")
+        by_strategy_date[sid][day] = r
+
+    for sid in qualified_ids:
+        if sid not in by_strategy_date:
+            return _unavailable("MISSING_STRATEGY_RETURNS")
+
+    all_dates: set[str] = set()
+    for sid in qualified_ids:
+        all_dates |= set(by_strategy_date[sid].keys())
+
+    if not all_dates:
+        return _unavailable("MISSING_STRATEGY_RETURNS")
+
+    sorted_dates = sorted(all_dates)
+
+    if not all(
+        all_dates.issubset(by_strategy_date[sid].keys()) for sid in qualified_ids
+    ):
+        return _unavailable("DIVERGENT_MEMBER_CALENDARS")
+
+    # ── B2: per-period capital → weights ─────────────────────────────────
+    period_capital_by_date: dict[str, dict[str, Decimal]] = defaultdict(dict)
+    if period_capital:
+        for row in period_capital:
+            sid = _panel_str(row.get("strategy_id") or "")
+            day = _panel_str(row.get("date") or "")
+            capital = _panel_decimal(
+                row.get("beginning_capital_usd"), "period_capital.capital"
+            )
+            period_capital_by_date[day][sid] = capital
+    else:
+        sorted_allocs = sorted(
+            allocations,
+            key=lambda item: _panel_str(item.get("as_of_date") or ""),
+            reverse=True,
+        )
+        if not sorted_allocs:
+            return _unavailable("MISSING_PERIOD_CAPITAL")
+        snapshot_date = _panel_str(sorted_allocs[0].get("as_of_date") or "")
+        if not snapshot_date:
+            return _unavailable("MISSING_PERIOD_CAPITAL")
+        for alloc in sorted_allocs:
+            if _panel_str(alloc.get("as_of_date") or "") != snapshot_date:
+                continue
+            sid = _panel_str(alloc.get("strategy_id") or "")
+            if sid not in qualified_ids:
+                continue
+            if alloc.get("scope") != "SYSTEMATIC":
+                continue
+            capital = _panel_decimal(
+                alloc.get("current_value"), "allocation.current_value"
+            )
+            for day in sorted_dates:
+                period_capital_by_date[day][sid] = capital
+
+    for day in sorted_dates:
+        day_capitals = period_capital_by_date.get(day, {})
+        day_sids = set(day_capitals.keys())
+        if day_sids != qualified_ids:
+            return _unavailable("MISSING_PERIOD_CAPITAL")
+        total = sum(day_capitals.values(), Decimal("0"))
+        if total <= Decimal("0"):
+            return _unavailable("INCOMPLETE_WEIGHTS")
+        with localcontext() as ctx:
+            ctx.prec = 34
+            total_weight = Decimal("0")
+            for sid in qualified_ids:
+                total_weight += day_capitals[sid] / total
+            if total_weight != Decimal("1"):
+                return _unavailable("INCOMPLETE_WEIGHTS")
+
+    # ── weighted composite daily returns ─────────────────────────────────
+    composite_returns: list[Decimal] = []
+    with localcontext() as ctx:
+        ctx.prec = 34
+        for day in sorted_dates:
+            day_capitals = period_capital_by_date[day]
+            total = sum(day_capitals.values(), Decimal("0"))
+            weighted_sum = Decimal("0")
+            for sid in qualified_ids:
+                weight = day_capitals[sid] / total
+                weighted_sum += weight * by_strategy_date[sid][day]
+            composite_returns.append(weighted_sum)
+
+    result = compute_full_systematic_hwm_index(
+        composite_returns,
+        full_systematic_coverage=full_coverage,
+    )
+
+    if result.get("status") != "AVAILABLE":
+        return _unavailable("INCOMPLETE_COVERAGE")
+
+    def _panel_decimal_text(value: Decimal) -> str:
+        return format(value.normalize(), "f")
+
+    return {
+        "hwm_index": _panel_decimal_text(result["index_series"][-1]),
+        "hwm_current_drawdown": _panel_decimal_text(result["current_drawdown"]),
+        "hwm_maximum_drawdown": _panel_decimal_text(result["maximum_drawdown"]),
+        "hwm_numerical_status": "AVAILABLE",
+    }
 
 
 def _reconcile_hwm_coverage(
@@ -4048,6 +4236,12 @@ def _panel_data(
         freshness_health,
         require_freshness=True,
     )
+    panel_numerical = _compute_panel_numerical_hwm(
+        strategies,
+        _objects(report.get("strategy_returns"), "strategy_returns"),
+        _objects(report.get("allocation_history"), "allocation_history"),
+    )
+    hwm_summary = {**hwm_summary, **panel_numerical}
     report_hwm = report.get("hwm_summary")
     if (
         report_hwm is not None
@@ -4061,6 +4255,32 @@ def _panel_data(
         raise ControlPanelValidationError(
             "portfolio summary HWM status differs from governed HWM evidence"
         )
+    report_numerical_status = (
+        report_hwm.get("hwm_numerical_status") if report_hwm is not None else None
+    )
+    panel_numerical_status = hwm_summary.get("hwm_numerical_status")
+    if (
+        report_numerical_status is not None
+        and report_numerical_status != panel_numerical_status
+    ):
+        raise ControlPanelValidationError(
+            "report numerical HWM status differs from governed HWM evidence"
+        )
+    if report_hwm is not None and panel_numerical_status == "AVAILABLE":
+        if report_hwm.get("hwm_current_drawdown") != hwm_summary.get(
+            "hwm_current_drawdown"
+        ):
+            raise ControlPanelValidationError(
+                "report numerical HWM current drawdown differs "
+                "from governed HWM evidence"
+            )
+        if report_hwm.get("hwm_maximum_drawdown") != hwm_summary.get(
+            "hwm_maximum_drawdown"
+        ):
+            raise ControlPanelValidationError(
+                "report numerical HWM maximum drawdown differs "
+                "from governed HWM evidence"
+            )
     strategies = [
         {
             **row,
@@ -4371,6 +4591,18 @@ def _panel_data(
             "hwm_status": hwm_summary["status"],
             "hwm_status_code_version": hwm_summary["status_code_version"],
             "hwm_status_semantics": hwm_summary["status_semantics"],
+            "hwm_numerical_status": hwm_summary.get(
+                "hwm_numerical_status", "UNAVAILABLE"
+            ),
+            "hwm_numerical_reason": hwm_summary.get("hwm_numerical_reason"),
+            **(
+                {
+                    "hwm_current_drawdown": hwm_summary["hwm_current_drawdown"],
+                    "hwm_maximum_drawdown": hwm_summary["hwm_maximum_drawdown"],
+                }
+                if hwm_summary.get("hwm_numerical_status") == "AVAILABLE"
+                else {}
+            ),
             "nav_coverage": hwm_summary["nav_coverage"],
             "readiness": _summary_value(summary, "Advisory readiness"),
             "readiness_loss_measure": "CORRELATION_ONE_CONSERVATIVE_BOUND",

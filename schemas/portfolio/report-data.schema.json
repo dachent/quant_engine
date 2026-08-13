@@ -88,7 +88,12 @@
         "status_semantics": {"const": "EXPLICIT_GOVERNED_HWM_PERIMETER"},
         "uncovered_details": {"type": "array", "items": {"type": "object"}},
         "uncovered_strategies": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-        "uncovered_value_usd": {"$ref": "#/$defs/decimal"}
+        "uncovered_value_usd": {"$ref": "#/$defs/decimal"},
+        "hwm_index": {"$ref": "#/$defs/decimal"},
+        "hwm_current_drawdown": {"$ref": "#/$defs/decimal"},
+        "hwm_maximum_drawdown": {"$ref": "#/$defs/decimal"},
+        "hwm_numerical_status": {"type": "string", "enum": ["AVAILABLE", "UNAVAILABLE"]},
+        "hwm_numerical_reason": {"type": "string"}
       }
     },
     "corrections": {"type": "array", "items": {"type": "object"}},
