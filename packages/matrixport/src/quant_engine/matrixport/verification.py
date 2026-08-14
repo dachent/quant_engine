@@ -47,6 +47,11 @@ SOURCE_LIMITED_WALLET_HISTORY_PATHS = {
     "/mapi/v1/wallet/withdrawals",
 }
 
+_WALLET_PATH_ATOM_PREFIX: dict[str, str] = {
+    "/mapi/v1/wallet/deposits": "wallet_deposit_currency",
+    "/mapi/v1/wallet/withdrawals": "wallet_withdrawal_currency",
+}
+
 
 def _iter_file_bytes(path: Path) -> Iterable[tuple[str, bytes]]:
     if path.suffix.lower() == ".xlsx":
@@ -543,9 +548,12 @@ def verify_coverage(run_dir: Path) -> dict[str, Any]:
                 and rejection_evidence_ok
             )
             if valid_source_limit:
-                source_limited.append(
-                    f"{endpoint.path}:{len(rejected_currencies)} enumerated currencies rejected by source"
+                prefix = _WALLET_PATH_ATOM_PREFIX.get(
+                    endpoint.path,
+                    endpoint.path.lstrip("/").replace("/", "_"),
                 )
+                for currency in sorted(rejected_currencies):
+                    source_limited.append(f"{prefix}:{currency}")
             else:
                 failures.append(f"{key}:required endpoint status is {status}")
     counts: dict[str, int] = defaultdict(int)
@@ -925,6 +933,7 @@ def verify_valuation(
                     f"daily_holdings row {index}:{product_id} missing NAV/FX without missing_reason"
                 )
 
+    coverage_reasons: set[str] = set()
     for index, row in enumerate(totals, start=1):
         active = _nonzero(row.get("active_product_count"))
         nav_complete = str(row.get("nav_coverage_ratio", "")) == "1"
@@ -932,11 +941,21 @@ def verify_valuation(
         declared_complete = str(row.get("strict_complete", "")).lower() == "true"
         strict_value = row.get("portfolio_value_usd_strict")
         reasons = str(row.get("missing_reasons") or "")
+        utc_date = str(row.get("utc_date", ""))
+        if active:
+            if not nav_complete and utc_date:
+                missing_coverage = True
+                coverage_reasons.add(f"nav_missing_date:{utc_date}")
+            if not fx_complete and utc_date:
+                missing_coverage = True
+                coverage_reasons.add(f"fx_missing_date:{utc_date}")
+            if not declared_complete and utc_date:
+                missing_coverage = True
+                coverage_reasons.add(f"reconciliation_incomplete_date:{utc_date}")
         incomplete = active and (
             not nav_complete or not fx_complete or not declared_complete
         )
         if incomplete:
-            missing_coverage = True
             if _nonblank(strict_value):
                 structural_failures.append(
                     f"daily_portfolio_totals row {index} has strict total despite missing NAV/FX/reconciliation"
@@ -957,9 +976,7 @@ def verify_valuation(
     elif counts.get("anchored_gap", 0) or missing_coverage:
         status = "PARTIAL"
         if missing_coverage:
-            acceptance_reasons.append(
-                "daily NAV/FX/reconciliation coverage is incomplete"
-            )
+            acceptance_reasons.extend(sorted(coverage_reasons))
     else:
         status = "PASS"
     return {

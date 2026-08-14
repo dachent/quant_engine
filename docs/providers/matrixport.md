@@ -63,11 +63,86 @@ python tools/matrixport_generation.py build <spec.json>
 python tools/matrixport_generation.py stage <spec.json> <dataMatrixport>
 ```
 
-Because the generation is explicitly `PARTIAL`, it is staged immutably but is
-not eligible for `CURRENT.json`. This preserves the core rule that only a
-verified generation complete within its declared boundary can become current
-authority. The frozen source run remains accepted evidence, not a silently
-complete portfolio authority.
+## Atomic gap taxonomy
+
+Every gap emitted by the verifier is a typed atomic item, never an aggregate
+string. This ensures undeclared material data cannot be absorbed by a
+coincidental aggregate match.
+
+| Atom prefix | Meaning | Example |
+|---|---|---|
+| `wallet_deposit_currency:` | One rejected deposit currency | `wallet_deposit_currency:CURR_A` |
+| `wallet_withdrawal_currency:` | One rejected withdrawal currency | `wallet_withdrawal_currency:CURR_B` |
+| `nav_missing_date:` | One date with missing NAV | `nav_missing_date:YYYY-MM-DD` |
+| `fx_missing_date:` | One date with missing FX rate | `fx_missing_date:YYYY-MM-DD` |
+| `reconciliation_incomplete_date:` | One date with incomplete reconciliation | `reconciliation_incomplete_date:YYYY-MM-DD` |
+| `{product_id}:anchored_gap` | Product whose valuation relies on anchor | `PROD-42:anchored_gap` |
+| `{product_id}:unavailable` | Product whose valuation is unavailable | `PROD-99:unavailable` |
+
+## Declared boundary exclusions
+
+The generation spec may include an optional `declared_exclusions` array. Each
+entry records one owner-accepted atomic gap item, rationale, and provenance:
+
+```json
+{
+  "declared_exclusions": [
+    {
+      "item": "wallet_deposit_currency:CURR_A",
+      "reason": "accepted rationale — e.g. API code <redacted> for defunct token",
+      "provenance": "owner-accepted YYYY-MM-DD per issue #NNN"
+    }
+  ]
+}
+```
+
+Matching uses **exact set-equality**: the set of declared exclusion items must
+equal the set of current gap atoms exactly.
+
+- **Undeclared gap atom** (a gap with no matching declaration) → `PARTIAL`,
+  build fails with undeclared gaps enumerated.
+- **Stale declaration** (a declared item that no longer matches any current
+  gap) → `PARTIAL`, build fails with stale declarations enumerated.
+- **Duplicate declaration items** → rejected at build time.
+- **Exact match** (every gap atom is declared and every declaration matches a
+  gap) → `COMPLETE_WITHIN_DECLARED_BOUNDARY`.
+
+The mechanism is data-driven from the spec and never hardcoded in the adapter;
+the exclusion records are written verbatim into the generation manifest's
+coverage section (`declared_exclusions` field).
+
+The accepted e4ccbf8cf447* generation (as_of 2026-08-03) has two exclusion
+classes accepted by the owner on 2026-08-14 (issue #287). The real declared
+exclusion list lives in the governed generation spec under the data root and
+is not reproduced in this repository.
+
+1. **Rejected currency symbols** rejected by the Matrixport API with code
+   `18100410 "Invalid params"` on `/mapi/v1/wallet/deposits` and
+   `/mapi/v1/wallet/withdrawals`, each producing per-symbol atomic gap items
+   (`wallet_deposit_currency:*` and `wallet_withdrawal_currency:*`).
+2. **NAV/FX/reconciliation gaps** where the provider endpoint returned
+   incomplete coverage for specific dates, producing per-cause atomic gap
+   items (`nav_missing_date:*`, `fx_missing_date:*`,
+   `reconciliation_incomplete_date:*`).
+
+## Publish path
+
+A generation whose coverage is `COMPLETE_WITHIN_DECLARED_BOUNDARY` and
+verification is `VERIFIED` can be published as the current authority:
+
+```powershell
+python tools/matrixport_generation.py publish <spec.json> <dataMatrixport> <generation_id>
+```
+
+The `publish` subcommand rebuilds the generation from the spec, verifies the
+generation ID matches, and calls the core `publish_generation` gate. The core
+gate re-verifies that both the coverage status and verification status are
+suitable before atomically writing `CURRENT.json`. A generation with `PARTIAL`
+coverage is rejected at publication time with `PublicationRejectedError`.
+
+This preserves the core rule that only a verified generation complete within
+its declared boundary can become current authority. The frozen source run
+remains accepted evidence, not a silently complete portfolio authority.
 
 ## Local data layout
 
