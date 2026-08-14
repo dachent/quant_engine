@@ -1500,7 +1500,7 @@ def test_hwm_inputs_confirmed_zero_fabricated_attestation_fails(
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
-        match="does not resolve to an admitted source artifact",
+        match="does not resolve to an admitted",
     ):
         baseline.build_catalog(spec_path)
 
@@ -1520,7 +1520,7 @@ def test_hwm_inputs_confirmed_zero_wrong_role_attestation_fails(
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
-        match="has schema role 'synthetic-schwab-flows'",
+        match="does not resolve to an admitted hwm-flow-attestation",
     ):
         baseline.build_catalog(spec_path)
 
@@ -1710,7 +1710,7 @@ def test_hwm_inputs_period_lane_without_authority_fails(tmp_path: Path) -> None:
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
-        match="periods lane 'PROVIDER' has no admitted calendar authority",
+        match="period lane has no admitted calendar authority",
     ):
         baseline.build_catalog(spec_path)
 
@@ -1799,7 +1799,7 @@ def test_hwm_inputs_component_account_not_mapped_to_strategy_fails(
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
-        match="'account-schwab-b' is not mapped to strategy 'strategy-1'",
+        match="does not bind to exactly one account-live rollforward row",
     ):
         baseline.build_catalog(spec_path)
 
@@ -1822,7 +1822,7 @@ def test_hwm_inputs_account_available_without_rollforward_evidence_fails(
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
-        match="lacks hash-bound NAV rollforward evidence",
+        match="does not bind to exactly one account-live rollforward row",
     ):
         baseline.build_catalog(spec_path)
 
@@ -1846,7 +1846,7 @@ def test_hwm_inputs_provider_available_without_capital_schedule_fails(
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
-        match="requires hash-bound provider capital evidence",
+        match="AVAILABLE row must use ACCOUNT lane",
     ):
         baseline.build_catalog(spec_path)
 
@@ -1957,7 +1957,7 @@ def test_hwm_inputs_legacy_available_fails_closed(tmp_path: Path) -> None:
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
-        match="LEGACY lane has no admitted effective-dated capital schedule",
+        match="AVAILABLE row must use ACCOUNT lane",
     ):
         baseline.build_catalog(spec_path)
 
@@ -2021,7 +2021,7 @@ def test_hwm_inputs_unknown_strategy_id_fails(tmp_path: Path) -> None:
     _write_envelope(spec_path, spec, envelope)
     with pytest.raises(
         baseline.BaselineValidationError,
-        match="not a known strategy",
+        match="period keyspace differs from the expected perimeter keyspace",
     ):
         baseline.build_catalog(spec_path)
 

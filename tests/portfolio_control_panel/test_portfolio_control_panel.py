@@ -3851,7 +3851,7 @@ def test_panel_rejects_confirmed_zero_with_empty_flow_evidence(
         report,
         catalog,
         mutate,
-        "hwm_inputs CONFIRMED_ZERO flow evidence is empty",
+        "CONFIRMED_ZERO flow_status requires non-empty flow_source_record_ids",
     )
 
 
@@ -3871,7 +3871,7 @@ def test_panel_rejects_confirmed_one_with_empty_fx_evidence(
         report,
         catalog,
         mutate,
-        "hwm_inputs CONFIRMED_ONE fx evidence is empty",
+        "CONFIRMED_ONE fx_status requires non-empty fx_source_record_ids",
     )
 
 

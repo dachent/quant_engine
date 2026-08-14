@@ -73,11 +73,14 @@ validation runs only after provider artifacts are admitted), and its hash
 must match `source_artifact_sha256`.  An observation artifact (e.g.
 `alpaca-events`) is never a valid acceptance authority.
 
-**Anchor content cross-check:** the builder parses the admitted acceptance
-record and requires exact equality of `anchor_date`, `index_base_value`,
-and `hwm_policy_id` between the envelope and the record.  The expected
-keyspace is derived from the anchor only after this cross-check, so a
-fabricated later anchor cannot truncate the keyspace.
+**Anchor content cross-check:** the shared validator parses the admitted
+acceptance record (when the admission builder supplies it via the
+`acceptance_record` parameter) and requires exact equality of
+`anchor_date`, `index_base_value`, and `hwm_policy_id` between the
+envelope and the record.  Consumers that cannot access the governed source
+files omit this parameter; the cross-check is admission-only.  The
+expected keyspace is derived from the anchor only after this cross-check,
+so a fabricated later anchor cannot truncate the keyspace.
 
 ### `calendar_authorities`
 
@@ -157,6 +160,14 @@ set; omission cannot masquerade as exclusion.
 account; for `ACCOUNT`-lane `AVAILABLE` rows each entry must additionally
 be MAPPED-assigned to the row's strategy on the row's date.
 
+**Lane enforcement:** every `AVAILABLE` row MUST use lane `ACCOUNT`.
+`PROVIDER`- and `LEGACY`-lane `AVAILABLE` rows are rejected fail-closed at
+both admission and consumption boundaries because no hash-bound provider or
+legacy capital evidence is admitted (deferred admission requirements 4 and
+5).  This check lives in the shared validator so every caller —
+admission builder, report consumer, and panel consumer — enforces it
+identically.
+
 **Capital provenance (never a trusted label):**
 
 - `ACCOUNT`-lane `AVAILABLE` capital is verified against the hash-bound
@@ -184,15 +195,19 @@ be MAPPED-assigned to the row's strategy on the row's date.
 | `allocation_endpoint_check.matched` | Boolean; must be `true`. |
 | `allocation_endpoint_check.delta_usd` | Decimal string; must equal the independently recomputed delta. |
 
-The allocation snapshot is endpoint reconciliation only.  The builder
-recomputes the check independently: at the latest systematic allocation
-snapshot date, each `ACCOUNT`-lane `AVAILABLE` period contributes its
-rollforward-verified ending capital (`beginning_capital × (1 + return)`
-from the same `strategy_returns` row); the sum is compared against the
-allocation snapshot total over exactly those strategies.  Any non-zero
-recomputed delta aborts the build (unreconciled capital is rejected); the
-declared `delta_usd` must equal the recomputed delta (`"0"` in canonical
-decimal text) and `matched` must be `true`.
+The allocation snapshot is endpoint reconciliation only.  The shared
+validator recomputes the check independently when the caller supplies the
+`allocations` parameter: at the latest systematic allocation snapshot date,
+each `ACCOUNT`-lane `AVAILABLE` period contributes its rollforward-verified
+ending capital (`beginning_capital × (1 + return)` from the same
+`strategy_returns` row); the sum is compared against the allocation snapshot
+total over exactly those strategies.  Any non-zero recomputed delta aborts
+the build (unreconciled capital is rejected); the declared `delta_usd` must
+equal the recomputed delta (`"0"` in canonical decimal text) and `matched`
+must be `true`.  Consumers that cannot access the allocation snapshot omit
+this parameter and fall back to a simple check (`matched == true` and
+`delta_usd == 0`); the admission builder always supplies allocations for
+independent recomputation.
 
 ## Governed HWM source roles
 
@@ -248,9 +263,13 @@ corresponding envelope content can validate:
    plus any governed HWM evidence sources the envelope references.
 2. When the spec declares the source, the builder loads the JSON and
    validates every cross-reference, disposition rule, keyspace-completeness
-   rule, capital-provenance rule, and the endpoint reconciliation against
-   the COMPLETE catalog context (provider artifacts included), then
-   populates `catalog["hwm_inputs"]`.
+   rule, capital-provenance rule, lane-enforcement rule, and the endpoint
+   reconciliation against the COMPLETE catalog context (provider artifacts
+   included) via the shared validator
+   (`validate_hwm_inputs_envelope`), then populates
+   `catalog["hwm_inputs"]`.  Admission-only checks (CONFIRMED_* attestation
+   content verification, account-assignment mapping) run afterward and are
+   clearly separated from the shared validation.
 3. When the spec omits the source, the builder omits the key entirely.
 4. The #277 HWM index engine reads only `catalog["hwm_inputs"]["periods"]`
    and filters to `disposition == "AVAILABLE"` rows.
@@ -268,17 +287,25 @@ The engine does NOT consume `calendar_authorities`, `reconciliation`,
 or non-`AVAILABLE` periods directly — those are governance interfaces
 consumed by the admission pipeline.
 
-Both #277 consumers re-enforce the full admission contract at the
-consumption boundary via the shared ledger-package validator
+Both #277 consumers AND the admission builder enforce the full contract
+via the shared ledger-package validator
 (`quant_engine.portfolio_ledger.validate_hwm_inputs_envelope`): a
-hash-bound but semantically invalid generation publishes nothing.  Two
-consumption-side rules follow from that boundary: an AVAILABLE row with a
-MISSING flow or fx status is invalid, and an AVAILABLE row carrying a
-CONFIRMED_ZERO/CONFIRMED_ONE attestation is rejected, because the
-attestation payload content is verifiable only at admission (the governed
-source files live outside the generation stores the consumers can reach).
-CONFIRMED_* assertions on non-AVAILABLE rows remain valid envelope
-content.
+hash-bound but semantically invalid generation publishes nothing.  The
+builder calls the validator at admission with its full context
+(allocations for endpoint recomputation, the parsed acceptance record for
+anchor-content cross-check); consumers call it with only the catalog-bound
+context.  Two consumption-side rules follow from that boundary: an
+AVAILABLE row with a MISSING flow or fx status is invalid, and an
+AVAILABLE row carrying a CONFIRMED_ZERO/CONFIRMED_ONE attestation is
+rejected, because the attestation payload content is verifiable only at
+admission (the governed source files live outside the generation stores
+the consumers can reach).  **hwm-001 unification note:** the builder
+previously admitted content-verified CONFIRMED_* statuses on AVAILABLE
+rows.  As of the hwm-001 consolidation fix, the shared validator's
+category rejection of CONFIRMED_* on AVAILABLE rows applies universally
+at both admission and consumption.  The builder still verifies CONFIRMED_*
+attestation content on non-AVAILABLE rows (admission-only).  CONFIRMED_*
+assertions on non-AVAILABLE rows remain valid envelope content.
 
 ## Fail-closed invariants
 

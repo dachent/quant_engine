@@ -45,6 +45,7 @@ from quant_engine.portfolio_ledger import (
     Transaction,
     decimal_text,
     hwm_policy_exclusions,
+    validate_hwm_inputs_envelope,
 )
 
 
@@ -2732,6 +2733,31 @@ def _load_hwm_inputs_envelope(
             _text(row.get("date"), "strategy_returns.date"),
         )
         rollforward[key] = row
+
+    # --- shared admission/consumption validation ---
+    # The ledger-package validator is the single authority for the hwm_inputs
+    # contract.  Run it at admission (with the builder's full context) so
+    # every check that both consumers enforce is also enforced here.
+    perimeter = sorted(
+        {
+            _text(item["strategy_id"], "allocation.strategy_id")
+            for item in allocations
+            if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
+        }
+    )
+    try:
+        validate_hwm_inputs_envelope(
+            envelope,
+            as_of_date=as_of,
+            perimeter=perimeter,
+            crosswalk=strategy_returns,
+            artifact_roles=artifact_registry,
+            policy_exclusions=policy_exclusions,
+            allocations=allocations,
+            acceptance_record=acceptance_doc,
+        )
+    except HwmInputsContractError as exc:
+        raise BaselineValidationError(str(exc)) from exc
 
     # --- periods ---
     periods = _objects(envelope["periods"], "hwm_inputs.periods")
