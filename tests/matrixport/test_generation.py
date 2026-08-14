@@ -8,6 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from quant_engine.core import (
+    CoverageStatus,
+    DeclaredExclusion,
+    ManifestValidationError,
+    PublicationRejectedError,
+    publish_generation,
+)
 from quant_engine.matrixport import (
     MatrixportGenerationError,
     build_generation,
@@ -233,3 +240,265 @@ def test_as_of_date_must_match_extraction_boundary(tmp_path: Path) -> None:
         match="as_of_date must equal the extraction run_end_ms UTC date",
     ):
         build_generation(spec)
+
+
+# ---------------------------------------------------------------------------
+# Declared-exclusion helpers and tests
+# ---------------------------------------------------------------------------
+
+
+def _spec_with_exclusions(
+    tmp_path: Path,
+    *,
+    exclusions: list[dict[str, str]] | None = None,
+    extra_gap: str | None = None,
+) -> Path:
+    """Build a spec identical to ``_spec`` but with optional declared_exclusions
+    and an optional extra gap not covered by any exclusion."""
+    spec_path = _spec(tmp_path)
+    document = json.loads(spec_path.read_text(encoding="utf-8"))
+    source_gap = document["baseline"]["known_gaps"][0]
+    valuation_gap = document["baseline"]["known_gaps"][1]
+    if exclusions is not None:
+        document["declared_exclusions"] = exclusions
+    if extra_gap is not None:
+        run = Path(document["run_root"])
+        verification = json.loads(
+            (run / "reports" / "verification.json").read_text(encoding="utf-8")
+        )
+        verification["checks"]["coverage"]["source_limited_reasons"].append(extra_gap)
+        _write_json(run / "reports" / "verification.json", verification)
+        document["baseline"]["known_gaps"] = [source_gap, valuation_gap, extra_gap]
+        # Re-hash the changed verification report
+        for artifact in document["artifacts"]:
+            if artifact["artifact_id"] == "reports/verification.json":
+                vpath = run / "reports" / "verification.json"
+                payload = vpath.read_bytes()
+                artifact["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+                artifact["expected_size_bytes"] = len(payload)
+                break
+    spec_path.write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return spec_path
+
+
+def test_declared_exclusions_flip_coverage_to_complete(tmp_path: Path) -> None:
+    """Both gap classes covered by declared exclusions -> COMPLETE_WITHIN_DECLARED_BOUNDARY."""
+    source_gap = "/synthetic: one source-limited request"
+    valuation_gap = "synthetic valuation coverage is incomplete"
+    exclusions = [
+        {
+            "item": source_gap,
+            "reason": "accepted zero-balance defunct tokens — API code 18100410",
+            "provenance": "owner-accepted 2026-08-14 per issue #287",
+        },
+        {
+            "item": valuation_gap,
+            "reason": "provider endpoint missing NAV for two dates",
+            "provenance": "owner-accepted 2026-08-14 per issue #287",
+        },
+    ]
+    spec = _spec_with_exclusions(tmp_path, exclusions=exclusions)
+    catalog, manifest, _ = build_generation(spec)
+
+    assert manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    assert catalog["coverage_status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert catalog["known_gaps"] == []
+    assert len(manifest.coverage.declared_exclusions) == 2
+    assert manifest.coverage.known_gaps == ()
+
+
+def test_undeclared_gap_keeps_coverage_partial(tmp_path: Path) -> None:
+    """A gap not covered by any declared exclusion keeps coverage PARTIAL."""
+    source_gap = "/synthetic: one source-limited request"
+    exclusions = [
+        {
+            "item": source_gap,
+            "reason": "accepted",
+            "provenance": "owner-accepted 2026-08-14 per issue #287",
+        },
+    ]
+    # The valuation gap is NOT declared, so coverage should stay PARTIAL.
+    spec = _spec_with_exclusions(tmp_path, exclusions=exclusions)
+    with pytest.raises(
+        MatrixportGenerationError,
+        match="declared_exclusions do not cover all gaps",
+    ):
+        build_generation(spec)
+
+
+def test_no_exclusions_keeps_partial(tmp_path: Path) -> None:
+    """Spec without declared_exclusions continues to produce PARTIAL (backward compat)."""
+    spec = _spec(tmp_path)
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    assert manifest.coverage.known_gaps != ()
+    assert manifest.coverage.declared_exclusions == ()
+
+
+def test_exclusion_records_land_verbatim_in_manifest(tmp_path: Path) -> None:
+    """Declared exclusion item, reason, and provenance are preserved in the manifest."""
+    gap = "/synthetic: one source-limited request"
+    valuation_gap = "synthetic valuation coverage is incomplete"
+    exclusions = [
+        {
+            "item": gap,
+            "reason": "API rejects 15 defunct legacy currency symbols (code 18100410)",
+            "provenance": "owner-accepted 2026-08-14 per issue #287",
+        },
+        {
+            "item": valuation_gap,
+            "reason": "NAV missing for 2026-01-27, 2026-07-03 on provider endpoint",
+            "provenance": "owner-accepted 2026-08-14 per issue #287",
+        },
+    ]
+    spec = _spec_with_exclusions(tmp_path, exclusions=exclusions)
+    _, manifest, _ = build_generation(spec)
+
+    assert len(manifest.coverage.declared_exclusions) == 2
+    exclusion_items = {e.item for e in manifest.coverage.declared_exclusions}
+    assert gap in exclusion_items
+    assert valuation_gap in exclusion_items
+
+    for exclusion in manifest.coverage.declared_exclusions:
+        assert "18100410" in exclusion.reason or "NAV missing" in exclusion.reason
+        assert "issue #287" in exclusion.provenance
+
+    # Round-trip through serialization
+    manifest_json = manifest.to_json_bytes()
+    reloaded = type(manifest).from_json_bytes(manifest_json)
+    assert (
+        reloaded.coverage.declared_exclusions == manifest.coverage.declared_exclusions
+    )
+    assert reloaded.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+
+
+def test_publish_rejected_for_partial_coverage(tmp_path: Path) -> None:
+    """publish_generation rejects a generation with PARTIAL coverage."""
+    spec = _spec(tmp_path)
+    root = tmp_path / "dataMatrixport"
+    staged = stage_generation_candidate(spec, root)
+    assert staged["publication_eligible"] is False
+    with pytest.raises(
+        PublicationRejectedError, match="generation coverage is not complete"
+    ):
+        publish_generation(root, staged["generation_id"])
+
+
+def test_publish_succeeds_for_complete_within_declared_boundary(
+    tmp_path: Path,
+) -> None:
+    """publish_generation accepts a generation that is COMPLETE_WITHIN_DECLARED_BOUNDARY."""
+    source_gap = "/synthetic: one source-limited request"
+    valuation_gap = "synthetic valuation coverage is incomplete"
+    exclusions = [
+        {
+            "item": source_gap,
+            "reason": "accepted",
+            "provenance": "owner-accepted 2026-08-14 per issue #287",
+        },
+        {
+            "item": valuation_gap,
+            "reason": "accepted",
+            "provenance": "owner-accepted 2026-08-14 per issue #287",
+        },
+    ]
+    spec = _spec_with_exclusions(tmp_path, exclusions=exclusions)
+    root = tmp_path / "dataMatrixport"
+    staged = stage_generation_candidate(spec, root)
+    assert staged["publication_eligible"] is True
+
+    pointer = publish_generation(root, staged["generation_id"])
+    assert pointer.generation_id == staged["generation_id"]
+
+    current_path = root / "CURRENT.json"
+    assert current_path.exists()
+    assert json.loads(current_path.read_text(encoding="utf-8"))["generation_id"] == str(
+        staged["generation_id"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# DeclaredExclusion contract tests
+# ---------------------------------------------------------------------------
+
+
+def test_declared_exclusion_validation() -> None:
+    """DeclaredExclusion enforces non-empty fields."""
+    with pytest.raises(ManifestValidationError, match="must not be empty"):
+        DeclaredExclusion(item="", reason="r", provenance="p")
+    with pytest.raises(ManifestValidationError, match="must not be empty"):
+        DeclaredExclusion(item="x", reason="", provenance="p")
+    with pytest.raises(ManifestValidationError, match="must not be empty"):
+        DeclaredExclusion(item="x", reason="r", provenance="")
+
+
+def test_declared_exclusion_round_trip() -> None:
+    """DeclaredExclusion to_dict/from_dict preserves all fields."""
+    original = DeclaredExclusion(
+        item="TEST-TOKEN",
+        reason="API code 18100410 Invalid params",
+        provenance="issue #287 2026-08-14",
+    )
+    serialized = original.to_dict()
+    assert serialized == {
+        "item": "TEST-TOKEN",
+        "reason": "API code 18100410 Invalid params",
+        "provenance": "issue #287 2026-08-14",
+    }
+    restored = DeclaredExclusion.from_dict(serialized)
+    assert restored == original
+    assert restored.item == "TEST-TOKEN"
+    assert restored.reason == "API code 18100410 Invalid params"
+    assert restored.provenance == "issue #287 2026-08-14"
+
+
+def test_coverage_claim_accepts_declared_exclusions(tmp_path: Path) -> None:
+    """CoverageClaim with COMPLETE + declared_exclusions is valid."""
+    from quant_engine.core import CoverageClaim
+
+    claim = CoverageClaim(
+        status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+        boundary="synthetic",
+        fact_types=("alpha",),
+        declared_exclusions=(
+            DeclaredExclusion(
+                item="GAP-1",
+                reason="accepted",
+                provenance="issue #287",
+            ),
+        ),
+    )
+    assert claim.declared_exclusions[0].item == "GAP-1"
+    assert claim.known_gaps == ()
+
+
+def test_coverage_claim_round_trip_with_exclusions() -> None:
+    """CoverageClaim serialization preserves declared_exclusions."""
+    from quant_engine.core import CoverageClaim
+
+    claim = CoverageClaim(
+        status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+        boundary="synthetic",
+        fact_types=("alpha", "beta"),
+        observed_start=date(2026, 7, 26),
+        observed_end=date(2026, 7, 26),
+        declared_exclusions=(
+            DeclaredExclusion(
+                item="GAP-CURRENCY",
+                reason="API rejects 15 symbols",
+                provenance="issue #287",
+            ),
+            DeclaredExclusion(
+                item="GAP-NAV",
+                reason="NAV missing for 2 dates",
+                provenance="issue #287",
+            ),
+        ),
+    )
+    serialized = claim.to_dict()
+    reloaded = CoverageClaim.from_dict(serialized)
+    assert reloaded == claim
+    assert len(reloaded.declared_exclusions) == 2

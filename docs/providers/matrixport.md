@@ -63,11 +63,61 @@ python tools/matrixport_generation.py build <spec.json>
 python tools/matrixport_generation.py stage <spec.json> <dataMatrixport>
 ```
 
-Because the generation is explicitly `PARTIAL`, it is staged immutably but is
-not eligible for `CURRENT.json`. This preserves the core rule that only a
-verified generation complete within its declared boundary can become current
-authority. The frozen source run remains accepted evidence, not a silently
-complete portfolio authority.
+## Declared boundary exclusions
+
+The generation spec may include an optional `declared_exclusions` array. Each
+entry records an owner-accepted exclusion with the exact gap identifier,
+rationale, and declaration provenance:
+
+```json
+{
+  "declared_exclusions": [
+    {
+      "item": "<gap-identifier>",
+      "reason": "accepted rationale — e.g. API code 18100410 for defunct tokens",
+      "provenance": "owner-accepted YYYY-MM-DD per issue #NNN"
+    }
+  ]
+}
+```
+
+When `declared_exclusions` is present and every residual gap in `known_gaps` is
+covered by a declared exclusion, the generation coverage evaluates to
+`COMPLETE_WITHIN_DECLARED_BOUNDARY`. Any gap not covered by a declared exclusion
+keeps the generation `PARTIAL`. The mechanism is data-driven from the spec and is
+never hardcoded in the adapter; the exclusion records are written verbatim into
+the generation manifest's coverage section (`declared_exclusions` field).
+
+The accepted e4ccbf8cf447* generation (as_of 2026-08-03) has two exclusion
+classes accepted by the owner on 2026-08-14 (issue #287):
+
+1. **15 currency symbols** rejected by the Matrixport API itself with code
+   `18100410 "Invalid params"` on `/mapi/v1/wallet/deposits` and
+   `/mapi/v1/wallet/withdrawals`: FTX-BTC-1, FTX-BTC-2, HUBX, MFIP-BCH,
+   MFIP-BNB, MFIP-BTC, MFIP-DOGE, MFIP-ETH, MFIP-LTC, MFIP-SOL, MFIP-USDC,
+   MFIP-USDT, USDC_OP, USDT_OP, UXLINK_OLD. All are zero-balance defunct/legacy
+   tokens.
+2. **2 NAV days** missing from the provider's own endpoint (2026-01-27,
+   2026-07-03; 2/241 rows).
+
+## Publish path
+
+A generation whose coverage is `COMPLETE_WITHIN_DECLARED_BOUNDARY` and
+verification is `VERIFIED` can be published as the current authority:
+
+```powershell
+python tools/matrixport_generation.py publish <spec.json> <dataMatrixport> <generation_id>
+```
+
+The `publish` subcommand rebuilds the generation from the spec, verifies the
+generation ID matches, and calls the core `publish_generation` gate. The core
+gate re-verifies that both the coverage status and verification status are
+suitable before atomically writing `CURRENT.json`. A generation with `PARTIAL`
+coverage is rejected at publication time with `PublicationRejectedError`.
+
+This preserves the core rule that only a verified generation complete within
+its declared boundary can become current authority. The frozen source run
+remains accepted evidence, not a silently complete portfolio authority.
 
 ## Local data layout
 
