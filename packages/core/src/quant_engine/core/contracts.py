@@ -255,6 +255,8 @@ class CoverageClaim:
     observed_end: date | None = None
     known_gaps: tuple[str, ...] = ()
     declared_exclusions: tuple[DeclaredExclusion, ...] = ()
+    undeclared_gaps: tuple[str, ...] = ()
+    stale_declarations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         boundary = _non_empty(self.boundary, "coverage.boundary")
@@ -265,6 +267,22 @@ class CoverageClaim:
             sorted({_non_empty(item, "coverage.known_gap") for item in self.known_gaps})
         )
         exclusions = tuple(sorted(self.declared_exclusions, key=lambda e: e.item))
+        undeclared = tuple(
+            sorted(
+                {
+                    _non_empty(item, "coverage.undeclared_gap")
+                    for item in self.undeclared_gaps
+                }
+            )
+        )
+        stale = tuple(
+            sorted(
+                {
+                    _non_empty(item, "coverage.stale_declaration")
+                    for item in self.stale_declarations
+                }
+            )
+        )
         if not facts:
             raise ManifestValidationError("coverage.fact_types must not be empty")
         if (self.observed_start is None) != (self.observed_end is None):
@@ -289,6 +307,8 @@ class CoverageClaim:
         object.__setattr__(self, "fact_types", facts)
         object.__setattr__(self, "known_gaps", gaps)
         object.__setattr__(self, "declared_exclusions", exclusions)
+        object.__setattr__(self, "undeclared_gaps", undeclared)
+        object.__setattr__(self, "stale_declarations", stale)
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -309,6 +329,10 @@ class CoverageClaim:
             result["declared_exclusions"] = [
                 exclusion.to_dict() for exclusion in self.declared_exclusions
             ]
+        if self.undeclared_gaps:
+            result["undeclared_gaps"] = list(self.undeclared_gaps)
+        if self.stale_declarations:
+            result["stale_declarations"] = list(self.stale_declarations)
         return result
 
     @classmethod
@@ -321,7 +345,12 @@ class CoverageClaim:
             "observed_start",
             "status",
         }
-        extra = set(value) - required_keys - {"declared_exclusions"}
+        allowed_optional = {
+            "declared_exclusions",
+            "undeclared_gaps",
+            "stale_declarations",
+        }
+        extra = set(value) - required_keys - allowed_optional
         if extra:
             raise ManifestValidationError(
                 f"coverage contains unexpected keys: {sorted(extra)}"
@@ -361,6 +390,20 @@ class CoverageClaim:
                 "coverage declared_exclusions must be objects"
             )
         exclusions = tuple(DeclaredExclusion.from_dict(item) for item in raw_exclusions)
+
+        def _parse_string_list(raw: object, label: str) -> tuple[str, ...]:
+            if not isinstance(raw, list) or not all(
+                isinstance(item, str) for item in raw
+            ):
+                raise ManifestValidationError(f"coverage {label} must be strings")
+            return tuple(raw)
+
+        undeclared = _parse_string_list(
+            value.get("undeclared_gaps", []), "undeclared_gaps"
+        )
+        stale = _parse_string_list(
+            value.get("stale_declarations", []), "stale_declarations"
+        )
         return cls(
             status=parsed_status,
             boundary=boundary,
@@ -377,6 +420,8 @@ class CoverageClaim:
             ),
             known_gaps=tuple(known_gaps),
             declared_exclusions=exclusions,
+            undeclared_gaps=undeclared,
+            stale_declarations=stale,
         )
 
 

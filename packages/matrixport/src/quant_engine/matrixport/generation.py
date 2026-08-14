@@ -453,21 +453,19 @@ def build_generation(
     if raw_exclusions and not undeclared and not stale:
         coverage_status = CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
         manifest_known_gaps: tuple[str, ...] = ()
+        manifest_undeclared: tuple[str, ...] = ()
+        manifest_stale: tuple[str, ...] = ()
     elif raw_exclusions:
-        messages: list[str] = []
-        if undeclared:
-            messages.append(
-                f"undeclared gaps ({len(undeclared)}): {sorted(undeclared)}"
-            )
-        if stale:
-            messages.append(f"stale declarations ({len(stale)}): {sorted(stale)}")
-        raise MatrixportGenerationError(
-            "declared_exclusions do not exactly match current gaps; "
-            + "; ".join(messages)
-        )
+        # Drift: produce evidence-bearing PARTIAL manifest with exact diff.
+        coverage_status = CoverageStatus.PARTIAL
+        manifest_known_gaps = tuple(known_gaps)
+        manifest_undeclared = tuple(sorted(undeclared))
+        manifest_stale = tuple(sorted(stale))
     else:
         coverage_status = CoverageStatus.PARTIAL
         manifest_known_gaps = tuple(known_gaps)
+        manifest_undeclared = ()
+        manifest_stale = ()
 
     declared_exclusions = tuple(
         DeclaredExclusion(
@@ -492,6 +490,10 @@ def build_generation(
     }
     if declared_exclusions:
         catalog["declared_exclusions"] = [e.to_dict() for e in declared_exclusions]
+    if manifest_undeclared:
+        catalog["undeclared_gaps"] = list(manifest_undeclared)
+    if manifest_stale:
+        catalog["stale_declarations"] = list(manifest_stale)
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
         artifact_id="normalized/generation-catalog.json",
@@ -517,6 +519,8 @@ def build_generation(
             observed_end=observed_boundary,
             known_gaps=manifest_known_gaps,
             declared_exclusions=declared_exclusions,
+            undeclared_gaps=manifest_undeclared,
+            stale_declarations=manifest_stale,
         ),
         artifacts=(*source_artifacts, catalog_artifact),
         verification=VerificationStatus.VERIFIED,

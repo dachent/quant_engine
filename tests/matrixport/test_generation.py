@@ -355,37 +355,33 @@ def test_owner_accepted_full_atomic_declaration_is_complete(
 def test_new_undeclared_nav_date_keeps_partial(
     tmp_path: Path,
 ) -> None:
-    """A second missing NAV date not covered by any exclusion → PARTIAL."""
+    """A second missing NAV date not covered by any exclusion → PARTIAL manifest
+    naming the exact undeclared atom, publish rejected via real path."""
     source_atom = "wallet_deposit_currency:synthetic-rejected-A"
     nav_atom_1 = "nav_missing_date:2026-01-27"
     nav_atom_2 = "nav_missing_date:2026-08-14"  # NEW, not declared
     exclusions = [
-        {
-            "item": source_atom,
-            "reason": "accepted",
-            "provenance": "issue #287",
-        },
-        {
-            "item": nav_atom_1,
-            "reason": "accepted",
-            "provenance": "issue #287",
-        },
+        {"item": source_atom, "reason": "accepted", "provenance": "issue #287"},
+        {"item": nav_atom_1, "reason": "accepted", "provenance": "issue #287"},
     ]
     spec = _spec_with_exclusions(
         tmp_path,
         exclusions=exclusions,
         extra_gaps=[nav_atom_2],
     )
-    with pytest.raises(
-        MatrixportGenerationError,
-        match="undeclared gaps.*nav_missing_date:2026-08-14",
-    ):
-        build_generation(spec)
+    catalog, manifest, _ = build_generation(spec)
 
-    # Prove publish is also rejected for PARTIAL coverage
+    # Evidence-bearing PARTIAL manifest
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    assert catalog["coverage_status"] == "PARTIAL"
+    assert nav_atom_2 in manifest.coverage.undeclared_gaps
+    assert nav_atom_2 in manifest.coverage.known_gaps
+    assert manifest.coverage.stale_declarations == ()
+
+    # Publish is rejected via the real publish path
     root = tmp_path / "dataMatrixport"
-    spec2 = _spec(tmp_path / "publish-check")
-    staged = stage_generation_candidate(spec2, root)
+    staged = stage_generation_candidate(spec, root)
+    assert staged["publication_eligible"] is False
     with pytest.raises(
         PublicationRejectedError, match="generation coverage is not complete"
     ):
@@ -398,7 +394,8 @@ def test_new_undeclared_nav_date_keeps_partial(
 def test_substituted_wallet_currency_same_count_keeps_partial(
     tmp_path: Path,
 ) -> None:
-    """A different rejected currency with the same count is NOT matched."""
+    """A different rejected currency with the same count → PARTIAL manifest
+    naming the exact undeclared atom."""
     source_atom_original = "wallet_deposit_currency:synthetic-rejected-A"
     source_atom_substituted = "wallet_deposit_currency:synthetic-rejected-B"
     nav_atom = "nav_missing_date:2026-01-27"
@@ -408,81 +405,64 @@ def test_substituted_wallet_currency_same_count_keeps_partial(
             "reason": "accepted",
             "provenance": "issue #287",
         },
-        {
-            "item": nav_atom,
-            "reason": "accepted",
-            "provenance": "issue #287",
-        },
+        {"item": nav_atom, "reason": "accepted", "provenance": "issue #287"},
     ]
-    # Replace the original gap with the substituted one
     spec = _spec_with_exclusions(
         tmp_path,
         exclusions=exclusions,
         extra_gaps=[source_atom_substituted],
         remove_gaps=[source_atom_original],
     )
-    with pytest.raises(
-        MatrixportGenerationError,
-        match="undeclared gaps",
-    ):
-        build_generation(spec)
+    catalog, manifest, _ = build_generation(spec)
+
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    assert source_atom_substituted in manifest.coverage.undeclared_gaps
+    assert source_atom_substituted in manifest.coverage.known_gaps
+    # The original declared atom is stale
+    assert source_atom_original in manifest.coverage.stale_declarations
 
 
-# --- Test (c): Stale declaration → reject ---
+# --- Test (c): Stale declaration → PARTIAL naming the stale atom ---
 
 
-def test_stale_declaration_rejected(tmp_path: Path) -> None:
-    """A declared exclusion that no longer matches any current gap is rejected."""
+def test_stale_declaration_produces_partial_manifest(tmp_path: Path) -> None:
+    """A declared exclusion not matching any current gap → PARTIAL manifest
+    naming the exact stale atom."""
     source_atom = "wallet_deposit_currency:synthetic-rejected-A"
     nav_atom = "nav_missing_date:2026-01-27"
     stale_atom = "wallet_deposit_currency:synthetic-LEGACY-TOKEN"
     exclusions = [
+        {"item": source_atom, "reason": "accepted", "provenance": "issue #287"},
+        {"item": nav_atom, "reason": "accepted", "provenance": "issue #287"},
         {
-            "item": source_atom,
-            "reason": "accepted",
-            "provenance": "issue #287",
-        },
-        {
-            "item": nav_atom,
-            "reason": "accepted",
-            "provenance": "issue #287",
-        },
-        {
-            "item": stale_atom,  # NOT present in current gaps
+            "item": stale_atom,
             "reason": "stale — upstream fixed this",
             "provenance": "issue #287",
         },
     ]
     spec = _spec_with_exclusions(tmp_path, exclusions=exclusions)
-    with pytest.raises(
-        MatrixportGenerationError,
-        match="stale declarations.*synthetic-LEGACY-TOKEN",
-    ):
-        build_generation(spec)
+    catalog, manifest, _ = build_generation(spec)
+
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    assert stale_atom in manifest.coverage.stale_declarations
+    assert manifest.coverage.undeclared_gaps == ()
+    # The declared stale item is still recorded in declared_exclusions
+    declared_items = {e.item for e in manifest.coverage.declared_exclusions}
+    assert stale_atom in declared_items
 
 
 # --- Test (e): Aggregate-string matching is gone ---
 
 
 def test_aggregate_string_matching_is_gone(tmp_path: Path) -> None:
-    """Prove that different symbols with the same count are not
-    absorbed by an aggregate-key exclusion."""
+    """Prove different symbols → PARTIAL manifest with undeclared + stale diff."""
     source_atom_a = "wallet_deposit_currency:synthetic-rejected-A"
     source_atom_b = "wallet_deposit_currency:synthetic-rejected-B"
     nav_atom = "nav_missing_date:2026-01-27"
 
-    # Exclusion only covers A, but gap set has B
     exclusions = [
-        {
-            "item": source_atom_a,
-            "reason": "only symbol A is accepted",
-            "provenance": "issue #287",
-        },
-        {
-            "item": nav_atom,
-            "reason": "accepted",
-            "provenance": "issue #287",
-        },
+        {"item": source_atom_a, "reason": "only symbol A", "provenance": "issue #287"},
+        {"item": nav_atom, "reason": "accepted", "provenance": "issue #287"},
     ]
     spec = _spec_with_exclusions(
         tmp_path,
@@ -490,11 +470,11 @@ def test_aggregate_string_matching_is_gone(tmp_path: Path) -> None:
         extra_gaps=[source_atom_b],
         remove_gaps=[source_atom_a],
     )
-    with pytest.raises(
-        MatrixportGenerationError,
-        match="undeclared gaps",
-    ):
-        build_generation(spec)
+    catalog, manifest, _ = build_generation(spec)
+
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    assert source_atom_b in manifest.coverage.undeclared_gaps
+    assert source_atom_a in manifest.coverage.stale_declarations
 
 
 # --- Duplicate exclusion items rejected ---

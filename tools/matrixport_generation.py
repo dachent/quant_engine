@@ -77,6 +77,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "publication_eligible": eligible,
                 "request_count": catalog["request_count"],
             }
+            if manifest.coverage.undeclared_gaps:
+                result["undeclared_gaps"] = list(manifest.coverage.undeclared_gaps)
+            if manifest.coverage.stale_declarations:
+                result["stale_declarations"] = list(
+                    manifest.coverage.stale_declarations
+                )
         elif args.command == "stage":
             result = stage_generation_candidate(args.spec, args.output_root)
         elif args.command == "publish":
@@ -103,6 +109,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"matrixport-generation: FAIL: {exc}")
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    if (
+        args.command == "build"
+        and result.get("coverage_status") != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    ):
+        print(
+            "matrixport-generation: BUILD FAILED — coverage is "
+            f"{result['coverage_status']} (see undeclared_gaps / stale_declarations above)",
+            flush=True,
+        )
+        return 1
     return 0
 
 
