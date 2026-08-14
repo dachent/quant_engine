@@ -1243,6 +1243,22 @@ def _validate_panel_hwm_envelope(
             if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
         }
     )
+    # Consumption-boundary full context: the builder embeds the hash-verified
+    # acceptance record and allocations snapshot into the catalog so the panel
+    # can enforce the anchor-content cross-check and endpoint recomputation
+    # without access to the governed source files.  Missing context is a
+    # fail-closed condition — the panel never falls back to declaration-only
+    # mode.
+    hwm_acceptance_record = catalog.get("hwm_acceptance_record")
+    hwm_allocations = catalog.get("allocations")
+    if not isinstance(hwm_acceptance_record, dict) or not isinstance(
+        hwm_allocations, list
+    ):
+        raise ControlPanelValidationError(
+            "hwm_inputs consumption context is incomplete: "
+            "hwm_acceptance_record or allocations missing from the catalog"
+        )
+
     try:
         validate_hwm_inputs_envelope(
             envelope,
@@ -1253,6 +1269,8 @@ def _validate_panel_hwm_envelope(
             policy_exclusions=hwm_policy_exclusions(
                 _load_json(HWM_POLICY, "HWM policy")
             ),
+            allocations=_objects(hwm_allocations, "allocations"),
+            acceptance_record=hwm_acceptance_record,
         )
     except HwmInputsContractError as exc:
         raise ControlPanelValidationError(str(exc)) from exc

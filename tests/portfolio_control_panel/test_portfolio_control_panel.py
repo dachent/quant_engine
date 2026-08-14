@@ -826,32 +826,72 @@ def _panel_baseline_catalog(
     extra_source_artifacts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The governed baseline catalog matching the panel fixture report."""
+    from decimal import Decimal
+
+    # Compute matching allocations from the envelope and crosswalk so the
+    # endpoint recomputation produces delta=0.  When no envelope is provided,
+    # use the original fixed-value allocations (enough for perimeter tests).
+    matching_allocations: list[dict[str, Any]] = [
+        {
+            "as_of_date": "2026-07-30",
+            "current_value": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": "100043.62",
+            },
+            "scope": "RESERVE",
+            "strategy_id": None,
+        }
+    ]
+    if envelope is not None and crosswalk is not None:
+        by_day: dict[str, dict[str, Decimal]] = {}
+        for rw in crosswalk:
+            sid = str(rw["strategy_id"])
+            day = str(rw["date"])
+            ret = Decimal(str(rw.get("return", "0")))
+            by_day.setdefault(day, {})[sid] = ret
+        endpoint_date = "2026-07-30"
+        for row in envelope.get("periods", []):
+            if (
+                row.get("disposition") != "AVAILABLE"
+                or row.get("lane") != "ACCOUNT"
+                or str(row.get("date")) != endpoint_date
+            ):
+                continue
+            sid = str(row["strategy_id"])
+            capital = Decimal(str(row["beginning_capital_usd"]))
+            period_return = by_day.get(endpoint_date, {}).get(sid, Decimal(0))
+            endpoint_val = str(capital * (Decimal(1) + period_return))
+            matching_allocations.append(
+                {
+                    "as_of_date": endpoint_date,
+                    "current_value": {
+                        "currency": "USD",
+                        "status": "AVAILABLE",
+                        "value": endpoint_val,
+                    },
+                    "scope": "SYSTEMATIC",
+                    "strategy_id": sid,
+                }
+            )
+    else:
+        # No envelope — use default SYSTEMATIC allocations for perimeter.
+        for index in range(9):
+            matching_allocations.append(
+                {
+                    "as_of_date": "2026-07-30",
+                    "current_value": {
+                        "currency": "USD",
+                        "status": "AVAILABLE",
+                        "value": str(1000 + index),
+                    },
+                    "scope": "SYSTEMATIC",
+                    "strategy_id": f"strategy-{index}",
+                }
+            )
+
     catalog: dict[str, Any] = {
-        "allocations": [
-            {
-                "as_of_date": "2026-07-30",
-                "current_value": {
-                    "currency": "USD",
-                    "status": "AVAILABLE",
-                    "value": str(1000 + index),
-                },
-                "scope": "SYSTEMATIC",
-                "strategy_id": f"strategy-{index}",
-            }
-            for index in range(9)
-        ]
-        + [
-            {
-                "as_of_date": "2026-07-30",
-                "current_value": {
-                    "currency": "USD",
-                    "status": "AVAILABLE",
-                    "value": "100043.62",
-                },
-                "scope": "RESERVE",
-                "strategy_id": None,
-            }
-        ],
+        "allocations": matching_allocations,
         "as_of_date": "2026-07-30",
         "baseline_schema_version": 1,
         "policy_version": "PORT-PERF-1",
@@ -860,6 +900,12 @@ def _panel_baseline_catalog(
     }
     if envelope is not None:
         catalog["hwm_inputs"] = envelope
+        anchor = envelope.get("anchor", {})
+        catalog["hwm_acceptance_record"] = {
+            "anchor_date": anchor.get("anchor_date"),
+            "index_base_value": anchor.get("index_base_value"),
+            "hwm_policy_id": anchor.get("hwm_policy_id"),
+        }
         catalog["source_artifacts"] = [
             {
                 "artifact_id": "anchor-acceptance-1",
@@ -3628,11 +3674,44 @@ def test_panel_rejects_coherently_tampered_report_copies(
             row["beginning_capital_usd"] = "999"
     for row in tampered_crosswalk:
         row["beginning_capital"] = "999"
-    # The forged report recomputes its claimed summary over the tampered
-    # copies, so the forgery is internally coherent.
+    # Compute allocations matching the tampered endpoint so the forgery is
+    # internally coherent (endpoint recomputation passes).
+    from decimal import Decimal as _Decimal
+    forged_allocations: list[dict[str, Any]] = []
+    by_day: dict[str, dict[str, _Decimal]] = {}
+    for rw in tampered_crosswalk:
+        sid = str(rw["strategy_id"])
+        day = str(rw["date"])
+        ret = _Decimal(str(rw.get("return", "0")))
+        by_day.setdefault(day, {})[sid] = ret
+    endpoint_date = "2026-07-30"
+    for row in tampered_envelope.get("periods", []):
+        if (
+            row.get("disposition") != "AVAILABLE"
+            or row.get("lane") != "ACCOUNT"
+            or str(row.get("date")) != endpoint_date
+        ):
+            continue
+        sid = str(row["strategy_id"])
+        capital = _Decimal(str(row["beginning_capital_usd"]))
+        period_return = by_day.get(endpoint_date, {}).get(sid, _Decimal(0))
+        endpoint_val = str(capital * (_Decimal(1) + period_return))
+        forged_allocations.append(
+            {
+                "as_of_date": endpoint_date,
+                "current_value": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": endpoint_val,
+                },
+                "scope": "SYSTEMATIC",
+                "strategy_id": sid,
+            }
+        )
     forged_view = {
         "as_of_date": catalog["as_of_date"],
-        "allocations": catalog["allocations"],
+        "allocations": forged_allocations,
+        "hwm_acceptance_record": catalog.get("hwm_acceptance_record"),
         "hwm_inputs": tampered_envelope,
         "source_artifacts": catalog["source_artifacts"],
         "strategy_returns": tampered_crosswalk,
@@ -4115,7 +4194,7 @@ def test_panel_rejects_unreconciled_endpoint_probe(
         report,
         catalog,
         mutate,
-        "hwm_inputs allocation endpoint check is not reconciled",
+        "delta_usd differs from the recomputed delta",
     )
 
 
@@ -4137,3 +4216,104 @@ def test_panel_rejects_incomplete_envelope_probe(
         mutate,
         "hwm_inputs envelope shape differs",
     )
+
+
+# ---------------------------------------------------------------------------
+# QC8 regression: full consumption-boundary context enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_panel_rejects_later_anchor_with_truncated_history(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """QC8: a fabricated later anchor (acceptance record says
+    2026-07-28, envelope claims 2026-07-29) is rejected by the panel's
+    anchor-content cross-check."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        catalog["hwm_inputs"]["anchor"]["anchor_date"] = "2026-07-29"
+        # Remove 2026-07-28 periods (would be outside new keyspace).
+        catalog["hwm_inputs"]["periods"] = [
+            p
+            for p in catalog["hwm_inputs"]["periods"]
+            if p["date"] != "2026-07-28"
+        ]
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "anchor anchor_date disagrees with the admitted "
+        "hwm-anchor-acceptance record",
+    )
+
+
+def test_panel_rejects_inflated_allocation_unchanged_declaration(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """QC8: an allocation inflated 10x with the envelope still declaring
+    {matched: true, delta_usd: "0"} is rejected by the panel's endpoint
+    recomputation."""
+    from decimal import Decimal as _D
+
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        for alloc in catalog["allocations"]:
+            if alloc.get("scope") == "SYSTEMATIC" and alloc.get("current_value"):
+                alloc["current_value"]["value"] = str(
+                    _D(alloc["current_value"]["value"]) * 10
+                )
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "allocation endpoint check does not reconcile",
+    )
+
+
+def test_panel_rejects_missing_acceptance_record_fails_closed(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """QC8: if the catalog lacks hwm_acceptance_record, the panel
+    consumer fails closed — never falls back to declaration-only mode."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        catalog.pop("hwm_acceptance_record", None)
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "hwm_inputs consumption context is incomplete",
+    )
+
+
+def test_panel_valid_envelope_with_full_context_passes(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """QC8 parity: a valid envelope with full consumption context
+    (acceptance_record + allocations) passes the panel's boundary check
+    and produces an AVAILABLE index."""
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    data = _candidate_data(candidate)
+    assert data["advisory"]["hwm_numerical_status"] == "AVAILABLE"
+    assert "hwm_index" in data["advisory"]

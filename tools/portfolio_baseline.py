@@ -2460,7 +2460,7 @@ def _load_hwm_inputs_envelope(
     assignments: Sequence[Mapping[str, Any]],
     strategy_returns: Sequence[Mapping[str, Any]],
     allocations: Sequence[Mapping[str, Any]],
-) -> tuple[dict[str, Any], SourceArtifact, dict[str, Any]] | None:
+) -> tuple[dict[str, Any], SourceArtifact, dict[str, Any], dict[str, Any]] | None:
     """Load and semantically validate the optional hwm_inputs envelope.
 
     When the spec declares an ``hwm-inputs`` source, load the JSON file,
@@ -3130,7 +3130,7 @@ def _load_hwm_inputs_envelope(
         "sha256": actual_hash,
         "source_key": "hwm-inputs",
     }
-    return envelope, hwm_artifact, hwm_link
+    return envelope, hwm_artifact, hwm_link, acceptance_doc
 
 
 def build_catalog(
@@ -3292,7 +3292,7 @@ def build_catalog(
     hwm_inputs_artifact: SourceArtifact | None = None
     hwm_inputs_link: dict[str, Any] | None = None
     if hwm_inputs_result is not None:
-        hwm_inputs_envelope, hwm_inputs_artifact, hwm_inputs_link = hwm_inputs_result
+        hwm_inputs_envelope, hwm_inputs_artifact, hwm_inputs_link, hwm_acceptance_record = hwm_inputs_result
     layer_metrics, live_metrics, implementation_gaps = _normalize_strategy_evidence(
         paths, strategy_aliases
     )
@@ -3452,6 +3452,10 @@ def build_catalog(
     }
     if hwm_inputs_envelope is not None:
         catalog["hwm_inputs"] = hwm_inputs_envelope
+        # Embed the hash-verified acceptance record so consumers can
+        # perform the anchor-content cross-check without access to the
+        # governed source files.
+        catalog["hwm_acceptance_record"] = hwm_acceptance_record
     if provenance.get("strategy_version_catalog") is not None:
         catalog["strategy_version_catalog"] = provenance["strategy_version_catalog"]
     catalog_bytes = canonical_json_bytes(catalog)

@@ -389,7 +389,12 @@ def validate_hwm_inputs_envelope(
                 "ENDPOINT_NOT_RECONCILED",
             )
     else:
-        # Fallback: consumers without allocations access do a simple check.
+        # Declaration-only fallback: used only when the caller cannot supply
+        # the allocations snapshot (test fixtures, or caller configurations
+        # that predate the #277 full-context mandate).  Production consumers
+        # (report, panel) and the admission builder ALWAYS supply allocations
+        # and fail closed at their own boundary if the data is absent — this
+        # branch is never reachable from those paths.
         if endpoint["matched"] is not True or declared_delta != 0:
             _fail(
                 "hwm_inputs allocation endpoint check is not reconciled",

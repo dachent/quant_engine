@@ -1827,11 +1827,75 @@ def _hwm_envelope(crosswalk: list[dict[str, Any]]) -> dict[str, Any]:
 def _attach_hwm_envelope(
     catalog: dict[str, Any], crosswalk: list[dict[str, Any]]
 ) -> None:
-    """Attach the envelope, its crosswalk, and the role-correct admitted
-    artifact entries to a fixture catalog.  Tests that mutate the envelope
-    after construction re-assign catalog["hwm_inputs"] afterwards."""
-    catalog["hwm_inputs"] = _hwm_envelope(crosswalk)
+    """Attach the envelope, its crosswalk, the role-correct admitted
+    artifact entries, the hash-verified acceptance record, and allocation
+    values matching the recomputed endpoint to a fixture catalog.  Tests that
+    mutate the envelope after construction re-assign catalog["hwm_inputs"]
+    afterwards."""
+    envelope = _hwm_envelope(crosswalk)
+    catalog["hwm_inputs"] = envelope
     catalog["strategy_returns"] = crosswalk
+
+    # The acceptance record embedded by the builder for consumption-boundary
+    # anchor-content cross-check.  Must equal the envelope's anchor fields.
+    anchor = envelope["anchor"]
+    catalog["hwm_acceptance_record"] = {
+        "anchor_date": anchor["anchor_date"],
+        "index_base_value": anchor["index_base_value"],
+        "hwm_policy_id": anchor["hwm_policy_id"],
+    }
+
+    # Replace allocations with values that match the envelope's recomputed
+    # endpoint so the validator's independent recomputation passes (delta=0).
+    # Preserve the catalog's original RESERVE allocation (not in perimeter).
+    from decimal import Decimal
+
+    by_day: dict[str, dict[str, Decimal]] = {}
+    for rw in crosswalk:
+        sid = str(rw["strategy_id"])
+        day = str(rw["date"])
+        ret = Decimal(str(rw.get("return", "0")))
+        by_day.setdefault(day, {})[sid] = ret
+
+    endpoint_date = "2026-01-03"  # latest allocation as_of_date
+    matching_allocations: list[dict[str, Any]] = []
+    for row in envelope["periods"]:
+        if (
+            row.get("disposition") != "AVAILABLE"
+            or row.get("lane") != "ACCOUNT"
+            or str(row.get("date")) != endpoint_date
+        ):
+            continue
+        sid = str(row["strategy_id"])
+        capital = Decimal(str(row["beginning_capital_usd"]))
+        period_return = by_day.get(endpoint_date, {}).get(sid, Decimal(0))
+        endpoint_val = str(capital * (Decimal(1) + period_return))
+        matching_allocations.append(
+            {
+                "allocation_id": f"allocation-{sid}",
+                "as_of_date": endpoint_date,
+                "current_value": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": endpoint_val,
+                },
+                "scope": "SYSTEMATIC",
+                "source_key": "synthetic-allocation",
+                "strategy_id": sid,
+                "systematic_weight": "0.1111111111111111111111111111111111",
+            }
+        )
+    # Keep any non-SYSTEMATIC (RESERVE) allocations from the original catalog.
+    original_allocations = catalog.get("allocations", [])
+    if isinstance(original_allocations, list):
+        for alloc in original_allocations:
+            if (
+                isinstance(alloc, dict)
+                and alloc.get("scope") != "SYSTEMATIC"
+            ):
+                matching_allocations.append(alloc)
+    catalog["allocations"] = matching_allocations
+
     catalog["source_artifacts"] = [
         *catalog["source_artifacts"],
         {
@@ -2229,3 +2293,107 @@ def test_hwm_numerical_available_with_missing_flow_fails_closed(
     assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
     assert hwm["hwm_numerical_reason"] == "HWM_INPUTS_INVALID"
     assert "hwm_index" not in hwm
+
+
+# ---------------------------------------------------------------------------
+# QC8 regression: full consumption-boundary context enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_hwm_later_anchor_truncated_history_rejected(tmp_path: Path) -> None:
+    """QC8: a fabricated later anchor that truncates the expected keyspace
+    is rejected by the report consumer's anchor-content cross-check (the
+    acceptance record from the catalog has anchor_date 2026-01-01, but the
+    envelope claims 2026-01-02)."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    _attach_hwm_envelope(catalog, crosswalk)
+    # The builder-embedded acceptance record says anchor_date=2026-01-01
+    # (matching the original envelope).  Fabricate the envelope anchor.
+    catalog["hwm_inputs"]["anchor"]["anchor_date"] = "2026-01-02"
+    # Remove the 2026-01-01 period rows (they'd be outside the new keyspace).
+    catalog["hwm_inputs"]["periods"] = [
+        p
+        for p in catalog["hwm_inputs"]["periods"]
+        if p["date"] != "2026-01-01"
+    ]
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    # The anchor cross-check fires first (ANCHOR_CONTENT_MISMATCH).
+    assert hwm["hwm_numerical_reason"] == "HWM_INPUTS_INVALID"
+    assert "hwm_index" not in hwm
+
+
+def test_hwm_inflated_allocation_unchanged_declaration_rejected(
+    tmp_path: Path,
+) -> None:
+    """QC8: an allocation inflated 10x with the envelope still declaring
+    {matched: true, delta_usd: "0"} is rejected by the report consumer's
+    endpoint recomputation."""
+    from decimal import Decimal as _D
+
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    _attach_hwm_envelope(catalog, crosswalk)
+    # Inflate every systematic allocation 10x.
+    for alloc in catalog["allocations"]:
+        if alloc.get("scope") == "SYSTEMATIC" and alloc.get("current_value"):
+            alloc["current_value"]["value"] = str(
+                _D(alloc["current_value"]["value"]) * 10
+            )
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm["hwm_numerical_reason"] == "ENDPOINT_NOT_RECONCILED"
+    assert "hwm_index" not in hwm
+
+
+def test_hwm_missing_acceptance_record_fails_closed(tmp_path: Path) -> None:
+    """QC8: if the catalog lacks hwm_acceptance_record, the report consumer
+    fails closed with MISSING_CONSUMPTION_CONTEXT — never falls back."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    _attach_hwm_envelope(catalog, crosswalk)
+    # Remove the builder-embedded acceptance record.
+    catalog.pop("hwm_acceptance_record", None)
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm["hwm_numerical_reason"] == "MISSING_CONSUMPTION_CONTEXT"
+    assert "hwm_index" not in hwm
+
+
+def test_hwm_valid_envelope_publishes_with_full_context(tmp_path: Path) -> None:
+    """QC8 parity: a valid envelope with all consumption context present
+    publishes an AVAILABLE index (identical at all three boundaries)."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    _attach_hwm_envelope(catalog, crosswalk)
+    # The fixture already embeds hwm_acceptance_record and matching
+    # allocations.
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "AVAILABLE"
+    assert "hwm_numerical_reason" not in hwm
+    assert "hwm_index" in hwm

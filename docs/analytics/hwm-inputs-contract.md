@@ -73,14 +73,18 @@ validation runs only after provider artifacts are admitted), and its hash
 must match `source_artifact_sha256`.  An observation artifact (e.g.
 `alpaca-events`) is never a valid acceptance authority.
 
-**Anchor content cross-check:** the shared validator parses the admitted
-acceptance record (when the admission builder supplies it via the
-`acceptance_record` parameter) and requires exact equality of
-`anchor_date`, `index_base_value`, and `hwm_policy_id` between the
-envelope and the record.  Consumers that cannot access the governed source
-files omit this parameter; the cross-check is admission-only.  The
-expected keyspace is derived from the anchor only after this cross-check,
-so a fabricated later anchor cannot truncate the keyspace.
+**Anchor content cross-check:** the shared validator requires exact equality
+of `anchor_date`, `index_base_value`, and `hwm_policy_id` between the
+envelope and the hash-verified acceptance record.  The builder embeds the
+parsed acceptance record into the catalog at build time
+(`catalog["hwm_acceptance_record"]`); both consumers (report and panel)
+read it from the catalog and pass it to the shared validator.  The
+cross-check runs at ALL THREE boundaries — builder admission, report
+consumption, and panel consumption — against the same hash-verified record.
+When the acceptance record is absent from the catalog, consumers fail closed
+(MISSING_CONSUMPTION_CONTEXT).  The expected keyspace is derived from the
+anchor only after this cross-check, so a fabricated later anchor cannot
+truncate the keyspace.
 
 ### `calendar_authorities`
 
@@ -196,18 +200,19 @@ identically.
 | `allocation_endpoint_check.delta_usd` | Decimal string; must equal the independently recomputed delta. |
 
 The allocation snapshot is endpoint reconciliation only.  The shared
-validator recomputes the check independently when the caller supplies the
-`allocations` parameter: at the latest systematic allocation snapshot date,
-each `ACCOUNT`-lane `AVAILABLE` period contributes its rollforward-verified
-ending capital (`beginning_capital × (1 + return)` from the same
-`strategy_returns` row); the sum is compared against the allocation snapshot
-total over exactly those strategies.  Any non-zero recomputed delta aborts
-the build (unreconciled capital is rejected); the declared `delta_usd` must
-equal the recomputed delta (`"0"` in canonical decimal text) and `matched`
-must be `true`.  Consumers that cannot access the allocation snapshot omit
-this parameter and fall back to a simple check (`matched == true` and
-`delta_usd == 0`); the admission builder always supplies allocations for
-independent recomputation.
+validator recomputes the check independently at all three boundaries
+(builder admission, report consumption, panel consumption): at the latest
+systematic allocation snapshot date, each `ACCOUNT`-lane `AVAILABLE` period
+contributes its rollforward-verified ending capital (`beginning_capital ×
+(1 + return)` from the same `strategy_returns` row); the sum is compared
+against the allocation snapshot total over exactly those strategies.  The
+builder and both consumers pass `catalog["allocations"]` into the validator
+as the `allocations` parameter.  Any non-zero recomputed delta aborts (code
+`ENDPOINT_NOT_RECONCILED`); the declared `delta_usd` must equal the
+recomputed delta (`"0"` in canonical decimal text) and `matched` must be
+`true`.  There is no declaration-only fallback at consumption; when the
+allocations snapshot is absent from the catalog, consumers fail closed
+(MISSING_CONSUMPTION_CONTEXT).
 
 ## Governed HWM source roles
 
