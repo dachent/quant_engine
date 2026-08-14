@@ -1516,3 +1516,23 @@ def test_window_date_rejects_trailing_junk(tmp_path: Path) -> None:
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(SchwabGenerationError, match="trailing content"):
         build_generation(spec)
+
+
+def test_window_date_rejects_restatement_suffix(tmp_path: Path) -> None:
+    """The WCH restatement suffix is valid on transactionDate only, never on
+    declared window boundaries (QC3 finding QC3-NEW-1)."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    manual_path = Path(document["roots"]["source"]) / manual_source["relative_path"]
+    value = json.loads(manual_path.read_text(encoding="utf-8"))
+    value["FromDate"] = "07/01/2026 as of 08/14/2026"
+    manual_path.write_text(json.dumps(value), encoding="utf-8")
+    payload = manual_path.read_bytes()
+    manual_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    manual_source["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="trailing content"):
+        build_generation(spec)

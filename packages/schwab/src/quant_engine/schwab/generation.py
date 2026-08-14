@@ -144,14 +144,18 @@ def _decimal_text(value: Decimal | None) -> str | None:
     return "0" if normalized in {"-0", ""} else normalized
 
 
-def _observed_date(value: object, name: str) -> date:
+def _observed_date(
+    value: object, name: str, *, allow_restatement_suffix: bool = False
+) -> date:
     raw = _text(value, name)
-    # Accept the WCH restatement suffix " as of MM/DD/YYYY" on transactionDate
-    as_of_match = re.match(
-        r"(\d{1,2}/\d{1,2}/\d{4}) as of (\d{1,2}/\d{1,2}/\d{4})$", raw
-    )
-    if as_of_match:
-        raw = as_of_match.group(1)
+    # The WCH restatement suffix " as of MM/DD/YYYY" is legitimate ONLY on
+    # provider transactionDate fields, never on declared window boundaries.
+    if allow_restatement_suffix:
+        as_of_match = re.match(
+            r"(\d{1,2}/\d{1,2}/\d{4}) as of (\d{1,2}/\d{1,2}/\d{4})$", raw
+        )
+        if as_of_match:
+            raw = as_of_match.group(1)
     for pattern in ("%m/%d/%Y", "%Y-%m-%d"):
         # Parse the first 10 chars (the date portion) and verify no
         # unrecognised trailing content remains.
@@ -757,7 +761,11 @@ def _transactions(
             ledger = Transaction(
                 record_id=record_id,
                 account_id=account_id,
-                event_date=_observed_date(record["transactionDate"], "transactionDate"),
+                event_date=_observed_date(
+                    record["transactionDate"],
+                    "transactionDate",
+                    allow_restatement_suffix=True,
+                ),
                 kind=key[1],
                 amount=(
                     ObservedAmount.available(observed_amount, "USD")
@@ -855,7 +863,11 @@ def _transactions_all(
             raise SchwabGenerationError("WCH transaction source must be an array")
         for source_ordinal, item in enumerate(raw_value, start=1):
             record = _object(item, "WCH transaction")
-            txn_date = _observed_date(record["transactionDate"], "transactionDate")
+            txn_date = _observed_date(
+                record["transactionDate"],
+                "transactionDate",
+                allow_restatement_suffix=True,
+            )
             key = _transaction_key(record, manual=False)
             in_window = window_start <= txn_date <= window_end
             if in_window:
@@ -891,7 +903,11 @@ def _transactions_all(
             ledger = Transaction(
                 record_id=record_id,
                 account_id=account_id,
-                event_date=_observed_date(record["transactionDate"], "transactionDate"),
+                event_date=_observed_date(
+                    record["transactionDate"],
+                    "transactionDate",
+                    allow_restatement_suffix=True,
+                ),
                 kind=key[1],
                 amount=(
                     ObservedAmount.available(observed_amount, "USD")
