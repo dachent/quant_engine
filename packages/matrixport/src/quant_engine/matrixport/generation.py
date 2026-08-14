@@ -16,6 +16,7 @@ from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
     CoverageStatus,
+    DeclaredExclusion,
     GenerationManifest,
     SourceArtifact,
     VerificationStatus,
@@ -126,13 +127,37 @@ def _json(path: Path, name: str) -> object:
 
 def _load_spec(path: Path) -> dict[str, Any]:
     spec = _object(_json(path, "spec"), "spec")
-    _strict(
-        spec,
-        {"artifacts", "as_of_date", "baseline", "run_id", "run_root", "schema_version"},
-        "spec",
-    )
+    required_keys = {
+        "artifacts",
+        "as_of_date",
+        "baseline",
+        "run_id",
+        "run_root",
+        "schema_version",
+    }
+    extra = set(spec) - required_keys - {"declared_exclusions"}
+    if extra:
+        raise MatrixportGenerationError(
+            f"spec contains unexpected keys: {sorted(extra)}"
+        )
+    missing = required_keys - set(spec)
+    if missing:
+        raise MatrixportGenerationError(
+            f"spec is missing required keys: {sorted(missing)}"
+        )
     if spec["schema_version"] != SPEC_SCHEMA_VERSION:
         raise MatrixportGenerationError("spec schema version is unsupported")
+    _exclusions = spec.get("declared_exclusions")
+    if _exclusions is not None:
+        if not isinstance(_exclusions, list):
+            raise MatrixportGenerationError("declared_exclusions must be an array")
+        for idx, entry in enumerate(_exclusions):
+            _strict(
+                entry, {"item", "reason", "provenance"}, f"declared_exclusions[{idx}]"
+            )
+            _text(entry.get("item"), f"declared_exclusions[{idx}].item")
+            _text(entry.get("reason"), f"declared_exclusions[{idx}].reason")
+            _text(entry.get("provenance"), f"declared_exclusions[{idx}].provenance")
     return spec
 
 
@@ -411,18 +436,73 @@ def build_generation(
         raise MatrixportGenerationError(
             "as_of_date must equal the extraction run_end_ms UTC date"
         )
+
+    # --- Evaluate declared exclusions with exact set-equality ---
+    raw_exclusions: list[dict[str, str]] = spec.get("declared_exclusions", []) or []
+    exclusion_items: set[str] = {str(e["item"]) for e in raw_exclusions}
+    gap_set: set[str] = set(known_gaps)
+
+    if len(exclusion_items) != len(raw_exclusions):
+        raise MatrixportGenerationError(
+            "declared_exclusions contain duplicate items; every item must be unique"
+        )
+
+    undeclared = gap_set - exclusion_items
+    stale = exclusion_items - gap_set
+
+    if raw_exclusions and not undeclared and not stale:
+        coverage_status = CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+        manifest_known_gaps: tuple[str, ...] = ()
+        manifest_undeclared: tuple[str, ...] = ()
+        manifest_stale: tuple[str, ...] = ()
+    elif raw_exclusions:
+        # Drift: produce evidence-bearing PARTIAL manifest with exact diff.
+        coverage_status = CoverageStatus.PARTIAL
+        manifest_undeclared = tuple(sorted(undeclared))
+        manifest_stale = tuple(sorted(stale))
+        if known_gaps:
+            # Actual gaps present (undeclared and/or mixed) → use them directly.
+            manifest_known_gaps = tuple(known_gaps)
+        else:
+            # Stale-only drift: no current gaps, but stale declarations exist.
+            # Encode stale atoms as synthetic gap entries so the PARTIAL
+            # contract is satisfied while the stale items remain auditable.
+            manifest_known_gaps = tuple(
+                f"stale_declaration:{atom}" for atom in sorted(stale)
+            )
+    else:
+        coverage_status = CoverageStatus.PARTIAL
+        manifest_known_gaps = tuple(known_gaps)
+        manifest_undeclared = ()
+        manifest_stale = ()
+
+    declared_exclusions = tuple(
+        DeclaredExclusion(
+            item=str(e["item"]),
+            reason=str(e["reason"]),
+            provenance=str(e["provenance"]),
+        )
+        for e in raw_exclusions
+    )
+
     catalog: dict[str, object] = {
         "aliases": ["BIT", "BIT.com"],
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
-        "coverage_status": CoverageStatus.PARTIAL.value,
+        "coverage_status": coverage_status.value,
         "coverage_status_counts": coverage_counts,
         "datasets": datasets,
-        "known_gaps": known_gaps,
+        "known_gaps": list(manifest_known_gaps),
         "observed_boundary_date": observed_boundary.isoformat(),
         "provider_id": "matrixport",
         "request_count": baseline["request_count"],
         "source_run_id": run_id,
     }
+    if declared_exclusions:
+        catalog["declared_exclusions"] = [e.to_dict() for e in declared_exclusions]
+    if manifest_undeclared:
+        catalog["undeclared_gaps"] = list(manifest_undeclared)
+    if manifest_stale:
+        catalog["stale_declarations"] = list(manifest_stale)
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
         artifact_id="normalized/generation-catalog.json",
@@ -438,7 +518,7 @@ def build_generation(
             name="quant-engine-matrixport", version=ADAPTER_VERSION
         ),
         coverage=CoverageClaim(
-            status=CoverageStatus.PARTIAL,
+            status=coverage_status,
             boundary=(
                 "Frozen Matrixport/BIT run through its recorded run_end_ms; "
                 "provider lifetime retention is not claimed."
@@ -446,7 +526,10 @@ def build_generation(
             fact_types=tuple(str(item["dataset"]) for item in datasets),
             observed_start=observed_boundary,
             observed_end=observed_boundary,
-            known_gaps=tuple(known_gaps),
+            known_gaps=manifest_known_gaps,
+            declared_exclusions=declared_exclusions,
+            undeclared_gaps=manifest_undeclared,
+            stale_declarations=manifest_stale,
         ),
         artifacts=(*source_artifacts, catalog_artifact),
         verification=VerificationStatus.VERIFIED,
@@ -528,7 +611,7 @@ def draft_generation_spec(run_root: Path, as_of_date: date) -> bytes:
 
 
 def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, object]:
-    """Create an immutable PARTIAL candidate; never advance CURRENT.json."""
+    """Create an immutable candidate; never advance CURRENT.json."""
 
     catalog, manifest, catalog_bytes = build_generation(spec_path)
     manifest_path = stage_generation(output_root, manifest)
@@ -537,12 +620,15 @@ def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, 
         raise MatrixportGenerationError("existing catalog conflicts with generation")
     if not catalog_path.exists():
         catalog_path.write_bytes(catalog_bytes)
+    eligible = (
+        manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    )
     return {
         "catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
         "coverage_status": manifest.coverage.status.value,
         "dataset_count": len(catalog["datasets"]),  # type: ignore[arg-type]
         "generation_id": manifest.generation_id,
-        "publication_eligible": False,
+        "publication_eligible": eligible,
         "published": False,
         "request_count": catalog["request_count"],
     }

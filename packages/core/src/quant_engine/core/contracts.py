@@ -208,6 +208,43 @@ class SourceArtifact:
 
 
 @dataclass(frozen=True)
+class DeclaredExclusion:
+    """One owner-accepted exclusion that narrows the coverage boundary.
+
+    Each exclusion records the exact item or gap identifier that the owner has
+    declared out of scope, the rationale, and the provenance of the declaration
+    (e.g. an issue reference and date).
+    """
+
+    item: str
+    reason: str
+    provenance: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "item", _non_empty(self.item, "exclusion.item"))
+        object.__setattr__(self, "reason", _non_empty(self.reason, "exclusion.reason"))
+        object.__setattr__(
+            self, "provenance", _non_empty(self.provenance, "exclusion.provenance")
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {"item": self.item, "reason": self.reason, "provenance": self.provenance}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> Self:
+        _strict_keys(value, {"item", "reason", "provenance"}, "declared_exclusion")
+        if not all(
+            isinstance(value.get(k), str) for k in ("item", "reason", "provenance")
+        ):
+            raise ManifestValidationError("declared_exclusion fields must be strings")
+        return cls(
+            item=value["item"],
+            reason=value["reason"],
+            provenance=value["provenance"],
+        )
+
+
+@dataclass(frozen=True)
 class CoverageClaim:
     """Coverage conclusion and its exact dataset/fact/time boundary."""
 
@@ -217,6 +254,9 @@ class CoverageClaim:
     observed_start: date | None = None
     observed_end: date | None = None
     known_gaps: tuple[str, ...] = ()
+    declared_exclusions: tuple[DeclaredExclusion, ...] = ()
+    undeclared_gaps: tuple[str, ...] = ()
+    stale_declarations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         boundary = _non_empty(self.boundary, "coverage.boundary")
@@ -225,6 +265,23 @@ class CoverageClaim:
         )
         gaps = tuple(
             sorted({_non_empty(item, "coverage.known_gap") for item in self.known_gaps})
+        )
+        exclusions = tuple(sorted(self.declared_exclusions, key=lambda e: e.item))
+        undeclared = tuple(
+            sorted(
+                {
+                    _non_empty(item, "coverage.undeclared_gap")
+                    for item in self.undeclared_gaps
+                }
+            )
+        )
+        stale = tuple(
+            sorted(
+                {
+                    _non_empty(item, "coverage.stale_declaration")
+                    for item in self.stale_declarations
+                }
+            )
         )
         if not facts:
             raise ManifestValidationError("coverage.fact_types must not be empty")
@@ -238,10 +295,15 @@ class CoverageClaim:
             and self.observed_start > self.observed_end
         ):
             raise ManifestValidationError("coverage interval is reversed")
-        if self.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY and gaps:
-            raise ManifestValidationError(
-                "complete coverage cannot declare gaps inside its boundary"
-            )
+        if self.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY:
+            if gaps:
+                raise ManifestValidationError(
+                    "complete coverage cannot declare gaps inside its boundary"
+                )
+            if undeclared or stale:
+                raise ManifestValidationError(
+                    "complete coverage must not carry undeclared_gaps or stale_declarations"
+                )
         if self.status in {CoverageStatus.PARTIAL, CoverageStatus.FAILED} and not gaps:
             raise ManifestValidationError(
                 "partial or failed coverage must declare at least one gap"
@@ -249,9 +311,12 @@ class CoverageClaim:
         object.__setattr__(self, "boundary", boundary)
         object.__setattr__(self, "fact_types", facts)
         object.__setattr__(self, "known_gaps", gaps)
+        object.__setattr__(self, "declared_exclusions", exclusions)
+        object.__setattr__(self, "undeclared_gaps", undeclared)
+        object.__setattr__(self, "stale_declarations", stale)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "boundary": self.boundary,
             "fact_types": list(self.fact_types),
             "known_gaps": list(self.known_gaps),
@@ -265,21 +330,41 @@ class CoverageClaim:
             ),
             "status": self.status.value,
         }
+        if self.declared_exclusions:
+            result["declared_exclusions"] = [
+                exclusion.to_dict() for exclusion in self.declared_exclusions
+            ]
+        if self.undeclared_gaps:
+            result["undeclared_gaps"] = list(self.undeclared_gaps)
+        if self.stale_declarations:
+            result["stale_declarations"] = list(self.stale_declarations)
+        return result
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> Self:
-        _strict_keys(
-            value,
-            {
-                "boundary",
-                "fact_types",
-                "known_gaps",
-                "observed_end",
-                "observed_start",
-                "status",
-            },
-            "coverage",
-        )
+        required_keys = {
+            "boundary",
+            "fact_types",
+            "known_gaps",
+            "observed_end",
+            "observed_start",
+            "status",
+        }
+        allowed_optional = {
+            "declared_exclusions",
+            "undeclared_gaps",
+            "stale_declarations",
+        }
+        extra = set(value) - required_keys - allowed_optional
+        if extra:
+            raise ManifestValidationError(
+                f"coverage contains unexpected keys: {sorted(extra)}"
+            )
+        missing = required_keys - set(value)
+        if missing:
+            raise ManifestValidationError(
+                f"coverage is missing required keys: {sorted(missing)}"
+            )
         boundary = value["boundary"]
         fact_types = value["fact_types"]
         known_gaps = value["known_gaps"]
@@ -302,6 +387,28 @@ class CoverageClaim:
             raise ManifestValidationError("coverage status is unknown") from exc
         observed_start = value["observed_start"]
         observed_end = value["observed_end"]
+        raw_exclusions = value.get("declared_exclusions", [])
+        if not isinstance(raw_exclusions, list) or not all(
+            isinstance(item, Mapping) for item in raw_exclusions
+        ):
+            raise ManifestValidationError(
+                "coverage declared_exclusions must be objects"
+            )
+        exclusions = tuple(DeclaredExclusion.from_dict(item) for item in raw_exclusions)
+
+        def _parse_string_list(raw: object, label: str) -> tuple[str, ...]:
+            if not isinstance(raw, list) or not all(
+                isinstance(item, str) for item in raw
+            ):
+                raise ManifestValidationError(f"coverage {label} must be strings")
+            return tuple(raw)
+
+        undeclared = _parse_string_list(
+            value.get("undeclared_gaps", []), "undeclared_gaps"
+        )
+        stale = _parse_string_list(
+            value.get("stale_declarations", []), "stale_declarations"
+        )
         return cls(
             status=parsed_status,
             boundary=boundary,
@@ -317,6 +424,9 @@ class CoverageClaim:
                 else _parse_date(observed_end, "coverage.observed_end")
             ),
             known_gaps=tuple(known_gaps),
+            declared_exclusions=exclusions,
+            undeclared_gaps=undeclared,
+            stale_declarations=stale,
         )
 
 
