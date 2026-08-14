@@ -3292,7 +3292,12 @@ def build_catalog(
     hwm_inputs_artifact: SourceArtifact | None = None
     hwm_inputs_link: dict[str, Any] | None = None
     if hwm_inputs_result is not None:
-        hwm_inputs_envelope, hwm_inputs_artifact, hwm_inputs_link, hwm_acceptance_record = hwm_inputs_result
+        (
+            hwm_inputs_envelope,
+            hwm_inputs_artifact,
+            hwm_inputs_link,
+            hwm_acceptance_record,
+        ) = hwm_inputs_result
     layer_metrics, live_metrics, implementation_gaps = _normalize_strategy_evidence(
         paths, strategy_aliases
     )

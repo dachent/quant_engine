@@ -315,13 +315,15 @@ def validate_hwm_inputs_envelope(
         # The latest systematic allocation snapshot date is the endpoint.
         snapshot_dates: set[date] = set()
         for alloc_item in allocations:
-            if alloc_item.get("scope") != "SYSTEMATIC" or alloc_item.get("strategy_id") is None:
+            if (
+                alloc_item.get("scope") != "SYSTEMATIC"
+                or alloc_item.get("strategy_id") is None
+            ):
                 continue
             snapshot_dates.add(_date(alloc_item["as_of_date"], "allocation.as_of_date"))
         if not snapshot_dates:
             _fail(
-                "no systematic allocation snapshot exists for endpoint "
-                "reconciliation",
+                "no systematic allocation snapshot exists for endpoint reconciliation",
                 "ENDPOINT_NO_SNAPSHOT",
             )
         snapshot_date = max(snapshot_dates)
@@ -342,9 +344,7 @@ def validate_hwm_inputs_envelope(
                     "rollforward evidence for endpoint reconciliation",
                     "ENDPOINT_MISSING_EVIDENCE",
                 )
-            capital = _decimal(
-                row["beginning_capital_usd"], "beginning_capital_usd"
-            )
+            capital = _decimal(row["beginning_capital_usd"], "beginning_capital_usd")
             period_return = _decimal(evidence.get("return"), "strategy_returns.return")
             verified_endpoints[str(row["strategy_id"])] = capital * (
                 Decimal(1) + period_return
@@ -463,7 +463,9 @@ def validate_hwm_inputs_envelope(
             _fail("hwm_inputs flow_source_record_ids must be non-empty text")
         if flow_status == "CONFIRMED_ZERO":
             if not flow_ids:
-                _fail("CONFIRMED_ZERO flow_status requires non-empty flow_source_record_ids")
+                _fail(
+                    "CONFIRMED_ZERO flow_status requires non-empty flow_source_record_ids"
+                )
             for evidence_id in flow_ids:
                 _require_role(evidence_id, "hwm-flow-attestation", "flow attestation")
         fx_ids = period_row.get("fx_source_record_ids")

@@ -1889,10 +1889,7 @@ def _attach_hwm_envelope(
     original_allocations = catalog.get("allocations", [])
     if isinstance(original_allocations, list):
         for alloc in original_allocations:
-            if (
-                isinstance(alloc, dict)
-                and alloc.get("scope") != "SYSTEMATIC"
-            ):
+            if isinstance(alloc, dict) and alloc.get("scope") != "SYSTEMATIC":
                 matching_allocations.append(alloc)
     catalog["allocations"] = matching_allocations
 
@@ -2313,9 +2310,7 @@ def test_hwm_later_anchor_truncated_history_rejected(tmp_path: Path) -> None:
     catalog["hwm_inputs"]["anchor"]["anchor_date"] = "2026-01-02"
     # Remove the 2026-01-01 period rows (they'd be outside the new keyspace).
     catalog["hwm_inputs"]["periods"] = [
-        p
-        for p in catalog["hwm_inputs"]["periods"]
-        if p["date"] != "2026-01-01"
+        p for p in catalog["hwm_inputs"]["periods"] if p["date"] != "2026-01-01"
     ]
     baseline_root = _published_baseline(tmp_path, catalog)
 

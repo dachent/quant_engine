@@ -3677,6 +3677,7 @@ def test_panel_rejects_coherently_tampered_report_copies(
     # Compute allocations matching the tampered endpoint so the forgery is
     # internally coherent (endpoint recomputation passes).
     from decimal import Decimal as _Decimal
+
     forged_allocations: list[dict[str, Any]] = []
     by_day: dict[str, dict[str, _Decimal]] = {}
     for rw in tampered_crosswalk:
@@ -4235,9 +4236,7 @@ def test_panel_rejects_later_anchor_with_truncated_history(
         catalog["hwm_inputs"]["anchor"]["anchor_date"] = "2026-07-29"
         # Remove 2026-07-28 periods (would be outside new keyspace).
         catalog["hwm_inputs"]["periods"] = [
-            p
-            for p in catalog["hwm_inputs"]["periods"]
-            if p["date"] != "2026-07-28"
+            p for p in catalog["hwm_inputs"]["periods"] if p["date"] != "2026-07-28"
         ]
 
     _expect_catalog_contract_probe(
@@ -4246,8 +4245,7 @@ def test_panel_rejects_later_anchor_with_truncated_history(
         report,
         catalog,
         mutate,
-        "anchor anchor_date disagrees with the admitted "
-        "hwm-anchor-acceptance record",
+        "anchor anchor_date disagrees with the admitted hwm-anchor-acceptance record",
     )
 
 
