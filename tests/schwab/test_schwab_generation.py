@@ -1383,3 +1383,136 @@ def test_per_account_07_31_catalog_digest(tmp_path: Path) -> None:
     assert actual_digest == GOLDEN, (
         f"per-account catalog digest changed: {actual_digest} != {GOLDEN}"
     )
+
+
+# -- Export record count tests ---------------------------------------------------
+
+
+def test_export_record_count_drop_fails(tmp_path: Path) -> None:
+    """When expected_record_count > actual rows, build fails."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    manual_source["expected_record_count"] = 3
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="fewer than the declared expected"):
+        build_generation(spec)
+
+
+def test_export_record_count_zero_rows_fails(tmp_path: Path) -> None:
+    """Zero rows with expected_record_count=1 fails."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    manual_source["expected_record_count"] = 1
+    manual_path = Path(document["roots"]["source"]) / manual_source["relative_path"]
+    value = {
+        "FromDate": "07/01/2026",
+        "ToDate": "08/14/2026",
+        "BrokerageTransactions": [],
+    }
+    manual_path.write_text(json.dumps(value), encoding="utf-8")
+    payload = manual_path.read_bytes()
+    manual_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    manual_source["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="fewer than the declared expected"):
+        build_generation(spec)
+
+
+def test_export_record_count_extra_row_passes(tmp_path: Path) -> None:
+    """Extra row above declared expected passes; transaction_count is total WCH rows."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    # Phase 1: expected_record_count matches actual rows
+    manual_source["expected_record_count"] = 2
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status.value == "PARTIAL"
+    assert len(catalog["transactions"]) == 2
+
+    # Phase 2: add a third matching row, keep expected at 2
+    manual_path = Path(document["roots"]["source"]) / manual_source["relative_path"]
+    value = json.loads(manual_path.read_text(encoding="utf-8"))
+    value["BrokerageTransactions"].append(
+        {
+            "Action": "Buy",
+            "Amount": "-15.00",
+            "Date": "07/15/2026",
+            "Description": "SYNTHETIC PURCHASE C",
+            "Fees & Comm": "0.00",
+            "Price": "15.00",
+            "Quantity": "1",
+            "Symbol": "SYNTHC",
+        }
+    )
+    manual_path.write_text(json.dumps(value), encoding="utf-8")
+    payload = manual_path.read_bytes()
+    manual_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    manual_source["expected_size_bytes"] = len(payload)
+
+    # Add corresponding WCH transaction to account 2
+    account_2_id = f"account-{2:016x}"
+    wch_source = next(
+        s
+        for s in document["sources"]
+        if s["role"] == "WCH_TRANSACTION_JSON" and s["account_id"] == account_2_id
+    )
+    wch_path = Path(document["roots"]["source"]) / wch_source["relative_path"]
+    wch_path.write_text(
+        json.dumps(
+            [
+                {
+                    "action": "Buy",
+                    "amount": "-15.00",
+                    "description": "SYNTHETIC PURCHASE C",
+                    "effectiveDate": "07/15/2026",
+                    "executionPrice": "15.00",
+                    "feesAndCommission": "0.00",
+                    "shareQuantity": "1",
+                    "symbol": "SYNTHC",
+                    "transactionDate": "07/15/2026",
+                    "transactionDetail": {"settleDate": "07/16/2026"},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    wch_payload = wch_path.read_bytes()
+    wch_source["expected_sha256"] = hashlib.sha256(wch_payload).hexdigest()
+    wch_source["expected_size_bytes"] = len(wch_payload)
+
+    document["baseline"]["transaction_count"] = 3
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    catalog, manifest, _ = build_generation(spec)
+    assert len(catalog["transactions"]) == 3
+    assert manifest.coverage.status.value == "PARTIAL"
+
+
+# -- Date validation tests -------------------------------------------------------
+
+
+def test_window_date_rejects_trailing_junk(tmp_path: Path) -> None:
+    """A FromDate with trailing junk characters raises an error."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    manual_path = Path(document["roots"]["source"]) / manual_source["relative_path"]
+    value = json.loads(manual_path.read_text(encoding="utf-8"))
+    value["FromDate"] = "07/01/2026junk"
+    manual_path.write_text(json.dumps(value), encoding="utf-8")
+    payload = manual_path.read_bytes()
+    manual_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    manual_source["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="trailing content"):
+        build_generation(spec)

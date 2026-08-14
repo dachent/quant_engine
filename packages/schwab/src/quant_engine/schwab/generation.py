@@ -146,11 +146,25 @@ def _decimal_text(value: Decimal | None) -> str | None:
 
 def _observed_date(value: object, name: str) -> date:
     raw = _text(value, name)
+    # Accept the WCH restatement suffix " as of MM/DD/YYYY" on transactionDate
+    as_of_match = re.match(
+        r"(\d{1,2}/\d{1,2}/\d{4}) as of (\d{1,2}/\d{1,2}/\d{4})$", raw
+    )
+    if as_of_match:
+        raw = as_of_match.group(1)
     for pattern in ("%m/%d/%Y", "%Y-%m-%d"):
+        # Parse the first 10 chars (the date portion) and verify no
+        # unrecognised trailing content remains.
+        prefix = raw[:10]
         try:
-            return datetime.strptime(raw[:10], pattern).date()
+            parsed = datetime.strptime(prefix, pattern).date()
         except ValueError:
-            pass
+            continue
+        if raw != prefix:
+            raise SchwabGenerationError(
+                f"{name} has trailing content after the date: {raw!r}"
+            )
+        return parsed
     raise SchwabGenerationError(f"{name} is not a supported date")
 
 
@@ -235,22 +249,28 @@ def _sources(
     artifacts: list[SourceArtifact] = []
     identifiers: set[str] = set()
     for record in _objects(value, "sources"):
-        _strict(
-            record,
-            {
-                "account_id",
-                "artifact_id",
-                "as_of_date",
-                "expected_sha256",
-                "expected_size_bytes",
-                "relative_path",
-                "role",
-                "root_id",
-                "schema_name",
-                "schema_version",
-            },
-            "sources[]",
-        )
+        allowed_keys = {
+            "account_id",
+            "artifact_id",
+            "as_of_date",
+            "expected_record_count",
+            "expected_sha256",
+            "expected_size_bytes",
+            "relative_path",
+            "role",
+            "root_id",
+            "schema_name",
+            "schema_version",
+        }
+        if not set(record).issubset(allowed_keys):
+            raise SchwabGenerationError(
+                f"sources[] keys differ: unexpected={sorted(set(record) - allowed_keys)}"
+            )
+        required_keys = allowed_keys - {"expected_record_count"}
+        if not required_keys.issubset(set(record)):
+            raise SchwabGenerationError(
+                f"sources[] keys differ: missing={sorted(required_keys - set(record))}"
+            )
         artifact_id = _relative(record["artifact_id"], "artifact_id")
         if artifact_id in identifiers:
             raise SchwabGenerationError("artifact IDs must be unique")
@@ -787,6 +807,8 @@ def _transactions(
 def _transactions_all(
     wch: Sequence[tuple[str | None, Path]],
     manual_path: Path,
+    *,
+    expected_record_count: int | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
     """Reconcile an all-accounts manual transaction export against per-account WCH.
 
@@ -795,6 +817,9 @@ def _transactions_all(
     Manual-only records → FAIL. WCH-only records → declared boundary gap
     (provider limitation). Returns a gap dict when WCH has uncovered in-window
     records.
+
+    If expected_record_count is declared, the export must have at least that
+    many rows (capture loss detection).
     """
     value = _object(_json(manual_path), "all-accounts manual transaction export")
     from_date_raw = _text(value.get("FromDate"), "FromDate")
@@ -809,6 +834,11 @@ def _transactions_all(
     rows = value.get("BrokerageTransactions")
     if not isinstance(rows, list):
         raise SchwabGenerationError("all-accounts manual transaction rows are missing")
+    if expected_record_count is not None and len(rows) < expected_record_count:
+        raise SchwabGenerationError(
+            f"all-accounts manual export has {len(rows)} rows, "
+            f"fewer than the declared expected {expected_record_count}"
+        )
     manual_keys: Counter[tuple[str, ...]] = Counter()
     for item in rows:
         record = _object(item, "all-accounts manual transaction")
@@ -1292,10 +1322,21 @@ def build_generation(
         raise SchwabGenerationError("crosswalk suffix derivation differs")
     sources, artifacts = _sources(spec["sources"], roots, generation_as_of)
     txn_partial_gap: dict[str, object] | None = None
+    expected_export_record_count: int | None = None
     if sources.get("MANUAL_TRANSACTION_JSON_ALL"):
+        # Read the declared export record count from the spec source entry
+        manual_all_sources = [
+            s for s in spec["sources"] if s.get("role") == "MANUAL_TRANSACTION_JSON_ALL"
+        ]
+        if manual_all_sources and "expected_record_count" in manual_all_sources[0]:
+            expected_export_record_count = _integer(
+                manual_all_sources[0]["expected_record_count"],
+                "expected_record_count",
+            )
         transactions, transaction_reconciliation, txn_partial_gap = _transactions_all(
             sources["WCH_TRANSACTION_JSON"],
             sources["MANUAL_TRANSACTION_JSON_ALL"][0][1],
+            expected_record_count=expected_export_record_count,
         )
     else:
         transactions, transaction_reconciliation = _transactions(
@@ -1466,6 +1507,11 @@ def build_generation(
             ),
             boundary=(
                 f"8 mapped Schwab brokerage accounts from {current_transport}, WCH history, and manual reference evidence"
+                + (
+                    f" (export record count {expected_export_record_count} per owner ruling #283)"
+                    if expected_export_record_count is not None
+                    else ""
+                )
                 if current_transport is not None
                 else "8 mapped Schwab brokerage accounts from reviewed WCH and manual evidence"
             ),
