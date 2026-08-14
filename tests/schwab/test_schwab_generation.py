@@ -820,9 +820,11 @@ def test_aggregate_transactions_extra_manual_fails(tmp_path: Path) -> None:
         build_generation(spec)
 
 
-def test_aggregate_transactions_wch_only_fails(tmp_path: Path) -> None:
-    """WCH-only records within the manual window are now rejected — the manual
-    export must be an exact match for the declared window."""
+def test_aggregate_transactions_wch_only_accepted_with_gap(
+    tmp_path: Path,
+) -> None:
+    """WCH-only records within the manual window are accepted with a declared
+    boundary gap (subset-exact verification)."""
     spec = _spec_aggregate(tmp_path)
     document = json.loads(spec.read_text(encoding="utf-8"))
     # Account 2 has an empty WCH array by default — add a transaction to it.
@@ -855,9 +857,20 @@ def test_aggregate_transactions_wch_only_fails(tmp_path: Path) -> None:
     payload = wch_path.read_bytes()
     wch_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
     wch_source["expected_size_bytes"] = len(payload)
+    document["baseline"]["transaction_count"] = (
+        document["baseline"]["transaction_count"] + 1
+    )
     spec.write_text(json.dumps(document), encoding="utf-8")
-    with pytest.raises(SchwabGenerationError, match="WCH-only records"):
-        build_generation(spec)
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status.value == "PARTIAL"
+    # Catalog coverage documents the partial-export gap
+    gaps = catalog["coverage"]["known_gaps"]
+    assert any("manual_export_partial:" in g for g in gaps)
+    # Reconciliation status is PASS_EXACT
+    txn_recon = [
+        r for r in catalog["reconciliation"] if r["fact_type"] == "TRANSACTION"
+    ][0]
+    assert txn_recon["status"] == "PASS_EXACT"
 
 
 def test_aggregate_transactions_changed_amount_fails(tmp_path: Path) -> None:

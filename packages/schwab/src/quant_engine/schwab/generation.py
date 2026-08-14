@@ -787,13 +787,14 @@ def _transactions(
 def _transactions_all(
     wch: Sequence[tuple[str | None, Path]],
     manual_path: Path,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
     """Reconcile an all-accounts manual transaction export against per-account WCH.
 
-    The manual JSON has a declared window (FromDate/ToDate). Only WCH transactions
-    whose transaction_date falls within that window are compared. The comparison
-    uses the same date/action/symbol/description/quantity/price/fees/amount key,
-    but without account_id since the all-accounts JSON has none.
+    The manual JSON has a declared window (FromDate/ToDate). Every manual record
+    must content-match a WCH record within the window (subset-exact verification).
+    Manual-only records → FAIL. WCH-only records → declared boundary gap
+    (provider limitation). Returns a gap dict when WCH has uncovered in-window
+    records.
     """
     value = _object(_json(manual_path), "all-accounts manual transaction export")
     from_date_raw = _text(value.get("FromDate"), "FromDate")
@@ -886,31 +887,38 @@ def _transactions_all(
             normalized.append(ledger)
 
     extra_manual = manual_keys - wch_keys
-    extra_wch = wch_keys - manual_keys
-    if extra_wch or extra_manual:
-        parts: list[str] = [
-            "all-accounts manual and WCH transaction sets differ within the declared window"
-        ]
-        if extra_manual:
-            parts.append(
-                f"manual-only records ({len(extra_manual)}): {sorted(extra_manual)[:3]}"
-            )
-        if extra_wch:
-            parts.append(
-                f"WCH-only records ({len(extra_wch)}): {sorted(extra_wch)[:3]}"
-            )
-        raise SchwabGenerationError("; ".join(parts))
-    # Verify shared keys have matching counts
+    if extra_manual:
+        sample = sorted(extra_manual)[:3]
+        raise SchwabGenerationError(
+            f"all-accounts manual has records not found in WCH within the declared window "
+            f"({len(extra_manual)} manual-only records): {sample}"
+        )
+    # Verify shared keys have matching counts (manual must not exceed WCH)
     count_mismatches: list[tuple[str, ...]] = []
     for key in set(manual_keys) & set(wch_keys):
-        if manual_keys[key] != wch_keys[key]:
+        if manual_keys[key] > wch_keys[key]:
             count_mismatches.append(key)
     if count_mismatches:
         sample = sorted(count_mismatches)[:3]
         raise SchwabGenerationError(
-            f"all-accounts manual has different count than WCH for shared keys "
+            f"all-accounts manual has higher count than WCH for shared keys "
             f"({len(count_mismatches)} affected): {sample}"
         )
+
+    extra_wch = wch_keys - manual_keys
+    wch_only_count = sum(extra_wch.values())
+    status = "PASS_EXACT"
+    gap: dict[str, object] | None = None
+    if wch_only_count:
+        # Declared boundary gap: Schwab's all-accounts export is structurally
+        # partial (provider limitation + owner ruling #283, 2026-08-14).
+        gap = {
+            "export_count": sum(manual_keys.values()),
+            "reason": "provider export is structurally partial (owner ruling #283)",
+            "wch_in_window_count": sum(wch_keys.values()),
+            "window_end": window_end.isoformat(),
+            "window_start": window_start.isoformat(),
+        }
 
     reconciliations: list[dict[str, object]] = [
         {
@@ -918,7 +926,7 @@ def _transactions_all(
             "fact_type": "TRANSACTION",
             "manual_count": sum(manual_keys.values()),
             "source_count": sum(wch_keys.values()),
-            "status": "PASS_EXACT",
+            "status": status,
             "window_end": window_end.isoformat(),
             "window_start": window_start.isoformat(),
         }
@@ -930,7 +938,7 @@ def _transactions_all(
             str(item["record_id"]),
         )
     )
-    return normalized, reconciliations
+    return normalized, reconciliations, gap
 
 
 def _nav_rows(path: Path, *, manual: bool) -> dict[date, Decimal]:
@@ -1283,8 +1291,9 @@ def build_generation(
     if tuple(sorted(suffix_to_internal)) != suffixes:
         raise SchwabGenerationError("crosswalk suffix derivation differs")
     sources, artifacts = _sources(spec["sources"], roots, generation_as_of)
+    txn_partial_gap: dict[str, object] | None = None
     if sources.get("MANUAL_TRANSACTION_JSON_ALL"):
-        transactions, transaction_reconciliation = _transactions_all(
+        transactions, transaction_reconciliation, txn_partial_gap = _transactions_all(
             sources["WCH_TRANSACTION_JSON"],
             sources["MANUAL_TRANSACTION_JSON_ALL"][0][1],
         )
@@ -1370,6 +1379,17 @@ def build_generation(
         "historical NAV has one later manual date per brokerage account",
         "two account histories contain documented intraday restatements",
         "Investor Checking is outside the accepted brokerage boundary",
+        *(
+            (
+                f"manual_export_partial:"
+                f"{txn_partial_gap['window_start']}-{txn_partial_gap['window_end']}"
+                f" export={txn_partial_gap['export_count']}"
+                f" wch={txn_partial_gap['wch_in_window_count']}"
+                f" ({txn_partial_gap['reason']})",
+            )
+            if txn_partial_gap is not None
+            else ()
+        ),
         *(
             (
                 f"{unavailable_position_quantity} manual position rows have unavailable quantity",
