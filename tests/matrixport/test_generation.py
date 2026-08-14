@@ -542,6 +542,77 @@ def test_stale_only_drift_produces_partial_with_synthetic_gaps(
         publish_generation(root, staged["generation_id"])
 
 
+# --- P1 probe: new cause on accepted date → PARTIAL ---
+
+
+def test_new_fx_failure_on_accepted_nav_date_keeps_partial(
+    tmp_path: Path,
+) -> None:
+    """A new FX failure on a date whose NAV gap was already accepted
+    produces a new cause-specific atom → PARTIAL."""
+    source_atom = "wallet_deposit_currency:synthetic-rejected-A"
+    nav_atom = "nav_missing_date:2026-01-27"
+    fx_atom = "fx_missing_date:2026-01-27"  # NEW — same date, different cause
+    exclusions = [
+        {"item": source_atom, "reason": "accepted", "provenance": "issue #287"},
+        {"item": nav_atom, "reason": "accepted", "provenance": "issue #287"},
+    ]
+    spec = _spec_with_exclusions(
+        tmp_path,
+        exclusions=exclusions,
+        extra_gaps=[fx_atom],
+    )
+    catalog, manifest, _ = build_generation(spec)
+
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    assert fx_atom in manifest.coverage.undeclared_gaps
+    assert nav_atom not in manifest.coverage.undeclared_gaps
+
+    # Publish rejects
+    root = tmp_path / "dataMatrixport"
+    staged = stage_generation_candidate(spec, root)
+    assert staged["publication_eligible"] is False
+    with pytest.raises(
+        PublicationRejectedError, match="generation coverage is not complete"
+    ):
+        publish_generation(root, staged["generation_id"])
+
+
+# --- P3: COMPLETE claim must not carry drift evidence ---
+
+
+def test_complete_claim_rejects_undeclared_gaps() -> None:
+    """COMPLETE_WITHIN_DECLARED_BOUNDARY must not have undeclared_gaps."""
+    from quant_engine.core import CoverageClaim
+
+    with pytest.raises(
+        ManifestValidationError,
+        match="must not carry undeclared_gaps or stale_declarations",
+    ):
+        CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic",
+            fact_types=("alpha",),
+            undeclared_gaps=("wallet_deposit_currency:UNEXPECTED",),
+        )
+
+
+def test_complete_claim_rejects_stale_declarations() -> None:
+    """COMPLETE_WITHIN_DECLARED_BOUNDARY must not have stale_declarations."""
+    from quant_engine.core import CoverageClaim
+
+    with pytest.raises(
+        ManifestValidationError,
+        match="must not carry undeclared_gaps or stale_declarations",
+    ):
+        CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic",
+            fact_types=("alpha",),
+            stale_declarations=("wallet_deposit_currency:STALE",),
+        )
+
+
 def _rehash_verification_artifact(doc: dict, run: Path) -> None:
     """Re-hash the verification.json artifact after mutation."""
     for artifact in doc["artifacts"]:

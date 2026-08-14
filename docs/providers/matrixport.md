@@ -71,9 +71,11 @@ coincidental aggregate match.
 
 | Atom prefix | Meaning | Example |
 |---|---|---|
-| `wallet_deposit_currency:` | One rejected deposit currency | `wallet_deposit_currency:FTX-BTC-1` |
-| `wallet_withdrawal_currency:` | One rejected withdrawal currency | `wallet_withdrawal_currency:USDT_OP` |
-| `nav_missing_date:` | One date with incomplete NAV/FX coverage | `nav_missing_date:2026-01-27` |
+| `wallet_deposit_currency:` | One rejected deposit currency | `wallet_deposit_currency:CURR_A` |
+| `wallet_withdrawal_currency:` | One rejected withdrawal currency | `wallet_withdrawal_currency:CURR_B` |
+| `nav_missing_date:` | One date with missing NAV | `nav_missing_date:YYYY-MM-DD` |
+| `fx_missing_date:` | One date with missing FX rate | `fx_missing_date:YYYY-MM-DD` |
+| `reconciliation_incomplete_date:` | One date with incomplete reconciliation | `reconciliation_incomplete_date:YYYY-MM-DD` |
 | `{product_id}:anchored_gap` | Product whose valuation relies on anchor | `PROD-42:anchored_gap` |
 | `{product_id}:unavailable` | Product whose valuation is unavailable | `PROD-99:unavailable` |
 
@@ -86,8 +88,8 @@ entry records one owner-accepted atomic gap item, rationale, and provenance:
 {
   "declared_exclusions": [
     {
-      "item": "wallet_deposit_currency:FTX-BTC-1",
-      "reason": "accepted rationale — e.g. API code 18100410 for defunct token",
+      "item": "wallet_deposit_currency:CURR_A",
+      "reason": "accepted rationale — e.g. API code <redacted> for defunct token",
       "provenance": "owner-accepted YYYY-MM-DD per issue #NNN"
     }
   ]
@@ -110,18 +112,18 @@ the exclusion records are written verbatim into the generation manifest's
 coverage section (`declared_exclusions` field).
 
 The accepted e4ccbf8cf447* generation (as_of 2026-08-03) has two exclusion
-classes accepted by the owner on 2026-08-14 (issue #287):
+classes accepted by the owner on 2026-08-14 (issue #287). The real declared
+exclusion list lives in the governed generation spec under the data root and
+is not reproduced in this repository.
 
-1. **15 currency symbols** rejected by the Matrixport API itself with code
+1. **Rejected currency symbols** rejected by the Matrixport API with code
    `18100410 "Invalid params"` on `/mapi/v1/wallet/deposits` and
-   `/mapi/v1/wallet/withdrawals`, producing 30 atomic gap items
-   (15 × `wallet_deposit_currency:*` + 15 × `wallet_withdrawal_currency:*`):
-   FTX-BTC-1, FTX-BTC-2, HUBX, MFIP-BCH, MFIP-BNB, MFIP-BTC, MFIP-DOGE,
-   MFIP-ETH, MFIP-LTC, MFIP-SOL, MFIP-USDC, MFIP-USDT, USDC_OP, USDT_OP,
-   UXLINK_OLD. All are zero-balance defunct/legacy tokens.
-2. **2 NAV days** missing from the provider's own endpoint, producing 2 atomic
-   gap items (`nav_missing_date:2026-01-27`, `nav_missing_date:2026-07-03`;
-   2/241 rows).
+   `/mapi/v1/wallet/withdrawals`, each producing per-symbol atomic gap items
+   (`wallet_deposit_currency:*` and `wallet_withdrawal_currency:*`).
+2. **NAV/FX/reconciliation gaps** where the provider endpoint returned
+   incomplete coverage for specific dates, producing per-cause atomic gap
+   items (`nav_missing_date:*`, `fx_missing_date:*`,
+   `reconciliation_incomplete_date:*`).
 
 ## Publish path
 

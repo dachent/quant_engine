@@ -295,10 +295,15 @@ class CoverageClaim:
             and self.observed_start > self.observed_end
         ):
             raise ManifestValidationError("coverage interval is reversed")
-        if self.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY and gaps:
-            raise ManifestValidationError(
-                "complete coverage cannot declare gaps inside its boundary"
-            )
+        if self.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY:
+            if gaps:
+                raise ManifestValidationError(
+                    "complete coverage cannot declare gaps inside its boundary"
+                )
+            if undeclared or stale:
+                raise ManifestValidationError(
+                    "complete coverage must not carry undeclared_gaps or stale_declarations"
+                )
         if self.status in {CoverageStatus.PARTIAL, CoverageStatus.FAILED} and not gaps:
             raise ManifestValidationError(
                 "partial or failed coverage must declare at least one gap"

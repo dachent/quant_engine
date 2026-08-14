@@ -933,7 +933,7 @@ def verify_valuation(
                     f"daily_holdings row {index}:{product_id} missing NAV/FX without missing_reason"
                 )
 
-    missing_dates: set[str] = set()
+    coverage_reasons: set[str] = set()
     for index, row in enumerate(totals, start=1):
         active = _nonzero(row.get("active_product_count"))
         nav_complete = str(row.get("nav_coverage_ratio", "")) == "1"
@@ -941,14 +941,21 @@ def verify_valuation(
         declared_complete = str(row.get("strict_complete", "")).lower() == "true"
         strict_value = row.get("portfolio_value_usd_strict")
         reasons = str(row.get("missing_reasons") or "")
+        utc_date = str(row.get("utc_date", ""))
+        if active:
+            if not nav_complete and utc_date:
+                missing_coverage = True
+                coverage_reasons.add(f"nav_missing_date:{utc_date}")
+            if not fx_complete and utc_date:
+                missing_coverage = True
+                coverage_reasons.add(f"fx_missing_date:{utc_date}")
+            if not declared_complete and utc_date:
+                missing_coverage = True
+                coverage_reasons.add(f"reconciliation_incomplete_date:{utc_date}")
         incomplete = active and (
             not nav_complete or not fx_complete or not declared_complete
         )
         if incomplete:
-            missing_coverage = True
-            utc_date = str(row.get("utc_date", ""))
-            if utc_date:
-                missing_dates.add(utc_date)
             if _nonblank(strict_value):
                 structural_failures.append(
                     f"daily_portfolio_totals row {index} has strict total despite missing NAV/FX/reconciliation"
@@ -969,8 +976,7 @@ def verify_valuation(
     elif counts.get("anchored_gap", 0) or missing_coverage:
         status = "PARTIAL"
         if missing_coverage:
-            for dt in sorted(missing_dates):
-                acceptance_reasons.append(f"nav_missing_date:{dt}")
+            acceptance_reasons.extend(sorted(coverage_reasons))
     else:
         status = "PASS"
     return {
