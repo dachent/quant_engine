@@ -450,6 +450,7 @@ def _crosswalk(
     *,
     declared_zero_activity: Sequence[dict[str, str]] = (),
 ) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    declared_zero_activity_ids = {d["raw_account_id"] for d in declared_zero_activity}
     raw_curves: dict[str, dict[date, Decimal]] = {}
     for statement in statements:
         raw_curves.setdefault(statement.raw_account_id, {})[statement.report_date] = (
@@ -467,6 +468,16 @@ def _crosswalk(
             if all(curve[day] == baseline_curve[day] for day in overlap):
                 candidates.append((account_id, len(overlap)))
         if len(candidates) != 1:
+            if raw_id in declared_zero_activity_ids:
+                # A declared zero-activity account carrying a Flex NAV curve is
+                # an abuse of the declaration — name the atom, fail closed.
+                atom = (
+                    "declared_zero_activity_abuse:flex_activity:"
+                    f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
+                )
+                raise IbkrGenerationError(
+                    f"{atom}: declared zero-activity account has Flex activity"
+                )
             raise IbkrGenerationError(
                 "raw account NAV curve lacks one unique exact match"
             )
