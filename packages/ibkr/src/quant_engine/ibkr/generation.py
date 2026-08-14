@@ -480,32 +480,50 @@ def _crosswalk(
                 "status": "PASS",
             }
         )
-    # Declared zero-activity accounts: attestation-based mapping
+    # Declared zero-activity accounts: attestation-based mapping.
+    # Declared raw accounts may share an internal account with an existing
+    # NAV-mapped raw account (Flex label alias, e.g. U22203488 ↔ U22203487-IA74-IA).
+    declared_raw_ids: set[str] = set()
     for decl in declared_zero_activity:
         raw_id = decl["raw_account_id"]
         internal_id = decl["internal_account_id"]
-        if raw_id in mapping:
+        if raw_id in mapping and raw_id not in declared_raw_ids:
             raise IbkrGenerationError(
                 "declared zero-activity account is already crosswalk-mapped"
+                " via NAV curve"
             )
-        if internal_id in mapping.values():
+        if internal_id in mapping.values() and raw_id not in mapping:
+            mapping[raw_id] = internal_id
+            proof.append(
+                {
+                    "account_id": internal_id,
+                    "exact_match_count": 0,
+                    "match_method": "DECLARED_ZERO_ACTIVITY_SHARED_INTERNAL",
+                    "provenance": decl["provenance"],
+                    "status": "PASS",
+                }
+            )
+        elif internal_id not in accepted:
             raise IbkrGenerationError(
-                "declared zero-activity account conflicts with existing mapping"
+                "declared zero-activity account internal account is not in baseline"
             )
-        mapping[raw_id] = internal_id
-        accepted[internal_id] = {}
-        proof.append(
-            {
-                "account_id": internal_id,
-                "exact_match_count": 0,
-                "match_method": "DECLARED_ZERO_ACTIVITY",
-                "provenance": decl["provenance"],
-                "status": "PASS",
-            }
-        )
-    if len(set(mapping.values())) != len(mapping) or set(mapping.values()) != set(
-        accepted
-    ):
+        else:
+            if raw_id not in mapping:
+                mapping[raw_id] = internal_id
+                proof.append(
+                    {
+                        "account_id": internal_id,
+                        "exact_match_count": 0,
+                        "match_method": "DECLARED_ZERO_ACTIVITY",
+                        "provenance": decl["provenance"],
+                        "status": "PASS",
+                    }
+                )
+        declared_raw_ids.add(raw_id)
+    non_declared = {k: v for k, v in mapping.items() if k not in declared_raw_ids}
+    if len(set(non_declared.values())) != len(non_declared) or set(
+        mapping.values()
+    ) != set(accepted):
         raise IbkrGenerationError("account crosswalk is not a complete bijection")
     return mapping, sorted(proof, key=lambda item: str(item["account_id"]))
 
@@ -989,6 +1007,33 @@ def _normalize(
             "known_gaps": tws_gaps,
             "status": "PARTIAL" if tws_gaps else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
         }
+
+    # Declared zero-activity accounts must have no activity in Flex or TWS.
+    if declared_zero_activity_raw_ids and tws_source is not None:
+        abuse_snapshot = tws_source[0]
+        for statement in statements:
+            if statement.raw_account_id in declared_zero_activity_raw_ids:
+                if (
+                    statement.positions
+                    or statement.trades
+                    or statement.cash_transactions
+                    or statement.transfers
+                    or statement.corporate_actions
+                ):
+                    atom = (
+                        "declared_zero_activity_abuse:flex_activity:"
+                        f"{hashlib.sha256(statement.raw_account_id.encode()).hexdigest()[:16]}"
+                    )
+                    tws_gaps.append(atom)
+                    tws_coverage["known_gaps"].append(atom)
+        for tws_pos in abuse_snapshot.positions:
+            if tws_pos.raw_account_id in declared_zero_activity_raw_ids:
+                atom = (
+                    "declared_zero_activity_abuse:tws_position:"
+                    f"{hashlib.sha256(tws_pos.raw_account_id.encode()).hexdigest()[:16]}"
+                )
+                tws_gaps.append(atom)
+                tws_coverage["known_gaps"].append(atom)
 
     return {
         "accounts": [

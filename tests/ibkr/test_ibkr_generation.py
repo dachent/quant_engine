@@ -799,139 +799,9 @@ def test_unauthorized_unmapped_atom_blocks_completion(
         publish_generation_candidate(spec_path, output, staged["generation_id"])
 
 
-@pytest.mark.parametrize(
-    "spec_factory,exclusion_hint,undeclared_hint",
-    [
-        (
-            "_topology_diff_spec",
-            "Order visibility is execution scope",
-            "account_topology:snapshot_only:",
-        ),
-        (
-            "_spec_cash_mismatch",
-            "AMBIGUOUS_REPORTED_ACCOUNT",
-            "No separately authorized TWS snapshot",
-        ),
-        (
-            "_topology_diff_spec",
-            "unmapped_tws_fact",
-            "account_topology:snapshot_only:",
-        ),
-    ],
-    ids=["order-visibility", "cross-account-rows", "summary-label"],
-)
-def test_each_exclusion_cannot_save_undeclared_gaps(
-    tmp_path: Path, spec_factory: str, exclusion_hint: str, undeclared_hint: str
-) -> None:
-    """Removing any one exclusion → PARTIAL when the matching gap exists
-    alongside an undeclared gap.  Each case pairs an authorized exclusion
-    gap with an undeclared gap; the undeclared gap always forces PARTIAL."""
-    spec: Path
-    if spec_factory == "_topology_diff_spec":
-        spec = _topology_diff_spec(tmp_path)
-    else:
-        spec = _spec(tmp_path, cash_mismatch=True)
-    _, manifest, _ = build_generation(spec)
-    assert manifest.coverage.status is CoverageStatus.PARTIAL
-    gaps_text = " ".join(manifest.coverage.known_gaps)
-    assert undeclared_hint in gaps_text
-    # The exclusion hint is either in the boundary (declared) or absent
-    # from the gaps (for unmapped_tws_fact whose hash ≠ 086e03b607cedf48
-    # so the atom itself is undeclared and appears in known_gaps)
-    if exclusion_hint == "unmapped_tws_fact":
-        assert exclusion_hint in gaps_text  # non-authorized atom stays undeclared
-    else:
-        assert exclusion_hint in manifest.coverage.boundary
-    output = tmp_path / "ibkr-private-output"
-    staged = stage_generation_candidate(spec, output)
-    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
-        publish_generation_candidate(spec, output, staged["generation_id"])
-
-
-def _published_two_account_baseline(
-    tmp_path: Path, nav_by_date: dict[date, str]
-) -> tuple[Path, str, str]:
-    root = tmp_path / "two-account-baseline"
-    catalog = {
-        "accounts": [
-            {
-                "account_id": "account-ibkr-synthetic",
-                "base_currency": "USD",
-                "role": "INVESTMENT",
-            },
-            {
-                "account_id": "account-ibkr-declared",
-                "base_currency": "USD",
-                "role": "INVESTMENT",
-            },
-        ],
-        "as_of_date": max(nav_by_date).isoformat(),
-        "assignments": [
-            {
-                "account_id": "account-ibkr-synthetic",
-                "effective_end": None,
-                "effective_start": min(nav_by_date).isoformat(),
-                "mapping_status": "MAPPED",
-                "strategy_id": "strategy-synthetic",
-            },
-            {
-                "account_id": "account-ibkr-declared",
-                "effective_end": None,
-                "effective_start": min(nav_by_date).isoformat(),
-                "mapping_status": "MAPPED",
-                "strategy_id": "strategy-synthetic",
-            },
-        ],
-        "baseline_schema_version": 1,
-        "nav_observations": [
-            {
-                "account_id": "account-ibkr-synthetic",
-                "as_of_date": observed.isoformat(),
-                "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
-                "provider": "IBKR",
-            }
-            for observed, value in sorted(nav_by_date.items())
-        ]
-        + [
-            {
-                "account_id": "account-ibkr-declared",
-                "as_of_date": min(nav_by_date).isoformat(),
-                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "0"},
-                "provider": "IBKR",
-            }
-        ],
-    }
-    catalog_bytes = canonical_json_bytes(catalog)
-    artifact = SourceArtifact(
-        artifact_id="normalized/portfolio-baseline.json",
-        sha256=hashlib.sha256(catalog_bytes).hexdigest(),
-        size_bytes=len(catalog_bytes),
-        as_of_date=max(nav_by_date),
-        schema_name="portfolio-baseline-catalog",
-        schema_version="1",
-    )
-    manifest = GenerationManifest.build(
-        as_of_date=max(nav_by_date),
-        adapter=AdapterIdentity("synthetic-baseline", "1"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="synthetic IBKR baseline",
-            fact_types=("nav",),
-            observed_start=min(nav_by_date),
-            observed_end=max(nav_by_date),
-        ),
-        artifacts=(artifact,),
-        verification=VerificationStatus.VERIFIED,
-    )
-    manifest_path = stage_generation(root, manifest)
-    catalog_path = manifest_path.parent / "portfolio-baseline.json"
-    catalog_path.write_bytes(catalog_bytes)
-    publish_generation(root, manifest.generation_id)
-    return root, manifest.generation_id, artifact.sha256
-
-
 def _declared_account_spec(tmp_path: Path) -> Path:
-    """Spec with SYNTH-RAW via NAV + SYNTH-DECLARED via zero-activity attestation."""
+    """Spec with SYNTH-RAW via NAV + SYNTH-DECLARED via zero-activity
+    attestation sharing the same internal account (Flex label alias pattern)."""
     source_root = tmp_path / "declared-evidence"
     source_root.mkdir()
     nav_by_date: dict[date, str] = {}
@@ -1074,7 +944,7 @@ def _declared_account_spec(tmp_path: Path) -> Path:
         }
     )
 
-    baseline_root, generation_id, catalog_hash = _published_two_account_baseline(
+    baseline_root, generation_id, catalog_hash = _published_baseline(
         tmp_path, nav_by_date
     )
     spec = {
@@ -1087,7 +957,7 @@ def _declared_account_spec(tmp_path: Path) -> Path:
         "declared_zero_activity_accounts": [
             {
                 "raw_account_id": "SYNTH-DECLARED",
-                "internal_account_id": "account-ibkr-declared",
+                "internal_account_id": "account-ibkr-synthetic",
                 "provenance": "owner attestation 2026-08-14, issue #286",
             }
         ],
@@ -1109,7 +979,7 @@ def test_declared_zero_activity_completes_boundary(tmp_path: Path) -> None:
     boundary = manifest.coverage.boundary
     assert "Zero-activity accounts:" in boundary
     assert "declared-zero-activity:" in boundary
-    assert "a132adbd6d682a5f" in boundary  # hash(SYNTH-DECLARED)[:16]
+    assert "a132adbd6d682a5f" in boundary
     assert "owner attestation 2026-08-14" in boundary
     output = tmp_path / "ibkr-private-output"
     staged = stage_generation_candidate(spec_path, output)
@@ -1120,16 +990,22 @@ def test_declared_zero_activity_completes_boundary(tmp_path: Path) -> None:
 
 def test_without_declaration_atoms_return(tmp_path: Path) -> None:
     """Same topology as _declared_account_spec but without the attestation.
-    The two-account baseline fails the crosswalk bijection without the
-    declared account to fill the gap — proving the declaration is required."""
+    SYNTH-DECLARED is TWS-managed but not crosswalk-mapped → named atoms."""
     spec_path = _declared_account_spec(tmp_path)
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     del spec["declared_zero_activity_accounts"]
     spec["schema_version"] = 2
     stripped = tmp_path / "ibkr-stripped-spec.json"
     stripped.write_bytes(canonical_json_bytes(spec))
-    with pytest.raises(IbkrGenerationError, match="complete bijection"):
-        build_generation(stripped)
+    _, manifest, _ = build_generation(stripped)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps_text = " ".join(manifest.coverage.known_gaps)
+    assert "account_topology:snapshot_only:" in gaps_text
+    assert "a132adbd6d682a5f" in gaps_text
+    output = tmp_path / "ibkr-private-output"
+    staged = stage_generation_candidate(stripped, output)
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(stripped, output, staged["generation_id"])
 
 
 def test_unknown_account_yields_named_atom(tmp_path: Path) -> None:
@@ -1172,3 +1048,91 @@ def test_unknown_account_yields_named_atom(tmp_path: Path) -> None:
     assert "account_topology:snapshot_only:" in gaps_text
     unknown_hash = hashlib.sha256(b"SYNTH-UNKNOWN").hexdigest()[:16]
     assert unknown_hash in gaps_text
+
+
+def test_zero_activity_abuse_tws_position_fails(tmp_path: Path) -> None:
+    """Declared zero-activity account with a TWS position → abuse atom, PARTIAL."""
+    spec_path = _declared_account_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    source_root = Path(spec["roots"]["legacy"])
+    for src in spec["sources"]:
+        if src["role"] == "TWS_CURRENT_SNAPSHOT":
+            snap_path = source_root / src["relative_path"]
+            snap = json.loads(snap_path.read_text(encoding="utf-8"))
+            snap["positions"].append(
+                {
+                    "account": "SYNTH-DECLARED",
+                    "average_cost": "5",
+                    "conid": "300",
+                    "currency": "USD",
+                    "exchange": "SYNTH",
+                    "expiry": "",
+                    "local_symbol": "ABUSE",
+                    "multiplier": "",
+                    "primary_exchange": "SYNTH",
+                    "quantity": "10",
+                    "security_type": "STK",
+                    "symbol": "ABUSE",
+                    "trading_class": "SYNTH",
+                }
+            )
+            snap_path.write_bytes(canonical_json_bytes(snap))
+            snap_bytes = snap_path.read_bytes()
+            src["expected_sha256"] = hashlib.sha256(snap_bytes).hexdigest()
+            src["expected_size_bytes"] = len(snap_bytes)
+    abuse_spec = tmp_path / "ibkr-abuse-spec.json"
+    abuse_spec.write_bytes(canonical_json_bytes(spec))
+    _, manifest, _ = build_generation(abuse_spec)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps_text = " ".join(manifest.coverage.known_gaps)
+    assert "declared_zero_activity_abuse:tws_position:" in gaps_text
+    assert "a132adbd6d682a5f" in gaps_text
+
+
+def test_removal_order_visibility_exclusion_yields_partial(
+    tmp_path: Path,
+) -> None:
+    """Order visibility exclusion absent with an undeclared snapshot_only atom.
+    The order gap IS declared-excluded but the snapshot_only atom is not."""
+    spec_path = _topology_diff_spec(tmp_path)
+    _, manifest, _ = build_generation(spec_path)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps = set(manifest.coverage.known_gaps)
+    assert "account_topology:snapshot_only:a821e0b93e7a426e" in gaps
+    assert "Order visibility is execution scope" in manifest.coverage.boundary
+    output = tmp_path / "ibkr-private-output"
+    staged = stage_generation_candidate(spec_path, output)
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(spec_path, output, staged["generation_id"])
+
+
+def test_removal_cross_account_exclusion_yields_partial(
+    tmp_path: Path,
+) -> None:
+    """Cross-account-rows exclusion present but no-TWS-snapshot gap undeclared."""
+    spec_path = _spec(tmp_path, cash_mismatch=True)
+    _, manifest, _ = build_generation(spec_path)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps = set(manifest.coverage.known_gaps)
+    assert "No separately authorized TWS snapshot was supplied" in gaps
+    assert "AMBIGUOUS_REPORTED_ACCOUNT" in manifest.coverage.boundary
+    output = tmp_path / "ibkr-private-output"
+    staged = stage_generation_candidate(spec_path, output)
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(spec_path, output, staged["generation_id"])
+
+
+def test_alteration_label_atom_exclusion_yields_partial(
+    tmp_path: Path,
+) -> None:
+    """unmapped_tws_fact atom with non-authorized hash → exclusion absent → PARTIAL."""
+    spec_path = _topology_diff_spec(tmp_path)
+    _, manifest, _ = build_generation(spec_path)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps = set(manifest.coverage.known_gaps)
+    assert "unmapped_tws_fact:a821e0b93e7a426e" in gaps
+    assert "086e03b607cedf48" not in manifest.coverage.boundary
+    output = tmp_path / "ibkr-private-output"
+    staged = stage_generation_candidate(spec_path, output)
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(spec_path, output, staged["generation_id"])

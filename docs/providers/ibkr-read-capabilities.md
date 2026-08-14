@@ -301,15 +301,12 @@ Repeating the same inputs produces the same catalog bytes and generation ID.
 
 The accepted destination-root replay produced immutable generation
 `a99c37f016bf6f60673db4ca3d8a2b44e1dc5223db9eb626688bb5d6656e7f68`
-and catalog SHA-256
-`fc43fa630d6d7ceac7e7497a00e485adbc6c3ffa5d25e9cb341828f9391f87d0`.
-It contains 916 NAV observations, 22,011 finalized Flex positions, 4,139
-transactions, 94 flows, 20 corporate actions, 8,931 FX observations, 117
-mapped current Gateway positions, and 24 current account values. With the
-ba3d1d8039a6d9d7 zero-activity attestation (owner ruling 2026-08-14, issue
-#286) included via `declared_zero_activity_accounts`, the generation reaches
-`COMPLETE_WITHIN_DECLARED_BOUNDARY` and is publication-eligible. The
-publication path follows the shared `quantbase/schwab` pattern: rebuild
+(staged, NOT published; `CURRENT.json` does not exist). It is `PARTIAL`
+due to the ba3d1d8039a6d9d7 account topology gap. When rebuilt with the
+ba3d1d8039a6d9d7 zero-activity attestation (owner ruling 2026-08-14,
+issue #286) in `declared_zero_activity_accounts` (spec v3), the rebuild
+reaches `COMPLETE_WITHIN_DECLARED_BOUNDARY` and becomes publication-eligible.
+The publication path follows the shared `quantbase/schwab` pattern: rebuild
 from spec → verify `VERIFIED` + `COMPLETE_WITHIN_DECLARED_BOUNDARY` →
 atomic `CURRENT.json` write.
 
