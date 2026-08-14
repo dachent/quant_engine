@@ -2177,25 +2177,27 @@ def _hwm_numerical_from_envelope(
             _text(link.get("schema_name"), "source_artifact.schema_name"),
             _text(link.get("sha256"), "source_artifact.sha256"),
         )
-    perimeter = sorted(
-        {
-            _text(item["strategy_id"], "allocation.strategy_id")
-            for item in _objects(catalog.get("allocations"), "allocations")
-            if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
-        }
-    )
     # Consumption-boundary full context: the builder embeds the hash-verified
     # acceptance record and allocations snapshot into the catalog so consumers
     # can enforce the anchor-content cross-check and endpoint recomputation
     # without access to the governed source files.  Missing context is a
     # fail-closed condition — the consumer never falls back to declaration-only
-    # mode.
+    # mode.  Both contexts are validated before ANY use of catalog allocations
+    # (including perimeter derivation below).
     hwm_acceptance_record = catalog.get("hwm_acceptance_record")
     hwm_allocations = catalog.get("allocations")
     if not isinstance(hwm_acceptance_record, dict) or not isinstance(
         hwm_allocations, list
     ):
         return _unavailable("MISSING_CONSUMPTION_CONTEXT")
+
+    perimeter = sorted(
+        {
+            _text(item["strategy_id"], "allocation.strategy_id")
+            for item in _objects(hwm_allocations, "allocations")
+            if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
+        }
+    )
 
     try:
         validate_hwm_inputs_envelope(

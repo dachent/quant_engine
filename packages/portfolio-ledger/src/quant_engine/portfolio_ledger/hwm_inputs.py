@@ -1,13 +1,13 @@
-"""Consumption-boundary validation for the governed hwm_inputs envelope.
+"""Shared validation authority for the governed hwm_inputs envelope.
 
-The baseline builder validates the envelope at admission; consumers (the
-portfolio report and the control panel) re-enforce the same semantic
+The baseline builder validates the envelope at admission and consumers
+(the portfolio report and the control panel) re-enforce the same semantic
 contract at their trust boundary, because a hash-bound, VERIFIED/COMPLETE
 generation can still carry a semantically invalid envelope (wrong-data
-class: crafted or drifted content, not a tampered hash).  This module is
-the single shared authority for that contract; both consumers call
-:func:`validate_hwm_inputs_envelope` before computing anything from the
-envelope.
+class: crafted or drifted content, not a tampered hash).  All three
+boundaries call :func:`validate_hwm_inputs_envelope` with full context
+(allocations + acceptance record, which the builder embeds in the
+hash-verified catalog) before computing anything from the envelope.
 """
 
 from __future__ import annotations
@@ -145,17 +145,22 @@ def validate_hwm_inputs_envelope(
     allocations: Sequence[Mapping[str, Any]] | None = None,
     acceptance_record: Mapping[str, Any] | None = None,
 ) -> None:
-    """Enforce the full hwm_inputs contract at the consumption boundary.
+    """Enforce the full hwm_inputs contract at every boundary.
 
-    Parameters are the consumer's governed context: the catalog as-of date,
+    Parameters are the caller's governed context: the catalog as-of date,
     the systematic perimeter strategy ids, the hash-bound rollforward
     crosswalk rows (``strategy_returns``), the admitted artifact registry
     (artifact id → (schema role, sha256)), and the admitted PORT-HWM-3
-    perimeter exclusions.  When the caller is the admission builder, also
-    supply ``allocations`` for independent endpoint recomputation and the
-    parsed ``acceptance_record`` for anchor-content cross-check; consumers
-    that cannot access the governed source files omit these.  Any violation
-    raises :class:`HwmInputsContractError` with a stable ``code``.
+    perimeter exclusions.  The admission builder AND both consumption
+    boundaries (report, panel) all supply ``allocations`` for independent
+    endpoint recomputation and the parsed ``acceptance_record`` for the
+    anchor-content cross-check — the builder embeds both into the
+    hash-verified catalog precisely so consumers can enforce the same
+    checks without access to the governed source files.  A caller that
+    omits them gets declaration-only structural validation, which
+    production consumers must refuse (they fail closed on missing
+    context instead).  Any violation raises
+    :class:`HwmInputsContractError` with a stable ``code``.
     """
     if set(envelope) != {
         "contract_version",
@@ -228,12 +233,11 @@ def validate_hwm_inputs_envelope(
             "artifact"
         )
 
-    # --- anchor content cross-check: when the admission builder supplies the
-    # parsed acceptance record, the envelope's anchor must equal it
-    # byte-for-byte on the governed fields, so a fabricated later anchor
-    # cannot truncate the derived keyspace.  Consumers that cannot access the
-    # governed source files omit this parameter; the cross-check is
-    # admission-only. ---
+    # --- anchor content cross-check: every production caller (admission
+    # builder and both consumers) supplies the parsed acceptance record, so
+    # the envelope's anchor must equal it byte-for-byte on the governed
+    # fields — a fabricated later anchor cannot truncate the derived
+    # keyspace at any boundary. ---
     if acceptance_record is not None:
         for field in ("anchor_date", "index_base_value", "hwm_policy_id"):
             if str(acceptance_record.get(field)) != str(anchor[field]):
