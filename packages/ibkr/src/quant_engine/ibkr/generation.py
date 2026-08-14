@@ -493,7 +493,7 @@ def _crosswalk(
         )
     # Declared zero-activity accounts: attestation-based mapping.
     # Declared raw accounts may share an internal account with an existing
-    # NAV-mapped raw account (Flex label alias, e.g. U22203488 ↔ U22203487-IA74-IA).
+    # NAV-mapped raw account (Flex label alias, e.g. ba3d1d8039a6d9d7).
     declared_raw_ids: set[str] = set()
     for decl in declared_zero_activity:
         raw_id = decl["raw_account_id"]
@@ -1000,13 +1000,16 @@ def _normalize(
                 )
                 tws_gaps.append(atom)
                 topology_gaps.append(atom)
-        if unmapped_position_accounts or unmapped_account_value_accounts:
-            all_unmapped = unmapped_position_accounts | unmapped_account_value_accounts
-            for raw_id in sorted(all_unmapped):
-                if raw_id in declared_zero_activity_raw_ids:
-                    continue
+        for raw_id in sorted(unmapped_position_accounts):
+            if raw_id not in declared_zero_activity_raw_ids:
                 tws_gaps.append(
-                    f"unmapped_tws_fact:"
+                    f"unmapped_tws_position:"
+                    f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
+                )
+        for raw_id in sorted(unmapped_account_value_accounts):
+            if raw_id not in declared_zero_activity_raw_ids:
+                tws_gaps.append(
+                    f"unmapped_tws_value:"
                     f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
                 )
         if order_visibility == "ZERO_ROWS_OBSERVED_NOT_VISIBILITY_PROOF":
@@ -1066,6 +1069,11 @@ def _normalize(
                 )
                 tws_gaps.append(atom)
                 tws_coverage["known_gaps"].append(atom)
+        tws_coverage["status"] = (
+            "PARTIAL"
+            if tws_coverage["known_gaps"]
+            else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        )
 
     return {
         "accounts": [
@@ -1158,15 +1166,15 @@ def declared_exclusion(gap: str, scope_count: int) -> str | None:
     Exported at module level so exclusion-removal tests can monkeypatch it
     and prove that each branch is load-bearing.
     """
-    if gap == "unmapped_tws_fact:086e03b607cedf48":
+    if gap == "unmapped_tws_value:086e03b607cedf48":
         return (
             "Non-managed TWS account summary label "
-            "(086e03b607cedf48): not in read boundary"
+            "(086e03b607cedf48): not in read boundary — "
+            "owner ruling 2026-08-14, issue #286"
         )
     if gap == ("Zero API order rows do not prove complete order visibility"):
         return (
-            "Order visibility is execution scope, excluded per "
-            "docs/providers/ibkr-read-capabilities.md:275-277"
+            "Order visibility is execution scope — owner ruling 2026-08-14, issue #286"
         )
     if gap == ("Some activity rows have an ambiguous provider-reported account scope"):
         return (

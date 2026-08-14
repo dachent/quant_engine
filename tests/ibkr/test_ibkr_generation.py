@@ -600,9 +600,7 @@ def test_declared_exclusions_flip_coverage_to_complete_within_boundary(
     assert "Flex statement account scope" in manifest.coverage.boundary
     assert "dachent/quant_engine #286" in manifest.coverage.boundary
     assert "Order visibility is execution scope" in manifest.coverage.boundary
-    assert (
-        "docs/providers/ibkr-read-capabilities.md:275-277" in manifest.coverage.boundary
-    )
+    assert "owner ruling 2026-08-14" in manifest.coverage.boundary
 
 
 def test_declared_boundary_publish_succeeds(tmp_path: Path) -> None:
@@ -751,10 +749,10 @@ def test_topology_atoms_block_completion_and_name_account(
     assert "account_topology:snapshot_only:" in gaps_text
     assert "a821e0b93e7a426e" in gaps_text  # hash(SYNTH-OTHER)[:16]
     # unmapped TWS facts from non-crosswalk account → per-account atom
-    assert "unmapped_tws_fact:a821e0b93e7a426e" in gaps_text
+    assert "unmapped_tws_position:a821e0b93e7a426e" in gaps_text
     # Topology atoms must NOT appear in the declared-exclusion boundary
     assert "account_topology" not in manifest.coverage.boundary
-    assert "unmapped_tws_fact" not in manifest.coverage.boundary
+    assert "unmapped_tws_value" not in manifest.coverage.boundary
     # Publish must reject
     output = tmp_path / "ibkr-private-output"
     staged = stage_generation_candidate(spec_path, output)
@@ -776,18 +774,18 @@ def test_flex_authority_no_flex_only_atoms(tmp_path: Path) -> None:
 def test_unauthorized_unmapped_atom_blocks_completion(
     tmp_path: Path,
 ) -> None:
-    """An unmapped_tws_fact atom for a non-authorized account stays PARTIAL."""
+    """An unmapped_tws_position atom for a non-authorized account stays PARTIAL."""
     spec_path = _topology_diff_spec(tmp_path)
     _, manifest, _ = build_generation(spec_path)
     gaps = set(manifest.coverage.known_gaps)
     # The unmapped atom for SYNTH-OTHER (a821e0b93e7a426e) is NOT the
     # authorized label (086e03b607cedf48) → undeclared → PARTIAL
-    assert "unmapped_tws_fact:a821e0b93e7a426e" in gaps
+    assert "unmapped_tws_position:a821e0b93e7a426e" in gaps
     assert "086e03b607cedf48" not in manifest.coverage.boundary
     assert (
         gaps
         - {
-            "unmapped_tws_fact:a821e0b93e7a426e",
+            "unmapped_tws_position:a821e0b93e7a426e",
             "account_topology:snapshot_only:a821e0b93e7a426e",
             "Zero API order rows do not prove complete order visibility",
         }
@@ -1188,12 +1186,12 @@ def test_removal_cross_account_exclusion_yields_partial(
 def test_alteration_label_atom_exclusion_yields_partial(
     tmp_path: Path,
 ) -> None:
-    """unmapped_tws_fact atom with non-authorized hash → exclusion absent → PARTIAL."""
+    """unmapped_tws_position atom with non-authorized hash → exclusion absent → PARTIAL."""
     spec_path = _topology_diff_spec(tmp_path)
     _, manifest, _ = build_generation(spec_path)
     assert manifest.coverage.status is CoverageStatus.PARTIAL
     gaps = set(manifest.coverage.known_gaps)
-    assert "unmapped_tws_fact:a821e0b93e7a426e" in gaps
+    assert "unmapped_tws_position:a821e0b93e7a426e" in gaps
     assert "086e03b607cedf48" not in manifest.coverage.boundary
     output = tmp_path / "ibkr-private-output"
     staged = stage_generation_candidate(spec_path, output)
@@ -1384,17 +1382,17 @@ def test_isolation_label_atom_exclusion(monkeypatch, tmp_path: Path) -> None:
     label_spec = tmp_path / "label-spec.json"
     label_spec.write_bytes(canonical_json_bytes(spec))
 
-    # Unpatched: unmapped_tws_fact for SYNTH-LABEL is undeclared → PARTIAL
+    # Unpatched: unmapped_tws_value for SYNTH-LABEL is undeclared → PARTIAL
     _, manifest, _ = build_generation(label_spec)
     assert manifest.coverage.status is CoverageStatus.PARTIAL
     gaps_text = " ".join(manifest.coverage.known_gaps)
-    assert "unmapped_tws_fact:5b0de93d9bbc36a0" in gaps_text
+    assert "unmapped_tws_value:5b0de93d9bbc36a0" in gaps_text
 
     # Patch: also exclude the synthetic label hash
     original = declared_exclusion
 
     def patched(gap: str, scope_count: int):
-        if gap == "unmapped_tws_fact:5b0de93d9bbc36a0":
+        if gap == "unmapped_tws_value:5b0de93d9bbc36a0":
             return "Synthetic label (5b0de93d9bbc36a0): test exclusion"
         return original(gap, scope_count)
 
@@ -1428,3 +1426,92 @@ def test_isolation_cross_account_exclusion(monkeypatch, tmp_path: Path) -> None:
     staged = stage_generation_candidate(spec_path, output)
     with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
         publish_generation_candidate(spec_path, output, staged["generation_id"])
+
+
+def test_label_account_position_not_excluded(tmp_path: Path) -> None:
+    """Label account's unmapped POSITION atom stays undeclared → PARTIAL."""
+    spec_path = _declared_account_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    source_root = Path(spec["roots"]["legacy"])
+    # Add a TWS position under the summary-only label account
+    for src in spec["sources"]:
+        if src["role"] == "TWS_CURRENT_SNAPSHOT":
+            snap_path = source_root / src["relative_path"]
+            snap = json.loads(snap_path.read_text(encoding="utf-8"))
+            if "SYNTH-LABEL" not in snap["managed_accounts"]:
+                snap["managed_accounts"].append("SYNTH-LABEL")
+            snap["account_summaries"].append(
+                {
+                    "account": "SYNTH-LABEL",
+                    "currency": "BASE",
+                    "request_id": "99",
+                    "tag": "NetLiquidation",
+                    "value": "0",
+                }
+            )
+            snap["positions"].append(
+                {
+                    "account": "SYNTH-LABEL",
+                    "average_cost": "5",
+                    "conid": "400",
+                    "currency": "USD",
+                    "exchange": "SYNTH",
+                    "expiry": "",
+                    "local_symbol": "SYNTH",
+                    "multiplier": "",
+                    "primary_exchange": "SYNTH",
+                    "quantity": "10",
+                    "security_type": "STK",
+                    "symbol": "SYNTH",
+                    "trading_class": "SYNTH",
+                }
+            )
+            snap_path.write_bytes(canonical_json_bytes(snap))
+            snap_bytes = snap_path.read_bytes()
+            src["expected_sha256"] = hashlib.sha256(snap_bytes).hexdigest()
+            src["expected_size_bytes"] = len(snap_bytes)
+    label_spec = tmp_path / "label-pos-spec.json"
+    label_spec.write_bytes(canonical_json_bytes(spec))
+    _, manifest, _ = build_generation(label_spec)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps_text = " ".join(manifest.coverage.known_gaps)
+    assert "unmapped_tws_position:5b0de93d9bbc36a0" in gaps_text
+    # The label exclusion covers values only — position atom is undeclared
+    assert "086e03b607cedf48" not in manifest.coverage.boundary
+    output = tmp_path / "ibkr-label-pos-output"
+    staged = stage_generation_candidate(label_spec, output)
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(label_spec, output, staged["generation_id"])
+
+
+def test_tws_coverage_partial_after_abuse(tmp_path: Path) -> None:
+    """TWS_CURRENT_STATE section status is PARTIAL after abuse atom appended."""
+    spec_path = _abuse_spec_with_snapshot_mutation(
+        tmp_path,
+        lambda snap: snap["positions"].append(
+            {
+                "account": "SYNTH-DECLARED",
+                "average_cost": "5",
+                "conid": "300",
+                "currency": "USD",
+                "exchange": "SYNTH",
+                "expiry": "",
+                "local_symbol": "ABUSE",
+                "multiplier": "",
+                "primary_exchange": "SYNTH",
+                "quantity": "10",
+                "security_type": "STK",
+                "symbol": "ABUSE",
+                "trading_class": "SYNTH",
+            }
+        ),
+    )
+    catalog, manifest, _ = build_generation(spec_path)
+    tws_section = next(
+        item
+        for item in catalog["fact_coverage"]
+        if item["fact_type"] == "TWS_CURRENT_STATE"
+    )
+    assert tws_section["status"] == "PARTIAL"
+    assert any("declared_zero_activity_abuse" in g for g in tws_section["known_gaps"])
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
