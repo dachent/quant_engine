@@ -482,3 +482,761 @@ def test_account_role_duplication_fails_closed(tmp_path: Path) -> None:
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(SchwabGenerationError, match="8 unique accounts"):
         build_generation(spec)
+
+
+# ---------------------------------------------------------------------------
+# All-accounts aggregate (MANUAL_TRANSACTION_JSON_ALL / MANUAL_NAV_CSV_ALL)
+# ---------------------------------------------------------------------------
+
+
+def _spec_aggregate(tmp_path: Path) -> Path:
+    """Build an all-accounts aggregate spec.
+
+    Two accounts have transactions within a declared window; the other six
+    have empty WCH transaction arrays.  NAV is populated for all eight
+    accounts and the all-accounts manual NAV CSV sums their values.
+    """
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    sources: list[dict[str, object]] = []
+    crosswalk: list[dict[str, str]] = []
+    position_rows: list[list[object]] = [
+        ["Positions for All-Accounts as of 01:41 PM ET, 07/31/2026"],
+        [],
+    ]
+    position_header = [
+        "Symbol",
+        "Description",
+        "Qty (Quantity)",
+        "Prev Close",
+        "Cost Basis",
+        "Price",
+        "Price Chng $ (Price Change $)",
+        "Price Chng % (Price Change %)",
+        "Mkt Val (Market Value)",
+        "Day Chng $ (Day Change $)",
+        "Day Chng % (Day Change %)",
+        "Gain $ (Gain/Loss $)",
+        "Gain % (Gain/Loss %)",
+        "Ratings",
+        "Reinvest?",
+        "Reinvest Capital Gains?",
+        "% of Acct (% of Account)",
+        "Cost/Share",
+        "Last Tr (ET)",
+        "Exchange",
+        "Asset Type",
+        "",
+    ]
+
+    # Transactions in the manual window: accounts 0 and 1 each have one.
+    manual_transactions: list[dict[str, object]] = []
+    nav_date_rows: list[
+        tuple[str, int, int]
+    ] = []  # date, wch_value_per_acct, manual_sum
+
+    for index in range(8):
+        suffix = f"{index + 1:03d}"
+        external = f"SYNTHETIC-{suffix}"
+        account_id = f"account-{index:016x}"
+        crosswalk.append(
+            {
+                "external_account_id": external,
+                "internal_account_id": account_id,
+            }
+        )
+
+        # WCH transactions: accounts 0 and 1 get one; others get none.
+        wch_txns: list[dict[str, object]] = []
+        if index == 0:
+            txn: dict[str, object] = {
+                "action": "Buy",
+                "amount": "-10.00",
+                "description": "SYNTHETIC PURCHASE A",
+                "effectiveDate": "07/30/2026",
+                "executionPrice": "10.00",
+                "feesAndCommission": "0.00",
+                "shareQuantity": "1",
+                "symbol": "SYNTH",
+                "transactionDate": "07/30/2026",
+                "transactionDetail": {"settleDate": "07/31/2026"},
+            }
+            wch_txns = [txn]
+            manual_transactions.append(
+                {
+                    "Action": "Buy",
+                    "Amount": "-10.00",
+                    "Date": "07/30/2026",
+                    "Description": "SYNTHETIC PURCHASE A",
+                    "Fees & Comm": "0.00",
+                    "Price": "10.00",
+                    "Quantity": "1",
+                    "Symbol": "SYNTH",
+                }
+            )
+        elif index == 1:
+            txn = {
+                "action": "Sell",
+                "amount": "15.50",
+                "description": "SYNTHETIC SALE B",
+                "effectiveDate": "07/29/2026",
+                "executionPrice": "15.50",
+                "feesAndCommission": "0.00",
+                "shareQuantity": "1",
+                "symbol": "SYNTHB",
+                "transactionDate": "07/29/2026",
+                "transactionDetail": {"settleDate": "07/30/2026"},
+            }
+            wch_txns = [txn]
+            manual_transactions.append(
+                {
+                    "Action": "Sell",
+                    "Amount": "15.50",
+                    "Date": "07/29/2026",
+                    "Description": "SYNTHETIC SALE B",
+                    "Fees & Comm": "0.00",
+                    "Price": "15.50",
+                    "Quantity": "1",
+                    "Symbol": "SYNTHB",
+                }
+            )
+
+        wch_transaction = source_root / f"wch-transaction-{index}.json"
+        wch_transaction.write_text(json.dumps(wch_txns), encoding="utf-8")
+        sources.append(
+            _source(
+                wch_transaction,
+                root=source_root,
+                artifact_id=f"wch/transaction-{index}.json",
+                role="WCH_TRANSACTION_JSON",
+                account_id=account_id,
+                schema_name="synthetic-wch-transaction",
+            )
+        )
+
+        # WCH NAV
+        wch_nav = source_root / f"wch-nav-{index}.csv"
+        date_a, date_b = "07/29/2026", "07/30/2026"
+        val_a = 100 + index
+        val_b = 101 + index
+        _write_csv(
+            wch_nav,
+            ["account_id", "account_name", "date", "account_value"],
+            [
+                [external, "SYNTHETIC", date_a, val_a],
+                [external, "SYNTHETIC", date_b, val_b],
+            ],
+        )
+        sources.append(
+            _source(
+                wch_nav,
+                root=source_root,
+                artifact_id=f"wch/nav-{index}.csv",
+                role="WCH_NAV_CSV",
+                account_id=account_id,
+                schema_name="synthetic-wch-nav",
+            )
+        )
+        nav_date_rows.append((date_a, val_a, 0))
+        nav_date_rows.append((date_b, val_b, 0))
+
+        # Position section
+        position_rows.extend(
+            [
+                [f"SYNTHETIC ...{suffix}"],
+                position_header,
+                [
+                    "SYNTH",
+                    "SYNTHETIC SECURITY",
+                    "1",
+                    "10",
+                    "10",
+                    "11",
+                    "1",
+                    "10%",
+                    "11",
+                    "1",
+                    "10%",
+                    "1",
+                    "10%",
+                    "",
+                    "No",
+                    "No",
+                    "100%",
+                    "10",
+                    "01:40 PM",
+                    "SYNTHETIC",
+                    "Equity",
+                    "",
+                ],
+                [],
+            ]
+        )
+
+    # All-accounts manual transaction JSON
+    manual_all_txn = source_root / "manual-transaction-all.json"
+    manual_all_txn.write_text(
+        json.dumps(
+            {
+                "FromDate": "07/01/2026",
+                "ToDate": "08/14/2026",
+                "BrokerageTransactions": manual_transactions,
+            }
+        ),
+        encoding="utf-8",
+    )
+    sources.append(
+        _source(
+            manual_all_txn,
+            root=source_root,
+            artifact_id="manual/transaction-all.json",
+            role="MANUAL_TRANSACTION_JSON_ALL",
+            account_id=None,
+            schema_name="synthetic-manual-transaction-all",
+        )
+    )
+
+    # All-accounts manual NAV CSV (multi-section single-date format)
+    manual_all_nav = source_root / "manual-nav-all.csv"
+    # Sum per-account values for 07/30/2026 (the date WCH has data for)
+    total_value = sum(101 + i for i in range(8))  # val_b for each account
+    with manual_all_nav.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Balances for All-Accounts as of 07/30/2026 03:50 PM ET"])
+        writer.writerow([])
+        writer.writerow(["Total Accounts Value", f"${total_value}"])
+        writer.writerow(["Total Day Change", "$0.00"])
+        writer.writerow(["Total Day Change %", "0%"])
+        writer.writerow(["Cash & Cash Investments Total", "$0.00"])
+        writer.writerow(["Total Market Value", f"${total_value}"])
+        writer.writerow([])
+        for index in range(8):
+            suffix = f"{index + 1:03d}"
+            writer.writerow([f"SYNTHETIC XXXX-{suffix}"])
+            writer.writerow(["Account Value", f"${101 + index}"])
+            writer.writerow(["Day Change", "$0.00"])
+            writer.writerow(["Day Change %", "0%"])
+            writer.writerow(["Cash & Cash Investments", "$0.00"])
+            writer.writerow(["Market Value", f"${101 + index}"])
+            writer.writerow([])
+    sources.append(
+        _source(
+            manual_all_nav,
+            root=source_root,
+            artifact_id="manual/nav-all.csv",
+            role="MANUAL_NAV_CSV_ALL",
+            account_id=None,
+            schema_name="synthetic-manual-nav-all",
+        )
+    )
+
+    # Position CSV
+    position_path = source_root / "positions.csv"
+    _write_csv(position_path, position_rows[0], position_rows[1:])
+    sources.append(
+        _source(
+            position_path,
+            root=source_root,
+            artifact_id="manual/current-positions.csv",
+            role="MANUAL_POSITION_CSV",
+            account_id=None,
+            schema_name="synthetic-position-export",
+        )
+    )
+
+    # Workbook reference
+    workbook = source_root / "reference.xlsx"
+    workbook.write_bytes(b"SYNTHETIC WORKBOOK REFERENCE")
+    sources.append(
+        _source(
+            workbook,
+            root=source_root,
+            artifact_id="manual/workbook-reference.xlsx",
+            role="WORKBOOK_REFERENCE",
+            account_id=None,
+            schema_name="synthetic-workbook-reference",
+        )
+    )
+
+    spec = {
+        "as_of_date": "2026-07-31",
+        "baseline": {
+            "account_count": 8,
+            "nav_count": 16,
+            "position_count": 8,
+            "transaction_count": 2,
+        },
+        "crosswalk": crosswalk,
+        "roots": {"source": str(source_root.resolve())},
+        "schema_version": 1,
+        "sources": sources,
+    }
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    return path
+
+
+# -- Aggregate transaction tests -------------------------------------------------
+
+
+def test_aggregate_transactions_pass(tmp_path: Path) -> None:
+    """Two accounts each have one matching transaction; build succeeds."""
+    spec = _spec_aggregate(tmp_path)
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status.value == "PARTIAL"
+    assert len(catalog["transactions"]) == 2
+    assert len(catalog["accounts"]) == 8
+    statuses = {item["status"] for item in catalog["reconciliation"]}
+    assert statuses == {"PASS_EXACT"}
+
+
+def test_aggregate_transactions_extra_manual_fails(tmp_path: Path) -> None:
+    """An extra transaction in the all-accounts manual that is not in WCH fails."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    manual_path = Path(document["roots"]["source"]) / manual_source["relative_path"]
+    value = json.loads(manual_path.read_text(encoding="utf-8"))
+    value["BrokerageTransactions"].append(
+        {
+            "Action": "Buy",
+            "Amount": "-99.00",
+            "Date": "07/28/2026",
+            "Description": "EXTRA",
+            "Fees & Comm": "0.00",
+            "Price": "99.00",
+            "Quantity": "1",
+            "Symbol": "EXTRA",
+        }
+    )
+    manual_path.write_text(json.dumps(value), encoding="utf-8")
+    payload = manual_path.read_bytes()
+    manual_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    manual_source["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="manual-only records"):
+        build_generation(spec)
+
+
+def test_aggregate_transactions_wch_only_accepted(tmp_path: Path) -> None:
+    """WCH-only records within the manual window are accepted (subset verification).
+    The manual export is a genuine verification sample; extra WCH records are expected."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    # Account 2 has an empty WCH array by default — add a transaction to it.
+    wch_source = next(
+        s
+        for s in document["sources"]
+        if s["role"] == "WCH_TRANSACTION_JSON"
+        and s["account_id"] == f"account-{2:016x}"
+    )
+    wch_path = Path(document["roots"]["source"]) / wch_source["relative_path"]
+    wch_path.write_text(
+        json.dumps(
+            [
+                {
+                    "action": "Buy",
+                    "amount": "-5.00",
+                    "description": "WCH ONLY EXTRA",
+                    "effectiveDate": "07/25/2026",
+                    "executionPrice": "5.00",
+                    "feesAndCommission": "0.00",
+                    "shareQuantity": "1",
+                    "symbol": "WCHX",
+                    "transactionDate": "07/25/2026",
+                    "transactionDetail": {"settleDate": "07/26/2026"},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    payload = wch_path.read_bytes()
+    wch_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    wch_source["expected_size_bytes"] = len(payload)
+    # Update baseline to account for the added WCH transaction
+    document["baseline"]["transaction_count"] = (
+        document["baseline"]["transaction_count"] + 1
+    )
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    # Build must succeed — WCH-only records are acceptable in subset verification
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status.value == "PARTIAL"
+    # Reconciliation should report PASS_SUBSET_VERIFIED with wch_only_in_window
+    reconciliation = [
+        r for r in catalog["reconciliation"] if r["fact_type"] == "TRANSACTION"
+    ][0]
+    assert reconciliation["status"] == "PASS_SUBSET_VERIFIED"
+    assert reconciliation.get("wch_only_in_window", 0) > 0
+
+
+def test_aggregate_transactions_changed_amount_fails(tmp_path: Path) -> None:
+    """Manual transaction amount differs from WCH — build fails."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    manual_path = Path(document["roots"]["source"]) / manual_source["relative_path"]
+    value = json.loads(manual_path.read_text(encoding="utf-8"))
+    # Change the amount of the first transaction.
+    value["BrokerageTransactions"][0]["Amount"] = "-99.00"
+    manual_path.write_text(json.dumps(value), encoding="utf-8")
+    payload = manual_path.read_bytes()
+    manual_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    manual_source["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="manual-only records"):
+        build_generation(spec)
+
+
+def test_aggregate_transactions_window_edge(tmp_path: Path) -> None:
+    """Transactions exactly at FromDate/ToDate are compared; outside-window
+    WCH transactions are ignored."""
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    sources: list[dict[str, object]] = []
+    crosswalk: list[dict[str, str]] = []
+    position_rows: list[list[object]] = [
+        ["Positions for All-Accounts as of 01:41 PM ET, 07/31/2026"],
+        [],
+    ]
+    position_header = [
+        "Symbol",
+        "Description",
+        "Qty (Quantity)",
+        "Prev Close",
+        "Cost Basis",
+        "Price",
+        "Price Chng $ (Price Change $)",
+        "Price Chng % (Price Change %)",
+        "Mkt Val (Market Value)",
+        "Day Chng $ (Day Change $)",
+        "Day Chng % (Day Change %)",
+        "Gain $ (Gain/Loss $)",
+        "Gain % (Gain/Loss %)",
+        "Ratings",
+        "Reinvest?",
+        "Reinvest Capital Gains?",
+        "% of Acct (% of Account)",
+        "Cost/Share",
+        "Last Tr (ET)",
+        "Exchange",
+        "Asset Type",
+        "",
+    ]
+
+    for index in range(8):
+        suffix = f"{index + 1:03d}"
+        external = f"SYNTHETIC-{suffix}"
+        account_id = f"account-{index:016x}"
+        crosswalk.append(
+            {"external_account_id": external, "internal_account_id": account_id}
+        )
+
+        wch_txns: list[dict[str, object]] = []
+        if index == 0:
+            # outside-window (before)
+            wch_txns.append(
+                {
+                    "action": "Buy",
+                    "amount": "-1.00",
+                    "description": "OUTSIDE BEFORE",
+                    "effectiveDate": "01/01/2026",
+                    "executionPrice": "1.00",
+                    "feesAndCommission": "0.00",
+                    "shareQuantity": "1",
+                    "symbol": "OUT",
+                    "transactionDate": "01/01/2026",
+                    "transactionDetail": {"settleDate": "01/02/2026"},
+                }
+            )
+            # exactly at FromDate
+            wch_txns.append(
+                {
+                    "action": "Buy",
+                    "amount": "-2.00",
+                    "description": "EDGE FROM",
+                    "effectiveDate": "07/01/2026",
+                    "executionPrice": "2.00",
+                    "feesAndCommission": "0.00",
+                    "shareQuantity": "1",
+                    "symbol": "EDG",
+                    "transactionDate": "07/01/2026",
+                    "transactionDetail": {"settleDate": "07/02/2026"},
+                }
+            )
+        elif index == 1:
+            # exactly at ToDate
+            wch_txns.append(
+                {
+                    "action": "Sell",
+                    "amount": "3.00",
+                    "description": "EDGE TO",
+                    "effectiveDate": "08/14/2026",
+                    "executionPrice": "3.00",
+                    "feesAndCommission": "0.00",
+                    "shareQuantity": "1",
+                    "symbol": "EDG",
+                    "transactionDate": "08/14/2026",
+                    "transactionDetail": {"settleDate": "08/15/2026"},
+                }
+            )
+            # outside-window (after)
+            wch_txns.append(
+                {
+                    "action": "Sell",
+                    "amount": "4.00",
+                    "description": "OUTSIDE AFTER",
+                    "effectiveDate": "09/01/2026",
+                    "executionPrice": "4.00",
+                    "feesAndCommission": "0.00",
+                    "shareQuantity": "1",
+                    "symbol": "OUT",
+                    "transactionDate": "09/01/2026",
+                    "transactionDetail": {"settleDate": "09/02/2026"},
+                }
+            )
+
+        wch_txn_path = source_root / f"wch-transaction-{index}.json"
+        wch_txn_path.write_text(json.dumps(wch_txns), encoding="utf-8")
+        sources.append(
+            _source(
+                wch_txn_path,
+                root=source_root,
+                artifact_id=f"wch/transaction-{index}.json",
+                role="WCH_TRANSACTION_JSON",
+                account_id=account_id,
+                schema_name="synthetic-wch-transaction",
+            )
+        )
+
+        # NAV
+        wch_nav = source_root / f"wch-nav-{index}.csv"
+        _write_csv(
+            wch_nav,
+            ["account_id", "account_name", "date", "account_value"],
+            [
+                [external, "SYNTHETIC", "07/29/2026", 100 + index],
+                [external, "SYNTHETIC", "07/30/2026", 101 + index],
+            ],
+        )
+        sources.append(
+            _source(
+                wch_nav,
+                root=source_root,
+                artifact_id=f"wch/nav-{index}.csv",
+                role="WCH_NAV_CSV",
+                account_id=account_id,
+                schema_name="synthetic-wch-nav",
+            )
+        )
+
+        position_rows.extend(
+            [
+                [f"SYNTHETIC ...{suffix}"],
+                position_header,
+                [
+                    "SYNTH",
+                    "SYNTHETIC SECURITY",
+                    "1",
+                    "10",
+                    "10",
+                    "11",
+                    "1",
+                    "10%",
+                    "11",
+                    "1",
+                    "10%",
+                    "1",
+                    "10%",
+                    "",
+                    "No",
+                    "No",
+                    "100%",
+                    "10",
+                    "01:40 PM",
+                    "SYNTHETIC",
+                    "Equity",
+                    "",
+                ],
+                [],
+            ]
+        )
+
+    # Manual all-accounts transactions: only the 2 in-window ones.
+    manual_all = source_root / "manual-transaction-all.json"
+    manual_all.write_text(
+        json.dumps(
+            {
+                "FromDate": "07/01/2026",
+                "ToDate": "08/14/2026",
+                "BrokerageTransactions": [
+                    {
+                        "Action": "Buy",
+                        "Amount": "-2.00",
+                        "Date": "07/01/2026",
+                        "Description": "EDGE FROM",
+                        "Fees & Comm": "0.00",
+                        "Price": "2.00",
+                        "Quantity": "1",
+                        "Symbol": "EDG",
+                    },
+                    {
+                        "Action": "Sell",
+                        "Amount": "3.00",
+                        "Date": "08/14/2026",
+                        "Description": "EDGE TO",
+                        "Fees & Comm": "0.00",
+                        "Price": "3.00",
+                        "Quantity": "1",
+                        "Symbol": "EDG",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    sources.append(
+        _source(
+            manual_all,
+            root=source_root,
+            artifact_id="manual/transaction-all.json",
+            role="MANUAL_TRANSACTION_JSON_ALL",
+            account_id=None,
+            schema_name="synthetic-manual-transaction-all",
+        )
+    )
+
+    # All-accounts NAV
+    manual_nav = source_root / "manual-nav-all.csv"
+    total_value = sum(101 + i for i in range(8))  # 07/30/2026 WCH values
+    with manual_nav.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Balances for All-Accounts as of 07/30/2026 03:50 PM ET"])
+        writer.writerow([])
+        writer.writerow(["Total Accounts Value", f"${total_value}"])
+        writer.writerow(["Total Day Change", "$0.00"])
+        writer.writerow(["Total Day Change %", "0%"])
+        writer.writerow(["Cash & Cash Investments Total", "$0.00"])
+        writer.writerow(["Total Market Value", f"${total_value}"])
+    sources.append(
+        _source(
+            manual_nav,
+            root=source_root,
+            artifact_id="manual/nav-all.csv",
+            role="MANUAL_NAV_CSV_ALL",
+            account_id=None,
+            schema_name="synthetic-manual-nav-all",
+        )
+    )
+
+    # Position CSV
+    position_path = source_root / "positions.csv"
+    _write_csv(position_path, position_rows[0], position_rows[1:])
+    sources.append(
+        _source(
+            position_path,
+            root=source_root,
+            artifact_id="manual/current-positions.csv",
+            role="MANUAL_POSITION_CSV",
+            account_id=None,
+            schema_name="synthetic-position-export",
+        )
+    )
+
+    # Workbook
+    workbook = source_root / "reference.xlsx"
+    workbook.write_bytes(b"SYNTHETIC WORKBOOK REFERENCE")
+    sources.append(
+        _source(
+            workbook,
+            root=source_root,
+            artifact_id="manual/workbook-reference.xlsx",
+            role="WORKBOOK_REFERENCE",
+            account_id=None,
+            schema_name="synthetic-workbook-reference",
+        )
+    )
+
+    spec = {
+        "as_of_date": "2026-07-31",
+        "baseline": {
+            "account_count": 8,
+            "nav_count": 16,
+            "position_count": 8,
+            "transaction_count": 4,  # all 4 WCH transactions (in + out of window)
+        },
+        "crosswalk": crosswalk,
+        "roots": {"source": str(source_root.resolve())},
+        "schema_version": 1,
+        "sources": sources,
+    }
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    catalog, manifest, _ = build_generation(spec_path)
+    assert len(catalog["transactions"]) == 4
+    assert manifest.coverage.status.value == "PARTIAL"
+
+
+# -- Aggregate NAV test -----------------------------------------------------------
+
+
+def test_aggregate_nav_pass(tmp_path: Path) -> None:
+    """All-accounts manual NAV CSV with values summed across accounts passes."""
+    spec = _spec_aggregate(tmp_path)
+    catalog, manifest, _ = build_generation(spec)
+    # 8 accounts × 2 NAV entries each
+    assert len(catalog["nav_observations"]) == 16
+    nav_recon = [
+        item for item in catalog["reconciliation"] if item["fact_type"] == "NAV"
+    ]
+    assert len(nav_recon) == 1
+    assert nav_recon[0]["account_id"] is None
+    assert nav_recon[0]["status"] == "PASS_EXACT"
+
+
+# -- Mutual exclusion test -------------------------------------------------------
+
+
+def test_aggregate_spec_rejects_both_roles(tmp_path: Path) -> None:
+    """A spec that includes both per-account and aggregate manual roles fails."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    source_root = Path(document["roots"]["source"])
+
+    # Add a per-account MANUAL_TRANSACTION_JSON source for account 0
+    manual_per_acct = source_root / "manual-transaction-0.json"
+    manual_per_acct.write_text(
+        json.dumps({"BrokerageTransactions": []}), encoding="utf-8"
+    )
+    account_0 = f"account-{0:016x}"
+    document["sources"].append(
+        _source(
+            manual_per_acct,
+            root=source_root,
+            artifact_id="manual/transaction-per-acct.json",
+            role="MANUAL_TRANSACTION_JSON",
+            account_id=account_0,
+            schema_name="synthetic-manual-transaction",
+        )
+    )
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(
+        SchwabGenerationError,
+        match="cannot use both per-account and aggregate manual transaction roles",
+    ):
+        build_generation(spec)
+
+
+# -- Backward-compatibility test --------------------------------------------------
+
+
+def test_per_account_07_31_still_works(tmp_path: Path) -> None:
+    """The original per-account _spec helper still builds successfully."""
+    spec = _spec(tmp_path)
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status.value == "PARTIAL"
+    assert len(catalog["accounts"]) == 8
+    assert len(catalog["transactions"]) == 8

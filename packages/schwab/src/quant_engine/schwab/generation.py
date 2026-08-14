@@ -42,12 +42,15 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _ROLES = {
     "MANUAL_NAV_CSV",
+    "MANUAL_NAV_CSV_ALL",
     "MANUAL_POSITION_CSV",
     "MANUAL_TRANSACTION_JSON",
+    "MANUAL_TRANSACTION_JSON_ALL",
     "WCH_NAV_CSV",
     "WCH_TRANSACTION_JSON",
     "WORKBOOK_REFERENCE",
 }
+_AGGREGATE_ROLES = frozenset({"MANUAL_NAV_CSV_ALL", "MANUAL_TRANSACTION_JSON_ALL"})
 
 
 class SchwabGenerationError(ValueError):
@@ -275,7 +278,11 @@ def _sources(
         account_id = (
             None if account_value is None else _text(account_value, "account_id")
         )
-        requires_account = role not in {"MANUAL_POSITION_CSV", "WORKBOOK_REFERENCE"}
+        _no_account_roles = {
+            "MANUAL_POSITION_CSV",
+            "WORKBOOK_REFERENCE",
+        } | _AGGREGATE_ROLES
+        requires_account = role not in _no_account_roles
         if requires_account != (account_id is not None):
             raise SchwabGenerationError("source account scope is invalid for role")
         grouped[role].append((account_id, path))
@@ -289,26 +296,50 @@ def _sources(
                 schema_version=_text(record["schema_version"], "schema_version"),
             )
         )
-    expected = {
+    expected: dict[str, int] = {
         "MANUAL_NAV_CSV": 8,
+        "MANUAL_NAV_CSV_ALL": 1,
         "MANUAL_POSITION_CSV": 1,
         "MANUAL_TRANSACTION_JSON": 8,
+        "MANUAL_TRANSACTION_JSON_ALL": 1,
         "WCH_NAV_CSV": 8,
         "WCH_TRANSACTION_JSON": 8,
         "WORKBOOK_REFERENCE": 1,
     }
-    if {key: len(value) for key, value in grouped.items()} != expected:
+    # Allow opting into either per-account or aggregate roles, not both
+    # (at least one manual transaction role and one manual NAV role required)
+    if grouped.get("MANUAL_TRANSACTION_JSON") and grouped.get(
+        "MANUAL_TRANSACTION_JSON_ALL"
+    ):
+        raise SchwabGenerationError(
+            "cannot use both per-account and aggregate manual transaction roles"
+        )
+    if grouped.get("MANUAL_NAV_CSV") and grouped.get("MANUAL_NAV_CSV_ALL"):
+        raise SchwabGenerationError(
+            "cannot use both per-account and aggregate manual NAV roles"
+        )
+    # Drop empty roles from expected comparison (mutual exclusion above)
+    actual_counts = {key: len(value) for key, value in grouped.items() if value}
+    expected_filtered = {k: v for k, v in expected.items() if k in actual_counts}
+    # Aggregate roles replace their per-account counterparts
+    if grouped.get("MANUAL_TRANSACTION_JSON_ALL"):
+        expected_filtered.pop("MANUAL_TRANSACTION_JSON", None)
+    if grouped.get("MANUAL_NAV_CSV_ALL"):
+        expected_filtered.pop("MANUAL_NAV_CSV", None)
+    if actual_counts != expected_filtered:
         raise SchwabGenerationError("accepted source-role inventory differs")
-    account_sets = {
+    account_scoped_roles = {
         role: {account_id for account_id, _ in items}
         for role, items in grouped.items()
-        if role not in {"MANUAL_POSITION_CSV", "WORKBOOK_REFERENCE"}
+        if items
+        and role not in {"MANUAL_POSITION_CSV", "WORKBOOK_REFERENCE"} | _AGGREGATE_ROLES
     }
     if any(
-        len(accounts) != 8 or None in accounts for accounts in account_sets.values()
+        len(accounts) != 8 or None in accounts
+        for accounts in account_scoped_roles.values()
     ):
         raise SchwabGenerationError("account-scoped roles must cover 8 unique accounts")
-    if len({frozenset(accounts) for accounts in account_sets.values()}) != 1:
+    if len({frozenset(accounts) for accounts in account_scoped_roles.values()}) != 1:
         raise SchwabGenerationError("account-scoped role coverage differs")
     return grouped, tuple(sorted(artifacts, key=lambda item: item.artifact_id))
 
@@ -753,6 +784,145 @@ def _transactions(
     return normalized, reconciliations
 
 
+def _transactions_all(
+    wch: Sequence[tuple[str | None, Path]],
+    manual_path: Path,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Reconcile an all-accounts manual transaction export against per-account WCH.
+
+    The manual JSON has a declared window (FromDate/ToDate). Only WCH transactions
+    whose transaction_date falls within that window are compared. The comparison
+    uses the same date/action/symbol/description/quantity/price/fees/amount key,
+    but without account_id since the all-accounts JSON has none.
+    """
+    value = _object(_json(manual_path), "all-accounts manual transaction export")
+    from_date_raw = _text(value.get("FromDate"), "FromDate")
+    to_date_raw = _text(value.get("ToDate"), "ToDate")
+    window_start = _observed_date(from_date_raw, "FromDate")
+    window_end = _observed_date(to_date_raw, "ToDate")
+    rows = value.get("BrokerageTransactions")
+    if not isinstance(rows, list):
+        raise SchwabGenerationError("all-accounts manual transaction rows are missing")
+    manual_keys: Counter[tuple[str, ...]] = Counter()
+    for item in rows:
+        record = _object(item, "all-accounts manual transaction")
+        key = _transaction_key(record, manual=True)
+        manual_keys[key] += 1
+
+    # Collect WCH transactions: all are normalized, only in-window are reconciled
+    wch_keys: Counter[tuple[str, ...]] = Counter()
+    normalized: list[dict[str, object]] = []
+    for account_id, path in wch:
+        assert account_id is not None
+        raw_value = _json(path)
+        if not isinstance(raw_value, list):
+            raise SchwabGenerationError("WCH transaction source must be an array")
+        for source_ordinal, item in enumerate(raw_value, start=1):
+            record = _object(item, "WCH transaction")
+            txn_date = _observed_date(record["transactionDate"], "transactionDate")
+            key = _transaction_key(record, manual=False)
+            in_window = window_start <= txn_date <= window_end
+            if in_window:
+                wch_keys[key] += 1
+            detail = record.get("transactionDetail")
+            details = {} if detail is None else _object(detail, "transactionDetail")
+            payload = {
+                "account_id": account_id,
+                "action": key[1],
+                "amount": key[7] or None,
+                "description": key[3],
+                "effective_date": (
+                    _observed_date(record["effectiveDate"], "effectiveDate").isoformat()
+                    if record.get("effectiveDate")
+                    else None
+                ),
+                "evidence_class": "WCH_HISTORICAL",
+                "execution_price": key[5] or None,
+                "fees_and_commission": key[6] or None,
+                "quantity": key[4] or None,
+                "settle_date": (
+                    _observed_date(details["settleDate"], "settleDate").isoformat()
+                    if details.get("settleDate")
+                    else None
+                ),
+                "symbol": key[2] or None,
+                "transaction_date": key[0],
+                "source_ordinal": source_ordinal,
+            }
+            record_id = _record_id("txn", payload)
+            observed_amount = _decimal(record.get("amount"), "amount", optional=True)
+            symbol = key[2]
+            ledger = Transaction(
+                record_id=record_id,
+                account_id=account_id,
+                event_date=_observed_date(record["transactionDate"], "transactionDate"),
+                kind=key[1],
+                amount=(
+                    ObservedAmount.available(observed_amount, "USD")
+                    if observed_amount is not None
+                    else ObservedAmount.unavailable("USD")
+                ),
+                mapping_status=MappingStatus.UNMAPPED,
+                security_id=_security_id(symbol) if symbol else None,
+            ).to_dict()
+            ledger.update(
+                {
+                    "description": key[3],
+                    "effective_date": payload["effective_date"],
+                    "evidence_class": "WCH_HISTORICAL",
+                    "execution_price": key[5] or None,
+                    "fees_and_commission": key[6] or None,
+                    "quantity": key[4] or None,
+                    "settle_date": payload["settle_date"],
+                    "source_ordinal": source_ordinal,
+                    "symbol": symbol or None,
+                }
+            )
+            normalized.append(ledger)
+
+    extra_manual = manual_keys - wch_keys
+    if extra_manual:
+        sample = sorted(extra_manual)[:3]
+        raise SchwabGenerationError(
+            f"all-accounts manual has records not found in WCH within the declared window "
+            f"({len(extra_manual)} manual-only records): {sample}"
+        )
+    # Verify shared keys have matching counts (manual count <= WCH count)
+    count_mismatches: list[tuple[str, ...]] = []
+    for key in set(manual_keys) & set(wch_keys):
+        if manual_keys[key] > wch_keys[key]:
+            count_mismatches.append(key)
+    if count_mismatches:
+        sample = sorted(count_mismatches)[:3]
+        raise SchwabGenerationError(
+            f"all-accounts manual has higher count than WCH for shared keys "
+            f"({len(count_mismatches)} affected): {sample}"
+        )
+    wch_only_count = sum((wch_keys - manual_keys).values())
+    status = "PASS_SUBSET_VERIFIED" if wch_only_count else "PASS_EXACT"
+
+    reconciliations: list[dict[str, object]] = [
+        {
+            "account_id": None,
+            "fact_type": "TRANSACTION",
+            "manual_count": sum(manual_keys.values()),
+            "source_count": sum(wch_keys.values()),
+            "status": status,
+            "wch_only_in_window": wch_only_count,
+            "window_end": window_end.isoformat(),
+            "window_start": window_start.isoformat(),
+        }
+    ]
+    normalized.sort(
+        key=lambda item: (
+            str(item["account_id"]),
+            str(item["event_date"]),
+            str(item["record_id"]),
+        )
+    )
+    return normalized, reconciliations
+
+
 def _nav_rows(path: Path, *, manual: bool) -> dict[date, Decimal]:
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -830,6 +1000,94 @@ def _nav(
             normalized.append(payload)
     normalized.sort(key=lambda item: (str(item["account_id"]), str(item["as_of_date"])))
     findings.sort(key=lambda item: str(item["account_id"]))
+    return normalized, findings
+
+
+def _nav_all(
+    wch: Sequence[tuple[str | None, Path]],
+    manual_path: Path,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Reconcile an all-accounts manual balances CSV against per-account WCH NAV.
+
+    The all-accounts CSV is a single-date multi-section report (not a Date/Amount
+    time series). It reports the total account value on the as-of date. We sum
+    per-account WCH NAV for that date and compare the total.
+    """
+    try:
+        with manual_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle)
+            rows = list(reader)
+    except (OSError, UnicodeDecodeError, csv.Error) as exc:
+        raise SchwabGenerationError("all-accounts NAV CSV is invalid") from exc
+
+    if not rows:
+        raise SchwabGenerationError("all-accounts NAV CSV is empty")
+    title = rows[0][0].strip() if rows[0] else ""
+    match = re.search(r"as of (\d{2}/\d{2}/\d{4})", title)
+    if match is None:
+        raise SchwabGenerationError("all-accounts NAV title timestamp is missing")
+    manual_date = datetime.strptime(match.group(1), "%m/%d/%Y").date()
+    total_value: Decimal | None = None
+    for row in rows:
+        if row and "Total Accounts Value" in row[0]:
+            raw = row[1].strip() if len(row) > 1 else ""
+            total_value = _decimal(raw, "Total Accounts Value")
+            break
+    if total_value is None:
+        raise SchwabGenerationError("all-accounts NAV total value is missing")
+
+    # Union WCH NAV: sum account values for the manual date
+    wch_union: dict[date, Decimal] = {}
+    for account_id, path in wch:
+        assert account_id is not None
+        observed = _nav_rows(path, manual=False)
+        for obs_date, amount in observed.items():
+            wch_union[obs_date] = wch_union.get(obs_date, Decimal("0")) + amount
+
+    wch_total = wch_union.get(manual_date)
+    status: str
+    if wch_total is not None:
+        if wch_total != total_value:
+            raise SchwabGenerationError(
+                f"all-accounts NAV total differs from WCH union on "
+                f"{manual_date.isoformat()}: manual={total_value}, WCH={wch_total}"
+            )
+        status = "PASS_EXACT"
+    else:
+        # Manual date is later than any WCH date — expected shape:
+        # exactly one later manual date per brokerage account boundary.
+        latest_wch = max(wch_union.keys()) if wch_union else None
+        if latest_wch is None or manual_date <= latest_wch:
+            raise SchwabGenerationError("all-accounts NAV date boundary is unexpected")
+        status = "PASS_WITH_LATER_MANUAL_DATE"
+
+    normalized: list[dict[str, object]] = []
+    for account_id, path in wch:
+        assert account_id is not None
+        observed = _nav_rows(path, manual=False)
+        for obs_date, amount in sorted(observed.items()):
+            identity = {
+                "account_id": account_id,
+                "as_of_date": obs_date.isoformat(),
+            }
+            payload = NavObservation(
+                record_id=_record_id("nav", identity),
+                account_id=account_id,
+                as_of_date=obs_date,
+                nav=ObservedAmount.available(amount, "USD"),
+            ).to_dict()
+            payload["evidence_class"] = "WCH_HISTORICAL"
+            normalized.append(payload)
+
+    findings: list[dict[str, object]] = [
+        {
+            "account_id": None,
+            "fact_type": "NAV",
+            "manual_date": manual_date.isoformat(),
+            "status": status,
+        }
+    ]
+    normalized.sort(key=lambda item: (str(item["account_id"]), str(item["as_of_date"])))
     return normalized, findings
 
 
@@ -972,10 +1230,24 @@ def build_generation(
     if tuple(sorted(suffix_to_internal)) != suffixes:
         raise SchwabGenerationError("crosswalk suffix derivation differs")
     sources, artifacts = _sources(spec["sources"], roots, generation_as_of)
-    transactions, transaction_reconciliation = _transactions(
-        sources["WCH_TRANSACTION_JSON"], sources["MANUAL_TRANSACTION_JSON"]
-    )
-    nav, nav_reconciliation = _nav(sources["WCH_NAV_CSV"], sources["MANUAL_NAV_CSV"])
+    if sources.get("MANUAL_TRANSACTION_JSON_ALL"):
+        transactions, transaction_reconciliation = _transactions_all(
+            sources["WCH_TRANSACTION_JSON"],
+            sources["MANUAL_TRANSACTION_JSON_ALL"][0][1],
+        )
+    else:
+        transactions, transaction_reconciliation = _transactions(
+            sources["WCH_TRANSACTION_JSON"], sources["MANUAL_TRANSACTION_JSON"]
+        )
+    if sources.get("MANUAL_NAV_CSV_ALL"):
+        nav, nav_reconciliation = _nav_all(
+            sources["WCH_NAV_CSV"],
+            sources["MANUAL_NAV_CSV_ALL"][0][1],
+        )
+    else:
+        nav, nav_reconciliation = _nav(
+            sources["WCH_NAV_CSV"], sources["MANUAL_NAV_CSV"]
+        )
     manual_positions, manual_position_as_of, unavailable_position_quantity = _positions(
         sources["MANUAL_POSITION_CSV"][0][1], suffix_to_internal
     )
