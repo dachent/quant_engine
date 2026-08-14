@@ -797,3 +797,52 @@ def test_unauthorized_unmapped_atom_blocks_completion(
     staged = stage_generation_candidate(spec_path, output)
     with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
         publish_generation_candidate(spec_path, output, staged["generation_id"])
+
+
+@pytest.mark.parametrize(
+    "spec_factory,exclusion_hint,undeclared_hint",
+    [
+        (
+            "_topology_diff_spec",
+            "Order visibility is execution scope",
+            "account_topology:snapshot_only:",
+        ),
+        (
+            "_spec_cash_mismatch",
+            "AMBIGUOUS_REPORTED_ACCOUNT",
+            "No separately authorized TWS snapshot",
+        ),
+        (
+            "_topology_diff_spec",
+            "unmapped_tws_fact",
+            "account_topology:snapshot_only:",
+        ),
+    ],
+    ids=["order-visibility", "cross-account-rows", "summary-label"],
+)
+def test_each_exclusion_cannot_save_undeclared_gaps(
+    tmp_path: Path, spec_factory: str, exclusion_hint: str, undeclared_hint: str
+) -> None:
+    """Removing any one exclusion → PARTIAL when the matching gap exists
+    alongside an undeclared gap.  Each case pairs an authorized exclusion
+    gap with an undeclared gap; the undeclared gap always forces PARTIAL."""
+    spec: Path
+    if spec_factory == "_topology_diff_spec":
+        spec = _topology_diff_spec(tmp_path)
+    else:
+        spec = _spec(tmp_path, cash_mismatch=True)
+    _, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps_text = " ".join(manifest.coverage.known_gaps)
+    assert undeclared_hint in gaps_text
+    # The exclusion hint is either in the boundary (declared) or absent
+    # from the gaps (for unmapped_tws_fact whose hash ≠ 086e03b607cedf48
+    # so the atom itself is undeclared and appears in known_gaps)
+    if exclusion_hint == "unmapped_tws_fact":
+        assert exclusion_hint in gaps_text  # non-authorized atom stays undeclared
+    else:
+        assert exclusion_hint in manifest.coverage.boundary
+    output = tmp_path / "ibkr-private-output"
+    staged = stage_generation_candidate(spec, output)
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(spec, output, staged["generation_id"])

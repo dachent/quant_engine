@@ -286,15 +286,16 @@ publication-eligible. Undeclared gaps still yield `PARTIAL` and Core
 publication rejects.
 Repeating the same inputs produces the same catalog bytes and generation ID.
 
-The accepted destination-root replay produced immutable partial generation
+The accepted destination-root replay produced immutable generation
 `a99c37f016bf6f60673db4ca3d8a2b44e1dc5223db9eb626688bb5d6656e7f68`
 and catalog SHA-256
 `fc43fa630d6d7ceac7e7497a00e485adbc6c3ffa5d25e9cb341828f9391f87d0`.
 It contains 916 NAV observations, 22,011 finalized Flex positions, 4,139
 transactions, 94 flows, 20 corporate actions, 8,931 FX observations, 117
-mapped current Gateway positions, and 24 current account values. Under the
-declared boundary, this generation evaluates `COMPLETE_WITHIN_DECLARED_BOUNDARY`
-and is publication-eligible. The publication path follows the shared
+mapped current Gateway positions, and 24 current account values. Coverage
+is `PARTIAL` — the ba3d1d8039a6d9d7 account topology adjudication is pending
+owner input; publication is blocked until resolved. `CURRENT.json` does
+not exist. When resolved, the publication path follows the shared
 `quantbase/schwab` pattern: rebuild from spec → verify `VERIFIED` +
 `COMPLETE_WITHIN_DECLARED_BOUNDARY` → atomic `CURRENT.json` write.
 
