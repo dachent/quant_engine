@@ -1199,6 +1199,26 @@ def test_spec_and_catalog_schemas_are_closed_and_preserve_yagni_boundary() -> No
         == {"type": "null"}
         for rule in period_rules
     )
+    # The embedded acceptance record must be declared in the closed catalog
+    # schema and coupled to the envelope in both directions (PR #284 review).
+    acceptance = catalog_schema["properties"]["hwm_acceptance_record"]
+    assert acceptance["additionalProperties"] is False
+    assert set(acceptance["required"]) == {
+        "anchor_date",
+        "hwm_policy_id",
+        "index_base_value",
+    }
+    coupling = catalog_schema["allOf"]
+    assert any(
+        rule.get("if", {}).get("required") == ["hwm_inputs"]
+        and rule.get("then", {}).get("required") == ["hwm_acceptance_record"]
+        for rule in coupling
+    )
+    assert any(
+        rule.get("if", {}).get("required") == ["hwm_acceptance_record"]
+        and rule.get("then", {}).get("required") == ["hwm_inputs"]
+        for rule in coupling
+    )
 
 
 # ── hwm_inputs envelope tests ─────────────────────────────────────────────
@@ -1225,12 +1245,20 @@ def test_hwm_inputs_present_populates_catalog_key(tmp_path: Path) -> None:
     ]
     assert len(hwm_artifacts) == 1
     assert hwm_artifacts[0]["artifact_id"] in artifact_ids
+    # The embedded acceptance record must be present and equal the governed
+    # hwm-anchor-acceptance source content on every governed field.
+    assert catalog["hwm_acceptance_record"] == {
+        "anchor_date": "2026-07-01",
+        "hwm_policy_id": "PORT-HWM-3",
+        "index_base_value": "1.0",
+    }
 
 
 def test_hwm_inputs_absent_omits_catalog_key(tmp_path: Path) -> None:
     spec_path, _spec_data = _spec(tmp_path)
     catalog, _manifest, _bytes = baseline.build_catalog(spec_path)
     assert "hwm_inputs" not in catalog
+    assert "hwm_acceptance_record" not in catalog
 
 
 def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
