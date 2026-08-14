@@ -36,9 +36,12 @@ from quant_engine.portfolio_ledger import (
     HWM_STATUS_CODE_VERSION,
     HWM_STATUS_SEMANTICS,
     HwmCoverageError,
+    HwmInputsContractError,
     compute_full_systematic_hwm_index,
     decimal_text,
     governed_hwm_coverage,
+    hwm_policy_exclusions,
+    validate_hwm_inputs_envelope,
 )
 
 
@@ -1204,36 +1207,55 @@ def _governed_hwm_coverage(
         raise ControlPanelValidationError(str(exc)) from exc
 
 
-_HWM_PERIOD_REQUIRED_KEYS: Final = frozenset(
-    {
-        "strategy_id",
-        "date",
-        "lane",
-        "disposition",
-        "beginning_capital_usd",
-        "return_source_record_id",
-        "flow_status",
-        "fx_status",
-    }
-)
-_HWM_PERIOD_KEYS: Final = _HWM_PERIOD_REQUIRED_KEYS | {
-    "component_account_ids",
-    "flow_source_record_ids",
-    "fx_source_record_ids",
-}
-_HWM_VALID_DISPOSITIONS: Final = frozenset(
-    {
-        "AVAILABLE",
-        "UNAVAILABLE",
-        "NOT_ADMITTED",
-        "EXPECTED_NON_TRADING",
-        "EXCLUDED_BY_POLICY",
-    }
-)
-_HWM_VALID_FLOW_STATUSES: Final = frozenset({"OBSERVED", "CONFIRMED_ZERO", "MISSING"})
-_HWM_VALID_FX_STATUSES: Final = frozenset(
-    {"OBSERVED", "CONFIRMED_ONE", "NOT_REQUIRED", "MISSING"}
-)
+def _validate_panel_hwm_envelope(
+    envelope: Mapping[str, Any], catalog: Mapping[str, Any]
+) -> None:
+    """Enforce the FULL hwm_inputs envelope contract against the governed
+    baseline catalog before the panel trusts the envelope for recomputation.
+
+    The catalog is the hash-verified authority (resolved by the report's
+    baseline reference); this is the panel's second trust boundary.  The
+    shared consumption-boundary validator
+    (:func:`quant_engine.portfolio_ledger.validate_hwm_inputs_envelope`) is
+    the single authority — the same contract the baseline builder enforces
+    at admission — covering the closed shapes, anchor constants and typed
+    acceptance provenance, per-lane calendar authorities with artifact-role
+    resolution, the reconciliation block (NAV_ROLLFORWARD with a reconciled
+    zero-delta endpoint), period-row enums and disposition invariants,
+    attestation evidence shape and role resolution, EXCLUDED_BY_POLICY rows
+    against the admitted PORT-HWM-3 exclusions, the governed anchor-to-as-of
+    keyspace over the systematic perimeter, and per-AVAILABLE-row
+    capital/component identity against the hash-bound rollforward rows.  Any
+    violation fails closed with an error — the envelope is never silently
+    trusted.
+    """
+    artifact_roles: dict[str, tuple[str, str]] = {}
+    for link in _objects(catalog.get("source_artifacts"), "source_artifacts"):
+        artifact_id = _text(link.get("artifact_id"), "source_artifact.artifact_id")
+        artifact_roles[artifact_id] = (
+            _text(link.get("schema_name"), "source_artifact.schema_name"),
+            _text(link.get("sha256"), "source_artifact.sha256"),
+        )
+    perimeter = sorted(
+        {
+            _text(item["strategy_id"], "allocation.strategy_id")
+            for item in _objects(catalog.get("allocations"), "allocations")
+            if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
+        }
+    )
+    try:
+        validate_hwm_inputs_envelope(
+            envelope,
+            as_of_date=_panel_date(catalog.get("as_of_date"), "catalog.as_of_date"),
+            perimeter=perimeter,
+            crosswalk=_objects(catalog.get("strategy_returns", []), "strategy_returns"),
+            artifact_roles=artifact_roles,
+            policy_exclusions=hwm_policy_exclusions(
+                _load_json(HWM_POLICY, "HWM policy")
+            ),
+        )
+    except HwmInputsContractError as exc:
+        raise ControlPanelValidationError(str(exc)) from exc
 
 
 def _panel_date(value: object, field_name: str) -> date:
@@ -1242,365 +1264,6 @@ def _panel_date(value: object, field_name: str) -> date:
         return date.fromisoformat(accepted)
     except ValueError as exc:
         raise ControlPanelValidationError(f"{field_name} must be an ISO date") from exc
-
-
-def _validate_panel_hwm_envelope(
-    envelope: Mapping[str, Any],
-    periods: Sequence[Mapping[str, Any]],
-    catalog: Mapping[str, Any],
-) -> None:
-    """Enforce the FULL hwm_inputs envelope contract against the governed
-    baseline catalog before the panel trusts the envelope for recomputation.
-
-    The catalog is the hash-verified authority (resolved by the report's
-    baseline reference); this is the panel's second trust boundary.  Every
-    nested constraint of the catalog schema's ``hwm_inputs`` section is
-    enforced: closed shapes, anchor constants and typed acceptance
-    provenance, per-lane calendar authorities with artifact-role resolution,
-    the reconciliation block, period-row enums and disposition invariants,
-    attestation evidence shape and role resolution, the governed
-    anchor-to-as-of keyspace over the systematic perimeter, and
-    per-AVAILABLE-row capital/component identity against the hash-bound
-    rollforward rows.  Any violation fails closed with an error — the
-    envelope is never silently trusted.
-
-    Attestation semantics: every CONFIRMED_* evidence id must resolve to an
-    admitted catalog artifact of the matching role.  The attestation payload
-    content is NOT reachable through the catalog binding (the source files
-    live outside the generation store), so an AVAILABLE row carrying a
-    CONFIRMED_* status is rejected rather than trusted.
-    """
-    if set(envelope) != {
-        "contract_version",
-        "anchor",
-        "calendar_authorities",
-        "periods",
-        "reconciliation",
-    }:
-        raise ControlPanelValidationError("hwm_inputs envelope shape differs")
-    if envelope["contract_version"] != 1:
-        raise ControlPanelValidationError("hwm_inputs contract_version must be 1")
-
-    # --- anchor: constants and typed, hash-bound acceptance provenance ---
-    anchor = _object(envelope["anchor"], "hwm_inputs.anchor")
-    if set(anchor) != {
-        "anchor_date",
-        "index_base_value",
-        "hwm_policy_id",
-        "acceptance_provenance",
-    }:
-        raise ControlPanelValidationError("hwm_inputs anchor shape differs")
-    anchor_date = _panel_date(anchor["anchor_date"], "hwm_inputs.anchor.anchor_date")
-    as_of = _panel_date(catalog.get("as_of_date"), "catalog.as_of_date")
-    if anchor_date > as_of:
-        raise ControlPanelValidationError(
-            "hwm_inputs anchor_date must not be after the catalog as_of_date"
-        )
-    if anchor["index_base_value"] != "1.0":
-        raise ControlPanelValidationError("hwm_inputs index_base_value must be 1.0")
-    if anchor["hwm_policy_id"] != "PORT-HWM-3":
-        raise ControlPanelValidationError("hwm_inputs hwm_policy_id must be PORT-HWM-3")
-    provenance = _object(
-        anchor["acceptance_provenance"], "hwm_inputs.anchor.acceptance_provenance"
-    )
-    if set(provenance) != {
-        "accepted_at",
-        "accepted_by",
-        "source_artifact_id",
-        "source_artifact_sha256",
-    }:
-        raise ControlPanelValidationError(
-            "hwm_inputs acceptance_provenance shape differs"
-        )
-    accepted_at = _text(
-        provenance["accepted_at"], "hwm_inputs acceptance_provenance accepted_at"
-    )
-    try:
-        parsed_accepted = datetime.fromisoformat(accepted_at.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ControlPanelValidationError(
-            "hwm_inputs acceptance_provenance accepted_at must be an ISO datetime"
-        ) from exc
-    if parsed_accepted.tzinfo is None:
-        raise ControlPanelValidationError(
-            "hwm_inputs acceptance_provenance accepted_at must carry a timezone"
-        )
-    _text(provenance["accepted_by"], "hwm_inputs acceptance_provenance accepted_by")
-    provenance_sha256 = _text(
-        provenance["source_artifact_sha256"],
-        "hwm_inputs acceptance_provenance source_artifact_sha256",
-    )
-    if re.fullmatch(r"[0-9a-f]{64}", provenance_sha256) is None:
-        raise ControlPanelValidationError(
-            "hwm_inputs acceptance_provenance sha256 is invalid"
-        )
-
-    # --- typed artifact resolution against the catalog's admitted set ---
-    artifact_roles: dict[str, tuple[str, str]] = {}
-    for link in _objects(catalog.get("source_artifacts"), "source_artifacts"):
-        artifact_id = _text(link.get("artifact_id"), "source_artifact.artifact_id")
-        artifact_roles[artifact_id] = (
-            _text(link.get("schema_name"), "source_artifact.schema_name"),
-            _text(link.get("sha256"), "source_artifact.sha256"),
-        )
-
-    def _require_role(artifact_id: object, role: str, field_name: str) -> None:
-        accepted_id = _text(artifact_id, field_name)
-        entry = artifact_roles.get(accepted_id)
-        if entry is None or entry[0] != role:
-            raise ControlPanelValidationError(
-                f"hwm_inputs {field_name} does not resolve to an admitted {role} "
-                "artifact"
-            )
-
-    _require_role(
-        provenance["source_artifact_id"],
-        "hwm-anchor-acceptance",
-        "acceptance_provenance source_artifact_id",
-    )
-    provenance_artifact = artifact_roles[
-        _text(provenance["source_artifact_id"], "acceptance_provenance")
-    ]
-    if provenance_artifact[1] != provenance_sha256:
-        raise ControlPanelValidationError(
-            "hwm_inputs acceptance_provenance sha256 does not match the admitted "
-            "artifact"
-        )
-
-    # --- calendar authorities: exactly one admitted authority per lane ---
-    authorities = _objects(
-        envelope["calendar_authorities"], "hwm_inputs.calendar_authorities"
-    )
-    if not authorities:
-        raise ControlPanelValidationError(
-            "hwm_inputs calendar_authorities must have at least one entry"
-        )
-    authority_lanes: set[str] = set()
-    for item in authorities:
-        if set(item) != {
-            "lane",
-            "authority_id",
-            "authority_version",
-            "calendar_kind",
-            "admitted_source_artifact_id",
-        }:
-            raise ControlPanelValidationError(
-                "hwm_inputs calendar authority shape differs"
-            )
-        lane = _text(item["lane"], "hwm_inputs calendar_authorities lane")
-        if lane not in {"ACCOUNT", "PROVIDER", "LEGACY"}:
-            raise ControlPanelValidationError("hwm_inputs authority lane differs")
-        if lane in authority_lanes:
-            raise ControlPanelValidationError(
-                "hwm_inputs calendar authority lane is duplicated"
-            )
-        authority_lanes.add(lane)
-        _text(item["authority_id"], "hwm_inputs authority_id")
-        _text(item["authority_version"], "hwm_inputs authority_version")
-        if item["calendar_kind"] not in {
-            "EXCHANGE",
-            "ALWAYS_ON",
-            "PROVIDER_PUBLICATION",
-        }:
-            raise ControlPanelValidationError("hwm_inputs calendar_kind differs")
-        _require_role(
-            item["admitted_source_artifact_id"],
-            f"hwm-calendar-authority-{lane.lower()}",
-            "calendar authority admitted_source_artifact_id",
-        )
-
-    # --- reconciliation block ---
-    reconciliation = _object(envelope["reconciliation"], "hwm_inputs.reconciliation")
-    if set(reconciliation) != {"period_capital_method", "allocation_endpoint_check"}:
-        raise ControlPanelValidationError("hwm_inputs reconciliation shape differs")
-    if reconciliation["period_capital_method"] != "NAV_ROLLFORWARD":
-        raise ControlPanelValidationError(
-            "hwm_inputs period_capital_method must be NAV_ROLLFORWARD"
-        )
-    endpoint = _object(
-        reconciliation["allocation_endpoint_check"],
-        "hwm_inputs allocation_endpoint_check",
-    )
-    if set(endpoint) != {"matched", "delta_usd"}:
-        raise ControlPanelValidationError(
-            "hwm_inputs allocation_endpoint_check shape differs"
-        )
-    if not isinstance(endpoint["matched"], bool):
-        raise ControlPanelValidationError(
-            "hwm_inputs allocation_endpoint_check.matched must be boolean"
-        )
-    try:
-        Decimal(_text(endpoint["delta_usd"], "hwm_inputs delta_usd"))
-    except InvalidOperation as exc:
-        raise ControlPanelValidationError(
-            "hwm_inputs allocation_endpoint_check.delta_usd must be decimal text"
-        ) from exc
-
-    if not periods:
-        raise ControlPanelValidationError(
-            "hwm_inputs periods must have at least one entry"
-        )
-    crosswalk: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
-        reference = row.get("account_reconciliation_sha256")
-        if reference is not None:
-            crosswalk[str(reference)].append(row)
-
-    seen_keys: set[tuple[str, str]] = set()
-    for period_row in periods:
-        if not _HWM_PERIOD_REQUIRED_KEYS.issubset(set(period_row)) or (
-            set(period_row) - _HWM_PERIOD_KEYS
-        ):
-            raise ControlPanelValidationError("hwm_inputs period keys differ")
-        strategy_id = _text(period_row["strategy_id"], "hwm_inputs.periods.strategy_id")
-        day = _panel_date(period_row["date"], "hwm_inputs.periods.date")
-        lane = _text(period_row["lane"], "hwm_inputs.periods.lane")
-        if lane not in {"ACCOUNT", "PROVIDER", "LEGACY"}:
-            raise ControlPanelValidationError("hwm_inputs lane differs")
-        if lane not in authority_lanes:
-            raise ControlPanelValidationError(
-                "hwm_inputs period lane has no admitted calendar authority"
-            )
-        disposition = _text(period_row["disposition"], "hwm_inputs.periods.disposition")
-        if disposition not in _HWM_VALID_DISPOSITIONS:
-            raise ControlPanelValidationError("hwm_inputs disposition differs")
-        flow_status = period_row["flow_status"]
-        if flow_status not in _HWM_VALID_FLOW_STATUSES:
-            raise ControlPanelValidationError("hwm_inputs flow_status differs")
-        fx_status = period_row["fx_status"]
-        if fx_status not in _HWM_VALID_FX_STATUSES:
-            raise ControlPanelValidationError("hwm_inputs fx_status differs")
-        key = (strategy_id, day.isoformat())
-        if key in seen_keys:
-            raise ControlPanelValidationError("hwm_inputs period is duplicated")
-        seen_keys.add(key)
-        capital = period_row["beginning_capital_usd"]
-        reference = period_row["return_source_record_id"]
-        components_value = period_row.get("component_account_ids")
-        if components_value is not None and (
-            not isinstance(components_value, list)
-            or not components_value
-            or any(
-                not isinstance(item, str) or not item.strip()
-                for item in components_value
-            )
-        ):
-            raise ControlPanelValidationError(
-                "hwm_inputs component_account_ids must be a non-empty list of "
-                "non-empty text"
-            )
-        flow_ids = period_row.get("flow_source_record_ids")
-        if flow_ids is not None and (
-            not isinstance(flow_ids, list)
-            or any(not isinstance(item, str) or not item.strip() for item in flow_ids)
-        ):
-            raise ControlPanelValidationError(
-                "hwm_inputs flow_source_record_ids must be non-empty text"
-            )
-        if flow_status == "CONFIRMED_ZERO":
-            if not flow_ids:
-                raise ControlPanelValidationError(
-                    "hwm_inputs CONFIRMED_ZERO flow evidence is empty"
-                )
-            for evidence_id in flow_ids:
-                _require_role(evidence_id, "hwm-flow-attestation", "flow attestation")
-        fx_ids = period_row.get("fx_source_record_ids")
-        if fx_ids is not None and (
-            not isinstance(fx_ids, list)
-            or any(not isinstance(item, str) or not item.strip() for item in fx_ids)
-        ):
-            raise ControlPanelValidationError(
-                "hwm_inputs fx_source_record_ids must be non-empty text"
-            )
-        if fx_status == "CONFIRMED_ONE":
-            if not fx_ids:
-                raise ControlPanelValidationError(
-                    "hwm_inputs CONFIRMED_ONE fx evidence is empty"
-                )
-            for evidence_id in fx_ids:
-                _require_role(evidence_id, "hwm-fx-attestation", "fx attestation")
-        if disposition == "AVAILABLE":
-            if not isinstance(capital, str) or not isinstance(reference, str):
-                raise ControlPanelValidationError(
-                    "hwm_inputs AVAILABLE period lacks capital or return reference"
-                )
-            if flow_status == "MISSING":
-                raise ControlPanelValidationError(
-                    "hwm_inputs AVAILABLE period must not have MISSING flow_status"
-                )
-            if fx_status == "MISSING":
-                raise ControlPanelValidationError(
-                    "hwm_inputs AVAILABLE period must not have MISSING fx_status"
-                )
-            if flow_status == "CONFIRMED_ZERO" or fx_status == "CONFIRMED_ONE":
-                # The attestation payload content is not reachable through
-                # the catalog binding, so a CONFIRMED_* assertion on an
-                # AVAILABLE row is rejected rather than trusted.
-                raise ControlPanelValidationError(
-                    "hwm_inputs AVAILABLE period attestation payload is not "
-                    "verifiable through the catalog binding"
-                )
-        elif capital is not None or reference is not None:
-            raise ControlPanelValidationError(
-                "hwm_inputs non-AVAILABLE period must carry null capital and "
-                "null return reference"
-            )
-        if disposition != "AVAILABLE":
-            continue
-        candidates = [
-            candidate
-            for candidate in crosswalk.get(str(reference), [])
-            if str(candidate.get("strategy_id") or "") == strategy_id
-            and str(candidate.get("date") or "") == day.isoformat()
-            and candidate.get("evidence_layer") == "ACCOUNT_LIVE"
-        ]
-        if len(candidates) != 1:
-            raise ControlPanelValidationError(
-                "hwm_inputs return reference does not bind to exactly one "
-                "account-live rollforward row"
-            )
-        evidence = candidates[0]
-        evidence_capital = evidence.get("beginning_capital")
-        if not isinstance(evidence_capital, str) or Decimal(
-            evidence_capital
-        ) != Decimal(capital):
-            raise ControlPanelValidationError(
-                "hwm_inputs capital differs from the bound rollforward row"
-            )
-        components = period_row.get("component_account_ids")
-        if (
-            not isinstance(components, list)
-            or not components
-            or sorted(str(item) for item in components)
-            != sorted(str(item) for item in evidence.get("component_account_ids", []))
-        ):
-            raise ControlPanelValidationError(
-                "hwm_inputs component accounts differ from the bound rollforward row"
-            )
-
-    # Governed keyspace: every systematic perimeter strategy on every day
-    # from the anchor through the catalog as-of date.
-    perimeter = sorted(
-        {
-            _text(item["strategy_id"], "allocation.strategy_id")
-            for item in _objects(catalog.get("allocations"), "allocations")
-            if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
-        }
-    )
-    if not perimeter:
-        raise ControlPanelValidationError(
-            "hwm_inputs systematic perimeter is empty in the governed catalog"
-        )
-    expected: set[tuple[str, str]] = set()
-    current = anchor_date
-    while current <= as_of:
-        for strategy_id in perimeter:
-            expected.add((strategy_id, current.isoformat()))
-        current += timedelta(days=1)
-    if seen_keys != expected:
-        raise ControlPanelValidationError(
-            "hwm_inputs period keyspace differs from the governed perimeter"
-        )
 
 
 def _compute_panel_numerical_hwm(catalog: Mapping[str, Any]) -> dict[str, Any]:
@@ -1644,7 +1307,7 @@ def _compute_panel_numerical_hwm(catalog: Mapping[str, Any]) -> dict[str, Any]:
         return _unavailable("HWM_INPUTS_INVALID")
     # The envelope is never trusted on its own: it must satisfy the full
     # governed contract against the catalog before any recomputation runs.
-    _validate_panel_hwm_envelope(envelope, periods, catalog)
+    _validate_panel_hwm_envelope(envelope, catalog)
 
     crosswalk: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):

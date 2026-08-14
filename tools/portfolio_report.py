@@ -40,9 +40,12 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
+    HwmInputsContractError,
     compute_full_systematic_hwm_index,
     decimal_text,
     governed_hwm_coverage,
+    hwm_policy_exclusions,
+    validate_hwm_inputs_envelope,
 )
 
 
@@ -2106,7 +2109,18 @@ _HWM_NUMERICAL_REASONS: Final = (
     "NO_AVAILABLE_PERIODS",
     "UNRESOLVED_RETURN_REFERENCE",
     "DUPLICATE_RETURN_REFERENCE",
+    "POLICY_EXCLUSION_INVALID",
+    "ENDPOINT_NOT_RECONCILED",
 )
+
+# Shared consumption-boundary validator codes → report reason codes.
+_HWM_CONTRACT_REASON_MAP: Final = {
+    "POLICY_EXCLUSION_INVALID": "POLICY_EXCLUSION_INVALID",
+    "ENDPOINT_NOT_RECONCILED": "ENDPOINT_NOT_RECONCILED",
+    "KEYSPACE_DIFFERS": "INCOMPLETE_PERIODS",
+    "UNRESOLVED_RETURN_REFERENCE": "UNRESOLVED_RETURN_REFERENCE",
+    "DUPLICATE_RETURN_REFERENCE": "DUPLICATE_RETURN_REFERENCE",
+}
 
 
 def _hwm_numerical_from_envelope(
@@ -2148,6 +2162,41 @@ def _hwm_numerical_from_envelope(
         periods = _objects(envelope.get("periods"), "hwm_inputs.periods")
     except ReportValidationError:
         return _unavailable("HWM_INPUTS_INVALID")
+
+    # Consumption boundary: re-enforce the semantic admission contract the
+    # baseline builder applies at admission — a hash-bound generation can
+    # still carry a semantically invalid envelope.  The shared validator in
+    # the ledger package is the single authority (same checks as the panel's
+    # second trust boundary).
+    artifact_roles: dict[str, tuple[str, str]] = {}
+    for link in _objects(catalog.get("source_artifacts"), "source_artifacts"):
+        artifact_id = _text(link.get("artifact_id"), "source_artifact.artifact_id")
+        artifact_roles[artifact_id] = (
+            _text(link.get("schema_name"), "source_artifact.schema_name"),
+            _text(link.get("sha256"), "source_artifact.sha256"),
+        )
+    perimeter = sorted(
+        {
+            _text(item["strategy_id"], "allocation.strategy_id")
+            for item in _objects(catalog.get("allocations"), "allocations")
+            if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
+        }
+    )
+    try:
+        validate_hwm_inputs_envelope(
+            envelope,
+            as_of_date=_date(catalog.get("as_of_date"), "catalog.as_of_date"),
+            perimeter=perimeter,
+            crosswalk=_objects(catalog.get("strategy_returns", []), "strategy_returns"),
+            artifact_roles=artifact_roles,
+            policy_exclusions=hwm_policy_exclusions(
+                _load_json(HWM_POLICY, "HWM policy")
+            ),
+        )
+    except HwmInputsContractError as exc:
+        return _unavailable(
+            _HWM_CONTRACT_REASON_MAP.get(exc.code, "HWM_INPUTS_INVALID")
+        )
 
     # Hash-bound return crosswalk admitted by the baseline catalog, indexed
     # as a multimap so duplicate references are detected, never overwritten.

@@ -1803,8 +1803,8 @@ def _hwm_envelope(crosswalk: list[dict[str, Any]]) -> dict[str, Any]:
             "acceptance_provenance": {
                 "accepted_at": "2026-01-03T00:00:00Z",
                 "accepted_by": "synthetic",
-                "source_artifact_id": "source-1",
-                "source_artifact_sha256": "3" * 64,
+                "source_artifact_id": "anchor-acceptance-1",
+                "source_artifact_sha256": "a" * 64,
             },
         },
         "calendar_authorities": [
@@ -1813,7 +1813,7 @@ def _hwm_envelope(crosswalk: list[dict[str, Any]]) -> dict[str, Any]:
                 "authority_id": "synthetic",
                 "authority_version": "1",
                 "calendar_kind": "EXCHANGE",
-                "admitted_source_artifact_id": "source-1",
+                "admitted_source_artifact_id": "calendar-account-1",
             }
         ],
         "periods": periods,
@@ -1822,6 +1822,35 @@ def _hwm_envelope(crosswalk: list[dict[str, Any]]) -> dict[str, Any]:
             "allocation_endpoint_check": {"matched": True, "delta_usd": "0"},
         },
     }
+
+
+def _attach_hwm_envelope(
+    catalog: dict[str, Any], crosswalk: list[dict[str, Any]]
+) -> None:
+    """Attach the envelope, its crosswalk, and the role-correct admitted
+    artifact entries to a fixture catalog.  Tests that mutate the envelope
+    after construction re-assign catalog["hwm_inputs"] afterwards."""
+    catalog["hwm_inputs"] = _hwm_envelope(crosswalk)
+    catalog["strategy_returns"] = crosswalk
+    catalog["source_artifacts"] = [
+        *catalog["source_artifacts"],
+        {
+            "artifact_id": "anchor-acceptance-1",
+            "as_of_date": "2026-01-03",
+            "schema_name": "hwm-anchor-acceptance",
+            "schema_version": "1",
+            "sha256": "a" * 64,
+            "source_key": "hwm-anchor-acceptance",
+        },
+        {
+            "artifact_id": "calendar-account-1",
+            "as_of_date": "2026-01-03",
+            "schema_name": "hwm-calendar-authority-account",
+            "schema_version": "1",
+            "sha256": "b" * 64,
+            "source_key": "hwm-calendar-authority-account",
+        },
+    ]
 
 
 def _hwm_freshness_file(tmp_path: Path) -> Path:
@@ -1863,8 +1892,7 @@ def test_hwm_numerical_composite_matches_hand_computation(tmp_path: Path) -> Non
     beginning-capital-weighted daily return, geometrically linked."""
     catalog = _baseline_catalog()
     crosswalk = _hwm_return_crosswalk()
-    catalog["hwm_inputs"] = _hwm_envelope(crosswalk)
-    catalog["strategy_returns"] = crosswalk
+    _attach_hwm_envelope(catalog, crosswalk)
     catalog["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
     baseline_root = _published_baseline(tmp_path / "baseline", catalog)
 
@@ -1947,8 +1975,8 @@ def test_hwm_numerical_unavailable_period_blocks_composite(tmp_path: Path) -> No
     blocked["disposition"] = "UNAVAILABLE"
     blocked["beginning_capital_usd"] = None
     blocked["return_source_record_id"] = None
+    _attach_hwm_envelope(catalog, crosswalk)
     catalog["hwm_inputs"] = envelope
-    catalog["strategy_returns"] = crosswalk
     baseline_root = _published_baseline(tmp_path, catalog)
 
     report, _, _ = reporter.build_report_data(
@@ -1991,8 +2019,8 @@ def test_hwm_numerical_all_unavailable_day_fails_closed(tmp_path: Path) -> None:
             row["disposition"] = "UNAVAILABLE"
             row["beginning_capital_usd"] = None
             row["return_source_record_id"] = None
+    _attach_hwm_envelope(catalog, crosswalk)
     catalog["hwm_inputs"] = envelope
-    catalog["strategy_returns"] = crosswalk
     baseline_root = _published_baseline(tmp_path, catalog)
 
     report, _, _ = reporter.build_report_data(
@@ -2013,7 +2041,7 @@ def test_hwm_numerical_duplicate_return_reference_fails_closed(
     silently rebinding the return."""
     catalog = _baseline_catalog()
     crosswalk = _hwm_return_crosswalk()
-    catalog["hwm_inputs"] = _hwm_envelope(crosswalk)
+    _attach_hwm_envelope(catalog, crosswalk)
     proven = crosswalk[0]
     crosswalk.append(
         # Duplicate reference, divergent return, distinct date so no earlier
@@ -2046,7 +2074,7 @@ def test_hwm_numerical_mismatched_return_reference_fails_closed(
     or evidence layer — does not bind; the composite fails closed."""
     catalog = _baseline_catalog()
     crosswalk = _hwm_return_crosswalk()
-    catalog["hwm_inputs"] = _hwm_envelope(crosswalk)
+    _attach_hwm_envelope(catalog, crosswalk)
     # The row for strategy-1 on 2026-01-02 is re-labeled to PROVIDER_LIVE:
     # the reference no longer has an ACCOUNT_LIVE identity match.
     target = next(
@@ -2055,7 +2083,6 @@ def test_hwm_numerical_mismatched_return_reference_fails_closed(
         if row["strategy_id"] == "strategy-1" and row["date"] == "2026-01-02"
     )
     target["evidence_layer"] = "PROVIDER_LIVE"
-    catalog["strategy_returns"] = crosswalk
     baseline_root = _published_baseline(tmp_path, catalog)
 
     report, _, _ = reporter.build_report_data(
@@ -2074,8 +2101,7 @@ def test_hwm_numerical_publishes_without_freshness_argument(tmp_path: Path) -> N
     the envelope-derived numerical status and applies the readiness gate."""
     catalog = _baseline_catalog()
     crosswalk = _hwm_return_crosswalk()
-    catalog["hwm_inputs"] = _hwm_envelope(crosswalk)
-    catalog["strategy_returns"] = crosswalk
+    _attach_hwm_envelope(catalog, crosswalk)
     catalog["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
     baseline_root = _published_baseline(tmp_path / "with-envelope", catalog)
 
@@ -2111,3 +2137,95 @@ def test_hwm_numerical_publishes_without_freshness_argument(tmp_path: Path) -> N
         == replay["full_systematic_hwm_status"]
     )
     assert _summary_row(report_no_env, "NAV coverage") == replay["nav_coverage"]
+
+
+def test_hwm_numerical_policy_exclusion_fraud_fails_closed(tmp_path: Path) -> None:
+    """Probe: rows relabeled EXCLUDED_BY_POLICY without an admitted policy
+    exclusion must not publish a number (wrong-data class: the envelope is
+    hash-bound but semantically invalid)."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    _attach_hwm_envelope(catalog, crosswalk)
+    for row in catalog["hwm_inputs"]["periods"]:
+        if row["strategy_id"] == "strategy-1":
+            row["disposition"] = "EXCLUDED_BY_POLICY"
+            row["beginning_capital_usd"] = None
+            row["return_source_record_id"] = None
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm["hwm_numerical_reason"] == "POLICY_EXCLUSION_INVALID"
+    assert "hwm_index" not in hwm
+
+
+def test_hwm_numerical_unreconciled_endpoint_blocks(tmp_path: Path) -> None:
+    """Probe: a failed or non-zero allocation endpoint check blocks
+    computation — the declared reconciliation is enforced at consumption."""
+    for endpoint in (
+        {"matched": False, "delta_usd": "999"},
+        {"matched": True, "delta_usd": "999"},
+        {"matched": False, "delta_usd": "0"},
+    ):
+        catalog = _baseline_catalog()
+        crosswalk = _hwm_return_crosswalk()
+        _attach_hwm_envelope(catalog, crosswalk)
+        catalog["hwm_inputs"]["reconciliation"]["allocation_endpoint_check"] = endpoint
+        baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+
+        report, _, _ = reporter.build_report_data(
+            baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+        )
+
+        hwm = report["hwm_summary"]
+        assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+        assert hwm["hwm_numerical_reason"] == "ENDPOINT_NOT_RECONCILED"
+        assert "hwm_index" not in hwm
+
+
+def test_hwm_numerical_incomplete_envelope_fails_closed(tmp_path: Path) -> None:
+    """Probe: a structurally incomplete envelope (only a periods key) is
+    invalid at the consumption boundary."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    _attach_hwm_envelope(catalog, crosswalk)
+    catalog["hwm_inputs"] = {
+        "periods": catalog["hwm_inputs"]["periods"],
+    }
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm["hwm_numerical_reason"] == "HWM_INPUTS_INVALID"
+    assert "hwm_index" not in hwm
+
+
+def test_hwm_numerical_available_with_missing_flow_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Probe: an AVAILABLE row with MISSING flow/fx evidence is invalid at
+    the consumption boundary, not silently computed."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    _attach_hwm_envelope(catalog, crosswalk)
+    for row in catalog["hwm_inputs"]["periods"]:
+        if row["disposition"] == "AVAILABLE" and row["strategy_id"] == "strategy-1":
+            row["flow_status"] = "MISSING"
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm["hwm_numerical_reason"] == "HWM_INPUTS_INVALID"
+    assert "hwm_index" not in hwm

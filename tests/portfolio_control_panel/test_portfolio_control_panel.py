@@ -4069,3 +4069,71 @@ def test_panel_accepts_non_available_confirmed_attestation(
     data = _candidate_data(candidate)
     assert data["advisory"]["hwm_numerical_status"] == "UNAVAILABLE"
     assert data["advisory"]["hwm_numerical_reason"] == "INCOMPLETE_PERIODS"
+
+
+def test_panel_rejects_policy_exclusion_fraud_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Probe: catalog envelope rows relabeled EXCLUDED_BY_POLICY without an
+    admitted policy exclusion are rejected by the shared contract validator
+    at the panel boundary."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        for row in catalog["hwm_inputs"]["periods"]:
+            if row["strategy_id"] == "strategy-1":
+                row["disposition"] = "EXCLUDED_BY_POLICY"
+                row["beginning_capital_usd"] = None
+                row["return_source_record_id"] = None
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "is not named in the admitted PORT-HWM-3 exclusions",
+    )
+
+
+def test_panel_rejects_unreconciled_endpoint_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Probe: a failed or non-zero allocation endpoint check blocks the
+    panel build — matched: false / delta 999 is never reconciled."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        catalog["hwm_inputs"]["reconciliation"]["allocation_endpoint_check"] = {
+            "matched": False,
+            "delta_usd": "999",
+        }
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "hwm_inputs allocation endpoint check is not reconciled",
+    )
+
+
+def test_panel_rejects_incomplete_envelope_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Probe: a structurally incomplete envelope (only a periods key) is
+    rejected by the closed-shape check at the panel boundary."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        catalog["hwm_inputs"] = {"periods": catalog["hwm_inputs"]["periods"]}
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "hwm_inputs envelope shape differs",
+    )

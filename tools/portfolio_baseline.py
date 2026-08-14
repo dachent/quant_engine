@@ -38,11 +38,13 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import (
     CashFlow,
+    HwmInputsContractError,
     MappingStatus,
     NavObservation,
     ObservedAmount,
     Transaction,
     decimal_text,
+    hwm_policy_exclusions,
 )
 
 
@@ -2341,18 +2343,13 @@ def _iso_datetime(value: object, field_name: str) -> str:
 
 def _hwm_policy_exclusions() -> dict[str, date]:
     """Load the admitted PORT-HWM-3 perimeter exclusions (strategy → effective
-    date) from the versioned repository contract."""
+    date) from the versioned repository contract, extracted by the shared
+    ledger-package helper so admission and consumption share one rule."""
     policy = _load_json(_HWM_POLICY_PATH, "hwm policy contract")
-    if policy.get("policy_id") != "PORT-HWM-3":
-        raise BaselineValidationError("hwm policy contract must be PORT-HWM-3")
-    perimeter = _object(policy.get("material_perimeter"), "hwm policy perimeter")
-    exclusions: dict[str, date] = {}
-    for item in _objects(perimeter.get("exclusions"), "hwm policy exclusions"):
-        strategy_id = _text(item.get("strategy_id"), "hwm policy exclusion")
-        exclusions[strategy_id] = _date(
-            item.get("effective_date"), "hwm policy exclusion effective_date"
-        )
-    return exclusions
+    try:
+        return hwm_policy_exclusions(policy)
+    except HwmInputsContractError as exc:
+        raise BaselineValidationError(str(exc)) from exc
 
 
 def _hwm_expected_keyspace(

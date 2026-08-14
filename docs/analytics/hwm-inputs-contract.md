@@ -268,6 +268,18 @@ The engine does NOT consume `calendar_authorities`, `reconciliation`,
 or non-`AVAILABLE` periods directly — those are governance interfaces
 consumed by the admission pipeline.
 
+Both #277 consumers re-enforce the full admission contract at the
+consumption boundary via the shared ledger-package validator
+(`quant_engine.portfolio_ledger.validate_hwm_inputs_envelope`): a
+hash-bound but semantically invalid generation publishes nothing.  Two
+consumption-side rules follow from that boundary: an AVAILABLE row with a
+MISSING flow or fx status is invalid, and an AVAILABLE row carrying a
+CONFIRMED_ZERO/CONFIRMED_ONE attestation is rejected, because the
+attestation payload content is verifiable only at admission (the governed
+source files live outside the generation stores the consumers can reach).
+CONFIRMED_* assertions on non-AVAILABLE rows remain valid envelope
+content.
+
 ## Fail-closed invariants
 
 - Decimal strings for all money and rate fields.

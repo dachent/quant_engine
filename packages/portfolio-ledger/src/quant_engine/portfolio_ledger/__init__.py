@@ -35,6 +35,11 @@ from quant_engine.portfolio_ledger.hwm import (
     compute_full_systematic_hwm_index,
     governed_hwm_coverage,
 )
+from quant_engine.portfolio_ledger.hwm_inputs import (
+    HwmInputsContractError,
+    hwm_policy_exclusions,
+    validate_hwm_inputs_envelope,
+)
 from quant_engine.portfolio_ledger.reconciliation import (
     AccountPositionReconciliation,
     ReconciliationException,
@@ -85,6 +90,7 @@ __all__ = [
     "HWM_STATUS_CODE_VERSION",
     "HWM_STATUS_SEMANTICS",
     "HwmCoverageError",
+    "HwmInputsContractError",
     "LedgerSlice",
     "LedgerValidationError",
     "MappingStatus",
@@ -112,7 +118,9 @@ __all__ = [
     "compute_full_systematic_hwm_index",
     "decimal_text",
     "governed_hwm_coverage",
+    "hwm_policy_exclusions",
     "reconcile_position_values",
     "reconcile_allocation_bridge",
+    "validate_hwm_inputs_envelope",
     "validate_provider_authority",
 ]
