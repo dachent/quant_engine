@@ -228,26 +228,28 @@ implemented by this decision.
 
 ## Declared boundary (issue #286)
 
-The read boundary is the **Flex statement account scope**. TWS-managed scope,
-order visibility, and unmapped current-state facts are execution-side concerns
-and are formally excluded from the read coverage boundary per
-`docs/providers/ibkr-read-capabilities.md:275-277`.
+The read boundary is the **Flex statement account scope**. Three exclusion
+classes are owner-authorized:
 
-Declared exclusions (recorded verbatim in the generation manifest boundary):
+1. **Order visibility** (execution scope): "Zero API order rows do not prove
+   complete order visibility".
+2. **Cross-account-discrepant rows** (bounded, count recorded): "Some activity
+   rows have an ambiguous provider-reported account scope" → kept `UNMAPPED`
+   with `AMBIGUOUS_REPORTED_ACCOUNT`.
+3. **Non-managed TWS account summary labels (086e03b607cedf48)**: "Some current TWS
+   facts lack an accepted account mapping" → not a Flex query account, not in
+   the read boundary.
 
-1. **TWS-managed-but-not-Flex accounts**: execution-side scope,
-   excluded per `ibkr-read-capabilities.md:275-277`.
-2. **Summary-only labels**: execution-side scope, excluded.
-3. **Zero API order rows**: order visibility is execution scope, excluded per
-   `ibkr-read-capabilities.md:275-277`.
-4. **Cross-account-discrepant rows (214 observed)**: kept `UNMAPPED` with
-   `AMBIGUOUS_REPORTED_ACCOUNT`; bounded declared gap with count recorded per
-   owner adjudication on issue #286.
+Account-level topology differences (flex-only / snapshot-only) are **not**
+excludable. They surface as per-account atoms
+(`account_topology:flex_only:<masked>`, `account_topology:snapshot_only:<masked>`)
+in the manifest. Any topology atom blocks completion — the build stays
+`PARTIAL` until each atom resolves through the crosswalk.
 
-When every residual gap is declared-excluded, coverage evaluates
-`COMPLETE_WITHIN_DECLARED_BOUNDARY` and the generation may be published.
-Undeclared gaps (such as an absent TWS snapshot on a legacy-only spec) still
-yield `PARTIAL` and block publication.
+When every residual gap is declared-excluded and no topology atoms exist,
+coverage evaluates `COMPLETE_WITHIN_DECLARED_BOUNDARY` and the generation may
+be published. Undeclared gaps (such as an absent TWS snapshot on a legacy-only
+spec) still yield `PARTIAL` and block publication.
 
 ## Offline generation runbook
 

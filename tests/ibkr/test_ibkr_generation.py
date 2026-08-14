@@ -636,10 +636,7 @@ def test_exclusion_records_land_verbatim_in_manifest(tmp_path: Path) -> None:
     _, manifest, _ = build_generation(spec_path)
     boundary = manifest.coverage.boundary
     assert "Declared exclusions:" in boundary
-    assert (
-        "TWS-managed-but-not-Flex accounts" in boundary
-        or "Order visibility is execution scope" in boundary
-    )
+    assert "Order visibility is execution scope" in boundary
 
 
 def test_catalog_bytes_unchanged_with_boundary_declaration(
@@ -664,3 +661,122 @@ def test_exclusion_counts_appear_in_boundary_when_scope_mismatch(
     # But the boundary still records the declared exclusions that matched
     assert "AMBIGUOUS_REPORTED_ACCOUNT" in manifest.coverage.boundary
     assert "1 catalog rows" in manifest.coverage.boundary
+
+
+def _topology_diff_spec(tmp_path: Path) -> Path:
+    """Spec where Flex crosswalk has SYNTH-RAW but TWS managed=SYNTH-OTHER."""
+    spec_path = _refreshed_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    source_root = Path(spec["roots"]["legacy"])
+
+    snapshot = {
+        "account_summaries": [
+            {
+                "account": "SYNTH-RAW",
+                "currency": "BASE",
+                "request_id": "1",
+                "tag": "NetLiquidation",
+                "value": "108",
+            }
+        ],
+        "captured_at_utc": "2026-01-09T20:00:00Z",
+        "connection": {"connected": True},
+        "current_day_executions": [],
+        "errors": [
+            {
+                "advanced_order_reject_json": "",
+                "error_code": 2104,
+                "message": "SYNTHETIC INFORMATIONAL STATUS",
+                "request_id": "-1",
+            }
+        ],
+        "managed_accounts": ["SYNTH-OTHER"],
+        "open_orders": [],
+        "order_statuses": [],
+        "positions": [
+            {
+                "account": "SYNTH-OTHER",
+                "average_cost": "10",
+                "conid": "100",
+                "currency": "USD",
+                "exchange": "SYNTH",
+                "expiry": "",
+                "local_symbol": "SYNTH",
+                "multiplier": "",
+                "primary_exchange": "SYNTH",
+                "quantity": "2",
+                "security_type": "STK",
+                "symbol": "SYNTH",
+                "trading_class": "SYNTH",
+            }
+        ],
+        "request_results": [
+            {"completed": True, "name": name}
+            for name in (
+                "account_summary",
+                "all_api_open_orders",
+                "current_day_executions",
+                "positions",
+            )
+        ],
+        "run_id": "tws-synthetic-topology-diff",
+        "schema_version": 1,
+    }
+    snapshot_path = source_root / "tws-snapshot-topology-diff.json"
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    snapshot_bytes = snapshot_path.read_bytes()
+
+    for source in list(spec["sources"]):
+        if source["role"] == "TWS_CURRENT_SNAPSHOT":
+            source["relative_path"] = snapshot_path.name
+            source["expected_sha256"] = hashlib.sha256(snapshot_bytes).hexdigest()
+            source["expected_size_bytes"] = len(snapshot_bytes)
+
+    out = tmp_path / "ibkr-topology-diff-spec.json"
+    out.write_bytes(canonical_json_bytes(spec))
+    return out
+
+
+def test_topology_atoms_block_completion_and_name_account(
+    tmp_path: Path,
+) -> None:
+    spec_path = _topology_diff_spec(tmp_path)
+    catalog, manifest, _ = build_generation(spec_path)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    # Per-account atoms must appear in known_gaps
+    gaps_text = " ".join(manifest.coverage.known_gaps)
+    assert "account_topology:flex_only:" in gaps_text
+    assert "account_topology:snapshot_only:" in gaps_text
+    # Verify the atoms name the account (hashed)
+    assert "d6177a34a47fe498" in gaps_text  # hash(SYNTH-RAW)[:16]
+    assert "a821e0b93e7a426e" in gaps_text  # hash(SYNTH-OTHER)[:16]
+    # Topology atoms must NOT appear in the declared-exclusion boundary
+    assert "account_topology" not in manifest.coverage.boundary
+    # Publish must reject
+    output = tmp_path / "ibkr-private-output"
+    staged = stage_generation_candidate(spec_path, output)
+    assert staged["coverage_status"] == "PARTIAL"
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(spec_path, output, staged["generation_id"])
+
+
+def test_altering_declared_exclusion_yields_partial(tmp_path: Path) -> None:
+    """A gap not matching any authorized exclusion pattern stays PARTIAL.
+
+    This verifies that removing any of the three owner-authorized exclusion
+    patterns from _declared_exclusion would cause the gap to become
+    undeclared → PARTIAL.  We test this by injecting a topology atom (which
+    is explicitly NOT among the three authorized classes) alongside the
+    authorized exclusions.
+    """
+    spec_path = _topology_diff_spec(tmp_path)
+    _, manifest, _ = build_generation(spec_path)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    # The topology atoms are *not* declared-excluded, so they appear as
+    # known_gaps even though the authorized exclusions are also present.
+    gaps = set(manifest.coverage.known_gaps)
+    assert any(gap.startswith("account_topology:") for gap in gaps)
+    # The authorized exclusion for order visibility is still matched,
+    # but the undeclared atom prevents COMPLETE.
+    assert "Order visibility is execution scope" in manifest.coverage.boundary
+    assert "account_topology" not in manifest.coverage.boundary

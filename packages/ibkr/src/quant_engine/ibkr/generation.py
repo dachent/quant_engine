@@ -751,6 +751,7 @@ def _normalize(
     tws_check: dict[str, Any]
     tws_coverage: dict[str, Any]
     tws_identity_partial = False
+    topology_gaps: list[str] = []
     if tws_source is None:
         tws_state = {
             "account_summary_value_count": 0,
@@ -892,7 +893,21 @@ def _normalize(
         }
         tws_gaps: list[str] = []
         if tws_identity_partial:
-            tws_gaps.append("TWS managed-account scope differs from current Flex scope")
+            snapshot_ids = frozenset(snapshot.raw_account_ids)
+            for raw_id in sorted(accepted_current_accounts - snapshot_ids):
+                atom = (
+                    f"account_topology:flex_only:"
+                    f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
+                )
+                tws_gaps.append(atom)
+                topology_gaps.append(atom)
+            for raw_id in sorted(snapshot_ids - accepted_current_accounts):
+                atom = (
+                    f"account_topology:snapshot_only:"
+                    f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
+                )
+                tws_gaps.append(atom)
+                topology_gaps.append(atom)
         if unmapped_positions or unmapped_account_values:
             tws_gaps.append("Some current TWS facts lack an accepted account mapping")
         if order_visibility == "ZERO_ROWS_OBSERVED_NOT_VISIBILITY_PROOF":
@@ -945,11 +960,7 @@ def _normalize(
                         if account_scope_mismatches
                         else []
                     ),
-                    *(
-                        ["TWS managed-account scope differs from current Flex scope"]
-                        if tws_identity_partial
-                        else []
-                    ),
+                    *topology_gaps,
                 ],
                 "status": (
                     "PARTIAL"
@@ -1059,11 +1070,6 @@ def build_generation(
         )
 
     def _declared_exclusion(gap: str, scope_count: int) -> str | None:
-        if gap == "TWS managed-account scope differs from current Flex scope":
-            return (
-                "TWS-managed-but-not-Flex accounts: execution-side scope, "
-                "excluded per docs/providers/ibkr-read-capabilities.md:275-277"
-            )
         if gap == "Some current TWS facts lack an accepted account mapping":
             return "Summary-only labels: execution-side scope, excluded"
         if gap == ("Zero API order rows do not prove complete order visibility"):
