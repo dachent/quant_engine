@@ -437,22 +437,35 @@ def build_generation(
             "as_of_date must equal the extraction run_end_ms UTC date"
         )
 
-    # --- Evaluate declared exclusions against residual gaps ---
+    # --- Evaluate declared exclusions with exact set-equality ---
     raw_exclusions: list[dict[str, str]] = spec.get("declared_exclusions", []) or []
     exclusion_items: set[str] = {str(e["item"]) for e in raw_exclusions}
-    residual_gaps = [gap for gap in known_gaps if gap not in exclusion_items]
-    if raw_exclusions and not residual_gaps:
+    gap_set: set[str] = set(known_gaps)
+
+    if len(exclusion_items) != len(raw_exclusions):
+        raise MatrixportGenerationError(
+            "declared_exclusions contain duplicate items; every item must be unique"
+        )
+
+    undeclared = gap_set - exclusion_items
+    stale = exclusion_items - gap_set
+
+    if raw_exclusions and not undeclared and not stale:
         coverage_status = CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
         manifest_known_gaps: tuple[str, ...] = ()
-    else:
-        if raw_exclusions and residual_gaps:
-            # Gaps remain that were not covered by any declared exclusion;
-            # stay PARTIAL and log the uncovered items.
-            uncovered = sorted(residual_gaps)
-            raise MatrixportGenerationError(
-                f"declared_exclusions do not cover all gaps; "
-                f"uncovered ({len(uncovered)}): {uncovered}"
+    elif raw_exclusions:
+        messages: list[str] = []
+        if undeclared:
+            messages.append(
+                f"undeclared gaps ({len(undeclared)}): {sorted(undeclared)}"
             )
+        if stale:
+            messages.append(f"stale declarations ({len(stale)}): {sorted(stale)}")
+        raise MatrixportGenerationError(
+            "declared_exclusions do not exactly match current gaps; "
+            + "; ".join(messages)
+        )
+    else:
         coverage_status = CoverageStatus.PARTIAL
         manifest_known_gaps = tuple(known_gaps)
 

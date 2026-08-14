@@ -63,42 +63,65 @@ python tools/matrixport_generation.py build <spec.json>
 python tools/matrixport_generation.py stage <spec.json> <dataMatrixport>
 ```
 
+## Atomic gap taxonomy
+
+Every gap emitted by the verifier is a typed atomic item, never an aggregate
+string. This ensures undeclared material data cannot be absorbed by a
+coincidental aggregate match.
+
+| Atom prefix | Meaning | Example |
+|---|---|---|
+| `wallet_deposit_currency:` | One rejected deposit currency | `wallet_deposit_currency:FTX-BTC-1` |
+| `wallet_withdrawal_currency:` | One rejected withdrawal currency | `wallet_withdrawal_currency:USDT_OP` |
+| `nav_missing_date:` | One date with incomplete NAV/FX coverage | `nav_missing_date:2026-01-27` |
+| `{product_id}:anchored_gap` | Product whose valuation relies on anchor | `PROD-42:anchored_gap` |
+| `{product_id}:unavailable` | Product whose valuation is unavailable | `PROD-99:unavailable` |
+
 ## Declared boundary exclusions
 
 The generation spec may include an optional `declared_exclusions` array. Each
-entry records an owner-accepted exclusion with the exact gap identifier,
-rationale, and declaration provenance:
+entry records one owner-accepted atomic gap item, rationale, and provenance:
 
 ```json
 {
   "declared_exclusions": [
     {
-      "item": "<gap-identifier>",
-      "reason": "accepted rationale — e.g. API code 18100410 for defunct tokens",
+      "item": "wallet_deposit_currency:FTX-BTC-1",
+      "reason": "accepted rationale — e.g. API code 18100410 for defunct token",
       "provenance": "owner-accepted YYYY-MM-DD per issue #NNN"
     }
   ]
 }
 ```
 
-When `declared_exclusions` is present and every residual gap in `known_gaps` is
-covered by a declared exclusion, the generation coverage evaluates to
-`COMPLETE_WITHIN_DECLARED_BOUNDARY`. Any gap not covered by a declared exclusion
-keeps the generation `PARTIAL`. The mechanism is data-driven from the spec and is
-never hardcoded in the adapter; the exclusion records are written verbatim into
-the generation manifest's coverage section (`declared_exclusions` field).
+Matching uses **exact set-equality**: the set of declared exclusion items must
+equal the set of current gap atoms exactly.
+
+- **Undeclared gap atom** (a gap with no matching declaration) → `PARTIAL`,
+  build fails with undeclared gaps enumerated.
+- **Stale declaration** (a declared item that no longer matches any current
+  gap) → `PARTIAL`, build fails with stale declarations enumerated.
+- **Duplicate declaration items** → rejected at build time.
+- **Exact match** (every gap atom is declared and every declaration matches a
+  gap) → `COMPLETE_WITHIN_DECLARED_BOUNDARY`.
+
+The mechanism is data-driven from the spec and never hardcoded in the adapter;
+the exclusion records are written verbatim into the generation manifest's
+coverage section (`declared_exclusions` field).
 
 The accepted e4ccbf8cf447* generation (as_of 2026-08-03) has two exclusion
 classes accepted by the owner on 2026-08-14 (issue #287):
 
 1. **15 currency symbols** rejected by the Matrixport API itself with code
    `18100410 "Invalid params"` on `/mapi/v1/wallet/deposits` and
-   `/mapi/v1/wallet/withdrawals`: FTX-BTC-1, FTX-BTC-2, HUBX, MFIP-BCH,
-   MFIP-BNB, MFIP-BTC, MFIP-DOGE, MFIP-ETH, MFIP-LTC, MFIP-SOL, MFIP-USDC,
-   MFIP-USDT, USDC_OP, USDT_OP, UXLINK_OLD. All are zero-balance defunct/legacy
-   tokens.
-2. **2 NAV days** missing from the provider's own endpoint (2026-01-27,
-   2026-07-03; 2/241 rows).
+   `/mapi/v1/wallet/withdrawals`, producing 30 atomic gap items
+   (15 × `wallet_deposit_currency:*` + 15 × `wallet_withdrawal_currency:*`):
+   FTX-BTC-1, FTX-BTC-2, HUBX, MFIP-BCH, MFIP-BNB, MFIP-BTC, MFIP-DOGE,
+   MFIP-ETH, MFIP-LTC, MFIP-SOL, MFIP-USDC, MFIP-USDT, USDC_OP, USDT_OP,
+   UXLINK_OLD. All are zero-balance defunct/legacy tokens.
+2. **2 NAV days** missing from the provider's own endpoint, producing 2 atomic
+   gap items (`nav_missing_date:2026-01-27`, `nav_missing_date:2026-07-03`;
+   2/241 rows).
 
 ## Publish path
 

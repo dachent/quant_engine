@@ -45,11 +45,12 @@ def _artifact(path: Path, root: Path) -> dict[str, object]:
 
 
 def _spec(tmp_path: Path) -> Path:
+    """Build a synthetic PARTIAL spec with atomic gap items."""
     run = tmp_path / "synthetic-run"
     reports = run / "reports"
     csv_root = run / "csv"
-    reports.mkdir(parents=True)
-    csv_root.mkdir()
+    reports.mkdir(parents=True, exist_ok=True)
+    csv_root.mkdir(exist_ok=True)
     dataset_rows = {"alpha": 1, "beta": 2}
     dataset_digests = {"alpha": "a" * 64, "beta": "b" * 64}
     for name, count in dataset_rows.items():
@@ -111,15 +112,16 @@ def _spec(tmp_path: Path) -> Path:
     (reports / "request_manifest.jsonl").write_text(
         '{"request":1}\n{"request":2}\n', encoding="utf-8"
     )
-    source_gap = "/synthetic: one source-limited request"
-    valuation_gap = "synthetic valuation coverage is incomplete"
+    # --- Atomic gap items ---
+    source_atom = "wallet_deposit_currency:synthetic-rejected-A"
+    nav_atom = "nav_missing_date:2026-01-27"
     _write_json(
         reports / "verification.json",
         {
             "checks": {
                 "coverage": {
                     "ok": True,
-                    "source_limited_reasons": [source_gap],
+                    "source_limited_reasons": [source_atom],
                     "status": "PARTIAL",
                     "status_counts": {
                         "complete_to_observed_boundary": 1,
@@ -140,7 +142,7 @@ def _spec(tmp_path: Path) -> Path:
                 "sqlite": {"dataset_counts": dataset_rows, "ok": True},
                 "valuation": {
                     "ok": True,
-                    "reasons": [valuation_gap],
+                    "reasons": [nav_atom],
                     "status": "PARTIAL",
                 },
             },
@@ -162,7 +164,7 @@ def _spec(tmp_path: Path) -> Path:
                 "partial": 1,
             },
             "dataset_count": 2,
-            "known_gaps": [source_gap, valuation_gap],
+            "known_gaps": [source_atom, nav_atom],
             "request_count": 2,
         },
         "run_id": run.name,
@@ -210,7 +212,7 @@ def test_hash_coverage_and_gap_drift_fail_closed(tmp_path: Path) -> None:
 
     spec = _spec(tmp_path / "coverage")
     document = json.loads(spec.read_text(encoding="utf-8"))
-    document["baseline"]["known_gaps"] = ["different gap"]
+    document["baseline"]["known_gaps"] = ["different atom"]
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(MatrixportGenerationError, match="known gaps differ"):
         build_generation(spec)
@@ -251,24 +253,50 @@ def _spec_with_exclusions(
     tmp_path: Path,
     *,
     exclusions: list[dict[str, str]] | None = None,
-    extra_gap: str | None = None,
+    extra_gaps: list[str] | None = None,
+    remove_gaps: list[str] | None = None,
 ) -> Path:
-    """Build a spec identical to ``_spec`` but with optional declared_exclusions
-    and an optional extra gap not covered by any exclusion."""
+    """Build a spec with optional declared_exclusions and gap mutations.
+
+    ``extra_gaps`` are added to both verification.json and known_gaps.
+    ``remove_gaps`` are removed from both.
+    """
     spec_path = _spec(tmp_path)
     document = json.loads(spec_path.read_text(encoding="utf-8"))
-    source_gap = document["baseline"]["known_gaps"][0]
-    valuation_gap = document["baseline"]["known_gaps"][1]
+    run = Path(document["run_root"])
+
     if exclusions is not None:
         document["declared_exclusions"] = exclusions
-    if extra_gap is not None:
-        run = Path(document["run_root"])
+
+    if extra_gaps or remove_gaps:
         verification = json.loads(
             (run / "reports" / "verification.json").read_text(encoding="utf-8")
         )
-        verification["checks"]["coverage"]["source_limited_reasons"].append(extra_gap)
+        remove_set = set(remove_gaps or [])
+        source_gaps = [
+            g
+            for g in verification["checks"]["coverage"]["source_limited_reasons"]
+            if g not in remove_set
+        ]
+        val_gaps = [
+            g
+            for g in verification["checks"]["valuation"]["reasons"]
+            if g not in remove_set
+        ]
+        for gap in extra_gaps or []:
+            if gap.startswith("nav_missing_date:"):
+                val_gaps.append(gap)
+            else:
+                source_gaps.append(gap)
+        verification["checks"]["coverage"]["source_limited_reasons"] = source_gaps
+        verification["checks"]["valuation"]["reasons"] = val_gaps
         _write_json(run / "reports" / "verification.json", verification)
-        document["baseline"]["known_gaps"] = [source_gap, valuation_gap, extra_gap]
+
+        current_gaps = set(document["baseline"]["known_gaps"])
+        current_gaps -= remove_set
+        current_gaps |= set(extra_gaps or [])
+        document["baseline"]["known_gaps"] = sorted(current_gaps)
+
         # Re-hash the changed verification report
         for artifact in document["artifacts"]:
             if artifact["artifact_id"] == "reports/verification.json":
@@ -277,6 +305,7 @@ def _spec_with_exclusions(
                 artifact["expected_sha256"] = hashlib.sha256(payload).hexdigest()
                 artifact["expected_size_bytes"] = len(payload)
                 break
+
     spec_path.write_text(
         json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
@@ -284,19 +313,24 @@ def _spec_with_exclusions(
     return spec_path
 
 
-def test_declared_exclusions_flip_coverage_to_complete(tmp_path: Path) -> None:
-    """Both gap classes covered by declared exclusions -> COMPLETE_WITHIN_DECLARED_BOUNDARY."""
-    source_gap = "/synthetic: one source-limited request"
-    valuation_gap = "synthetic valuation coverage is incomplete"
+# --- Test (d): Full owner-accepted atomic declaration → COMPLETE ---
+
+
+def test_owner_accepted_full_atomic_declaration_is_complete(
+    tmp_path: Path,
+) -> None:
+    """All gaps covered by exact atomic declared exclusions → COMPLETE."""
+    source_atom = "wallet_deposit_currency:synthetic-rejected-A"
+    nav_atom = "nav_missing_date:2026-01-27"
     exclusions = [
         {
-            "item": source_gap,
-            "reason": "accepted zero-balance defunct tokens — API code 18100410",
+            "item": source_atom,
+            "reason": "accepted — API code 18100410",
             "provenance": "owner-accepted 2026-08-14 per issue #287",
         },
         {
-            "item": valuation_gap,
-            "reason": "provider endpoint missing NAV for two dates",
+            "item": nav_atom,
+            "reason": "provider missing NAV for this date",
             "provenance": "owner-accepted 2026-08-14 per issue #287",
         },
     ]
@@ -309,48 +343,208 @@ def test_declared_exclusions_flip_coverage_to_complete(tmp_path: Path) -> None:
     assert len(manifest.coverage.declared_exclusions) == 2
     assert manifest.coverage.known_gaps == ()
 
+    # Verify each atom is recorded verbatim in the manifest
+    items = {e.item for e in manifest.coverage.declared_exclusions}
+    assert source_atom in items
+    assert nav_atom in items
 
-def test_undeclared_gap_keeps_coverage_partial(tmp_path: Path) -> None:
-    """A gap not covered by any declared exclusion keeps coverage PARTIAL."""
-    source_gap = "/synthetic: one source-limited request"
+
+# --- Test (a): New undeclared NAV date → PARTIAL + publish rejected ---
+
+
+def test_new_undeclared_nav_date_keeps_partial(
+    tmp_path: Path,
+) -> None:
+    """A second missing NAV date not covered by any exclusion → PARTIAL."""
+    source_atom = "wallet_deposit_currency:synthetic-rejected-A"
+    nav_atom_1 = "nav_missing_date:2026-01-27"
+    nav_atom_2 = "nav_missing_date:2026-08-14"  # NEW, not declared
     exclusions = [
         {
-            "item": source_gap,
+            "item": source_atom,
             "reason": "accepted",
-            "provenance": "owner-accepted 2026-08-14 per issue #287",
+            "provenance": "issue #287",
+        },
+        {
+            "item": nav_atom_1,
+            "reason": "accepted",
+            "provenance": "issue #287",
         },
     ]
-    # The valuation gap is NOT declared, so coverage should stay PARTIAL.
-    spec = _spec_with_exclusions(tmp_path, exclusions=exclusions)
+    spec = _spec_with_exclusions(
+        tmp_path,
+        exclusions=exclusions,
+        extra_gaps=[nav_atom_2],
+    )
     with pytest.raises(
         MatrixportGenerationError,
-        match="declared_exclusions do not cover all gaps",
+        match="undeclared gaps.*nav_missing_date:2026-08-14",
+    ):
+        build_generation(spec)
+
+    # Prove publish is also rejected for PARTIAL coverage
+    root = tmp_path / "dataMatrixport"
+    spec2 = _spec(tmp_path / "publish-check")
+    staged = stage_generation_candidate(spec2, root)
+    with pytest.raises(
+        PublicationRejectedError, match="generation coverage is not complete"
+    ):
+        publish_generation(root, staged["generation_id"])
+
+
+# --- Test (b): Substituted wallet currency same count → PARTIAL ---
+
+
+def test_substituted_wallet_currency_same_count_keeps_partial(
+    tmp_path: Path,
+) -> None:
+    """A different rejected currency with the same count is NOT matched."""
+    source_atom_original = "wallet_deposit_currency:synthetic-rejected-A"
+    source_atom_substituted = "wallet_deposit_currency:synthetic-rejected-B"
+    nav_atom = "nav_missing_date:2026-01-27"
+    exclusions = [
+        {
+            "item": source_atom_original,
+            "reason": "accepted",
+            "provenance": "issue #287",
+        },
+        {
+            "item": nav_atom,
+            "reason": "accepted",
+            "provenance": "issue #287",
+        },
+    ]
+    # Replace the original gap with the substituted one
+    spec = _spec_with_exclusions(
+        tmp_path,
+        exclusions=exclusions,
+        extra_gaps=[source_atom_substituted],
+        remove_gaps=[source_atom_original],
+    )
+    with pytest.raises(
+        MatrixportGenerationError,
+        match="undeclared gaps",
     ):
         build_generation(spec)
 
 
-def test_no_exclusions_keeps_partial(tmp_path: Path) -> None:
-    """Spec without declared_exclusions continues to produce PARTIAL (backward compat)."""
-    spec = _spec(tmp_path)
-    catalog, manifest, _ = build_generation(spec)
-    assert manifest.coverage.status is CoverageStatus.PARTIAL
-    assert manifest.coverage.known_gaps != ()
-    assert manifest.coverage.declared_exclusions == ()
+# --- Test (c): Stale declaration → reject ---
+
+
+def test_stale_declaration_rejected(tmp_path: Path) -> None:
+    """A declared exclusion that no longer matches any current gap is rejected."""
+    source_atom = "wallet_deposit_currency:synthetic-rejected-A"
+    nav_atom = "nav_missing_date:2026-01-27"
+    stale_atom = "wallet_deposit_currency:synthetic-LEGACY-TOKEN"
+    exclusions = [
+        {
+            "item": source_atom,
+            "reason": "accepted",
+            "provenance": "issue #287",
+        },
+        {
+            "item": nav_atom,
+            "reason": "accepted",
+            "provenance": "issue #287",
+        },
+        {
+            "item": stale_atom,  # NOT present in current gaps
+            "reason": "stale — upstream fixed this",
+            "provenance": "issue #287",
+        },
+    ]
+    spec = _spec_with_exclusions(tmp_path, exclusions=exclusions)
+    with pytest.raises(
+        MatrixportGenerationError,
+        match="stale declarations.*synthetic-LEGACY-TOKEN",
+    ):
+        build_generation(spec)
+
+
+# --- Test (e): Aggregate-string matching is gone ---
+
+
+def test_aggregate_string_matching_is_gone(tmp_path: Path) -> None:
+    """Prove that different symbols with the same count are not
+    absorbed by an aggregate-key exclusion."""
+    source_atom_a = "wallet_deposit_currency:synthetic-rejected-A"
+    source_atom_b = "wallet_deposit_currency:synthetic-rejected-B"
+    nav_atom = "nav_missing_date:2026-01-27"
+
+    # Exclusion only covers A, but gap set has B
+    exclusions = [
+        {
+            "item": source_atom_a,
+            "reason": "only symbol A is accepted",
+            "provenance": "issue #287",
+        },
+        {
+            "item": nav_atom,
+            "reason": "accepted",
+            "provenance": "issue #287",
+        },
+    ]
+    spec = _spec_with_exclusions(
+        tmp_path,
+        exclusions=exclusions,
+        extra_gaps=[source_atom_b],
+        remove_gaps=[source_atom_a],
+    )
+    with pytest.raises(
+        MatrixportGenerationError,
+        match="undeclared gaps",
+    ):
+        build_generation(spec)
+
+
+# --- Duplicate exclusion items rejected ---
+
+
+def test_duplicate_exclusion_items_rejected(tmp_path: Path) -> None:
+    """Duplicate declared_exclusion items are rejected at build time."""
+    source_atom = "wallet_deposit_currency:synthetic-rejected-A"
+    nav_atom = "nav_missing_date:2026-01-27"
+    exclusions = [
+        {
+            "item": source_atom,
+            "reason": "first copy",
+            "provenance": "issue #287",
+        },
+        {
+            "item": source_atom,  # DUPLICATE
+            "reason": "second copy",
+            "provenance": "issue #287",
+        },
+        {
+            "item": nav_atom,
+            "reason": "accepted",
+            "provenance": "issue #287",
+        },
+    ]
+    spec = _spec_with_exclusions(tmp_path, exclusions=exclusions)
+    with pytest.raises(
+        MatrixportGenerationError,
+        match="declared_exclusions contain duplicate items",
+    ):
+        build_generation(spec)
+
+
+# --- Manifest verbatim recording ---
 
 
 def test_exclusion_records_land_verbatim_in_manifest(tmp_path: Path) -> None:
-    """Declared exclusion item, reason, and provenance are preserved in the manifest."""
-    gap = "/synthetic: one source-limited request"
-    valuation_gap = "synthetic valuation coverage is incomplete"
+    """Declared exclusion item, reason, and provenance preserved in manifest."""
+    source_atom = "wallet_deposit_currency:synthetic-rejected-A"
+    nav_atom = "nav_missing_date:2026-01-27"
     exclusions = [
         {
-            "item": gap,
+            "item": source_atom,
             "reason": "API rejects 15 defunct legacy currency symbols (code 18100410)",
             "provenance": "owner-accepted 2026-08-14 per issue #287",
         },
         {
-            "item": valuation_gap,
-            "reason": "NAV missing for 2026-01-27, 2026-07-03 on provider endpoint",
+            "item": nav_atom,
+            "reason": "NAV missing for 2026-01-27 on provider endpoint",
             "provenance": "owner-accepted 2026-08-14 per issue #287",
         },
     ]
@@ -359,8 +553,8 @@ def test_exclusion_records_land_verbatim_in_manifest(tmp_path: Path) -> None:
 
     assert len(manifest.coverage.declared_exclusions) == 2
     exclusion_items = {e.item for e in manifest.coverage.declared_exclusions}
-    assert gap in exclusion_items
-    assert valuation_gap in exclusion_items
+    assert source_atom in exclusion_items
+    assert nav_atom in exclusion_items
 
     for exclusion in manifest.coverage.declared_exclusions:
         assert "18100410" in exclusion.reason or "NAV missing" in exclusion.reason
@@ -373,6 +567,18 @@ def test_exclusion_records_land_verbatim_in_manifest(tmp_path: Path) -> None:
         reloaded.coverage.declared_exclusions == manifest.coverage.declared_exclusions
     )
     assert reloaded.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+
+
+# --- Backward compat ---
+
+
+def test_no_exclusions_keeps_partial(tmp_path: Path) -> None:
+    """Spec without declared_exclusions continues to produce PARTIAL."""
+    spec = _spec(tmp_path)
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    assert manifest.coverage.known_gaps != ()
+    assert manifest.coverage.declared_exclusions == ()
 
 
 def test_publish_rejected_for_partial_coverage(tmp_path: Path) -> None:
@@ -390,17 +596,17 @@ def test_publish_rejected_for_partial_coverage(tmp_path: Path) -> None:
 def test_publish_succeeds_for_complete_within_declared_boundary(
     tmp_path: Path,
 ) -> None:
-    """publish_generation accepts a generation that is COMPLETE_WITHIN_DECLARED_BOUNDARY."""
-    source_gap = "/synthetic: one source-limited request"
-    valuation_gap = "synthetic valuation coverage is incomplete"
+    """publish_generation accepts COMPLETE_WITHIN_DECLARED_BOUNDARY generation."""
+    source_atom = "wallet_deposit_currency:synthetic-rejected-A"
+    nav_atom = "nav_missing_date:2026-01-27"
     exclusions = [
         {
-            "item": source_gap,
+            "item": source_atom,
             "reason": "accepted",
             "provenance": "owner-accepted 2026-08-14 per issue #287",
         },
         {
-            "item": valuation_gap,
+            "item": nav_atom,
             "reason": "accepted",
             "provenance": "owner-accepted 2026-08-14 per issue #287",
         },
@@ -438,24 +644,21 @@ def test_declared_exclusion_validation() -> None:
 def test_declared_exclusion_round_trip() -> None:
     """DeclaredExclusion to_dict/from_dict preserves all fields."""
     original = DeclaredExclusion(
-        item="TEST-TOKEN",
+        item="wallet_deposit_currency:FTX-BTC-1",
         reason="API code 18100410 Invalid params",
         provenance="issue #287 2026-08-14",
     )
     serialized = original.to_dict()
     assert serialized == {
-        "item": "TEST-TOKEN",
+        "item": "wallet_deposit_currency:FTX-BTC-1",
         "reason": "API code 18100410 Invalid params",
         "provenance": "issue #287 2026-08-14",
     }
     restored = DeclaredExclusion.from_dict(serialized)
     assert restored == original
-    assert restored.item == "TEST-TOKEN"
-    assert restored.reason == "API code 18100410 Invalid params"
-    assert restored.provenance == "issue #287 2026-08-14"
 
 
-def test_coverage_claim_accepts_declared_exclusions(tmp_path: Path) -> None:
+def test_coverage_claim_accepts_declared_exclusions() -> None:
     """CoverageClaim with COMPLETE + declared_exclusions is valid."""
     from quant_engine.core import CoverageClaim
 
@@ -465,13 +668,13 @@ def test_coverage_claim_accepts_declared_exclusions(tmp_path: Path) -> None:
         fact_types=("alpha",),
         declared_exclusions=(
             DeclaredExclusion(
-                item="GAP-1",
+                item="wallet_deposit_currency:TOKEN",
                 reason="accepted",
                 provenance="issue #287",
             ),
         ),
     )
-    assert claim.declared_exclusions[0].item == "GAP-1"
+    assert claim.declared_exclusions[0].item == "wallet_deposit_currency:TOKEN"
     assert claim.known_gaps == ()
 
 
@@ -487,13 +690,13 @@ def test_coverage_claim_round_trip_with_exclusions() -> None:
         observed_end=date(2026, 7, 26),
         declared_exclusions=(
             DeclaredExclusion(
-                item="GAP-CURRENCY",
+                item="wallet_deposit_currency:FTX-BTC-1",
                 reason="API rejects 15 symbols",
                 provenance="issue #287",
             ),
             DeclaredExclusion(
-                item="GAP-NAV",
-                reason="NAV missing for 2 dates",
+                item="nav_missing_date:2026-01-27",
+                reason="NAV missing",
                 provenance="issue #287",
             ),
         ),
