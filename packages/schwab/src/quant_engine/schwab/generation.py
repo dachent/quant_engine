@@ -800,6 +800,11 @@ def _transactions_all(
     to_date_raw = _text(value.get("ToDate"), "ToDate")
     window_start = _observed_date(from_date_raw, "FromDate")
     window_end = _observed_date(to_date_raw, "ToDate")
+    if window_start > window_end:
+        raise SchwabGenerationError(
+            f"transaction export window is reversed: FromDate={from_date_raw}, "
+            f"ToDate={to_date_raw}"
+        )
     rows = value.get("BrokerageTransactions")
     if not isinstance(rows, list):
         raise SchwabGenerationError("all-accounts manual transaction rows are missing")
@@ -881,25 +886,31 @@ def _transactions_all(
             normalized.append(ledger)
 
     extra_manual = manual_keys - wch_keys
-    if extra_manual:
-        sample = sorted(extra_manual)[:3]
-        raise SchwabGenerationError(
-            f"all-accounts manual has records not found in WCH within the declared window "
-            f"({len(extra_manual)} manual-only records): {sample}"
-        )
-    # Verify shared keys have matching counts (manual count <= WCH count)
+    extra_wch = wch_keys - manual_keys
+    if extra_wch or extra_manual:
+        parts: list[str] = [
+            "all-accounts manual and WCH transaction sets differ within the declared window"
+        ]
+        if extra_manual:
+            parts.append(
+                f"manual-only records ({len(extra_manual)}): {sorted(extra_manual)[:3]}"
+            )
+        if extra_wch:
+            parts.append(
+                f"WCH-only records ({len(extra_wch)}): {sorted(extra_wch)[:3]}"
+            )
+        raise SchwabGenerationError("; ".join(parts))
+    # Verify shared keys have matching counts
     count_mismatches: list[tuple[str, ...]] = []
     for key in set(manual_keys) & set(wch_keys):
-        if manual_keys[key] > wch_keys[key]:
+        if manual_keys[key] != wch_keys[key]:
             count_mismatches.append(key)
     if count_mismatches:
         sample = sorted(count_mismatches)[:3]
         raise SchwabGenerationError(
-            f"all-accounts manual has higher count than WCH for shared keys "
+            f"all-accounts manual has different count than WCH for shared keys "
             f"({len(count_mismatches)} affected): {sample}"
         )
-    wch_only_count = sum((wch_keys - manual_keys).values())
-    status = "PASS_SUBSET_VERIFIED" if wch_only_count else "PASS_EXACT"
 
     reconciliations: list[dict[str, object]] = [
         {
@@ -907,8 +918,7 @@ def _transactions_all(
             "fact_type": "TRANSACTION",
             "manual_count": sum(manual_keys.values()),
             "source_count": sum(wch_keys.values()),
-            "status": status,
-            "wch_only_in_window": wch_only_count,
+            "status": "PASS_EXACT",
             "window_end": window_end.isoformat(),
             "window_start": window_start.isoformat(),
         }
@@ -1006,12 +1016,15 @@ def _nav(
 def _nav_all(
     wch: Sequence[tuple[str | None, Path]],
     manual_path: Path,
+    *,
+    suffix_to_internal: Mapping[str, str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Reconcile an all-accounts manual balances CSV against per-account WCH NAV.
 
-    The all-accounts CSV is a single-date multi-section report (not a Date/Amount
-    time series). It reports the total account value on the as-of date. We sum
-    per-account WCH NAV for that date and compare the total.
+    The all-accounts CSV is a single-date multi-section report. Each section
+    starts with an account label like "PCRA Trust XXXX-5620" where the last
+    three digits map to a crosswalk suffix. The "Account Value" row within
+    each section is compared against that account's WCH NAV for the same date.
     """
     try:
         with manual_path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -1027,39 +1040,86 @@ def _nav_all(
     if match is None:
         raise SchwabGenerationError("all-accounts NAV title timestamp is missing")
     manual_date = datetime.strptime(match.group(1), "%m/%d/%Y").date()
-    total_value: Decimal | None = None
-    for row in rows:
-        if row and "Total Accounts Value" in row[0]:
-            raw = row[1].strip() if len(row) > 1 else ""
-            total_value = _decimal(raw, "Total Accounts Value")
-            break
-    if total_value is None:
-        raise SchwabGenerationError("all-accounts NAV total value is missing")
 
-    # Union WCH NAV: sum account values for the manual date
-    wch_union: dict[date, Decimal] = {}
+    # Parse per-account sections from the CSV
+    manual_by_account: dict[str, Decimal] = {}
+    section_re = re.compile(r".*XXXX-(\d{4})$")
+    current_account_id: str | None = None
+    for row in rows:
+        if not row or not row[0].strip():
+            continue
+        cell = row[0].strip().strip('"')
+        sec_match = section_re.match(cell)
+        if sec_match:
+            suffix4 = sec_match.group(1)
+            suffix3 = suffix4[-3:]
+            current_account_id = suffix_to_internal.get(suffix3)
+            if current_account_id is None:
+                raise SchwabGenerationError(
+                    f"all-accounts NAV section suffix '{suffix3}' is not in the crosswalk"
+                )
+            if current_account_id in manual_by_account:
+                raise SchwabGenerationError(
+                    f"all-accounts NAV has duplicate section for account "
+                    f"{current_account_id}"
+                )
+            continue
+        if current_account_id is not None and cell == "Account Value":
+            raw = row[1].strip() if len(row) > 1 else ""
+            amount = _decimal(raw, f"Account Value for {current_account_id}")
+            assert amount is not None
+            manual_by_account[current_account_id] = amount
+            current_account_id = None
+
+    expected_ids = set(suffix_to_internal.values())
+    found_ids = set(manual_by_account)
+    if found_ids != expected_ids:
+        missing = sorted(expected_ids - found_ids)
+        extra = sorted(found_ids - expected_ids)
+        raise SchwabGenerationError(
+            f"all-accounts NAV account coverage differs from crosswalk: "
+            f"missing={missing}, extra={extra}"
+        )
+
+    # Compare each account's value against WCH NAV for the manual date
+    wch_by_account: dict[str, dict[date, Decimal]] = {}
     for account_id, path in wch:
         assert account_id is not None
-        observed = _nav_rows(path, manual=False)
-        for obs_date, amount in observed.items():
-            wch_union[obs_date] = wch_union.get(obs_date, Decimal("0")) + amount
+        wch_by_account[account_id] = _nav_rows(path, manual=False)
 
-    wch_total = wch_union.get(manual_date)
-    status: str
-    if wch_total is not None:
-        if wch_total != total_value:
-            raise SchwabGenerationError(
-                f"all-accounts NAV total differs from WCH union on "
-                f"{manual_date.isoformat()}: manual={total_value}, WCH={wch_total}"
+    per_account_findings: list[dict[str, object]] = []
+    for account_id in sorted(expected_ids):
+        wch_rows = wch_by_account[account_id]
+        wch_value = wch_rows.get(manual_date)
+        manual_value = manual_by_account[account_id]
+        if wch_value is None:
+            latest_wch = max(wch_rows.keys()) if wch_rows else None
+            if latest_wch is None or manual_date <= latest_wch:
+                raise SchwabGenerationError(
+                    f"NAV date boundary is unexpected for account {account_id}"
+                )
+            per_account_findings.append(
+                {
+                    "account_id": account_id,
+                    "fact_type": "NAV",
+                    "manual_date": manual_date.isoformat(),
+                    "status": "PASS_WITH_LATER_MANUAL_DATE",
+                }
             )
-        status = "PASS_EXACT"
-    else:
-        # Manual date is later than any WCH date — expected shape:
-        # exactly one later manual date per brokerage account boundary.
-        latest_wch = max(wch_union.keys()) if wch_union else None
-        if latest_wch is None or manual_date <= latest_wch:
-            raise SchwabGenerationError("all-accounts NAV date boundary is unexpected")
-        status = "PASS_WITH_LATER_MANUAL_DATE"
+        elif wch_value != manual_value:
+            raise SchwabGenerationError(
+                f"all-accounts NAV value differs for account {account_id} on "
+                f"{manual_date.isoformat()}: manual={manual_value}, WCH={wch_value}"
+            )
+        else:
+            per_account_findings.append(
+                {
+                    "account_id": account_id,
+                    "fact_type": "NAV",
+                    "manual_date": manual_date.isoformat(),
+                    "status": "PASS_EXACT",
+                }
+            )
 
     normalized: list[dict[str, object]] = []
     for account_id, path in wch:
@@ -1079,16 +1139,9 @@ def _nav_all(
             payload["evidence_class"] = "WCH_HISTORICAL"
             normalized.append(payload)
 
-    findings: list[dict[str, object]] = [
-        {
-            "account_id": None,
-            "fact_type": "NAV",
-            "manual_date": manual_date.isoformat(),
-            "status": status,
-        }
-    ]
+    per_account_findings.sort(key=lambda item: str(item["account_id"]))
     normalized.sort(key=lambda item: (str(item["account_id"]), str(item["as_of_date"])))
-    return normalized, findings
+    return normalized, per_account_findings
 
 
 def _positions(
@@ -1243,6 +1296,7 @@ def build_generation(
         nav, nav_reconciliation = _nav_all(
             sources["WCH_NAV_CSV"],
             sources["MANUAL_NAV_CSV_ALL"][0][1],
+            suffix_to_internal=suffix_to_internal,
         )
     else:
         nav, nav_reconciliation = _nav(

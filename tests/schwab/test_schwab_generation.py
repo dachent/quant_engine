@@ -711,8 +711,8 @@ def _spec_aggregate(tmp_path: Path) -> Path:
         writer.writerow(["Total Market Value", f"${total_value}"])
         writer.writerow([])
         for index in range(8):
-            suffix = f"{index + 1:03d}"
-            writer.writerow([f"SYNTHETIC XXXX-{suffix}"])
+            suffix_label = f"9{index + 1:03d}"  # 4-digit: "9001", regex last-3 → "001"
+            writer.writerow([f"SYNTHETIC XXXX-{suffix_label}"])
             writer.writerow(["Account Value", f"${101 + index}"])
             writer.writerow(["Day Change", "$0.00"])
             writer.writerow(["Day Change %", "0%"])
@@ -820,9 +820,9 @@ def test_aggregate_transactions_extra_manual_fails(tmp_path: Path) -> None:
         build_generation(spec)
 
 
-def test_aggregate_transactions_wch_only_accepted(tmp_path: Path) -> None:
-    """WCH-only records within the manual window are accepted (subset verification).
-    The manual export is a genuine verification sample; extra WCH records are expected."""
+def test_aggregate_transactions_wch_only_fails(tmp_path: Path) -> None:
+    """WCH-only records within the manual window are now rejected — the manual
+    export must be an exact match for the declared window."""
     spec = _spec_aggregate(tmp_path)
     document = json.loads(spec.read_text(encoding="utf-8"))
     # Account 2 has an empty WCH array by default — add a transaction to it.
@@ -855,20 +855,9 @@ def test_aggregate_transactions_wch_only_accepted(tmp_path: Path) -> None:
     payload = wch_path.read_bytes()
     wch_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
     wch_source["expected_size_bytes"] = len(payload)
-    # Update baseline to account for the added WCH transaction
-    document["baseline"]["transaction_count"] = (
-        document["baseline"]["transaction_count"] + 1
-    )
     spec.write_text(json.dumps(document), encoding="utf-8")
-    # Build must succeed — WCH-only records are acceptable in subset verification
-    catalog, manifest, _ = build_generation(spec)
-    assert manifest.coverage.status.value == "PARTIAL"
-    # Reconciliation should report PASS_SUBSET_VERIFIED with wch_only_in_window
-    reconciliation = [
-        r for r in catalog["reconciliation"] if r["fact_type"] == "TRANSACTION"
-    ][0]
-    assert reconciliation["status"] == "PASS_SUBSET_VERIFIED"
-    assert reconciliation.get("wch_only_in_window", 0) > 0
+    with pytest.raises(SchwabGenerationError, match="WCH-only records"):
+        build_generation(spec)
 
 
 def test_aggregate_transactions_changed_amount_fails(tmp_path: Path) -> None:
@@ -1109,7 +1098,7 @@ def test_aggregate_transactions_window_edge(tmp_path: Path) -> None:
         )
     )
 
-    # All-accounts NAV
+    # All-accounts NAV with per-account sections
     manual_nav = source_root / "manual-nav-all.csv"
     total_value = sum(101 + i for i in range(8))  # 07/30/2026 WCH values
     with manual_nav.open("w", encoding="utf-8", newline="") as handle:
@@ -1121,6 +1110,16 @@ def test_aggregate_transactions_window_edge(tmp_path: Path) -> None:
         writer.writerow(["Total Day Change %", "0%"])
         writer.writerow(["Cash & Cash Investments Total", "$0.00"])
         writer.writerow(["Total Market Value", f"${total_value}"])
+        writer.writerow([])
+        for i in range(8):
+            suffix_label = f"9{i + 1:03d}"
+            writer.writerow([f"SYNTHETIC XXXX-{suffix_label}"])
+            writer.writerow(["Account Value", f"${101 + i}"])
+            writer.writerow(["Day Change", "$0.00"])
+            writer.writerow(["Day Change %", "0%"])
+            writer.writerow(["Cash & Cash Investments", "$0.00"])
+            writer.writerow(["Market Value", f"${101 + i}"])
+            writer.writerow([])
     sources.append(
         _source(
             manual_nav,
@@ -1184,7 +1183,7 @@ def test_aggregate_transactions_window_edge(tmp_path: Path) -> None:
 
 
 def test_aggregate_nav_pass(tmp_path: Path) -> None:
-    """All-accounts manual NAV CSV with values summed across accounts passes."""
+    """All-accounts manual NAV CSV reconciled per-account against WCH NAV passes."""
     spec = _spec_aggregate(tmp_path)
     catalog, manifest, _ = build_generation(spec)
     # 8 accounts × 2 NAV entries each
@@ -1192,9 +1191,11 @@ def test_aggregate_nav_pass(tmp_path: Path) -> None:
     nav_recon = [
         item for item in catalog["reconciliation"] if item["fact_type"] == "NAV"
     ]
-    assert len(nav_recon) == 1
-    assert nav_recon[0]["account_id"] is None
-    assert nav_recon[0]["status"] == "PASS_EXACT"
+    # Per-account reconciliation: one finding per account
+    assert len(nav_recon) == 8
+    for entry in nav_recon:
+        assert entry["account_id"] is not None
+        assert entry["status"] == "PASS_EXACT"
 
 
 # -- Mutual exclusion test -------------------------------------------------------
@@ -1240,3 +1241,132 @@ def test_per_account_07_31_still_works(tmp_path: Path) -> None:
     assert manifest.coverage.status.value == "PARTIAL"
     assert len(catalog["accounts"]) == 8
     assert len(catalog["transactions"]) == 8
+
+
+# -- Reversed window test --------------------------------------------------------
+
+
+def test_window_reversed_fails(tmp_path: Path) -> None:
+    """A transaction export with FromDate > ToDate must fail."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    manual_path = Path(document["roots"]["source"]) / manual_source["relative_path"]
+    value = json.loads(manual_path.read_text(encoding="utf-8"))
+    value["FromDate"] = "08/14/2026"
+    value["ToDate"] = "07/01/2026"
+    manual_path.write_text(json.dumps(value), encoding="utf-8")
+    payload = manual_path.read_bytes()
+    manual_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    manual_source["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="window is reversed"):
+        build_generation(spec)
+
+
+# -- NAV cross-account pair test --------------------------------------------------
+
+
+def test_nav_cross_account_pair_fails(tmp_path: Path) -> None:
+    """A +$5 shift on account 0 and -$5 on account 1 vs WCH must fail."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_NAV_CSV_ALL"
+    )
+    nav_path = Path(document["roots"]["source"]) / manual_source["relative_path"]
+    # Rewrite NAV CSV with +$5 on account 0 and -$5 on account 1
+    total_value = sum(101 + i for i in range(8))
+    with nav_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Balances for All-Accounts as of 07/30/2026 03:50 PM ET"])
+        writer.writerow([])
+        writer.writerow(["Total Accounts Value", f"${total_value}"])
+        writer.writerow(["Total Day Change", "$0.00"])
+        writer.writerow(["Total Day Change %", "0%"])
+        writer.writerow(["Cash & Cash Investments Total", "$0.00"])
+        writer.writerow(["Total Market Value", f"${total_value}"])
+        writer.writerow([])
+        for i in range(8):
+            suffix_label = f"9{i + 1:03d}"
+            writer.writerow([f"SYNTHETIC XXXX-{suffix_label}"])
+            if i == 0:
+                writer.writerow(["Account Value", f"${101 + i + 5}"])
+            elif i == 1:
+                writer.writerow(["Account Value", f"${101 + i - 5}"])
+            else:
+                writer.writerow(["Account Value", f"${101 + i}"])
+            writer.writerow(["Day Change", "$0.00"])
+            writer.writerow(["Day Change %", "0%"])
+            writer.writerow(["Cash & Cash Investments", "$0.00"])
+            writer.writerow(["Market Value", f"${101 + i}"])
+            writer.writerow([])
+    payload = nav_path.read_bytes()
+    manual_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    manual_source["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="NAV value differs for account"):
+        build_generation(spec)
+
+
+# -- NAV missing section test -----------------------------------------------------
+
+
+def test_nav_missing_section_fails(tmp_path: Path) -> None:
+    """An all-accounts NAV CSV missing one account section must fail."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_NAV_CSV_ALL"
+    )
+    nav_path = Path(document["roots"]["source"]) / manual_source["relative_path"]
+    # Rewrite NAV CSV with only 7 accounts (omit account 0)
+    total_value = sum(101 + i for i in range(8))
+    with nav_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Balances for All-Accounts as of 07/30/2026 03:50 PM ET"])
+        writer.writerow([])
+        writer.writerow(["Total Accounts Value", f"${total_value}"])
+        writer.writerow(["Total Day Change", "$0.00"])
+        writer.writerow(["Total Day Change %", "0%"])
+        writer.writerow(["Cash & Cash Investments Total", "$0.00"])
+        writer.writerow(["Total Market Value", f"${total_value}"])
+        writer.writerow([])
+        for i in range(1, 8):  # skip account 0
+            suffix_label = f"9{i + 1:03d}"
+            writer.writerow([f"SYNTHETIC XXXX-{suffix_label}"])
+            writer.writerow(["Account Value", f"${101 + i}"])
+            writer.writerow(["Day Change", "$0.00"])
+            writer.writerow(["Day Change %", "0%"])
+            writer.writerow(["Cash & Cash Investments", "$0.00"])
+            writer.writerow(["Market Value", f"${101 + i}"])
+            writer.writerow([])
+    payload = nav_path.read_bytes()
+    manual_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    manual_source["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(
+        SchwabGenerationError, match="account coverage differs from crosswalk"
+    ):
+        build_generation(spec)
+
+
+# -- Per-account catalog digest golden test ---------------------------------------
+
+
+def test_per_account_07_31_catalog_digest(tmp_path: Path) -> None:
+    """The per-account path produces a deterministic catalog digest."""
+    spec = _spec(tmp_path)
+    catalog, manifest, _ = build_generation(spec)
+    catalog_bytes = canonical_json_bytes(catalog)
+    actual_digest = hashlib.sha256(catalog_bytes).hexdigest()
+    assert manifest.coverage.status.value == "PARTIAL"
+    assert len(catalog["transactions"]) == 8
+    # Golden digest — must match exactly as long as the per-account code path
+    # is unchanged from the reference build.
+    GOLDEN = "6f8d8501b557d97dead19362f5edb76f500ef05488014fd7956fa17afa744332"
+    assert actual_digest == GOLDEN, (
+        f"per-account catalog digest changed: {actual_digest} != {GOLDEN}"
+    )
