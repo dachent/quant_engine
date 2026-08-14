@@ -770,13 +770,13 @@ def test_declared_exclusion_validation() -> None:
 def test_declared_exclusion_round_trip() -> None:
     """DeclaredExclusion to_dict/from_dict preserves all fields."""
     original = DeclaredExclusion(
-        item="wallet_deposit_currency:FTX-BTC-1",
+        item="wallet_deposit_currency:SYNTH-CURR-1",
         reason="API code 18100410 Invalid params",
         provenance="issue #287 2026-08-14",
     )
     serialized = original.to_dict()
     assert serialized == {
-        "item": "wallet_deposit_currency:FTX-BTC-1",
+        "item": "wallet_deposit_currency:SYNTH-CURR-1",
         "reason": "API code 18100410 Invalid params",
         "provenance": "issue #287 2026-08-14",
     }
@@ -816,7 +816,7 @@ def test_coverage_claim_round_trip_with_exclusions() -> None:
         observed_end=date(2026, 7, 26),
         declared_exclusions=(
             DeclaredExclusion(
-                item="wallet_deposit_currency:FTX-BTC-1",
+                item="wallet_deposit_currency:SYNTH-CURR-1",
                 reason="API rejects 15 symbols",
                 provenance="issue #287",
             ),
