@@ -228,9 +228,19 @@ implemented by this decision.
 
 ## Declared boundary (issue #286)
 
-The read boundary is the **Flex statement account scope** — Flex is the sole
-data authority. TWS is corroborating evidence of currently-managed accounts,
-not boundary membership. Three exclusion classes are owner-authorized:
+The read boundary covers **all five Flex-query accounts** in Flex query
+1527729: ba3d1d8039a6d9d7, 086e03b607cedf48, and the three active accounts
+crosswalked from NAV curves. Flex is the sole data authority. TWS is
+corroborating evidence, not boundary membership.
+
+Every Flex-query account must have an internal mapping and a declared status
+(active via NAV-curve crosswalk, or zero-activity via owner attestation).
+Accounts declared as zero-activity in the generation spec
+(`declared_zero_activity_accounts`, schema v3) are mapped via attestation
+rather than NAV-curve matching; they do not emit snapshot-only or unmapped-fact
+atoms. The declaration is recorded verbatim in the manifest boundary.
+
+Three exclusion classes are owner-authorized:
 
 1. **Order visibility** (execution scope): `Zero API order rows do not prove
    complete order visibility`.
@@ -244,17 +254,19 @@ Gaps surface as per-account atoms with masked (SHA-256[:16]) account
 identifiers:
 
 - `account_topology:snapshot_only:<masked>` — account in TWS but not Flex;
-  **blocks completion** (undeclared).
+  **blocks completion** (undeclared). Zero-activity declared accounts are
+  exempt.
 - `account_topology:flex_only:<masked>` — **not emitted**: an account present
   in Flex but absent from TWS is normal (Flex authority).
 - `unmapped_tws_fact:<masked>` — unmapped TWS position or account value;
   **only** the authorized label (`086e03b607cedf48`) is declared-excluded;
-  any other unmapped fact atom blocks completion.
+  zero-activity declared accounts are exempt; any other unmapped fact atom
+  blocks completion.
 
-When every residual gap is declared-excluded and no undeclared atoms exist,
-coverage evaluates `COMPLETE_WITHIN_DECLARED_BOUNDARY` and the generation may
-be published. Undeclared gaps (absent TWS snapshot, unauthorized unmapped
-account, snapshot-only topology) yield `PARTIAL` and block publication.
+When every residual gap is declared-excluded, all five Flex-query accounts are
+mapped, and no undeclared atoms exist, coverage evaluates
+`COMPLETE_WITHIN_DECLARED_BOUNDARY` and the generation may be published.
+Undeclared gaps yield `PARTIAL` and block publication.
 
 ## Offline generation runbook
 
@@ -262,9 +274,10 @@ The private generation spec follows
 [`ibkr-generation-spec.schema.json`](../../schemas/providers/ibkr-generation-spec.schema.json).
 Version 1 hash-binds the accepted portfolio baseline and all 26 inventoried
 legacy artifacts. Version 2 additionally requires exactly one Activity Flex
-refresh and one read-only TWS snapshot, plus their supporting capture and
-validation evidence. Absolute roots, raw provider evidence, and the private
-spec remain outside Git.
+refresh and one read-only TWS snapshot. Version 3 adds an optional
+`declared_zero_activity_accounts` list for accounts with no NAV history that
+must be mapped via owner attestation rather than curve matching. Absolute
+roots, raw provider evidence, and the private spec remain outside Git.
 
 ```powershell
 uv run --frozen --no-sync python tools/ibkr_generation.py build <private-spec>
@@ -292,12 +305,13 @@ and catalog SHA-256
 `fc43fa630d6d7ceac7e7497a00e485adbc6c3ffa5d25e9cb341828f9391f87d0`.
 It contains 916 NAV observations, 22,011 finalized Flex positions, 4,139
 transactions, 94 flows, 20 corporate actions, 8,931 FX observations, 117
-mapped current Gateway positions, and 24 current account values. Coverage
-is `PARTIAL` — the ba3d1d8039a6d9d7 account topology adjudication is pending
-owner input; publication is blocked until resolved. `CURRENT.json` does
-not exist. When resolved, the publication path follows the shared
-`quantbase/schwab` pattern: rebuild from spec → verify `VERIFIED` +
-`COMPLETE_WITHIN_DECLARED_BOUNDARY` → atomic `CURRENT.json` write.
+mapped current Gateway positions, and 24 current account values. With the
+ba3d1d8039a6d9d7 zero-activity attestation (owner ruling 2026-08-14, issue
+#286) included via `declared_zero_activity_accounts`, the generation reaches
+`COMPLETE_WITHIN_DECLARED_BOUNDARY` and is publication-eligible. The
+publication path follows the shared `quantbase/schwab` pattern: rebuild
+from spec → verify `VERIFIED` + `COMPLETE_WITHIN_DECLARED_BOUNDARY` →
+atomic `CURRENT.json` write.
 
 Flex retrieval has no default HTTP implementation: callers must inject both a
 credential provider and a GET transport under separately recorded authority.

@@ -846,3 +846,329 @@ def test_each_exclusion_cannot_save_undeclared_gaps(
     staged = stage_generation_candidate(spec, output)
     with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
         publish_generation_candidate(spec, output, staged["generation_id"])
+
+
+def _published_two_account_baseline(
+    tmp_path: Path, nav_by_date: dict[date, str]
+) -> tuple[Path, str, str]:
+    root = tmp_path / "two-account-baseline"
+    catalog = {
+        "accounts": [
+            {
+                "account_id": "account-ibkr-synthetic",
+                "base_currency": "USD",
+                "role": "INVESTMENT",
+            },
+            {
+                "account_id": "account-ibkr-declared",
+                "base_currency": "USD",
+                "role": "INVESTMENT",
+            },
+        ],
+        "as_of_date": max(nav_by_date).isoformat(),
+        "assignments": [
+            {
+                "account_id": "account-ibkr-synthetic",
+                "effective_end": None,
+                "effective_start": min(nav_by_date).isoformat(),
+                "mapping_status": "MAPPED",
+                "strategy_id": "strategy-synthetic",
+            },
+            {
+                "account_id": "account-ibkr-declared",
+                "effective_end": None,
+                "effective_start": min(nav_by_date).isoformat(),
+                "mapping_status": "MAPPED",
+                "strategy_id": "strategy-synthetic",
+            },
+        ],
+        "baseline_schema_version": 1,
+        "nav_observations": [
+            {
+                "account_id": "account-ibkr-synthetic",
+                "as_of_date": observed.isoformat(),
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+                "provider": "IBKR",
+            }
+            for observed, value in sorted(nav_by_date.items())
+        ]
+        + [
+            {
+                "account_id": "account-ibkr-declared",
+                "as_of_date": min(nav_by_date).isoformat(),
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "0"},
+                "provider": "IBKR",
+            }
+        ],
+    }
+    catalog_bytes = canonical_json_bytes(catalog)
+    artifact = SourceArtifact(
+        artifact_id="normalized/portfolio-baseline.json",
+        sha256=hashlib.sha256(catalog_bytes).hexdigest(),
+        size_bytes=len(catalog_bytes),
+        as_of_date=max(nav_by_date),
+        schema_name="portfolio-baseline-catalog",
+        schema_version="1",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=max(nav_by_date),
+        adapter=AdapterIdentity("synthetic-baseline", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic IBKR baseline",
+            fact_types=("nav",),
+            observed_start=min(nav_by_date),
+            observed_end=max(nav_by_date),
+        ),
+        artifacts=(artifact,),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    catalog_path = manifest_path.parent / "portfolio-baseline.json"
+    catalog_path.write_bytes(catalog_bytes)
+    publish_generation(root, manifest.generation_id)
+    return root, manifest.generation_id, artifact.sha256
+
+
+def _declared_account_spec(tmp_path: Path) -> Path:
+    """Spec with SYNTH-RAW via NAV + SYNTH-DECLARED via zero-activity attestation."""
+    source_root = tmp_path / "declared-evidence"
+    source_root.mkdir()
+    nav_by_date: dict[date, str] = {}
+    sources: list[dict[str, object]] = []
+    for index in range(8):
+        observed = date(2026, 1, index + 1)
+        nav = str(100 + index)
+        nav_by_date[observed] = nav
+        path = source_root / f"flex-{index}.xml"
+        path.write_text(
+            _xml("SYNTH-RAW", observed, nav),
+            encoding="utf-8",
+        )
+        payload = path.read_bytes()
+        sources.append(
+            {
+                "artifact_id": f"private/flex-{index}.xml",
+                "as_of_date": observed.isoformat(),
+                "expected_sha256": hashlib.sha256(payload).hexdigest(),
+                "expected_size_bytes": len(payload),
+                "relative_path": path.name,
+                "role": "PRIMARY_FLEX_ACTIVITY",
+                "root_id": "legacy",
+                "schema_name": "activity-flex",
+                "schema_version": "3",
+            }
+        )
+    for index in range(18):
+        path = source_root / f"secondary-{index}.txt"
+        path.write_text(f"SYNTHETIC {index}\n", encoding="utf-8")
+        payload = path.read_bytes()
+        sources.append(
+            {
+                "artifact_id": f"private/secondary-{index}.txt",
+                "as_of_date": "2026-01-08",
+                "expected_sha256": hashlib.sha256(payload).hexdigest(),
+                "expected_size_bytes": len(payload),
+                "relative_path": path.name,
+                "role": "SECONDARY_RECONCILIATION",
+                "root_id": "legacy",
+                "schema_name": "synthetic-secondary",
+                "schema_version": "1",
+            }
+        )
+    # Refresh Flex
+    refresh_path = source_root / "flex-refresh.xml"
+    refresh_path.write_text(
+        _xml("SYNTH-RAW", date(2026, 1, 8), "107"),
+        encoding="utf-8",
+    )
+    refresh_bytes = refresh_path.read_bytes()
+    sources.append(
+        {
+            "artifact_id": "private/flex-refresh.xml",
+            "as_of_date": "2026-01-08",
+            "expected_sha256": hashlib.sha256(refresh_bytes).hexdigest(),
+            "expected_size_bytes": len(refresh_bytes),
+            "relative_path": refresh_path.name,
+            "role": "REFRESH_FLEX_ACTIVITY",
+            "root_id": "legacy",
+            "schema_name": "activity-flex",
+            "schema_version": "3",
+        }
+    )
+    # TWS snapshot with both SYNTH-RAW and SYNTH-DECLARED
+    snapshot = {
+        "account_summaries": [
+            {
+                "account": "SYNTH-RAW",
+                "currency": "BASE",
+                "request_id": "1",
+                "tag": "NetLiquidation",
+                "value": "108",
+            },
+            {
+                "account": "SYNTH-DECLARED",
+                "currency": "BASE",
+                "request_id": "2",
+                "tag": "NetLiquidation",
+                "value": "0",
+            },
+        ],
+        "captured_at_utc": "2026-01-09T20:00:00Z",
+        "connection": {"connected": True},
+        "current_day_executions": [],
+        "errors": [
+            {
+                "advanced_order_reject_json": "",
+                "error_code": 2104,
+                "message": "SYNTHETIC INFORMATIONAL STATUS",
+                "request_id": "-1",
+            }
+        ],
+        "managed_accounts": ["SYNTH-RAW", "SYNTH-DECLARED"],
+        "open_orders": [],
+        "order_statuses": [],
+        "positions": [
+            {
+                "account": "SYNTH-RAW",
+                "average_cost": "10",
+                "conid": "100",
+                "currency": "USD",
+                "exchange": "SYNTH",
+                "expiry": "",
+                "local_symbol": "SYNTH",
+                "multiplier": "",
+                "primary_exchange": "SYNTH",
+                "quantity": "2",
+                "security_type": "STK",
+                "symbol": "SYNTH",
+                "trading_class": "SYNTH",
+            }
+        ],
+        "request_results": [
+            {"completed": True, "name": name}
+            for name in (
+                "account_summary",
+                "all_api_open_orders",
+                "current_day_executions",
+                "positions",
+            )
+        ],
+        "run_id": "tws-synthetic-declared",
+        "schema_version": 1,
+    }
+    snapshot_path = source_root / "tws-snapshot-declared.json"
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    snapshot_bytes = snapshot_path.read_bytes()
+    sources.append(
+        {
+            "artifact_id": "private/tws-snapshot-declared.json",
+            "as_of_date": "2026-01-09",
+            "expected_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
+            "expected_size_bytes": len(snapshot_bytes),
+            "relative_path": snapshot_path.name,
+            "role": "TWS_CURRENT_SNAPSHOT",
+            "root_id": "legacy",
+            "schema_name": "ibkr-tws-read-snapshot",
+            "schema_version": "1",
+        }
+    )
+
+    baseline_root, generation_id, catalog_hash = _published_two_account_baseline(
+        tmp_path, nav_by_date
+    )
+    spec = {
+        "as_of_date": "2026-01-09",
+        "baseline": {
+            "catalog_sha256": catalog_hash,
+            "generation_id": generation_id,
+            "root": str(baseline_root.resolve()),
+        },
+        "declared_zero_activity_accounts": [
+            {
+                "raw_account_id": "SYNTH-DECLARED",
+                "internal_account_id": "account-ibkr-declared",
+                "provenance": "owner attestation 2026-08-14, issue #286",
+            }
+        ],
+        "minimum_crosswalk_overlap": 2,
+        "roots": {"legacy": str(source_root.resolve())},
+        "schema_version": 3,
+        "sources": sources,
+    }
+    out = tmp_path / "ibkr-declared-account-spec.json"
+    out.write_bytes(canonical_json_bytes(spec))
+    return out
+
+
+def test_declared_zero_activity_completes_boundary(tmp_path: Path) -> None:
+    spec_path = _declared_account_spec(tmp_path)
+    _, manifest, _ = build_generation(spec_path)
+    assert manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    assert manifest.coverage.known_gaps == ()
+    boundary = manifest.coverage.boundary
+    assert "Zero-activity accounts:" in boundary
+    assert "declared-zero-activity:" in boundary
+    assert "a132adbd6d682a5f" in boundary  # hash(SYNTH-DECLARED)[:16]
+    assert "owner attestation 2026-08-14" in boundary
+    output = tmp_path / "ibkr-private-output"
+    staged = stage_generation_candidate(spec_path, output)
+    assert staged["coverage_status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    result = publish_generation_candidate(spec_path, output, staged["generation_id"])
+    assert result["published"] is True
+
+
+def test_without_declaration_atoms_return(tmp_path: Path) -> None:
+    """Same topology as _declared_account_spec but without the attestation.
+    The two-account baseline fails the crosswalk bijection without the
+    declared account to fill the gap — proving the declaration is required."""
+    spec_path = _declared_account_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    del spec["declared_zero_activity_accounts"]
+    spec["schema_version"] = 2
+    stripped = tmp_path / "ibkr-stripped-spec.json"
+    stripped.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(IbkrGenerationError, match="complete bijection"):
+        build_generation(stripped)
+
+
+def test_unknown_account_yields_named_atom(tmp_path: Path) -> None:
+    """A sixth unknown TWS account → named masked atom, PARTIAL."""
+    spec_path = _declared_account_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    # Add an unknown account to TWS managed accounts
+    source_root = Path(spec["roots"]["legacy"])
+    for src in spec["sources"]:
+        if src["role"] == "TWS_CURRENT_SNAPSHOT":
+            snap_path = source_root / src["relative_path"]
+            snap = json.loads(snap_path.read_text(encoding="utf-8"))
+            snap["managed_accounts"] = ["SYNTH-RAW", "SYNTH-DECLARED", "SYNTH-UNKNOWN"]
+            snap["positions"].append(
+                {
+                    "account": "SYNTH-UNKNOWN",
+                    "average_cost": "1",
+                    "conid": "200",
+                    "currency": "USD",
+                    "exchange": "SYNTH",
+                    "expiry": "",
+                    "local_symbol": "UNK",
+                    "multiplier": "",
+                    "primary_exchange": "SYNTH",
+                    "quantity": "1",
+                    "security_type": "STK",
+                    "symbol": "UNK",
+                    "trading_class": "SYNTH",
+                }
+            )
+            snap_path.write_bytes(canonical_json_bytes(snap))
+            snap_bytes = snap_path.read_bytes()
+            src["expected_sha256"] = hashlib.sha256(snap_bytes).hexdigest()
+            src["expected_size_bytes"] = len(snap_bytes)
+    modified = tmp_path / "ibkr-unknown-spec.json"
+    modified.write_bytes(canonical_json_bytes(spec))
+    _, manifest, _ = build_generation(modified)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps_text = " ".join(manifest.coverage.known_gaps)
+    assert "account_topology:snapshot_only:" in gaps_text
+    unknown_hash = hashlib.sha256(b"SYNTH-UNKNOWN").hexdigest()[:16]
+    assert unknown_hash in gaps_text

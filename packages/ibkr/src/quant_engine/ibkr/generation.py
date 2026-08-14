@@ -46,7 +46,7 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-SPEC_SCHEMA_VERSION = 2
+SPEC_SCHEMA_VERSION = 3
 CATALOG_SCHEMA_VERSION = 3
 ADAPTER_VERSION = "0.3.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -151,29 +151,65 @@ def _security_id(conid: str) -> str:
     return f"security-ibkr-{hashlib.sha256(conid.encode()).hexdigest()[:24]}"
 
 
+def _parse_zero_activity(
+    value: object,
+) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    entries = _objects(value, "declared_zero_activity_accounts")
+    parsed: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in entries:
+        _strict(
+            item,
+            {"raw_account_id", "internal_account_id", "provenance"},
+            "declared_zero_activity_account",
+        )
+        raw_id = _text(item["raw_account_id"], "zero_activity.raw_account_id")
+        internal_id = _identifier(
+            item["internal_account_id"], "zero_activity.internal_account_id"
+        )
+        provenance = _text(item["provenance"], "zero_activity.provenance")
+        if raw_id in seen:
+            raise IbkrGenerationError(
+                "declared zero-activity raw account must be unique"
+            )
+        seen.add(raw_id)
+        parsed.append(
+            {
+                "raw_account_id": raw_id,
+                "internal_account_id": internal_id,
+                "provenance": provenance,
+            }
+        )
+    return parsed
+
+
 def _load_spec(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise IbkrGenerationError("IBKR spec is not valid UTF-8 JSON") from exc
     spec = _object(value, "spec")
-    _strict(
-        spec,
-        {
-            "as_of_date",
-            "baseline",
-            "minimum_crosswalk_overlap",
-            "roots",
-            "schema_version",
-            "sources",
-        },
-        "spec",
-    )
-    if spec["schema_version"] not in {1, SPEC_SCHEMA_VERSION}:
+    schema_version = _integer(spec["schema_version"], "schema_version")
+    if schema_version not in {1, 2, SPEC_SCHEMA_VERSION}:
         raise IbkrGenerationError("IBKR spec schema version is unsupported")
+    expected_keys = {
+        "as_of_date",
+        "baseline",
+        "minimum_crosswalk_overlap",
+        "roots",
+        "schema_version",
+        "sources",
+    }
+    if schema_version == SPEC_SCHEMA_VERSION:
+        expected_keys.add("declared_zero_activity_accounts")
+    _strict(spec, expected_keys, "spec")
     minimum = _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap")
     if minimum < 2:
         raise IbkrGenerationError("minimum_crosswalk_overlap must be at least 2")
+    if schema_version == SPEC_SCHEMA_VERSION:
+        _parse_zero_activity(spec.get("declared_zero_activity_accounts"))
     return spec
 
 
@@ -411,6 +447,8 @@ def _crosswalk(
     statements: Sequence[FlexDailyStatement],
     catalog: Mapping[str, Any],
     minimum_overlap: int,
+    *,
+    declared_zero_activity: Sequence[dict[str, str]] = (),
 ) -> tuple[dict[str, str], list[dict[str, Any]]]:
     raw_curves: dict[str, dict[date, Decimal]] = {}
     for statement in statements:
@@ -439,6 +477,29 @@ def _crosswalk(
                 "account_id": account_id,
                 "exact_match_count": count,
                 "match_method": "EXACT_ACCEPTED_NAV_CURVE",
+                "status": "PASS",
+            }
+        )
+    # Declared zero-activity accounts: attestation-based mapping
+    for decl in declared_zero_activity:
+        raw_id = decl["raw_account_id"]
+        internal_id = decl["internal_account_id"]
+        if raw_id in mapping:
+            raise IbkrGenerationError(
+                "declared zero-activity account is already crosswalk-mapped"
+            )
+        if internal_id in mapping.values():
+            raise IbkrGenerationError(
+                "declared zero-activity account conflicts with existing mapping"
+            )
+        mapping[raw_id] = internal_id
+        accepted[internal_id] = {}
+        proof.append(
+            {
+                "account_id": internal_id,
+                "exact_match_count": 0,
+                "match_method": "DECLARED_ZERO_ACTIVITY",
+                "provenance": decl["provenance"],
                 "status": "PASS",
             }
         )
@@ -490,6 +551,8 @@ def _normalize(
     refresh_raw_account_ids: frozenset[str],
     flex_overlap_count: int,
     tws_source: tuple[TwsSnapshot, str] | None,
+    *,
+    declared_zero_activity_raw_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     accounts_by_id = {
         _text(item.get("account_id"), "account.account_id"): item
@@ -900,6 +963,8 @@ def _normalize(
             snapshot_ids = frozenset(snapshot.raw_account_ids)
             # flex_only = normal under Flex authority — no atom emitted
             for raw_id in sorted(snapshot_ids - accepted_current_accounts):
+                if raw_id in declared_zero_activity_raw_ids:
+                    continue
                 atom = (
                     f"account_topology:snapshot_only:"
                     f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
@@ -909,6 +974,8 @@ def _normalize(
         if unmapped_position_accounts or unmapped_account_value_accounts:
             all_unmapped = unmapped_position_accounts | unmapped_account_value_accounts
             for raw_id in sorted(all_unmapped):
+                if raw_id in declared_zero_activity_raw_ids:
+                    continue
                 tws_gaps.append(
                     f"unmapped_tws_fact:"
                     f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
@@ -1023,10 +1090,15 @@ def build_generation(
     baseline, baseline_artifact = _baseline(spec["baseline"])
     statements, refresh_accounts, flex_overlap_count = _statements(sources)
     tws_source = _tws_source(sources)
+    declared_zero_activity = spec.get("declared_zero_activity_accounts") or []
+    declared_zero_activity_raw_ids = frozenset(
+        item["raw_account_id"] for item in declared_zero_activity
+    )
     crosswalk, proof = _crosswalk(
         statements,
         baseline,
         _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap"),
+        declared_zero_activity=declared_zero_activity,
     )
     catalog = _normalize(
         statements,
@@ -1036,6 +1108,7 @@ def build_generation(
         refresh_accounts,
         flex_overlap_count,
         tws_source,
+        declared_zero_activity_raw_ids=declared_zero_activity_raw_ids,
     )
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
@@ -1116,6 +1189,14 @@ def build_generation(
         if exclusion_reasons
         else ""
     )
+    if declared_zero_activity:
+        decl_entries = [
+            f"declared-zero-activity:"
+            f"{hashlib.sha256(item['raw_account_id'].encode()).hexdigest()[:16]}"
+            f" ({item['provenance']})"
+            for item in declared_zero_activity
+        ]
+        boundary += " Zero-activity accounts: " + "; ".join(decl_entries)
 
     manifest = GenerationManifest.build(
         as_of_date=generation_as_of,
