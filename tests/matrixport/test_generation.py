@@ -477,6 +477,81 @@ def test_aggregate_string_matching_is_gone(tmp_path: Path) -> None:
     assert source_atom_a in manifest.coverage.stale_declarations
 
 
+# --- Stale-only drift (no current gaps) ---
+
+
+def test_stale_only_drift_produces_partial_with_synthetic_gaps(
+    tmp_path: Path,
+) -> None:
+    """When upstream fixes the last current gap leaving only stale declarations,
+    the PARTIAL manifest must carry stale_declaration:<atom> synthetic gap
+    entries so the core contract is satisfied."""
+    wallet_atom = "wallet_deposit_currency:synthetic-rejected-A"
+
+    # Phase 1: build a single-gap spec with matching exclusion → COMPLETE
+    spec = _spec(tmp_path)
+    doc = json.loads(spec.read_text(encoding="utf-8"))
+    run = Path(doc["run_root"])
+    # Remove NAV gap
+    v = json.loads((run / "reports" / "verification.json").read_text(encoding="utf-8"))
+    v["checks"]["valuation"]["reasons"] = []
+    _write_json(run / "reports" / "verification.json", v)
+    doc["baseline"]["known_gaps"] = [wallet_atom]
+    doc["declared_exclusions"] = [
+        {"item": wallet_atom, "reason": "accepted", "provenance": "issue #287"}
+    ]
+    _rehash_verification_artifact(doc, run)
+    spec.write_text(
+        json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    # Verify: 1 gap + 1 exclusion → COMPLETE
+    _, manifest_ok, _ = build_generation(spec)
+    assert (
+        manifest_ok.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    )
+
+    # Phase 2: upstream fixes the wallet gap → zero gaps, stale declaration
+    doc = json.loads(spec.read_text(encoding="utf-8"))
+    v = json.loads((run / "reports" / "verification.json").read_text(encoding="utf-8"))
+    v["checks"]["coverage"]["source_limited_reasons"] = []
+    _write_json(run / "reports" / "verification.json", v)
+    doc["baseline"]["known_gaps"] = []
+    _rehash_verification_artifact(doc, run)
+    spec.write_text(
+        json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    catalog, manifest, _ = build_generation(spec)
+
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    assert wallet_atom in manifest.coverage.stale_declarations
+    assert manifest.coverage.undeclared_gaps == ()
+    # Core contract satisfied: known_gaps carries synthetic stale entries
+    assert len(manifest.coverage.known_gaps) > 0
+    assert f"stale_declaration:{wallet_atom}" in manifest.coverage.known_gaps
+
+    # Publish rejects via real path
+    root = tmp_path / "dataMatrixport"
+    staged = stage_generation_candidate(spec, root)
+    assert staged["publication_eligible"] is False
+    with pytest.raises(
+        PublicationRejectedError, match="generation coverage is not complete"
+    ):
+        publish_generation(root, staged["generation_id"])
+
+
+def _rehash_verification_artifact(doc: dict, run: Path) -> None:
+    """Re-hash the verification.json artifact after mutation."""
+    for artifact in doc["artifacts"]:
+        if artifact["artifact_id"] == "reports/verification.json":
+            payload = (run / "reports" / "verification.json").read_bytes()
+            artifact["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+            artifact["expected_size_bytes"] = len(payload)
+            return
+
+
 # --- Duplicate exclusion items rejected ---
 
 

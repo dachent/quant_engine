@@ -458,9 +458,18 @@ def build_generation(
     elif raw_exclusions:
         # Drift: produce evidence-bearing PARTIAL manifest with exact diff.
         coverage_status = CoverageStatus.PARTIAL
-        manifest_known_gaps = tuple(known_gaps)
         manifest_undeclared = tuple(sorted(undeclared))
         manifest_stale = tuple(sorted(stale))
+        if known_gaps:
+            # Actual gaps present (undeclared and/or mixed) → use them directly.
+            manifest_known_gaps = tuple(known_gaps)
+        else:
+            # Stale-only drift: no current gaps, but stale declarations exist.
+            # Encode stale atoms as synthetic gap entries so the PARTIAL
+            # contract is satisfied while the stale items remain auditable.
+            manifest_known_gaps = tuple(
+                f"stale_declaration:{atom}" for atom in sorted(stale)
+            )
     else:
         coverage_status = CoverageStatus.PARTIAL
         manifest_known_gaps = tuple(known_gaps)
