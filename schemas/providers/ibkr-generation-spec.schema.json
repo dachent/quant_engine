@@ -13,7 +13,7 @@
     "sources"
   ],
   "properties": {
-    "schema_version": {"enum": [1, 2]},
+    "schema_version": {"enum": [1, 2, 3]},
     "as_of_date": {"type": "string", "format": "date"},
     "minimum_crosswalk_overlap": {"type": "integer", "minimum": 2},
     "roots": {
@@ -36,6 +36,10 @@
       "type": "array",
       "minItems": 26,
       "items": {"$ref": "#/$defs/source"}
+    },
+    "declared_zero_activity_accounts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/zeroActivityAccount"}
     }
   },
   "$defs": {
@@ -80,6 +84,16 @@
         "schema_name": {"type": "string", "minLength": 1},
         "schema_version": {"type": "string", "minLength": 1}
       }
+    },
+    "zeroActivityAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw_account_id", "internal_account_id", "provenance"],
+      "properties": {
+        "raw_account_id": {"type": "string", "minLength": 1},
+        "internal_account_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+        "provenance": {"type": "string", "minLength": 1}
+      }
     }
   },
   "allOf": [
@@ -90,6 +104,13 @@
     {
       "if": {"properties": {"schema_version": {"const": 2}}},
       "then": {"properties": {"sources": {"minItems": 28}}}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 3}}},
+      "then": {
+        "required": ["declared_zero_activity_accounts"],
+        "properties": {"sources": {"minItems": 28}}
+      }
     }
   ]
 }

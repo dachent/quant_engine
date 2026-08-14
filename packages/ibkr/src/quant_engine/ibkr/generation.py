@@ -1034,6 +1034,27 @@ def _normalize(
                 )
                 tws_gaps.append(atom)
                 tws_coverage["known_gaps"].append(atom)
+        # A genuinely empty account may still carry ZERO-valued summary rows;
+        # only nonzero values or real executions disprove the declaration.
+        for tws_value in abuse_snapshot.account_values:
+            if (
+                tws_value.raw_account_id in declared_zero_activity_raw_ids
+                and tws_value.value != 0
+            ):
+                atom = (
+                    "declared_zero_activity_abuse:tws_value:"
+                    f"{hashlib.sha256(tws_value.raw_account_id.encode()).hexdigest()[:16]}"
+                )
+                tws_gaps.append(atom)
+                tws_coverage["known_gaps"].append(atom)
+        for tws_exec in abuse_snapshot.executions:
+            if tws_exec.raw_account_id in declared_zero_activity_raw_ids:
+                atom = (
+                    "declared_zero_activity_abuse:tws_execution:"
+                    f"{hashlib.sha256(tws_exec.raw_account_id.encode()).hexdigest()[:16]}"
+                )
+                tws_gaps.append(atom)
+                tws_coverage["known_gaps"].append(atom)
 
     return {
         "accounts": [
@@ -1120,6 +1141,31 @@ def _normalize(
     }
 
 
+def declared_exclusion(gap: str, scope_count: int) -> str | None:
+    """Classify one gap into an authorized exclusion reason, or None.
+
+    Exported at module level so exclusion-removal tests can monkeypatch it
+    and prove that each branch is load-bearing.
+    """
+    if gap == "unmapped_tws_fact:086e03b607cedf48":
+        return (
+            "Non-managed TWS account summary label "
+            "(086e03b607cedf48): not in read boundary"
+        )
+    if gap == ("Zero API order rows do not prove complete order visibility"):
+        return (
+            "Order visibility is execution scope, excluded per "
+            "docs/providers/ibkr-read-capabilities.md:275-277"
+        )
+    if gap == ("Some activity rows have an ambiguous provider-reported account scope"):
+        return (
+            f"{scope_count} catalog rows with "
+            "AMBIGUOUS_REPORTED_ACCOUNT: bounded declared gap "
+            "per issue #286 owner adjudication"
+        )
+    return None
+
+
 def build_generation(
     spec_path: Path,
 ) -> tuple[dict[str, Any], GenerationManifest, bytes]:
@@ -1190,31 +1236,10 @@ def build_generation(
             "Some activity rows have an ambiguous provider-reported account scope"
         )
 
-    def _declared_exclusion(gap: str, scope_count: int) -> str | None:
-        if gap == "unmapped_tws_fact:086e03b607cedf48":
-            return (
-                "Non-managed TWS account summary label "
-                "(086e03b607cedf48): not in read boundary"
-            )
-        if gap == ("Zero API order rows do not prove complete order visibility"):
-            return (
-                "Order visibility is execution scope, excluded per "
-                "docs/providers/ibkr-read-capabilities.md:275-277"
-            )
-        if gap == (
-            "Some activity rows have an ambiguous provider-reported account scope"
-        ):
-            return (
-                f"{scope_count} catalog rows with "
-                "AMBIGUOUS_REPORTED_ACCOUNT: bounded declared gap "
-                "per issue #286 owner adjudication"
-            )
-        return None
-
     undeclared = [
         gap
         for gap in raw_gaps
-        if _declared_exclusion(gap, account_scope_exceptions) is None
+        if declared_exclusion(gap, account_scope_exceptions) is None
     ]
     if undeclared:
         coverage_status = CoverageStatus.PARTIAL
@@ -1225,7 +1250,7 @@ def build_generation(
 
     exclusion_reasons: list[str] = []
     for gap in raw_gaps:
-        reason = _declared_exclusion(gap, account_scope_exceptions)
+        reason = declared_exclusion(gap, account_scope_exceptions)
         if reason is not None:
             exclusion_reasons.append(reason)
 

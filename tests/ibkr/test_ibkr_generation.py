@@ -30,6 +30,7 @@ from quant_engine.ibkr import (
     TwsPosition,
     TwsSnapshot,
     build_generation,
+    declared_exclusion,
     parse_flex_file,
     publish_generation_candidate,
     reconcile_tws_snapshot,
@@ -1089,6 +1090,68 @@ def test_zero_activity_abuse_tws_position_fails(tmp_path: Path) -> None:
     assert "a132adbd6d682a5f" in gaps_text
 
 
+def _abuse_spec_with_snapshot_mutation(tmp_path: Path, mutate) -> Path:
+    """Return a spec whose TWS snapshot was mutated in place by mutate(snap)."""
+    spec_path = _declared_account_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    source_root = Path(spec["roots"]["legacy"])
+    for src in spec["sources"]:
+        if src["role"] == "TWS_CURRENT_SNAPSHOT":
+            snap_path = source_root / src["relative_path"]
+            snap = json.loads(snap_path.read_text(encoding="utf-8"))
+            mutate(snap)
+            snap_path.write_bytes(canonical_json_bytes(snap))
+            snap_bytes = snap_path.read_bytes()
+            src["expected_sha256"] = hashlib.sha256(snap_bytes).hexdigest()
+            src["expected_size_bytes"] = len(snap_bytes)
+    abuse_spec = tmp_path / "ibkr-abuse-spec.json"
+    abuse_spec.write_bytes(canonical_json_bytes(spec))
+    return abuse_spec
+
+
+def test_zero_activity_abuse_nonzero_tws_value_fails(tmp_path: Path) -> None:
+    """Declared zero-activity account with a NONZERO TWS value → PARTIAL."""
+
+    def add_value(snap):
+        snap["account_summaries"].append(
+            {
+                "account": "SYNTH-DECLARED",
+                "currency": "USD",
+                "request_id": "99",
+                "tag": "NetLiquidation",
+                "value": "0.01",
+            }
+        )
+
+    _, manifest, _ = build_generation(
+        _abuse_spec_with_snapshot_mutation(tmp_path, add_value)
+    )
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps_text = " ".join(manifest.coverage.known_gaps)
+    assert "declared_zero_activity_abuse:tws_value:" in gaps_text
+
+
+def test_zero_activity_abuse_tws_execution_fails(tmp_path: Path) -> None:
+    """Declared zero-activity account with a TWS execution → PARTIAL."""
+
+    def add_execution(snap):
+        snap["current_day_executions"].append(
+            {
+                "account": "SYNTH-DECLARED",
+                "conid": "300",
+                "execution_id": "exec-abuse-001",
+                "quantity": "1",
+            }
+        )
+
+    _, manifest, _ = build_generation(
+        _abuse_spec_with_snapshot_mutation(tmp_path, add_execution)
+    )
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps_text = " ".join(manifest.coverage.known_gaps)
+    assert "declared_zero_activity_abuse:tws_execution:" in gaps_text
+
+
 def test_removal_order_visibility_exclusion_yields_partial(
     tmp_path: Path,
 ) -> None:
@@ -1133,6 +1196,235 @@ def test_alteration_label_atom_exclusion_yields_partial(
     assert "unmapped_tws_fact:a821e0b93e7a426e" in gaps
     assert "086e03b607cedf48" not in manifest.coverage.boundary
     output = tmp_path / "ibkr-private-output"
+    staged = stage_generation_candidate(spec_path, output)
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(spec_path, output, staged["generation_id"])
+
+
+# ── Isolation tests: monkeypatch proves each exclusion branch is load-bearing ──
+
+
+def _refreshed_cash_mismatch_spec(tmp_path: Path) -> Path:
+    """Like _refreshed_spec but with cash_mismatch and no confounding gap."""
+    source_root = tmp_path / "rcm-evidence"
+    source_root.mkdir()
+    nav_by_date: dict[date, str] = {}
+    sources: list[dict[str, object]] = []
+    for index in range(8):
+        observed = date(2026, 1, index + 1)
+        nav = str(100 + index)
+        nav_by_date[observed] = nav
+        path = source_root / f"flex-{index}.xml"
+        path.write_text(
+            _xml(
+                "SYNTH-RAW",
+                observed,
+                nav,
+                cash_account="SYNTH-OTHER" if index == 0 else None,
+            ),
+            encoding="utf-8",
+        )
+        payload = path.read_bytes()
+        sources.append(
+            {
+                "artifact_id": f"private/flex-{index}.xml",
+                "as_of_date": observed.isoformat(),
+                "expected_sha256": hashlib.sha256(payload).hexdigest(),
+                "expected_size_bytes": len(payload),
+                "relative_path": path.name,
+                "role": "PRIMARY_FLEX_ACTIVITY",
+                "root_id": "legacy",
+                "schema_name": "activity-flex",
+                "schema_version": "3",
+            }
+        )
+    for index in range(18):
+        path = source_root / f"secondary-{index}.txt"
+        path.write_text(f"SYNTHETIC {index}\n", encoding="utf-8")
+        payload = path.read_bytes()
+        sources.append(
+            {
+                "artifact_id": f"private/secondary-{index}.txt",
+                "as_of_date": "2026-01-08",
+                "expected_sha256": hashlib.sha256(payload).hexdigest(),
+                "expected_size_bytes": len(payload),
+                "relative_path": path.name,
+                "role": "SECONDARY_RECONCILIATION",
+                "root_id": "legacy",
+                "schema_name": "synthetic-secondary",
+                "schema_version": "1",
+            }
+        )
+    refresh_path = source_root / "flex-refresh.xml"
+    refresh_path.write_text(
+        _xml("SYNTH-RAW", date(2026, 1, 8), "107"),
+        encoding="utf-8",
+    )
+    refresh_bytes = refresh_path.read_bytes()
+    sources.append(
+        {
+            "artifact_id": "private/flex-refresh.xml",
+            "as_of_date": "2026-01-08",
+            "expected_sha256": hashlib.sha256(refresh_bytes).hexdigest(),
+            "expected_size_bytes": len(refresh_bytes),
+            "relative_path": refresh_path.name,
+            "role": "REFRESH_FLEX_ACTIVITY",
+            "root_id": "legacy",
+            "schema_name": "activity-flex",
+            "schema_version": "3",
+        }
+    )
+    snapshot = {
+        "account_summaries": [],
+        "captured_at_utc": "2026-01-09T20:00:00Z",
+        "connection": {"connected": True},
+        "current_day_executions": [],
+        "errors": [{"error_code": 2104, "message": "OK", "request_id": "-1"}],
+        "managed_accounts": ["SYNTH-RAW"],
+        "open_orders": [{"order_id": 1}],
+        "order_statuses": [],
+        "positions": [],
+        "request_results": [
+            {"completed": True, "name": name}
+            for name in (
+                "account_summary",
+                "all_api_open_orders",
+                "current_day_executions",
+                "positions",
+            )
+        ],
+        "run_id": "rcm",
+        "schema_version": 1,
+    }
+    snapshot_path = source_root / "tws-snapshot.json"
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    snapshot_bytes = snapshot_path.read_bytes()
+    sources.append(
+        {
+            "artifact_id": "private/tws-snapshot.json",
+            "as_of_date": "2026-01-09",
+            "expected_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
+            "expected_size_bytes": len(snapshot_bytes),
+            "relative_path": snapshot_path.name,
+            "role": "TWS_CURRENT_SNAPSHOT",
+            "root_id": "legacy",
+            "schema_name": "ibkr-tws-read-snapshot",
+            "schema_version": "1",
+        }
+    )
+    baseline_root, generation_id, catalog_hash = _published_baseline(
+        tmp_path, nav_by_date
+    )
+    spec = {
+        "as_of_date": "2026-01-09",
+        "baseline": {
+            "catalog_sha256": catalog_hash,
+            "generation_id": generation_id,
+            "root": str(baseline_root.resolve()),
+        },
+        "minimum_crosswalk_overlap": 2,
+        "roots": {"legacy": str(source_root.resolve())},
+        "schema_version": 2,
+        "sources": sources,
+    }
+    out = tmp_path / "rcm-spec.json"
+    out.write_bytes(canonical_json_bytes(spec))
+    return out
+
+
+def test_isolation_order_visibility_exclusion(monkeypatch, tmp_path: Path) -> None:
+    """Monkeypatch-out the order-visibility exclusion → PARTIAL."""
+    spec_path = _declared_account_spec(tmp_path)
+    # Unpatched: COMPLETE
+    _, manifest, _ = build_generation(spec_path)
+    assert manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    assert "Order visibility is execution scope" in manifest.coverage.boundary
+
+    # Patch: drop order-visibility only
+    original = declared_exclusion
+
+    def patched(gap: str, scope_count: int):
+        if gap == "Zero API order rows do not prove complete order visibility":
+            return None
+        return original(gap, scope_count)
+
+    monkeypatch.setattr("quant_engine.ibkr.generation.declared_exclusion", patched)
+    _, manifest2, _ = build_generation(spec_path)
+    assert manifest2.coverage.status is CoverageStatus.PARTIAL
+    gaps_text = " ".join(manifest2.coverage.known_gaps)
+    assert "Zero API order rows" in gaps_text
+    output = tmp_path / "ibkr-iso-output"
+    staged = stage_generation_candidate(spec_path, output)
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(spec_path, output, staged["generation_id"])
+
+
+def test_isolation_label_atom_exclusion(monkeypatch, tmp_path: Path) -> None:
+    """Synthetic non-authorized unmapped atom → PARTIAL; patch → COMPLETE."""
+    spec_path = _declared_account_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    source_root = Path(spec["roots"]["legacy"])
+    for src in spec["sources"]:
+        if src["role"] == "TWS_CURRENT_SNAPSHOT":
+            snap_path = source_root / src["relative_path"]
+            snap = json.loads(snap_path.read_text(encoding="utf-8"))
+            snap["account_summaries"].append(
+                {
+                    "account": "SYNTH-LABEL",
+                    "currency": "BASE",
+                    "request_id": "99",
+                    "tag": "NetLiquidation",
+                    "value": "0",
+                }
+            )
+            snap_path.write_bytes(canonical_json_bytes(snap))
+            snap_bytes = snap_path.read_bytes()
+            src["expected_sha256"] = hashlib.sha256(snap_bytes).hexdigest()
+            src["expected_size_bytes"] = len(snap_bytes)
+    label_spec = tmp_path / "label-spec.json"
+    label_spec.write_bytes(canonical_json_bytes(spec))
+
+    # Unpatched: unmapped_tws_fact for SYNTH-LABEL is undeclared → PARTIAL
+    _, manifest, _ = build_generation(label_spec)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    gaps_text = " ".join(manifest.coverage.known_gaps)
+    assert "unmapped_tws_fact:5b0de93d9bbc36a0" in gaps_text
+
+    # Patch: also exclude the synthetic label hash
+    original = declared_exclusion
+
+    def patched(gap: str, scope_count: int):
+        if gap == "unmapped_tws_fact:5b0de93d9bbc36a0":
+            return "Synthetic label (5b0de93d9bbc36a0): test exclusion"
+        return original(gap, scope_count)
+
+    monkeypatch.setattr("quant_engine.ibkr.generation.declared_exclusion", patched)
+    _, manifest2, _ = build_generation(label_spec)
+    assert manifest2.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+
+
+def test_isolation_cross_account_exclusion(monkeypatch, tmp_path: Path) -> None:
+    """Monkeypatch-out the ambiguous-scope exclusion → PARTIAL."""
+    spec_path = _refreshed_cash_mismatch_spec(tmp_path)
+    # Unpatched: ambiguous-scope gap is declared → COMPLETE
+    _, manifest, _ = build_generation(spec_path)
+    assert manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    assert "AMBIGUOUS_REPORTED_ACCOUNT" in manifest.coverage.boundary
+
+    # Patch: drop ambiguous-scope branch
+    original = declared_exclusion
+
+    def patched(gap: str, scope_count: int):
+        if "ambiguous provider-reported account scope" in gap:
+            return None
+        return original(gap, scope_count)
+
+    monkeypatch.setattr("quant_engine.ibkr.generation.declared_exclusion", patched)
+    _, manifest2, _ = build_generation(spec_path)
+    assert manifest2.coverage.status is CoverageStatus.PARTIAL
+    gaps_text = " ".join(manifest2.coverage.known_gaps)
+    assert "ambiguous provider-reported account scope" in gaps_text
+    output = tmp_path / "ibkr-iso-output"
     staged = stage_generation_candidate(spec_path, output)
     with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
         publish_generation_candidate(spec_path, output, staged["generation_id"])
