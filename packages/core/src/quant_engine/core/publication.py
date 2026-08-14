@@ -283,6 +283,14 @@ def stage_generation(root: Path, manifest: GenerationManifest) -> Path:
 def read_generation(root: Path, generation_id: str) -> GenerationManifest:
     root = _validate_root(root)
     path = _generation_path(root, generation_id)
+    for directory, label in (
+        (path.parent.parent, "generations root"),
+        (path.parent, "generation directory"),
+    ):
+        if directory.is_symlink():
+            raise GenerationConflictError(f"{label} must not be a symlink")
+        if directory.exists() and not directory.is_dir():
+            raise GenerationConflictError(f"{label} must be a regular directory")
     if path.is_symlink():
         raise GenerationConflictError("generation manifest must not be a symlink")
     try:
@@ -290,9 +298,14 @@ def read_generation(root: Path, generation_id: str) -> GenerationManifest:
     except FileNotFoundError as exc:
         raise GenerationConflictError("generation manifest is missing") from exc
     try:
-        return GenerationManifest.from_json_bytes(content)
+        manifest = GenerationManifest.from_json_bytes(content)
     except ManifestValidationError as exc:
         raise GenerationConflictError("generation manifest failed integrity") from exc
+    if manifest.generation_id != generation_id:
+        raise GenerationConflictError(
+            "generation manifest identity differs from the requested generation"
+        )
+    return manifest
 
 
 def publication_state(root: Path, generation_id: str) -> PublicationState:

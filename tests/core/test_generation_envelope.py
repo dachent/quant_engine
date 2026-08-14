@@ -324,3 +324,52 @@ def test_current_pointer_detects_undeclared_file_addition(tmp_path: Path) -> Non
 
     with pytest.raises(PointerIntegrityError, match="inventory hash differs"):
         read_current(tmp_path)
+
+
+def test_read_generation_rejects_manifest_identity_mismatch(tmp_path: Path) -> None:
+    """A valid manifest staged under one identity must not resolve under a
+    different requested generation id."""
+    manifest = _manifest()
+    staged = stage_generation(tmp_path, manifest)
+    wrong_id = "f" * 64
+    wrong_dir = tmp_path / "generations" / wrong_id
+    wrong_dir.mkdir(parents=True)
+    (wrong_dir / "generation.json").write_bytes(staged.read_bytes())
+
+    with pytest.raises(
+        GenerationConflictError,
+        match="identity differs from the requested generation",
+    ):
+        read_generation(tmp_path, wrong_id)
+
+
+def test_read_generation_rejects_linked_generation_path_components(
+    tmp_path: Path,
+) -> None:
+    """Linked generations root or generation directory must fail closed."""
+    manifest = _manifest()
+    stage_generation(tmp_path, manifest)
+
+    linked_root = tmp_path / "linked-root"
+    linked_root.mkdir()
+    try:
+        (linked_root / "generations").symlink_to(
+            tmp_path / "generations", target_is_directory=True
+        )
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    with pytest.raises(
+        GenerationConflictError, match="generations root must not be a symlink"
+    ):
+        read_generation(linked_root, manifest.generation_id)
+
+    linked_generation = tmp_path / "linked-generation"
+    (linked_generation / "generations").mkdir(parents=True)
+    (linked_generation / "generations" / manifest.generation_id).symlink_to(
+        tmp_path / "generations" / manifest.generation_id,
+        target_is_directory=True,
+    )
+    with pytest.raises(
+        GenerationConflictError, match="generation directory must not be a symlink"
+    ):
+        read_generation(linked_generation, manifest.generation_id)

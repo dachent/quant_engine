@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import sys
+from typing import Any
 
 import pytest
 
@@ -22,6 +23,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import decimal_text
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_control_panel.py"
@@ -198,7 +200,7 @@ def _report() -> dict[str, object]:
             {"metric": "Correlation-one stress", "value": "0.37249726899852387"},
             {
                 "metric": "Full-systematic HWM",
-                "value": "NOT_AUTOMATABLE_MISSING_COMPLETE_DAILY_NAV",
+                "value": "NOT_AUTOMATABLE_STALE_OR_MISSING_GOVERNED_HWM_DAILY_NAV",
             },
             {"metric": "Advisory readiness", "value": "DO_NOT_EXPAND_SYSTEMATIC_RISK"},
         ],
@@ -765,7 +767,7 @@ def _publish_report(root: Path, source: Path, value: object) -> None:
         artifacts=(
             SourceArtifact.from_path(
                 source,
-                artifact_id="synthetic/portfolio-report-data.json",
+                artifact_id="normalized/portfolio-report-data.json",
                 as_of_date=date(2026, 7, 30),
                 schema_name="synthetic-portfolio-report",
                 schema_version="1",
@@ -778,6 +780,189 @@ def _publish_report(root: Path, source: Path, value: object) -> None:
         source.read_bytes()
     )
     publish_generation(root, manifest.generation_id)
+
+
+def _report_with_baseline(inputs: dict[str, Any]) -> dict[str, Any]:
+    """A fresh fixture report bound to the fixture's baseline generation."""
+    report = _report()
+    report["baseline"] = inputs["baseline_identity"]
+    return report
+
+
+def _with_hwm_summary(
+    report: dict[str, Any],
+    freshness_path: Path,
+    baseline_catalog: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach the governed HWM summary the panel will recompute, derived from
+    the report's strategy rows, the given freshness assessment file, and the
+    governed baseline catalog (the panel's reconciliation authority).
+
+    The panel requires and unconditionally reconciles the accepted report's
+    hwm_summary, so fixture reports must carry the expected summary.
+    """
+    freshness_rows = json.loads(freshness_path.read_text(encoding="utf-8"))[
+        "assessments"
+    ]
+    policy, _policy_hash = panel._hwm_policy(
+        date.fromisoformat(freshness_rows[0]["evaluated_on"])
+    )
+    _strategies, coverage_summary = panel._governed_hwm_coverage(
+        report["strategy_summary"],
+        policy,
+        freshness_rows,
+        require_freshness=True,
+    )
+    report["hwm_summary"] = {
+        **coverage_summary,
+        **panel._compute_panel_numerical_hwm(baseline_catalog),
+    }
+    return report
+
+
+def _panel_baseline_catalog(
+    envelope: dict[str, Any] | None = None,
+    crosswalk: list[dict[str, Any]] | None = None,
+    extra_source_artifacts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """The governed baseline catalog matching the panel fixture report."""
+    from decimal import Decimal
+
+    # Compute matching allocations from the envelope and crosswalk so the
+    # endpoint recomputation produces delta=0.  When no envelope is provided,
+    # use the original fixed-value allocations (enough for perimeter tests).
+    matching_allocations: list[dict[str, Any]] = [
+        {
+            "as_of_date": "2026-07-30",
+            "current_value": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": "100043.62",
+            },
+            "scope": "RESERVE",
+            "strategy_id": None,
+        }
+    ]
+    if envelope is not None and crosswalk is not None:
+        by_day: dict[str, dict[str, Decimal]] = {}
+        for rw in crosswalk:
+            sid = str(rw["strategy_id"])
+            day = str(rw["date"])
+            ret = Decimal(str(rw.get("return", "0")))
+            by_day.setdefault(day, {})[sid] = ret
+        endpoint_date = "2026-07-30"
+        for row in envelope.get("periods", []):
+            if (
+                row.get("disposition") != "AVAILABLE"
+                or row.get("lane") != "ACCOUNT"
+                or str(row.get("date")) != endpoint_date
+            ):
+                continue
+            sid = str(row["strategy_id"])
+            capital = Decimal(str(row["beginning_capital_usd"]))
+            period_return = by_day.get(endpoint_date, {}).get(sid, Decimal(0))
+            endpoint_val = str(capital * (Decimal(1) + period_return))
+            matching_allocations.append(
+                {
+                    "as_of_date": endpoint_date,
+                    "current_value": {
+                        "currency": "USD",
+                        "status": "AVAILABLE",
+                        "value": endpoint_val,
+                    },
+                    "scope": "SYSTEMATIC",
+                    "strategy_id": sid,
+                }
+            )
+    else:
+        # No envelope — use default SYSTEMATIC allocations for perimeter.
+        for index in range(9):
+            matching_allocations.append(
+                {
+                    "as_of_date": "2026-07-30",
+                    "current_value": {
+                        "currency": "USD",
+                        "status": "AVAILABLE",
+                        "value": str(1000 + index),
+                    },
+                    "scope": "SYSTEMATIC",
+                    "strategy_id": f"strategy-{index}",
+                }
+            )
+
+    catalog: dict[str, Any] = {
+        "allocations": matching_allocations,
+        "as_of_date": "2026-07-30",
+        "baseline_schema_version": 1,
+        "policy_version": "PORT-PERF-1",
+        "source_artifacts": [],
+        "strategy_returns": list(crosswalk or []),
+    }
+    if envelope is not None:
+        catalog["hwm_inputs"] = envelope
+        anchor = envelope.get("anchor", {})
+        catalog["hwm_acceptance_record"] = {
+            "anchor_date": anchor.get("anchor_date"),
+            "index_base_value": anchor.get("index_base_value"),
+            "hwm_policy_id": anchor.get("hwm_policy_id"),
+        }
+        catalog["source_artifacts"] = [
+            {
+                "artifact_id": "anchor-acceptance-1",
+                "as_of_date": "2026-07-30",
+                "schema_name": "hwm-anchor-acceptance",
+                "schema_version": "1",
+                "sha256": "a" * 64,
+                "source_key": "hwm-anchor-acceptance",
+            },
+            {
+                "artifact_id": "calendar-account-1",
+                "as_of_date": "2026-07-30",
+                "schema_name": "hwm-calendar-authority-account",
+                "schema_version": "1",
+                "sha256": "b" * 64,
+                "source_key": "hwm-calendar-authority-account",
+            },
+            *(extra_source_artifacts or []),
+        ]
+    return catalog
+
+
+def _publish_baseline(
+    root: Path, source: Path, catalog: dict[str, Any]
+) -> dict[str, str]:
+    """Publish a governed baseline generation; returns the report-facing
+    baseline identity (exact generation id + catalog hash)."""
+    content = canonical_json_bytes(catalog)
+    source.write_bytes(content)
+    artifact = SourceArtifact(
+        artifact_id="normalized/portfolio-baseline.json",
+        sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        as_of_date=date(2026, 7, 30),
+        schema_name="portfolio-baseline-catalog",
+        schema_version="1",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 7, 30),
+        adapter=AdapterIdentity("synthetic-baseline", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic control-panel test baseline",
+            fact_types=("portfolio",),
+            observed_start=date(2026, 7, 30),
+            observed_end=date(2026, 7, 30),
+        ),
+        artifacts=(artifact,),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    (manifest_path.parent / "portfolio-baseline.json").write_bytes(content)
+    publish_generation(root, manifest.generation_id)
+    return {
+        "catalog_sha256": artifact.sha256,
+        "generation_id": manifest.generation_id,
+    }
 
 
 def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
@@ -863,7 +1048,6 @@ def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
 def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     report_root = tmp_path / "reporting"
     source_report = tmp_path / "synthetic-portfolio-report-data.json"
-    _publish_report(report_root, source_report, _report())
     decomposition_root = tmp_path / "analytics" / "decomposition"
     correlation_root = tmp_path / "analytics" / "correlation"
     _publish_analytics(
@@ -978,7 +1162,22 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
             },
         },
     )
+    # The governed baseline generation is the panel's reconciliation
+    # authority for the envelope, crosswalk, and perimeter; the accepted
+    # report binds to it by exact generation id and catalog hash, and
+    # carries the governed HWM summary the panel recomputes.
+    baseline_root = tmp_path / "baseline"
+    baseline_catalog = _panel_baseline_catalog()
+    baseline_identity = _publish_baseline(
+        baseline_root, tmp_path / "baseline-catalog.json", baseline_catalog
+    )
+    report = _report()
+    report["baseline"] = baseline_identity
+    _with_hwm_summary(report, freshness, baseline_catalog)
+    _publish_report(report_root, source_report, report)
     return {
+        "baseline": baseline_root,
+        "baseline_identity": baseline_identity,
         "correlation": correlation_root,
         "decomposition": decomposition_root,
         "freshness": freshness,
@@ -1022,12 +1221,14 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     second = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     assert first["panel_id"] == second["panel_id"]
     assert (
@@ -1038,6 +1239,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         inputs["legacy"],
         Path(first["candidate_dir"]),
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     assert result["all_passed"] is True
     assert result["checks_passed"] == result["checks_total"]
@@ -1215,6 +1417,7 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
         decomposition_lenses_root=lens_root,
         decomposition_plan_bundle=plan_bundle,
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(result["candidate_dir"])
     verification = panel.verify_candidate(
@@ -1224,6 +1427,7 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
         decomposition_lenses_root=lens_root,
         decomposition_plan_bundle=plan_bundle,
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     assert verification["all_passed"] is True
     data = json.loads(
@@ -1261,6 +1465,7 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
     tmp_path: Path,
 ) -> None:
     compatible_report = _report()
+    compatible_report["baseline"] = inputs["baseline_identity"]
     for strategy in compatible_report["strategy_summary"]:
         strategy.update(
             {
@@ -1277,7 +1482,9 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
     _publish_report(
         report_root,
         tmp_path / "compatible-portfolio-report-data.json",
-        compatible_report,
+        _with_hwm_summary(
+            compatible_report, inputs["freshness"], _panel_baseline_catalog()
+        ),
     )
     _publish_analytics(
         inputs["correlation"],
@@ -1290,6 +1497,7 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     data = json.loads(
         (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
@@ -1315,6 +1523,7 @@ def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
     tmp_path: Path,
 ) -> None:
     partially_compatible_report = _report()
+    partially_compatible_report["baseline"] = inputs["baseline_identity"]
     eligible = partially_compatible_report["strategy_summary"][0]
     eligible.update(
         {
@@ -1331,7 +1540,9 @@ def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
     _publish_report(
         report_root,
         tmp_path / "partially-compatible-portfolio-report-data.json",
-        partially_compatible_report,
+        _with_hwm_summary(
+            partially_compatible_report, inputs["freshness"], _panel_baseline_catalog()
+        ),
     )
     correlation = _correlation_v2()
     hybrid_composition = correlation["dependence_modes"]["LIVE_PLUS_BACKTEST"][
@@ -1354,6 +1565,7 @@ def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(result["candidate_dir"])
     verification = panel.verify_candidate(
@@ -1361,6 +1573,7 @@ def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
         inputs["legacy"],
         candidate,
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     assert verification["all_passed"] is True
     data = json.loads(
@@ -1489,6 +1702,7 @@ def test_unresolved_versions_suppress_layered_hybrid_analytics(
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     data = json.loads(
         (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
@@ -1529,6 +1743,7 @@ def test_template_line_endings_do_not_change_identity(
         tmp_path / "lf-output",
         lf_template,
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     crlf = panel.build_candidate(
         inputs["report"],
@@ -1536,6 +1751,7 @@ def test_template_line_endings_do_not_change_identity(
         tmp_path / "crlf-output",
         crlf_template,
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     assert lf["panel_id"] == crlf["panel_id"]
 
@@ -1586,6 +1802,7 @@ def test_provider_evidence_overlay_preserves_separate_account_and_provider_dates
         inputs["output"],
         strategy_evidence_path=evidence,
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     data = json.loads(
         (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
@@ -1611,6 +1828,7 @@ def test_source_drift_fails_closed(inputs: dict[str, Path]) -> None:
             inputs["legacy"],
             inputs["output"],
             freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
         )
 
 
@@ -1713,6 +1931,7 @@ def test_freshness_health_is_visible_with_dates_and_reason(
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=health,
+        baseline_root=inputs["baseline"],
     )
     data = json.loads(
         (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
@@ -1842,6 +2061,7 @@ def test_current_panel_fails_closed_without_fact_coverage_matrix(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     report = _report()
+    report["baseline"] = inputs["baseline_identity"]
     report["fact_coverage_matrix"] = []
     report_root = tmp_path / "reporting-without-fact-matrix"
     _publish_report(report_root, tmp_path / "report-without-fact-matrix.json", report)
@@ -1854,10 +2074,13 @@ def test_current_panel_fails_closed_without_fact_coverage_matrix(
             inputs["legacy"],
             inputs["output"],
             freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
         )
 
 
-def test_stale_governed_strategy_blocks_hwm_claim(inputs: dict[str, Path]) -> None:
+def test_stale_governed_strategy_blocks_hwm_claim(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
     payload = json.loads(inputs["freshness"].read_text(encoding="utf-8"))
     payload["assessments"][0].update(
         {
@@ -1871,11 +2094,24 @@ def test_stale_governed_strategy_blocks_hwm_claim(inputs: dict[str, Path]) -> No
     )
     _write_json(inputs["freshness"], payload)
 
+    # The panel reconciles the report's HWM summary unconditionally, so the
+    # accepted report must be republished against the mutated freshness.
+    _republish_report(
+        inputs["report"],
+        tmp_path,
+        _with_hwm_summary(
+            _report_with_baseline(inputs),
+            inputs["freshness"],
+            _panel_baseline_catalog(),
+        ),
+    )
+
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     data = json.loads(
         (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
@@ -1899,6 +2135,7 @@ def test_candidate_tamper_fails_closed(inputs: dict[str, Path]) -> None:
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(result["candidate_dir"])
     (candidate / "app.js").write_text("tampered", encoding="utf-8")
@@ -1908,6 +2145,7 @@ def test_candidate_tamper_fails_closed(inputs: dict[str, Path]) -> None:
             inputs["legacy"],
             candidate,
             freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
         )
 
 
@@ -1917,6 +2155,7 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
@@ -1929,6 +2168,7 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
         qa,
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     pointer = read_current(inputs["output"])
     assert published["publication_state"] == "PUBLISHED"
@@ -1969,6 +2209,7 @@ def test_stable_launcher_browser_qa_proves_redirect(
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "candidate")
@@ -1979,6 +2220,7 @@ def test_stable_launcher_browser_qa_proves_redirect(
         qa,
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     launcher = inputs["output"] / "index.html"
     launcher_qa = _qa(candidate, tmp_path / "launcher")
@@ -2023,6 +2265,7 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "candidate")
@@ -2033,6 +2276,7 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
         qa,
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     launcher = inputs["output"] / "index.html"
     launcher_qa = _qa(candidate, tmp_path / "launcher")
@@ -2076,6 +2320,7 @@ def test_publication_manifest_uses_later_operational_freshness_date(
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
@@ -2087,6 +2332,7 @@ def test_publication_manifest_uses_later_operational_freshness_date(
         qa,
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
 
     generation = inputs["output"] / "generations" / str(published["generation_id"])
@@ -2137,6 +2383,7 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
@@ -2156,6 +2403,7 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
             qa,
             inputs["output"],
             freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
         )
 
     assert read_current(inputs["output"]).generation_id == previous.generation_id
@@ -2170,6 +2418,7 @@ def test_browser_qa_rejects_console_error(
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
@@ -2691,6 +2940,39 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     assert "central_case" in schema["properties"]["dependence_analysis"]["required"]
     assert "central_case_loss" in schema["properties"]["advisory"]["required"]
     assert "underwriting_policy_sha256" in schema["properties"]["meta"]["required"]
+    # The advisory and hwm_summary carry the numerical composite block with
+    # conditional rules: drawdown fields required iff AVAILABLE, reason iff
+    # UNAVAILABLE, and the opposite fields are forbidden in each case.
+    advisory = schema["properties"]["advisory"]
+    assert "hwm_numerical_status" in advisory["required"]
+    advisory_available = next(
+        rule
+        for rule in advisory["allOf"]
+        if rule.get("if", {}).get("properties", {}).get("hwm_numerical_status")
+        == {"const": "AVAILABLE"}
+    )
+    assert advisory_available["then"]["required"] == [
+        "hwm_index",
+        "hwm_current_drawdown",
+        "hwm_maximum_drawdown",
+    ]
+    assert advisory_available["then"]["not"] == {"required": ["hwm_numerical_reason"]}
+    advisory_unavailable = next(
+        rule
+        for rule in advisory["allOf"]
+        if rule.get("if", {}).get("properties", {}).get("hwm_numerical_status")
+        == {"const": "UNAVAILABLE"}
+    )
+    assert advisory_unavailable["then"]["required"] == ["hwm_numerical_reason"]
+    assert "not" in advisory_unavailable["then"]
+    hwm_summary = schema["properties"]["hwm_summary"]
+    assert "hwm_numerical_status" in hwm_summary["required"]
+    assert any(
+        rule.get("then", {}).get("required")
+        == ["hwm_index", "hwm_current_drawdown", "hwm_maximum_drawdown"]
+        and "not" in rule.get("then", {})
+        for rule in hwm_summary["allOf"]
+    )
     blocked = schema["properties"]["hybrid_mode_gate"]["properties"][
         "blocked_strategies"
     ]["items"]
@@ -2981,3 +3263,1055 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
     assert (
         "All eight non-Candidate mobile surfaces meet the 44px target" in interaction_qa
     )
+
+
+# ── hwm_inputs numerical composite (HWM-001) ─────────────────────────────
+
+_PANEL_HWM_DAYS = ("2026-07-28", "2026-07-29", "2026-07-30")
+_PANEL_HWM_CAPITAL = {
+    "strategy-0": {"2026-07-29": "100", "2026-07-30": "110"},
+    "strategy-1": {"2026-07-29": "300", "2026-07-30": "285"},
+}
+_PANEL_HWM_RETURNS = {
+    "2026-07-29": {"strategy-0": "0.10", "strategy-1": "-0.05"},
+    "2026-07-30": {"strategy-0": "0.02", "strategy-1": "0.04"},
+}
+# Numerical keys the composite block contributes to an hwm_summary.
+_NUMERICAL_KEYS = {
+    "hwm_index",
+    "hwm_current_drawdown",
+    "hwm_maximum_drawdown",
+    "hwm_numerical_status",
+    "hwm_numerical_reason",
+}
+_FLOW_ATTESTATION_ARTIFACT = {
+    "artifact_id": "flow-attestation-1",
+    "as_of_date": "2026-07-30",
+    "schema_name": "hwm-flow-attestation",
+    "schema_version": "1",
+    "sha256": "c" * 64,
+    "source_key": "hwm-flow-attestation",
+}
+
+
+def _panel_hwm_envelope(crosswalk: list[dict[str, object]]) -> dict[str, object]:
+    """Synthetic governed envelope over the panel fixture strategies,
+    referencing the hash-bound rollforward crosswalk rows.  Artifact ids
+    resolve against the fixture catalog's source_artifacts."""
+    references = {
+        (str(row["strategy_id"]), str(row["date"])): str(
+            row["account_reconciliation_sha256"]
+        )
+        for row in crosswalk
+    }
+    periods: list[dict[str, object]] = []
+    for day in _PANEL_HWM_DAYS:
+        for index in range(9):
+            strategy_id = f"strategy-{index}"
+            if day == "2026-07-28":
+                periods.append(
+                    {
+                        "strategy_id": strategy_id,
+                        "date": day,
+                        "lane": "ACCOUNT",
+                        "disposition": "EXPECTED_NON_TRADING",
+                        "beginning_capital_usd": None,
+                        "return_source_record_id": None,
+                        "flow_status": "MISSING",
+                        "fx_status": "MISSING",
+                    }
+                )
+            else:
+                periods.append(
+                    {
+                        "strategy_id": strategy_id,
+                        "date": day,
+                        "lane": "ACCOUNT",
+                        "disposition": "AVAILABLE",
+                        "beginning_capital_usd": _PANEL_HWM_CAPITAL.get(
+                            strategy_id, {}
+                        ).get(day, "100"),
+                        "return_source_record_id": references[(strategy_id, day)],
+                        "component_account_ids": [f"account-{index:02d}"],
+                        "flow_status": "OBSERVED",
+                        "fx_status": "NOT_REQUIRED",
+                        "flow_source_record_ids": [],
+                        "fx_source_record_ids": [],
+                    }
+                )
+    return {
+        "contract_version": 1,
+        "anchor": {
+            "anchor_date": "2026-07-28",
+            "index_base_value": "1.0",
+            "hwm_policy_id": "PORT-HWM-3",
+            "acceptance_provenance": {
+                "accepted_at": "2026-07-30T00:00:00Z",
+                "accepted_by": "synthetic",
+                "source_artifact_id": "anchor-acceptance-1",
+                "source_artifact_sha256": "a" * 64,
+            },
+        },
+        "calendar_authorities": [
+            {
+                "lane": "ACCOUNT",
+                "authority_id": "synthetic",
+                "authority_version": "1",
+                "calendar_kind": "EXCHANGE",
+                "admitted_source_artifact_id": "calendar-account-1",
+            }
+        ],
+        "periods": periods,
+        "reconciliation": {
+            "period_capital_method": "NAV_ROLLFORWARD",
+            "allocation_endpoint_check": {"matched": True, "delta_usd": "0"},
+        },
+    }
+
+
+def _panel_hwm_crosswalk() -> list[dict[str, object]]:
+    """Hash-bound rollforward crosswalk rows, shaped exactly as the provider
+    ledger's account-live rollforward emits them (the admitted-envelope
+    evidence path)."""
+    rows: list[dict[str, object]] = []
+    for day in ("2026-07-29", "2026-07-30"):
+        for index in range(9):
+            strategy_id = f"strategy-{index}"
+            reference = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "account_ids": [f"account-{index:02d}"],
+                        "date": day,
+                        "source_record_ids": [f"nav-{strategy_id}-{day}"],
+                        "strategy_id": strategy_id,
+                    }
+                )
+            ).hexdigest()
+            rows.append(
+                {
+                    "account_reconciliation_sha256": reference,
+                    "beginning_capital": _PANEL_HWM_CAPITAL.get(strategy_id, {}).get(
+                        day, "100"
+                    ),
+                    "component_account_count": 1,
+                    "component_account_ids": [f"account-{index:02d}"],
+                    "date": day,
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "flow_timing": "DATE_ONLY_END_OF_DAY",
+                    "provider_id": "synthetic",
+                    "return": _PANEL_HWM_RETURNS[day].get(strategy_id, "0"),
+                    "return_basis": "NET",
+                    "return_type": "TOTAL",
+                    "source_record_ids": [f"nav-{strategy_id}-{day}"],
+                    "strategy_id": strategy_id,
+                }
+            )
+    return rows
+
+
+def _republish_report(root: Path, tmp_path: Path, value: dict[str, object]) -> None:
+    """Publish a new report generation carrying extra fields."""
+    _publish_report(root, tmp_path / "updated-report.json", value)
+
+
+def _candidate_data(candidate: dict[str, object]) -> dict[str, object]:
+    return json.loads(
+        (
+            Path(str(candidate["candidate_dir"])) / "data" / "dashboard_data.json"
+        ).read_text(encoding="utf-8")
+    )
+
+
+def _expected_hwm_numerics() -> dict[str, str]:
+    """Hand-computed composite: day 1 (100*0.10 + 300*(-0.05) + 700*0)/1100,
+    day 2 (110*0.02 + 285*0.04 + 700*0)/1095, geometrically linked."""
+    with localcontext() as ctx:
+        ctx.prec = 34
+        ctx.rounding = ROUND_HALF_EVEN
+        r1 = (Decimal(100) * Decimal("0.10") + Decimal(300) * Decimal("-0.05")) / (
+            Decimal(1100)
+        )
+        r2 = (Decimal(110) * Decimal("0.02") + Decimal(285) * Decimal("0.04")) / (
+            Decimal(1095)
+        )
+        index = Decimal("1.0")
+        peak = index
+        max_drawdown = Decimal("0")
+        for r in (r1, r2):
+            index = index * (1 + r)
+            peak = max(peak, index)
+            max_drawdown = max(max_drawdown, 1 - index / peak)
+    return {
+        "hwm_index": decimal_text(index),
+        "hwm_current_drawdown": decimal_text(Decimal(1) - index / peak),
+        "hwm_maximum_drawdown": decimal_text(max_drawdown),
+    }
+
+
+def _envelope_report(
+    inputs: dict[str, Any], tmp_path: Path
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Publish a governed baseline generation carrying the envelope and
+    crosswalk, and build the matching report (copies equal to the catalog,
+    hwm_summary computed from the catalog).  Returns (report, catalog); the
+    report is NOT yet republished."""
+    crosswalk = _panel_hwm_crosswalk()
+    envelope = _panel_hwm_envelope(crosswalk)
+    catalog = _panel_baseline_catalog(envelope, crosswalk)
+    identity = _publish_baseline(
+        inputs["baseline"], tmp_path / "baseline-envelope.json", catalog
+    )
+    report = _report()
+    report["baseline"] = identity
+    report["hwm_inputs"] = envelope
+    report["strategy_returns"] = crosswalk
+    _with_hwm_summary(report, inputs["freshness"], catalog)
+    return report, catalog
+
+
+def _expect_panel_rejection(
+    inputs: dict[str, Any], tmp_path: Path, report: dict[str, Any], match: str
+) -> None:
+    _republish_report(inputs["report"], tmp_path, report)
+    with pytest.raises(panel.ControlPanelValidationError, match=match):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            tmp_path / "output-2",
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+        )
+
+
+def _expect_catalog_contract_probe(
+    inputs: dict[str, Any],
+    tmp_path: Path,
+    report: dict[str, Any],
+    catalog: dict[str, Any],
+    mutate: Any,
+    match: str,
+) -> None:
+    """Tamper the CATALOG's envelope (the reconciliation authority), publish
+    it as a new baseline generation, rebind the report, and expect the
+    panel's full-contract validator to reject.  The report's carried copy
+    mirrors the tampered catalog, so the validator — not the copy-equality
+    check — is what fires."""
+    tampered = json.loads(json.dumps(catalog))
+    mutate(tampered)
+    identity = _publish_baseline(
+        inputs["baseline"], tmp_path / "tampered-baseline.json", tampered
+    )
+    report["baseline"] = identity
+    report["hwm_inputs"] = tampered["hwm_inputs"]
+    _expect_panel_rejection(inputs, tmp_path, report, match)
+
+
+def test_advisory_carries_numerical_hwm_when_envelope_present(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    data = _candidate_data(candidate)
+
+    expected = _expected_hwm_numerics()
+    advisory = data["advisory"]
+    assert advisory["hwm_numerical_status"] == "AVAILABLE"
+    assert "hwm_numerical_reason" not in advisory
+    assert advisory["hwm_index"] == expected["hwm_index"]
+    assert advisory["hwm_current_drawdown"] == expected["hwm_current_drawdown"]
+    assert advisory["hwm_maximum_drawdown"] == expected["hwm_maximum_drawdown"]
+    assert data["hwm_summary"]["hwm_numerical_status"] == "AVAILABLE"
+    assert (
+        data["hwm_summary"]["hwm_maximum_drawdown"]
+        == (expected["hwm_maximum_drawdown"])
+    )
+
+
+def test_advisory_omits_drawdown_fields_when_envelope_absent(
+    inputs: dict[str, Any],
+) -> None:
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    data = _candidate_data(candidate)
+
+    advisory = data["advisory"]
+    assert advisory["hwm_numerical_status"] == "UNAVAILABLE"
+    assert advisory["hwm_numerical_reason"] == "NO_HWM_INPUTS"
+    assert "hwm_index" not in advisory
+    assert "hwm_current_drawdown" not in advisory
+    assert "hwm_maximum_drawdown" not in advisory
+
+
+def test_panel_rejects_tampered_numerical_hwm_in_report(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    _republish_report(inputs["report"], tmp_path, report)
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    computed = _candidate_data(candidate)["hwm_summary"]
+
+    # Republish the report with a tampered numerical field: the panel's
+    # independent recomputation from the catalog must reject it.
+    tampered = dict(report)
+    tampered["hwm_summary"] = {**computed, "hwm_maximum_drawdown": "9.99"}
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        tampered,
+        "governed HWM summary differs from the accepted portfolio report",
+    )
+
+
+def test_panel_rejects_report_without_hwm_summary(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Deletion tamper: a report that omits the governed HWM summary is
+    rejected unconditionally — the comparison cannot be bypassed."""
+    report = _report_with_baseline(inputs)
+    assert "hwm_summary" not in report
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        report,
+        "accepted portfolio report lacks the governed HWM summary",
+    )
+
+
+def test_panel_rejects_permissive_readiness_when_numerical_hwm_unavailable(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Readiness tamper: with the numerical composite UNAVAILABLE the report
+    must gate advisory readiness to DO_NOT_EXPAND_SYSTEMATIC_RISK; a
+    permissive row is rejected against the panel's recomputed state."""
+    report = _report_with_baseline(inputs)
+    _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog())
+    assert report["hwm_summary"]["hwm_numerical_status"] == "UNAVAILABLE"
+    report["portfolio_summary"] = [
+        (
+            {**row, "value": "ELIGIBLE_FOR_REVIEW"}
+            if row["metric"] == "Advisory readiness"
+            else row
+        )
+        for row in report["portfolio_summary"]
+    ]
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        report,
+        "report advisory readiness ignores the numerical HWM gate",
+    )
+
+
+def test_panel_all_unavailable_day_fails_closed(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Regression: a required day whose members are ALL UNAVAILABLE is a
+    coverage gap.  The catalog's envelope carries the gap; the panel
+    recomputes INCOMPLETE_PERIODS from the catalog and the advisory shows
+    the composite as UNAVAILABLE — the day is never silently skipped."""
+    crosswalk = _panel_hwm_crosswalk()
+    envelope = _panel_hwm_envelope(crosswalk)
+    for row in envelope["periods"]:
+        if row["date"] == "2026-07-29":
+            row["disposition"] = "UNAVAILABLE"
+            row["beginning_capital_usd"] = None
+            row["return_source_record_id"] = None
+    catalog = _panel_baseline_catalog(envelope, crosswalk)
+    identity = _publish_baseline(
+        inputs["baseline"], tmp_path / "baseline-gap.json", catalog
+    )
+    report = _report()
+    report["baseline"] = identity
+    report["hwm_inputs"] = envelope
+    report["strategy_returns"] = crosswalk
+    _with_hwm_summary(report, inputs["freshness"], catalog)
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    data = _candidate_data(candidate)
+    assert data["advisory"]["hwm_numerical_status"] == "UNAVAILABLE"
+    assert data["advisory"]["hwm_numerical_reason"] == "INCOMPLETE_PERIODS"
+    assert "hwm_index" not in data["advisory"]
+
+
+def test_panel_rejects_coherently_tampered_report_copies(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Coordinated tamper: the report's envelope, crosswalk, and claimed
+    hwm_summary are coherently rewritten (capital 100 -> 999 everywhere in
+    the report's copies), but the catalog is pristine.  The panel's
+    authority is the catalog, so the forged report is rejected."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+    tampered_envelope = json.loads(json.dumps(report["hwm_inputs"]))
+    tampered_crosswalk = json.loads(json.dumps(report["strategy_returns"]))
+    for row in tampered_envelope["periods"]:
+        if row["disposition"] == "AVAILABLE":
+            row["beginning_capital_usd"] = "999"
+    for row in tampered_crosswalk:
+        row["beginning_capital"] = "999"
+    # Compute allocations matching the tampered endpoint so the forgery is
+    # internally coherent (endpoint recomputation passes).
+    from decimal import Decimal as _Decimal
+
+    forged_allocations: list[dict[str, Any]] = []
+    by_day: dict[str, dict[str, _Decimal]] = {}
+    for rw in tampered_crosswalk:
+        sid = str(rw["strategy_id"])
+        day = str(rw["date"])
+        ret = _Decimal(str(rw.get("return", "0")))
+        by_day.setdefault(day, {})[sid] = ret
+    endpoint_date = "2026-07-30"
+    for row in tampered_envelope.get("periods", []):
+        if (
+            row.get("disposition") != "AVAILABLE"
+            or row.get("lane") != "ACCOUNT"
+            or str(row.get("date")) != endpoint_date
+        ):
+            continue
+        sid = str(row["strategy_id"])
+        capital = _Decimal(str(row["beginning_capital_usd"]))
+        period_return = by_day.get(endpoint_date, {}).get(sid, _Decimal(0))
+        endpoint_val = str(capital * (_Decimal(1) + period_return))
+        forged_allocations.append(
+            {
+                "as_of_date": endpoint_date,
+                "current_value": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": endpoint_val,
+                },
+                "scope": "SYSTEMATIC",
+                "strategy_id": sid,
+            }
+        )
+    forged_view = {
+        "as_of_date": catalog["as_of_date"],
+        "allocations": forged_allocations,
+        "hwm_acceptance_record": catalog.get("hwm_acceptance_record"),
+        "hwm_inputs": tampered_envelope,
+        "source_artifacts": catalog["source_artifacts"],
+        "strategy_returns": tampered_crosswalk,
+    }
+    forged_numerical = panel._compute_panel_numerical_hwm(forged_view)
+    assert forged_numerical["hwm_numerical_status"] == "AVAILABLE"
+    assert forged_numerical["hwm_index"] != report["hwm_summary"]["hwm_index"]
+    report["hwm_inputs"] = tampered_envelope
+    report["strategy_returns"] = tampered_crosswalk
+    report["hwm_summary"] = {
+        **{
+            key: value
+            for key, value in report["hwm_summary"].items()
+            if key not in _NUMERICAL_KEYS
+        },
+        **forged_numerical,
+    }
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        report,
+        "report hwm_inputs differs from the governed baseline catalog",
+    )
+
+
+def test_panel_rejects_truncated_envelope(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """A truncated report envelope copy (one period row dropped) no longer
+    matches the governed catalog."""
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    report["hwm_inputs"]["periods"] = report["hwm_inputs"]["periods"][:-1]
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        report,
+        "report hwm_inputs differs from the governed baseline catalog",
+    )
+
+
+def test_panel_rejects_envelope_missing_date(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """A whole required day missing from the report's envelope copy no longer
+    matches the governed catalog."""
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    report["hwm_inputs"]["periods"] = [
+        row for row in report["hwm_inputs"]["periods"] if row["date"] != "2026-07-29"
+    ]
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        report,
+        "report hwm_inputs differs from the governed baseline catalog",
+    )
+
+
+def test_panel_rejects_envelope_capital_mismatch(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """A tampered crosswalk copy (capital 100 -> 999 in the report's
+    strategy_returns) no longer matches the governed catalog."""
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    report["strategy_returns"][0]["beginning_capital"] = "999"
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        report,
+        "report strategy_returns differ from the governed baseline catalog",
+    )
+
+
+def test_panel_rejects_envelope_component_mismatch(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """A tampered component-account copy in the report's envelope no longer
+    matches the governed catalog."""
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    available_row = report["hwm_inputs"]["periods"][9]
+    assert available_row["disposition"] == "AVAILABLE"
+    available_row["component_account_ids"] = ["account-08"]
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        report,
+        "report hwm_inputs differs from the governed baseline catalog",
+    )
+
+
+def test_panel_fails_closed_without_baseline_root(inputs: dict[str, Any]) -> None:
+    """The baseline generation is a mandatory input: no root, no panel."""
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="baseline root is required for governed HWM reconciliation",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+        )
+
+
+def test_panel_fails_closed_when_baseline_generation_is_unresolvable(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """A report binding to a baseline generation that does not exist fails
+    closed."""
+    report = _report()
+    report["baseline"] = {
+        "catalog_sha256": "f" * 64,
+        "generation_id": "e" * 64,
+    }
+    _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog())
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        report,
+        "governed baseline generation is missing or failed integrity",
+    )
+
+
+def test_panel_rejects_anchor_base_value_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, catalog = _envelope_report(inputs, tmp_path)
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        lambda catalog: catalog["hwm_inputs"]["anchor"].update(
+            {"index_base_value": "999"}
+        ),
+        "hwm_inputs index_base_value must be 1.0",
+    )
+
+
+def test_panel_rejects_anchor_policy_id_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, catalog = _envelope_report(inputs, tmp_path)
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        lambda catalog: catalog["hwm_inputs"]["anchor"].update(
+            {"hwm_policy_id": "PORT-HWM-2"}
+        ),
+        "hwm_inputs hwm_policy_id must be PORT-HWM-3",
+    )
+
+
+def test_panel_rejects_arbitrary_provenance_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, catalog = _envelope_report(inputs, tmp_path)
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        lambda catalog: catalog["hwm_inputs"]["anchor"]["acceptance_provenance"].update(
+            {"source_artifact_id": "arbitrary-core-artifact"}
+        ),
+        "does not resolve to an admitted hwm-anchor-acceptance artifact",
+    )
+
+
+def test_panel_rejects_empty_calendar_authorities_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, catalog = _envelope_report(inputs, tmp_path)
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        lambda catalog: catalog["hwm_inputs"].update({"calendar_authorities": []}),
+        "hwm_inputs calendar_authorities must have at least one entry",
+    )
+
+
+def test_panel_rejects_invalid_reconciliation_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, catalog = _envelope_report(inputs, tmp_path)
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        lambda catalog: catalog["hwm_inputs"]["reconciliation"].update(
+            {"period_capital_method": "SNAPSHOT_BACKFILL"}
+        ),
+        "hwm_inputs period_capital_method must be NAV_ROLLFORWARD",
+    )
+
+
+def test_panel_rejects_confirmed_zero_with_empty_flow_evidence(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """The full contract requires non-empty attestation evidence arrays:
+    CONFIRMED_ZERO with an empty flow evidence list is rejected."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        row = catalog["hwm_inputs"]["periods"][0]
+        row["flow_status"] = "CONFIRMED_ZERO"
+        row["flow_source_record_ids"] = []
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "CONFIRMED_ZERO flow_status requires non-empty flow_source_record_ids",
+    )
+
+
+def test_panel_rejects_confirmed_one_with_empty_fx_evidence(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        row = catalog["hwm_inputs"]["periods"][0]
+        row["fx_status"] = "CONFIRMED_ONE"
+        row["fx_source_record_ids"] = []
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "CONFIRMED_ONE fx_status requires non-empty fx_source_record_ids",
+    )
+
+
+def test_panel_rejects_non_string_component_account_id(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        available = catalog["hwm_inputs"]["periods"][9]
+        assert available["disposition"] == "AVAILABLE"
+        available["component_account_ids"] = [7]
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "hwm_inputs component_account_ids must be a non-empty list",
+    )
+
+
+def test_panel_rejects_empty_periods(inputs: dict[str, Any], tmp_path: Path) -> None:
+    """An envelope with no periods cannot be the governed artifact, even
+    before keyspace reconciliation."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        catalog["hwm_inputs"]["periods"] = []
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "hwm_inputs periods must have at least one entry",
+    )
+
+
+def test_panel_rejects_available_with_missing_flow_status(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """An AVAILABLE row whose flow evidence is MISSING was never admitted;
+    the panel rejects it."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        available = catalog["hwm_inputs"]["periods"][9]
+        assert available["disposition"] == "AVAILABLE"
+        available["flow_status"] = "MISSING"
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "hwm_inputs AVAILABLE period must not have MISSING flow_status",
+    )
+
+
+def test_panel_rejects_available_with_missing_fx_status(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        available = catalog["hwm_inputs"]["periods"][9]
+        assert available["disposition"] == "AVAILABLE"
+        available["fx_status"] = "MISSING"
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "hwm_inputs AVAILABLE period must not have MISSING fx_status",
+    )
+
+
+def test_panel_rejects_fabricated_attestation_id(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """A non-empty but fabricated CONFIRMED_ZERO evidence id does not
+    resolve to an admitted attestation artifact."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        row = catalog["hwm_inputs"]["periods"][0]
+        row["flow_status"] = "CONFIRMED_ZERO"
+        row["flow_source_record_ids"] = ["fabricated-flow-attestation"]
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "does not resolve to an admitted hwm-flow-attestation artifact",
+    )
+
+
+def test_panel_rejects_wrong_role_attestation_id(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """A CONFIRMED_ZERO evidence id resolving to a non-attestation role is
+    rejected."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        row = catalog["hwm_inputs"]["periods"][0]
+        row["flow_status"] = "CONFIRMED_ZERO"
+        row["flow_source_record_ids"] = ["calendar-account-1"]
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "does not resolve to an admitted hwm-flow-attestation artifact",
+    )
+
+
+def test_panel_rejects_available_confirmed_attestation_payload_unverifiable(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """An AVAILABLE row carrying CONFIRMED_ZERO is rejected at the panel: the
+    attestation payload content is not reachable through the catalog
+    binding, so the assertion cannot be trusted for the composite."""
+    crosswalk = _panel_hwm_crosswalk()
+    envelope = _panel_hwm_envelope(crosswalk)
+    available = envelope["periods"][9]
+    assert available["disposition"] == "AVAILABLE"
+    available["flow_status"] = "CONFIRMED_ZERO"
+    available["flow_source_record_ids"] = ["flow-attestation-1"]
+    catalog = _panel_baseline_catalog(
+        envelope, crosswalk, extra_source_artifacts=[_FLOW_ATTESTATION_ARTIFACT]
+    )
+    identity = _publish_baseline(
+        inputs["baseline"], tmp_path / "baseline-attested.json", catalog
+    )
+    report = _report()
+    report["baseline"] = identity
+    report["hwm_inputs"] = envelope
+    report["strategy_returns"] = crosswalk
+    _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog())
+    report["hwm_summary"]["hwm_numerical_status"] = "UNAVAILABLE"
+    report["hwm_summary"]["hwm_numerical_reason"] = "NO_HWM_INPUTS"
+    _expect_panel_rejection(
+        inputs,
+        tmp_path,
+        report,
+        "hwm_inputs AVAILABLE period attestation payload is not verifiable "
+        "through the catalog binding",
+    )
+
+
+def test_panel_accepts_non_available_confirmed_attestation(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Positive control: a non-AVAILABLE row with a CONFIRMED_ZERO flow
+    attestation resolving to an admitted role artifact passes validation;
+    the day becomes a required-but-unavailable period."""
+    crosswalk = _panel_hwm_crosswalk()
+    envelope = _panel_hwm_envelope(crosswalk)
+    row = envelope["periods"][0]
+    assert row["disposition"] == "EXPECTED_NON_TRADING"
+    row["disposition"] = "UNAVAILABLE"
+    row["flow_status"] = "CONFIRMED_ZERO"
+    row["flow_source_record_ids"] = ["flow-attestation-1"]
+    catalog = _panel_baseline_catalog(
+        envelope, crosswalk, extra_source_artifacts=[_FLOW_ATTESTATION_ARTIFACT]
+    )
+    identity = _publish_baseline(
+        inputs["baseline"], tmp_path / "baseline-attested.json", catalog
+    )
+    report = _report()
+    report["baseline"] = identity
+    report["hwm_inputs"] = envelope
+    report["strategy_returns"] = crosswalk
+    _with_hwm_summary(report, inputs["freshness"], catalog)
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    data = _candidate_data(candidate)
+    assert data["advisory"]["hwm_numerical_status"] == "UNAVAILABLE"
+    assert data["advisory"]["hwm_numerical_reason"] == "INCOMPLETE_PERIODS"
+
+
+def test_panel_rejects_policy_exclusion_fraud_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Probe: catalog envelope rows relabeled EXCLUDED_BY_POLICY without an
+    admitted policy exclusion are rejected by the shared contract validator
+    at the panel boundary."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        for row in catalog["hwm_inputs"]["periods"]:
+            if row["strategy_id"] == "strategy-1":
+                row["disposition"] = "EXCLUDED_BY_POLICY"
+                row["beginning_capital_usd"] = None
+                row["return_source_record_id"] = None
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "is not named in the admitted PORT-HWM-3 exclusions",
+    )
+
+
+def test_panel_rejects_unreconciled_endpoint_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Probe: a failed or non-zero allocation endpoint check blocks the
+    panel build — matched: false / delta 999 is never reconciled."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        catalog["hwm_inputs"]["reconciliation"]["allocation_endpoint_check"] = {
+            "matched": False,
+            "delta_usd": "999",
+        }
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "delta_usd differs from the recomputed delta",
+    )
+
+
+def test_panel_rejects_incomplete_envelope_probe(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """Probe: a structurally incomplete envelope (only a periods key) is
+    rejected by the closed-shape check at the panel boundary."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        catalog["hwm_inputs"] = {"periods": catalog["hwm_inputs"]["periods"]}
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "hwm_inputs envelope shape differs",
+    )
+
+
+# ---------------------------------------------------------------------------
+# QC8 regression: full consumption-boundary context enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_panel_rejects_later_anchor_with_truncated_history(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """QC8: a fabricated later anchor (acceptance record says
+    2026-07-28, envelope claims 2026-07-29) is rejected by the panel's
+    anchor-content cross-check."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        catalog["hwm_inputs"]["anchor"]["anchor_date"] = "2026-07-29"
+        # Remove 2026-07-28 periods (would be outside new keyspace).
+        catalog["hwm_inputs"]["periods"] = [
+            p for p in catalog["hwm_inputs"]["periods"] if p["date"] != "2026-07-28"
+        ]
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "anchor anchor_date disagrees with the admitted hwm-anchor-acceptance record",
+    )
+
+
+def test_panel_rejects_inflated_allocation_unchanged_declaration(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """QC8: an allocation inflated 10x with the envelope still declaring
+    {matched: true, delta_usd: "0"} is rejected by the panel's endpoint
+    recomputation."""
+    from decimal import Decimal as _D
+
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        for alloc in catalog["allocations"]:
+            if alloc.get("scope") == "SYSTEMATIC" and alloc.get("current_value"):
+                alloc["current_value"]["value"] = str(
+                    _D(alloc["current_value"]["value"]) * 10
+                )
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "allocation endpoint check does not reconcile",
+    )
+
+
+def test_panel_rejects_missing_acceptance_record_fails_closed(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """QC8: if the catalog lacks hwm_acceptance_record, the panel
+    consumer fails closed — never falls back to declaration-only mode."""
+    report, catalog = _envelope_report(inputs, tmp_path)
+
+    def mutate(catalog: dict[str, Any]) -> None:
+        catalog.pop("hwm_acceptance_record", None)
+
+    _expect_catalog_contract_probe(
+        inputs,
+        tmp_path,
+        report,
+        catalog,
+        mutate,
+        "hwm_inputs consumption context is incomplete",
+    )
+
+
+def test_panel_valid_envelope_with_full_context_passes(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    """QC8 parity: a valid envelope with full consumption context
+    (acceptance_record + allocations) passes the panel's boundary check
+    and produces an AVAILABLE index."""
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    data = _candidate_data(candidate)
+    assert data["advisory"]["hwm_numerical_status"] == "AVAILABLE"
+    assert "hwm_index" in data["advisory"]

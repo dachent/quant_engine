@@ -477,3 +477,51 @@ def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
     )
     assert calls[1][0][0:2] == ("portfolio_decomposition.py", "stage")
     assert calls[2][0][0:2] == ("portfolio_decomposition.py", "publish")
+
+
+def test_panel_invocations_carry_baseline_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: every panel build/verify/publish invocation must carry
+    --baseline-root (the panel's governed reconciliation authority)."""
+    recipe = _recipe(tmp_path)
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        return {"candidate_dir": str(tmp_path / "candidate")}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    analytics = {
+        "decomposition_root": str(tmp_path / "decomposition"),
+        "decomposition_lenses_root": str(tmp_path / "lenses"),
+        "correlation_root": str(tmp_path / "correlation"),
+        "weekly_root": str(tmp_path / "weekly"),
+    }
+    baseline_root = tmp_path / "stages" / "baseline"
+    builder.build_panel_candidate(
+        recipe,
+        tmp_path / "stages" / "report",
+        baseline_root,
+        tmp_path / "bundle",
+        analytics,
+        tmp_path / "freshness.json",
+        tmp_path / "stages" / "panel",
+    )
+    builder.publish_panel(
+        recipe,
+        tmp_path / "stages" / "report",
+        baseline_root,
+        tmp_path / "bundle",
+        analytics,
+        tmp_path / "freshness.json",
+        tmp_path / "candidate",
+        tmp_path / "qa",
+        tmp_path / "stages" / "panel",
+    )
+
+    assert [call[1] for call in calls] == ["build", "verify", "publish"]
+    for call in calls:
+        assert call[0] == "portfolio_control_panel.py"
+        assert "--baseline-root" in call
+        assert call[call.index("--baseline-root") + 1] == str(baseline_root)

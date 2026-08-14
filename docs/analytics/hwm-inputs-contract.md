@@ -14,9 +14,36 @@ pre-envelope builder (golden regression in
 
 The `hwm_inputs` envelope is the **input contract** consumed by the HWM
 index engine (issue #277).  The builder populates and validates it; the
-consumer reads only from `catalog["hwm_inputs"]["periods"]`.  The #277
-wiring into `portfolio_report.py` / `portfolio_control_panel.py` is NOT
-in this change — it stays on a dedicated hold branch.
+consumers read only from `catalog["hwm_inputs"]["periods"]`.
+
+The #277 consumers are implemented (branch `feat/hwm-001-composite`):
+
+- `tools/portfolio_report.py` (`_hwm_numerical_from_envelope`, called from
+  `build_report_data`) computes the composite daily systematic return
+  series from the envelope's AVAILABLE periods — per date, the
+  beginning-capital-weighted member return with returns resolved through
+  the hash-bound `strategy_returns` crosswalk — and hands it to the ledger
+  kernel (`compute_full_systematic_hwm_index`).  The numerical block
+  (`hwm_numerical_status`, `hwm_numerical_reason`, and when AVAILABLE
+  `hwm_index` / `hwm_current_drawdown` / `hwm_maximum_drawdown`) publishes
+  on the report's `hwm_summary` whether or not a freshness assessment is
+  supplied.  An absent envelope yields `UNAVAILABLE`/`NO_HWM_INPUTS`; any
+  internal defect, an all-UNAVAILABLE required day, a duplicate or
+  mismatched return reference, or an unresolved reference yields
+  `UNAVAILABLE` with a structured reason — never an error and never a
+  fallback.  An in-scope perimeter with numerical status UNAVAILABLE gates
+  the report's advisory readiness to `DO_NOT_EXPAND_SYSTEMATIC_RISK` (the
+  gate only tightens the replayed control action).
+- `tools/portfolio_control_panel.py` reconciles the report's claims against
+  the governed baseline generation named by the report's baseline
+  reference (manifest and catalog hash-verified through the core
+  publication machinery), validates the catalog's envelope against the full
+  contract above, recomputes the composite from the CATALOG, and requires
+  the report's carried copies (`hwm_inputs`, `strategy_returns`, perimeter,
+  as-of) to equal the catalog exactly.  The report's envelope remains a
+  display view; authority for reconciliation is the catalog.  Any
+  divergence, a missing baseline root, or an unresolvable generation fails
+  the panel build closed.
 
 ## Envelope structure
 
@@ -46,11 +73,18 @@ validation runs only after provider artifacts are admitted), and its hash
 must match `source_artifact_sha256`.  An observation artifact (e.g.
 `alpaca-events`) is never a valid acceptance authority.
 
-**Anchor content cross-check:** the builder parses the admitted acceptance
-record and requires exact equality of `anchor_date`, `index_base_value`,
-and `hwm_policy_id` between the envelope and the record.  The expected
-keyspace is derived from the anchor only after this cross-check, so a
-fabricated later anchor cannot truncate the keyspace.
+**Anchor content cross-check:** the shared validator requires exact equality
+of `anchor_date`, `index_base_value`, and `hwm_policy_id` between the
+envelope and the hash-verified acceptance record.  The builder embeds the
+parsed acceptance record into the catalog at build time
+(`catalog["hwm_acceptance_record"]`); both consumers (report and panel)
+read it from the catalog and pass it to the shared validator.  The
+cross-check runs at ALL THREE boundaries — builder admission, report
+consumption, and panel consumption — against the same hash-verified record.
+When the acceptance record is absent from the catalog, consumers fail closed
+(MISSING_CONSUMPTION_CONTEXT).  The expected keyspace is derived from the
+anchor only after this cross-check, so a fabricated later anchor cannot
+truncate the keyspace.
 
 ### `calendar_authorities`
 
@@ -130,6 +164,14 @@ set; omission cannot masquerade as exclusion.
 account; for `ACCOUNT`-lane `AVAILABLE` rows each entry must additionally
 be MAPPED-assigned to the row's strategy on the row's date.
 
+**Lane enforcement:** every `AVAILABLE` row MUST use lane `ACCOUNT`.
+`PROVIDER`- and `LEGACY`-lane `AVAILABLE` rows are rejected fail-closed at
+both admission and consumption boundaries because no hash-bound provider or
+legacy capital evidence is admitted (deferred admission requirements 4 and
+5).  This check lives in the shared validator so every caller —
+admission builder, report consumer, and panel consumer — enforces it
+identically.
+
 **Capital provenance (never a trusted label):**
 
 - `ACCOUNT`-lane `AVAILABLE` capital is verified against the hash-bound
@@ -157,15 +199,20 @@ be MAPPED-assigned to the row's strategy on the row's date.
 | `allocation_endpoint_check.matched` | Boolean; must be `true`. |
 | `allocation_endpoint_check.delta_usd` | Decimal string; must equal the independently recomputed delta. |
 
-The allocation snapshot is endpoint reconciliation only.  The builder
-recomputes the check independently: at the latest systematic allocation
-snapshot date, each `ACCOUNT`-lane `AVAILABLE` period contributes its
-rollforward-verified ending capital (`beginning_capital × (1 + return)`
-from the same `strategy_returns` row); the sum is compared against the
-allocation snapshot total over exactly those strategies.  Any non-zero
-recomputed delta aborts the build (unreconciled capital is rejected); the
-declared `delta_usd` must equal the recomputed delta (`"0"` in canonical
-decimal text) and `matched` must be `true`.
+The allocation snapshot is endpoint reconciliation only.  The shared
+validator recomputes the check independently at all three boundaries
+(builder admission, report consumption, panel consumption): at the latest
+systematic allocation snapshot date, each `ACCOUNT`-lane `AVAILABLE` period
+contributes its rollforward-verified ending capital (`beginning_capital ×
+(1 + return)` from the same `strategy_returns` row); the sum is compared
+against the allocation snapshot total over exactly those strategies.  The
+builder and both consumers pass `catalog["allocations"]` into the validator
+as the `allocations` parameter.  Any non-zero recomputed delta aborts (code
+`ENDPOINT_NOT_RECONCILED`); the declared `delta_usd` must equal the
+recomputed delta (`"0"` in canonical decimal text) and `matched` must be
+`true`.  There is no declaration-only fallback at consumption; when the
+allocations snapshot is absent from the catalog, consumers fail closed
+(MISSING_CONSUMPTION_CONTEXT).
 
 ## Governed HWM source roles
 
@@ -221,9 +268,13 @@ corresponding envelope content can validate:
    plus any governed HWM evidence sources the envelope references.
 2. When the spec declares the source, the builder loads the JSON and
    validates every cross-reference, disposition rule, keyspace-completeness
-   rule, capital-provenance rule, and the endpoint reconciliation against
-   the COMPLETE catalog context (provider artifacts included), then
-   populates `catalog["hwm_inputs"]`.
+   rule, capital-provenance rule, lane-enforcement rule, and the endpoint
+   reconciliation against the COMPLETE catalog context (provider artifacts
+   included) via the shared validator
+   (`validate_hwm_inputs_envelope`), then populates
+   `catalog["hwm_inputs"]`.  Admission-only checks (CONFIRMED_* attestation
+   content verification, account-assignment mapping) run afterward and are
+   clearly separated from the shared validation.
 3. When the spec omits the source, the builder omits the key entirely.
 4. The #277 HWM index engine reads only `catalog["hwm_inputs"]["periods"]`
    and filters to `disposition == "AVAILABLE"` rows.
@@ -240,6 +291,26 @@ The HWM index engine expects from `hwm_inputs.periods`:
 The engine does NOT consume `calendar_authorities`, `reconciliation`,
 or non-`AVAILABLE` periods directly — those are governance interfaces
 consumed by the admission pipeline.
+
+Both #277 consumers AND the admission builder enforce the full contract
+via the shared ledger-package validator
+(`quant_engine.portfolio_ledger.validate_hwm_inputs_envelope`): a
+hash-bound but semantically invalid generation publishes nothing.  The
+builder calls the validator at admission with its full context
+(allocations for endpoint recomputation, the parsed acceptance record for
+anchor-content cross-check); consumers call it with only the catalog-bound
+context.  Two consumption-side rules follow from that boundary: an
+AVAILABLE row with a MISSING flow or fx status is invalid, and an
+AVAILABLE row carrying a CONFIRMED_ZERO/CONFIRMED_ONE attestation is
+rejected, because the attestation payload content is verifiable only at
+admission (the governed source files live outside the generation stores
+the consumers can reach).  **hwm-001 unification note:** the builder
+previously admitted content-verified CONFIRMED_* statuses on AVAILABLE
+rows.  As of the hwm-001 consolidation fix, the shared validator's
+category rejection of CONFIRMED_* on AVAILABLE rows applies universally
+at both admission and consumption.  The builder still verifies CONFIRMED_*
+attestation content on non-AVAILABLE rows (admission-only).  CONFIRMED_*
+assertions on non-AVAILABLE rows remain valid envelope content.
 
 ## Fail-closed invariants
 

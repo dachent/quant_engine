@@ -38,11 +38,14 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import (
     CashFlow,
+    HwmInputsContractError,
     MappingStatus,
     NavObservation,
     ObservedAmount,
     Transaction,
     decimal_text,
+    hwm_policy_exclusions,
+    validate_hwm_inputs_envelope,
 )
 
 
@@ -2341,18 +2344,13 @@ def _iso_datetime(value: object, field_name: str) -> str:
 
 def _hwm_policy_exclusions() -> dict[str, date]:
     """Load the admitted PORT-HWM-3 perimeter exclusions (strategy → effective
-    date) from the versioned repository contract."""
+    date) from the versioned repository contract, extracted by the shared
+    ledger-package helper so admission and consumption share one rule."""
     policy = _load_json(_HWM_POLICY_PATH, "hwm policy contract")
-    if policy.get("policy_id") != "PORT-HWM-3":
-        raise BaselineValidationError("hwm policy contract must be PORT-HWM-3")
-    perimeter = _object(policy.get("material_perimeter"), "hwm policy perimeter")
-    exclusions: dict[str, date] = {}
-    for item in _objects(perimeter.get("exclusions"), "hwm policy exclusions"):
-        strategy_id = _text(item.get("strategy_id"), "hwm policy exclusion")
-        exclusions[strategy_id] = _date(
-            item.get("effective_date"), "hwm policy exclusion effective_date"
-        )
-    return exclusions
+    try:
+        return hwm_policy_exclusions(policy)
+    except HwmInputsContractError as exc:
+        raise BaselineValidationError(str(exc)) from exc
 
 
 def _hwm_expected_keyspace(
@@ -2462,7 +2460,7 @@ def _load_hwm_inputs_envelope(
     assignments: Sequence[Mapping[str, Any]],
     strategy_returns: Sequence[Mapping[str, Any]],
     allocations: Sequence[Mapping[str, Any]],
-) -> tuple[dict[str, Any], SourceArtifact, dict[str, Any]] | None:
+) -> tuple[dict[str, Any], SourceArtifact, dict[str, Any], dict[str, Any]] | None:
     """Load and semantically validate the optional hwm_inputs envelope.
 
     When the spec declares an ``hwm-inputs`` source, load the JSON file,
@@ -2735,6 +2733,31 @@ def _load_hwm_inputs_envelope(
             _text(row.get("date"), "strategy_returns.date"),
         )
         rollforward[key] = row
+
+    # --- shared admission/consumption validation ---
+    # The ledger-package validator is the single authority for the hwm_inputs
+    # contract.  Run it at admission (with the builder's full context) so
+    # every check that both consumers enforce is also enforced here.
+    perimeter = sorted(
+        {
+            _text(item["strategy_id"], "allocation.strategy_id")
+            for item in allocations
+            if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
+        }
+    )
+    try:
+        validate_hwm_inputs_envelope(
+            envelope,
+            as_of_date=as_of,
+            perimeter=perimeter,
+            crosswalk=strategy_returns,
+            artifact_roles=artifact_registry,
+            policy_exclusions=policy_exclusions,
+            allocations=allocations,
+            acceptance_record=acceptance_doc,
+        )
+    except HwmInputsContractError as exc:
+        raise BaselineValidationError(str(exc)) from exc
 
     # --- periods ---
     periods = _objects(envelope["periods"], "hwm_inputs.periods")
@@ -3107,7 +3130,7 @@ def _load_hwm_inputs_envelope(
         "sha256": actual_hash,
         "source_key": "hwm-inputs",
     }
-    return envelope, hwm_artifact, hwm_link
+    return envelope, hwm_artifact, hwm_link, acceptance_doc
 
 
 def build_catalog(
@@ -3269,7 +3292,12 @@ def build_catalog(
     hwm_inputs_artifact: SourceArtifact | None = None
     hwm_inputs_link: dict[str, Any] | None = None
     if hwm_inputs_result is not None:
-        hwm_inputs_envelope, hwm_inputs_artifact, hwm_inputs_link = hwm_inputs_result
+        (
+            hwm_inputs_envelope,
+            hwm_inputs_artifact,
+            hwm_inputs_link,
+            hwm_acceptance_record,
+        ) = hwm_inputs_result
     layer_metrics, live_metrics, implementation_gaps = _normalize_strategy_evidence(
         paths, strategy_aliases
     )
@@ -3429,6 +3457,10 @@ def build_catalog(
     }
     if hwm_inputs_envelope is not None:
         catalog["hwm_inputs"] = hwm_inputs_envelope
+        # Embed the hash-verified acceptance record so consumers can
+        # perform the anchor-content cross-check without access to the
+        # governed source files.
+        catalog["hwm_acceptance_record"] = hwm_acceptance_record
     if provenance.get("strategy_version_catalog") is not None:
         catalog["strategy_version_catalog"] = provenance["strategy_version_catalog"]
     catalog_bytes = canonical_json_bytes(catalog)

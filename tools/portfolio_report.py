@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from datetime import date, datetime, time
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import hashlib
 import io
 import json
@@ -40,8 +40,12 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
+    HwmInputsContractError,
+    compute_full_systematic_hwm_index,
     decimal_text,
     governed_hwm_coverage,
+    hwm_policy_exclusions,
+    validate_hwm_inputs_envelope,
 )
 
 
@@ -631,6 +635,11 @@ def _portfolio_summary(
     catalog: Mapping[str, Any], hwm_summary: Mapping[str, Any] | None = None
 ) -> list[dict[str, Any]]:
     replay = _object(catalog.get("replay"), "replay")
+    # The coverage fields exist only when a freshness assessment was
+    # supplied; a numerical-only hwm_summary (no freshness) falls back to
+    # the replayed values exactly as the pre-envelope report did.
+    nav_coverage = hwm_summary.get("nav_coverage") if hwm_summary is not None else None
+    coverage_status = hwm_summary.get("status") if hwm_summary is not None else None
     return [
         {
             "metric": "Baseline replay",
@@ -660,14 +669,12 @@ def _portfolio_summary(
             "metric": "NAV coverage",
             "status": (
                 "COMPLETE_WITHIN_DECLARED_BOUNDARY"
-                if hwm_summary is not None and hwm_summary.get("nav_coverage") == "1"
+                if nav_coverage == "1"
                 else "PARTIAL"
             ),
             "unit": "ratio",
             "value": (
-                hwm_summary.get("nav_coverage")
-                if hwm_summary is not None
-                else replay.get("nav_coverage")
+                nav_coverage if nav_coverage is not None else replay.get("nav_coverage")
             ),
         },
         {
@@ -679,12 +686,12 @@ def _portfolio_summary(
         {
             "metric": "Full-systematic HWM",
             "status": (
-                hwm_summary.get("status") if hwm_summary is not None else "UNAVAILABLE"
+                coverage_status if coverage_status is not None else "UNAVAILABLE"
             ),
             "unit": "status",
             "value": (
-                hwm_summary.get("status")
-                if hwm_summary is not None
+                coverage_status
+                if coverage_status is not None
                 else replay.get("full_systematic_hwm_status")
             ),
         },
@@ -692,7 +699,20 @@ def _portfolio_summary(
             "metric": "Advisory readiness",
             "status": "ADVISORY",
             "unit": "status",
-            "value": replay.get("portfolio_action"),
+            # The readiness surface is this report row: the value is the
+            # baseline replay of the combined-control-status source (the
+            # replay itself is a frozen-input check in the baseline builder
+            # and is deliberately unchanged).  Per the performance-policy
+            # ADR, an in-scope HWM perimeter whose numerical composite is
+            # UNAVAILABLE gates readiness to DO_NOT_EXPAND_SYSTEMATIC_RISK;
+            # the gate only ever tightens the replayed value and changes no
+            # other readiness semantics.
+            "value": (
+                "DO_NOT_EXPAND_SYSTEMATIC_RISK"
+                if hwm_summary is not None
+                and hwm_summary.get("hwm_numerical_status") == "UNAVAILABLE"
+                else replay.get("portfolio_action")
+            ),
         },
     ]
 
@@ -2082,6 +2102,220 @@ def _hwm_policy(evaluation_date: date) -> tuple[dict[str, Any], str]:
     return policy, sha256
 
 
+_HWM_NUMERICAL_REASONS: Final = (
+    "NO_HWM_INPUTS",
+    "HWM_INPUTS_INVALID",
+    "INCOMPLETE_PERIODS",
+    "NO_AVAILABLE_PERIODS",
+    "UNRESOLVED_RETURN_REFERENCE",
+    "DUPLICATE_RETURN_REFERENCE",
+    "POLICY_EXCLUSION_INVALID",
+    "ENDPOINT_NOT_RECONCILED",
+    "MISSING_CONSUMPTION_CONTEXT",
+)
+
+# Shared consumption-boundary validator codes → report reason codes.
+_HWM_CONTRACT_REASON_MAP: Final = {
+    "POLICY_EXCLUSION_INVALID": "POLICY_EXCLUSION_INVALID",
+    "ENDPOINT_NOT_RECONCILED": "ENDPOINT_NOT_RECONCILED",
+    "ENDPOINT_DELTA_MISMATCH": "ENDPOINT_NOT_RECONCILED",
+    "KEYSPACE_DIFFERS": "INCOMPLETE_PERIODS",
+    "UNRESOLVED_RETURN_REFERENCE": "UNRESOLVED_RETURN_REFERENCE",
+    "DUPLICATE_RETURN_REFERENCE": "DUPLICATE_RETURN_REFERENCE",
+}
+
+
+def _hwm_numerical_from_envelope(
+    catalog: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compute the numerical full-systematic HWM from the governed envelope.
+
+    The ``hwm_inputs`` envelope is the only input: period capital, return
+    references, and dispositions come from its period rows; daily returns
+    resolve through the hash-bound ``strategy_returns`` crosswalk.  A missing
+    envelope or any internal defect yields ``UNAVAILABLE`` with a structured
+    reason — never an error and never a fallback to snapshots or observation
+    grids.
+
+    Crosswalk binding: every AVAILABLE period's ``return_source_record_id``
+    must match EXACTLY ONE ``strategy_returns`` row on reference
+    (``account_reconciliation_sha256``), ``strategy_id``, ``date``, and
+    ``evidence_layer == "ACCOUNT_LIVE"``, and no other row may carry the
+    same reference at all — a duplicate or mismatched row fails closed
+    instead of overwriting the proven row.
+
+    Composite rule (per the kernel contract): a day carries no period only
+    when every perimeter member is ``EXPECTED_NON_TRADING`` (or
+    policy-excluded); on any other day every member must be AVAILABLE (a
+    single UNAVAILABLE or NOT_ADMITTED member blocks the whole composite —
+    no survivors), and the period return is the
+    beginning-capital-weighted member return.
+    """
+
+    def _unavailable(reason: str) -> dict[str, Any]:
+        assert reason in _HWM_NUMERICAL_REASONS, f"unknown reason code: {reason}"
+        return {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": reason}
+
+    raw = catalog.get("hwm_inputs")
+    if raw is None:
+        return _unavailable("NO_HWM_INPUTS")
+    try:
+        envelope = _object(raw, "hwm_inputs")
+        periods = _objects(envelope.get("periods"), "hwm_inputs.periods")
+    except ReportValidationError:
+        return _unavailable("HWM_INPUTS_INVALID")
+
+    # Consumption boundary: re-enforce the semantic admission contract the
+    # baseline builder applies at admission — a hash-bound generation can
+    # still carry a semantically invalid envelope.  The shared validator in
+    # the ledger package is the single authority (same checks as the panel's
+    # second trust boundary).
+    artifact_roles: dict[str, tuple[str, str]] = {}
+    for link in _objects(catalog.get("source_artifacts"), "source_artifacts"):
+        artifact_id = _text(link.get("artifact_id"), "source_artifact.artifact_id")
+        artifact_roles[artifact_id] = (
+            _text(link.get("schema_name"), "source_artifact.schema_name"),
+            _text(link.get("sha256"), "source_artifact.sha256"),
+        )
+    # Consumption-boundary full context: the builder embeds the hash-verified
+    # acceptance record and allocations snapshot into the catalog so consumers
+    # can enforce the anchor-content cross-check and endpoint recomputation
+    # without access to the governed source files.  Missing context is a
+    # fail-closed condition — the consumer never falls back to declaration-only
+    # mode.  Both contexts are validated before ANY use of catalog allocations
+    # (including perimeter derivation below).
+    hwm_acceptance_record = catalog.get("hwm_acceptance_record")
+    hwm_allocations = catalog.get("allocations")
+    if not isinstance(hwm_acceptance_record, dict) or not isinstance(
+        hwm_allocations, list
+    ):
+        return _unavailable("MISSING_CONSUMPTION_CONTEXT")
+
+    perimeter = sorted(
+        {
+            _text(item["strategy_id"], "allocation.strategy_id")
+            for item in _objects(hwm_allocations, "allocations")
+            if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
+        }
+    )
+
+    try:
+        validate_hwm_inputs_envelope(
+            envelope,
+            as_of_date=_date(catalog.get("as_of_date"), "catalog.as_of_date"),
+            perimeter=perimeter,
+            crosswalk=_objects(catalog.get("strategy_returns", []), "strategy_returns"),
+            artifact_roles=artifact_roles,
+            policy_exclusions=hwm_policy_exclusions(
+                _load_json(HWM_POLICY, "HWM policy")
+            ),
+            allocations=_objects(hwm_allocations, "allocations"),
+            acceptance_record=hwm_acceptance_record,
+        )
+    except HwmInputsContractError as exc:
+        return _unavailable(
+            _HWM_CONTRACT_REASON_MAP.get(exc.code, "HWM_INPUTS_INVALID")
+        )
+
+    # Hash-bound return crosswalk admitted by the baseline catalog, indexed
+    # as a multimap so duplicate references are detected, never overwritten.
+    crosswalk: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
+        reference = row.get("account_reconciliation_sha256")
+        if reference is None:
+            continue
+        crosswalk[str(reference)].append(row)
+
+    by_date: dict[str, dict[str, Mapping[str, Any]]] = defaultdict(dict)
+    for row in periods:
+        strategy_id = row.get("strategy_id")
+        day = row.get("date")
+        disposition = row.get("disposition")
+        if (
+            not isinstance(strategy_id, str)
+            or not strategy_id
+            or not isinstance(day, str)
+            or not day
+            or not isinstance(disposition, str)
+        ):
+            return _unavailable("HWM_INPUTS_INVALID")
+        if strategy_id in by_date[day]:
+            return _unavailable("HWM_INPUTS_INVALID")
+        by_date[day][strategy_id] = row
+
+    composite_returns: list[Decimal] = []
+    with localcontext() as ctx:
+        ctx.prec = 34
+        ctx.rounding = ROUND_HALF_EVEN
+        for day in sorted(by_date):
+            members = [
+                row
+                for row in by_date[day].values()
+                if row["disposition"] != "EXCLUDED_BY_POLICY"
+            ]
+            # A day is legitimately empty only when every perimeter member is
+            # expected not to trade (policy-excluded members are already
+            # removed from `members`).  A required day whose members are all
+            # UNAVAILABLE or NOT_ADMITTED is a coverage gap, never a
+            # skippable period.
+            if all(row["disposition"] == "EXPECTED_NON_TRADING" for row in members):
+                continue
+            if any(row["disposition"] != "AVAILABLE" for row in members):
+                return _unavailable("INCOMPLETE_PERIODS")
+            weighted_return = Decimal(0)
+            total_capital = Decimal(0)
+            for member in sorted(members, key=lambda item: str(item["strategy_id"])):
+                try:
+                    capital = _decimal(
+                        member.get("beginning_capital_usd"),
+                        "hwm_inputs.beginning_capital_usd",
+                    )
+                except ReportValidationError:
+                    return _unavailable("HWM_INPUTS_INVALID")
+                reference = member.get("return_source_record_id")
+                if not isinstance(reference, str):
+                    return _unavailable("UNRESOLVED_RETURN_REFERENCE")
+                candidates = crosswalk.get(reference, [])
+                if len(candidates) != 1:
+                    # Zero rows: unresolved; more than one row carrying the
+                    # reference: a duplicate must never overwrite the proven
+                    # row — both fail closed.
+                    return _unavailable(
+                        "DUPLICATE_RETURN_REFERENCE"
+                        if candidates
+                        else "UNRESOLVED_RETURN_REFERENCE"
+                    )
+                match = candidates[0]
+                if (
+                    str(match.get("strategy_id") or "") != str(member["strategy_id"])
+                    or str(match.get("date") or "") != day
+                    or match.get("evidence_layer") != "ACCOUNT_LIVE"
+                ):
+                    return _unavailable("UNRESOLVED_RETURN_REFERENCE")
+                weighted_return += capital * _decimal(
+                    match.get("return"), "strategy_returns.return"
+                )
+                total_capital += capital
+            if total_capital <= 0:
+                return _unavailable("INCOMPLETE_PERIODS")
+            composite_returns.append(weighted_return / total_capital)
+
+    if not composite_returns:
+        return _unavailable("NO_AVAILABLE_PERIODS")
+    result = compute_full_systematic_hwm_index(
+        composite_returns,
+        full_systematic_coverage=True,
+    )
+    if result.get("status") != "AVAILABLE":
+        return _unavailable("INCOMPLETE_PERIODS")
+    return {
+        "hwm_index": decimal_text(result["index_series"][-1]),
+        "hwm_current_drawdown": decimal_text(result["current_drawdown"]),
+        "hwm_maximum_drawdown": decimal_text(result["maximum_drawdown"]),
+        "hwm_numerical_status": "AVAILABLE",
+    }
+
+
 def _reconcile_hwm_coverage(
     coverage: Sequence[Mapping[str, Any]], hwm_summary: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
@@ -2239,7 +2473,14 @@ def build_report_data(
         )
         strategy_summary = _merge_attribution(strategy_summary, attribution_catalog)
     coverage = _coverage(catalog)
-    hwm_summary: dict[str, Any] | None = None
+    # The numerical composite consumes only the governed hwm_inputs envelope
+    # and is computed independently of the freshness argument: the perimeter
+    # is governed by PORT-HWM-3 regardless of whether a freshness assessment
+    # is supplied, so the NO_HWM_INPUTS/envelope-derived status always
+    # publishes.  Absence or any internal defect yields UNAVAILABLE with a
+    # structured reason, never an error or a fallback.
+    hwm_numerical = _hwm_numerical_from_envelope(catalog)
+    hwm_summary: dict[str, Any]
     hwm_provenance: list[dict[str, Any]] = []
     if freshness_health_path is not None:
         portfolio_as_of = _date(catalog.get("as_of_date"), "portfolio as_of_date")
@@ -2251,7 +2492,7 @@ def build_report_data(
         )
         hwm_policy, hwm_policy_sha256 = _hwm_policy(evaluation_date)
         try:
-            strategy_summary, hwm_summary = governed_hwm_coverage(
+            strategy_summary, coverage_summary = governed_hwm_coverage(
                 strategy_summary,
                 hwm_policy,
                 freshness,
@@ -2259,6 +2500,7 @@ def build_report_data(
             )
         except HwmCoverageError as exc:
             raise ReportValidationError(str(exc)) from exc
+        hwm_summary = {**coverage_summary, **hwm_numerical}
         coverage = _reconcile_hwm_coverage(coverage, hwm_summary)
         hwm_provenance = [
             {
@@ -2274,6 +2516,10 @@ def build_report_data(
                 "sha256": freshness_sha256,
             },
         ]
+    else:
+        # No freshness assessment: the coverage perimeter is not evaluated,
+        # but the governed numerical state still publishes on its own.
+        hwm_summary = hwm_numerical
     report: dict[str, Any] = {
         "account_summary": _accounts(catalog),
         "allocation_history": _allocations(catalog),
@@ -2419,8 +2665,9 @@ def build_report_data(
         report["implementation_return_attribution_contract"] = (
             implementation_return_attribution_ref
         )
-    if hwm_summary is not None:
-        report["hwm_summary"] = hwm_summary
+    report["hwm_summary"] = hwm_summary
+    if catalog.get("hwm_inputs") is not None:
+        report["hwm_inputs"] = catalog["hwm_inputs"]
     if attribution_catalog is not None and attribution_ref is not None:
         report["strategy_attribution"] = {
             "benchmark_assignments": attribution_catalog["benchmark_assignments"],

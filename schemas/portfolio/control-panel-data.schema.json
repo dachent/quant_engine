@@ -88,11 +88,16 @@
     "advisory": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["central_case_loss", "correlation_one_stress", "hwm_limit", "hwm_status", "hwm_status_code_version", "hwm_status_semantics", "nav_coverage", "readiness", "readiness_loss_measure", "reason"],
+      "required": ["central_case_loss", "correlation_one_stress", "hwm_limit", "hwm_numerical_status", "hwm_status", "hwm_status_code_version", "hwm_status_semantics", "nav_coverage", "readiness", "readiness_loss_measure", "reason"],
       "properties": {
         "central_case_loss": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
         "correlation_one_stress": { "$ref": "#/$defs/decimal" },
         "hwm_limit": { "$ref": "#/$defs/decimal" },
+        "hwm_index": { "$ref": "#/$defs/decimal" },
+        "hwm_current_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_maximum_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_numerical_status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "hwm_numerical_reason": { "type": "string", "minLength": 1 },
         "hwm_status": { "type": "string" },
         "hwm_status_code_version": { "const": 2 },
         "hwm_status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
@@ -100,7 +105,23 @@
         "readiness": { "type": "string" },
         "readiness_loss_measure": { "const": "CORRELATION_ONE_CONSERVATIVE_BOUND" },
         "reason": { "type": "string" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "hwm_numerical_status": { "const": "AVAILABLE" } }, "required": ["hwm_numerical_status"] },
+          "then": {
+            "required": ["hwm_index", "hwm_current_drawdown", "hwm_maximum_drawdown"],
+            "not": { "required": ["hwm_numerical_reason"] }
+          }
+        },
+        {
+          "if": { "properties": { "hwm_numerical_status": { "const": "UNAVAILABLE" } }, "required": ["hwm_numerical_status"] },
+          "then": {
+            "required": ["hwm_numerical_reason"],
+            "not": { "anyOf": [{ "required": ["hwm_index"] }, { "required": ["hwm_current_drawdown"] }, { "required": ["hwm_maximum_drawdown"] }] }
+          }
+        }
+      ]
     },
     "candidate_appendix": {
       "type": "object",
@@ -288,13 +309,18 @@
     "hwm_summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["covered_value_usd", "excluded_details", "excluded_strategies", "excluded_value_usd", "governed_perimeter_value_usd", "nav_coverage", "policy_id", "status", "status_code_version", "status_semantics", "uncovered_details", "uncovered_strategies", "uncovered_value_usd"],
+      "required": ["covered_value_usd", "excluded_details", "excluded_strategies", "excluded_value_usd", "governed_perimeter_value_usd", "hwm_numerical_status", "nav_coverage", "policy_id", "status", "status_code_version", "status_semantics", "uncovered_details", "uncovered_strategies", "uncovered_value_usd"],
       "properties": {
         "covered_value_usd": { "$ref": "#/$defs/decimal" },
         "excluded_details": { "type": "array", "items": { "type": "object" } },
         "excluded_value_usd": { "$ref": "#/$defs/decimal" },
         "excluded_strategies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "governed_perimeter_value_usd": { "$ref": "#/$defs/decimal" },
+        "hwm_index": { "$ref": "#/$defs/decimal" },
+        "hwm_current_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_maximum_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_numerical_status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "hwm_numerical_reason": { "type": "string", "minLength": 1 },
         "nav_coverage": { "$ref": "#/$defs/decimal" },
         "policy_id": { "const": "PORT-HWM-3" },
         "status": { "type": "string" },
@@ -303,7 +329,23 @@
         "uncovered_details": { "type": "array", "items": { "type": "object" } },
         "uncovered_strategies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "uncovered_value_usd": { "$ref": "#/$defs/decimal" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "hwm_numerical_status": { "const": "AVAILABLE" } }, "required": ["hwm_numerical_status"] },
+          "then": {
+            "required": ["hwm_index", "hwm_current_drawdown", "hwm_maximum_drawdown"],
+            "not": { "required": ["hwm_numerical_reason"] }
+          }
+        },
+        {
+          "if": { "properties": { "hwm_numerical_status": { "const": "UNAVAILABLE" } }, "required": ["hwm_numerical_status"] },
+          "then": {
+            "required": ["hwm_numerical_reason"],
+            "not": { "anyOf": [{ "required": ["hwm_index"] }, { "required": ["hwm_current_drawdown"] }, { "required": ["hwm_maximum_drawdown"] }] }
+          }
+        }
+      ]
     },
     "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "performance": { "$ref": "#/$defs/rows" },

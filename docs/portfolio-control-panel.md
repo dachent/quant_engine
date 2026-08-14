@@ -13,6 +13,19 @@ without preserving stale calculations or hard-coded operator conclusions.
   HWM freshness is evaluated on the lane admitted for that strategy. A
   position displays a strategy only when the baseline found one exact
   effective-dated account assignment.
+- The numerical HWM composite (the `hwm_inputs` envelope) is reconciled
+  against the governed baseline generation, never against the report's
+  carried copies: the panel requires the baseline root (`--baseline-root`),
+  resolves the exact generation named by the report's baseline reference,
+  hash-verifies its manifest and catalog, validates the catalog's envelope
+  against the full contract (anchor constants and typed acceptance
+  provenance, per-lane calendar authorities with artifact-role resolution,
+  reconciliation block, disposition invariants, governed anchor-to-as-of
+  keyspace over the systematic perimeter, and capital/component identity
+  against the hash-bound rollforward rows), and recomputes the composite
+  from the catalog. A missing root, an unresolvable generation, a copy that
+  differs from the catalog, or any contract violation fails the build
+  closed. The report's carried envelope remains display-only.
 - Every strategy row also projects the effective-dated v2 strategy-version
   registry: overall disposition, design/configuration/backtest/live-boundary
   status, cost and benchmark evidence, source route, compatibility, and named
@@ -133,6 +146,7 @@ From the repository root, set local paths without committing them:
 $portfolioRoot = 'C:\Tools\quant-engine\data'
 $engine = Split-Path -Parent $PWD
 $report = Join-Path $portfolioRoot 'reporting'
+$baseline = Join-Path $portfolioRoot 'baseline'
 $output = Join-Path $portfolioRoot 'control-panel'
 $legacy = Join-Path $engine "_strategy_allocation_audit\model_harness_baseline\control-panel-qa\portfolio_control_panel"
 $lensRoot = Join-Path $portfolioRoot 'analytics\decomposition-lenses'
@@ -142,7 +156,7 @@ $replication = Join-Path $portfolioRoot 'analytics\replication'
 $freshness = "<exact hash-bound release freshness-health.json>"
 
 uv run --frozen --no-sync python tools/portfolio_control_panel.py build `
-  --report-root $report --legacy-panel $legacy --output-root $output `
+  --report-root $report --baseline-root $baseline --legacy-panel $legacy --output-root $output `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `
@@ -158,7 +172,12 @@ not built if any lens pointer, plan hash, schema, nine-strategy boundary,
 36-pair boundary, factor contribution identity, or correlation-one
 reconciliation differs.
 
-`--freshness-health` is mandatory. Build it deterministically from the exact
+`--freshness-health` is mandatory. `--baseline-root` is likewise mandatory:
+it must point at the governed baseline generation root (the panel resolves
+the exact baseline generation named by the report's baseline reference and
+hash-verifies its manifest and catalog before reconciling the numerical HWM
+composite against it). Build the freshness file deterministically from the
+exact
 provider-ledger generation before panel construction:
 
 ```powershell
@@ -185,7 +204,7 @@ browser work:
 
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
-  --report-root $report --legacy-panel $legacy `
+  --report-root $report --baseline-root $baseline --legacy-panel $legacy `
   --candidate-dir <candidate-directory> `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
@@ -324,7 +343,7 @@ pass, publish the already accepted local candidate:
 
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
-  --report-root $report --legacy-panel $legacy `
+  --report-root $report --baseline-root $baseline --legacy-panel $legacy `
   --candidate-dir <candidate-directory> --qa-dir $qa --output-root $output `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
