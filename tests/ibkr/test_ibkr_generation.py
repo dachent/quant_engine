@@ -31,6 +31,7 @@ from quant_engine.ibkr import (
     TwsSnapshot,
     build_generation,
     parse_flex_file,
+    publish_generation_candidate,
     reconcile_tws_snapshot,
     stage_generation_candidate,
 )
@@ -586,3 +587,80 @@ def test_tws_boundary_reconciles_without_order_surface() -> None:
     assert partial.account_identity_status == "PARTIAL"
     assert partial.overlap_account_count == 1
     assert partial.flex_only_account_count == 1
+
+
+def test_declared_exclusions_flip_coverage_to_complete_within_boundary(
+    tmp_path: Path,
+) -> None:
+    spec_path = _refreshed_spec(tmp_path)
+    _, manifest, _ = build_generation(spec_path)
+    assert manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    assert manifest.coverage.known_gaps == ()
+    assert "Flex statement account scope" in manifest.coverage.boundary
+    assert "dachent/quant_engine #286" in manifest.coverage.boundary
+    assert "Order visibility is execution scope" in manifest.coverage.boundary
+    assert (
+        "docs/providers/ibkr-read-capabilities.md:275-277" in manifest.coverage.boundary
+    )
+
+
+def test_declared_boundary_publish_succeeds(tmp_path: Path) -> None:
+    spec_path = _refreshed_spec(tmp_path)
+    output = tmp_path / "ibkr-private-output"
+    # First stage to get the generation_id
+    staged = stage_generation_candidate(spec_path, output)
+    assert staged["coverage_status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    gen_id = staged["generation_id"]
+    # Now publish the same generation
+    result = publish_generation_candidate(spec_path, output, gen_id)
+    assert result["published"] is True
+    assert result["coverage_status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert result["generation_id"] == gen_id
+    assert (output / "CURRENT.json").exists()
+
+
+def test_undeclared_gaps_still_yield_partial_and_publish_rejects(
+    tmp_path: Path,
+) -> None:
+    spec_path = _spec(tmp_path)
+    output = tmp_path / "ibkr-private-output"
+    staged = stage_generation_candidate(spec_path, output)
+    assert staged["coverage_status"] == "PARTIAL"
+    # publish_generation_candidate itself rejects PARTIAL
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(spec_path, output, staged["generation_id"])
+
+
+def test_exclusion_records_land_verbatim_in_manifest(tmp_path: Path) -> None:
+    spec_path = _refreshed_spec(tmp_path)
+    _, manifest, _ = build_generation(spec_path)
+    boundary = manifest.coverage.boundary
+    assert "Declared exclusions:" in boundary
+    assert (
+        "TWS-managed-but-not-Flex accounts" in boundary
+        or "Order visibility is execution scope" in boundary
+    )
+
+
+def test_catalog_bytes_unchanged_with_boundary_declaration(
+    tmp_path: Path,
+) -> None:
+    # Build twice with the refreshed spec and verify catalog bytes match
+    spec_path = _refreshed_spec(tmp_path)
+    first_catalog, first_manifest, first_bytes = build_generation(spec_path)
+    second_catalog, second_manifest, second_bytes = build_generation(spec_path)
+    assert first_bytes == second_bytes
+    assert first_catalog == second_catalog
+    assert first_manifest.generation_id == second_manifest.generation_id
+
+
+def test_exclusion_counts_appear_in_boundary_when_scope_mismatch(
+    tmp_path: Path,
+) -> None:
+    spec_path = _spec(tmp_path, cash_mismatch=True)
+    _, manifest, _ = build_generation(spec_path)
+    # Coverage stays PARTIAL because "No TWS snapshot" is not a declared exclusion
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    # But the boundary still records the declared exclusions that matched
+    assert "AMBIGUOUS_REPORTED_ACCOUNT" in manifest.coverage.boundary
+    assert "1 catalog rows" in manifest.coverage.boundary

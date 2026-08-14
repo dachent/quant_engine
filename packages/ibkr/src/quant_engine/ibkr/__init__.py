@@ -11,6 +11,7 @@ from quant_engine.ibkr.flex import (
 from quant_engine.ibkr.generation import (
     IbkrGenerationError,
     build_generation,
+    publish_generation_candidate,
     stage_generation_candidate,
 )
 from quant_engine.ibkr.tws import (
@@ -42,6 +43,7 @@ __all__ = [
     "build_generation",
     "load_tws_snapshot",
     "parse_flex_file",
+    "publish_generation_candidate",
     "reconcile_tws_snapshot",
     "stage_generation_candidate",
 ]

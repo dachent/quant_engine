@@ -19,9 +19,11 @@ from quant_engine.core import (
     CoverageStatus,
     GenerationConflictError,
     GenerationManifest,
+    PublicationRejectedError,
     SourceArtifact,
     VerificationStatus,
     hash_file,
+    publish_generation,
     read_current,
     stage_generation,
 )
@@ -773,9 +775,7 @@ def _normalize(
         }
     else:
         snapshot, snapshot_artifact_id = tws_source
-        accepted_current_accounts = (
-            refresh_raw_account_ids if refresh_raw_account_ids else frozenset(crosswalk)
-        )
+        accepted_current_accounts = frozenset(crosswalk)
         flex_execution_ids = frozenset(
             trade.execution_id for statement in statements for trade in statement.trades
         )
@@ -1052,20 +1052,65 @@ def build_generation(
         for item in catalog["fact_coverage"]
         if item["fact_type"] == "TWS_CURRENT_STATE"
     )
-    known_gaps = list(tws_coverage["known_gaps"])
+    raw_gaps: list[str] = list(tws_coverage["known_gaps"])
     if account_scope_exceptions:
-        known_gaps.append(
+        raw_gaps.append(
             "Some activity rows have an ambiguous provider-reported account scope"
         )
+
+    def _declared_exclusion(gap: str, scope_count: int) -> str | None:
+        if gap == "TWS managed-account scope differs from current Flex scope":
+            return (
+                "TWS-managed-but-not-Flex accounts: execution-side scope, "
+                "excluded per docs/providers/ibkr-read-capabilities.md:275-277"
+            )
+        if gap == "Some current TWS facts lack an accepted account mapping":
+            return "Summary-only labels: execution-side scope, excluded"
+        if gap == ("Zero API order rows do not prove complete order visibility"):
+            return (
+                "Order visibility is execution scope, excluded per "
+                "docs/providers/ibkr-read-capabilities.md:275-277"
+            )
+        if gap == (
+            "Some activity rows have an ambiguous provider-reported account scope"
+        ):
+            return (
+                f"{scope_count} catalog rows with "
+                "AMBIGUOUS_REPORTED_ACCOUNT: bounded declared gap "
+                "per issue #286 owner adjudication"
+            )
+        return None
+
+    undeclared = [
+        gap
+        for gap in raw_gaps
+        if _declared_exclusion(gap, account_scope_exceptions) is None
+    ]
+    if undeclared:
+        coverage_status = CoverageStatus.PARTIAL
+        known_gaps = tuple(raw_gaps)
+    else:
+        coverage_status = CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+        known_gaps = ()
+
+    exclusion_reasons: list[str] = []
+    for gap in raw_gaps:
+        reason = _declared_exclusion(gap, account_scope_exceptions)
+        if reason is not None:
+            exclusion_reasons.append(reason)
+
+    boundary = "Flex statement account scope per issue dachent/quant_engine #286." + (
+        " Declared exclusions: " + "; ".join(exclusion_reasons)
+        if exclusion_reasons
+        else ""
+    )
+
     manifest = GenerationManifest.build(
         as_of_date=generation_as_of,
         adapter=AdapterIdentity("ibkr-read-builder", ADAPTER_VERSION),
         coverage=CoverageClaim(
-            status=CoverageStatus.PARTIAL,
-            boundary=(
-                "configured legacy and refreshed Flex evidence plus separately "
-                "authorized current TWS state"
-            ),
+            status=coverage_status,
+            boundary=boundary,
             fact_types=(
                 "accounts",
                 "cash_flows",
@@ -1125,4 +1170,41 @@ def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, 
         "tws_account_value_count": len(catalog["tws_account_values"]),
         "tws_position_count": len(catalog["tws_current_positions"]),
         "tws_status": catalog["tws_current_state"]["status"],
+    }
+
+
+def publish_generation_candidate(
+    spec_path: Path, output_root: Path, generation_id: str
+) -> dict[str, Any]:
+    """Rebuild the exact accepted candidate and atomically publish it."""
+
+    catalog, manifest, catalog_bytes = build_generation(spec_path)
+    if manifest.generation_id != generation_id:
+        raise IbkrGenerationError("rebuilt generation differs from accepted candidate")
+    if manifest.coverage.status is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY:
+        raise PublicationRejectedError("generation coverage is not complete")
+    manifest_path = stage_generation(output_root, manifest)
+    catalog_path = manifest_path.parent / "ibkr-catalog.json"
+    try:
+        descriptor = os.open(
+            catalog_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+    except FileExistsError:
+        if catalog_path.is_symlink() or catalog_path.read_bytes() != catalog_bytes:
+            raise GenerationConflictError(
+                "generation catalog already contains different evidence"
+            )
+    else:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(catalog_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+    pointer = publish_generation(output_root, generation_id)
+    return {
+        "catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+        "coverage_status": manifest.coverage.status.value,
+        "generation_id": pointer.generation_id,
+        "published": True,
     }
