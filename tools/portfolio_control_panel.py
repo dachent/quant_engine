@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import hashlib
 import json
 import math
@@ -27,6 +28,7 @@ from quant_engine.core import (
     hash_file,
     publish_generation,
     read_current,
+    read_generation,
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -34,6 +36,8 @@ from quant_engine.portfolio_ledger import (
     HWM_STATUS_CODE_VERSION,
     HWM_STATUS_SEMANTICS,
     HwmCoverageError,
+    compute_full_systematic_hwm_index,
+    decimal_text,
     governed_hwm_coverage,
 )
 
@@ -564,11 +568,137 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
         pointer = read_current(root)
     except (OSError, ValueError, RuntimeError) as exc:
         raise ControlPanelValidationError("report pointer is not accepted") from exc
+    try:
+        manifest = read_generation(root, pointer.generation_id)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ControlPanelValidationError(
+            "report generation is missing or failed integrity"
+        ) from exc
+    artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "normalized/portfolio-report-data.json"
+        ),
+        None,
+    )
+    if artifact is None:
+        raise ControlPanelValidationError(
+            "report data artifact is missing from the generation manifest"
+        )
     path = root / "generations" / pointer.generation_id / "portfolio-report-data.json"
-    report = _load_json(path, "portfolio report data")
+    if path.is_symlink() or not path.is_file():
+        raise ControlPanelValidationError("report data is missing or linked")
+    # The report bytes are read exactly once: hashed, compared against the
+    # verified generation manifest's artifact hash AND size, and only then
+    # decoded — no swap between verification and parsing can supply an
+    # ungoverned baseline reference.
+    content = path.read_bytes()
+    if (hashlib.sha256(content).hexdigest(), len(content)) != (
+        artifact.sha256,
+        artifact.size_bytes,
+    ):
+        raise ControlPanelValidationError(
+            "report data is not hash-bound by its generation manifest"
+        )
+    try:
+        report = _object(json.loads(content.decode("utf-8")), "portfolio report data")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ControlPanelValidationError(
+            "portfolio report data is not readable JSON"
+        ) from exc
     if report.get("report_schema_version") != 1:
         raise ControlPanelValidationError("portfolio report schema is unsupported")
-    return report, {"generation_id": pointer.generation_id, "sha256": _hash(path)}, path
+    return (
+        report,
+        {"generation_id": pointer.generation_id, "sha256": artifact.sha256},
+        path,
+    )
+
+
+def _baseline_catalog_for_report(
+    baseline_root: Path | None, report: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Resolve the governed baseline generation the report binds to.
+
+    The panel's reconciliation authority for the HWM envelope, the
+    rollforward crosswalk, and the perimeter is the baseline CATALOG — never
+    the report's carried copies.  There is no CURRENT indirection here: the
+    report's baseline reference names the exact generation, resolved through
+    the core library's integrity machinery (``read_generation`` parses the
+    content-addressed manifest with full strict-key and identity
+    validation).  The catalog bytes are read exactly ONCE: the same bytes
+    are hashed, compared against the manifest's artifact hash AND size and
+    the report's accepted catalog hash, and only then decoded.  The
+    generation must meet publication eligibility (VERIFIED and
+    COMPLETE_WITHIN_DECLARED_BOUNDARY).  A missing root, an unresolvable or
+    ineligible generation, or any hash drift fails closed.
+    """
+    if baseline_root is None:
+        raise ControlPanelValidationError(
+            "baseline root is required for governed HWM reconciliation"
+        )
+    reference = _object(report.get("baseline"), "report.baseline")
+    generation_id = _text(reference.get("generation_id"), "baseline.generation_id")
+    expected_sha256 = _text(reference.get("catalog_sha256"), "baseline.catalog_sha256")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        raise ControlPanelValidationError("baseline.catalog_sha256 is invalid")
+    try:
+        manifest = read_generation(baseline_root, generation_id)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ControlPanelValidationError(
+            "governed baseline generation is missing or failed integrity"
+        ) from exc
+    if manifest.verification is not VerificationStatus.VERIFIED:
+        raise ControlPanelValidationError(
+            "governed baseline generation is not verification-complete"
+        )
+    if manifest.coverage.status is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY:
+        raise ControlPanelValidationError(
+            "governed baseline generation coverage is not complete"
+        )
+    artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "normalized/portfolio-baseline.json"
+        ),
+        None,
+    )
+    if artifact is None:
+        raise ControlPanelValidationError(
+            "baseline catalog artifact is missing from the generation manifest"
+        )
+    catalog_path = (
+        baseline_root / "generations" / generation_id / "portfolio-baseline.json"
+    )
+    if catalog_path.is_symlink() or not catalog_path.is_file():
+        raise ControlPanelValidationError(
+            "governed baseline generation is missing or linked"
+        )
+    # Read the catalog bytes exactly once: hash and decode the same bytes so
+    # no swap is possible between verification and parsing.
+    content = catalog_path.read_bytes()
+    if (hashlib.sha256(content).hexdigest(), len(content)) != (
+        artifact.sha256,
+        artifact.size_bytes,
+    ):
+        raise ControlPanelValidationError(
+            "baseline catalog is not hash-bound by its generation manifest"
+        )
+    if artifact.sha256 != expected_sha256:
+        raise ControlPanelValidationError(
+            "baseline catalog differs from the report's accepted reference"
+        )
+    try:
+        catalog = _object(json.loads(content.decode("utf-8")), "baseline catalog")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ControlPanelValidationError(
+            "baseline catalog is not readable JSON"
+        ) from exc
+    if catalog.get("baseline_schema_version") != 1:
+        raise ControlPanelValidationError("baseline schema version is unsupported")
+    return catalog
 
 
 def _current_analytics(
@@ -1072,6 +1202,544 @@ def _governed_hwm_coverage(
         )
     except HwmCoverageError as exc:
         raise ControlPanelValidationError(str(exc)) from exc
+
+
+_HWM_PERIOD_REQUIRED_KEYS: Final = frozenset(
+    {
+        "strategy_id",
+        "date",
+        "lane",
+        "disposition",
+        "beginning_capital_usd",
+        "return_source_record_id",
+        "flow_status",
+        "fx_status",
+    }
+)
+_HWM_PERIOD_KEYS: Final = _HWM_PERIOD_REQUIRED_KEYS | {
+    "component_account_ids",
+    "flow_source_record_ids",
+    "fx_source_record_ids",
+}
+_HWM_VALID_DISPOSITIONS: Final = frozenset(
+    {
+        "AVAILABLE",
+        "UNAVAILABLE",
+        "NOT_ADMITTED",
+        "EXPECTED_NON_TRADING",
+        "EXCLUDED_BY_POLICY",
+    }
+)
+_HWM_VALID_FLOW_STATUSES: Final = frozenset({"OBSERVED", "CONFIRMED_ZERO", "MISSING"})
+_HWM_VALID_FX_STATUSES: Final = frozenset(
+    {"OBSERVED", "CONFIRMED_ONE", "NOT_REQUIRED", "MISSING"}
+)
+
+
+def _panel_date(value: object, field_name: str) -> date:
+    accepted = _text(value, field_name)
+    try:
+        return date.fromisoformat(accepted)
+    except ValueError as exc:
+        raise ControlPanelValidationError(f"{field_name} must be an ISO date") from exc
+
+
+def _validate_panel_hwm_envelope(
+    envelope: Mapping[str, Any],
+    periods: Sequence[Mapping[str, Any]],
+    catalog: Mapping[str, Any],
+) -> None:
+    """Enforce the FULL hwm_inputs envelope contract against the governed
+    baseline catalog before the panel trusts the envelope for recomputation.
+
+    The catalog is the hash-verified authority (resolved by the report's
+    baseline reference); this is the panel's second trust boundary.  Every
+    nested constraint of the catalog schema's ``hwm_inputs`` section is
+    enforced: closed shapes, anchor constants and typed acceptance
+    provenance, per-lane calendar authorities with artifact-role resolution,
+    the reconciliation block, period-row enums and disposition invariants,
+    attestation evidence shape and role resolution, the governed
+    anchor-to-as-of keyspace over the systematic perimeter, and
+    per-AVAILABLE-row capital/component identity against the hash-bound
+    rollforward rows.  Any violation fails closed with an error — the
+    envelope is never silently trusted.
+
+    Attestation semantics: every CONFIRMED_* evidence id must resolve to an
+    admitted catalog artifact of the matching role.  The attestation payload
+    content is NOT reachable through the catalog binding (the source files
+    live outside the generation store), so an AVAILABLE row carrying a
+    CONFIRMED_* status is rejected rather than trusted.
+    """
+    if set(envelope) != {
+        "contract_version",
+        "anchor",
+        "calendar_authorities",
+        "periods",
+        "reconciliation",
+    }:
+        raise ControlPanelValidationError("hwm_inputs envelope shape differs")
+    if envelope["contract_version"] != 1:
+        raise ControlPanelValidationError("hwm_inputs contract_version must be 1")
+
+    # --- anchor: constants and typed, hash-bound acceptance provenance ---
+    anchor = _object(envelope["anchor"], "hwm_inputs.anchor")
+    if set(anchor) != {
+        "anchor_date",
+        "index_base_value",
+        "hwm_policy_id",
+        "acceptance_provenance",
+    }:
+        raise ControlPanelValidationError("hwm_inputs anchor shape differs")
+    anchor_date = _panel_date(anchor["anchor_date"], "hwm_inputs.anchor.anchor_date")
+    as_of = _panel_date(catalog.get("as_of_date"), "catalog.as_of_date")
+    if anchor_date > as_of:
+        raise ControlPanelValidationError(
+            "hwm_inputs anchor_date must not be after the catalog as_of_date"
+        )
+    if anchor["index_base_value"] != "1.0":
+        raise ControlPanelValidationError("hwm_inputs index_base_value must be 1.0")
+    if anchor["hwm_policy_id"] != "PORT-HWM-3":
+        raise ControlPanelValidationError("hwm_inputs hwm_policy_id must be PORT-HWM-3")
+    provenance = _object(
+        anchor["acceptance_provenance"], "hwm_inputs.anchor.acceptance_provenance"
+    )
+    if set(provenance) != {
+        "accepted_at",
+        "accepted_by",
+        "source_artifact_id",
+        "source_artifact_sha256",
+    }:
+        raise ControlPanelValidationError(
+            "hwm_inputs acceptance_provenance shape differs"
+        )
+    accepted_at = _text(
+        provenance["accepted_at"], "hwm_inputs acceptance_provenance accepted_at"
+    )
+    try:
+        parsed_accepted = datetime.fromisoformat(accepted_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ControlPanelValidationError(
+            "hwm_inputs acceptance_provenance accepted_at must be an ISO datetime"
+        ) from exc
+    if parsed_accepted.tzinfo is None:
+        raise ControlPanelValidationError(
+            "hwm_inputs acceptance_provenance accepted_at must carry a timezone"
+        )
+    _text(provenance["accepted_by"], "hwm_inputs acceptance_provenance accepted_by")
+    provenance_sha256 = _text(
+        provenance["source_artifact_sha256"],
+        "hwm_inputs acceptance_provenance source_artifact_sha256",
+    )
+    if re.fullmatch(r"[0-9a-f]{64}", provenance_sha256) is None:
+        raise ControlPanelValidationError(
+            "hwm_inputs acceptance_provenance sha256 is invalid"
+        )
+
+    # --- typed artifact resolution against the catalog's admitted set ---
+    artifact_roles: dict[str, tuple[str, str]] = {}
+    for link in _objects(catalog.get("source_artifacts"), "source_artifacts"):
+        artifact_id = _text(link.get("artifact_id"), "source_artifact.artifact_id")
+        artifact_roles[artifact_id] = (
+            _text(link.get("schema_name"), "source_artifact.schema_name"),
+            _text(link.get("sha256"), "source_artifact.sha256"),
+        )
+
+    def _require_role(artifact_id: object, role: str, field_name: str) -> None:
+        accepted_id = _text(artifact_id, field_name)
+        entry = artifact_roles.get(accepted_id)
+        if entry is None or entry[0] != role:
+            raise ControlPanelValidationError(
+                f"hwm_inputs {field_name} does not resolve to an admitted {role} "
+                "artifact"
+            )
+
+    _require_role(
+        provenance["source_artifact_id"],
+        "hwm-anchor-acceptance",
+        "acceptance_provenance source_artifact_id",
+    )
+    provenance_artifact = artifact_roles[
+        _text(provenance["source_artifact_id"], "acceptance_provenance")
+    ]
+    if provenance_artifact[1] != provenance_sha256:
+        raise ControlPanelValidationError(
+            "hwm_inputs acceptance_provenance sha256 does not match the admitted "
+            "artifact"
+        )
+
+    # --- calendar authorities: exactly one admitted authority per lane ---
+    authorities = _objects(
+        envelope["calendar_authorities"], "hwm_inputs.calendar_authorities"
+    )
+    if not authorities:
+        raise ControlPanelValidationError(
+            "hwm_inputs calendar_authorities must have at least one entry"
+        )
+    authority_lanes: set[str] = set()
+    for item in authorities:
+        if set(item) != {
+            "lane",
+            "authority_id",
+            "authority_version",
+            "calendar_kind",
+            "admitted_source_artifact_id",
+        }:
+            raise ControlPanelValidationError(
+                "hwm_inputs calendar authority shape differs"
+            )
+        lane = _text(item["lane"], "hwm_inputs calendar_authorities lane")
+        if lane not in {"ACCOUNT", "PROVIDER", "LEGACY"}:
+            raise ControlPanelValidationError("hwm_inputs authority lane differs")
+        if lane in authority_lanes:
+            raise ControlPanelValidationError(
+                "hwm_inputs calendar authority lane is duplicated"
+            )
+        authority_lanes.add(lane)
+        _text(item["authority_id"], "hwm_inputs authority_id")
+        _text(item["authority_version"], "hwm_inputs authority_version")
+        if item["calendar_kind"] not in {
+            "EXCHANGE",
+            "ALWAYS_ON",
+            "PROVIDER_PUBLICATION",
+        }:
+            raise ControlPanelValidationError("hwm_inputs calendar_kind differs")
+        _require_role(
+            item["admitted_source_artifact_id"],
+            f"hwm-calendar-authority-{lane.lower()}",
+            "calendar authority admitted_source_artifact_id",
+        )
+
+    # --- reconciliation block ---
+    reconciliation = _object(envelope["reconciliation"], "hwm_inputs.reconciliation")
+    if set(reconciliation) != {"period_capital_method", "allocation_endpoint_check"}:
+        raise ControlPanelValidationError("hwm_inputs reconciliation shape differs")
+    if reconciliation["period_capital_method"] != "NAV_ROLLFORWARD":
+        raise ControlPanelValidationError(
+            "hwm_inputs period_capital_method must be NAV_ROLLFORWARD"
+        )
+    endpoint = _object(
+        reconciliation["allocation_endpoint_check"],
+        "hwm_inputs allocation_endpoint_check",
+    )
+    if set(endpoint) != {"matched", "delta_usd"}:
+        raise ControlPanelValidationError(
+            "hwm_inputs allocation_endpoint_check shape differs"
+        )
+    if not isinstance(endpoint["matched"], bool):
+        raise ControlPanelValidationError(
+            "hwm_inputs allocation_endpoint_check.matched must be boolean"
+        )
+    try:
+        Decimal(_text(endpoint["delta_usd"], "hwm_inputs delta_usd"))
+    except InvalidOperation as exc:
+        raise ControlPanelValidationError(
+            "hwm_inputs allocation_endpoint_check.delta_usd must be decimal text"
+        ) from exc
+
+    if not periods:
+        raise ControlPanelValidationError(
+            "hwm_inputs periods must have at least one entry"
+        )
+    crosswalk: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
+        reference = row.get("account_reconciliation_sha256")
+        if reference is not None:
+            crosswalk[str(reference)].append(row)
+
+    seen_keys: set[tuple[str, str]] = set()
+    for period_row in periods:
+        if not _HWM_PERIOD_REQUIRED_KEYS.issubset(set(period_row)) or (
+            set(period_row) - _HWM_PERIOD_KEYS
+        ):
+            raise ControlPanelValidationError("hwm_inputs period keys differ")
+        strategy_id = _text(period_row["strategy_id"], "hwm_inputs.periods.strategy_id")
+        day = _panel_date(period_row["date"], "hwm_inputs.periods.date")
+        lane = _text(period_row["lane"], "hwm_inputs.periods.lane")
+        if lane not in {"ACCOUNT", "PROVIDER", "LEGACY"}:
+            raise ControlPanelValidationError("hwm_inputs lane differs")
+        if lane not in authority_lanes:
+            raise ControlPanelValidationError(
+                "hwm_inputs period lane has no admitted calendar authority"
+            )
+        disposition = _text(period_row["disposition"], "hwm_inputs.periods.disposition")
+        if disposition not in _HWM_VALID_DISPOSITIONS:
+            raise ControlPanelValidationError("hwm_inputs disposition differs")
+        flow_status = period_row["flow_status"]
+        if flow_status not in _HWM_VALID_FLOW_STATUSES:
+            raise ControlPanelValidationError("hwm_inputs flow_status differs")
+        fx_status = period_row["fx_status"]
+        if fx_status not in _HWM_VALID_FX_STATUSES:
+            raise ControlPanelValidationError("hwm_inputs fx_status differs")
+        key = (strategy_id, day.isoformat())
+        if key in seen_keys:
+            raise ControlPanelValidationError("hwm_inputs period is duplicated")
+        seen_keys.add(key)
+        capital = period_row["beginning_capital_usd"]
+        reference = period_row["return_source_record_id"]
+        components_value = period_row.get("component_account_ids")
+        if components_value is not None and (
+            not isinstance(components_value, list)
+            or not components_value
+            or any(
+                not isinstance(item, str) or not item.strip()
+                for item in components_value
+            )
+        ):
+            raise ControlPanelValidationError(
+                "hwm_inputs component_account_ids must be a non-empty list of "
+                "non-empty text"
+            )
+        flow_ids = period_row.get("flow_source_record_ids")
+        if flow_ids is not None and (
+            not isinstance(flow_ids, list)
+            or any(not isinstance(item, str) or not item.strip() for item in flow_ids)
+        ):
+            raise ControlPanelValidationError(
+                "hwm_inputs flow_source_record_ids must be non-empty text"
+            )
+        if flow_status == "CONFIRMED_ZERO":
+            if not flow_ids:
+                raise ControlPanelValidationError(
+                    "hwm_inputs CONFIRMED_ZERO flow evidence is empty"
+                )
+            for evidence_id in flow_ids:
+                _require_role(evidence_id, "hwm-flow-attestation", "flow attestation")
+        fx_ids = period_row.get("fx_source_record_ids")
+        if fx_ids is not None and (
+            not isinstance(fx_ids, list)
+            or any(not isinstance(item, str) or not item.strip() for item in fx_ids)
+        ):
+            raise ControlPanelValidationError(
+                "hwm_inputs fx_source_record_ids must be non-empty text"
+            )
+        if fx_status == "CONFIRMED_ONE":
+            if not fx_ids:
+                raise ControlPanelValidationError(
+                    "hwm_inputs CONFIRMED_ONE fx evidence is empty"
+                )
+            for evidence_id in fx_ids:
+                _require_role(evidence_id, "hwm-fx-attestation", "fx attestation")
+        if disposition == "AVAILABLE":
+            if not isinstance(capital, str) or not isinstance(reference, str):
+                raise ControlPanelValidationError(
+                    "hwm_inputs AVAILABLE period lacks capital or return reference"
+                )
+            if flow_status == "MISSING":
+                raise ControlPanelValidationError(
+                    "hwm_inputs AVAILABLE period must not have MISSING flow_status"
+                )
+            if fx_status == "MISSING":
+                raise ControlPanelValidationError(
+                    "hwm_inputs AVAILABLE period must not have MISSING fx_status"
+                )
+            if flow_status == "CONFIRMED_ZERO" or fx_status == "CONFIRMED_ONE":
+                # The attestation payload content is not reachable through
+                # the catalog binding, so a CONFIRMED_* assertion on an
+                # AVAILABLE row is rejected rather than trusted.
+                raise ControlPanelValidationError(
+                    "hwm_inputs AVAILABLE period attestation payload is not "
+                    "verifiable through the catalog binding"
+                )
+        elif capital is not None or reference is not None:
+            raise ControlPanelValidationError(
+                "hwm_inputs non-AVAILABLE period must carry null capital and "
+                "null return reference"
+            )
+        if disposition != "AVAILABLE":
+            continue
+        candidates = [
+            candidate
+            for candidate in crosswalk.get(str(reference), [])
+            if str(candidate.get("strategy_id") or "") == strategy_id
+            and str(candidate.get("date") or "") == day.isoformat()
+            and candidate.get("evidence_layer") == "ACCOUNT_LIVE"
+        ]
+        if len(candidates) != 1:
+            raise ControlPanelValidationError(
+                "hwm_inputs return reference does not bind to exactly one "
+                "account-live rollforward row"
+            )
+        evidence = candidates[0]
+        evidence_capital = evidence.get("beginning_capital")
+        if not isinstance(evidence_capital, str) or Decimal(
+            evidence_capital
+        ) != Decimal(capital):
+            raise ControlPanelValidationError(
+                "hwm_inputs capital differs from the bound rollforward row"
+            )
+        components = period_row.get("component_account_ids")
+        if (
+            not isinstance(components, list)
+            or not components
+            or sorted(str(item) for item in components)
+            != sorted(str(item) for item in evidence.get("component_account_ids", []))
+        ):
+            raise ControlPanelValidationError(
+                "hwm_inputs component accounts differ from the bound rollforward row"
+            )
+
+    # Governed keyspace: every systematic perimeter strategy on every day
+    # from the anchor through the catalog as-of date.
+    perimeter = sorted(
+        {
+            _text(item["strategy_id"], "allocation.strategy_id")
+            for item in _objects(catalog.get("allocations"), "allocations")
+            if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
+        }
+    )
+    if not perimeter:
+        raise ControlPanelValidationError(
+            "hwm_inputs systematic perimeter is empty in the governed catalog"
+        )
+    expected: set[tuple[str, str]] = set()
+    current = anchor_date
+    while current <= as_of:
+        for strategy_id in perimeter:
+            expected.add((strategy_id, current.isoformat()))
+        current += timedelta(days=1)
+    if seen_keys != expected:
+        raise ControlPanelValidationError(
+            "hwm_inputs period keyspace differs from the governed perimeter"
+        )
+
+
+def _compute_panel_numerical_hwm(catalog: Mapping[str, Any]) -> dict[str, Any]:
+    """Recompute the numerical full-systematic HWM from the governed
+    baseline catalog so the panel can reconcile it against the report.
+
+    This mirrors ``_hwm_numerical_from_envelope`` in
+    ``tools/portfolio_report.py`` exactly, but reads the CATALOG (the
+    hash-verified authority named by the report's baseline reference), not
+    the report's carried copies: the ``hwm_inputs`` envelope is the only
+    input, daily returns resolve through the catalog's hash-bound
+    ``strategy_returns`` crosswalk with exactly-one identity match per
+    reference (duplicates or mismatches fail closed), and absence or any
+    internal defect yields UNAVAILABLE with the same structured reason —
+    never an error and never a fallback.
+    """
+
+    def _unavailable(reason: str) -> dict[str, Any]:
+        return {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": reason}
+
+    def _panel_decimal(value: object, field_name: str) -> Decimal:
+        if not isinstance(value, str):
+            raise ControlPanelValidationError(f"{field_name} must be decimal text")
+        try:
+            accepted = Decimal(value)
+        except InvalidOperation as exc:
+            raise ControlPanelValidationError(
+                f"{field_name} must be decimal text"
+            ) from exc
+        if not accepted.is_finite():
+            raise ControlPanelValidationError(f"{field_name} must be finite")
+        return accepted
+
+    raw = catalog.get("hwm_inputs")
+    if raw is None:
+        return _unavailable("NO_HWM_INPUTS")
+    try:
+        envelope = _object(raw, "hwm_inputs")
+        periods = _objects(envelope.get("periods"), "hwm_inputs.periods")
+    except ControlPanelValidationError:
+        return _unavailable("HWM_INPUTS_INVALID")
+    # The envelope is never trusted on its own: it must satisfy the full
+    # governed contract against the catalog before any recomputation runs.
+    _validate_panel_hwm_envelope(envelope, periods, catalog)
+
+    crosswalk: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
+        reference = row.get("account_reconciliation_sha256")
+        if reference is not None:
+            crosswalk[str(reference)].append(row)
+
+    by_date: dict[str, dict[str, Mapping[str, Any]]] = defaultdict(dict)
+    for row in periods:
+        strategy_id = row.get("strategy_id")
+        day = row.get("date")
+        disposition = row.get("disposition")
+        if (
+            not isinstance(strategy_id, str)
+            or not strategy_id
+            or not isinstance(day, str)
+            or not day
+            or not isinstance(disposition, str)
+        ):
+            return _unavailable("HWM_INPUTS_INVALID")
+        if strategy_id in by_date[day]:
+            return _unavailable("HWM_INPUTS_INVALID")
+        by_date[day][strategy_id] = row
+
+    composite_returns: list[Decimal] = []
+    with localcontext() as ctx:
+        ctx.prec = 34
+        ctx.rounding = ROUND_HALF_EVEN
+        for day in sorted(by_date):
+            members = [
+                row
+                for row in by_date[day].values()
+                if row["disposition"] != "EXCLUDED_BY_POLICY"
+            ]
+            # A day is legitimately empty only when every perimeter member is
+            # expected not to trade (policy-excluded members are already
+            # removed from `members`).  A required day whose members are all
+            # UNAVAILABLE or NOT_ADMITTED is a coverage gap, never a
+            # skippable period.
+            if all(row["disposition"] == "EXPECTED_NON_TRADING" for row in members):
+                continue
+            if any(row["disposition"] != "AVAILABLE" for row in members):
+                return _unavailable("INCOMPLETE_PERIODS")
+            weighted_return = Decimal(0)
+            total_capital = Decimal(0)
+            for member in sorted(members, key=lambda item: str(item["strategy_id"])):
+                try:
+                    capital = _panel_decimal(
+                        member.get("beginning_capital_usd"),
+                        "hwm_inputs.beginning_capital_usd",
+                    )
+                except ControlPanelValidationError:
+                    return _unavailable("HWM_INPUTS_INVALID")
+                reference = member.get("return_source_record_id")
+                if not isinstance(reference, str):
+                    return _unavailable("UNRESOLVED_RETURN_REFERENCE")
+                candidates = crosswalk.get(reference, [])
+                if len(candidates) != 1:
+                    # Zero rows: unresolved; more than one row carrying the
+                    # reference: a duplicate must never overwrite the proven
+                    # row — both fail closed.
+                    return _unavailable(
+                        "DUPLICATE_RETURN_REFERENCE"
+                        if candidates
+                        else "UNRESOLVED_RETURN_REFERENCE"
+                    )
+                match = candidates[0]
+                if (
+                    str(match.get("strategy_id") or "") != str(member["strategy_id"])
+                    or str(match.get("date") or "") != day
+                    or match.get("evidence_layer") != "ACCOUNT_LIVE"
+                ):
+                    return _unavailable("UNRESOLVED_RETURN_REFERENCE")
+                weighted_return += capital * _panel_decimal(
+                    match.get("return"), "strategy_returns.return"
+                )
+                total_capital += capital
+            if total_capital <= 0:
+                return _unavailable("INCOMPLETE_PERIODS")
+            composite_returns.append(weighted_return / total_capital)
+
+    if not composite_returns:
+        return _unavailable("NO_AVAILABLE_PERIODS")
+    result = compute_full_systematic_hwm_index(
+        composite_returns,
+        full_systematic_coverage=True,
+    )
+    if result.get("status") != "AVAILABLE":
+        return _unavailable("INCOMPLETE_PERIODS")
+    return {
+        "hwm_index": decimal_text(result["index_series"][-1]),
+        "hwm_current_drawdown": decimal_text(result["current_drawdown"]),
+        "hwm_maximum_drawdown": decimal_text(result["maximum_drawdown"]),
+        "hwm_numerical_status": "AVAILABLE",
+    }
 
 
 def _reconcile_hwm_coverage(
@@ -3668,9 +4336,14 @@ def _panel_data(
     replication_payload: Mapping[str, Any] | None = None,
     candidate_driver_map: Mapping[str, Any] | None = None,
     candidate_driver_map_identity: Mapping[str, str] | None = None,
+    baseline_catalog: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
+    if baseline_catalog is None:
+        raise ControlPanelValidationError(
+            "baseline catalog is mandatory for governed HWM reconciliation"
+        )
     summary = _summary(report)
     strategies = _objects(report.get("strategy_summary"), "strategy_summary")
     accounts = _objects(report.get("account_summary"), "account_summary")
@@ -4048,18 +4721,69 @@ def _panel_data(
         freshness_health,
         require_freshness=True,
     )
-    report_hwm = report.get("hwm_summary")
-    if (
-        report_hwm is not None
-        and _object(report_hwm, "report.hwm_summary") != hwm_summary
+    # Governed authority: the baseline catalog named by the report's
+    # baseline reference (hash-verified at resolution) is the source for the
+    # envelope, the rollforward crosswalk, and the perimeter.  The report's
+    # carried copies are display views and must equal the catalog exactly —
+    # coordinated tampering of mutually dependent report copies fails here.
+    if _text(report.get("as_of_date"), "report.as_of_date") != _text(
+        baseline_catalog.get("as_of_date"), "catalog.as_of_date"
     ):
+        raise ControlPanelValidationError(
+            "report as_of_date differs from the governed baseline catalog"
+        )
+    if report.get("hwm_inputs") != baseline_catalog.get("hwm_inputs"):
+        raise ControlPanelValidationError(
+            "report hwm_inputs differs from the governed baseline catalog"
+        )
+    if report.get("strategy_returns", []) != baseline_catalog.get(
+        "strategy_returns", []
+    ):
+        raise ControlPanelValidationError(
+            "report strategy_returns differ from the governed baseline catalog"
+        )
+    report_perimeter = {
+        _text(item["strategy_id"], "allocation_history.strategy_id")
+        for item in allocations
+        if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
+    }
+    catalog_perimeter = {
+        _text(item["strategy_id"], "catalog allocation.strategy_id")
+        for item in _objects(baseline_catalog.get("allocations"), "allocations")
+        if item.get("scope") == "SYSTEMATIC" and item.get("strategy_id")
+    }
+    if report_perimeter != catalog_perimeter:
+        raise ControlPanelValidationError(
+            "report perimeter differs from the governed baseline catalog"
+        )
+    # Independently recompute the numerical composite from the governed
+    # catalog (never the report's copies); the full-summary equality check
+    # below then reconciles the numerical HWM fields against the report.
+    hwm_summary = {**hwm_summary, **_compute_panel_numerical_hwm(baseline_catalog)}
+    report_hwm = report.get("hwm_summary")
+    if report_hwm is None:
+        raise ControlPanelValidationError(
+            "accepted portfolio report lacks the governed HWM summary"
+        )
+    if _object(report_hwm, "report.hwm_summary") != hwm_summary:
         raise ControlPanelValidationError(
             "governed HWM summary differs from the accepted portfolio report"
         )
     reported_hwm = _summary_value(summary, "Full-systematic HWM")
-    if report_hwm is not None and reported_hwm != hwm_summary["status"]:
+    if reported_hwm != hwm_summary["status"]:
         raise ControlPanelValidationError(
             "portfolio summary HWM status differs from governed HWM evidence"
+        )
+    # Readiness is derived from the recomputed numerical state: an
+    # UNAVAILABLE composite must gate the report's advisory readiness to
+    # DO_NOT_EXPAND_SYSTEMATIC_RISK; a permissive report row is rejected.
+    report_readiness = _summary_value(summary, "Advisory readiness")
+    if (
+        hwm_summary.get("hwm_numerical_status") == "UNAVAILABLE"
+        and report_readiness != "DO_NOT_EXPAND_SYSTEMATIC_RISK"
+    ):
+        raise ControlPanelValidationError(
+            "report advisory readiness ignores the numerical HWM gate"
         )
     strategies = [
         {
@@ -4371,6 +5095,24 @@ def _panel_data(
             "hwm_status": hwm_summary["status"],
             "hwm_status_code_version": hwm_summary["status_code_version"],
             "hwm_status_semantics": hwm_summary["status_semantics"],
+            "hwm_numerical_status": hwm_summary.get(
+                "hwm_numerical_status", "UNAVAILABLE"
+            ),
+            **(
+                {"hwm_numerical_reason": hwm_summary["hwm_numerical_reason"]}
+                if hwm_summary.get("hwm_numerical_status", "UNAVAILABLE")
+                == "UNAVAILABLE"
+                else {}
+            ),
+            **(
+                {
+                    "hwm_index": hwm_summary["hwm_index"],
+                    "hwm_current_drawdown": hwm_summary["hwm_current_drawdown"],
+                    "hwm_maximum_drawdown": hwm_summary["hwm_maximum_drawdown"],
+                }
+                if hwm_summary.get("hwm_numerical_status") == "AVAILABLE"
+                else {}
+            ),
             "nav_coverage": hwm_summary["nav_coverage"],
             "readiness": _summary_value(summary, "Advisory readiness"),
             "readiness_loss_measure": "CORRELATION_ONE_CONSERVATIVE_BOUND",
@@ -4518,6 +5260,7 @@ def _rendered_files(
     freshness_health_path: Path | None = None,
     replication_root: Path | None = None,
     candidate_driver_map_path: Path | None = None,
+    baseline_root: Path | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -4539,6 +5282,7 @@ def _rendered_files(
     freshness_health = _freshness_health(freshness_health_path, portfolio_as_of)
     if freshness_health_path is None:
         raise ControlPanelValidationError("freshness health artifact is mandatory")
+    baseline_catalog = _baseline_catalog_for_report(baseline_root, report)
     resolved_decomposition, resolved_correlation = _analytics_roots(
         report_root, decomposition_root, correlation_root
     )
@@ -4619,6 +5363,7 @@ def _rendered_files(
         replication_payload,
         candidate_driver_map,
         candidate_driver_map_identity,
+        baseline_catalog,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -4698,6 +5443,7 @@ def build_candidate(
     freshness_health_path: Path | None = None,
     replication_root: Path | None = None,
     candidate_driver_map_path: Path | None = None,
+    baseline_root: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -4712,6 +5458,7 @@ def build_candidate(
         freshness_health_path,
         replication_root,
         candidate_driver_map_path,
+        baseline_root,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -4787,6 +5534,7 @@ def verify_candidate(
     freshness_health_path: Path | None = None,
     replication_root: Path | None = None,
     candidate_driver_map_path: Path | None = None,
+    baseline_root: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -4801,6 +5549,7 @@ def verify_candidate(
         freshness_health_path,
         replication_root,
         candidate_driver_map_path,
+        baseline_root,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -5885,6 +6634,7 @@ def publish_panel(
     freshness_health_path: Path | None = None,
     replication_root: Path | None = None,
     candidate_driver_map_path: Path | None = None,
+    baseline_root: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         report_root,
@@ -5900,6 +6650,7 @@ def publish_panel(
         freshness_health_path,
         replication_root,
         candidate_driver_map_path,
+        baseline_root,
     )
     qa = validate_qa(candidate_dir, qa_dir)
     _write_exact(
@@ -5918,6 +6669,7 @@ def publish_panel(
         freshness_health_path,
         replication_root,
         candidate_driver_map_path,
+        baseline_root,
     )
     (
         report_path,
@@ -6170,6 +6922,15 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--candidate-driver-map", type=Path)
         command.add_argument("--strategy-evidence", type=Path)
         command.add_argument("--freshness-health", type=Path, required=True)
+        command.add_argument(
+            "--baseline-root",
+            type=Path,
+            required=True,
+            help=(
+                "Governed baseline generation root (reconciliation authority "
+                "for the HWM envelope, crosswalk, and perimeter)"
+            ),
+        )
         command.add_argument("--output-root", type=Path, required=name != "verify")
         if name != "build":
             command.add_argument("--candidate-dir", type=Path, required=True)
@@ -6203,6 +6964,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.freshness_health,
                 args.replication_root,
                 args.candidate_driver_map,
+                args.baseline_root,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -6219,6 +6981,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.freshness_health,
                 args.replication_root,
                 args.candidate_driver_map,
+                args.baseline_root,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -6243,6 +7006,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.freshness_health,
                 args.replication_root,
                 args.candidate_driver_map,
+                args.baseline_root,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)

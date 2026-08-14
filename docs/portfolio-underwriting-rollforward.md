@@ -290,6 +290,7 @@ Acceptance requires:
 ```powershell
 & $enginePython tools\portfolio_control_panel.py verify `
   --report-root (Join-Path $portfolioRoot 'reporting') `
+  --baseline-root (Join-Path $portfolioRoot 'baseline') `
   --legacy-panel $legacyPanel `
   --candidate-dir '<candidate-directory>' `
   --decomposition-lenses-root (Join-Path $portfolioRoot 'analytics\decomposition-lenses') `

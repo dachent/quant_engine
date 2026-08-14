@@ -14,9 +14,36 @@ pre-envelope builder (golden regression in
 
 The `hwm_inputs` envelope is the **input contract** consumed by the HWM
 index engine (issue #277).  The builder populates and validates it; the
-consumer reads only from `catalog["hwm_inputs"]["periods"]`.  The #277
-wiring into `portfolio_report.py` / `portfolio_control_panel.py` is NOT
-in this change — it stays on a dedicated hold branch.
+consumers read only from `catalog["hwm_inputs"]["periods"]`.
+
+The #277 consumers are implemented (branch `feat/hwm-001-composite`):
+
+- `tools/portfolio_report.py` (`_hwm_numerical_from_envelope`, called from
+  `build_report_data`) computes the composite daily systematic return
+  series from the envelope's AVAILABLE periods — per date, the
+  beginning-capital-weighted member return with returns resolved through
+  the hash-bound `strategy_returns` crosswalk — and hands it to the ledger
+  kernel (`compute_full_systematic_hwm_index`).  The numerical block
+  (`hwm_numerical_status`, `hwm_numerical_reason`, and when AVAILABLE
+  `hwm_index` / `hwm_current_drawdown` / `hwm_maximum_drawdown`) publishes
+  on the report's `hwm_summary` whether or not a freshness assessment is
+  supplied.  An absent envelope yields `UNAVAILABLE`/`NO_HWM_INPUTS`; any
+  internal defect, an all-UNAVAILABLE required day, a duplicate or
+  mismatched return reference, or an unresolved reference yields
+  `UNAVAILABLE` with a structured reason — never an error and never a
+  fallback.  An in-scope perimeter with numerical status UNAVAILABLE gates
+  the report's advisory readiness to `DO_NOT_EXPAND_SYSTEMATIC_RISK` (the
+  gate only tightens the replayed control action).
+- `tools/portfolio_control_panel.py` reconciles the report's claims against
+  the governed baseline generation named by the report's baseline
+  reference (manifest and catalog hash-verified through the core
+  publication machinery), validates the catalog's envelope against the full
+  contract above, recomputes the composite from the CATALOG, and requires
+  the report's carried copies (`hwm_inputs`, `strategy_returns`, perimeter,
+  as-of) to equal the catalog exactly.  The report's envelope remains a
+  display view; authority for reconciliation is the catalog.  Any
+  divergence, a missing baseline root, or an unresolvable generation fails
+  the panel build closed.
 
 ## Envelope structure
 

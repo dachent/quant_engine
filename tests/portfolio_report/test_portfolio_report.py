@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
 import importlib.util
 import json
@@ -27,6 +27,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import decimal_text
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -1112,6 +1113,50 @@ def test_report_schema_is_closed_and_keeps_mwr_unavailable() -> None:
         schema["$defs"]["performance"]["properties"]["mwr_status"]["const"]
         == "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE"
     )
+    # hwm_summary carries the numerical composite block with conditional rules:
+    # drawdown fields required iff AVAILABLE, reason iff UNAVAILABLE, and the
+    # opposite fields are forbidden in each case.
+    hwm_summary = schema["properties"]["hwm_summary"]
+    assert "hwm_summary" in schema["required"]
+    assert "hwm_numerical_status" in hwm_summary["required"]
+    assert hwm_summary["properties"]["hwm_numerical_status"] == {
+        "enum": ["AVAILABLE", "UNAVAILABLE"]
+    }
+    rules = hwm_summary["allOf"]
+    available_rule = next(
+        rule
+        for rule in rules
+        if rule.get("if", {}).get("properties", {}).get("hwm_numerical_status")
+        == {"const": "AVAILABLE"}
+    )
+    assert available_rule["then"]["required"] == [
+        "hwm_index",
+        "hwm_current_drawdown",
+        "hwm_maximum_drawdown",
+    ]
+    assert available_rule["then"]["not"] == {"required": ["hwm_numerical_reason"]}
+    unavailable_rule = next(
+        rule
+        for rule in rules
+        if rule.get("if", {}).get("properties", {}).get("hwm_numerical_status")
+        == {"const": "UNAVAILABLE"}
+    )
+    assert unavailable_rule["then"]["required"] == ["hwm_numerical_reason"]
+    assert "not" in unavailable_rule["then"]
+    # The governed coverage fields are required exactly when the coverage
+    # evaluation (freshness path) produced them.
+    assert any(
+        rule.get("if", {}).get("required") == ["status"]
+        and "covered_value_usd" in rule.get("then", {}).get("required", [])
+        for rule in rules
+    )
+    assert "hwm_inputs" in schema["properties"]
+    assert "hwm_inputs" not in schema["required"]
+    # The report-carried envelope references the closed catalog envelope
+    # shape rather than admitting an arbitrary object.
+    assert schema["properties"]["hwm_inputs"] == {
+        "$ref": "baseline-catalog.schema.json#/properties/hwm_inputs"
+    }
 
 
 def _published_provider_ledger(
@@ -1646,3 +1691,423 @@ def test_report_fails_closed_when_provider_reconciliation_source_is_missing(
         match="hash-bound provider-ledger catalog is missing or ambiguous",
     ):
         reporter.build_report_data(baseline_root)
+
+
+# ── hwm_inputs numerical composite (HWM-001) ─────────────────────────────
+
+_HWM_DAYS = ("2026-01-01", "2026-01-02", "2026-01-03")
+# Varying per-sleeve beginning capital across the two contributing days.
+_HWHM_CAPITAL = {
+    "strategy-1": {"2026-01-02": "100", "2026-01-03": "110"},
+    "strategy-2": {"2026-01-02": "300", "2026-01-03": "285"},
+}
+_HWM_RETURNS = {
+    "2026-01-02": {"strategy-1": "0.10", "strategy-2": "-0.05"},
+    "2026-01-03": {"strategy-1": "0.02", "strategy-2": "0.04"},
+}
+
+
+def _hwm_return_crosswalk() -> list[dict[str, Any]]:
+    """Hash-bound rollforward crosswalk rows, shaped exactly as the provider
+    ledger's account-live rollforward emits them (the admitted-envelope
+    evidence path); the envelope's return references equal the rows'
+    account_reconciliation_sha256."""
+    rows: list[dict[str, Any]] = []
+    for day in ("2026-01-02", "2026-01-03"):
+        for index in range(1, 10):
+            strategy_id = f"strategy-{index}"
+            reference = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "account_ids": ["account-a"],
+                        "date": day,
+                        "source_record_ids": [f"nav-{strategy_id}-{day}"],
+                        "strategy_id": strategy_id,
+                    }
+                )
+            ).hexdigest()
+            rows.append(
+                {
+                    "account_reconciliation_sha256": reference,
+                    "beginning_capital": _HWHM_CAPITAL.get(strategy_id, {}).get(
+                        day, "100"
+                    ),
+                    "component_account_count": 1,
+                    "component_account_ids": ["account-a"],
+                    "date": day,
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "flow_timing": "DATE_ONLY_END_OF_DAY",
+                    "provider_id": "synthetic",
+                    "return": _HWM_RETURNS[day].get(strategy_id, "0"),
+                    "return_basis": "NET",
+                    "return_type": "TOTAL",
+                    "source_record_ids": [f"nav-{strategy_id}-{day}"],
+                    "strategy_id": strategy_id,
+                }
+            )
+    return rows
+
+
+def _hwm_envelope(crosswalk: list[dict[str, Any]]) -> dict[str, Any]:
+    """Synthetic governed envelope: 2026-01-01 is non-trading for every
+    sleeve; 2026-01-02/03 carry AVAILABLE rows for all nine perimeter
+    strategies with per-sleeve varying capital, referencing the hash-bound
+    rollforward crosswalk rows."""
+    references = {
+        (str(row["strategy_id"]), str(row["date"])): str(
+            row["account_reconciliation_sha256"]
+        )
+        for row in crosswalk
+    }
+    periods: list[dict[str, Any]] = []
+    for day in _HWM_DAYS:
+        for index in range(1, 10):
+            strategy_id = f"strategy-{index}"
+            if day == "2026-01-01":
+                periods.append(
+                    {
+                        "strategy_id": strategy_id,
+                        "date": day,
+                        "lane": "ACCOUNT",
+                        "disposition": "EXPECTED_NON_TRADING",
+                        "beginning_capital_usd": None,
+                        "return_source_record_id": None,
+                        "flow_status": "MISSING",
+                        "fx_status": "MISSING",
+                    }
+                )
+            else:
+                periods.append(
+                    {
+                        "strategy_id": strategy_id,
+                        "date": day,
+                        "lane": "ACCOUNT",
+                        "disposition": "AVAILABLE",
+                        "beginning_capital_usd": _HWHM_CAPITAL.get(strategy_id, {}).get(
+                            day, "100"
+                        ),
+                        "return_source_record_id": references[(strategy_id, day)],
+                        "component_account_ids": ["account-a"],
+                        "flow_status": "OBSERVED",
+                        "fx_status": "NOT_REQUIRED",
+                        "flow_source_record_ids": [],
+                        "fx_source_record_ids": [],
+                    }
+                )
+    return {
+        "contract_version": 1,
+        "anchor": {
+            "anchor_date": "2026-01-01",
+            "index_base_value": "1.0",
+            "hwm_policy_id": "PORT-HWM-3",
+            "acceptance_provenance": {
+                "accepted_at": "2026-01-03T00:00:00Z",
+                "accepted_by": "synthetic",
+                "source_artifact_id": "source-1",
+                "source_artifact_sha256": "3" * 64,
+            },
+        },
+        "calendar_authorities": [
+            {
+                "lane": "ACCOUNT",
+                "authority_id": "synthetic",
+                "authority_version": "1",
+                "calendar_kind": "EXCHANGE",
+                "admitted_source_artifact_id": "source-1",
+            }
+        ],
+        "periods": periods,
+        "reconciliation": {
+            "period_capital_method": "NAV_ROLLFORWARD",
+            "allocation_endpoint_check": {"matched": True, "delta_usd": "0"},
+        },
+    }
+
+
+def _hwm_freshness_file(tmp_path: Path) -> Path:
+    payload = {
+        "assessment_schema_version": 2,
+        "as_of_date": "2026-01-03",
+        "assessments": [
+            {
+                "blocks_current_consumers": False,
+                "evaluated_on": "2026-01-03",
+                "fact_type": "strategy-returns",
+                "reason": "synthetic fresh",
+                "state": "FRESH",
+                "subject_id": f"strategy-{index}",
+            }
+            for index in range(1, 10)
+        ],
+        "policy": {
+            "expected_interval_days": 1,
+            "grace_days": 0,
+            "mode": "RECURRING",
+            "policy_id": "daily-current",
+            "stale_after_days": 5,
+        },
+    }
+    path = tmp_path / "freshness-health.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _summary_row(report: dict[str, Any], metric: str) -> Any:
+    return next(
+        row["value"] for row in report["portfolio_summary"] if row["metric"] == metric
+    )
+
+
+def test_hwm_numerical_composite_matches_hand_computation(tmp_path: Path) -> None:
+    """Multi-sleeve varying-capital periods: the composite is the
+    beginning-capital-weighted daily return, geometrically linked."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    catalog["hwm_inputs"] = _hwm_envelope(crosswalk)
+    catalog["strategy_returns"] = crosswalk
+    catalog["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "AVAILABLE"
+    assert "hwm_numerical_reason" not in hwm
+    # Hand-computed expectation (Decimal, 34-digit precision, half-even):
+    #   day 2026-01-02: (100*0.10 + 300*(-0.05) + 700*0) / 1100
+    #   day 2026-01-03: (110*0.02 + 285*0.04 + 700*0) / 1095
+    with localcontext() as ctx:
+        ctx.prec = 34
+        ctx.rounding = ROUND_HALF_EVEN
+        r1 = (Decimal(100) * Decimal("0.10") + Decimal(300) * Decimal("-0.05")) / (
+            Decimal(1100)
+        )
+        r2 = (Decimal(110) * Decimal("0.02") + Decimal(285) * Decimal("0.04")) / (
+            Decimal(1095)
+        )
+        index = Decimal("1.0")
+        peak = index
+        max_drawdown = Decimal("0")
+        for r in (r1, r2):
+            index = index * (1 + r)
+            peak = max(peak, index)
+            max_drawdown = max(max_drawdown, 1 - index / peak)
+        current_drawdown = 1 - index / peak
+    assert hwm["hwm_index"] == decimal_text(index)
+    assert hwm["hwm_current_drawdown"] == decimal_text(current_drawdown)
+    assert hwm["hwm_maximum_drawdown"] == decimal_text(max_drawdown)
+    assert current_drawdown == Decimal("0")
+    assert max_drawdown > 0
+    # The numerical gate only tightens: AVAILABLE leaves readiness untouched.
+    assert _summary_row(report, "Advisory readiness") == "ELIGIBLE_FOR_REVIEW"
+    # The report carries the governed envelope for downstream reconciliation.
+    assert report["hwm_inputs"]["contract_version"] == 1
+
+
+def test_hwm_numerical_unavailable_without_envelope(tmp_path: Path) -> None:
+    """No envelope → UNAVAILABLE/NO_HWM_INPUTS; every existing field keeps
+    its current value."""
+    catalog = _baseline_catalog()
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    assert "hwm_inputs" not in report
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm["hwm_numerical_reason"] == "NO_HWM_INPUTS"
+    assert "hwm_index" not in hwm
+    assert "hwm_current_drawdown" not in hwm
+    assert "hwm_maximum_drawdown" not in hwm
+    # Existing coverage/status fields are untouched by the numerical block.
+    assert hwm["status"] == "NOT_AUTOMATABLE_STALE_OR_MISSING_GOVERNED_HWM_DAILY_NAV"
+    assert hwm["policy_id"] == "PORT-HWM-3"
+    replay = catalog["replay"]
+    assert _summary_row(report, "Full-systematic HWM") == hwm["status"]
+    assert _summary_row(report, "Advisory readiness") == replay["portfolio_action"]
+    assert _summary_row(report, "Baseline replay") == replay["status"]
+    assert _summary_row(report, "Total liquid") == replay["total_liquid_usd"]
+
+
+def test_hwm_numerical_unavailable_period_blocks_composite(tmp_path: Path) -> None:
+    """A single UNAVAILABLE member row on a contributing day fails the whole
+    composite closed — the composite is never recalculated over survivors."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    envelope = _hwm_envelope(crosswalk)
+    blocked = next(
+        row
+        for row in envelope["periods"]
+        if row["strategy_id"] == "strategy-4" and row["date"] == "2026-01-02"
+    )
+    blocked["disposition"] = "UNAVAILABLE"
+    blocked["beginning_capital_usd"] = None
+    blocked["return_source_record_id"] = None
+    catalog["hwm_inputs"] = envelope
+    catalog["strategy_returns"] = crosswalk
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm["hwm_numerical_reason"] == "INCOMPLETE_PERIODS"
+    assert "hwm_index" not in hwm
+
+
+def test_hwm_numerical_unavailable_gates_readiness(tmp_path: Path) -> None:
+    """Conformance vector missing_full_hwm_fails_closed: an in-scope HWM
+    perimeter with numerical status UNAVAILABLE gates advisory readiness to
+    DO_NOT_EXPAND_SYSTEMATIC_RISK even when the replayed control action is
+    permissive."""
+    catalog = _baseline_catalog()
+    catalog["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    assert report["hwm_summary"]["hwm_numerical_status"] == "UNAVAILABLE"
+    assert _summary_row(report, "Advisory readiness") == "DO_NOT_EXPAND_SYSTEMATIC_RISK"
+
+
+def test_hwm_numerical_all_unavailable_day_fails_closed(tmp_path: Path) -> None:
+    """Regression: a required day whose members are ALL UNAVAILABLE is a
+    coverage gap — it must not be silently skipped.  Only a day where every
+    perimeter member is EXPECTED_NON_TRADING (or policy-excluded) carries no
+    period."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    envelope = _hwm_envelope(crosswalk)
+    for row in envelope["periods"]:
+        if row["date"] == "2026-01-02":
+            row["disposition"] = "UNAVAILABLE"
+            row["beginning_capital_usd"] = None
+            row["return_source_record_id"] = None
+    catalog["hwm_inputs"] = envelope
+    catalog["strategy_returns"] = crosswalk
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm["hwm_numerical_reason"] == "INCOMPLETE_PERIODS"
+    assert "hwm_index" not in hwm
+
+
+def test_hwm_numerical_duplicate_return_reference_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Crosswalk binding: a second strategy_returns row carrying the same
+    reference (last-write-wins overwrite probe) must fail closed instead of
+    silently rebinding the return."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    catalog["hwm_inputs"] = _hwm_envelope(crosswalk)
+    proven = crosswalk[0]
+    crosswalk.append(
+        # Duplicate reference, divergent return, distinct date so no earlier
+        # account-live series check fires — only the composite's strict
+        # reference binding can catch the collision.
+        {
+            **proven,
+            "date": "2026-01-01",
+            "return": "9.99",
+            "source_record_ids": ["nav-duplicate"],
+        }
+    )
+    catalog["strategy_returns"] = crosswalk
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm["hwm_numerical_reason"] == "DUPLICATE_RETURN_REFERENCE"
+    assert "hwm_index" not in hwm
+
+
+def test_hwm_numerical_mismatched_return_reference_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A crosswalk row matching only the reference — wrong strategy, date,
+    or evidence layer — does not bind; the composite fails closed."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    catalog["hwm_inputs"] = _hwm_envelope(crosswalk)
+    # The row for strategy-1 on 2026-01-02 is re-labeled to PROVIDER_LIVE:
+    # the reference no longer has an ACCOUNT_LIVE identity match.
+    target = next(
+        row
+        for row in crosswalk
+        if row["strategy_id"] == "strategy-1" and row["date"] == "2026-01-02"
+    )
+    target["evidence_layer"] = "PROVIDER_LIVE"
+    catalog["strategy_returns"] = crosswalk
+    baseline_root = _published_baseline(tmp_path, catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=_hwm_freshness_file(tmp_path)
+    )
+
+    hwm = report["hwm_summary"]
+    assert hwm["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm["hwm_numerical_reason"] == "UNRESOLVED_RETURN_REFERENCE"
+    assert "hwm_index" not in hwm
+
+
+def test_hwm_numerical_publishes_without_freshness_argument(tmp_path: Path) -> None:
+    """The numerical state is independent of the freshness argument: with no
+    freshness health supplied the report still publishes hwm_summary with
+    the envelope-derived numerical status and applies the readiness gate."""
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    catalog["hwm_inputs"] = _hwm_envelope(crosswalk)
+    catalog["strategy_returns"] = crosswalk
+    catalog["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
+    baseline_root = _published_baseline(tmp_path / "with-envelope", catalog)
+
+    report, _, _ = reporter.build_report_data(baseline_root)
+
+    hwm = report["hwm_summary"]
+    # Numerical-only summary: no coverage fields without the freshness path.
+    assert "covered_value_usd" not in hwm
+    assert hwm["hwm_numerical_status"] == "AVAILABLE"
+    assert "hwm_index" in hwm
+    # AVAILABLE does not tighten readiness.
+    assert _summary_row(report, "Advisory readiness") == "ELIGIBLE_FOR_REVIEW"
+
+    catalog_no_envelope = _baseline_catalog()
+    catalog_no_envelope["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
+    baseline_root_no_env = _published_baseline(
+        tmp_path / "without-envelope", catalog_no_envelope
+    )
+    report_no_env, _, _ = reporter.build_report_data(baseline_root_no_env)
+
+    hwm_no_env = report_no_env["hwm_summary"]
+    assert hwm_no_env["hwm_numerical_status"] == "UNAVAILABLE"
+    assert hwm_no_env["hwm_numerical_reason"] == "NO_HWM_INPUTS"
+    # UNAVAILABLE gates readiness even without the freshness argument.
+    assert (
+        _summary_row(report_no_env, "Advisory readiness")
+        == "DO_NOT_EXPAND_SYSTEMATIC_RISK"
+    )
+    # Replay-sourced fallback rows keep their pre-envelope values.
+    replay = catalog_no_envelope["replay"]
+    assert (
+        _summary_row(report_no_env, "Full-systematic HWM")
+        == replay["full_systematic_hwm_status"]
+    )
+    assert _summary_row(report_no_env, "NAV coverage") == replay["nav_coverage"]

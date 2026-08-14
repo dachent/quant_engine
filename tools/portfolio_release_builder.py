@@ -1181,6 +1181,7 @@ def build_report(
 def build_panel_candidate(
     recipe_path: Path,
     report_root: Path,
+    baseline_root: Path,
     attribution_bundle: Path,
     analytics: Mapping[str, Any],
     freshness_health: Path,
@@ -1193,6 +1194,8 @@ def build_panel_candidate(
         "build",
         "--report-root",
         str(report_root),
+        "--baseline-root",
+        str(baseline_root),
         "--legacy-panel",
         str(legacy_panel),
         "--decomposition-root",
@@ -1220,6 +1223,8 @@ def build_panel_candidate(
         "verify",
         "--report-root",
         str(report_root),
+        "--baseline-root",
+        str(baseline_root),
         "--legacy-panel",
         str(legacy_panel),
         "--decomposition-root",
@@ -1247,6 +1252,7 @@ def build_panel_candidate(
 def publish_panel(
     recipe_path: Path,
     report_root: Path,
+    baseline_root: Path,
     attribution_bundle: Path,
     analytics: Mapping[str, Any],
     freshness_health: Path,
@@ -1261,6 +1267,8 @@ def publish_panel(
         "publish",
         "--report-root",
         str(report_root),
+        "--baseline-root",
+        str(baseline_root),
         "--legacy-panel",
         str(legacy_panel),
         "--decomposition-root",
@@ -1379,6 +1387,7 @@ def build_stage(
             else build_panel_candidate(
                 recipe_path,
                 stages / "report",
+                stages / "baseline",
                 _path(attribution.get("destination"), "attribution destination"),
                 analytics,
                 _path(ledger.get("freshness_health"), "freshness health"),
@@ -1391,6 +1400,7 @@ def build_stage(
             result = publish_panel(
                 recipe_path,
                 stages / "report",
+                stages / "baseline",
                 _path(attribution.get("destination"), "attribution destination"),
                 analytics,
                 _path(ledger.get("freshness_health"), "freshness health"),
