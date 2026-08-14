@@ -743,15 +743,17 @@ def test_topology_atoms_block_completion_and_name_account(
     spec_path = _topology_diff_spec(tmp_path)
     catalog, manifest, _ = build_generation(spec_path)
     assert manifest.coverage.status is CoverageStatus.PARTIAL
-    # Per-account atoms must appear in known_gaps
     gaps_text = " ".join(manifest.coverage.known_gaps)
-    assert "account_topology:flex_only:" in gaps_text
+    # flex_only = normal under Flex authority — NO atom emitted
+    assert "account_topology:flex_only:" not in gaps_text
+    # snapshot_only = gap — atom emitted
     assert "account_topology:snapshot_only:" in gaps_text
-    # Verify the atoms name the account (hashed)
-    assert "d6177a34a47fe498" in gaps_text  # hash(SYNTH-RAW)[:16]
     assert "a821e0b93e7a426e" in gaps_text  # hash(SYNTH-OTHER)[:16]
+    # unmapped TWS facts from non-crosswalk account → per-account atom
+    assert "unmapped_tws_fact:a821e0b93e7a426e" in gaps_text
     # Topology atoms must NOT appear in the declared-exclusion boundary
     assert "account_topology" not in manifest.coverage.boundary
+    assert "unmapped_tws_fact" not in manifest.coverage.boundary
     # Publish must reject
     output = tmp_path / "ibkr-private-output"
     staged = stage_generation_candidate(spec_path, output)
@@ -760,23 +762,38 @@ def test_topology_atoms_block_completion_and_name_account(
         publish_generation_candidate(spec_path, output, staged["generation_id"])
 
 
-def test_altering_declared_exclusion_yields_partial(tmp_path: Path) -> None:
-    """A gap not matching any authorized exclusion pattern stays PARTIAL.
+def test_flex_authority_no_flex_only_atoms(tmp_path: Path) -> None:
+    """flex_only = normal under Flex authority; no topology atom emitted."""
+    spec_path = _refreshed_spec(tmp_path)
+    _, manifest, _ = build_generation(spec_path)
+    gaps_text = " ".join(manifest.coverage.known_gaps)
+    assert "account_topology:flex_only:" not in gaps_text
+    assert "account_topology:snapshot_only:" not in gaps_text
+    assert manifest.coverage.status is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
 
-    This verifies that removing any of the three owner-authorized exclusion
-    patterns from _declared_exclusion would cause the gap to become
-    undeclared → PARTIAL.  We test this by injecting a topology atom (which
-    is explicitly NOT among the three authorized classes) alongside the
-    authorized exclusions.
-    """
+
+def test_unauthorized_unmapped_atom_blocks_completion(
+    tmp_path: Path,
+) -> None:
+    """An unmapped_tws_fact atom for a non-authorized account stays PARTIAL."""
     spec_path = _topology_diff_spec(tmp_path)
     _, manifest, _ = build_generation(spec_path)
-    assert manifest.coverage.status is CoverageStatus.PARTIAL
-    # The topology atoms are *not* declared-excluded, so they appear as
-    # known_gaps even though the authorized exclusions are also present.
     gaps = set(manifest.coverage.known_gaps)
-    assert any(gap.startswith("account_topology:") for gap in gaps)
-    # The authorized exclusion for order visibility is still matched,
-    # but the undeclared atom prevents COMPLETE.
-    assert "Order visibility is execution scope" in manifest.coverage.boundary
-    assert "account_topology" not in manifest.coverage.boundary
+    # The unmapped atom for SYNTH-OTHER (a821e0b93e7a426e) is NOT the
+    # authorized label (086e03b607cedf48) → undeclared → PARTIAL
+    assert "unmapped_tws_fact:a821e0b93e7a426e" in gaps
+    assert "086e03b607cedf48" not in manifest.coverage.boundary
+    assert (
+        gaps
+        - {
+            "unmapped_tws_fact:a821e0b93e7a426e",
+            "account_topology:snapshot_only:a821e0b93e7a426e",
+            "Zero API order rows do not prove complete order visibility",
+        }
+        == set()
+    )
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    output = tmp_path / "ibkr-private-output"
+    staged = stage_generation_candidate(spec_path, output)
+    with pytest.raises(PublicationRejectedError, match="coverage is not complete"):
+        publish_generation_candidate(spec_path, output, staged["generation_id"])

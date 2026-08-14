@@ -790,10 +790,12 @@ def _normalize(
         observed_at = snapshot.observed_at.isoformat().replace("+00:00", "Z")
         snapshot_date = snapshot.observed_at.date()
         unmapped_positions = 0
+        unmapped_position_accounts: set[str] = set()
         for current_position in snapshot.positions:
             current_account_id = crosswalk.get(current_position.raw_account_id)
             if current_account_id is None:
                 unmapped_positions += 1
+                unmapped_position_accounts.add(current_position.raw_account_id)
                 continue
             account = accounts_by_id[current_account_id]
             currency = current_position.currency or _text(
@@ -830,10 +832,12 @@ def _normalize(
 
         managed_accounts = frozenset(snapshot.raw_account_ids)
         unmapped_account_values = 0
+        unmapped_account_value_accounts: set[str] = set()
         for account_value in snapshot.account_values:
             current_account_id = crosswalk.get(account_value.raw_account_id)
             if current_account_id is None:
                 unmapped_account_values += 1
+                unmapped_account_value_accounts.add(account_value.raw_account_id)
                 continue
             account = accounts_by_id[current_account_id]
             currency = (
@@ -894,13 +898,7 @@ def _normalize(
         tws_gaps: list[str] = []
         if tws_identity_partial:
             snapshot_ids = frozenset(snapshot.raw_account_ids)
-            for raw_id in sorted(accepted_current_accounts - snapshot_ids):
-                atom = (
-                    f"account_topology:flex_only:"
-                    f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
-                )
-                tws_gaps.append(atom)
-                topology_gaps.append(atom)
+            # flex_only = normal under Flex authority — no atom emitted
             for raw_id in sorted(snapshot_ids - accepted_current_accounts):
                 atom = (
                     f"account_topology:snapshot_only:"
@@ -908,8 +906,13 @@ def _normalize(
                 )
                 tws_gaps.append(atom)
                 topology_gaps.append(atom)
-        if unmapped_positions or unmapped_account_values:
-            tws_gaps.append("Some current TWS facts lack an accepted account mapping")
+        if unmapped_position_accounts or unmapped_account_value_accounts:
+            all_unmapped = unmapped_position_accounts | unmapped_account_value_accounts
+            for raw_id in sorted(all_unmapped):
+                tws_gaps.append(
+                    f"unmapped_tws_fact:"
+                    f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
+                )
         if order_visibility == "ZERO_ROWS_OBSERVED_NOT_VISIBILITY_PROOF":
             tws_gaps.append(
                 "Zero API order rows do not prove complete order visibility"
@@ -964,7 +967,7 @@ def _normalize(
                 ],
                 "status": (
                     "PARTIAL"
-                    if account_scope_mismatches or tws_identity_partial
+                    if account_scope_mismatches or topology_gaps
                     else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
                 ),
             },
@@ -1070,8 +1073,11 @@ def build_generation(
         )
 
     def _declared_exclusion(gap: str, scope_count: int) -> str | None:
-        if gap == "Some current TWS facts lack an accepted account mapping":
-            return "Summary-only labels: execution-side scope, excluded"
+        if gap == "unmapped_tws_fact:086e03b607cedf48":
+            return (
+                "Non-managed TWS account summary label "
+                "(086e03b607cedf48): not in read boundary"
+            )
         if gap == ("Zero API order rows do not prove complete order visibility"):
             return (
                 "Order visibility is execution scope, excluded per "

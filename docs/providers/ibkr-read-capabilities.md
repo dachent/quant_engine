@@ -228,28 +228,33 @@ implemented by this decision.
 
 ## Declared boundary (issue #286)
 
-The read boundary is the **Flex statement account scope**. Three exclusion
-classes are owner-authorized:
+The read boundary is the **Flex statement account scope** — Flex is the sole
+data authority. TWS is corroborating evidence of currently-managed accounts,
+not boundary membership. Three exclusion classes are owner-authorized:
 
-1. **Order visibility** (execution scope): "Zero API order rows do not prove
-   complete order visibility".
-2. **Cross-account-discrepant rows** (bounded, count recorded): "Some activity
-   rows have an ambiguous provider-reported account scope" → kept `UNMAPPED`
+1. **Order visibility** (execution scope): `Zero API order rows do not prove
+   complete order visibility`.
+2. **Cross-account-discrepant rows** (bounded, count recorded): `Some activity
+   rows have an ambiguous provider-reported account scope` → kept `UNMAPPED`
    with `AMBIGUOUS_REPORTED_ACCOUNT`.
-3. **Non-managed TWS account summary labels (086e03b607cedf48)**: "Some current TWS
-   facts lack an accepted account mapping" → not a Flex query account, not in
-   the read boundary.
+3. **Non-managed TWS account summary label** (`unmapped_tws_fact:086e03b607cedf48`):
+   not a Flex query account, not in the read boundary.
 
-Account-level topology differences (flex-only / snapshot-only) are **not**
-excludable. They surface as per-account atoms
-(`account_topology:flex_only:<masked>`, `account_topology:snapshot_only:<masked>`)
-in the manifest. Any topology atom blocks completion — the build stays
-`PARTIAL` until each atom resolves through the crosswalk.
+Gaps surface as per-account atoms with masked (SHA-256[:16]) account
+identifiers:
 
-When every residual gap is declared-excluded and no topology atoms exist,
+- `account_topology:snapshot_only:<masked>` — account in TWS but not Flex;
+  **blocks completion** (undeclared).
+- `account_topology:flex_only:<masked>` — **not emitted**: an account present
+  in Flex but absent from TWS is normal (Flex authority).
+- `unmapped_tws_fact:<masked>` — unmapped TWS position or account value;
+  **only** the authorized label (`086e03b607cedf48`) is declared-excluded;
+  any other unmapped fact atom blocks completion.
+
+When every residual gap is declared-excluded and no undeclared atoms exist,
 coverage evaluates `COMPLETE_WITHIN_DECLARED_BOUNDARY` and the generation may
-be published. Undeclared gaps (such as an absent TWS snapshot on a legacy-only
-spec) still yield `PARTIAL` and block publication.
+be published. Undeclared gaps (absent TWS snapshot, unauthorized unmapped
+account, snapshot-only topology) yield `PARTIAL` and block publication.
 
 ## Offline generation runbook
 
