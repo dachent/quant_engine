@@ -330,28 +330,61 @@ def _sources(
         "WCH_TRANSACTION_JSON": 8,
         "WORKBOOK_REFERENCE": 1,
     }
-    # Allow opting into either per-account or aggregate roles, not both
-    # (at least one manual transaction role and one manual NAV role required)
-    if grouped.get("MANUAL_TRANSACTION_JSON") and grouped.get(
-        "MANUAL_TRANSACTION_JSON_ALL"
-    ):
+    actual_counts = {key: len(value) for key, value in grouped.items() if value}
+
+    # Mandatory singleton roles — every generation must include these
+    for role in ("MANUAL_POSITION_CSV", "WORKBOOK_REFERENCE"):
+        if actual_counts.get(role) != expected[role]:
+            raise SchwabGenerationError(
+                f"mandatory role {role} is missing or has wrong count"
+            )
+
+    # Mandatory WCH roles
+    for role in ("WCH_NAV_CSV", "WCH_TRANSACTION_JSON"):
+        if actual_counts.get(role) != expected[role]:
+            raise SchwabGenerationError(
+                f"mandatory role {role} is missing or has wrong count"
+            )
+
+    # Exactly one manual transaction role (per-account or aggregate)
+    has_txn_per = "MANUAL_TRANSACTION_JSON" in actual_counts
+    has_txn_all = "MANUAL_TRANSACTION_JSON_ALL" in actual_counts
+    if has_txn_per and has_txn_all:
         raise SchwabGenerationError(
             "cannot use both per-account and aggregate manual transaction roles"
         )
-    if grouped.get("MANUAL_NAV_CSV") and grouped.get("MANUAL_NAV_CSV_ALL"):
+    if not has_txn_per and not has_txn_all:
+        raise SchwabGenerationError(
+            "a manual transaction role (per-account or aggregate) is required"
+        )
+
+    # Exactly one manual NAV role
+    has_nav_per = "MANUAL_NAV_CSV" in actual_counts
+    has_nav_all = "MANUAL_NAV_CSV_ALL" in actual_counts
+    if has_nav_per and has_nav_all:
         raise SchwabGenerationError(
             "cannot use both per-account and aggregate manual NAV roles"
         )
-    # Drop empty roles from expected comparison (mutual exclusion above)
-    actual_counts = {key: len(value) for key, value in grouped.items() if value}
-    expected_filtered = {k: v for k, v in expected.items() if k in actual_counts}
-    # Aggregate roles replace their per-account counterparts
-    if grouped.get("MANUAL_TRANSACTION_JSON_ALL"):
-        expected_filtered.pop("MANUAL_TRANSACTION_JSON", None)
-    if grouped.get("MANUAL_NAV_CSV_ALL"):
-        expected_filtered.pop("MANUAL_NAV_CSV", None)
-    if actual_counts != expected_filtered:
-        raise SchwabGenerationError("accepted source-role inventory differs")
+    if not has_nav_per and not has_nav_all:
+        raise SchwabGenerationError(
+            "a manual NAV role (per-account or aggregate) is required"
+        )
+
+    # Validate the chosen role has the expected count
+    chosen_txn_role = (
+        "MANUAL_TRANSACTION_JSON_ALL" if has_txn_all else "MANUAL_TRANSACTION_JSON"
+    )
+    chosen_nav_role = "MANUAL_NAV_CSV_ALL" if has_nav_all else "MANUAL_NAV_CSV"
+    for role in (
+        chosen_txn_role,
+        chosen_nav_role,
+        "MANUAL_POSITION_CSV",
+        "WORKBOOK_REFERENCE",
+        "WCH_NAV_CSV",
+        "WCH_TRANSACTION_JSON",
+    ):
+        if actual_counts.get(role) != expected[role]:
+            raise SchwabGenerationError(f"role {role} has wrong count")
     account_scoped_roles = {
         role: {account_id for account_id, _ in items}
         for role, items in grouped.items()
@@ -1342,14 +1375,24 @@ def build_generation(
     txn_partial_gap: dict[str, object] | None = None
     expected_export_record_count: int | None = None
     if sources.get("MANUAL_TRANSACTION_JSON_ALL"):
-        # Read the declared export record count from the spec source entry
+        # The aggregate transaction role requires a declared export record count
         manual_all_sources = [
             s for s in spec["sources"] if s.get("role") == "MANUAL_TRANSACTION_JSON_ALL"
         ]
-        if manual_all_sources and "expected_record_count" in manual_all_sources[0]:
-            expected_export_record_count = _integer(
-                manual_all_sources[0]["expected_record_count"],
-                "expected_record_count",
+        if (
+            not manual_all_sources
+            or "expected_record_count" not in manual_all_sources[0]
+        ):
+            raise SchwabGenerationError(
+                "MANUAL_TRANSACTION_JSON_ALL requires expected_record_count"
+            )
+        expected_export_record_count = _integer(
+            manual_all_sources[0]["expected_record_count"],
+            "expected_record_count",
+        )
+        if expected_export_record_count < 1:
+            raise SchwabGenerationError(
+                "expected_record_count must be strictly positive"
             )
         transactions, transaction_reconciliation, txn_partial_gap = _transactions_all(
             sources["WCH_TRANSACTION_JSON"],

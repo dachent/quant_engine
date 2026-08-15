@@ -685,16 +685,16 @@ def _spec_aggregate(tmp_path: Path) -> Path:
         ),
         encoding="utf-8",
     )
-    sources.append(
-        _source(
-            manual_all_txn,
-            root=source_root,
-            artifact_id="manual/transaction-all.json",
-            role="MANUAL_TRANSACTION_JSON_ALL",
-            account_id=None,
-            schema_name="synthetic-manual-transaction-all",
-        )
+    source = _source(
+        manual_all_txn,
+        root=source_root,
+        artifact_id="manual/transaction-all.json",
+        role="MANUAL_TRANSACTION_JSON_ALL",
+        account_id=None,
+        schema_name="synthetic-manual-transaction-all",
     )
+    source["expected_record_count"] = 2
+    sources.append(source)
 
     # All-accounts manual NAV CSV (multi-section single-date format)
     manual_all_nav = source_root / "manual-nav-all.csv"
@@ -1100,16 +1100,16 @@ def test_aggregate_transactions_window_edge(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    sources.append(
-        _source(
-            manual_all,
-            root=source_root,
-            artifact_id="manual/transaction-all.json",
-            role="MANUAL_TRANSACTION_JSON_ALL",
-            account_id=None,
-            schema_name="synthetic-manual-transaction-all",
-        )
+    source = _source(
+        manual_all,
+        root=source_root,
+        artifact_id="manual/transaction-all.json",
+        role="MANUAL_TRANSACTION_JSON_ALL",
+        account_id=None,
+        schema_name="synthetic-manual-transaction-all",
     )
+    source["expected_record_count"] = 2
+    sources.append(source)
 
     # All-accounts NAV with per-account sections
     manual_nav = source_root / "manual-nav-all.csv"
@@ -1535,4 +1535,77 @@ def test_window_date_rejects_restatement_suffix(tmp_path: Path) -> None:
     manual_source["expected_size_bytes"] = len(payload)
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(SchwabGenerationError, match="trailing content"):
+        build_generation(spec)
+
+
+# -- Mandatory role validation tests -----------------------------------------------
+
+
+def test_missing_txn_role_fails(tmp_path: Path) -> None:
+    """A spec with no MANUAL_TRANSACTION_JSON source must fail."""
+    spec = _spec(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    document["sources"] = [
+        s
+        for s in document["sources"]
+        if s["role"] not in ("MANUAL_TRANSACTION_JSON", "MANUAL_TRANSACTION_JSON_ALL")
+    ]
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="manual transaction role"):
+        build_generation(spec)
+
+
+def test_missing_workbook_role_fails(tmp_path: Path) -> None:
+    """A spec with no WORKBOOK_REFERENCE source must fail."""
+    spec = _spec(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    document["sources"] = [
+        s for s in document["sources"] if s["role"] != "WORKBOOK_REFERENCE"
+    ]
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(
+        SchwabGenerationError, match="mandatory role WORKBOOK_REFERENCE"
+    ):
+        build_generation(spec)
+
+
+# -- expected_record_count validation tests ---------------------------------------
+
+
+def test_expected_record_count_missing_fails(tmp_path: Path) -> None:
+    """MANUAL_TRANSACTION_JSON_ALL without expected_record_count must fail."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    del manual_source["expected_record_count"]
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="requires expected_record_count"):
+        build_generation(spec)
+
+
+def test_expected_record_count_zero_fails(tmp_path: Path) -> None:
+    """expected_record_count of 0 must fail as not strictly positive."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    manual_source["expected_record_count"] = 0
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="strictly positive"):
+        build_generation(spec)
+
+
+def test_expected_record_count_negative_fails(tmp_path: Path) -> None:
+    """expected_record_count of -1 must fail as not strictly positive."""
+    spec = _spec_aggregate(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    manual_source = next(
+        s for s in document["sources"] if s["role"] == "MANUAL_TRANSACTION_JSON_ALL"
+    )
+    manual_source["expected_record_count"] = -1
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="strictly positive"):
         build_generation(spec)
