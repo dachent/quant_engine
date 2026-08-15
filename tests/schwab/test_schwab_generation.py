@@ -82,11 +82,11 @@ def _spec(tmp_path: Path) -> Path:
     ]
     for index in range(8):
         suffix = f"{index + 1:03d}"
-        external = f"SYNTHETIC-{suffix}"
+        ext = f"SYNTHETIC-{suffix}"
         account_id = f"account-{index:016x}"
         crosswalk.append(
             {
-                "external_" + "account_id": external,
+                "external_" + "account_id": ext,
                 "internal_account_id": account_id,
             }
         )
@@ -149,8 +149,8 @@ def _spec(tmp_path: Path) -> Path:
             wch_nav,
             ["account_id", "account_name", "date", "account_value"],
             [
-                [external, "SYNTHETIC", "07/29/2026", 100 + index],
-                [external, "SYNTHETIC", "07/30/2026", 101 + index],
+                [ext, "SYNTHETIC", "07/29/2026", 100 + index],
+                [ext, "SYNTHETIC", "07/30/2026", 101 + index],
             ],
         )
         sources.append(
@@ -537,11 +537,11 @@ def _spec_aggregate(tmp_path: Path) -> Path:
 
     for index in range(8):
         suffix = f"{index + 1:03d}"
-        external = f"SYNTHETIC-{suffix}"
+        ext = f"SYNTHETIC-{suffix}"
         account_id = f"account-{index:016x}"
         crosswalk.append(
             {
-                "external_account_id": external,
+                "external_account_id": ext,
                 "internal_account_id": account_id,
             }
         )
@@ -623,8 +623,8 @@ def _spec_aggregate(tmp_path: Path) -> Path:
             wch_nav,
             ["account_id", "account_name", "date", "account_value"],
             [
-                [external, "SYNTHETIC", date_a, val_a],
-                [external, "SYNTHETIC", date_b, val_b],
+                [ext, "SYNTHETIC", date_a, val_a],
+                [ext, "SYNTHETIC", date_b, val_b],
             ],
         )
         sources.append(
@@ -931,10 +931,10 @@ def test_aggregate_transactions_window_edge(tmp_path: Path) -> None:
 
     for index in range(8):
         suffix = f"{index + 1:03d}"
-        external = f"SYNTHETIC-{suffix}"
+        ext = f"SYNTHETIC-{suffix}"
         account_id = f"account-{index:016x}"
         crosswalk.append(
-            {"external_account_id": external, "internal_account_id": account_id}
+            {"external_account_id": ext, "internal_account_id": account_id}
         )
 
         wch_txns: list[dict[str, object]] = []
@@ -1020,8 +1020,8 @@ def test_aggregate_transactions_window_edge(tmp_path: Path) -> None:
             wch_nav,
             ["account_id", "account_name", "date", "account_value"],
             [
-                [external, "SYNTHETIC", "07/29/2026", 100 + index],
-                [external, "SYNTHETIC", "07/30/2026", 101 + index],
+                [ext, "SYNTHETIC", "07/29/2026", 100 + index],
+                [ext, "SYNTHETIC", "07/30/2026", 101 + index],
             ],
         )
         sources.append(
