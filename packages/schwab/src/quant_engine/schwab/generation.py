@@ -696,7 +696,9 @@ def _transaction_key(record: Mapping[str, Any], *, manual: bool) -> tuple[str, .
     for index, name in enumerate(names):
         value = record.get(name)
         if index == 0:
-            values.append(_observed_date(value, name).isoformat())
+            values.append(
+                _observed_date(value, name, allow_restatement_suffix=True).isoformat()
+            )
         elif index >= 4:
             values.append(_decimal_text(_decimal(value, name, optional=True)) or "")
         else:
