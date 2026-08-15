@@ -2974,7 +2974,9 @@ def _canonical_strategy_series_contracts(
             raise ControlPanelValidationError(
                 f"dependence strategy version is absent: {series_id}"
             )
-        strategy_version = _text(dependence_version, f"dependence strategy version {series_id}")
+        strategy_version = _text(
+            dependence_version, f"dependence strategy version {series_id}"
+        )
         expected = {
             "evidence_layer": layer,
             "generation_id": _text(

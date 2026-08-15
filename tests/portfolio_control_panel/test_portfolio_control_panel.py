@@ -4325,7 +4325,9 @@ def test_panel_valid_envelope_with_full_context_passes(
 _VERSION = "abc123def4567890abcdef0123456789abcdef01"
 
 
-def _parity_dependence(series_id: str, version: str | None = _VERSION) -> dict[str, Any]:
+def _parity_dependence(
+    series_id: str, version: str | None = _VERSION
+) -> dict[str, Any]:
     """Minimal valid dependence-series-composition row."""
     return {
         "canonical_live_series_sha256": "e" * 64,
@@ -4374,7 +4376,9 @@ def _parity_weekly() -> dict[str, Any]:
                     }
                 },
                 "observation_meta_by_mode": {
-                    "LIVE_ONLY": {"2026-07-30": ["2026-07-30", "2026-01-02", "2026-07-30"]}
+                    "LIVE_ONLY": {
+                        "2026-07-30": ["2026-07-30", "2026-01-02", "2026-07-30"]
+                    }
                 },
                 "primary_group": "STRATEGY",
                 "series_id": "test-series",
@@ -4482,15 +4486,11 @@ def test_canonical_series_identity_missing_dependence_version_fails() -> None:
 def test_canonical_series_identity_counts_still_displayed() -> None:
     """Observation counts remain in the contract for display — the 223-vs-196
     case that was previously a false failure now passes because versions match."""
-    evidence = {
-        "strategy-0": _parity_evidence("strategy-0", version=_VERSION)
-    }
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}
     names = {"strategy-0": "test-series"}
     dependence = {
         "series_composition": {
-            "test-series": _parity_dependence(
-                "test-series", version=_VERSION
-            )
+            "test-series": _parity_dependence("test-series", version=_VERSION)
         }
     }
 
