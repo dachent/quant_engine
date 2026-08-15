@@ -4315,3 +4315,190 @@ def test_panel_valid_envelope_with_full_context_passes(
     data = _candidate_data(candidate)
     assert data["advisory"]["hwm_numerical_status"] == "AVAILABLE"
     assert "hwm_index" in data["advisory"]
+
+
+# ---------------------------------------------------------------------------
+# Series-identity parity (strategy_version) — unit tests for
+# _canonical_strategy_series_contracts
+# ---------------------------------------------------------------------------
+
+_VERSION = "abc123def4567890abcdef0123456789abcdef01"
+
+
+def _parity_dependence(series_id: str, version: str | None = _VERSION) -> dict[str, Any]:
+    """Minimal valid dependence-series-composition row."""
+    return {
+        "canonical_live_series_sha256": "e" * 64,
+        "live_evidence_layer": "ACCOUNT_LIVE",
+        "live_observations": 80,
+        "observed_end": "2026-07-30",
+        "observed_start": "2026-01-02",
+        "series_id": series_id,
+        "strategy_version": version,
+    }
+
+
+def _parity_evidence(
+    strategy_id: str,
+    layer: str = "ACCOUNT_LIVE",
+    version: str | None = _VERSION,
+) -> dict[str, Any]:
+    """Minimal valid evidence row carrying strategy_version."""
+    return {
+        "evidence_layer": layer,
+        "generation_id": "d" * 64,
+        "generation_as_of_date": "2026-07-30",
+        "provider_id": "synthetic",
+        "strategy_id": strategy_id,
+        "strategy_version": version,
+        "account" if layer == "ACCOUNT_LIVE" else "provider": {
+            "observed_end": "2026-07-30",
+            "observed_start": "2026-01-02",
+            "return_observations": 223,
+        },
+    }
+
+
+def _parity_weekly() -> dict[str, Any]:
+    return {
+        "generation_id": "w" * 64,
+        "series": [
+            {
+                "calendar_basis_by_mode": {"LIVE_ONLY": "NYSE"},
+                "display_name": "test-series",
+                "mode_coverage": {
+                    "LIVE_ONLY": {
+                        "canonical_live_series_sha256": "e" * 64,
+                        "live_daily_observations": 196,
+                        "strategy_version": _VERSION,
+                    }
+                },
+                "observation_meta_by_mode": {
+                    "LIVE_ONLY": {"2026-07-30": ["2026-07-30", "2026-01-02", "2026-07-30"]}
+                },
+                "primary_group": "STRATEGY",
+                "series_id": "test-series",
+                "values_by_mode": {"LIVE_ONLY": {"2026-07-29": "0.01"}},
+            }
+        ],
+        "strategy_evidence_modes": ["LIVE_ONLY"],
+    }
+
+
+def _parity_factor() -> dict[str, Any]:
+    return {
+        "series": [
+            {
+                "series_id": "test-series",
+                "coverage": {
+                    "canonical_live_series_sha256": "e" * 64,
+                    "canonical_live_observed_end": "2026-07-30",
+                    "canonical_live_observed_start": "2026-01-02",
+                    "canonical_live_observations": 223,
+                },
+            }
+        ]
+    }
+
+
+def test_canonical_series_identity_same_version_passes() -> None:
+    """Same strategy_version on both evidence and dependence passes."""
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}
+    names = {"strategy-0": "test-series"}
+    dependence = {
+        "series_composition": {
+            "test-series": _parity_dependence("test-series", version=_VERSION)
+        }
+    }
+    factor = _parity_factor()
+    weekly = _parity_weekly()
+
+    contracts = panel._canonical_strategy_series_contracts(
+        evidence, names, factor, dependence, weekly
+    )
+    assert len(contracts) == 1
+    assert contracts[0]["strategy_version"] == _VERSION
+    # Observation counts are still present in the contract (display-only).
+    assert contracts[0]["return_observations"] == 223
+
+
+def test_canonical_series_identity_different_version_fails() -> None:
+    """Mismatched versions fail closed with a named reason."""
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version="version-a")}
+    names = {"strategy-0": "test-series"}
+    dependence = {
+        "series_composition": {
+            "test-series": _parity_dependence("test-series", version="version-b")
+        }
+    }
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="dependence canonical-series version parity failed",
+    ):
+        panel._canonical_strategy_series_contracts(
+            evidence, names, _parity_factor(), dependence, _parity_weekly()
+        )
+
+
+def test_canonical_series_identity_missing_evidence_version_fails() -> None:
+    """Absent version on evidence fails closed with a named reason."""
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=None)}
+    names = {"strategy-0": "test-series"}
+    dependence = {
+        "series_composition": {
+            "test-series": _parity_dependence("test-series", version=_VERSION)
+        }
+    }
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="evidence strategy version is absent",
+    ):
+        panel._canonical_strategy_series_contracts(
+            evidence, names, _parity_factor(), dependence, _parity_weekly()
+        )
+
+
+def test_canonical_series_identity_missing_dependence_version_fails() -> None:
+    """Absent version on dependence fails closed with a named reason."""
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}
+    names = {"strategy-0": "test-series"}
+    dependence = {
+        "series_composition": {
+            "test-series": _parity_dependence("test-series", version=None)
+        }
+    }
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="dependence strategy version is absent",
+    ):
+        panel._canonical_strategy_series_contracts(
+            evidence, names, _parity_factor(), dependence, _parity_weekly()
+        )
+
+
+def test_canonical_series_identity_counts_still_displayed() -> None:
+    """Observation counts remain in the contract for display — the 223-vs-196
+    case that was previously a false failure now passes because versions match."""
+    evidence = {
+        "strategy-0": _parity_evidence("strategy-0", version=_VERSION)
+    }
+    names = {"strategy-0": "test-series"}
+    dependence = {
+        "series_composition": {
+            "test-series": _parity_dependence(
+                "test-series", version=_VERSION
+            )
+        }
+    }
+
+    contracts = panel._canonical_strategy_series_contracts(
+        evidence, names, _parity_factor(), dependence, _parity_weekly()
+    )
+    assert len(contracts) == 1
+    # Evidence raw count 223, decomposition lens live_observations 80.
+    # Both are preserved as metadata — no equality claimed.
+    assert contracts[0]["return_observations"] == 223
+    assert contracts[0]["strategy_version"] == _VERSION

@@ -2961,6 +2961,20 @@ def _canonical_strategy_series_contracts(
             raise ControlPanelValidationError(
                 f"canonical strategy series is empty: {series_id}"
             )
+        evidence_version = evidence.get("strategy_version")
+        dependence = _object(
+            composition.get(series_id), f"dependence series composition {series_id}"
+        )
+        dependence_version = dependence.get("strategy_version")
+        if evidence_version is None:
+            raise ControlPanelValidationError(
+                f"evidence strategy version is absent: {series_id}"
+            )
+        if not isinstance(dependence_version, str) or not dependence_version.strip():
+            raise ControlPanelValidationError(
+                f"dependence strategy version is absent: {series_id}"
+            )
+        strategy_version = _text(dependence_version, f"dependence strategy version {series_id}")
         expected = {
             "evidence_layer": layer,
             "generation_id": _text(
@@ -2975,15 +2989,16 @@ def _canonical_strategy_series_contracts(
             "return_observations": observation_count,
             "series_id": series_id,
             "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
         }
-        dependence = _object(
-            composition.get(series_id), f"dependence series composition {series_id}"
-        )
+        if str(evidence_version) != strategy_version:
+            raise ControlPanelValidationError(
+                f"dependence canonical-series version parity failed: {series_id}"
+            )
         dependence_observed = {
             "evidence_layer": dependence.get("live_evidence_layer"),
             "observed_end": dependence.get("observed_end"),
             "observed_start": dependence.get("observed_start"),
-            "return_observations": dependence.get("live_observations"),
         }
         if dependence_observed != {
             key: expected[key]
@@ -2991,16 +3006,11 @@ def _canonical_strategy_series_contracts(
                 "evidence_layer",
                 "observed_end",
                 "observed_start",
-                "return_observations",
             )
         }:
             raise ControlPanelValidationError(
                 f"dependence canonical-series parity failed: {series_id}"
             )
-        strategy_version = _text(
-            dependence.get("strategy_version"),
-            f"dependence strategy version {series_id}",
-        )
 
         factor = factor_by_name.get(series_id)
         if factor is None or not isinstance(factor.get("coverage"), dict):
@@ -3075,14 +3085,12 @@ def _canonical_strategy_series_contracts(
             ),
             "observed_end": max(str(value[2]) for value in weekly_bounds),
             "observed_start": min(str(value[1]) for value in weekly_bounds),
-            "return_observations": mode_coverage.get("live_daily_observations"),
             "strategy_version": mode_coverage.get("strategy_version"),
         }
         if weekly_observed != {
             "canonical_live_series_sha256": factor_series_sha256,
             "observed_end": expected["observed_end"],
             "observed_start": expected["observed_start"],
-            "return_observations": expected["return_observations"],
             "strategy_version": strategy_version,
         }:
             raise ControlPanelValidationError(
