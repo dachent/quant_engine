@@ -19,9 +19,11 @@ from quant_engine.core import (
     CoverageStatus,
     GenerationConflictError,
     GenerationManifest,
+    PublicationRejectedError,
     SourceArtifact,
     VerificationStatus,
     hash_file,
+    publish_generation,
     read_current,
     stage_generation,
 )
@@ -44,7 +46,7 @@ from quant_engine.portfolio_ledger import (
 )
 
 
-SPEC_SCHEMA_VERSION = 2
+SPEC_SCHEMA_VERSION = 3
 CATALOG_SCHEMA_VERSION = 3
 ADAPTER_VERSION = "0.3.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -149,29 +151,65 @@ def _security_id(conid: str) -> str:
     return f"security-ibkr-{hashlib.sha256(conid.encode()).hexdigest()[:24]}"
 
 
+def _parse_zero_activity(
+    value: object,
+) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    entries = _objects(value, "declared_zero_activity_accounts")
+    parsed: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in entries:
+        _strict(
+            item,
+            {"raw_account_id", "internal_account_id", "provenance"},
+            "declared_zero_activity_account",
+        )
+        raw_id = _text(item["raw_account_id"], "zero_activity.raw_account_id")
+        internal_id = _identifier(
+            item["internal_account_id"], "zero_activity.internal_account_id"
+        )
+        provenance = _text(item["provenance"], "zero_activity.provenance")
+        if raw_id in seen:
+            raise IbkrGenerationError(
+                "declared zero-activity raw account must be unique"
+            )
+        seen.add(raw_id)
+        parsed.append(
+            {
+                "raw_account_id": raw_id,
+                "internal_account_id": internal_id,
+                "provenance": provenance,
+            }
+        )
+    return parsed
+
+
 def _load_spec(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise IbkrGenerationError("IBKR spec is not valid UTF-8 JSON") from exc
     spec = _object(value, "spec")
-    _strict(
-        spec,
-        {
-            "as_of_date",
-            "baseline",
-            "minimum_crosswalk_overlap",
-            "roots",
-            "schema_version",
-            "sources",
-        },
-        "spec",
-    )
-    if spec["schema_version"] not in {1, SPEC_SCHEMA_VERSION}:
+    schema_version = _integer(spec["schema_version"], "schema_version")
+    if schema_version not in {1, 2, SPEC_SCHEMA_VERSION}:
         raise IbkrGenerationError("IBKR spec schema version is unsupported")
+    expected_keys = {
+        "as_of_date",
+        "baseline",
+        "minimum_crosswalk_overlap",
+        "roots",
+        "schema_version",
+        "sources",
+    }
+    if schema_version == SPEC_SCHEMA_VERSION:
+        expected_keys.add("declared_zero_activity_accounts")
+    _strict(spec, expected_keys, "spec")
     minimum = _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap")
     if minimum < 2:
         raise IbkrGenerationError("minimum_crosswalk_overlap must be at least 2")
+    if schema_version == SPEC_SCHEMA_VERSION:
+        _parse_zero_activity(spec.get("declared_zero_activity_accounts"))
     return spec
 
 
@@ -409,7 +447,10 @@ def _crosswalk(
     statements: Sequence[FlexDailyStatement],
     catalog: Mapping[str, Any],
     minimum_overlap: int,
+    *,
+    declared_zero_activity: Sequence[dict[str, str]] = (),
 ) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    declared_zero_activity_ids = {d["raw_account_id"] for d in declared_zero_activity}
     raw_curves: dict[str, dict[date, Decimal]] = {}
     for statement in statements:
         raw_curves.setdefault(statement.raw_account_id, {})[statement.report_date] = (
@@ -427,6 +468,16 @@ def _crosswalk(
             if all(curve[day] == baseline_curve[day] for day in overlap):
                 candidates.append((account_id, len(overlap)))
         if len(candidates) != 1:
+            if raw_id in declared_zero_activity_ids:
+                # A declared zero-activity account carrying a Flex NAV curve is
+                # an abuse of the declaration — name the atom, fail closed.
+                atom = (
+                    "declared_zero_activity_abuse:flex_activity:"
+                    f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
+                )
+                raise IbkrGenerationError(
+                    f"{atom}: declared zero-activity account has Flex activity"
+                )
             raise IbkrGenerationError(
                 "raw account NAV curve lacks one unique exact match"
             )
@@ -440,9 +491,50 @@ def _crosswalk(
                 "status": "PASS",
             }
         )
-    if len(set(mapping.values())) != len(mapping) or set(mapping.values()) != set(
-        accepted
-    ):
+    # Declared zero-activity accounts: attestation-based mapping.
+    # Declared raw accounts may share an internal account with an existing
+    # NAV-mapped raw account (Flex label alias, e.g. ba3d1d8039a6d9d7).
+    declared_raw_ids: set[str] = set()
+    for decl in declared_zero_activity:
+        raw_id = decl["raw_account_id"]
+        internal_id = decl["internal_account_id"]
+        if raw_id in mapping and raw_id not in declared_raw_ids:
+            raise IbkrGenerationError(
+                "declared zero-activity account is already crosswalk-mapped"
+                " via NAV curve"
+            )
+        if internal_id in mapping.values() and raw_id not in mapping:
+            mapping[raw_id] = internal_id
+            proof.append(
+                {
+                    "account_id": internal_id,
+                    "exact_match_count": 0,
+                    "match_method": "DECLARED_ZERO_ACTIVITY_SHARED_INTERNAL",
+                    "provenance": decl["provenance"],
+                    "status": "PASS",
+                }
+            )
+        elif internal_id not in accepted:
+            raise IbkrGenerationError(
+                "declared zero-activity account internal account is not in baseline"
+            )
+        else:
+            if raw_id not in mapping:
+                mapping[raw_id] = internal_id
+                proof.append(
+                    {
+                        "account_id": internal_id,
+                        "exact_match_count": 0,
+                        "match_method": "DECLARED_ZERO_ACTIVITY",
+                        "provenance": decl["provenance"],
+                        "status": "PASS",
+                    }
+                )
+        declared_raw_ids.add(raw_id)
+    non_declared = {k: v for k, v in mapping.items() if k not in declared_raw_ids}
+    if len(set(non_declared.values())) != len(non_declared) or set(
+        mapping.values()
+    ) != set(accepted):
         raise IbkrGenerationError("account crosswalk is not a complete bijection")
     return mapping, sorted(proof, key=lambda item: str(item["account_id"]))
 
@@ -488,6 +580,8 @@ def _normalize(
     refresh_raw_account_ids: frozenset[str],
     flex_overlap_count: int,
     tws_source: tuple[TwsSnapshot, str] | None,
+    *,
+    declared_zero_activity_raw_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     accounts_by_id = {
         _text(item.get("account_id"), "account.account_id"): item
@@ -749,6 +843,7 @@ def _normalize(
     tws_check: dict[str, Any]
     tws_coverage: dict[str, Any]
     tws_identity_partial = False
+    topology_gaps: list[str] = []
     if tws_source is None:
         tws_state = {
             "account_summary_value_count": 0,
@@ -773,9 +868,7 @@ def _normalize(
         }
     else:
         snapshot, snapshot_artifact_id = tws_source
-        accepted_current_accounts = (
-            refresh_raw_account_ids if refresh_raw_account_ids else frozenset(crosswalk)
-        )
+        accepted_current_accounts = frozenset(crosswalk)
         flex_execution_ids = frozenset(
             trade.execution_id for statement in statements for trade in statement.trades
         )
@@ -789,10 +882,12 @@ def _normalize(
         observed_at = snapshot.observed_at.isoformat().replace("+00:00", "Z")
         snapshot_date = snapshot.observed_at.date()
         unmapped_positions = 0
+        unmapped_position_accounts: set[str] = set()
         for current_position in snapshot.positions:
             current_account_id = crosswalk.get(current_position.raw_account_id)
             if current_account_id is None:
                 unmapped_positions += 1
+                unmapped_position_accounts.add(current_position.raw_account_id)
                 continue
             account = accounts_by_id[current_account_id]
             currency = current_position.currency or _text(
@@ -829,10 +924,12 @@ def _normalize(
 
         managed_accounts = frozenset(snapshot.raw_account_ids)
         unmapped_account_values = 0
+        unmapped_account_value_accounts: set[str] = set()
         for account_value in snapshot.account_values:
             current_account_id = crosswalk.get(account_value.raw_account_id)
             if current_account_id is None:
                 unmapped_account_values += 1
+                unmapped_account_value_accounts.add(account_value.raw_account_id)
                 continue
             account = accounts_by_id[current_account_id]
             currency = (
@@ -892,9 +989,29 @@ def _normalize(
         }
         tws_gaps: list[str] = []
         if tws_identity_partial:
-            tws_gaps.append("TWS managed-account scope differs from current Flex scope")
-        if unmapped_positions or unmapped_account_values:
-            tws_gaps.append("Some current TWS facts lack an accepted account mapping")
+            snapshot_ids = frozenset(snapshot.raw_account_ids)
+            # flex_only = normal under Flex authority — no atom emitted
+            for raw_id in sorted(snapshot_ids - accepted_current_accounts):
+                if raw_id in declared_zero_activity_raw_ids:
+                    continue
+                atom = (
+                    f"account_topology:snapshot_only:"
+                    f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
+                )
+                tws_gaps.append(atom)
+                topology_gaps.append(atom)
+        for raw_id in sorted(unmapped_position_accounts):
+            if raw_id not in declared_zero_activity_raw_ids:
+                tws_gaps.append(
+                    f"unmapped_tws_position:"
+                    f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
+                )
+        for raw_id in sorted(unmapped_account_value_accounts):
+            if raw_id not in declared_zero_activity_raw_ids:
+                tws_gaps.append(
+                    f"unmapped_tws_value:"
+                    f"{hashlib.sha256(raw_id.encode()).hexdigest()[:16]}"
+                )
         if order_visibility == "ZERO_ROWS_OBSERVED_NOT_VISIBILITY_PROOF":
             tws_gaps.append(
                 "Zero API order rows do not prove complete order visibility"
@@ -904,6 +1021,59 @@ def _normalize(
             "known_gaps": tws_gaps,
             "status": "PARTIAL" if tws_gaps else "COMPLETE_WITHIN_DECLARED_BOUNDARY",
         }
+
+    # Declared zero-activity accounts must have no activity in Flex or TWS.
+    if declared_zero_activity_raw_ids and tws_source is not None:
+        abuse_snapshot = tws_source[0]
+        for statement in statements:
+            if statement.raw_account_id in declared_zero_activity_raw_ids:
+                if (
+                    statement.positions
+                    or statement.trades
+                    or statement.cash_transactions
+                    or statement.transfers
+                    or statement.corporate_actions
+                ):
+                    atom = (
+                        "declared_zero_activity_abuse:flex_activity:"
+                        f"{hashlib.sha256(statement.raw_account_id.encode()).hexdigest()[:16]}"
+                    )
+                    tws_gaps.append(atom)
+                    tws_coverage["known_gaps"].append(atom)
+        for tws_pos in abuse_snapshot.positions:
+            if tws_pos.raw_account_id in declared_zero_activity_raw_ids:
+                atom = (
+                    "declared_zero_activity_abuse:tws_position:"
+                    f"{hashlib.sha256(tws_pos.raw_account_id.encode()).hexdigest()[:16]}"
+                )
+                tws_gaps.append(atom)
+                tws_coverage["known_gaps"].append(atom)
+        # A genuinely empty account may still carry ZERO-valued summary rows;
+        # only nonzero values or real executions disprove the declaration.
+        for tws_value in abuse_snapshot.account_values:
+            if (
+                tws_value.raw_account_id in declared_zero_activity_raw_ids
+                and tws_value.value != 0
+            ):
+                atom = (
+                    "declared_zero_activity_abuse:tws_value:"
+                    f"{hashlib.sha256(tws_value.raw_account_id.encode()).hexdigest()[:16]}"
+                )
+                tws_gaps.append(atom)
+                tws_coverage["known_gaps"].append(atom)
+        for tws_exec in abuse_snapshot.executions:
+            if tws_exec.raw_account_id in declared_zero_activity_raw_ids:
+                atom = (
+                    "declared_zero_activity_abuse:tws_execution:"
+                    f"{hashlib.sha256(tws_exec.raw_account_id.encode()).hexdigest()[:16]}"
+                )
+                tws_gaps.append(atom)
+                tws_coverage["known_gaps"].append(atom)
+        tws_coverage["status"] = (
+            "PARTIAL"
+            if tws_coverage["known_gaps"]
+            else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        )
 
     return {
         "accounts": [
@@ -945,15 +1115,11 @@ def _normalize(
                         if account_scope_mismatches
                         else []
                     ),
-                    *(
-                        ["TWS managed-account scope differs from current Flex scope"]
-                        if tws_identity_partial
-                        else []
-                    ),
+                    *topology_gaps,
                 ],
                 "status": (
                     "PARTIAL"
-                    if account_scope_mismatches or tws_identity_partial
+                    if account_scope_mismatches or topology_gaps
                     else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
                 ),
             },
@@ -994,6 +1160,31 @@ def _normalize(
     }
 
 
+def declared_exclusion(gap: str, scope_count: int) -> str | None:
+    """Classify one gap into an authorized exclusion reason, or None.
+
+    Exported at module level so exclusion-removal tests can monkeypatch it
+    and prove that each branch is load-bearing.
+    """
+    if gap == "unmapped_tws_value:086e03b607cedf48":
+        return (
+            "Non-managed TWS account summary label "
+            "(086e03b607cedf48): not in read boundary — "
+            "owner ruling 2026-08-14, issue #286"
+        )
+    if gap == ("Zero API order rows do not prove complete order visibility"):
+        return (
+            "Order visibility is execution scope — owner ruling 2026-08-14, issue #286"
+        )
+    if gap == ("Some activity rows have an ambiguous provider-reported account scope"):
+        return (
+            f"{scope_count} catalog rows with "
+            "AMBIGUOUS_REPORTED_ACCOUNT: bounded declared gap "
+            "per issue #286 owner adjudication"
+        )
+    return None
+
+
 def build_generation(
     spec_path: Path,
 ) -> tuple[dict[str, Any], GenerationManifest, bytes]:
@@ -1009,10 +1200,15 @@ def build_generation(
     baseline, baseline_artifact = _baseline(spec["baseline"])
     statements, refresh_accounts, flex_overlap_count = _statements(sources)
     tws_source = _tws_source(sources)
+    declared_zero_activity = spec.get("declared_zero_activity_accounts") or []
+    declared_zero_activity_raw_ids = frozenset(
+        item["raw_account_id"] for item in declared_zero_activity
+    )
     crosswalk, proof = _crosswalk(
         statements,
         baseline,
         _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap"),
+        declared_zero_activity=declared_zero_activity,
     )
     catalog = _normalize(
         statements,
@@ -1022,6 +1218,7 @@ def build_generation(
         refresh_accounts,
         flex_overlap_count,
         tws_source,
+        declared_zero_activity_raw_ids=declared_zero_activity_raw_ids,
     )
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
@@ -1052,20 +1249,50 @@ def build_generation(
         for item in catalog["fact_coverage"]
         if item["fact_type"] == "TWS_CURRENT_STATE"
     )
-    known_gaps = list(tws_coverage["known_gaps"])
+    raw_gaps: list[str] = list(tws_coverage["known_gaps"])
     if account_scope_exceptions:
-        known_gaps.append(
+        raw_gaps.append(
             "Some activity rows have an ambiguous provider-reported account scope"
         )
+
+    undeclared = [
+        gap
+        for gap in raw_gaps
+        if declared_exclusion(gap, account_scope_exceptions) is None
+    ]
+    if undeclared:
+        coverage_status = CoverageStatus.PARTIAL
+        known_gaps = tuple(raw_gaps)
+    else:
+        coverage_status = CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+        known_gaps = ()
+
+    exclusion_reasons: list[str] = []
+    for gap in raw_gaps:
+        reason = declared_exclusion(gap, account_scope_exceptions)
+        if reason is not None:
+            exclusion_reasons.append(reason)
+
+    boundary = "Flex statement account scope per issue dachent/quant_engine #286." + (
+        " Declared exclusions: " + "; ".join(exclusion_reasons)
+        if exclusion_reasons
+        else ""
+    )
+    if declared_zero_activity:
+        decl_entries = [
+            f"declared-zero-activity:"
+            f"{hashlib.sha256(item['raw_account_id'].encode()).hexdigest()[:16]}"
+            f" ({item['provenance']})"
+            for item in declared_zero_activity
+        ]
+        boundary += " Zero-activity accounts: " + "; ".join(decl_entries)
+
     manifest = GenerationManifest.build(
         as_of_date=generation_as_of,
         adapter=AdapterIdentity("ibkr-read-builder", ADAPTER_VERSION),
         coverage=CoverageClaim(
-            status=CoverageStatus.PARTIAL,
-            boundary=(
-                "configured legacy and refreshed Flex evidence plus separately "
-                "authorized current TWS state"
-            ),
+            status=coverage_status,
+            boundary=boundary,
             fact_types=(
                 "accounts",
                 "cash_flows",
@@ -1125,4 +1352,41 @@ def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, 
         "tws_account_value_count": len(catalog["tws_account_values"]),
         "tws_position_count": len(catalog["tws_current_positions"]),
         "tws_status": catalog["tws_current_state"]["status"],
+    }
+
+
+def publish_generation_candidate(
+    spec_path: Path, output_root: Path, generation_id: str
+) -> dict[str, Any]:
+    """Rebuild the exact accepted candidate and atomically publish it."""
+
+    catalog, manifest, catalog_bytes = build_generation(spec_path)
+    if manifest.generation_id != generation_id:
+        raise IbkrGenerationError("rebuilt generation differs from accepted candidate")
+    if manifest.coverage.status is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY:
+        raise PublicationRejectedError("generation coverage is not complete")
+    manifest_path = stage_generation(output_root, manifest)
+    catalog_path = manifest_path.parent / "ibkr-catalog.json"
+    try:
+        descriptor = os.open(
+            catalog_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+    except FileExistsError:
+        if catalog_path.is_symlink() or catalog_path.read_bytes() != catalog_bytes:
+            raise GenerationConflictError(
+                "generation catalog already contains different evidence"
+            )
+    else:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(catalog_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+    pointer = publish_generation(output_root, generation_id)
+    return {
+        "catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+        "coverage_status": manifest.coverage.status.value,
+        "generation_id": pointer.generation_id,
+        "published": True,
     }

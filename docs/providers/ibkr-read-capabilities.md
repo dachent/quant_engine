@@ -226,39 +226,89 @@ implemented by this decision.
   ledger now implements that record. A shared FX record remains deferred until
   multiple recurring consumers exist.
 
+## Declared boundary (issue #286)
+
+The read boundary covers **all five Flex-query accounts** in Flex query
+1527729: ba3d1d8039a6d9d7, 086e03b607cedf48, and the three active accounts
+crosswalked from NAV curves. Flex is the sole data authority. TWS is
+corroborating evidence, not boundary membership.
+
+Every Flex-query account must have an internal mapping and a declared status
+(active via NAV-curve crosswalk, or zero-activity via owner attestation).
+Accounts declared as zero-activity in the generation spec
+(`declared_zero_activity_accounts`, schema v3) are mapped via attestation
+rather than NAV-curve matching; they do not emit snapshot-only or unmapped-fact
+atoms. The declaration is recorded verbatim in the manifest boundary.
+
+Three exclusion classes are owner-authorized:
+
+1. **Order visibility** (execution scope): `Zero API order rows do not prove
+   complete order visibility`.
+2. **Cross-account-discrepant rows** (bounded, count recorded): `Some activity
+   rows have an ambiguous provider-reported account scope` → kept `UNMAPPED`
+   with `AMBIGUOUS_REPORTED_ACCOUNT`.
+3. **Non-managed TWS account summary label** (`unmapped_tws_fact:086e03b607cedf48`):
+   not a Flex query account, not in the read boundary.
+
+Gaps surface as per-account atoms with masked (SHA-256[:16]) account
+identifiers:
+
+- `account_topology:snapshot_only:<masked>` — account in TWS but not Flex;
+  **blocks completion** (undeclared). Zero-activity declared accounts are
+  exempt.
+- `account_topology:flex_only:<masked>` — **not emitted**: an account present
+  in Flex but absent from TWS is normal (Flex authority).
+- `unmapped_tws_fact:<masked>` — unmapped TWS position or account value;
+  **only** the authorized label (`086e03b607cedf48`) is declared-excluded;
+  zero-activity declared accounts are exempt; any other unmapped fact atom
+  blocks completion.
+
+When every residual gap is declared-excluded, all five Flex-query accounts are
+mapped, and no undeclared atoms exist, coverage evaluates
+`COMPLETE_WITHIN_DECLARED_BOUNDARY` and the generation may be published.
+Undeclared gaps yield `PARTIAL` and block publication.
+
 ## Offline generation runbook
 
 The private generation spec follows
 [`ibkr-generation-spec.schema.json`](../../schemas/providers/ibkr-generation-spec.schema.json).
 Version 1 hash-binds the accepted portfolio baseline and all 26 inventoried
 legacy artifacts. Version 2 additionally requires exactly one Activity Flex
-refresh and one read-only TWS snapshot, plus their supporting capture and
-validation evidence. Absolute roots, raw provider evidence, and the private
-spec remain outside Git.
+refresh and one read-only TWS snapshot. Version 3 adds an optional
+`declared_zero_activity_accounts` list for accounts with no NAV history that
+must be mapped via owner attestation rather than curve matching. Absolute
+roots, raw provider evidence, and the private spec remain outside Git.
 
 ```powershell
 uv run --frozen --no-sync python tools/ibkr_generation.py build <private-spec>
 uv run --frozen --no-sync python tools/ibkr_generation.py stage <private-spec> <private-output-root>
+uv run --frozen --no-sync python tools/ibkr_generation.py publish <private-spec> <private-output-root> <generation-id>
 ```
 
 `build` performs no writes. It fails if an overlapping refreshed statement
 differs from accepted legacy facts. `stage` creates a content-addressed
-candidate and never writes `CURRENT.json`. The catalog retains Flex history,
-mapped current TWS positions and account values, sanitized topology counts, and
-explicit unmapped counts. The candidate remains `PARTIAL` while the account
-topology and legacy row-level account-scope exceptions remain unresolved, so
-Core publication rejects it.
+candidate and never writes `CURRENT.json`. `publish` rebuilds the exact
+accepted candidate, re-verifies `VERIFIED` + `COMPLETE_WITHIN_DECLARED_BOUNDARY`,
+and atomically writes `CURRENT.json` through the shared Core publication
+envelope. The catalog retains Flex history, mapped current TWS positions and
+account values, sanitized topology counts, and explicit unmapped counts.
+When every residual gap is declared-excluded under the Flex-scope declared
+boundary (see [Declared boundary](#declared-boundary-issue-286)), coverage
+evaluates `COMPLETE_WITHIN_DECLARED_BOUNDARY` and the candidate is
+publication-eligible. Undeclared gaps still yield `PARTIAL` and Core
+publication rejects.
 Repeating the same inputs produces the same catalog bytes and generation ID.
 
-The accepted destination-root replay produced immutable partial generation
+The accepted destination-root replay produced immutable generation
 `a99c37f016bf6f60673db4ca3d8a2b44e1dc5223db9eb626688bb5d6656e7f68`
-and catalog SHA-256
-`fc43fa630d6d7ceac7e7497a00e485adbc6c3ffa5d25e9cb341828f9391f87d0`.
-It contains 916 NAV observations, 22,011 finalized Flex positions, 4,139
-transactions, 94 flows, 20 corporate actions, 8,931 FX observations, 117
-mapped current Gateway positions, and 24 current account values. This is an
-accepted evidence generation, not current portfolio authority: coverage is
-`PARTIAL` and `CURRENT.json` is absent.
+(staged, NOT published; `CURRENT.json` does not exist). It is `PARTIAL`
+due to the ba3d1d8039a6d9d7 account topology gap. When rebuilt with the
+ba3d1d8039a6d9d7 zero-activity attestation (owner ruling 2026-08-14,
+issue #286) in `declared_zero_activity_accounts` (spec v3), the rebuild
+reaches `COMPLETE_WITHIN_DECLARED_BOUNDARY` and becomes publication-eligible.
+The publication path follows the shared `quantbase/schwab` pattern: rebuild
+from spec → verify `VERIFIED` + `COMPLETE_WITHIN_DECLARED_BOUNDARY` →
+atomic `CURRENT.json` write.
 
 Flex retrieval has no default HTTP implementation: callers must inject both a
 credential provider and a GET transport under separately recorded authority.
@@ -275,3 +325,14 @@ issue's separately approved recovery procedure.
 Any later credential use, provider call, pointer publication, data move, or
 deletion still requires the governing issue's authority. UI, PAPER, live
 trading, and execution architecture remain deferred.
+
+## SEC-002 quarantine assessment
+
+No IBKR quarantine profile is needed. Flex XML captures and TWS snapshot JSONs
+contain account identifiers, positions, trades, NAV, and reconciliation data
+but no credential-shaped artifacts: no tokens, passwords, API keys, cookies,
+session identifiers, or browser state. The Flex Web Service token is resolved
+through an injected `credential_provider` callable and never enters source,
+files, or logs. Raw account IDs are provider identifiers crosswalked locally,
+not credentials. The `tools/provider_security_quarantine.py` profile machinery
+does not apply.
