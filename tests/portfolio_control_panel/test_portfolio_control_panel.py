@@ -4464,6 +4464,25 @@ def test_canonical_series_identity_missing_evidence_version_fails() -> None:
         )
 
 
+def test_canonical_series_identity_malformed_evidence_version_fails() -> None:
+    """A non-string evidence version fails closed, never coerced to a match."""
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=123)}
+    names = {"strategy-0": "test-series"}
+    dependence = {
+        "series_composition": {
+            "test-series": _parity_dependence("test-series", version="123")
+        }
+    }
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="evidence strategy version is absent",
+    ):
+        panel._canonical_strategy_series_contracts(
+            evidence, names, _parity_factor(), dependence, _parity_weekly()
+        )
+
+
 def test_canonical_series_identity_missing_dependence_version_fails() -> None:
     """Absent version on dependence fails closed with a named reason."""
     evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}

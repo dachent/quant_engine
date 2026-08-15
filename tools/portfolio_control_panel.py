@@ -2966,7 +2966,7 @@ def _canonical_strategy_series_contracts(
             composition.get(series_id), f"dependence series composition {series_id}"
         )
         dependence_version = dependence.get("strategy_version")
-        if evidence_version is None:
+        if not isinstance(evidence_version, str) or not evidence_version.strip():
             raise ControlPanelValidationError(
                 f"evidence strategy version is absent: {series_id}"
             )
@@ -2993,7 +2993,7 @@ def _canonical_strategy_series_contracts(
             "strategy_id": strategy_id,
             "strategy_version": strategy_version,
         }
-        if str(evidence_version) != strategy_version:
+        if evidence_version != strategy_version:
             raise ControlPanelValidationError(
                 f"dependence canonical-series version parity failed: {series_id}"
             )
