@@ -356,6 +356,19 @@ def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     return _object(decoded, field_name)
 
 
+def _load_json_decimal(path: Path, field_name: str) -> dict[str, Any]:
+    """Parse with float→Decimal for exact monetary reconciliation.
+
+    Scoped to inputs whose money values feed Decimal-exact checks: a global
+    parse would leak Decimal into verbatim-copied output sections, which
+    canonical_json_bytes cannot serialize."""
+    try:
+        decoded = json.loads(path.read_text(encoding="utf-8-sig"), parse_float=Decimal)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BaselineValidationError(f"{field_name} is not readable JSON") from exc
+    return _object(decoded, field_name)
+
+
 def _read_csv(path: Path, source_key: str) -> list[dict[str, str]]:
     try:
         text = path.read_text(encoding="utf-8-sig")
@@ -1723,7 +1736,7 @@ def _replay(
         },
         "replay",
     )
-    summary = _load_json(
+    summary = _load_json_decimal(
         paths["current-portfolio-summary"], "current-portfolio-summary"
     )
     evidence = _load_json(paths["phase2-evidence-summary"], "phase2-evidence-summary")
