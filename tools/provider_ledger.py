@@ -12,12 +12,13 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import csv
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from typing import Any, Final, Mapping, Sequence
@@ -65,8 +66,15 @@ _ACCOUNT_FACTS: Final = {
         "positions",
         "transactions",
     ),
+    "matrixport": ("nav_observations",),
+    "quantbase": ("flows", "nav_observations"),
     "schwab": ("nav_observations", "positions", "transactions"),
 }
+_CSV_FACT_ACCOUNT: Final[dict[str, str]] = {
+    "matrixport": "account-d2e5821e608e25f1",
+    "quantbase": "account-58e75e8d952fa1b8",
+}
+_QUANTBASE_FUND_ID: Final = "107"
 _SCHWAB_FLOW_KINDS: Final = frozenset(
     {
         "Bank Transfer",
@@ -139,7 +147,21 @@ def _observed_decimal(value: object, name: str) -> Decimal | None:
         if status != "AVAILABLE" or value.get("value") is None:
             raise ProviderLedgerError(f"{name} observation is invalid")
         return _decimal(value["value"], name)
+    if isinstance(value, str) and not value.strip():
+        # A blank CSV cell is an absent observation (e.g. a provider-missing
+        # day), not a zero and never a parse error.
+        return None
     return _decimal(value, name)
+
+
+def _quantbase_day(value: object, name: str) -> date:
+    """Parse Quantbase's MM/DD/YYYY date format."""
+    text = _text(value, name)
+    try:
+        parsed = datetime.strptime(text, "%m/%d/%Y").date()
+    except ValueError as exc:
+        raise ProviderLedgerError(f"{name} must be a Quantbase date") from exc
+    return parsed
 
 
 def _relative(value: object, name: str) -> Path:
@@ -152,6 +174,17 @@ def _relative(value: object, name: str) -> Path:
     ):
         raise ProviderLedgerError(f"{name} must be a portable relative path")
     return portable
+
+
+_RUN_ID: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _run_id(value: object, name: str) -> str:
+    """Validate a provider run identifier before it joins a filesystem path."""
+    text = _text(value, name)
+    if not _RUN_ID.fullmatch(text) or ".." in text:
+        raise ProviderLedgerError(f"{name} is not a safe run identifier")
+    return text
 
 
 def _exact_file(root: Path, relative: Path, name: str) -> Path:
@@ -173,15 +206,370 @@ def _verify_hash(path: Path, expected: object, name: str) -> tuple[str, int]:
     return digest, size
 
 
-def _manifest(path: Path, expected_hash: object, name: str) -> GenerationManifest:
-    _verify_hash(path, expected_hash, name)
+def _manifest(
+    path: Path, expected_hash: object, name: str
+) -> tuple[GenerationManifest, str, int]:
+    """Hash-verify then parse the SAME bytes — never reopen after hashing.
+
+    Returns the manifest plus the digest and size of the verified buffer so
+    callers never re-hash the file (a concurrent replacement must not let the
+    parsed manifest and the recorded artifact describe different bytes)."""
+    if path.is_symlink() or not path.is_file():
+        raise ProviderLedgerError(f"{name} must be a regular file")
     try:
-        manifest = GenerationManifest.from_json_bytes(path.read_bytes())
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ProviderLedgerError(f"{name} is not readable") from exc
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != _text(expected_hash, f"{name}.sha256"):
+        raise ProviderLedgerError(f"{name} hash differs")
+    try:
+        manifest = GenerationManifest.from_json_bytes(content)
     except Exception as exc:
         raise ProviderLedgerError(f"{name} is not a valid generation manifest") from exc
     if manifest.verification is not VerificationStatus.VERIFIED:
         raise ProviderLedgerError(f"{name} is not VERIFIED")
-    return manifest
+    return manifest, digest, len(content)
+
+
+def _find_manifest_artifact(
+    manifest: GenerationManifest, artifact_id: str, name: str
+) -> SourceArtifact:
+    for artifact in manifest.artifacts:
+        if artifact.artifact_id == artifact_id:
+            return artifact
+    raise ProviderLedgerError(f"{name} artifact is missing from the manifest")
+
+
+def _read_csv_rows(path: Path, required: set[str], name: str) -> list[dict[str, str]]:
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ProviderLedgerError(f"{name} is not readable UTF-8 CSV") from exc
+    return _parse_csv_rows(text, required, name)
+
+
+def _parse_csv_rows(text: str, required: set[str], name: str) -> list[dict[str, str]]:
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if not required.issubset(reader.fieldnames or ()):
+        raise ProviderLedgerError(f"{name} lacks required columns")
+    rows = []
+    for row in reader:
+        if None in row or any(value is None for value in row.values()):
+            raise ProviderLedgerError(f"{name} contains a malformed row")
+        rows.append({str(key): str(value) for key, value in row.items()})
+    return rows
+
+
+def _verified_json(
+    path: Path, expected: object, name: str
+) -> tuple[dict[str, Any], str, int]:
+    """Hash-verify then parse the SAME bytes — never reopen after hashing."""
+    if path.is_symlink() or not path.is_file():
+        raise ProviderLedgerError(f"{name} must be a regular file")
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ProviderLedgerError(f"{name} is not readable") from exc
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != _text(expected, f"{name}.sha256"):
+        raise ProviderLedgerError(f"{name} hash differs")
+    try:
+        value = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProviderLedgerError(f"{name} is not readable JSON") from exc
+    if not isinstance(value, dict):
+        raise ProviderLedgerError(f"{name} must be an object")
+    return value, digest, len(content)
+
+
+def _verified_csv_rows(
+    path: Path, expected: object, required: set[str], name: str
+) -> list[dict[str, str]]:
+    """Hash-verify then parse the SAME bytes — never reopen after hashing."""
+    if path.is_symlink() or not path.is_file():
+        raise ProviderLedgerError(f"{name} is missing or linked")
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ProviderLedgerError(f"{name} is not readable") from exc
+    if hashlib.sha256(content).hexdigest() != _text(expected, f"{name}.sha256"):
+        raise ProviderLedgerError(f"{name} hash differs")
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ProviderLedgerError(f"{name} is not readable UTF-8 CSV") from exc
+    return _parse_csv_rows(text, required, name)
+
+
+def _mapped_strategy_for_account(
+    account_id: str,
+    day: date,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> tuple[str | None, str]:
+    return _mapped_strategy(
+        {"account_id": account_id, "as_of_date": day.isoformat()},
+        accounts,
+        strategies,
+        assignments,
+    )
+
+
+def _matrixport_nav_observations(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Admit Matrixport daily portfolio totals as account NAV observations."""
+    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
+    artifact_id = "csv/daily_portfolio_totals.csv"
+    artifact = _find_manifest_artifact(
+        manifest, artifact_id, "matrixport daily portfolio totals"
+    )
+    path = _exact_file(
+        root / "output" / source_run_id,
+        Path(artifact_id),
+        "matrixport daily portfolio totals",
+    )
+    rows = _verified_csv_rows(
+        path,
+        artifact.sha256,
+        {"utc_date", "portfolio_value_usd_observed", "strict_complete"},
+        "matrixport daily portfolio totals",
+    )
+    observations: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("strict_complete") != "true":
+            # A partial sum over products with missing NAV/FX evidence is not
+            # an authoritative portfolio total: never admit it as an account
+            # NAV observation (it would fabricate a drawdown).
+            continue
+        value = _observed_decimal(
+            row.get("portfolio_value_usd_observed"),
+            "matrixport portfolio_value_usd_observed",
+        )
+        if value is None or value <= 0:
+            # A blank cell is an absent observation; a non-positive total is
+            # not a plausible portfolio NAV — never admit either.
+            continue
+        day = _day(row["utc_date"], "matrixport portfolio utc_date")
+        strategy_id, mapping_status = _mapped_strategy_for_account(
+            account_id, day, accounts, strategies, assignments
+        )
+        source_id = day.isoformat()
+        observations.append(
+            {
+                "account_id": account_id,
+                "as_of_date": source_id,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": generation_id,
+                "mapping_status": mapping_status,
+                "market_value": row["portfolio_value_usd_observed"],
+                "nav": row["portfolio_value_usd_observed"],
+                "provider_id": "matrixport",
+                "record_id": f"matrixport:{source_id}",
+                "source_artifact_id": artifact_id,
+                "source_record_id": source_id,
+                "strategy_id": strategy_id,
+            }
+        )
+    return observations
+
+
+def _quantbase_nav_observations(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Admit Quantbase Volatis daily dashboard values as account NAV observations."""
+    account_id = _CSV_FACT_ACCOUNT["quantbase"]
+    run_id = _run_id(
+        _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
+            "run_id"
+        ),
+        "quantbase.legacy_lineage.run_id",
+    )
+    relative_path = "csv/dashboard_Volatis_Strategy_pricehistory.csv"
+    artifact_id = f"source/{relative_path}"
+    artifact = _find_manifest_artifact(
+        manifest, artifact_id, "quantbase Volatis pricehistory"
+    )
+    path = _exact_file(
+        root / "source-runs" / run_id / "artifacts",
+        Path(relative_path),
+        "quantbase Volatis pricehistory",
+    )
+    rows = _verified_csv_rows(
+        path, artifact.sha256, {"time", "value"}, "quantbase Volatis pricehistory"
+    )
+    observations: list[dict[str, Any]] = []
+    for row in rows:
+        value = _observed_decimal(row.get("value"), "quantbase Volatis value")
+        if value is None or value <= 0:
+            continue
+        day = _quantbase_day(row["time"], "quantbase Volatis time")
+        strategy_id, mapping_status = _mapped_strategy_for_account(
+            account_id, day, accounts, strategies, assignments
+        )
+        source_id = day.isoformat()
+        observations.append(
+            {
+                "account_id": account_id,
+                "as_of_date": source_id,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": generation_id,
+                "mapping_status": mapping_status,
+                "market_value": row["value"],
+                "nav": row["value"],
+                "provider_id": "quantbase",
+                "record_id": f"quantbase:{source_id}",
+                "source_artifact_id": artifact_id,
+                "source_record_id": source_id,
+                "strategy_id": strategy_id,
+            }
+        )
+    return observations
+
+
+def _quantbase_flows(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Admit Quantbase capital contributions as flows.
+
+    Mirrors the legacy reconciliation (tools/portfolio_target_series.py):
+    contributions are filled_txn BUY rows on the fund, matched in order
+    against cost-basis increases in the dashboard history, and booked on the
+    day the cost basis rises. A contribution that does not reconcile is a
+    hard failure — never a silently mis-booked flow."""
+    account_id = _CSV_FACT_ACCOUNT["quantbase"]
+    run_id = _run_id(
+        _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
+            "run_id"
+        ),
+        "quantbase.legacy_lineage.run_id",
+    )
+    run_root = root / "source-runs" / run_id / "artifacts"
+    price_rel = Path("csv/dashboard_Volatis_Strategy_pricehistory.csv")
+    price_artifact = _find_manifest_artifact(
+        manifest, f"source/{price_rel.as_posix()}", "quantbase Volatis pricehistory"
+    )
+    price_rows = _verified_csv_rows(
+        _exact_file(run_root, price_rel, "quantbase Volatis pricehistory"),
+        price_artifact.sha256,
+        {"time", "cost_basis"},
+        "quantbase Volatis pricehistory",
+    )
+    activity_rel = Path("csv/account_activity.csv")
+    activity_artifact = _find_manifest_artifact(
+        manifest, f"source/{activity_rel.as_posix()}", "quantbase account activity"
+    )
+    activity_rows = _verified_csv_rows(
+        _exact_file(run_root, activity_rel, "quantbase account activity"),
+        activity_artifact.sha256,
+        {"activity_type", "amount", "fund", "is_rebalance", "time", "type"},
+        "quantbase account activity",
+    )
+
+    contributions: list[tuple[datetime, Decimal]] = []
+    for row in activity_rows:
+        if (
+            row["activity_type"] != "filled_txn"
+            or row["fund"] != _QUANTBASE_FUND_ID
+            or row["is_rebalance"].lower() != "false"
+        ):
+            continue
+        amount = _observed_decimal(row["amount"], "quantbase activity amount")
+        if amount is None or amount <= 0 or row["type"].upper() != "BUY":
+            continue
+        try:
+            observed = datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ProviderLedgerError(
+                "quantbase activity timestamp is invalid"
+            ) from exc
+        contributions.append((observed, amount))
+    contributions.sort(key=lambda item: item[0])
+
+    history: list[tuple[date, Decimal]] = []
+    for row in price_rows:
+        cost_basis = _observed_decimal(row.get("cost_basis"), "quantbase cost basis")
+        if cost_basis is None or cost_basis < 0:
+            continue
+        history.append(
+            (_quantbase_day(row["time"], "quantbase Volatis time"), cost_basis)
+        )
+    history.sort(key=lambda item: item[0])
+
+    pending: list[tuple[datetime, Decimal]] = []
+    contribution_index = 0
+    previous_cost_basis = Decimal(0)
+    booked_flows: dict[date, Decimal] = {}
+    tolerance = Decimal("0.02")
+    for day, cost_basis in history:
+        while (
+            contribution_index < len(contributions)
+            and contributions[contribution_index][0].date() <= day
+        ):
+            pending.append(contributions[contribution_index])
+            contribution_index += 1
+        delta = cost_basis - previous_cost_basis
+        if delta > tolerance and pending:
+            running = Decimal(0)
+            matched_count = 0
+            for index, (_timestamp, amount) in enumerate(pending):
+                running += amount
+                if abs(running - delta) <= tolerance:
+                    matched_count = index + 1
+                    break
+                if running > delta + tolerance:
+                    break
+            if matched_count:
+                booked_flows[day] = running
+                pending = pending[matched_count:]
+        previous_cost_basis = cost_basis
+    if contribution_index != len(contributions) or pending:
+        raise ProviderLedgerError("quantbase capital additions do not reconcile")
+
+    flows: list[dict[str, Any]] = []
+    for day, amount in sorted(booked_flows.items()):
+        strategy_id, mapping_status = _mapped_strategy_for_account(
+            account_id, day, accounts, strategies, assignments
+        )
+        flows.append(
+            {
+                "account_id": account_id,
+                "amount": format(amount.normalize(), "f"),
+                "event_date": day.isoformat(),
+                "evidence_layer": "ACCOUNT_LIVE",
+                "flow_type": "EXTERNAL_PROVIDER_TRANSFER",
+                "generation_id": generation_id,
+                "mapping_basis": "RECONCILED_COST_BASIS_INCREASE",
+                "mapping_status": mapping_status,
+                "provider_id": "quantbase",
+                "record_id": f"quantbase-flow:{day.isoformat()}",
+                "source_artifact_id": f"source/{activity_rel.as_posix()}",
+                "source_record_id": day.isoformat(),
+                "strategy_id": strategy_id,
+            }
+        )
+    return flows
 
 
 def _load_spec(path: Path) -> dict[str, Any]:
@@ -211,8 +599,9 @@ def _provenance(spec: Mapping[str, Any]) -> tuple[dict[str, Any], SourceArtifact
     if set(ref) != {"catalog_path", "catalog_sha256", "generation_id"}:
         raise ProviderLedgerError("provenance reference keys differ")
     path = Path(_text(ref["catalog_path"], "provenance.catalog_path")).resolve()
-    digest, size = _verify_hash(path, ref["catalog_sha256"], "provenance catalog")
-    catalog = _load_json(path, "provenance catalog")
+    catalog, digest, size = _verified_json(
+        path, ref["catalog_sha256"], "provenance catalog"
+    )
     if catalog.get("generation_id") not in {None, ref["generation_id"]}:
         raise ProviderLedgerError("provenance generation identity differs")
     as_of = _day(catalog.get("as_of_date"), "provenance.as_of_date")
@@ -234,6 +623,7 @@ def _provider(
     GenerationManifest,
     dict[str, Any],
     tuple[SourceArtifact, SourceArtifact],
+    Path,
 ]:
     ref = _object(value, f"providers.{provider_id}")
     expected = {
@@ -246,7 +636,7 @@ def _provider(
     if set(ref) != expected:
         raise ProviderLedgerError(f"{provider_id} provider reference keys differ")
     root = Path(_text(ref["root"], f"{provider_id}.root")).resolve()
-    generation_id = _text(ref["generation_id"], f"{provider_id}.generation_id")
+    generation_id = _run_id(ref["generation_id"], f"{provider_id}.generation_id")
     generation_root = root / "generations" / generation_id
     manifest_path = _exact_file(
         generation_root, Path("generation.json"), f"{provider_id} manifest"
@@ -255,15 +645,14 @@ def _provider(
     catalog_path = _exact_file(
         generation_root, Path(catalog_name), f"{provider_id} catalog"
     )
-    manifest = _manifest(
+    manifest, manifest_hash, manifest_size = _manifest(
         manifest_path, ref["manifest_sha256"], f"{provider_id} manifest"
     )
     if manifest.generation_id != generation_id or manifest.as_of_date > baseline_as_of:
         raise ProviderLedgerError(f"{provider_id} generation identity or date differs")
-    catalog_hash, catalog_size = _verify_hash(
+    catalog, catalog_hash, catalog_size = _verified_json(
         catalog_path, ref["catalog_sha256"], f"{provider_id} catalog"
     )
-    catalog = _load_json(catalog_path, f"{provider_id} catalog")
     schema_version = catalog.get("catalog_schema_version")
     if schema_version not in versions:
         raise ProviderLedgerError(f"{provider_id} catalog schema is unsupported")
@@ -311,9 +700,10 @@ def _provider(
         qualification=qualification,
     )
     artifacts = (
-        SourceArtifact.from_path(
-            manifest_path,
+        SourceArtifact(
             artifact_id=f"providers/{provider_id}/generation.json",
+            sha256=manifest_hash,
+            size_bytes=manifest_size,
             as_of_date=manifest.as_of_date,
             schema_name="generation-manifest",
             schema_version="1",
@@ -327,7 +717,7 @@ def _provider(
             schema_version=str(schema_version),
         ),
     )
-    return identity, manifest, catalog, artifacts
+    return identity, manifest, catalog, artifacts, root
 
 
 def _assignment_index(
@@ -401,11 +791,68 @@ def _project_account_facts(
     accounts: set[str],
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    manifest: GenerationManifest | None = None,
+    root: Path | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     projections: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exceptions: list[dict[str, Any]] = []
     for source_fact in _ACCOUNT_FACTS.get(provider_id, ()):
         target_fact = "flows" if source_fact == "cash_flows" else source_fact
+        if provider_id in _CSV_FACT_ACCOUNT and source_fact in {
+            "flows",
+            "nav_observations",
+        }:
+            if manifest is None or root is None:
+                raise ProviderLedgerError(
+                    f"{provider_id} CSV facts require a manifest and root"
+                )
+            if provider_id == "matrixport":
+                if source_fact != "nav_observations":
+                    continue
+                rows: list[dict[str, Any]] = _matrixport_nav_observations(
+                    generation_id,
+                    manifest,
+                    catalog,
+                    root,
+                    accounts,
+                    strategies,
+                    assignments,
+                )
+            elif source_fact == "nav_observations":
+                rows = _quantbase_nav_observations(
+                    generation_id,
+                    manifest,
+                    catalog,
+                    root,
+                    accounts,
+                    strategies,
+                    assignments,
+                )
+            else:
+                rows = _quantbase_flows(
+                    generation_id,
+                    manifest,
+                    catalog,
+                    root,
+                    accounts,
+                    strategies,
+                    assignments,
+                )
+            projections[target_fact].extend(rows)
+            for row in rows:
+                if row["mapping_status"] == "UNMAPPED":
+                    exceptions.append(
+                        {
+                            "account_in_provenance": row["account_id"] in accounts,
+                            "effective_date": row.get("as_of_date")
+                            or row.get("event_date"),
+                            "fact_type": target_fact,
+                            "provider_id": provider_id,
+                            "record_id": row["record_id"],
+                            "status": "UNMAPPED",
+                        }
+                    )
+            continue
         rows = _objects(catalog.get(source_fact, []), f"{provider_id}.{source_fact}")
         for row in rows:
             day = _row_day(row)
@@ -482,13 +929,85 @@ def _project_account_facts(
     return dict(projections), exceptions
 
 
+def _validate_nav_observation_moves(
+    nav_observations: Sequence[Mapping[str, Any]],
+    flows: Sequence[Mapping[str, Any]],
+) -> None:
+    """Reject day-over-day NAV moves >10x when no same-day flow is present.
+
+    The bound is intentionally narrow: it catches unit/double-conversion
+    anomalies without second-guessing legitimate large flows.
+    """
+    flow_amounts: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
+    for row in flows:
+        if row.get("mapping_status") != "MAPPED":
+            continue
+        raw_amount = row.get("amount")
+        if raw_amount is None or (
+            isinstance(raw_amount, str) and not raw_amount.strip()
+        ):
+            continue
+        amount = _observed_decimal(raw_amount, "flow amount")
+        if amount is None:
+            continue
+        key = (
+            str(row["provider_id"]),
+            str(row["account_id"]),
+            str(row.get("event_date") or ""),
+        )
+        flow_amounts[key] += abs(amount)
+    by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in nav_observations:
+        if row.get("mapping_status") != "MAPPED":
+            continue
+        by_account[(str(row["provider_id"]), str(row["account_id"]))].append(row)
+    for (provider_id, account_id), rows in by_account.items():
+        ordered = sorted(rows, key=lambda item: str(item["as_of_date"]))
+        for previous, current in zip(ordered, ordered[1:]):
+            prior_nav = _observed_decimal(previous.get("nav"), "prior NAV")
+            ending_nav = _observed_decimal(current.get("nav"), "ending NAV")
+            if prior_nav is None or ending_nav is None or prior_nav <= 0:
+                continue
+            if ending_nav > prior_nav * Decimal(
+                "10"
+            ) or ending_nav < prior_nav / Decimal("10"):
+                day = str(current["as_of_date"])
+                flow_total = flow_amounts.get((provider_id, account_id, day))
+                if flow_total is None:
+                    raise ProviderLedgerError(
+                        "NAV_OBSERVATION_EXCESSIVE_MOVE_WITHOUT_FLOW: "
+                        f"{provider_id}/{account_id} moved from {prior_nav} to "
+                        f"{ending_nav} on {day} without a matching flow"
+                    )
+                # A flow exempts the move only if its magnitude can explain
+                # it: a $1 transfer must not whitewash a unit/conversion
+                # error that coincides with it.
+                if abs(ending_nav - prior_nav) > flow_total * Decimal("2"):
+                    raise ProviderLedgerError(
+                        "NAV_OBSERVATION_EXCESSIVE_MOVE_BEYOND_FLOW: "
+                        f"{provider_id}/{account_id} moved from {prior_nav} to "
+                        f"{ending_nav} on {day} but same-day flows total "
+                        f"{flow_total}"
+                    )
+
+
 def _csv_rows(
     path: Path, expected_hash: object, name: str
 ) -> tuple[list[dict[str, str]], SourceArtifact]:
-    digest, size = _verify_hash(path, expected_hash, name)
+    """Hash-verify then parse the SAME bytes — never reopen after hashing."""
+    if path.is_symlink() or not path.is_file():
+        raise ProviderLedgerError(f"{name} must be a regular file")
     try:
-        text = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError) as exc:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ProviderLedgerError(f"{name} is not readable") from exc
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != _text(expected_hash, f"{name}.sha256"):
+        raise ProviderLedgerError(f"{name} hash differs")
+    size = len(content)
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
         raise ProviderLedgerError(f"{name} is not readable UTF-8 CSV") from exc
     reader = csv.DictReader(io.StringIO(text, newline=""))
     required = {"series_id", "date", "return", "evidence_layer"}
@@ -534,10 +1053,9 @@ def _strategy_inputs(
     evidence_path = Path(
         _text(ref["strategy_evidence_path"], "strategy_evidence_path")
     ).resolve()
-    evidence_hash, evidence_size = _verify_hash(
+    evidence, evidence_hash, evidence_size = _verified_json(
         evidence_path, ref["strategy_evidence_sha256"], "strategy evidence"
     )
-    evidence = _load_json(evidence_path, "strategy evidence")
     evidence_rows = _objects(evidence.get("strategies"), "strategy evidence.strategies")
     strategies = {
         _text(item.get("strategy_id"), "strategy_id"): _text(
@@ -688,9 +1206,15 @@ def _broker_strategy_returns(
         day = str(row.get("event_date") or "")
         if not day:
             continue
-        amount = _observed_decimal(row.get("amount"), "flow amount")
-        if amount is not None:
-            flows[(provider_id, account_id, day)] += amount
+        raw_amount = row.get("amount")
+        if raw_amount is None or (
+            isinstance(raw_amount, str) and not raw_amount.strip()
+        ):
+            raise ProviderLedgerError("mapped flow amount is missing")
+        amount = _observed_decimal(raw_amount, "flow amount")
+        if amount is None:
+            raise ProviderLedgerError("mapped flow amount is unavailable")
+        flows[(provider_id, account_id, day)] += amount
 
     by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in nav_rows:
@@ -1331,7 +1855,7 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
     catalogs: dict[str, dict[str, Any]] = {}
     manifests: dict[str, GenerationManifest] = {}
     for provider_id in sorted(_PROVIDER_CATALOGS):
-        identity, manifest, provider_catalog, artifacts = _provider(
+        identity, manifest, provider_catalog, artifacts, root = _provider(
             provider_id, _object(spec["providers"], "providers")[provider_id], as_of
         )
         identities.append(identity)
@@ -1356,6 +1880,8 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
             accounts,
             strategies,
             assignments,
+            manifest=manifest,
+            root=root,
         )
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
@@ -1373,6 +1899,9 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
         )
         for item in _objects(provenance.get("strategies"), "strategies")
     }
+    _validate_nav_observation_moves(
+        combined.get("nav_observations", []), combined.get("flows", [])
+    )
     broker_returns = _broker_strategy_returns(
         combined.get("nav_observations", []), combined.get("flows", [])
     )
