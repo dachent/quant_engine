@@ -1533,17 +1533,14 @@ def build_layered_correlation_inputs(
             implementation_status = "NOT_EVALUATED"
             disposition_reason = None
         version_by_series[series_id] = version
-        # The live series identity is always the accepted live path (the
-        # generation-bound sim-twin for Portfolio123), regardless of any
-        # declared versioned history: the provenance/baseline authority
-        # attests this value, and the panel verifies parity against it.
-        if series_id == portfolio123_series_id:
-            live_version = version
-        else:
-            live_version = _strategy_version(
-                "accepted-live-path",
-                {"rows": rows, "series_id": series_id},
-            )
+        # The live series identity is always the accepted live path, hash-bound
+        # to the live rows, regardless of any declared versioned history or
+        # generation-bound sim-twin: the baseline/provenance authority attests
+        # this value, and the panel verifies parity against it.
+        live_version = _strategy_version(
+            "accepted-live-path",
+            {"rows": rows, "series_id": series_id},
+        )
         live_version_by_series[series_id] = live_version
         mapping_proof.append(
             {

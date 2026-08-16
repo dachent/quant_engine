@@ -80,6 +80,7 @@ class EvidenceModeSeries:
     series_id: str
     live_evidence_layer: str
     strategy_version: str
+    live_version_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -331,20 +332,26 @@ def _evidence_mode_definition(
     value: Mapping[str, Any], index: int
 ) -> EvidenceModeSeries:
     name = f"evidence_mode_series[{index}]"
-    _strict_keys(
-        value,
-        {"live_evidence_layer", "series_id", "strategy_version"},
-        name,
-    )
+    actual_keys = set(value)
+    required = {"live_evidence_layer", "series_id", "strategy_version"}
+    if not required <= actual_keys <= required | {"live_version_ref"}:
+        raise CorrelationError(
+            f"{name} keys differ: missing={sorted(required - actual_keys)}, "
+            f"unexpected={sorted(actual_keys - required - {'live_version_ref'})}"
+        )
     live_layer = _text(value["live_evidence_layer"], f"{name}.live_evidence_layer")
     if live_layer not in {"ACCOUNT_LIVE", "PROVIDER_LIVE", "OFFICIAL_VEHICLE"}:
         raise CorrelationError(
             f"{name}.live_evidence_layer is not an accepted live layer"
         )
+    live_version_ref = value.get("live_version_ref")
+    if live_version_ref is not None:
+        live_version_ref = _text(live_version_ref, f"{name}.live_version_ref")
     return EvidenceModeSeries(
         series_id=_text(value["series_id"], f"{name}.series_id"),
         live_evidence_layer=live_layer,
         strategy_version=_text(value["strategy_version"], f"{name}.strategy_version"),
+        live_version_ref=live_version_ref,
     )
 
 
@@ -626,6 +633,7 @@ def _mode_composition(
         "live_evidence_layer": definition.live_evidence_layer,
         "live_inception": live_rows[0].day.isoformat() if live_rows else None,
         "live_observations": len(live_rows),
+        "live_version_ref": definition.live_version_ref,
         "observed_end": combined[-1].day.isoformat() if combined else None,
         "observed_start": combined[0].day.isoformat() if combined else None,
         "series_id": definition.series_id,

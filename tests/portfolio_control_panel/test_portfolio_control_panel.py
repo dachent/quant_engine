@@ -4472,6 +4472,9 @@ def test_canonical_series_identity_full_version_divergence_passes() -> None:
     )
     assert len(contracts) == 1
     assert contracts[0]["strategy_version"] == _VERSION
+
+
+def test_canonical_series_identity_missing_live_version_fails() -> None:
     """Absent live_version_ref on dependence fails closed with a named reason."""
     evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}
     names = {"strategy-0": "test-series"}

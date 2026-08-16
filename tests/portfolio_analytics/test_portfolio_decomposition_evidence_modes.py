@@ -85,13 +85,11 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                 "evidence_mode_series": [
                     {
                         "live_evidence_layer": "ACCOUNT_LIVE",
-                        "live_version_ref": "accepted-live-path:alpha",
                         "series_id": "alpha",
                         "strategy_version": "alpha-v1",
                     },
                     {
                         "live_evidence_layer": "ACCOUNT_LIVE",
-                        "live_version_ref": "accepted-live-path:beta",
                         "series_id": "beta",
                         "strategy_version": "beta-v1",
                     },
@@ -195,6 +193,35 @@ def test_rejects_duplicate_mode_series_definition(tmp_path: Path) -> None:
     inputs["correlation_spec_path"].write_bytes(_canonical(correlation))
 
     with pytest.raises(builder.EvidenceModeError, match="duplicate series"):
+        builder.build_bundle(**inputs)
+
+
+def test_live_version_ref_is_computed_from_base_rows(tmp_path: Path) -> None:
+    """The composition carries the live identity hash-bound to the base rows."""
+    inputs = _fixture(tmp_path)
+    outputs, _manifest = builder.build_bundle(**inputs)
+    hybrid_spec = json.loads(outputs["base-spec.json"])
+    live_spec = json.loads(outputs["live-base-spec.json"])
+    for spec in (hybrid_spec, live_spec):
+        for series_id in ("alpha", "beta"):
+            ref = spec["series_composition"][series_id]["live_version_ref"]
+            assert isinstance(ref, str) and ref.startswith("accepted-live-path:")
+
+
+def test_declared_live_version_mismatch_fails(tmp_path: Path) -> None:
+    """A declared live_version_ref that disagrees with the base rows fails."""
+    inputs = _fixture(tmp_path)
+    correlation = json.loads(
+        inputs["correlation_spec_path"].read_text(encoding="utf-8")
+    )
+    correlation["evidence_mode_series"][0]["live_version_ref"] = (
+        "accepted-live-path:wrong"
+    )
+    inputs["correlation_spec_path"].write_bytes(_canonical(correlation))
+
+    with pytest.raises(
+        builder.EvidenceModeError, match="declared live version differs"
+    ):
         builder.build_bundle(**inputs)
 
 
