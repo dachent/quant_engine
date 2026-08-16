@@ -350,7 +350,10 @@ def _portable_relative(value: object, field_name: str) -> str:
 
 def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     try:
-        decoded = json.loads(path.read_text(encoding="utf-8-sig"))
+        # parse_float=Decimal: governed money values must survive parsing
+        # exactly — a systematic total with sub-cent precision must not be
+        # silently rounded through float before a Decimal-exact comparison.
+        decoded = json.loads(path.read_text(encoding="utf-8-sig"), parse_float=Decimal)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise BaselineValidationError(f"{field_name} is not readable JSON") from exc
     return _object(decoded, field_name)

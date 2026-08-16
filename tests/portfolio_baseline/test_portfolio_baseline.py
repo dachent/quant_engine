@@ -2072,3 +2072,19 @@ def test_cli_output_is_sanitized(
     assert str(spec["roots"]["synthetic"]) not in output
     assert "SYNTH-A" not in output
     assert "Synthetic Strategy" not in output
+
+
+def test_load_json_preserves_sub_cent_precision(tmp_path: Path) -> None:
+    """Pass-3 defect: governed money parsed via float cannot survive a
+    Decimal-exact reconciliation when the true sum carries sub-cent digits.
+    _load_json must parse floats as Decimal."""
+    import decimal
+
+    path = tmp_path / "summary.json"
+    exact = "446546.0893751776827506151026"
+    path.write_text('{"systematic_total": ' + exact + "}", encoding="utf-8")
+
+    parsed = baseline._load_json(path, "summary")
+
+    assert isinstance(parsed["systematic_total"], decimal.Decimal)
+    assert str(parsed["systematic_total"]) == exact
