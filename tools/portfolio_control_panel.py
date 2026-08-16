@@ -3009,19 +3009,28 @@ def _canonical_strategy_series_contracts(
             )
         dependence_observed = {
             "evidence_layer": dependence.get("live_evidence_layer"),
-            "observed_end": dependence.get("observed_end"),
             "observed_start": dependence.get("observed_start"),
         }
         if dependence_observed != {
-            key: expected[key]
-            for key in (
-                "evidence_layer",
-                "observed_end",
-                "observed_start",
-            )
+            key: expected[key] for key in ("evidence_layer", "observed_start")
         }:
             raise ControlPanelValidationError(
-                f"dependence canonical-series parity failed: {series_id}"
+                f"dependence canonical-series origin parity failed: {series_id}"
+            )
+        # The evidence row describes the full accepted live path; the
+        # dependence composition describes the factor-limited canonical
+        # evaluation window. Their ENDS legitimately diverge (the window lags
+        # for factor publication), but the window can never extend beyond the
+        # evidenced path.
+        dependence_observed_end = _text(
+            dependence.get("observed_end"), f"dependence observed_end {series_id}"
+        )
+        evidence_observed_end = _text(
+            expected["observed_end"], f"evidence observed_end {series_id}"
+        )
+        if dependence_observed_end > evidence_observed_end:
+            raise ControlPanelValidationError(
+                f"dependence canonical series extends beyond the evidenced live path: {series_id}"
             )
 
         factor = factor_by_name.get(series_id)
@@ -3056,9 +3065,13 @@ def _canonical_strategy_series_contracts(
                 factor_coverage.get("target_observations"),
             ),
         }
+        # Factor coverage and the dependence composition both describe the
+        # canonical evaluation window, so their dates and counts are the same
+        # quantity and must be equal.
         if factor_observed != {
-            key: expected[key]
-            for key in ("observed_end", "observed_start", "return_observations")
+            "observed_end": dependence_observed_end,
+            "observed_start": dependence_observed["observed_start"],
+            "return_observations": dependence.get("live_observations"),
         }:
             raise ControlPanelValidationError(
                 f"factor canonical-series parity failed: {series_id}"
@@ -3101,8 +3114,8 @@ def _canonical_strategy_series_contracts(
         }
         if weekly_observed != {
             "canonical_live_series_sha256": factor_series_sha256,
-            "observed_end": expected["observed_end"],
-            "observed_start": expected["observed_start"],
+            "observed_end": dependence_observed_end,
+            "observed_start": dependence_observed["observed_start"],
             "strategy_version": strategy_version,
         }:
             raise ControlPanelValidationError(

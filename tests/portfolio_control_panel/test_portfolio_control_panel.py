@@ -4348,16 +4348,22 @@ def _parity_evidence(
     layer: str = "ACCOUNT_LIVE",
     version: str | None = _VERSION,
 ) -> dict[str, Any]:
-    """Minimal valid evidence row carrying strategy_version."""
+    """Minimal valid evidence row carrying strategy_version.
+
+    Mirrors the production semantics: the evidence row describes the FULL
+    accepted live path (223 observations through 2026-08-13), which extends
+    beyond the factor-limited canonical evaluation window (80 observations
+    through 2026-07-30) that the dependence/factor/weekly fixtures describe.
+    """
     return {
         "evidence_layer": layer,
         "generation_id": "d" * 64,
-        "generation_as_of_date": "2026-07-30",
+        "generation_as_of_date": "2026-08-13",
         "provider_id": "synthetic",
         "strategy_id": strategy_id,
         "strategy_version": version,
         "account" if layer == "ACCOUNT_LIVE" else "provider": {
-            "observed_end": "2026-07-30",
+            "observed_end": "2026-08-13",
             "observed_start": "2026-01-02",
             "return_observations": 223,
         },
@@ -4401,7 +4407,7 @@ def _parity_factor() -> dict[str, Any]:
                     "canonical_live_series_sha256": "e" * 64,
                     "canonical_live_observed_end": "2026-07-30",
                     "canonical_live_observed_start": "2026-01-02",
-                    "canonical_live_observations": 223,
+                    "canonical_live_observations": 80,
                 },
             }
         ]
@@ -4575,3 +4581,26 @@ def test_canonical_series_identity_counts_still_displayed() -> None:
     # Both are preserved as metadata — no equality claimed.
     assert contracts[0]["return_observations"] == 223
     assert contracts[0]["strategy_version"] == _VERSION
+
+
+def test_canonical_series_dependence_beyond_evidence_fails() -> None:
+    """The canonical window extending past the evidenced live path fails closed."""
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}
+    names = {"strategy-0": "test-series"}
+    dependence_row = _parity_dependence("test-series", version=_VERSION)
+    dependence_row["observed_end"] = "2026-08-14"  # one day past the evidence end
+    factor = _parity_factor()
+    factor["series"][0]["coverage"]["canonical_live_observed_end"] = "2026-08-14"
+    weekly = _parity_weekly()
+    weekly["series"][0]["observation_meta_by_mode"]["LIVE_ONLY"] = {
+        "2026-08-14": ["2026-08-14", "2026-01-02", "2026-08-14"]
+    }
+    dependence = {"series_composition": {"test-series": dependence_row}}
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="extends beyond the evidenced live path",
+    ):
+        panel._canonical_strategy_series_contracts(
+            evidence, names, factor, dependence, weekly
+        )
