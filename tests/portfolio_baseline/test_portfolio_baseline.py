@@ -2077,14 +2077,20 @@ def test_cli_output_is_sanitized(
 def test_load_json_preserves_sub_cent_precision(tmp_path: Path) -> None:
     """Pass-3 defect: governed money parsed via float cannot survive a
     Decimal-exact reconciliation when the true sum carries sub-cent digits.
-    _load_json must parse floats as Decimal."""
+    The Decimal parse is scoped to `_load_json_decimal` (monetary
+    reconciliation inputs); the default loader must NOT Decimal-ize, so
+    verbatim-copied sections stay JSON-serializable."""
     import decimal
 
     path = tmp_path / "summary.json"
     exact = "446546.0893751776827506151026"
-    path.write_text('{"systematic_total": ' + exact + "}", encoding="utf-8")
+    path.write_text(
+        '{"systematic_total": ' + exact + ', "note": 0.1}', encoding="utf-8"
+    )
 
-    parsed = baseline._load_json(path, "summary")
-
+    parsed = baseline._load_json_decimal(path, "summary")
     assert isinstance(parsed["systematic_total"], decimal.Decimal)
     assert str(parsed["systematic_total"]) == exact
+
+    default = baseline._load_json(path, "summary")
+    assert isinstance(default["systematic_total"], float)

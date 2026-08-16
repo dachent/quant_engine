@@ -350,9 +350,19 @@ def _portable_relative(value: object, field_name: str) -> str:
 
 def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     try:
-        # parse_float=Decimal: governed money values must survive parsing
-        # exactly — a systematic total with sub-cent precision must not be
-        # silently rounded through float before a Decimal-exact comparison.
+        decoded = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BaselineValidationError(f"{field_name} is not readable JSON") from exc
+    return _object(decoded, field_name)
+
+
+def _load_json_decimal(path: Path, field_name: str) -> dict[str, Any]:
+    """Parse with float→Decimal for exact monetary reconciliation.
+
+    Scoped to inputs whose money values feed Decimal-exact checks: a global
+    parse would leak Decimal into verbatim-copied output sections, which
+    canonical_json_bytes cannot serialize."""
+    try:
         decoded = json.loads(path.read_text(encoding="utf-8-sig"), parse_float=Decimal)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise BaselineValidationError(f"{field_name} is not readable JSON") from exc
@@ -1726,7 +1736,7 @@ def _replay(
         },
         "replay",
     )
-    summary = _load_json(
+    summary = _load_json_decimal(
         paths["current-portfolio-summary"], "current-portfolio-summary"
     )
     evidence = _load_json(paths["phase2-evidence-summary"], "phase2-evidence-summary")
