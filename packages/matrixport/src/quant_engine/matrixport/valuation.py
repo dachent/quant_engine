@@ -463,10 +463,14 @@ def reconstruct_daily_valuations(
 ) -> ValuationResult:
     """Reconstruct daily UTC positions and values without NAV forward-fill.
 
-    ``portfolio_value_usd_observed`` uses only API-reported USD NAV or an API
-    FX rate.  Stablecoin parity remains in a separate column.  The strict total
-    may use the explicitly accepted USD/USDC/USDT parity assumption, but is
-    null whenever any non-zero held product lacks its daily NAV or USD path.
+    ``portfolio_value_usd_observed`` uses API-reported USD NAV where present,
+    then the accepted USD/USDC/USDT parity assumption for parity-denominated
+    products, then an API FX rate for everything else.  A parity-denominated
+    product carrying a grossly non-parity FX rate is a defective rate
+    attachment (another currency's rate); parity is used and the conflict is
+    recorded in ``quality_issues``.  The strict total may use the explicitly
+    accepted USD/USDC/USDT parity assumption, but is null whenever any
+    non-zero held product lacks its daily NAV or USD path.
     """
 
     normalized_events: list[PositionEvent] = []
@@ -644,11 +648,15 @@ def reconstruct_daily_valuations(
             before_fee_value = (
                 running_share * before_fee_nav if before_fee_nav is not None else None
             )
-            api_reported_usd = (
-                running_share * nav["nav_usd"]
-                if nav and nav["nav_usd"] is not None
-                else None
-            )
+            nav_channel_usd = None
+            api_usd_overflow = False
+            if nav and nav["nav_usd"] is not None:
+                try:
+                    nav_channel_usd = running_share * nav["nav_usd"]
+                except ArithmeticError:
+                    # An extreme provider claim that overflows Decimal is
+                    # defective evidence, not a crash.
+                    api_usd_overflow = True
             current_api_native = (
                 holding.get("native_value")
                 if holding is not None and utc_day == end_date
@@ -659,30 +667,231 @@ def reconstruct_daily_valuations(
                 if holding is not None and utc_day == end_date
                 else None
             )
-            if current_api_usd is not None:
-                api_reported_usd = current_api_usd
-            api_rate_usd = (
-                native_value * nav["fx_rate"]
-                if native_value is not None and nav and nav["fx_rate"] is not None
-                else None
+            # The NAV-channel USD total and the current-holding USD snapshot
+            # are independent provider claims; keep them separate so each can
+            # be cross-checked — the snapshot never silently overwrites the
+            # NAV-channel evidence.
+            api_reported_usd = (
+                current_api_usd if current_api_usd is not None else nav_channel_usd
             )
+            # A parity-denominated product must carry USD-scale rate evidence.
+            # Any of the three USD-attachment channels — the FX rate, the
+            # API-reported USD NAV, or the current-holding USD snapshot — that
+            # is grossly inconsistent with the product's own denomination is a
+            # defective attachment (e.g. the BTC/USD rate on a USDT product):
+            # distrust it, never convert with it, and record the conflict. The
+            # check keys on the DENOMINATION, never on which values exist.
+            parity_denominated = currency in PARITY_CURRENCIES
+            conflict_evidence: list[str] = []
+            if parity_denominated:
+                parity_fx_rate = nav["fx_rate"] if nav is not None else None
+                fx_in_bounds = parity_fx_rate is not None and (
+                    Decimal("0.5") <= parity_fx_rate <= Decimal("2")
+                )
+                if parity_fx_rate is not None and not fx_in_bounds:
+                    conflict_evidence.append(f"fx_rate={decimal_text(parity_fx_rate)}")
+                nav_usd = nav["nav_usd"] if nav is not None else None
+                if api_usd_overflow:
+                    conflict_evidence.append("nav_usd=overflow")
+                elif nav_usd is not None:
+                    if nav_value is None:
+                        # No native NAV to ratio against: the claim stands only
+                        # when an in-bounds FX rate independently corroborates
+                        # USD scale.
+                        if not fx_in_bounds:
+                            conflict_evidence.append("nav_usd_without_cross_reference")
+                    elif nav_value == 0:
+                        if nav_usd != 0:
+                            conflict_evidence.append("nav_usd_ratio=zero_reference")
+                    else:
+                        try:
+                            usd_ratio = nav_usd / nav_value
+                        except ArithmeticError:
+                            usd_ratio = None
+                        if usd_ratio is None:
+                            conflict_evidence.append("nav_usd_ratio=overflow")
+                        elif not (Decimal("0.5") <= usd_ratio <= Decimal("2")):
+                            conflict_evidence.append(
+                                f"nav_usd_ratio={decimal_text(usd_ratio)}"
+                            )
+                # The current snapshot is checked against the RECONSTRUCTED
+                # native value (the independent reference), falling back to the
+                # snapshot's own native only when no reconstruction exists.
+                snapshot_reference = (
+                    native_value if native_value is not None else current_api_native
+                )
+                if current_api_usd is not None and snapshot_reference is not None:
+                    if snapshot_reference == 0:
+                        if current_api_usd != 0:
+                            conflict_evidence.append("snapshot_ratio=zero_reference")
+                    else:
+                        try:
+                            snapshot_ratio = current_api_usd / snapshot_reference
+                        except ArithmeticError:
+                            snapshot_ratio = None
+                        if snapshot_ratio is None:
+                            conflict_evidence.append("snapshot_ratio=overflow")
+                        elif not (Decimal("0.5") <= snapshot_ratio <= Decimal("2")):
+                            conflict_evidence.append(
+                                f"snapshot_ratio={decimal_text(snapshot_ratio)}"
+                            )
+            # Whether the two provider USD channels corroborate each other
+            # (computed BEFORE any conflict nulling). A corroborated pair that
+            # contradicts the denomination-anchored fallback means the evidence
+            # families disagree — that fails closed below rather than picking
+            # a side.
+            usd_pair_agree = False
+            if (
+                nav_channel_usd is not None
+                and current_api_usd is not None
+                and not api_usd_overflow
+            ):
+                if nav_channel_usd == 0:
+                    usd_pair_agree = current_api_usd == 0
+                else:
+                    try:
+                        pair_ratio = current_api_usd / nav_channel_usd
+                    except ArithmeticError:
+                        pair_ratio = None
+                    usd_pair_agree = pair_ratio is not None and (
+                        Decimal("0.5") <= pair_ratio <= Decimal("2")
+                    )
+            parity_fx_conflict = bool(conflict_evidence)
+            if parity_fx_conflict:
+                api_reported_usd = None
+                current_api_usd = None
             parity_usd = (
                 native_value
                 if native_value is not None and currency in PARITY_CURRENCIES
                 else None
             )
+            api_rate_usd = None
+            fx_rate_overflow = False
+            if (
+                not parity_denominated
+                and native_value is not None
+                and nav
+                and nav["fx_rate"] is not None
+            ):
+                try:
+                    api_rate_usd = native_value * nav["fx_rate"]
+                except ArithmeticError:
+                    # An extreme FX rate that overflows Decimal is defective
+                    # evidence, not a crash.
+                    fx_rate_overflow = True
+            # A non-parity product's provider USD claims are cross-checked
+            # against independent evidence: the computed native x FX value when
+            # it exists, otherwise the NAV-channel total against the current
+            # snapshot — the only check left. A grossly inconsistent claim is
+            # distrusted; when the two provider claims contradict each other
+            # with no independent reference, BOTH are distrusted (fail closed).
+            api_usd_conflict = False
+            if not parity_denominated:
+                if api_usd_overflow:
+                    conflict_evidence.append("nav_usd=overflow")
+                    api_usd_conflict = True
+                if fx_rate_overflow:
+                    conflict_evidence.append("fx_rate=overflow")
+                    api_usd_conflict = True
+                if api_reported_usd is not None and api_rate_usd is not None:
+                    if api_rate_usd == 0:
+                        if api_reported_usd != 0:
+                            conflict_evidence.append(
+                                "api_vs_computed_ratio=zero_reference"
+                            )
+                            api_usd_conflict = True
+                    else:
+                        try:
+                            api_ratio = api_reported_usd / api_rate_usd
+                        except ArithmeticError:
+                            api_ratio = None
+                        if api_ratio is None:
+                            conflict_evidence.append("api_vs_computed_ratio=overflow")
+                            api_usd_conflict = True
+                        elif not (Decimal("0.5") <= api_ratio <= Decimal("2")):
+                            conflict_evidence.append(
+                                f"api_vs_computed_ratio={decimal_text(api_ratio)}"
+                            )
+                            api_usd_conflict = True
+                elif (
+                    api_rate_usd is None
+                    and nav_channel_usd is not None
+                    and current_api_usd is not None
+                ):
+                    if nav_channel_usd == 0:
+                        channel_conflict = current_api_usd != 0
+                        channel_ratio = "zero_reference"
+                    else:
+                        try:
+                            channel_ratio_value = current_api_usd / nav_channel_usd
+                        except ArithmeticError:
+                            channel_ratio_value = None
+                        channel_conflict = channel_ratio_value is None or not (
+                            Decimal("0.5") <= channel_ratio_value <= Decimal("2")
+                        )
+                        channel_ratio = (
+                            "overflow"
+                            if channel_ratio_value is None
+                            else decimal_text(channel_ratio_value)
+                        )
+                    if channel_conflict:
+                        conflict_evidence.append(
+                            f"snapshot_vs_nav_usd_ratio={channel_ratio}"
+                        )
+                        api_usd_conflict = True
+                if api_usd_conflict:
+                    api_reported_usd = None
+                    current_api_usd = None
+            fallback_usd = parity_usd if parity_usd is not None else api_rate_usd
+            fail_closed = False
+            if (
+                (parity_fx_conflict or api_usd_conflict)
+                and usd_pair_agree
+                and fallback_usd is not None
+                and nav_channel_usd is not None
+            ):
+                if fallback_usd == 0:
+                    fallback_outlier = nav_channel_usd != 0
+                else:
+                    try:
+                        fallback_ratio = nav_channel_usd / fallback_usd
+                    except ArithmeticError:
+                        fallback_ratio = None
+                    fallback_outlier = fallback_ratio is None or not (
+                        Decimal("0.5") <= fallback_ratio <= Decimal("2")
+                    )
+                if fallback_outlier:
+                    # The corroborated provider USD pair contradicts the
+                    # denomination-anchored fallback: the evidence families
+                    # disagree, so emit NO value rather than the lone outlier.
+                    conflict_evidence.append("fallback_is_lone_outlier")
+                    fail_closed = True
             observed_usd = (
-                api_reported_usd if api_reported_usd is not None else api_rate_usd
+                None
+                if fail_closed
+                else api_reported_usd
+                if api_reported_usd is not None
+                else parity_usd
+                if parity_usd is not None
+                else api_rate_usd
             )
-            strict_component = observed_usd if observed_usd is not None else parity_usd
-            if current_api_usd is not None:
+            strict_component = (
+                None
+                if fail_closed
+                else observed_usd
+                if observed_usd is not None
+                else parity_usd
+            )
+            if fail_closed:
+                valuation_source = "conflict_fail_closed"
+            elif current_api_usd is not None:
                 valuation_source = "api_reported_current_holding_usd"
             elif api_reported_usd is not None:
                 valuation_source = "api_reported_usd_nav"
-            elif api_rate_usd is not None:
-                valuation_source = "api_fx_rate"
             elif parity_usd is not None:
                 valuation_source = "assumed_stablecoin_parity"
+            elif api_rate_usd is not None:
+                valuation_source = "api_fx_rate"
             elif nav_value is None:
                 valuation_source = "missing_nav"
             else:
@@ -751,6 +960,30 @@ def reconstruct_daily_valuations(
                     ),
                 }
             )
+            if parity_fx_conflict:
+                quality.append(
+                    {
+                        "source_table": "daily_holdings",
+                        "source_index": utc_day.isoformat(),
+                        "product_id": product_id,
+                        "reason": (
+                            "parity_fx_rate_conflict:"
+                            f"currency={currency}:" + ",".join(conflict_evidence)
+                        ),
+                    }
+                )
+            if api_usd_conflict:
+                quality.append(
+                    {
+                        "source_table": "daily_holdings",
+                        "source_index": utc_day.isoformat(),
+                        "product_id": product_id,
+                        "reason": (
+                            "api_usd_cross_check_conflict:"
+                            f"currency={currency}:" + ",".join(conflict_evidence)
+                        ),
+                    }
+                )
 
     daily_rows.sort(key=lambda row: (row["utc_date"], row["product_id"]))
     currency_rows, portfolio_rows = _aggregate_portfolio(daily_rows)

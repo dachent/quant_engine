@@ -7,7 +7,15 @@ import sys
 
 import pytest
 
-from quant_engine.core import CoverageClaim, CoverageStatus
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+    hash_file,
+)
 from quant_engine.portfolio_ledger import (
     GenerationQualification,
     ProviderGenerationIdentity,
@@ -69,6 +77,27 @@ def test_broker_returns_are_flow_adjusted_and_capital_weighted() -> None:
     assert rows[0]["beginning_capital"] == "400"
     assert len(rows[0]["account_reconciliation_sha256"]) == 64
     assert rows[0]["flow_timing"] == "DATE_ONLY_END_OF_DAY"
+
+
+def test_broker_returns_fail_closed_on_blank_flow_amount() -> None:
+    """A MAPPED flow with a blank amount is malformed evidence — fail closed,
+    never compute a return as if no flow occurred."""
+    nav = [
+        _nav("a", "2026-01-01", "100", "a-1"),
+        _nav("a", "2026-01-02", "110", "a-2"),
+    ]
+    flows = [
+        {
+            "account_id": "a",
+            "amount": "",
+            "event_date": "2026-01-02",
+            "mapping_status": "MAPPED",
+            "provider_id": "schwab",
+        }
+    ]
+
+    with pytest.raises(ledger.ProviderLedgerError, match="flow amount is missing"):
+        ledger._broker_strategy_returns(nav, flows)
 
 
 def test_account_rollforward_appends_only_dates_newer_than_accepted_history() -> None:
@@ -400,3 +429,389 @@ def test_provider_coverage_rejects_non_list_catalog_limitations() -> None:
             manifest_coverage,
             {"coverage": {"out_of_boundary": "not-a-list"}},
         )
+
+
+def _make_manifest(csv_path: Path, artifact_id: str) -> GenerationManifest:
+    digest, size = hash_file(csv_path)
+    return GenerationManifest.build(
+        as_of_date=date(2026, 8, 16),
+        adapter=AdapterIdentity(name="test-provider-ledger", version="1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="test",
+            fact_types=("nav_observations",),
+            observed_start=date(2026, 8, 13),
+            observed_end=date(2026, 8, 14),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id=artifact_id,
+                sha256=digest,
+                size_bytes=size,
+                as_of_date=date(2026, 8, 16),
+                schema_name="test-csv",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+
+
+def test_matrixport_daily_portfolio_totals_admitted_as_nav_observations(
+    tmp_path: Path,
+) -> None:
+    run_id = "20260816T141010.494Z"
+    csv_rel = Path("csv/daily_portfolio_totals.csv")
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    csv_path = output_root / csv_rel
+    csv_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-13,48663.88457193982560558809181,48663.88457193982560558809181,true\n"
+        "2026-08-14,48663.88457193982560558809181,48663.88457193982560558809181,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    accounts = {"account-d2e5821e608e25f1"}
+    strategies = {"robuxio-crypto"}
+    assignments = {
+        "account-d2e5821e608e25f1": [
+            {
+                "effective_start": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "strategy_id": "robuxio-crypto",
+            }
+        ]
+    }
+
+    rows = ledger._matrixport_nav_observations(
+        "gen-1", manifest, catalog, tmp_path, accounts, strategies, assignments
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["account_id"] == "account-d2e5821e608e25f1"
+    assert rows[0]["as_of_date"] == "2026-08-13"
+    assert rows[0]["nav"] == "48663.88457193982560558809181"
+    assert rows[0]["market_value"] == "48663.88457193982560558809181"
+    assert rows[0]["provider_id"] == "matrixport"
+    assert rows[0]["record_id"] == "matrixport:2026-08-13"
+    assert rows[0]["source_artifact_id"] == "csv/daily_portfolio_totals.csv"
+    assert rows[0]["strategy_id"] == "robuxio-crypto"
+    assert rows[0]["mapping_status"] == "MAPPED"
+    assert rows[1]["as_of_date"] == "2026-08-14"
+
+
+def test_matrixport_blank_nav_day_is_skipped_not_fatal(tmp_path: Path) -> None:
+    """Blank value cells (the owner-accepted provider-missing NAV days) are
+    absent observations, never parse errors."""
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    csv_path = output_root / "csv/daily_portfolio_totals.csv"
+    csv_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-01-26,49500.5,49500.5,true\n"
+        "2026-01-27,,,true\n"
+        "2026-01-28,49520.75,49520.75,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    assignments = {
+        "account-d2e5821e608e25f1": [
+            {
+                "effective_start": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "strategy_id": "robuxio-crypto",
+            }
+        ]
+    }
+
+    rows = ledger._matrixport_nav_observations(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        assignments,
+    )
+
+    assert [row["as_of_date"] for row in rows] == ["2026-01-26", "2026-01-28"]
+
+
+def test_matrixport_csv_hash_tamper_fails_closed(tmp_path: Path) -> None:
+    """The admission parses the exact bytes it hash-verified; a wrong expected
+    hash raises, and nothing is parsed."""
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    csv_path = output_root / "csv/daily_portfolio_totals.csv"
+    csv_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-13,48663.88,48663.88,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    for artifact in manifest.artifacts:
+        artifact.__dict__["sha256"] = "0" * 64  # tamper
+    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+
+    with pytest.raises(ledger.ProviderLedgerError, match="hash differs"):
+        ledger._matrixport_nav_observations(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            {},
+        )
+
+
+def test_quantbase_volatis_dashboard_admitted_as_nav_observations(
+    tmp_path: Path,
+) -> None:
+    run_id = "legacy-20260814-6b0538e2cc69"
+    csv_rel = Path("csv/dashboard_Volatis_Strategy_pricehistory.csv")
+    artifact_root = tmp_path / "source-runs" / run_id / "artifacts"
+    (artifact_root / "csv").mkdir(parents=True)
+    csv_path = artifact_root / csv_rel
+    csv_path.write_text(
+        "time,value,cost_basis,profit_loss\n"
+        "08/13/2026,66914.29,48098.81,0.3912\n"
+        "08/14/2026,66593.33,46833.87,0.4219\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_manifest(
+        csv_path, "source/csv/dashboard_Volatis_Strategy_pricehistory.csv"
+    )
+    catalog = {
+        "catalog_schema_version": 1,
+        "legacy_lineage": {"run_id": run_id},
+    }
+    accounts = {"account-58e75e8d952fa1b8"}
+    strategies = {"volatis-strategy"}
+    assignments = {
+        "account-58e75e8d952fa1b8": [
+            {
+                "effective_start": "2024-10-01",
+                "mapping_status": "MAPPED",
+                "strategy_id": "volatis-strategy",
+            }
+        ]
+    }
+
+    rows = ledger._quantbase_nav_observations(
+        "gen-1", manifest, catalog, tmp_path, accounts, strategies, assignments
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["account_id"] == "account-58e75e8d952fa1b8"
+    assert rows[0]["as_of_date"] == "2026-08-13"
+    assert rows[0]["nav"] == "66914.29"
+    assert rows[0]["market_value"] == "66914.29"
+    assert rows[0]["provider_id"] == "quantbase"
+    assert rows[0]["record_id"] == "quantbase:2026-08-13"
+    assert (
+        rows[0]["source_artifact_id"]
+        == "source/csv/dashboard_Volatis_Strategy_pricehistory.csv"
+    )
+    assert rows[0]["strategy_id"] == "volatis-strategy"
+    assert rows[0]["mapping_status"] == "MAPPED"
+    assert rows[1]["as_of_date"] == "2026-08-14"
+
+
+def test_nav_observation_sanity_bound_rejects_excessive_move_without_flow() -> None:
+    nav = [
+        {
+            "provider_id": "matrixport",
+            "account_id": "account-d2e5821e608e25f1",
+            "as_of_date": "2026-08-13",
+            "nav": "48663.88",
+            "mapping_status": "MAPPED",
+        },
+        {
+            "provider_id": "matrixport",
+            "account_id": "account-d2e5821e608e25f1",
+            "as_of_date": "2026-08-14",
+            "nav": "4866388.00",
+            "mapping_status": "MAPPED",
+        },
+    ]
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="NAV_OBSERVATION_EXCESSIVE_MOVE_WITHOUT_FLOW",
+    ):
+        ledger._validate_nav_observation_moves(nav, [])
+
+
+def test_nav_observation_sanity_bound_allows_excessive_move_with_flow() -> None:
+    nav = [
+        {
+            "provider_id": "matrixport",
+            "account_id": "account-d2e5821e608e25f1",
+            "as_of_date": "2026-08-13",
+            "nav": "48663.88",
+            "mapping_status": "MAPPED",
+        },
+        {
+            "provider_id": "matrixport",
+            "account_id": "account-d2e5821e608e25f1",
+            "as_of_date": "2026-08-14",
+            "nav": "4866388.00",
+            "mapping_status": "MAPPED",
+        },
+    ]
+    flows = [
+        {
+            "provider_id": "matrixport",
+            "account_id": "account-d2e5821e608e25f1",
+            "event_date": "2026-08-14",
+            "amount": "1000000",
+            "mapping_status": "MAPPED",
+        }
+    ]
+    ledger._validate_nav_observation_moves(nav, flows)
+
+
+def test_matrixport_incomplete_totals_never_admitted(tmp_path: Path) -> None:
+    """QC round-6: a partial sum (strict_complete=false) is not an
+    authoritative portfolio total — it is skipped, never admitted as a NAV
+    observation where it would fabricate a drawdown."""
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    csv_path = output_root / "csv/daily_portfolio_totals.csv"
+    csv_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-13,48663.88,48663.88,true\n"
+        "2026-08-14,9000.00,,false\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    assignments = {
+        "account-d2e5821e608e25f1": [
+            {
+                "effective_start": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "strategy_id": "robuxio-crypto",
+            }
+        ]
+    }
+
+    rows = ledger._matrixport_nav_observations(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        assignments,
+    )
+
+    assert [row["as_of_date"] for row in rows] == ["2026-08-13"]
+
+
+def test_matrixport_source_run_id_traversal_rejected(tmp_path: Path) -> None:
+    """QC round-6: a catalog run identifier that escapes the output root is
+    rejected before any path join."""
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    csv_path = output_root / "csv/daily_portfolio_totals.csv"
+    csv_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-13,48663.88,48663.88,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    catalog = {"catalog_schema_version": 2, "source_run_id": "../escape"}
+
+    with pytest.raises(ledger.ProviderLedgerError, match="not a safe run identifier"):
+        ledger._matrixport_nav_observations(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            {},
+        )
+
+
+def test_quantbase_run_id_traversal_rejected(tmp_path: Path) -> None:
+    run_id = "legacy-20260814-6b0538e2cc69"
+    artifact_root = tmp_path / "source-runs" / run_id / "artifacts"
+    (artifact_root / "csv").mkdir(parents=True)
+    csv_path = artifact_root / "csv/dashboard_Volatis_Strategy_pricehistory.csv"
+    csv_path.write_text(
+        "time,value,cost_basis,profit_loss\n08/13/2026,66914.29,48098.81,0.3912\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_manifest(
+        csv_path, "source/csv/dashboard_Volatis_Strategy_pricehistory.csv"
+    )
+    catalog = {
+        "catalog_schema_version": 1,
+        "legacy_lineage": {"run_id": "../escape"},
+    }
+
+    with pytest.raises(ledger.ProviderLedgerError, match="not a safe run identifier"):
+        ledger._quantbase_nav_observations(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-58e75e8d952fa1b8"},
+            {"volatis-strategy"},
+            {},
+        )
+
+
+def test_provider_generation_id_traversal_rejected() -> None:
+    """QC round-6: the top-level provider generation_id joins a filesystem
+    path, so it passes through the same run-identifier validator."""
+    with pytest.raises(ledger.ProviderLedgerError, match="not a safe run identifier"):
+        ledger._run_id("../escape", "matrixport.generation_id")
+
+
+def test_matrixport_non_positive_totals_never_admitted(tmp_path: Path) -> None:
+    """QC round-7: a non-positive portfolio total is not a plausible NAV —
+    skipped like a blank cell, never admitted."""
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    csv_path = output_root / "csv/daily_portfolio_totals.csv"
+    csv_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-13,48663.88,48663.88,true\n"
+        "2026-08-14,-5,-5,true\n"
+        "2026-08-15,0,0,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    assignments = {
+        "account-d2e5821e608e25f1": [
+            {
+                "effective_start": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "strategy_id": "robuxio-crypto",
+            }
+        ]
+    }
+
+    rows = ledger._matrixport_nav_observations(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        assignments,
+    )
+
+    assert [row["as_of_date"] for row in rows] == ["2026-08-13"]

@@ -146,10 +146,26 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
     )
     if artifact is None:
         raise VerticalBuildError("reusable provider-ledger artifact is absent")
-    catalog_sha256, catalog_size = _sha(files["provider-ledger.json"])
-    if artifact.sha256 != catalog_sha256 or artifact.size_bytes != catalog_size:
+    ledger_path = files["provider-ledger.json"]
+    try:
+        content = ledger_path.read_bytes()
+    except OSError as exc:
+        raise VerticalBuildError(
+            "reusable provider-ledger artifact is unavailable"
+        ) from exc
+    if artifact.sha256 != hashlib.sha256(
+        content
+    ).hexdigest() or artifact.size_bytes != len(content):
         raise VerticalBuildError("reusable provider-ledger artifact identity differs")
-    catalog = _load(files["provider-ledger.json"], "reusable provider-ledger")
+    # Parse the SAME bytes that were just hashed — never reopen after hashing.
+    try:
+        catalog = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise VerticalBuildError(
+            "reusable provider-ledger is not readable JSON"
+        ) from exc
+    if not isinstance(catalog, dict):
+        raise VerticalBuildError("reusable provider-ledger root must be an object")
     if (
         catalog.get("as_of_date") != manifest.as_of_date.isoformat()
         or catalog.get("catalog_schema_version") != 1
