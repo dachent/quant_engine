@@ -493,8 +493,16 @@ def test_matrixport_daily_portfolio_totals_admitted_as_nav_observations(
     assert len(rows) == 2
     assert rows[0]["account_id"] == "account-d2e5821e608e25f1"
     assert rows[0]["as_of_date"] == "2026-08-13"
-    assert rows[0]["nav"] == "48663.88457193982560558809181"
-    assert rows[0]["market_value"] == "48663.88457193982560558809181"
+    assert rows[0]["nav"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "48663.88457193982560558809181",
+    }
+    assert rows[0]["market_value"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "48663.88457193982560558809181",
+    }
     assert rows[0]["provider_id"] == "matrixport"
     assert rows[0]["record_id"] == "matrixport:2026-08-13"
     assert rows[0]["source_artifact_id"] == "csv/daily_portfolio_totals.csv"
@@ -611,8 +619,16 @@ def test_quantbase_volatis_dashboard_admitted_as_nav_observations(
     assert len(rows) == 2
     assert rows[0]["account_id"] == "account-58e75e8d952fa1b8"
     assert rows[0]["as_of_date"] == "2026-08-13"
-    assert rows[0]["nav"] == "66914.29"
-    assert rows[0]["market_value"] == "66914.29"
+    assert rows[0]["nav"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "66914.29",
+    }
+    assert rows[0]["market_value"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "66914.29",
+    }
     assert rows[0]["provider_id"] == "quantbase"
     assert rows[0]["record_id"] == "quantbase:2026-08-13"
     assert (

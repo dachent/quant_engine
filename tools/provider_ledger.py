@@ -364,6 +364,14 @@ def _matrixport_nav_observations(
             account_id, day, accounts, strategies, assignments
         )
         source_id = day.isoformat()
+        # The ledger contract wraps observed money as {currency, status,
+        # value} — the shape every catalog provider emits and downstream
+        # readers (report, baseline) require.
+        wrapped = {
+            "currency": "USD",
+            "status": "AVAILABLE",
+            "value": row["portfolio_value_usd_observed"],
+        }
         observations.append(
             {
                 "account_id": account_id,
@@ -371,8 +379,8 @@ def _matrixport_nav_observations(
                 "evidence_layer": "ACCOUNT_LIVE",
                 "generation_id": generation_id,
                 "mapping_status": mapping_status,
-                "market_value": row["portfolio_value_usd_observed"],
-                "nav": row["portfolio_value_usd_observed"],
+                "market_value": dict(wrapped),
+                "nav": dict(wrapped),
                 "provider_id": "matrixport",
                 "record_id": f"matrixport:{source_id}",
                 "source_artifact_id": artifact_id,
@@ -423,6 +431,9 @@ def _quantbase_nav_observations(
             account_id, day, accounts, strategies, assignments
         )
         source_id = day.isoformat()
+        # Same wrapped {currency, status, value} money shape as the catalog
+        # providers — downstream readers require it.
+        wrapped = {"currency": "USD", "status": "AVAILABLE", "value": row["value"]}
         observations.append(
             {
                 "account_id": account_id,
@@ -430,8 +441,8 @@ def _quantbase_nav_observations(
                 "evidence_layer": "ACCOUNT_LIVE",
                 "generation_id": generation_id,
                 "mapping_status": mapping_status,
-                "market_value": row["value"],
-                "nav": row["value"],
+                "market_value": dict(wrapped),
+                "nav": dict(wrapped),
                 "provider_id": "quantbase",
                 "record_id": f"quantbase:{source_id}",
                 "source_artifact_id": artifact_id,
