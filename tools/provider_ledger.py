@@ -67,13 +67,14 @@ _ACCOUNT_FACTS: Final = {
         "transactions",
     ),
     "matrixport": ("nav_observations",),
-    "quantbase": ("nav_observations",),
+    "quantbase": ("flows", "nav_observations"),
     "schwab": ("nav_observations", "positions", "transactions"),
 }
 _CSV_FACT_ACCOUNT: Final[dict[str, str]] = {
     "matrixport": "account-d2e5821e608e25f1",
     "quantbase": "account-58e75e8d952fa1b8",
 }
+_QUANTBASE_FUND_ID: Final = "107"
 _SCHWAB_FLOW_KINDS: Final = frozenset(
     {
         "Bank Transfer",
@@ -441,6 +442,136 @@ def _quantbase_nav_observations(
     return observations
 
 
+def _quantbase_flows(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Admit Quantbase capital contributions as flows.
+
+    Mirrors the legacy reconciliation (tools/portfolio_target_series.py):
+    contributions are filled_txn BUY rows on the fund, matched in order
+    against cost-basis increases in the dashboard history, and booked on the
+    day the cost basis rises. A contribution that does not reconcile is a
+    hard failure — never a silently mis-booked flow."""
+    account_id = _CSV_FACT_ACCOUNT["quantbase"]
+    run_id = _run_id(
+        _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
+            "run_id"
+        ),
+        "quantbase.legacy_lineage.run_id",
+    )
+    run_root = root / "source-runs" / run_id / "artifacts"
+    price_rel = Path("csv/dashboard_Volatis_Strategy_pricehistory.csv")
+    price_artifact = _find_manifest_artifact(
+        manifest, f"source/{price_rel.as_posix()}", "quantbase Volatis pricehistory"
+    )
+    price_rows = _verified_csv_rows(
+        _exact_file(run_root, price_rel, "quantbase Volatis pricehistory"),
+        price_artifact.sha256,
+        {"time", "cost_basis"},
+        "quantbase Volatis pricehistory",
+    )
+    activity_rel = Path("csv/account_activity.csv")
+    activity_artifact = _find_manifest_artifact(
+        manifest, f"source/{activity_rel.as_posix()}", "quantbase account activity"
+    )
+    activity_rows = _verified_csv_rows(
+        _exact_file(run_root, activity_rel, "quantbase account activity"),
+        activity_artifact.sha256,
+        {"activity_type", "amount", "fund", "is_rebalance", "time", "type"},
+        "quantbase account activity",
+    )
+
+    contributions: list[tuple[datetime, Decimal]] = []
+    for row in activity_rows:
+        if (
+            row["activity_type"] != "filled_txn"
+            or row["fund"] != _QUANTBASE_FUND_ID
+            or row["is_rebalance"].lower() != "false"
+        ):
+            continue
+        amount = _observed_decimal(row["amount"], "quantbase activity amount")
+        if amount is None or amount <= 0 or row["type"].upper() != "BUY":
+            continue
+        try:
+            observed = datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ProviderLedgerError(
+                "quantbase activity timestamp is invalid"
+            ) from exc
+        contributions.append((observed, amount))
+    contributions.sort(key=lambda item: item[0])
+
+    history: list[tuple[date, Decimal]] = []
+    for row in price_rows:
+        cost_basis = _observed_decimal(row.get("cost_basis"), "quantbase cost basis")
+        if cost_basis is None or cost_basis < 0:
+            continue
+        history.append(
+            (_quantbase_day(row["time"], "quantbase Volatis time"), cost_basis)
+        )
+    history.sort(key=lambda item: item[0])
+
+    pending: list[tuple[datetime, Decimal]] = []
+    contribution_index = 0
+    previous_cost_basis = Decimal(0)
+    booked_flows: dict[date, Decimal] = {}
+    tolerance = Decimal("0.02")
+    for day, cost_basis in history:
+        while (
+            contribution_index < len(contributions)
+            and contributions[contribution_index][0].date() <= day
+        ):
+            pending.append(contributions[contribution_index])
+            contribution_index += 1
+        delta = cost_basis - previous_cost_basis
+        if delta > tolerance and pending:
+            running = Decimal(0)
+            matched_count = 0
+            for index, (_timestamp, amount) in enumerate(pending):
+                running += amount
+                if abs(running - delta) <= tolerance:
+                    matched_count = index + 1
+                    break
+                if running > delta + tolerance:
+                    break
+            if matched_count:
+                booked_flows[day] = running
+                pending = pending[matched_count:]
+        previous_cost_basis = cost_basis
+    if contribution_index != len(contributions) or pending:
+        raise ProviderLedgerError("quantbase capital additions do not reconcile")
+
+    flows: list[dict[str, Any]] = []
+    for day, amount in sorted(booked_flows.items()):
+        strategy_id, mapping_status = _mapped_strategy_for_account(
+            account_id, day, accounts, strategies, assignments
+        )
+        flows.append(
+            {
+                "account_id": account_id,
+                "amount": format(amount.normalize(), "f"),
+                "event_date": day.isoformat(),
+                "evidence_layer": "ACCOUNT_LIVE",
+                "flow_type": "EXTERNAL_PROVIDER_TRANSFER",
+                "generation_id": generation_id,
+                "mapping_basis": "RECONCILED_COST_BASIS_INCREASE",
+                "mapping_status": mapping_status,
+                "provider_id": "quantbase",
+                "record_id": f"quantbase-flow:{day.isoformat()}",
+                "source_artifact_id": f"source/{activity_rel.as_posix()}",
+                "source_record_id": day.isoformat(),
+                "strategy_id": strategy_id,
+            }
+        )
+    return flows
+
+
 def _load_spec(path: Path) -> dict[str, Any]:
     spec = _load_json(path, "provider-ledger spec")
     expected = {
@@ -667,13 +798,28 @@ def _project_account_facts(
     exceptions: list[dict[str, Any]] = []
     for source_fact in _ACCOUNT_FACTS.get(provider_id, ()):
         target_fact = "flows" if source_fact == "cash_flows" else source_fact
-        if provider_id in _CSV_FACT_ACCOUNT and source_fact == "nav_observations":
+        if provider_id in _CSV_FACT_ACCOUNT and source_fact in {
+            "flows",
+            "nav_observations",
+        }:
             if manifest is None or root is None:
                 raise ProviderLedgerError(
                     f"{provider_id} CSV facts require a manifest and root"
                 )
             if provider_id == "matrixport":
-                rows = _matrixport_nav_observations(
+                if source_fact != "nav_observations":
+                    continue
+                rows: list[dict[str, Any]] = _matrixport_nav_observations(
+                    generation_id,
+                    manifest,
+                    catalog,
+                    root,
+                    accounts,
+                    strategies,
+                    assignments,
+                )
+            elif source_fact == "nav_observations":
+                rows = _quantbase_nav_observations(
                     generation_id,
                     manifest,
                     catalog,
@@ -683,7 +829,7 @@ def _project_account_facts(
                     assignments,
                 )
             else:
-                rows = _quantbase_nav_observations(
+                rows = _quantbase_flows(
                     generation_id,
                     manifest,
                     catalog,
@@ -698,7 +844,8 @@ def _project_account_facts(
                     exceptions.append(
                         {
                             "account_in_provenance": row["account_id"] in accounts,
-                            "effective_date": row["as_of_date"],
+                            "effective_date": row.get("as_of_date")
+                            or row.get("event_date"),
                             "fact_type": target_fact,
                             "provider_id": provider_id,
                             "record_id": row["record_id"],
@@ -791,15 +938,24 @@ def _validate_nav_observation_moves(
     The bound is intentionally narrow: it catches unit/double-conversion
     anomalies without second-guessing legitimate large flows.
     """
-    flow_keys = {
-        (
+    flow_amounts: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
+    for row in flows:
+        if row.get("mapping_status") != "MAPPED":
+            continue
+        raw_amount = row.get("amount")
+        if raw_amount is None or (
+            isinstance(raw_amount, str) and not raw_amount.strip()
+        ):
+            continue
+        amount = _observed_decimal(raw_amount, "flow amount")
+        if amount is None:
+            continue
+        key = (
             str(row["provider_id"]),
             str(row["account_id"]),
             str(row.get("event_date") or ""),
         )
-        for row in flows
-        if row.get("mapping_status") == "MAPPED"
-    }
+        flow_amounts[key] += abs(amount)
     by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in nav_observations:
         if row.get("mapping_status") != "MAPPED":
@@ -816,11 +972,22 @@ def _validate_nav_observation_moves(
                 "10"
             ) or ending_nav < prior_nav / Decimal("10"):
                 day = str(current["as_of_date"])
-                if (provider_id, account_id, day) not in flow_keys:
+                flow_total = flow_amounts.get((provider_id, account_id, day))
+                if flow_total is None:
                     raise ProviderLedgerError(
                         "NAV_OBSERVATION_EXCESSIVE_MOVE_WITHOUT_FLOW: "
                         f"{provider_id}/{account_id} moved from {prior_nav} to "
                         f"{ending_nav} on {day} without a matching flow"
+                    )
+                # A flow exempts the move only if its magnitude can explain
+                # it: a $1 transfer must not whitewash a unit/conversion
+                # error that coincides with it.
+                if abs(ending_nav - prior_nav) > flow_total * Decimal("2"):
+                    raise ProviderLedgerError(
+                        "NAV_OBSERVATION_EXCESSIVE_MOVE_BEYOND_FLOW: "
+                        f"{provider_id}/{account_id} moved from {prior_nav} to "
+                        f"{ending_nav} on {day} but same-day flows total "
+                        f"{flow_total}"
                     )
 
 

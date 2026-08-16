@@ -4,6 +4,7 @@ from datetime import date
 import importlib.util
 from pathlib import Path
 import sys
+from typing import Any, Mapping
 
 import pytest
 
@@ -669,11 +670,46 @@ def test_nav_observation_sanity_bound_allows_excessive_move_with_flow() -> None:
             "provider_id": "matrixport",
             "account_id": "account-d2e5821e608e25f1",
             "event_date": "2026-08-14",
-            "amount": "1000000",
+            "amount": "5000000",
             "mapping_status": "MAPPED",
         }
     ]
     ledger._validate_nav_observation_moves(nav, flows)
+
+
+def test_nav_observation_sanity_bound_rejects_move_beyond_flow_magnitude() -> None:
+    """Codex PR review P2: a token same-day flow must not exempt an extreme
+    NAV move — the flow magnitude has to explain the move."""
+    nav = [
+        {
+            "provider_id": "matrixport",
+            "account_id": "account-d2e5821e608e25f1",
+            "as_of_date": "2026-08-13",
+            "nav": "48663.88",
+            "mapping_status": "MAPPED",
+        },
+        {
+            "provider_id": "matrixport",
+            "account_id": "account-d2e5821e608e25f1",
+            "as_of_date": "2026-08-14",
+            "nav": "4866388.00",
+            "mapping_status": "MAPPED",
+        },
+    ]
+    flows = [
+        {
+            "provider_id": "matrixport",
+            "account_id": "account-d2e5821e608e25f1",
+            "event_date": "2026-08-14",
+            "amount": "1",
+            "mapping_status": "MAPPED",
+        }
+    ]
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="NAV_OBSERVATION_EXCESSIVE_MOVE_BEYOND_FLOW",
+    ):
+        ledger._validate_nav_observation_moves(nav, flows)
 
 
 def test_matrixport_incomplete_totals_never_admitted(tmp_path: Path) -> None:
@@ -815,3 +851,137 @@ def test_matrixport_non_positive_totals_never_admitted(tmp_path: Path) -> None:
     )
 
     assert [row["as_of_date"] for row in rows] == ["2026-08-13"]
+
+
+def _make_two_artifact_manifest(
+    files: Mapping[str, Path],
+) -> GenerationManifest:
+    return GenerationManifest.build(
+        as_of_date=date(2026, 8, 16),
+        adapter=AdapterIdentity(name="test-provider-ledger", version="1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="test",
+            fact_types=("nav_observations", "flows"),
+            observed_start=date(2026, 8, 13),
+            observed_end=date(2026, 8, 14),
+        ),
+        artifacts=tuple(
+            SourceArtifact(
+                artifact_id=artifact_id,
+                sha256=hash_file(path)[0],
+                size_bytes=hash_file(path)[1],
+                as_of_date=date(2026, 8, 16),
+                schema_name="test-csv",
+                schema_version="1",
+            )
+            for artifact_id, path in files.items()
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+
+
+def _quantbase_fixture(tmp_path: Path) -> tuple[Path, dict[str, Any], Path, Path]:
+    run_id = "legacy-20260814-6b0538e2cc69"
+    artifact_root = tmp_path / "source-runs" / run_id / "artifacts"
+    (artifact_root / "csv").mkdir(parents=True)
+    price_path = artifact_root / "csv/dashboard_Volatis_Strategy_pricehistory.csv"
+    price_path.write_text(
+        "time,value,cost_basis,profit_loss\n"
+        "08/12/2026,50000.00,50000.00,0\n"
+        "08/13/2026,150100.00,150000.00,0.0007\n"
+        "08/14/2026,150200.00,150000.00,0.0013\n",
+        encoding="utf-8-sig",
+    )
+    activity_path = artifact_root / "csv/account_activity.csv"
+    activity_path.write_text(
+        "activity_type,amount,fund,is_rebalance,time,type\n"
+        "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY\n"
+        "filled_txn,50000,14,False,2026-08-12T20:00:00Z,BUY\n"
+        "filled_txn,100000,107,True,2026-08-13T19:00:00Z,BUY\n",
+        encoding="utf-8-sig",
+    )
+    catalog = {
+        "catalog_schema_version": 1,
+        "legacy_lineage": {"run_id": run_id},
+    }
+    return tmp_path, catalog, price_path, activity_path
+
+
+def test_quantbase_contributions_admitted_as_reconciled_flows(
+    tmp_path: Path,
+) -> None:
+    """Codex PR review P1: Quantbase capital contributions must enter the
+    ledger as flows (booked on the cost-basis increase day, reconciled
+    against the dashboard history) — never as investment performance."""
+    root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
+    manifest = _make_two_artifact_manifest(
+        {
+            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv": price_path,
+            "source/csv/account_activity.csv": activity_path,
+        }
+    )
+    assignments = {
+        "account-58e75e8d952fa1b8": [
+            {
+                "effective_start": "2024-10-01",
+                "mapping_status": "MAPPED",
+                "strategy_id": "volatis-strategy",
+            }
+        ]
+    }
+
+    rows = ledger._quantbase_flows(
+        "gen-1",
+        manifest,
+        catalog,
+        root,
+        {"account-58e75e8d952fa1b8"},
+        {"volatis-strategy"},
+        assignments,
+    )
+
+    # Only the non-rebalance BUY on fund 107 (100000) reconciles against the
+    # 50000 -> 150000 cost-basis increase on 2026-08-13.
+    assert len(rows) == 1
+    assert rows[0]["event_date"] == "2026-08-13"
+    assert rows[0]["amount"] == "100000"
+    assert rows[0]["flow_type"] == "EXTERNAL_PROVIDER_TRANSFER"
+    assert rows[0]["mapping_basis"] == "RECONCILED_COST_BASIS_INCREASE"
+    assert rows[0]["mapping_status"] == "MAPPED"
+    assert rows[0]["strategy_id"] == "volatis-strategy"
+    assert rows[0]["record_id"] == "quantbase-flow:2026-08-13"
+
+
+def test_quantbase_unreconciled_contribution_fails_closed(tmp_path: Path) -> None:
+    root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
+    with activity_path.open("a", encoding="utf-8") as handle:
+        handle.write("filled_txn,77777,107,False,2026-08-14T20:00:00Z,BUY\n")
+    manifest = _make_two_artifact_manifest(
+        {
+            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv": price_path,
+            "source/csv/account_activity.csv": activity_path,
+        }
+    )
+    assignments = {
+        "account-58e75e8d952fa1b8": [
+            {
+                "effective_start": "2024-10-01",
+                "mapping_status": "MAPPED",
+                "strategy_id": "volatis-strategy",
+            }
+        ]
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="capital additions do not reconcile"
+    ):
+        ledger._quantbase_flows(
+            "gen-1",
+            manifest,
+            catalog,
+            root,
+            {"account-58e75e8d952fa1b8"},
+            {"volatis-strategy"},
+            assignments,
+        )
