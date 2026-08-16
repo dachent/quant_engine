@@ -929,6 +929,37 @@ def _project_account_facts(
     return dict(projections), exceptions
 
 
+_CASH_TRANSACTION_KINDS: Final = frozenset(
+    {
+        # Schwab cash income/charge kinds — they change account NAV with no
+        # offsetting position, so they can explain a NAV move. Trades,
+        # reinvests, and security movements are NOT evidence.
+        "BANK INTEREST",
+        "CASH DIVIDEND",
+        "CASH IN LIEU",
+        "CREDIT INTEREST",
+        "DIV ADJUSTMENT",
+        "INTEREST ADJ",
+        "JOURNAL",
+        "MARGIN INTEREST",
+        "MISC CASH ENTRY",
+        "MONEYLINK ADJ",
+        "NON-QUALIFIED DIV",
+        "PR YR CASH DIV",
+        "QUALIFIED DIVIDEND",
+        "SERVICE FEE",
+        "SPECIAL DIVIDEND",
+        "SPECIAL NON QUAL DIV",
+        "SPECIAL QUAL DIV",
+    }
+)
+
+
+def _is_cash_activity(row: Mapping[str, Any]) -> bool:
+    kind = str(row.get("kind") or "").strip().upper()
+    return kind in _CASH_TRANSACTION_KINDS or kind.startswith("CASH_ACTIVITY:")
+
+
 def _validate_nav_observation_moves(
     nav_observations: Sequence[Mapping[str, Any]],
     flows: Sequence[Mapping[str, Any]],
@@ -943,7 +974,11 @@ def _validate_nav_observation_moves(
     transactions only testify that the move is real.
     """
     activity_amounts: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
-    for row in (*flows, *transactions):
+    explanatory = [
+        *(row for row in flows),
+        *(row for row in transactions if _is_cash_activity(row)),
+    ]
+    for row in explanatory:
         if row.get("mapping_status") != "MAPPED":
             continue
         raw_amount = row.get("amount")
@@ -1205,21 +1240,29 @@ def _broker_strategy_returns(
     for row in flow_rows:
         if row.get("mapping_status") != "MAPPED":
             continue
-        if str(row.get("flow_type") or "").startswith("TRANSFER:INTERNAL"):
-            # Intra-account currency-ledger moves net to zero at account level
-            # and often carry no USD amount; they are never contributions.
-            continue
         provider_id = str(row["provider_id"])
         account_id = str(row["account_id"])
         day = str(row.get("event_date") or "")
         if not day:
             continue
         raw_amount = row.get("amount")
-        if raw_amount is None or (
+        amount_missing = raw_amount is None or (
             isinstance(raw_amount, str) and not raw_amount.strip()
+        )
+        amount = (
+            None if amount_missing else _observed_decimal(raw_amount, "flow amount")
+        )
+        if str(row.get("flow_type") or "").startswith("TRANSFER:INTERNAL") and (
+            amount_missing or amount is None
         ):
+            # Intra-account currency-ledger moves without a USD amount net to
+            # zero at account level; they are never contributions. An internal
+            # transfer WITH an available amount is real capital movement and
+            # is counted (both sides net out within an account; across
+            # accounts each side adjusts its own sleeve).
+            continue
+        if amount_missing:
             raise ProviderLedgerError("mapped flow amount is missing")
-        amount = _observed_decimal(raw_amount, "flow amount")
         if amount is None:
             raise ProviderLedgerError("mapped flow amount is unavailable")
         flows[(provider_id, account_id, day)] += amount

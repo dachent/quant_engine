@@ -1105,3 +1105,78 @@ def test_broker_returns_skip_internal_transfers_but_raise_on_external_unavailabl
         ledger.ProviderLedgerError, match="mapped flow amount is unavailable"
     ):
         ledger._broker_strategy_returns(nav, external)
+
+
+def test_nav_move_guard_ignores_trade_notionals() -> None:
+    """Codex PR #311 P1: an ordinary same-day BUY is cash<->position, not NAV
+    evidence — its notional must not exempt an unexplained extreme move."""
+    nav = [
+        {
+            "provider_id": "schwab",
+            "account_id": "account-x",
+            "as_of_date": "2026-06-23",
+            "nav": "100",
+            "mapping_status": "MAPPED",
+        },
+        {
+            "provider_id": "schwab",
+            "account_id": "account-x",
+            "as_of_date": "2026-06-24",
+            "nav": "100000",
+            "mapping_status": "MAPPED",
+        },
+    ]
+    trade = [
+        {
+            "provider_id": "schwab",
+            "account_id": "account-x",
+            "event_date": "2026-06-24",
+            "kind": "Buy",
+            "amount": "99900",
+            "mapping_status": "MAPPED",
+        }
+    ]
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="NAV_OBSERVATION_EXCESSIVE_MOVE_WITHOUT_FLOW",
+    ):
+        ledger._validate_nav_observation_moves(nav, [], trade)
+
+
+def test_internal_transfer_with_available_amount_is_counted() -> None:
+    """Codex PR #311 P1: an internal transfer carrying a real USD amount is
+    capital movement, not performance — it adjusts the return."""
+    nav = [
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "as_of_date": "2026-08-13",
+            "nav": "100",
+            "mapping_status": "MAPPED",
+            "strategy_id": "s-1",
+            "record_id": "ibkr:2026-08-13",
+        },
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "as_of_date": "2026-08-14",
+            "nav": "200",
+            "mapping_status": "MAPPED",
+            "strategy_id": "s-1",
+            "record_id": "ibkr:2026-08-14",
+        },
+    ]
+    transfer = [
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "event_date": "2026-08-14",
+            "flow_type": "TRANSFER:INTERNAL:IN",
+            "amount": "100",
+            "mapping_status": "MAPPED",
+        }
+    ]
+    rows = ledger._broker_strategy_returns(nav, transfer)
+    assert len(rows) == 1
+    # (200 - 100) / 100 - 1 = 0 — the doubling is flow, not performance.
+    assert ledger._observed_decimal(rows[0]["return"], "return") == 0
