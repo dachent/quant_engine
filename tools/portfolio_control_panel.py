@@ -2966,6 +2966,7 @@ def _canonical_strategy_series_contracts(
             composition.get(series_id), f"dependence series composition {series_id}"
         )
         dependence_version = dependence.get("strategy_version")
+        live_version_ref = dependence.get("live_version_ref")
         if not isinstance(evidence_version, str) or not evidence_version.strip():
             raise ControlPanelValidationError(
                 f"evidence strategy version is absent: {series_id}"
@@ -2977,6 +2978,15 @@ def _canonical_strategy_series_contracts(
         strategy_version = _text(
             dependence_version, f"dependence strategy version {series_id}"
         )
+        # The evidence row attests the accepted live path; the dependence
+        # composition's full-series strategy_version may additionally bind a
+        # declared versioned history (or a governance disposition sentinel).
+        # Parity is therefore checked against the dependence live_version_ref,
+        # which is hash-bound to the same live rows as the evidence version.
+        if not isinstance(live_version_ref, str) or not live_version_ref.strip():
+            raise ControlPanelValidationError(
+                f"dependence live version is absent: {series_id}"
+            )
         expected = {
             "evidence_layer": layer,
             "generation_id": _text(
@@ -2991,9 +3001,9 @@ def _canonical_strategy_series_contracts(
             "return_observations": observation_count,
             "series_id": series_id,
             "strategy_id": strategy_id,
-            "strategy_version": strategy_version,
+            "strategy_version": live_version_ref,
         }
-        if evidence_version != strategy_version:
+        if evidence_version != live_version_ref:
             raise ControlPanelValidationError(
                 f"dependence canonical-series version parity failed: {series_id}"
             )
@@ -3102,7 +3112,6 @@ def _canonical_strategy_series_contracts(
             {
                 **expected,
                 "canonical_live_series_sha256": factor_series_sha256,
-                "strategy_version": strategy_version,
             }
         )
     return contracts

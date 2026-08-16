@@ -229,6 +229,10 @@ def build_bundle(
                 "live_evidence_layer": live_layer,
                 "live_inception": live_inception.isoformat(),
                 "live_observations": len(live_rows),
+                "live_version_ref": _text(
+                    definition.get("live_version_ref"),
+                    f"live version reference {series_id}",
+                ),
                 "overlapping_backtest_observations_rejected": len(overlapping_backtest),
                 "series_id": series_id,
                 "status": (
@@ -246,6 +250,10 @@ def build_bundle(
                 "live_evidence_layer": live_layer,
                 "live_inception": live_inception.isoformat(),
                 "live_observations": len(live_rows),
+                "live_version_ref": _text(
+                    definition.get("live_version_ref"),
+                    f"live version reference {series_id}",
+                ),
                 "overlapping_backtest_observations_rejected": 0,
                 "series_id": series_id,
                 "status": "AVAILABLE_LIVE_ONLY",

@@ -85,11 +85,13 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                 "evidence_mode_series": [
                     {
                         "live_evidence_layer": "ACCOUNT_LIVE",
+                        "live_version_ref": "accepted-live-path:alpha",
                         "series_id": "alpha",
                         "strategy_version": "alpha-v1",
                     },
                     {
                         "live_evidence_layer": "ACCOUNT_LIVE",
+                        "live_version_ref": "accepted-live-path:beta",
                         "series_id": "beta",
                         "strategy_version": "beta-v1",
                     },

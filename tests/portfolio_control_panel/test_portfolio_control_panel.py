@@ -4326,13 +4326,16 @@ _VERSION = "abc123def4567890abcdef0123456789abcdef01"
 
 
 def _parity_dependence(
-    series_id: str, version: str | None = _VERSION
+    series_id: str,
+    version: str | None = _VERSION,
+    live_version: str | None = _VERSION,
 ) -> dict[str, Any]:
     """Minimal valid dependence-series-composition row."""
     return {
         "canonical_live_series_sha256": "e" * 64,
         "live_evidence_layer": "ACCOUNT_LIVE",
         "live_observations": 80,
+        "live_version_ref": live_version,
         "observed_end": "2026-07-30",
         "observed_start": "2026-01-02",
         "series_id": series_id,
@@ -4361,7 +4364,7 @@ def _parity_evidence(
     }
 
 
-def _parity_weekly() -> dict[str, Any]:
+def _parity_weekly(version: str | None = _VERSION) -> dict[str, Any]:
     return {
         "generation_id": "w" * 64,
         "series": [
@@ -4372,7 +4375,7 @@ def _parity_weekly() -> dict[str, Any]:
                     "LIVE_ONLY": {
                         "canonical_live_series_sha256": "e" * 64,
                         "live_daily_observations": 196,
-                        "strategy_version": _VERSION,
+                        "strategy_version": version,
                     }
                 },
                 "observation_meta_by_mode": {
@@ -4427,18 +4430,60 @@ def test_canonical_series_identity_same_version_passes() -> None:
 
 
 def test_canonical_series_identity_different_version_fails() -> None:
-    """Mismatched versions fail closed with a named reason."""
+    """Mismatched live versions fail closed with a named reason."""
     evidence = {"strategy-0": _parity_evidence("strategy-0", version="version-a")}
     names = {"strategy-0": "test-series"}
     dependence = {
         "series_composition": {
-            "test-series": _parity_dependence("test-series", version="version-b")
+            "test-series": _parity_dependence("test-series", live_version="version-b")
         }
     }
 
     with pytest.raises(
         panel.ControlPanelValidationError,
         match="dependence canonical-series version parity failed",
+    ):
+        panel._canonical_strategy_series_contracts(
+            evidence, names, _parity_factor(), dependence, _parity_weekly()
+        )
+
+
+def test_canonical_series_identity_full_version_divergence_passes() -> None:
+    """The dependence full-series version may bind a declared history while the
+    live identity still matches — parity is checked on live_version_ref."""
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}
+    names = {"strategy-0": "test-series"}
+    dependence = {
+        "series_composition": {
+            "test-series": _parity_dependence(
+                "test-series",
+                version="deprecated-no-history:2026-08-08",
+                live_version=_VERSION,
+            )
+        }
+    }
+
+    contracts = panel._canonical_strategy_series_contracts(
+        evidence,
+        names,
+        _parity_factor(),
+        dependence,
+        _parity_weekly(version="deprecated-no-history:2026-08-08"),
+    )
+    assert len(contracts) == 1
+    assert contracts[0]["strategy_version"] == _VERSION
+    """Absent live_version_ref on dependence fails closed with a named reason."""
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}
+    names = {"strategy-0": "test-series"}
+    dependence = {
+        "series_composition": {
+            "test-series": _parity_dependence("test-series", live_version=None)
+        }
+    }
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="dependence live version is absent",
     ):
         panel._canonical_strategy_series_contracts(
             evidence, names, _parity_factor(), dependence, _parity_weekly()
