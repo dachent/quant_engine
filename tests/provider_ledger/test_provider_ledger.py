@@ -961,7 +961,11 @@ def test_quantbase_contributions_admitted_as_reconciled_flows(
     # 50000 -> 150000 cost-basis increase on 2026-08-13.
     assert len(rows) == 1
     assert rows[0]["event_date"] == "2026-08-13"
-    assert rows[0]["amount"] == "100000"
+    assert rows[0]["amount"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "100000",
+    }
     assert rows[0]["flow_type"] == "EXTERNAL_PROVIDER_TRANSFER"
     assert rows[0]["mapping_basis"] == "RECONCILED_COST_BASIS_INCREASE"
     assert rows[0]["mapping_status"] == "MAPPED"
