@@ -657,6 +657,27 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
     }
     assert len([row for row in other if row["evidence_layer"] == "BACKTEST"]) == 2
     assert {row["strategy_version"] for row in other} == {"other-current:v1"}
+    # The live identity is the accepted-live-path hash over the two Other live
+    # rows (hardcoded oracle: sha256 of the canonical JSON rows payload), while
+    # the full-series version still binds the declared history.
+    other_entry = next(
+        item for item in spec["evidence_mode_series"] if item["series_id"] == "Other"
+    )
+    assert other_entry["strategy_version"] == "other-current:v1"
+    assert other_entry["live_version_ref"] == (
+        "accepted-live-path:e3b144a350688907d385a9fa93e5925e562327363cdf9d2c0242b104aa1a9ae8"
+    )
+    # The Portfolio123 sim-twin series uses the same uniform live identity:
+    # the accepted-live-path hash over its live rows, not the sim-twin binding.
+    ai_entry = next(
+        item
+        for item in spec["evidence_mode_series"]
+        if item["series_id"] == "AI Factor [P123]"
+    )
+    assert ai_entry["strategy_version"].startswith("p123-live-sim-twin:")
+    assert ai_entry["live_version_ref"] == (
+        "accepted-live-path:6b9b3e5b57d81ad1916ca298654741bc7bb9e33c052f0afa7e384ec7bf7d3b47"
+    )
     other_mapping = next(
         item for item in proof["series_mappings"] if item["series_id"] == "Other"
     )

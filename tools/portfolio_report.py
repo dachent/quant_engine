@@ -832,6 +832,20 @@ def _cagr(cumulative_return: str, observed_start: str, observed_end: str) -> str
 
 def _strategy_provider_evidence(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     series = _account_live_return_series(catalog)
+    # Resolve the effective-dated strategy version for each strategy from the
+    # governed catalog so the panel can verify series identity downstream.
+    strategy_versions: dict[str, str] = {}
+    version_catalog = catalog.get("strategy_version_catalog")
+    if version_catalog is not None:
+        version_data = _object(version_catalog, "strategy_version_catalog")
+        for item in _objects(
+            version_data.get("strategies"), "strategy version catalog"
+        ):
+            sid = _text(item.get("strategy_id"), "strategy version strategy_id")
+            vref = item.get("version_ref")
+            if vref is not None:
+                strategy_versions[sid] = _text(vref, f"strategy version {sid}")
+
     rows: list[dict[str, Any]] = []
     for original in _objects(
         catalog.get("strategy_provider_evidence", []),
@@ -839,6 +853,7 @@ def _strategy_provider_evidence(catalog: Mapping[str, Any]) -> list[dict[str, An
     ):
         row = dict(original)
         strategy_id = _text(row.get("strategy_id"), "provider evidence.strategy_id")
+        row["strategy_version"] = strategy_versions.get(strategy_id)
         if row.get("evidence_layer") == "ACCOUNT_LIVE":
             canonical = series.get(strategy_id)
             if canonical is None:

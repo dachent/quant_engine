@@ -186,6 +186,21 @@ def build_bundle(
         if len(semantics) != 1:
             raise EvidenceModeError(f"base return semantics differ: {series_id}")
         return_basis, return_type = next(iter(semantics))
+        # The live identity is hash-bound to the base live rows themselves, not
+        # to the frozen correlation declaration: the baseline/provenance
+        # authority attests this value, and the panel verifies parity against
+        # it. A declared live_version_ref, when present, must match.
+        live_version_ref = "accepted-live-path:" + _hash(
+            canonical_json_bytes({"rows": live_rows, "series_id": series_id})
+        )
+        declared_live_version = definition.get("live_version_ref")
+        if declared_live_version is not None and (
+            not isinstance(declared_live_version, str)
+            or declared_live_version != live_version_ref
+        ):
+            raise EvidenceModeError(
+                f"declared live version differs from the base live rows: {series_id}"
+            )
         declared_backtest = [
             row
             for row in layered_by_series.get(series_id, [])
@@ -229,6 +244,7 @@ def build_bundle(
                 "live_evidence_layer": live_layer,
                 "live_inception": live_inception.isoformat(),
                 "live_observations": len(live_rows),
+                "live_version_ref": live_version_ref,
                 "overlapping_backtest_observations_rejected": len(overlapping_backtest),
                 "series_id": series_id,
                 "status": (
@@ -246,6 +262,7 @@ def build_bundle(
                 "live_evidence_layer": live_layer,
                 "live_inception": live_inception.isoformat(),
                 "live_observations": len(live_rows),
+                "live_version_ref": live_version_ref,
                 "overlapping_backtest_observations_rejected": 0,
                 "series_id": series_id,
                 "status": "AVAILABLE_LIVE_ONLY",

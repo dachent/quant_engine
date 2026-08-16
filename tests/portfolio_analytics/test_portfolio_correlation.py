@@ -505,6 +505,60 @@ def test_live_and_backtest_modes_are_separate_and_live_wins_overlap(
     assert combined_performance["maximum_drawdown"] is not None
 
 
+def test_live_version_ref_threads_into_dependence_composition(
+    tmp_path: Path,
+) -> None:
+    """A declared live_version_ref reaches both dependence mode compositions;
+    the legacy three-key form yields null."""
+    root = tmp_path / "mode-source"
+    _source, spec, _days = _write_mode_fixture(root)
+    payload = json.loads(spec.read_text(encoding="utf-8"))
+    for entry in payload["evidence_mode_series"]:
+        if entry["series_id"] == "a":
+            entry["live_version_ref"] = "accepted-live-path:" + "a" * 64
+    spec.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    result, _manifest, _content = correlation.build_correlation(spec, root)
+    modes = cast(dict[str, dict[str, Any]], result["dependence_modes"])
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        composition = modes[mode]["series_composition"]
+        assert composition["a"]["live_version_ref"] == (
+            "accepted-live-path:" + "a" * 64
+        )
+        # Legacy three-key declaration propagates as null; the panel fails
+        # closed on it.
+        assert composition["b"]["live_version_ref"] is None
+
+
+def test_evidence_mode_series_rejects_unknown_and_malformed_keys(
+    tmp_path: Path,
+) -> None:
+    """Typo'd keys and non-text live_version_ref fail closed at parse time."""
+    root = tmp_path / "mode-source"
+    _source, spec, _days = _write_mode_fixture(root)
+    payload = json.loads(spec.read_text(encoding="utf-8"))
+    payload["evidence_mode_series"][0]["live_version"] = "accepted-live-path:x"
+    spec.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(correlation.CorrelationError, match="keys differ"):
+        correlation.build_correlation(spec, root)
+
+    payload = json.loads(spec.read_text(encoding="utf-8"))
+    del payload["evidence_mode_series"][0]["live_version"]
+    payload["evidence_mode_series"][0]["live_version_ref"] = 123
+    spec.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(correlation.CorrelationError, match="live_version_ref"):
+        correlation.build_correlation(spec, root)
+
+
 def test_performance_summary_compounds_and_fails_closed_on_invalid_returns() -> None:
     rows = [
         correlation.ReturnRow(date(2025, 1, 1), 0.1, "BACKTEST", "v1", "0.1"),

@@ -196,6 +196,63 @@ def test_rejects_duplicate_mode_series_definition(tmp_path: Path) -> None:
         builder.build_bundle(**inputs)
 
 
+def test_live_version_ref_is_computed_from_base_rows(tmp_path: Path) -> None:
+    """The composition carries the live identity hash-bound to the base rows.
+
+    The expected values are hardcoded oracles (sha256 over the canonical JSON
+    of {"rows": <the fixture's seven-column base rows>, "series_id": ...}):
+    hashing the wrong rows, fields, or byte encoding changes them.
+    """
+    inputs = _fixture(tmp_path)
+    outputs, _manifest = builder.build_bundle(**inputs)
+    hybrid_spec = json.loads(outputs["base-spec.json"])
+    live_spec = json.loads(outputs["live-base-spec.json"])
+    for spec in (hybrid_spec, live_spec):
+        assert (
+            spec["series_composition"]["alpha"]["live_version_ref"]
+            == "accepted-live-path:f70267b9ec1a71985d2caf707348cadde5f174261d8cc4da8689233638f005c0"
+        )
+        assert (
+            spec["series_composition"]["beta"]["live_version_ref"]
+            == "accepted-live-path:1f849e9259ce664192ce38d40849044e7e0fc534a26ad00e462dafe6e51b5c95"
+        )
+
+
+def test_declared_live_version_match_is_accepted(tmp_path: Path) -> None:
+    """A declared live_version_ref equal to the computed live identity passes."""
+    inputs = _fixture(tmp_path)
+    correlation = json.loads(
+        inputs["correlation_spec_path"].read_text(encoding="utf-8")
+    )
+    correlation["evidence_mode_series"][0]["live_version_ref"] = (
+        "accepted-live-path:f70267b9ec1a71985d2caf707348cadde5f174261d8cc4da8689233638f005c0"
+    )
+    inputs["correlation_spec_path"].write_bytes(_canonical(correlation))
+
+    outputs, _manifest = builder.build_bundle(**inputs)
+    hybrid_spec = json.loads(outputs["base-spec.json"])
+    assert hybrid_spec["series_composition"]["alpha"]["live_version_ref"].endswith(
+        "f70267b9ec1a71985d2caf707348cadde5f174261d8cc4da8689233638f005c0"
+    )
+
+
+def test_declared_live_version_mismatch_fails(tmp_path: Path) -> None:
+    """A declared live_version_ref that disagrees with the base rows fails."""
+    inputs = _fixture(tmp_path)
+    correlation = json.loads(
+        inputs["correlation_spec_path"].read_text(encoding="utf-8")
+    )
+    correlation["evidence_mode_series"][0]["live_version_ref"] = (
+        "accepted-live-path:wrong"
+    )
+    inputs["correlation_spec_path"].write_bytes(_canonical(correlation))
+
+    with pytest.raises(
+        builder.EvidenceModeError, match="declared live version differs"
+    ):
+        builder.build_bundle(**inputs)
+
+
 def test_write_is_content_addressed_and_idempotent(tmp_path: Path) -> None:
     inputs = _fixture(tmp_path)
     first = builder.write_bundle(tmp_path / "output", **inputs)

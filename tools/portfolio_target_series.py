@@ -1455,6 +1455,7 @@ def build_layered_correlation_inputs(
     for row in target_rows:
         rows_by_series[row["series_id"]].append(row)
     version_by_series: dict[str, str] = {}
+    live_version_by_series: dict[str, str] = {}
     live_layer_by_series: dict[str, str] = {}
     mapping_proof: list[dict[str, object]] = []
     for series_id in series_ids:
@@ -1532,6 +1533,15 @@ def build_layered_correlation_inputs(
             implementation_status = "NOT_EVALUATED"
             disposition_reason = None
         version_by_series[series_id] = version
+        # The live series identity is always the accepted live path, hash-bound
+        # to the live rows, regardless of any declared versioned history or
+        # generation-bound sim-twin: the baseline/provenance authority attests
+        # this value, and the panel verifies parity against it.
+        live_version = _strategy_version(
+            "accepted-live-path",
+            {"rows": rows, "series_id": series_id},
+        )
+        live_version_by_series[series_id] = live_version
         mapping_proof.append(
             {
                 "backtest_observations": backtest_observations,
@@ -1545,6 +1555,7 @@ def build_layered_correlation_inputs(
                 "implementation_reconciliation_status": implementation_status,
                 "live_evidence_layer": live_layer,
                 "live_observations": len(rows),
+                "live_version_ref": live_version,
                 "series_id": series_id,
                 "status": status,
                 "strategy_version": version,
@@ -1598,6 +1609,7 @@ def build_layered_correlation_inputs(
     spec["evidence_mode_series"] = [
         {
             "live_evidence_layer": live_layer_by_series[series_id],
+            "live_version_ref": live_version_by_series[series_id],
             "series_id": series_id,
             "strategy_version": version_by_series[series_id],
         }
