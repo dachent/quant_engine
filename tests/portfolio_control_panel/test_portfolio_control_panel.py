@@ -4513,12 +4513,18 @@ def test_canonical_series_identity_missing_evidence_version_fails() -> None:
 
 
 def test_canonical_series_identity_malformed_evidence_version_fails() -> None:
-    """A non-string evidence version fails closed, never coerced to a match."""
+    """A non-string evidence version fails closed, never coerced to a match.
+
+    The dependence live identity is set to "123" so the ONLY guard that can
+    catch this is the type check: a str() coercion would silently pass.
+    """
     evidence = {"strategy-0": _parity_evidence("strategy-0", version=123)}
     names = {"strategy-0": "test-series"}
     dependence = {
         "series_composition": {
-            "test-series": _parity_dependence("test-series", version="123")
+            "test-series": _parity_dependence(
+                "test-series", version="123", live_version="123"
+            )
         }
     }
 
