@@ -932,14 +932,18 @@ def _project_account_facts(
 def _validate_nav_observation_moves(
     nav_observations: Sequence[Mapping[str, Any]],
     flows: Sequence[Mapping[str, Any]],
+    transactions: Sequence[Mapping[str, Any]] = (),
 ) -> None:
-    """Reject day-over-day NAV moves >10x when no same-day flow is present.
+    """Reject day-over-day NAV moves >10x that no same-day activity explains.
 
     The bound is intentionally narrow: it catches unit/double-conversion
-    anomalies without second-guessing legitimate large flows.
+    anomalies without second-guessing legitimate large flows. The explanatory
+    evidence is ANY mapped same-day cash activity (flows or transactions —
+    e.g. a Cash Dividend lifting a dust residual); only flows adjust returns,
+    transactions only testify that the move is real.
     """
-    flow_amounts: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
-    for row in flows:
+    activity_amounts: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
+    for row in (*flows, *transactions):
         if row.get("mapping_status") != "MAPPED":
             continue
         raw_amount = row.get("amount")
@@ -947,15 +951,15 @@ def _validate_nav_observation_moves(
             isinstance(raw_amount, str) and not raw_amount.strip()
         ):
             continue
-        amount = _observed_decimal(raw_amount, "flow amount")
+        amount = _observed_decimal(raw_amount, "activity amount")
         if amount is None:
             continue
         key = (
             str(row["provider_id"]),
             str(row["account_id"]),
-            str(row.get("event_date") or ""),
+            str(row.get("event_date") or row.get("as_of_date") or ""),
         )
-        flow_amounts[key] += abs(amount)
+        activity_amounts[key] += abs(amount)
     by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in nav_observations:
         if row.get("mapping_status") != "MAPPED":
@@ -972,22 +976,22 @@ def _validate_nav_observation_moves(
                 "10"
             ) or ending_nav < prior_nav / Decimal("10"):
                 day = str(current["as_of_date"])
-                flow_total = flow_amounts.get((provider_id, account_id, day))
-                if flow_total is None:
+                activity_total = activity_amounts.get((provider_id, account_id, day))
+                if activity_total is None:
                     raise ProviderLedgerError(
                         "NAV_OBSERVATION_EXCESSIVE_MOVE_WITHOUT_FLOW: "
                         f"{provider_id}/{account_id} moved from {prior_nav} to "
                         f"{ending_nav} on {day} without a matching flow"
                     )
-                # A flow exempts the move only if its magnitude can explain
+                # Activity exempts the move only if its magnitude can explain
                 # it: a $1 transfer must not whitewash a unit/conversion
                 # error that coincides with it.
-                if abs(ending_nav - prior_nav) > flow_total * Decimal("2"):
+                if abs(ending_nav - prior_nav) > activity_total * Decimal("2"):
                     raise ProviderLedgerError(
                         "NAV_OBSERVATION_EXCESSIVE_MOVE_BEYOND_FLOW: "
                         f"{provider_id}/{account_id} moved from {prior_nav} to "
-                        f"{ending_nav} on {day} but same-day flows total "
-                        f"{flow_total}"
+                        f"{ending_nav} on {day} but same-day activity totals "
+                        f"{activity_total}"
                     )
 
 
@@ -1200,6 +1204,10 @@ def _broker_strategy_returns(
     flows: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
     for row in flow_rows:
         if row.get("mapping_status") != "MAPPED":
+            continue
+        if str(row.get("flow_type") or "").startswith("TRANSFER:INTERNAL"):
+            # Intra-account currency-ledger moves net to zero at account level
+            # and often carry no USD amount; they are never contributions.
             continue
         provider_id = str(row["provider_id"])
         account_id = str(row["account_id"])
@@ -1900,7 +1908,9 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
         for item in _objects(provenance.get("strategies"), "strategies")
     }
     _validate_nav_observation_moves(
-        combined.get("nav_observations", []), combined.get("flows", [])
+        combined.get("nav_observations", []),
+        combined.get("flows", []),
+        combined.get("transactions", []),
     )
     broker_returns = _broker_strategy_returns(
         combined.get("nav_observations", []), combined.get("flows", [])
