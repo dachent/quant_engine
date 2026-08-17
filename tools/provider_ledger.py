@@ -566,7 +566,12 @@ def _quantbase_flows(
         flows.append(
             {
                 "account_id": account_id,
-                "amount": format(amount.normalize(), "f"),
+                "amount": {
+                    # The wrapped money shape the ledger contract requires.
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": format(amount.normalize(), "f"),
+                },
                 "event_date": day.isoformat(),
                 "evidence_layer": "ACCOUNT_LIVE",
                 "flow_type": "EXTERNAL_PROVIDER_TRANSFER",
