@@ -46,6 +46,13 @@ Each section keeps:
 - `columns`
 - `rows`
 
+Every raw or parsed output receives a deterministic sibling
+`*.manifest.json`. Parsed mode also retains the native ZIP as
+`*.source.zip`. The receipt binds the exact request, retained raw ZIP name,
+hash and size, written artifact hash and size, coverage summary, and a
+content-derived source run ID. Output paths must resolve inside the current
+workspace, and an existing different artifact or receipt is never overwritten.
+
 ## Guidance
 
 - Raw mode should preserve the native zip payload unchanged.
@@ -53,3 +60,5 @@ Each section keeps:
 - Convert provider missing sentinels like `-99.99` and `-999` to `null`.
 - Reject `_TXT.zip` feeds and reject HTML page URLs.
 - Do not scrape `data_library.html` or any other Kenneth French HTML page during runtime.
+- Supply the parsed artifact and its sibling source-run manifest together to
+  downstream normalization; the parsed JSON alone is not acquisition evidence.

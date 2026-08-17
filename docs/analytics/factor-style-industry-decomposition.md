@@ -146,13 +146,16 @@ not overwrite prior evidence.
 `tools/portfolio_public_decomposition_sources.py` converts accepted Kenneth
 French parser outputs into three deterministic files: US factors, Europe
 factors, and US 49-industry value-weighted returns. It verifies every feed
-identity and URL, hashes every input and output, converts provider percentages
-to decimal returns, joins factor and momentum histories only on exact dates,
+identity and URL, requires each parsed input's hash-bound acquisition receipt,
+verifies the retained raw ZIP, binds its hash and the content-derived source-run
+identity, hashes every input and output, converts provider percentages to
+decimal returns, joins factor and momentum histories only on exact dates,
 joins US industries to the US risk-free series on exact dates, and preserves
 missing industry returns as empty observations. Its column order is directly
 compatible with the decomposition engine: date, risk-free return, then factor
 or industry returns. It never fills, interpolates, or treats missing values as
-zero.
+zero. Parsed JSON without the matching acquisition receipt fails before model
+planning.
 
 Coverage is reported as three separate intervals: the complete retained
 strategy target, the complete model-specific factor source, and their
