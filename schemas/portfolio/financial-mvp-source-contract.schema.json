@@ -1,0 +1,877 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/financial-mvp-source-contract.schema.json",
+  "title": "Financial MVP and source-segment contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "contract_schema_version",
+    "financial_outcomes",
+    "golden_case",
+    "product",
+    "source_segments",
+    "strategies"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "../schemas/portfolio/financial-mvp-source-contract.schema.json"
+    },
+    "contract_schema_version": {"const": 1},
+    "product": {"$ref": "#/$defs/product"},
+    "strategies": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/strategy"}
+    },
+    "financial_outcomes": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"$ref": "#/$defs/outcome"}
+    },
+    "source_segments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/source_segment"}
+    },
+    "golden_case": {"$ref": "#/$defs/golden_case"}
+  },
+  "$defs": {
+    "date_or_null": {
+      "type": ["string", "null"],
+      "format": "date"
+    },
+    "hash_or_null": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nonempty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "unique_strings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/nonempty_string"}
+    },
+    "policy_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approval_evidence",
+        "calculation_effect",
+        "decision_authority",
+        "decision_status",
+        "examples",
+        "plain_language",
+        "recommended_treatment",
+        "selected_treatment"
+      ],
+      "properties": {
+        "approval_evidence": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "calculation_effect": {"$ref": "#/$defs/nonempty_string"},
+        "decision_authority": {
+          "enum": [
+            "FINANCIAL_MVP_DEFINITION",
+            "OWNER_318",
+            "PORT_PERF_1",
+            "SHARED_FLOW_POLICY_324"
+          ]
+        },
+        "decision_status": {
+          "enum": [
+            "SETTLED_BY_PRODUCT_DEFINITION",
+            "SETTLED_BY_EXISTING_POLICY",
+            "OWNER_DECISION_REQUIRED",
+            "DEPENDENCY_REQUIRED",
+            "APPROVED"
+          ]
+        },
+        "examples": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nonempty_string"}
+        },
+        "plain_language": {"$ref": "#/$defs/nonempty_string"},
+        "recommended_treatment": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "selected_treatment": {
+          "type": ["string", "null"],
+          "minLength": 1
+        }
+      }
+    },
+    "owner_decision_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approved_on",
+        "authority_issue",
+        "comment_id",
+        "decision_id",
+        "digest_comment_id",
+        "digest_evidence_url",
+        "evidence_url",
+        "payload_sha256",
+        "policy_owner_issue"
+      ],
+      "properties": {
+        "approved_on": {
+          "type": "string",
+          "format": "date"
+        },
+        "authority_issue": {"const": 330},
+        "comment_id": {"type": "integer", "minimum": 1},
+        "decision_id": {"$ref": "#/$defs/nonempty_string"},
+        "digest_comment_id": {"type": "integer", "minimum": 1},
+        "digest_evidence_url": {"$ref": "#/$defs/nonempty_string"},
+        "evidence_url": {"$ref": "#/$defs/nonempty_string"},
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "policy_owner_issue": {"const": 318}
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "readiness": {
+      "enum": ["READY", "REQUIRED_NOT_READY"]
+    },
+    "requirement": {
+      "enum": ["REQUIRED", "OPTIONAL", "EXCLUDED"]
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "as_of_policy",
+        "final_artifacts",
+        "operator_outcome",
+        "product_id",
+        "product_version",
+        "publication_boundary",
+        "repository_compatibility",
+        "runtime_profile"
+      ],
+      "properties": {
+        "product_id": {"const": "FINANCIAL_MVP"},
+        "product_version": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$"
+        },
+        "runtime_profile": {"const": "PORTFOLIO_SOURCE_TO_PANEL_V1"},
+        "operator_outcome": {"$ref": "#/$defs/nonempty_string"},
+        "as_of_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["calendar_cutoff", "policy_id", "publication_lag_rule"],
+          "properties": {
+            "calendar_cutoff": {"$ref": "#/$defs/nonempty_string"},
+            "policy_id": {"$ref": "#/$defs/nonempty_string"},
+            "publication_lag_rule": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "repository_compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "minimum_main_sha",
+            "pipeline_profile",
+            "vertical_recipe_schema_versions"
+          ],
+          "properties": {
+            "minimum_main_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "pipeline_profile": {"const": "PORTFOLIO_SOURCE_TO_PANEL_V1"},
+            "vertical_recipe_schema_versions": {
+              "const": [6, 7]
+            }
+          }
+        },
+        "final_artifacts": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["acceptance", "role"],
+            "properties": {
+              "acceptance": {"$ref": "#/$defs/nonempty_string"},
+              "role": {
+                "enum": ["REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"]
+              }
+            }
+          }
+        },
+        "publication_boundary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["authority", "required_issue_sequence", "status"],
+          "properties": {
+            "authority": {"const": "SEPARATE_EXPLICIT_RELEASE_AUTHORIZATION"},
+            "required_issue_sequence": {"const": [332, 283]},
+            "status": {"const": "NOT_AUTHORIZED_BY_THIS_CONTRACT"}
+          }
+        }
+      }
+    },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blockers",
+        "effective_product_interval",
+        "funded_membership",
+        "outcome_dispositions",
+        "product_requirement",
+        "readiness",
+        "readiness_reason",
+        "strategy_id",
+        "strategy_version"
+      ],
+      "properties": {
+        "strategy_id": {"$ref": "#/$defs/nonempty_string"},
+        "product_requirement": {"$ref": "#/$defs/requirement"},
+        "readiness": {"$ref": "#/$defs/readiness"},
+        "readiness_reason": {"$ref": "#/$defs/nonempty_string"},
+        "blockers": {"$ref": "#/$defs/blockers"},
+        "effective_product_interval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["effective_end", "effective_start"],
+          "properties": {
+            "effective_start": {"type": "string", "format": "date"},
+            "effective_end": {"$ref": "#/$defs/date_or_null"}
+          }
+        },
+        "strategy_version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "version_ref"],
+          "properties": {
+            "status": {"enum": ["EVIDENCED", "UNRESOLVED"]},
+            "version_ref": {"type": ["string", "null"], "minLength": 1}
+          }
+        },
+        "funded_membership": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["authority", "effective_end", "effective_start", "status"],
+          "properties": {
+            "authority": {"$ref": "#/$defs/nonempty_string"},
+            "effective_start": {"$ref": "#/$defs/date_or_null"},
+            "effective_end": {"$ref": "#/$defs/date_or_null"},
+            "status": {
+              "enum": ["EVIDENCED", "REQUIRED_NOT_READY", "EXCLUDED"]
+            }
+          }
+        },
+        "outcome_dispositions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "AS_HELD_COMPOSITE_HWM",
+            "DECOMPOSITION",
+            "DEPENDENCE",
+            "INVESTED_CAPITAL"
+          ],
+          "properties": {
+            "AS_HELD_COMPOSITE_HWM": {
+              "enum": ["REQUIRED", "EXCLUDED_BY_ACCEPTED_POLICY"]
+            },
+            "DECOMPOSITION": {
+              "enum": ["REQUIRED", "EXCLUDED_BY_ACCEPTED_POLICY"]
+            },
+            "DEPENDENCE": {
+              "enum": ["REQUIRED", "EXCLUDED_BY_ACCEPTED_POLICY"]
+            },
+            "INVESTED_CAPITAL": {
+              "enum": ["REQUIRED", "EXCLUDED_BY_ACCEPTED_POLICY"]
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"readiness": {"const": "REQUIRED_NOT_READY"}},
+            "required": ["readiness"]
+          },
+          "then": {
+            "properties": {"blockers": {"minItems": 1}}
+          }
+        }
+      ]
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted_statuses",
+        "blockers",
+        "calculation_contract",
+        "consumers",
+        "outcome_id",
+        "owner_issue",
+        "product_requirement",
+        "readiness"
+      ],
+      "properties": {
+        "outcome_id": {
+          "enum": [
+            "AS_HELD_COMPOSITE_HWM",
+            "INVESTED_CAPITAL",
+            "DECOMPOSITION",
+            "DEPENDENCE"
+          ]
+        },
+        "owner_issue": {"type": "integer", "minimum": 1},
+        "product_requirement": {"const": "REQUIRED"},
+        "readiness": {"$ref": "#/$defs/readiness"},
+        "blockers": {"$ref": "#/$defs/blockers"},
+        "accepted_statuses": {"$ref": "#/$defs/unique_strings"},
+        "consumers": {"$ref": "#/$defs/unique_strings"},
+        "calculation_contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "alignment": {"$ref": "#/$defs/nonempty_string"},
+            "analyses": {"$ref": "#/$defs/unique_strings"},
+            "capital": {"$ref": "#/$defs/nonempty_string"},
+            "change_control": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "authoritative_edit_location",
+                "check_command",
+                "decision_digest_command",
+                "downstream_issues",
+                "edit_rule",
+                "generated_views",
+                "identity_rule",
+                "live_evidence_command",
+                "propagation_command"
+              ],
+              "properties": {
+                "authoritative_edit_location": {"$ref": "#/$defs/nonempty_string"},
+                "check_command": {"$ref": "#/$defs/nonempty_string"},
+                "decision_digest_command": {"$ref": "#/$defs/nonempty_string"},
+                "downstream_issues": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {"type": "integer", "minimum": 1}
+                },
+                "edit_rule": {"$ref": "#/$defs/nonempty_string"},
+                "generated_views": {"$ref": "#/$defs/unique_strings"},
+                "identity_rule": {"$ref": "#/$defs/nonempty_string"},
+                "live_evidence_command": {"$ref": "#/$defs/nonempty_string"},
+                "propagation_command": {"$ref": "#/$defs/nonempty_string"}
+              }
+            },
+            "classification_treatments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "CORRECTION_REVERSAL",
+                "DIVIDEND_INTEREST_REINVESTMENT",
+                "EXTERNAL_CONTRIBUTION",
+                "EXTERNAL_WITHDRAWAL",
+                "FEE_TAX_REBATE_EXPENSE",
+                "IN_KIND_FUNDING",
+                "INTERNAL_TRANSFER",
+                "MARGIN_FINANCING",
+                "OPENING_CONTRIBUTED_BASIS",
+                "PREDECESSOR_TRANSITION"
+              ],
+              "properties": {
+                "CORRECTION_REVERSAL": {"$ref": "#/$defs/policy_decision"},
+                "DIVIDEND_INTEREST_REINVESTMENT": {"$ref": "#/$defs/policy_decision"},
+                "EXTERNAL_CONTRIBUTION": {"$ref": "#/$defs/policy_decision"},
+                "EXTERNAL_WITHDRAWAL": {"$ref": "#/$defs/policy_decision"},
+                "FEE_TAX_REBATE_EXPENSE": {"$ref": "#/$defs/policy_decision"},
+                "IN_KIND_FUNDING": {"$ref": "#/$defs/policy_decision"},
+                "INTERNAL_TRANSFER": {"$ref": "#/$defs/policy_decision"},
+                "MARGIN_FINANCING": {"$ref": "#/$defs/policy_decision"},
+                "OPENING_CONTRIBUTED_BASIS": {"$ref": "#/$defs/policy_decision"},
+                "PREDECESSOR_TRANSITION": {"$ref": "#/$defs/policy_decision"}
+              }
+            },
+            "definition": {"$ref": "#/$defs/nonempty_string"},
+            "distinct_from": {"$ref": "#/$defs/unique_strings"},
+            "evidence_modes": {"$ref": "#/$defs/unique_strings"},
+            "flow_classifications": {"$ref": "#/$defs/unique_strings"},
+            "flows": {"$ref": "#/$defs/nonempty_string"},
+            "flow_timing": {"$ref": "#/$defs/policy_decision"},
+            "frequency": {"$ref": "#/$defs/nonempty_string"},
+            "fx_base_currency": {"$ref": "#/$defs/policy_decision"},
+            "gains_treatment": {"$ref": "#/$defs/nonempty_string"},
+            "horizons": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "integer", "minimum": 1}
+            },
+            "internal_transfer_aggregate_effect": {"$ref": "#/$defs/nonempty_string"},
+            "leverage_accounting": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "affected_metrics",
+                "approval_evidence",
+                "consumers",
+                "double_counting_guard",
+                "invested_capital_treatment",
+                "missing_fact_behavior",
+                "required_facts",
+                "status",
+                "synthetic_vector"
+              ],
+              "properties": {
+                "affected_metrics": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "DECOMPOSITION_DEPENDENCE",
+                    "HWM_DRAWDOWN",
+                    "MWR",
+                    "TOTAL_RETURN",
+                    "TWR"
+                  ],
+                  "properties": {
+                    "DECOMPOSITION_DEPENDENCE": {"$ref": "#/$defs/nonempty_string"},
+                    "HWM_DRAWDOWN": {"$ref": "#/$defs/nonempty_string"},
+                    "MWR": {"$ref": "#/$defs/nonempty_string"},
+                    "TOTAL_RETURN": {"$ref": "#/$defs/nonempty_string"},
+                    "TWR": {"$ref": "#/$defs/nonempty_string"}
+                  }
+                },
+                "approval_evidence": {"$ref": "#/$defs/nonempty_string"},
+                "consumers": {"$ref": "#/$defs/unique_strings"},
+                "double_counting_guard": {"$ref": "#/$defs/nonempty_string"},
+                "invested_capital_treatment": {"$ref": "#/$defs/nonempty_string"},
+                "missing_fact_behavior": {"$ref": "#/$defs/nonempty_string"},
+                "required_facts": {"$ref": "#/$defs/unique_strings"},
+                "status": {"const": "APPROVED"},
+                "synthetic_vector": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "asset_return",
+                    "borrowed_principal",
+                    "ending_nav",
+                    "financing_cost",
+                    "gross_assets_end",
+                    "gross_assets_start",
+                    "hwm_index_end",
+                    "hwm_index_start",
+                    "invested_capital",
+                    "mwr_one_year",
+                    "owner_contributed_capital",
+                    "owner_external_flows",
+                    "total_return",
+                    "twr"
+                  ],
+                  "properties": {
+                    "asset_return": {"$ref": "#/$defs/nonempty_string"},
+                    "borrowed_principal": {"$ref": "#/$defs/nonempty_string"},
+                    "ending_nav": {"$ref": "#/$defs/nonempty_string"},
+                    "financing_cost": {"$ref": "#/$defs/nonempty_string"},
+                    "gross_assets_end": {"$ref": "#/$defs/nonempty_string"},
+                    "gross_assets_start": {"$ref": "#/$defs/nonempty_string"},
+                    "hwm_index_end": {"$ref": "#/$defs/nonempty_string"},
+                    "hwm_index_start": {"$ref": "#/$defs/nonempty_string"},
+                    "invested_capital": {"$ref": "#/$defs/nonempty_string"},
+                    "mwr_one_year": {"$ref": "#/$defs/nonempty_string"},
+                    "owner_contributed_capital": {"$ref": "#/$defs/nonempty_string"},
+                    "owner_external_flows": {"$ref": "#/$defs/nonempty_string"},
+                    "total_return": {"$ref": "#/$defs/nonempty_string"},
+                    "twr": {"$ref": "#/$defs/nonempty_string"}
+                  }
+                }
+              }
+            },
+            "lenses": {"$ref": "#/$defs/unique_strings"},
+            "linking": {"$ref": "#/$defs/nonempty_string"},
+            "membership": {"$ref": "#/$defs/nonempty_string"},
+            "missing_history": {"$ref": "#/$defs/nonempty_string"},
+            "missing_infrastructure": {"$ref": "#/$defs/nonempty_string"},
+            "negative_net_contributions": {"$ref": "#/$defs/policy_decision"},
+            "owner_decision_receipts": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "CORRECTION_REVERSAL",
+                "FX_BASE_CURRENCY",
+                "MARGIN_AND_LEVERAGE",
+                "NEGATIVE_NET_CONTRIBUTIONS",
+                "PREDECESSOR_TRANSITION"
+              ],
+              "properties": {
+                "CORRECTION_REVERSAL": {"$ref": "#/$defs/owner_decision_receipt"},
+                "FX_BASE_CURRENCY": {"$ref": "#/$defs/owner_decision_receipt"},
+                "MARGIN_AND_LEVERAGE": {"$ref": "#/$defs/owner_decision_receipt"},
+                "NEGATIVE_NET_CONTRIBUTIONS": {"$ref": "#/$defs/owner_decision_receipt"},
+                "PREDECESSOR_TRANSITION": {"$ref": "#/$defs/owner_decision_receipt"}
+              }
+            },
+            "policy_id": {"$ref": "#/$defs/nonempty_string"},
+            "policy_owner_issue": {"type": "integer", "minimum": 1},
+            "policy_schema_version": {"type": "integer", "minimum": 1},
+            "policy_status": {"enum": ["READY", "REQUIRED_NOT_READY"]},
+            "required_metrics": {"$ref": "#/$defs/unique_strings"},
+            "selection": {"$ref": "#/$defs/nonempty_string"},
+            "shared_flow_contract": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "conformance_vectors_path",
+                "conformance_vectors_sha256",
+                "current_policy_id",
+                "current_policy_path",
+                "current_policy_sha256",
+                "extension_authority_issue",
+                "extension_status"
+              ],
+              "properties": {
+                "conformance_vectors_path": {"$ref": "#/$defs/nonempty_string"},
+                "conformance_vectors_sha256": {"$ref": "#/$defs/hash_or_null"},
+                "current_policy_id": {"const": "PORT-PERF-1"},
+                "current_policy_path": {"$ref": "#/$defs/nonempty_string"},
+                "current_policy_sha256": {"$ref": "#/$defs/hash_or_null"},
+                "extension_authority_issue": {"const": 324},
+                "extension_status": {"enum": ["READY", "REQUIRED_NOT_READY"]}
+              }
+            },
+            "splice": {"$ref": "#/$defs/nonempty_string"},
+            "surfaces": {"$ref": "#/$defs/unique_strings"}
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"readiness": {"const": "REQUIRED_NOT_READY"}},
+            "required": ["readiness"]
+          },
+          "then": {
+            "properties": {"blockers": {"minItems": 1}}
+          }
+        }
+      ]
+    },
+    "source_segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "absence_behavior",
+        "acquisition",
+        "admission",
+        "authority",
+        "blockers",
+        "capture_status",
+        "consumers",
+        "current_generation",
+        "data_classes",
+        "endpoint_or_artifact_selector",
+        "evidence_layer",
+        "existence_status",
+        "freshness",
+        "interval",
+        "invalidated_outputs",
+        "owner_policy_decision",
+        "product_requirement",
+        "readiness",
+        "schema",
+        "source_id",
+        "source_version",
+        "strategy_version",
+        "subjects",
+        "temporal",
+        "units"
+      ],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/nonempty_string"},
+        "source_version": {"$ref": "#/$defs/nonempty_string"},
+        "strategy_version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["binding", "status", "version_refs"],
+          "properties": {
+            "binding": {"$ref": "#/$defs/nonempty_string"},
+            "status": {
+              "enum": ["EVIDENCED", "NOT_APPLICABLE", "UNRESOLVED"]
+            },
+            "version_refs": {
+              "type": "object",
+              "additionalProperties": {"$ref": "#/$defs/nonempty_string"}
+            }
+          }
+        },
+        "subjects": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account_scope", "strategy_ids"],
+          "properties": {
+            "account_scope": {"$ref": "#/$defs/nonempty_string"},
+            "strategy_ids": {"$ref": "#/$defs/unique_strings"}
+          }
+        },
+        "data_classes": {"$ref": "#/$defs/unique_strings"},
+        "authority": {"$ref": "#/$defs/nonempty_string"},
+        "endpoint_or_artifact_selector": {"$ref": "#/$defs/nonempty_string"},
+        "acquisition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["adapter", "auth_and_metering_class", "mode"],
+          "properties": {
+            "adapter": {"$ref": "#/$defs/nonempty_string"},
+            "auth_and_metering_class": {"$ref": "#/$defs/nonempty_string"},
+            "mode": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "evidence_layer": {
+          "enum": [
+            "ACCOUNT_LIVE",
+            "BACKTEST",
+            "MARKET_OBSERVATION",
+            "PROVIDER_LIVE",
+            "PROVIDER_TRACK_RECORD",
+            "QUALITATIVE_DESIGN",
+            "REFERENCE_DATA",
+            "STATIC_POLICY"
+          ]
+        },
+        "interval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "effective_end",
+            "effective_start",
+            "observed_end",
+            "observed_start",
+            "splice_policy"
+          ],
+          "properties": {
+            "effective_start": {"$ref": "#/$defs/date_or_null"},
+            "effective_end": {"$ref": "#/$defs/date_or_null"},
+            "observed_start": {"$ref": "#/$defs/date_or_null"},
+            "observed_end": {"$ref": "#/$defs/date_or_null"},
+            "splice_policy": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": {"$ref": "#/$defs/nonempty_string"},
+            "version": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "units": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["currency", "measurement"],
+          "properties": {
+            "currency": {"$ref": "#/$defs/nonempty_string"},
+            "measurement": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "temporal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cadence", "calendar", "timezone"],
+          "properties": {
+            "cadence": {"$ref": "#/$defs/nonempty_string"},
+            "calendar": {"$ref": "#/$defs/nonempty_string"},
+            "timezone": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "freshness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_age_days", "publication_lag_days", "rule"],
+          "properties": {
+            "max_age_days": {"type": "integer", "minimum": 0},
+            "publication_lag_days": {"type": "integer", "minimum": 0},
+            "rule": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "admission": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["facts", "transform", "version"],
+          "properties": {
+            "facts": {"$ref": "#/$defs/unique_strings"},
+            "transform": {"$ref": "#/$defs/nonempty_string"},
+            "version": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "product_requirement": {"$ref": "#/$defs/requirement"},
+        "consumers": {"$ref": "#/$defs/unique_strings"},
+        "current_generation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["as_of", "generation_id", "sha256"],
+          "properties": {
+            "as_of": {"$ref": "#/$defs/date_or_null"},
+            "generation_id": {"$ref": "#/$defs/hash_or_null"},
+            "sha256": {"$ref": "#/$defs/hash_or_null"}
+          }
+        },
+        "existence_status": {
+          "enum": ["EXISTS", "DOES_NOT_EXIST", "UNRESOLVED"]
+        },
+        "capture_status": {
+          "enum": ["CAPTURED_GOVERNED", "NOT_CAPTURED", "UNRESOLVED"]
+        },
+        "absence_behavior": {"$ref": "#/$defs/nonempty_string"},
+        "readiness": {"$ref": "#/$defs/readiness"},
+        "blockers": {"$ref": "#/$defs/blockers"},
+        "invalidated_outputs": {"$ref": "#/$defs/unique_strings"},
+        "owner_policy_decision": {"$ref": "#/$defs/nonempty_string"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "product_requirement": {"const": "REQUIRED"},
+              "readiness": {"const": "REQUIRED_NOT_READY"}
+            },
+            "required": ["product_requirement", "readiness"]
+          },
+          "then": {
+            "properties": {"blockers": {"minItems": 1}}
+          }
+        }
+      ]
+    },
+    "golden_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "expected", "fixture_id", "inputs", "value_class"],
+      "properties": {
+        "fixture_id": {"$ref": "#/$defs/nonempty_string"},
+        "value_class": {"const": "SYNTHETIC_VALUE_FREE"},
+        "currency": {"const": "USD"},
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "calculation_configuration",
+            "component_returns",
+            "decomposition_inputs",
+            "dependence_inputs",
+            "external_flows",
+            "initial_contributions",
+            "internal_transfers"
+          ],
+          "properties": {
+            "calculation_configuration": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "base_currency",
+                "external_flows_timing",
+                "initial_contributions_timing",
+                "internal_transfers_timing"
+              ],
+              "properties": {
+                "base_currency": {"const": "USD"},
+                "external_flows_timing": {"$ref": "#/$defs/nonempty_string"},
+                "initial_contributions_timing": {"$ref": "#/$defs/nonempty_string"},
+                "internal_transfers_timing": {"$ref": "#/$defs/nonempty_string"}
+              }
+            },
+            "component_returns": {"type": "array", "items": {"type": "object"}},
+            "decomposition_inputs": {"type": "array", "items": {"type": "object"}},
+            "dependence_inputs": {"type": "object"},
+            "external_flows": {"type": "array", "items": {"type": "object"}},
+            "initial_contributions": {"type": "array", "items": {"type": "object"}},
+            "internal_transfers": {"type": "array", "items": {"type": "object"}}
+          }
+        },
+        "expected": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decomposition",
+            "dependence",
+            "hwm",
+            "invested_capital",
+            "report_panel_parity",
+            "source_bindings",
+            "stage_identities"
+          ],
+          "properties": {
+            "hwm": {"type": "object"},
+            "invested_capital": {"type": "object"},
+            "decomposition": {"type": "array", "items": {"type": "object"}},
+            "dependence": {"type": "object"},
+            "source_bindings": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "consumers",
+                  "generation_sha256",
+                  "input_key",
+                  "schema",
+                  "source_id",
+                  "version"
+                ],
+                "properties": {
+                  "consumers": {"$ref": "#/$defs/unique_strings"},
+                  "generation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "input_key": {"$ref": "#/$defs/nonempty_string"},
+                  "schema": {"$ref": "#/$defs/nonempty_string"},
+                  "source_id": {"$ref": "#/$defs/nonempty_string"},
+                  "version": {"$ref": "#/$defs/nonempty_string"}
+                }
+              }
+            },
+            "stage_identities": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["AS_HELD_COMPOSITE_HWM", "DECOMPOSITION", "DEPENDENCE", "INVESTED_CAPITAL"],
+              "properties": {
+                "AS_HELD_COMPOSITE_HWM": {"$ref": "#/$defs/golden_stage_identity"},
+                "DECOMPOSITION": {"$ref": "#/$defs/golden_stage_identity"},
+                "DEPENDENCE": {"$ref": "#/$defs/golden_stage_identity"},
+                "INVESTED_CAPITAL": {"$ref": "#/$defs/golden_stage_identity"}
+              }
+            },
+            "report_panel_parity": {"type": "object"}
+          }
+        }
+      }
+    },
+    "golden_stage_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_sha256", "output_sha256", "stage_id"],
+      "properties": {
+        "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "stage_id": {"$ref": "#/$defs/nonempty_string"}
+      }
+    }
+  }
+}
