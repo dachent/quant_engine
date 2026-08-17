@@ -418,10 +418,17 @@ const volatisPerformance = await page.locator("#performance-table tbody tr", { h
 const robuxioPerformance = await page.locator("#performance-table tbody tr", { hasText: "Robuxio" }).textContent();
 checks.push(check(
   "Volatis and Robuxio expose their accepted account-live return paths",
-  volatisPerformance?.includes("canonical account-live returns")
-    && volatisPerformance.includes("Available account-live return path")
-    && robuxioPerformance?.includes("canonical account-live returns")
-    && robuxioPerformance.includes("Available account-live return path"),
+  // The return path must be exposed and available; the precise label varies
+  // with the evidence present: frozen canonical series ("canonical
+  // account-live returns" / "Available account-live return path") or real
+  // ledger account evidence ("account NAV observations" / "Available with
+  // inferred flow timing"). The available-with-inferred-flow-timing label is
+  // the more precise rendering when date-only flows exist.
+  [volatisPerformance, robuxioPerformance].every((row) =>
+    row
+    && /canonical account-live returns|account NAV observations/.test(row)
+    && /Available( account-live return path| with inferred flow timing)/.test(row)
+  ),
   { robuxio: robuxioPerformance, volatis: volatisPerformance },
 ));
 checks.push(check(
