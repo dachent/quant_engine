@@ -1529,6 +1529,7 @@ def build_bundle(
                 "inputs/governance/current-strategy-decomposition-plan.json",
                 plan_content,
                 "current-strategy-decomposition-plan",
+                str(plan["schema_version"]),
             ),
             _provenance_definition(
                 "catalog/decomposition-source-catalog.json",
@@ -2085,7 +2086,7 @@ def build_bundle(
 
     _validate_plan_authority(plan, plan_content, financial_mvp_contract)
     disposition_result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "candidate_dispositions": sorted(
             candidate_dispositions,
             key=lambda item: (
@@ -2100,7 +2101,7 @@ def build_bundle(
     disposition_content = _canonical_json(disposition_result)
     outputs["candidate-dispositions.json"] = disposition_content
     manifest: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "builder": "portfolio-current-decomposition-plan",
         "builder_version": BUILDER_VERSION,
         "assurance_profile": assurance_profile,

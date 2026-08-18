@@ -797,6 +797,19 @@ def _legacy_release_plan_specs(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     plan-bundle composition into this existing release runtime.
     """
 
+    if (
+        plan.get("builder") != "portfolio-current-decomposition-plan"
+        or plan.get("builder_version") not in {"0.15.0", "0.16.0"}
+        or plan.get("schema_version") != 1
+    ):
+        raise VerticalBuildError(
+            "current decomposition plan requires #331 exact plan-bundle integration"
+        )
+    bundle_id = _text(plan.get("bundle_id"), "attribution plan bundle_id")
+    identity = dict(plan)
+    identity.pop("bundle_id")
+    if hashlib.sha256(canonical_json_bytes(identity)).hexdigest() != bundle_id:
+        raise VerticalBuildError("attribution plan bundle identity differs")
     specs = plan.get("specs")
     if not isinstance(specs, list) or not specs:
         raise VerticalBuildError("attribution plan has no lens specifications")

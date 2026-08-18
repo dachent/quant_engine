@@ -491,6 +491,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     )
 
     assert manifest["builder_version"] == "0.17.0"
+    assert manifest["schema_version"] == 2
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
         "fraction": "0.20",
@@ -541,7 +542,19 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         "portfolio-layered-history-segments"
     )
     assert history_provenance["history/segments.csv"]["schema_version"] == "1"
+    plan_provenance = {
+        item["artifact_id"]: item
+        for item in json.loads(outputs["specs/economic.json"])["provenance_sources"]
+        if item["artifact_id"].startswith("plan/")
+    }
+    assert (
+        plan_provenance["plan/current-strategy-decomposition-plan.json"][
+            "schema_version"
+        ]
+        == "3"
+    )
     dispositions = json.loads(outputs["candidate-dispositions.json"])
+    assert dispositions["schema_version"] == 2
     assert len(dispositions["candidate_dispositions"]) == 108
     assert {row["surface"] for row in dispositions["candidate_dispositions"]} == {
         "STATIC",
