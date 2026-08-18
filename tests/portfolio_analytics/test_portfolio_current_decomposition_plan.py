@@ -637,6 +637,36 @@ def test_dynamic_surface_policy_and_grid_fail_closed(tmp_path: Path) -> None:
             }
         )
 
+    numerically_duplicated = _fixture(
+        tmp_path / "numerically-duplicated",
+        plan_mutator=lambda plan: plan["split_policy"]["dynamic"].update(
+            smoothness_candidates=["0.000001", "1e-6"]
+        ),
+    )
+    with pytest.raises(planner.CurrentPlanError, match="numerically duplicated"):
+        planner.build_bundle(
+            **{
+                key: value
+                for key, value in numerically_duplicated.items()
+                if key != "plan_document"
+            }
+        )
+
+    numerically_duplicated_ridge = _fixture(
+        tmp_path / "numerically-duplicated-ridge",
+        plan_mutator=lambda plan: plan["split_policy"].update(
+            ridge_candidates=["0.000001", "1e-6"]
+        ),
+    )
+    with pytest.raises(planner.CurrentPlanError, match="numerically duplicated"):
+        planner.build_bundle(
+            **{
+                key: value
+                for key, value in numerically_duplicated_ridge.items()
+                if key != "plan_document"
+            }
+        )
+
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     outcome = next(
         row

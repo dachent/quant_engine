@@ -1623,8 +1623,12 @@ def build_bundle(
     ridge = split.get("ridge_candidates")
     if not isinstance(ridge, list) or not ridge:
         raise CurrentPlanError("split.ridge_candidates must be a non-empty array")
-    for index, candidate in enumerate(ridge):
+    normalized_ridge = tuple(
         _decimal(candidate, f"split.ridge_candidates[{index}]", Decimal("0"))
+        for index, candidate in enumerate(ridge)
+    )
+    if len(normalized_ridge) != len(set(normalized_ridge)):
+        raise CurrentPlanError("split.ridge_candidates are numerically duplicated")
     dynamic = _object(split.get("dynamic"), "split.dynamic")
     if set(dynamic) != {"constraint", "smoothness_candidates", "state_ridge"}:
         raise CurrentPlanError("split.dynamic fields differ")
@@ -1642,13 +1646,17 @@ def build_bundle(
         _text(value, f"split.dynamic.smoothness_candidates[{index}]")
         for index, value in enumerate(raw_smoothness)
     )
-    if len(dynamic_smoothness) != len(set(dynamic_smoothness)):
-        raise CurrentPlanError("split.dynamic.smoothness_candidates are duplicated")
-    for index, candidate in enumerate(dynamic_smoothness):
+    normalized_smoothness = tuple(
         _decimal(
             candidate,
             f"split.dynamic.smoothness_candidates[{index}]",
             Decimal("0.000000000001"),
+        )
+        for index, candidate in enumerate(dynamic_smoothness)
+    )
+    if len(normalized_smoothness) != len(set(normalized_smoothness)):
+        raise CurrentPlanError(
+            "split.dynamic.smoothness_candidates are numerically duplicated"
         )
 
     assignments_by_source: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
