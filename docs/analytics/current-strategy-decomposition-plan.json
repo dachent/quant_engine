@@ -14,7 +14,7 @@
       "lens": "ECONOMIC_FACTOR",
       "universe_id": "us-equity-economic-factors",
       "input_key": "us_factors",
-      "maximum_factor_staleness_days": 45,
+      "freshness_policy_id": "KENNETH_FRENCH_MONTHLY_DAILY_45D_V1",
       "risk_free_column": "rf",
       "return_type": "EXCESS",
       "column_policy": "LOWER_CANDIDATE_ID"
@@ -23,7 +23,7 @@
       "lens": "ECONOMIC_FACTOR",
       "universe_id": "europe-equity-economic-factors",
       "input_key": "europe_factors",
-      "maximum_factor_staleness_days": 45,
+      "freshness_policy_id": "KENNETH_FRENCH_MONTHLY_DAILY_45D_V1",
       "risk_free_column": "rf",
       "return_type": "EXCESS",
       "column_policy": "REMOVE_EU_PREFIX_THEN_LOWER"
@@ -59,7 +59,7 @@
       "lens": "RETURN_INDUSTRY",
       "universe_id": "us-49-industry-return",
       "input_key": "us_industries",
-      "maximum_factor_staleness_days": 45,
+      "freshness_policy_id": "KENNETH_FRENCH_MONTHLY_DAILY_45D_V1",
       "risk_free_column": "rf",
       "return_type": "TOTAL",
       "column_policy": "CANDIDATE_ID"

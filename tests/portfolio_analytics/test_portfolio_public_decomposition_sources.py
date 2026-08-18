@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import date
 import hashlib
 import importlib.util
 import io
@@ -21,6 +22,10 @@ if SPEC is None or SPEC.loader is None:
 sources = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = sources
 SPEC.loader.exec_module(sources)
+
+RUN_STARTED_AT_UTC = "2026-03-17T11:55:00Z"
+RUN_ENDED_AT_UTC = "2026-03-17T12:05:00Z"
+EVALUATION_DATE = "2026-03-17"
 
 
 def _write_json(path: Path, value: object) -> Path:
@@ -167,11 +172,11 @@ def _inputs(tmp_path: Path) -> tuple[Path, dict[str, Path], dict[str, Path]]:
             "version": "1.2.0",
         }
         response = {
-            "captured_at_utc": "2026-08-17T12:00:00Z",
+            "captured_at_utc": "2026-03-17T12:00:00Z",
             "content_type": "application/zip",
             "etag": None,
             "final_url": urls[key],
-            "last_modified": "Mon, 17 Aug 2026 12:00:00 GMT",
+            "last_modified": "Tue, 17 Mar 2026 12:00:00 GMT",
             "status": 200,
         }
         response_identity = {
@@ -237,11 +242,67 @@ def _csv_rows(data: bytes) -> list[list[str]]:
     return list(csv.reader(io.StringIO(data.decode("utf-8"))))
 
 
+def _set_capture_time(manifests: dict[str, Path], captured_at_utc: str) -> None:
+    for path in manifests.values():
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["response"]["captured_at_utc"] = captured_at_utc
+        _write_json(path, manifest)
+
+
+def _set_source_dates(
+    paths: dict[str, Path],
+    manifests: dict[str, Path],
+    dates: dict[str, list[str]],
+) -> None:
+    for key, path in paths.items():
+        document = json.loads(path.read_text(encoding="utf-8"))
+        rows = document["sections"][0]["rows"]
+        assert len(rows) == len(dates[key])
+        for row, period in zip(rows, dates[key], strict=True):
+            row["period"] = period
+        _write_json(path, document)
+        content = path.read_bytes()
+        manifest = json.loads(manifests[key].read_text(encoding="utf-8"))
+        manifest["artifact"]["sha256"] = hashlib.sha256(content).hexdigest()
+        manifest["artifact"]["size_bytes"] = len(content)
+        _write_json(manifests[key], manifest)
+
+
+def _build_bundle(
+    catalog: Path, paths: dict[str, Path], manifests: dict[str, Path]
+) -> tuple[dict[str, bytes], dict[str, object]]:
+    return sources.build_bundle(
+        catalog,
+        paths,
+        manifests,
+        RUN_STARTED_AT_UTC,
+        RUN_ENDED_AT_UTC,
+        EVALUATION_DATE,
+    )
+
+
+def _write_bundle(
+    catalog: Path,
+    paths: dict[str, Path],
+    manifests: dict[str, Path],
+    root: Path,
+) -> dict[str, object]:
+    return sources.write_bundle(
+        catalog,
+        paths,
+        manifests,
+        root,
+        RUN_STARTED_AT_UTC,
+        RUN_ENDED_AT_UTC,
+        EVALUATION_DATE,
+    )
+
+
 def test_build_uses_exact_dates_decimal_returns_and_explicit_missing(
     tmp_path: Path,
 ) -> None:
     catalog, paths, manifests = _inputs(tmp_path)
-    outputs, manifest = sources.build_bundle(catalog, paths, manifests)
+    outputs, manifest = _build_bundle(catalog, paths, manifests)
 
     us_rows = _csv_rows(outputs["us_factors_daily.csv"])
     assert us_rows == [
@@ -265,7 +326,49 @@ def test_build_uses_exact_dates_decimal_returns_and_explicit_missing(
     assert industry_rows[1][-1] == ""
 
     output_manifest = {item["path"]: item for item in manifest["outputs"]}
-    assert manifest["builder_version"] == "0.2.0"
+    assert manifest["builder_version"] == "0.3.0"
+    receipt_hashes = {
+        key: hashlib.sha256(path.read_bytes()).hexdigest()
+        for key, path in manifests.items()
+    }
+    acquisition_run_payload = {
+        "evaluation_date": EVALUATION_DATE,
+        "run_started_at_utc": RUN_STARTED_AT_UTC,
+        "run_ended_at_utc": RUN_ENDED_AT_UTC,
+        "receipt_manifest_sha256s": receipt_hashes,
+    }
+    assert manifest["schema_version"] == 2
+    assert manifest["acquisition_run"] == {
+        "run_id": hashlib.sha256(
+            sources._canonical_json(acquisition_run_payload)
+        ).hexdigest(),
+        "evaluation_date": EVALUATION_DATE,
+        "run_started_at_utc": RUN_STARTED_AT_UTC,
+        "run_ended_at_utc": RUN_ENDED_AT_UTC,
+        "acquisition_requirement": "EVERY_SOURCE_CAPTURED_WITHIN_CURRENT_RUN",
+        "capture_window_first_utc": "2026-03-17T12:00:00Z",
+        "capture_window_last_utc": "2026-03-17T12:00:00Z",
+        "receipt_manifest_sha256s": receipt_hashes,
+    }
+    assert manifest["freshness_policy"] == {
+        "policy_id": "KENNETH_FRENCH_MONTHLY_DAILY_45D_V1",
+        "observation_cadence": "DAILY",
+        "publication_cadence": "MONTHLY",
+        "deadline_anchor": "CALENDAR_MONTH_END",
+        "publication_lag_days": 45,
+        "calendar": "CALENDAR_DAY",
+        "deadline_inclusive": True,
+        "boundary_rule": "LATEST_PROVIDER_VALID_DAY_IN_ELIGIBLE_MONTH",
+        "receipt_rule": "CAPTURED_WITHIN_CURRENT_RUN",
+    }
+    assert output_manifest["us_factors_daily.csv"]["freshness"] == {
+        "state": "CURRENT",
+        "eligible_month": "2026-01",
+        "eligible_month_end": "2026-01-31",
+        "publication_deadline": "2026-03-17",
+        "provider_available_end": "2026-01-02",
+        "accepted_observation_end": "2026-01-02",
+    }
     assert output_manifest["us_factors_daily.csv"]["factor_only_dates_dropped"] == 1
     assert output_manifest["us_factors_daily.csv"]["momentum_only_dates_dropped"] == 1
     industry_manifest = output_manifest["us_49_industries_value_weighted_daily.csv"]
@@ -275,8 +378,8 @@ def test_build_uses_exact_dates_decimal_returns_and_explicit_missing(
 
 def test_bundle_is_deterministic_and_hashes_every_output(tmp_path: Path) -> None:
     catalog, paths, manifests = _inputs(tmp_path)
-    first_outputs, first_manifest = sources.build_bundle(catalog, paths, manifests)
-    second_outputs, second_manifest = sources.build_bundle(catalog, paths, manifests)
+    first_outputs, first_manifest = _build_bundle(catalog, paths, manifests)
+    second_outputs, second_manifest = _build_bundle(catalog, paths, manifests)
     assert first_outputs == second_outputs
     assert first_manifest == second_manifest
     for item in first_manifest["outputs"]:
@@ -304,11 +407,138 @@ def test_bundle_is_deterministic_and_hashes_every_output(tmp_path: Path) -> None
             "raw_artifact"
         ]["name"]
         shutil.copyfile(manifests[key].parent / raw_name, source_root / raw_name)
-    relocated_outputs, relocated_manifest = sources.build_bundle(
+    relocated_outputs, relocated_manifest = _build_bundle(
         relocated_catalog, relocated_paths, relocated_manifests
     )
     assert relocated_outputs == first_outputs
     assert relocated_manifest == first_manifest
+
+
+def test_monthly_publication_lag_accepts_june_on_august_17(tmp_path: Path) -> None:
+    catalog, paths, manifests = _inputs(tmp_path)
+    _set_source_dates(
+        paths,
+        manifests,
+        {
+            "us_factors": ["20260630", "20260701"],
+            "us_momentum": ["20260630", "20260701"],
+            "europe_factors": ["20260630", "20260701"],
+            "europe_momentum": ["20260630", "20260701"],
+            "us_industries": ["20260630"],
+        },
+    )
+    _set_capture_time(manifests, "2026-08-17T12:00:00Z")
+
+    _outputs, manifest = sources.build_bundle(
+        catalog,
+        paths,
+        manifests,
+        "2026-08-17T11:55:00Z",
+        "2026-08-17T12:05:00Z",
+        "2026-08-17",
+    )
+
+    outputs_by_name = {output["path"]: output for output in manifest["outputs"]}
+    for output in outputs_by_name.values():
+        assert output["freshness"]["state"] == "CURRENT"
+        assert output["freshness"]["eligible_month"] == "2026-06"
+        assert output["freshness"]["publication_deadline"] == "2026-08-14"
+        assert output["freshness"]["accepted_observation_end"] == "2026-06-30"
+        assert output["last_date"] == "2026-06-30"
+    assert (
+        outputs_by_name["us_factors_daily.csv"]["freshness"][
+            "provider_available_end"
+        ]
+        == "2026-07-01"
+    )
+    assert (
+        outputs_by_name["europe_factors_daily.csv"]["freshness"][
+            "provider_available_end"
+        ]
+        == "2026-07-01"
+    )
+    assert (
+        outputs_by_name["us_49_industries_value_weighted_daily.csv"]["freshness"][
+            "provider_available_end"
+        ]
+        == "2026-06-30"
+    )
+    for data in _outputs.values():
+        assert _csv_rows(data)[-1][0] == "2026-06-30"
+
+
+def test_publication_deadline_changes_required_month_on_day_45() -> None:
+    assert sources._required_observation_month_end(date(2026, 8, 13)).isoformat() == (
+        "2026-05-31"
+    )
+    assert sources._required_observation_month_end(date(2026, 8, 14)).isoformat() == (
+        "2026-06-30"
+    )
+    assert sources._required_observation_month_end(date(2026, 9, 13)).isoformat() == (
+        "2026-06-30"
+    )
+    assert sources._required_observation_month_end(date(2026, 9, 14)).isoformat() == (
+        "2026-07-31"
+    )
+    assert sources._required_observation_month_end(date(2024, 3, 15)).isoformat() == (
+        "2023-12-31"
+    )
+    assert sources._required_observation_month_end(date(2024, 3, 16)).isoformat() == (
+        "2024-01-31"
+    )
+
+
+def test_publication_lag_fails_after_required_month_is_missing(
+    tmp_path: Path,
+) -> None:
+    catalog, paths, manifests = _inputs(tmp_path)
+    _set_source_dates(
+        paths,
+        manifests,
+        {
+            "us_factors": ["20260528", "20260529"],
+            "us_momentum": ["20260528", "20260529"],
+            "europe_factors": ["20260528", "20260529"],
+            "europe_momentum": ["20260528", "20260529"],
+            "us_industries": ["20260529"],
+        },
+    )
+    _set_capture_time(manifests, "2026-08-17T12:00:00Z")
+
+    with pytest.raises(
+        sources.PublicSourceError, match="REQUIRED_PUBLICATION_MONTH_ABSENT: 2026-06"
+    ):
+        sources.build_bundle(
+            catalog,
+            paths,
+            manifests,
+            "2026-08-17T11:55:00Z",
+            "2026-08-17T12:05:00Z",
+            "2026-08-17",
+        )
+
+
+def test_rejects_receipt_outside_current_run_window(tmp_path: Path) -> None:
+    catalog, paths, manifests = _inputs(tmp_path)
+
+    with pytest.raises(sources.PublicSourceError, match="outside the current run"):
+        sources.build_bundle(
+            catalog,
+            paths,
+            manifests,
+            "2026-03-17T12:01:00Z",
+            "2026-03-17T12:05:00Z",
+            "2026-03-17",
+        )
+
+
+def test_current_run_window_includes_both_exact_endpoints(tmp_path: Path) -> None:
+    catalog, paths, manifests = _inputs(tmp_path)
+    _set_capture_time(manifests, RUN_STARTED_AT_UTC)
+    _build_bundle(catalog, paths, manifests)
+
+    _set_capture_time(manifests, RUN_ENDED_AT_UTC)
+    _build_bundle(catalog, paths, manifests)
 
 
 def test_rejects_duplicate_dates_and_catalog_url_drift(tmp_path: Path) -> None:
@@ -322,20 +552,20 @@ def test_rejects_duplicate_dates_and_catalog_url_drift(tmp_path: Path) -> None:
         source_manifest["artifact"]["sha256"] = hashlib.sha256(changed).hexdigest()
         source_manifest["artifact"]["size_bytes"] = len(changed)
         _write_json(manifests["us_factors"], source_manifest)
-        sources.build_bundle(catalog, paths, manifests)
+        _build_bundle(catalog, paths, manifests)
 
     catalog, paths, manifests = _inputs(tmp_path)
     value = json.loads(paths["europe_momentum"].read_text(encoding="utf-8"))
     value["source_url"] = "https://wrong.example.test/feed.zip"
     _write_json(paths["europe_momentum"], value)
     with pytest.raises(sources.PublicSourceError, match="does not match"):
-        sources.build_bundle(catalog, paths, manifests)
+        _build_bundle(catalog, paths, manifests)
 
 
 def test_rejects_missing_or_tampered_source_run_manifest(tmp_path: Path) -> None:
     catalog, paths, manifests = _inputs(tmp_path)
     with pytest.raises(sources.PublicSourceError, match="source manifest keys"):
-        sources.build_bundle(
+        _build_bundle(
             catalog,
             paths,
             {key: path for key, path in manifests.items() if key != "us_factors"},
@@ -345,7 +575,7 @@ def test_rejects_missing_or_tampered_source_run_manifest(tmp_path: Path) -> None
     manifest["source_run_id"] = "0" * 64
     _write_json(manifests["us_factors"], manifest)
     with pytest.raises(sources.PublicSourceError, match="source-run identity differs"):
-        sources.build_bundle(catalog, paths, manifests)
+        _build_bundle(catalog, paths, manifests)
 
     tamper_root = tmp_path / "raw-tamper"
     tamper_root.mkdir()
@@ -354,7 +584,7 @@ def test_rejects_missing_or_tampered_source_run_manifest(tmp_path: Path) -> None
     raw_path = manifests["us_factors"].parent / manifest["raw_artifact"]["name"]
     raw_path.write_bytes(b"tampered")
     with pytest.raises(sources.PublicSourceError, match="raw source identity differs"):
-        sources.build_bundle(catalog, paths, manifests)
+        _build_bundle(catalog, paths, manifests)
 
 
 def test_rejects_invalid_capture_timestamp(tmp_path: Path) -> None:
@@ -364,14 +594,14 @@ def test_rejects_invalid_capture_timestamp(tmp_path: Path) -> None:
     _write_json(manifests["us_factors"], manifest)
 
     with pytest.raises(sources.PublicSourceError, match="not RFC3339 UTC"):
-        sources.build_bundle(catalog, paths, manifests)
+        _build_bundle(catalog, paths, manifests)
 
 
 def test_write_is_immutable(tmp_path: Path) -> None:
     catalog, paths, manifests = _inputs(tmp_path)
     root = tmp_path / "bundles"
-    result = sources.write_bundle(catalog, paths, manifests, root)
+    result = _write_bundle(catalog, paths, manifests, root)
     destination = Path(result["destination"])
     assert (destination / "source-manifest.json").is_file()
     with pytest.raises(sources.PublicSourceError, match="already exists"):
-        sources.write_bundle(catalog, paths, manifests, root)
+        _write_bundle(catalog, paths, manifests, root)

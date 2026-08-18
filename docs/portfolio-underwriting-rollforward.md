@@ -152,8 +152,11 @@ The strategy target, factor source, and exact-common-date model interval are
 separate coverage facts. Preserve target rows through their actual strategy
 end date even when a public factor source publishes later on a monthly lag.
 Kenneth French economic-factor and industry sources use a declared 45-calendar-
-day publication-lag allowance; ETF style and sector sources retain a 10-day
-allowance. The panel must display all three intervals and the limiting input.
+allowance measured from calendar month-end, while every scheduled daily or
+weekly run must acquire new receipts. These are separate gates: a receipt must
+fall inside the current run window, and the retained observations must include
+the latest month whose 45-day publication deadline has elapsed. The panel must
+display all three intervals and the limiting input.
 
 Pass the emitted manifest and returns to `portfolio_target_series.py` with
 `--strategy-history-manifest` and `--strategy-history-returns`. Its

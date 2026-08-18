@@ -10,13 +10,15 @@ import json
 import re
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-BUILDER_VERSION = "0.2.0"
+BUILDER_VERSION = "0.3.0"
+FRESHNESS_POLICY_ID = "KENNETH_FRENCH_MONTHLY_DAILY_45D_V1"
+PUBLICATION_LAG_CALENDAR_DAYS = 45
 DATE_PATTERN = re.compile(r"\d{8}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 UTC_TIMESTAMP_PATTERN = re.compile(
@@ -98,6 +100,39 @@ def _integer(value: object, name: str) -> int:
     if parsed <= 0 or parsed != value:
         raise PublicSourceError(f"{name} must be a positive integer")
     return parsed
+
+
+def _utc_datetime(value: object, name: str) -> datetime:
+    timestamp = _text(value, name)
+    if UTC_TIMESTAMP_PATTERN.fullmatch(timestamp) is None:
+        raise PublicSourceError(f"{name} is not RFC3339 UTC")
+    try:
+        return datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")
+    except ValueError as exc:
+        raise PublicSourceError(f"{name} is not RFC3339 UTC") from exc
+
+
+def _date_value(value: object, name: str) -> date:
+    raw = _text(value, name)
+    try:
+        parsed = date.fromisoformat(raw)
+    except ValueError as exc:
+        raise PublicSourceError(f"{name} is not an ISO date") from exc
+    if parsed.isoformat() != raw:
+        raise PublicSourceError(f"{name} is not an ISO date")
+    return parsed
+
+
+def _month_end(value: date) -> date:
+    next_month = (value.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return next_month - timedelta(days=1)
+
+
+def _required_observation_month_end(evaluated_on: date) -> date:
+    candidate = _month_end(evaluated_on)
+    while candidate + timedelta(days=PUBLICATION_LAG_CALENDAR_DAYS) > evaluated_on:
+        candidate = _month_end(candidate.replace(day=1) - timedelta(days=1))
+    return candidate
 
 
 def _load_catalog(path: Path) -> tuple[dict[str, Mapping[str, Any]], str, int]:
@@ -263,12 +298,7 @@ def _load_source(
     if not isinstance(response, dict) or set(response) != response_keys:
         raise PublicSourceError(f"{key} HTTP response identity contract differs")
     captured_at = _text(response.get("captured_at_utc"), f"{key}.captured_at_utc")
-    if UTC_TIMESTAMP_PATTERN.fullmatch(captured_at) is None:
-        raise PublicSourceError(f"{key} capture timestamp is not RFC3339 UTC")
-    try:
-        datetime.fromisoformat(captured_at.removesuffix("Z") + "+00:00")
-    except ValueError as exc:
-        raise PublicSourceError(f"{key} capture timestamp is not RFC3339 UTC") from exc
+    _utc_datetime(captured_at, f"{key} capture timestamp")
     content_type = _text(response.get("content_type"), f"{key}.content_type")
     final_url = _text(response.get("final_url"), f"{key}.final_url")
     status = _integer(response.get("status"), f"{key}.status")
@@ -402,6 +432,44 @@ def _csv_bytes(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> bytes:
     return stream.getvalue().encode("utf-8")
 
 
+def _admit_publication_boundary(
+    name: str, data: bytes, eligible_month_end: date
+) -> tuple[bytes, date, date, int, int]:
+    rows = list(csv.reader(io.StringIO(data.decode("utf-8"))))
+    if len(rows) < 2:
+        raise PublicSourceError(f"{name} has no normalized observations")
+    header, observations = rows[0], rows[1:]
+    dated_rows = [(_date_value(row[0], f"{name} observation date"), row) for row in observations]
+    provider_available_end = dated_rows[-1][0]
+    eligible_rows = [
+        (day, row)
+        for day, row in dated_rows
+        if (day.year, day.month)
+        == (eligible_month_end.year, eligible_month_end.month)
+        and (
+            name == OUTPUT_NAMES[2]
+            or all(value != "" for value in row[1:])
+        )
+    ]
+    if not eligible_rows:
+        raise PublicSourceError(
+            f"{name} REQUIRED_PUBLICATION_MONTH_ABSENT: "
+            f"{eligible_month_end:%Y-%m}"
+        )
+    accepted_observation_end = max(day for day, _row in eligible_rows)
+    admitted_rows = [
+        row for day, row in dated_rows if day <= accepted_observation_end
+    ]
+    missing_cells = sum(value == "" for row in admitted_rows for value in row[1:])
+    return (
+        _csv_bytes(header, admitted_rows),
+        provider_available_end,
+        accepted_observation_end,
+        len(admitted_rows),
+        missing_cells,
+    )
+
+
 def _factor_output(
     factors: SourceDocument,
     momentum: SourceDocument,
@@ -511,6 +579,9 @@ def build_bundle(
     catalog_path: Path,
     source_paths: Mapping[str, Path],
     source_manifest_paths: Mapping[str, Path],
+    run_started_at_utc: str,
+    run_ended_at_utc: str,
+    evaluation_date: str,
 ) -> tuple[dict[str, bytes], dict[str, object]]:
     """Build normalized outputs and their canonical manifest without writing."""
     if set(source_paths) != set(SOURCE_KEYS):
@@ -524,6 +595,27 @@ def build_bundle(
         key: _load_source(key, source_paths[key], source_manifest_paths[key], catalog)
         for key in SOURCE_KEYS
     }
+    run_started_at = _utc_datetime(run_started_at_utc, "run_started_at_utc")
+    run_ended_at = _utc_datetime(run_ended_at_utc, "run_ended_at_utc")
+    evaluated_on = _date_value(evaluation_date, "evaluation_date")
+    if run_ended_at < run_started_at:
+        raise PublicSourceError("run_ended_at_utc precedes run_started_at_utc")
+    capture_times = {
+        key: _utc_datetime(
+            source.response.get("captured_at_utc"), f"{key} captured_at_utc"
+        )
+        for key, source in sources.items()
+    }
+    outside_run = [
+        key
+        for key, captured_at in capture_times.items()
+        if captured_at < run_started_at or captured_at > run_ended_at
+    ]
+    if outside_run:
+        raise PublicSourceError(
+            "source receipts are outside the current run window: "
+            + ", ".join(sorted(outside_run))
+        )
     us_data, us_coverage = _factor_output(
         sources["us_factors"], sources["us_momentum"], "Mom"
     )
@@ -543,13 +635,72 @@ def build_bundle(
         OUTPUT_NAMES[1]: europe_coverage,
         OUTPUT_NAMES[2]: industry_coverage,
     }
+    required_month_end = _required_observation_month_end(evaluated_on)
+    publication_deadline = required_month_end + timedelta(
+        days=PUBLICATION_LAG_CALENDAR_DAYS
+    )
+    freshness: dict[str, dict[str, object]] = {}
+    for name in OUTPUT_NAMES:
+        (
+            outputs[name],
+            provider_available_end,
+            accepted_observation_end,
+            admitted_row_count,
+            admitted_missing_cells,
+        ) = _admit_publication_boundary(name, outputs[name], required_month_end)
+        coverage[name]["last_date"] = accepted_observation_end.isoformat()
+        coverage[name]["row_count"] = admitted_row_count
+        coverage[name]["missing_cells"] = admitted_missing_cells
+        freshness[name] = {
+            "state": "CURRENT",
+            "eligible_month": required_month_end.strftime("%Y-%m"),
+            "eligible_month_end": required_month_end.isoformat(),
+            "publication_deadline": publication_deadline.isoformat(),
+            "provider_available_end": provider_available_end.isoformat(),
+            "accepted_observation_end": accepted_observation_end.isoformat(),
+        }
+    receipt_manifest_sha256s = {
+        key: source.manifest_sha256 for key, source in sources.items()
+    }
+    acquisition_run_payload = {
+        "evaluation_date": evaluated_on.isoformat(),
+        "run_started_at_utc": run_started_at_utc,
+        "run_ended_at_utc": run_ended_at_utc,
+        "receipt_manifest_sha256s": receipt_manifest_sha256s,
+    }
+    acquisition_run_id = _sha256(_canonical_json(acquisition_run_payload))
     manifest: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "builder": "portfolio-public-decomposition-sources",
         "builder_version": BUILDER_VERSION,
         "catalog": {
             "sha256": catalog_hash,
             "bytes": catalog_size,
+        },
+        "acquisition_run": {
+            "run_id": acquisition_run_id,
+            "evaluation_date": evaluated_on.isoformat(),
+            "run_started_at_utc": run_started_at_utc,
+            "run_ended_at_utc": run_ended_at_utc,
+            "acquisition_requirement": "EVERY_SOURCE_CAPTURED_WITHIN_CURRENT_RUN",
+            "capture_window_first_utc": min(capture_times.values())
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "capture_window_last_utc": max(capture_times.values())
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "receipt_manifest_sha256s": receipt_manifest_sha256s,
+        },
+        "freshness_policy": {
+            "policy_id": FRESHNESS_POLICY_ID,
+            "observation_cadence": "DAILY",
+            "publication_cadence": "MONTHLY",
+            "deadline_anchor": "CALENDAR_MONTH_END",
+            "publication_lag_days": PUBLICATION_LAG_CALENDAR_DAYS,
+            "calendar": "CALENDAR_DAY",
+            "deadline_inclusive": True,
+            "boundary_rule": "LATEST_PROVIDER_VALID_DAY_IN_ELIGIBLE_MONTH",
+            "receipt_rule": "CAPTURED_WITHIN_CURRENT_RUN",
         },
         "sources": [
             {
@@ -575,6 +726,7 @@ def build_bundle(
                 "sha256": _sha256(outputs[name]),
                 "bytes": len(outputs[name]),
                 **coverage[name],
+                "freshness": freshness[name],
             }
             for name in OUTPUT_NAMES
         ],
@@ -583,6 +735,7 @@ def build_bundle(
             "missing_observation": "EMPTY_CELL_NEVER_ZERO",
             "provider_percent_conversion": "DIVIDE_BY_100",
             "industry_lens": "RETURN_BASED_INFERENTIAL_NOT_HOLDINGS_AUTHORITY",
+            "freshness": FRESHNESS_POLICY_ID,
         },
     }
     manifest["bundle_id"] = _sha256(_canonical_json(manifest))
@@ -594,9 +747,19 @@ def write_bundle(
     source_paths: Mapping[str, Path],
     source_manifest_paths: Mapping[str, Path],
     output_root: Path,
+    run_started_at_utc: str,
+    run_ended_at_utc: str,
+    evaluation_date: str,
 ) -> dict[str, object]:
     """Write a new immutable bundle; existing output paths are never replaced."""
-    outputs, manifest = build_bundle(catalog_path, source_paths, source_manifest_paths)
+    outputs, manifest = build_bundle(
+        catalog_path,
+        source_paths,
+        source_manifest_paths,
+        run_started_at_utc,
+        run_ended_at_utc,
+        evaluation_date,
+    )
     bundle_id = _text(manifest["bundle_id"], "bundle_id")
     destination = output_root.resolve() / bundle_id
     if destination.exists():
@@ -627,6 +790,9 @@ def _parser() -> argparse.ArgumentParser:
             f"--{key.replace('_', '-')}-manifest", type=Path, required=True
         )
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--run-started-at-utc", required=True)
+    parser.add_argument("--run-ended-at-utc", required=True)
+    parser.add_argument("--evaluation-date", required=True)
     return parser
 
 
@@ -637,7 +803,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         key: getattr(args, f"{key}_manifest") for key in SOURCE_KEYS
     }
     result = write_bundle(
-        args.catalog, source_paths, source_manifest_paths, args.output_root
+        args.catalog,
+        source_paths,
+        source_manifest_paths,
+        args.output_root,
+        args.run_started_at_utc,
+        args.run_ended_at_utc,
+        args.evaluation_date,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
