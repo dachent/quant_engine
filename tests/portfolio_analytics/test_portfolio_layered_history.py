@@ -75,10 +75,22 @@ def _manifest(
 
 
 def _pointer(path: Path, generation_id: str, manifest_path: Path) -> None:
+    source_name = {
+        "ledger": "provider-ledger",
+        "matrixport": "matrixport",
+        "quantbase": "quantbase",
+        "p123": "portfolio123",
+    }[path.parent.name]
+    manifest_content = manifest_path.read_bytes()
+    manifest = json.loads(manifest_content)
     _write_json(
         path,
         {
-            "artifact_inventory_sha256": "f" * 64,
+            "artifact_inventory_sha256": (
+                target_series._source_generation_inventory_sha256(
+                    source_name, manifest_content, manifest
+                )
+            ),
             "generation_id": generation_id,
             "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
             "pointer_schema_version": 2,
@@ -94,6 +106,9 @@ def _update_source_generation(
         item for item in contract["source_segments"] if item["source_id"] == source_id
     )
     generation = json.loads(manifest.read_text(encoding="utf-8"))
+    pointer_path = manifest.parent / "CURRENT.json"
+    if pointer_path.exists():
+        _pointer(pointer_path, generation["generation_id"], manifest)
     source["current_generation"] = {
         "as_of": as_of,
         "generation_id": generation["generation_id"],
@@ -1029,13 +1044,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.9.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.10.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.9.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.10.0"}
     assert (
         "strategy-history"
         in generation_schema["properties"]["source_manifests"]["properties"]
@@ -1852,6 +1867,29 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         validate_layered_history_generation(
             artifacts=artifacts,
             manifest_content=_reidentify_manifest(pointer_rewrite),
+            contract_path=fixture["contract_path"],
+        )
+
+    inventory_rewrite = json.loads(manifest_content)
+    rewritten_pointer = json.loads(
+        inventory_rewrite["source_pointers"]["provider-ledger"]
+    )
+    rewritten_pointer["artifact_inventory_sha256"] = "0" * 64
+    rewritten_pointer_content = canonical_json_bytes(rewritten_pointer)
+    inventory_rewrite["source_pointers"]["provider-ledger"] = (
+        rewritten_pointer_content.decode("utf-8")
+    )
+    inventory_input = next(
+        row
+        for row in inventory_rewrite["inputs"]
+        if row["input_id"] == "provider-ledger-current"
+    )
+    inventory_input["sha256"] = hashlib.sha256(rewritten_pointer_content).hexdigest()
+    inventory_input["size_bytes"] = len(rewritten_pointer_content)
+    with pytest.raises(TargetSeriesError, match="current pointer inventory differs"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(inventory_rewrite),
             contract_path=fixture["contract_path"],
         )
 

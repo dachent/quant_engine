@@ -64,7 +64,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.9.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.10.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 LAYERED_HISTORY_MODE_POLICY: Final = {
     "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
@@ -303,6 +303,101 @@ def _manifest_artifacts(value: object) -> dict[str, VerifiedArtifact]:
             raise TargetSeriesError("manifest artifact identity is invalid")
         result[artifact_id] = VerifiedArtifact(artifact_id, sha256, size)
     return result
+
+
+def _inventory_sha256(files: list[dict[str, object]]) -> str:
+    files.sort(key=lambda item: str(item["relative_path"]))
+    return hashlib.sha256(
+        canonical_json_bytes({"files": files, "inventory_schema_version": 1})
+    ).hexdigest()
+
+
+def _source_generation_inventory_sha256(
+    source_name: str,
+    manifest_content: bytes,
+    manifest: Mapping[str, Any],
+) -> str:
+    """Derive the published generation inventory from governed manifest bytes."""
+
+    artifacts = _manifest_artifacts(manifest.get("artifacts"))
+    production_inventory_artifacts: dict[str, dict[str, str]] = {
+        "provider-ledger": {"normalized/provider-ledger.json": "provider-ledger.json"},
+        "matrixport": {"normalized/generation-catalog.json": "catalog.json"},
+        "quantbase": {
+            "normalized/quantbase-generation.json": "quantbase-generation.json"
+        },
+        "portfolio123": {
+            "normalized/portfolio123-generation.json": "portfolio123-generation.json"
+        },
+    }
+    if source_name not in production_inventory_artifacts:
+        raise TargetSeriesError("source generation inventory profile differs")
+    selected: dict[str, str] = {}
+    configured = production_inventory_artifacts[source_name]
+    if set(configured) <= set(artifacts):
+        selected.update(configured)
+        if source_name == "portfolio123":
+            selected.update(
+                {
+                    artifact_id: artifact_id
+                    for artifact_id in artifacts
+                    if artifact_id.startswith("tables/")
+                }
+            )
+    else:
+        # Portable synthetic fixtures do not stage provider envelope catalogs.
+        # Their declared artifacts are the complete generation inventory.
+        selected.update({artifact_id: artifact_id for artifact_id in artifacts})
+    if not selected:
+        raise TargetSeriesError("source generation inventory is empty")
+    files: list[dict[str, object]] = [
+        {
+            "relative_path": "generation.json",
+            "sha256": hashlib.sha256(manifest_content).hexdigest(),
+            "size_bytes": len(manifest_content),
+        }
+    ]
+    for artifact_id, relative_path in selected.items():
+        artifact = artifacts[artifact_id]
+        files.append(
+            {
+                "relative_path": relative_path,
+                "sha256": artifact.sha256,
+                "size_bytes": artifact.size_bytes,
+            }
+        )
+    if len({str(item["relative_path"]) for item in files}) != len(files):
+        raise TargetSeriesError("source generation inventory paths differ")
+    return _inventory_sha256(files)
+
+
+def _generation_directory_inventory_sha256(generation_dir: Path) -> str:
+    if generation_dir.is_symlink() or not generation_dir.is_dir():
+        raise TargetSeriesError("source generation directory is missing or linked")
+    files: list[dict[str, object]] = []
+    for directory_name, directory_names, file_names in os.walk(
+        generation_dir, followlinks=False
+    ):
+        directory = Path(directory_name)
+        if any((directory / name).is_symlink() for name in directory_names):
+            raise TargetSeriesError("source generation inventory contains a link")
+        for name in file_names:
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                raise TargetSeriesError(
+                    "source generation inventory contains an irregular file"
+                )
+            digest, size = _sha256(path)
+            files.append(
+                {
+                    "relative_path": path.relative_to(generation_dir).as_posix(),
+                    "sha256": digest,
+                    "size_bytes": size,
+                }
+            )
+    if "generation.json" not in {str(item["relative_path"]) for item in files}:
+        raise TargetSeriesError("source generation inventory lacks generation.json")
+    return _inventory_sha256(files)
 
 
 def _verify_artifact(
@@ -1635,8 +1730,11 @@ def _verified_current_generation(
     manifest_path: Path,
     source: Mapping[str, Any],
     name: str,
+    inventory_profile: str,
 ) -> tuple[dict[str, Any], str, str]:
+    pointer_content = pointer_path.read_bytes()
     pointer = _load_json(pointer_path, f"{name} current pointer")
+    manifest_content = manifest_path.read_bytes()
     manifest = _load_json(manifest_path, f"{name} generation manifest")
     current = source.get("current_generation")
     if not isinstance(current, dict):
@@ -1650,8 +1748,35 @@ def _verified_current_generation(
     ):
         raise TargetSeriesError(f"{name} current generation identity differs")
     manifest_hash, _manifest_size = _sha256(manifest_path)
-    if current.get("sha256") != manifest_hash:
+    if (
+        current.get("sha256") != manifest_hash
+        or pointer.get("manifest_sha256") != manifest_hash
+        or pointer.get("state") != "PUBLISHED"
+        or canonical_json_bytes(pointer) != pointer_content
+    ):
         raise TargetSeriesError(f"{name} generation manifest differs from contract")
+    pointer_schema_version = pointer.get("pointer_schema_version")
+    expected_pointer_keys = {
+        "generation_id",
+        "manifest_sha256",
+        "pointer_schema_version",
+        "state",
+    }
+    if pointer_schema_version == 2:
+        expected_pointer_keys.add("artifact_inventory_sha256")
+    if set(pointer) != expected_pointer_keys or pointer_schema_version not in {1, 2}:
+        raise TargetSeriesError(f"{name} current pointer contract differs")
+    if pointer_schema_version == 2:
+        inventory_sha256 = _source_generation_inventory_sha256(
+            inventory_profile, manifest_content, manifest
+        )
+        if pointer.get("artifact_inventory_sha256") != inventory_sha256:
+            raise TargetSeriesError(f"{name} current pointer inventory differs")
+        generation_dir = pointer_path.parent / "generations" / generation_id
+        if generation_dir.exists() and (
+            _generation_directory_inventory_sha256(generation_dir) != inventory_sha256
+        ):
+            raise TargetSeriesError(f"{name} published generation inventory differs")
     as_of = str(manifest.get("as_of_date", ""))
     try:
         date.fromisoformat(as_of)
@@ -2336,6 +2461,7 @@ def build_layered_history_generation(
         manifest_path=provider_ledger_manifest_path,
         source=sources["owner-account-live-history"],
         name="provider ledger",
+        inventory_profile="provider-ledger",
     )
     matrixport_manifest, matrixport_generation, matrixport_as_of = (
         _verified_current_generation(
@@ -2343,6 +2469,7 @@ def build_layered_history_generation(
             manifest_path=matrixport_manifest_path,
             source=sources["matrixport-account-generation"],
             name="Matrixport",
+            inventory_profile="matrixport",
         )
     )
     quantbase_manifest, quantbase_generation, quantbase_as_of = (
@@ -2351,6 +2478,7 @@ def build_layered_history_generation(
             manifest_path=quantbase_manifest_path,
             source=sources["quantbase-account-generation"],
             name="Quantbase",
+            inventory_profile="quantbase",
         )
     )
     p123_manifest, p123_generation, p123_as_of = _verified_current_generation(
@@ -2358,6 +2486,7 @@ def build_layered_history_generation(
         manifest_path=portfolio123_manifest_path,
         source=sources["portfolio123-model-generation"],
         name="Portfolio123",
+        inventory_profile="portfolio123",
     )
     if (
         max(
@@ -3785,6 +3914,12 @@ def validate_layered_history_generation(
             not isinstance(inventory_sha, str)
             or len(inventory_sha) != 64
             or any(ch not in "0123456789abcdef" for ch in inventory_sha)
+            or inventory_sha
+            != _source_generation_inventory_sha256(
+                source_name,
+                raw_source_manifests[source_name].encode("utf-8"),
+                source_manifests[source_name],
+            )
         ):
             raise TargetSeriesError(
                 f"layered history current pointer inventory differs: {source_name}"
