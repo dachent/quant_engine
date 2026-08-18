@@ -187,27 +187,46 @@ the generation manifest plus the exact hashes and sizes of every consumed
 artifact.
 
 - Matrixport consecutive after-fee unit NAV becomes Robuxio `ACCOUNT_LIVE`,
-  `NET`, `TOTAL` returns after proving one matching positive live holding.
+  `NET`, `TOTAL` returns only after a successful positive subscription and the
+  first confirmed held observation. Pre-funding product NAV remains distinct
+  `PROVIDER_LIVE` comparison evidence, and the funding-boundary return is
+  excluded.
 - Quantbase Volatis account value is adjusted for non-rebalance cash additions
   only after each activity amount reconciles to an observed cost-basis increase
   within two cents. The documented date-only convention is end-of-day booking.
+  The 2024-10-13 purchase has no accepted event-time value; funded membership
+  therefore begins with positive reconciled NAV and cost basis on 2024-10-15,
+  and measurable account returns begin on 2024-10-16.
 - Portfolio123 provider-live equity remains separate from the IBKR account-live
-  path. Exact-date overlap produces correlation, tracking error, and cumulative
-  implementation-gap evidence; no provider return is appended to account TWR.
+  path. The exact connected-model curve is captured, but its `Cash Added` field
+  is not accepted as a per-period external flow. #320 must accept the return
+  transform before exact-date comparison is materialized; no provider return is
+  appended to account TWR.
 
 The normalized targets, source proofs, strategy-evidence overlay, and upstream
 generation manifests are hash-bound inputs to the decomposition generation.
 Private product/account identifiers and source data remain outside Git. Missing
 dates, NAV, FX, and returns are not forward-filled or interpolated.
+Matrixport normalization requires `--subscriptions` from the same verified
+generation as `--nav` and `--holdings`; a configured assignment is not funding.
+Workstation QC must run `portfolio_financial_mvp_contract.py
+verify-history-evidence` with the four explicit governed local roots. The gate
+resolves every generated receipt selector, hashes regular-file bytes, checks
+the current pointer and generation manifest, and emits only root labels,
+contract identity, and receipt count—not source values or account identifiers.
 The overlay contract is
 `schemas/portfolio/strategy-provider-evidence.schema.json`.
 
 The roll-forward CLI takes explicit paths and provider identities from local
 configuration; none is hard-coded or committed. A separately verified
-strategy-history bundle supplies version-bound GrizzlyBears, QSI,
-TuringTrader, and Volatis histories. The Portfolio123 live-simulation twin
-supplies AI Factor. History compatibility never asserts that the brokerage
-account executed the model correctly; trade reconciliation remains separate.
+strategy-history bundle supplies version-bound GrizzlyBears, QSI, and
+TuringTrader backtests. The captured Volatis path is provider/account live and
+is not admitted as a backtest. The exact Portfolio123 EU connected-model curve
+is retained as `PROVIDER_LIVE`, but its return transform is not yet accepted;
+its exact-version backtest is also not captured.
+The Portfolio123 live-simulation twin supplies AI Factor. History compatibility
+never asserts that the brokerage account executed the model correctly; trade
+reconciliation remains separate.
 
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_target_series.py `
@@ -244,13 +263,14 @@ accepted exact-date reconciliation to the account-live series. Its indexed
 model path is converted to consecutive returns and bound to the same
 generation-derived strategy-version reference as the account-live series. The
 dependence builder uses all admitted history only before the first account-live
-observation. The current contract admits long history for AI Factor,
-GrizzlyBears, QSI, TuringTrader, and Volatis. EU remains unavailable because
-the exact connected model was omitted from the HAR export; other long EU
-curves are not interchangeable. EchoTrade is deprecated with no history and
-Composer is immaterial with unconnected history. Omitting all
-three arguments preserves the replay-compatible schema-v1 output. Supplying a
-partial set fails closed.
+observation. The current contract admits exact-version backtest history for AI
+Factor, GrizzlyBears, QSI, and TuringTrader. Volatis remains live-only because
+its current provider/account path is not a backtest. The exact Portfolio123 EU
+provider-live curve is captured, but its return transform and exact-version
+backtest are not accepted; other long EU curves are not interchangeable.
+EchoTrade is deprecated with no history and Composer is immaterial with
+unconnected history. Omitting all three arguments preserves the replay-
+compatible schema-v1 output. Supplying a partial set fails closed.
 
 ## Build, verify, publish, and recover
 

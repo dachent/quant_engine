@@ -36,7 +36,7 @@ def _write(path: Path, content: str) -> tuple[str, int]:
     return hashlib.sha256(data).hexdigest(), len(data)
 
 
-def _sources(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+def _sources(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     base = tmp_path / "base.csv"
     _write(
         base,
@@ -54,6 +54,12 @@ def _sources(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     )
     holdings = tmp_path / "holdings.csv"
     holding_hash, holding_size = _write(holdings, "product_id,shares\nP1,100\n")
+    subscriptions = tmp_path / "subscriptions.csv"
+    subscription_hash, subscription_size = _write(
+        subscriptions,
+        "confirm_nav_time_utc,product_id,status,subscription_share,subscription_time_utc\n"
+        "2026-01-02T00:00:00+00:00,P1,300,100,2026-01-01T21:00:00+00:00\n",
+    )
     manifest = tmp_path / "generation.json"
     manifest.write_text(
         json.dumps(
@@ -71,15 +77,20 @@ def _sources(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
                         "sha256": holding_hash,
                         "size_bytes": holding_size,
                     },
+                    {
+                        "artifact_id": "csv/subscription_details.csv",
+                        "sha256": subscription_hash,
+                        "size_bytes": subscription_size,
+                    },
                 ],
             }
         ),
         encoding="utf-8",
     )
-    return base, manifest, nav, holdings
+    return base, manifest, nav, holdings, subscriptions
 
 
-def test_matrixport_target_build_is_deterministic_and_account_live(
+def test_matrixport_target_starts_account_live_only_after_funding(
     tmp_path: Path,
 ) -> None:
     sources = _sources(tmp_path)
@@ -89,30 +100,95 @@ def test_matrixport_target_build_is_deterministic_and_account_live(
     assert proof_bytes == second_proof
     rows = list(csv.DictReader(io.StringIO(first.decode("utf-8"))))
     robuxio = [row for row in rows if row["series_id"] == "Robuxio"]
-    assert [row["return"] for row in robuxio] == ["0.1", "-0.1"]
+    assert [row["date"] for row in robuxio] == ["2026-01-03"]
+    assert [row["return"] for row in robuxio] == ["-0.1"]
     assert {row["evidence_layer"] for row in robuxio} == {"ACCOUNT_LIVE"}
     proof = json.loads(proof_bytes)
+    assert proof["builder"] == "portfolio-target-series/matrixport-2"
     assert proof["coverage"]["nav_observations"] == 3
-    assert proof["coverage"]["return_observations"] == 2
+    assert proof["coverage"]["provider_live_observed_end"] == "2026-01-01"
+    assert proof["coverage"]["account_live_start"] == "2026-01-02"
+    assert proof["coverage"]["funding_event_date"] == "2026-01-02"
+    assert proof["coverage"]["subscription_initiated_date"] == "2026-01-01"
+    assert proof["coverage"]["boundary_return_excluded"] is True
+    assert proof["coverage"]["return_observations"] == 1
 
 
 def test_matrixport_target_rejects_manifest_drift(tmp_path: Path) -> None:
-    base, manifest, nav, holdings = _sources(tmp_path)
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
     nav.write_text(nav.read_text(encoding="utf-8") + "P1,2026-01-04T00:00:00Z,1\n")
     with pytest.raises(TargetSeriesError, match="differs from the manifest"):
-        build_matrixport_targets(base, manifest, nav, holdings, "P1", "Robuxio")
+        build_matrixport_targets(
+            base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
+        )
 
 
 def test_matrixport_target_requires_matching_live_holding(tmp_path: Path) -> None:
-    base, manifest, nav, holdings = _sources(tmp_path)
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
     with pytest.raises(TargetSeriesError, match="exactly one live holding"):
-        build_matrixport_targets(base, manifest, nav, holdings, "UNKNOWN", "Robuxio")
+        build_matrixport_targets(
+            base, manifest, nav, holdings, subscriptions, "UNKNOWN", "Robuxio"
+        )
+
+
+def test_matrixport_target_rejects_assignment_without_successful_funding(
+    tmp_path: Path,
+) -> None:
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
+    subscription_hash, subscription_size = _write(
+        subscriptions,
+        "confirm_nav_time_utc,product_id,status,subscription_share,subscription_time_utc\n"
+        "2026-01-02T00:00:00+00:00,P1,299,100,2026-01-01T21:00:00+00:00\n",
+    )
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    artifact = next(
+        row
+        for row in manifest_value["artifacts"]
+        if row["artifact_id"] == "csv/subscription_details.csv"
+    )
+    artifact["sha256"] = subscription_hash
+    artifact["size_bytes"] = subscription_size
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+
+    with pytest.raises(
+        TargetSeriesError, match="lacks a successful positive subscription"
+    ):
+        build_matrixport_targets(
+            base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
+        )
+
+
+def test_matrixport_target_requires_exact_held_nav_at_funding_confirmation(
+    tmp_path: Path,
+) -> None:
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
+    subscription_hash, subscription_size = _write(
+        subscriptions,
+        "confirm_nav_time_utc,product_id,status,subscription_share,subscription_time_utc\n"
+        "2026-01-04T00:00:00+00:00,P1,300,100,2026-01-01T21:00:00+00:00\n",
+    )
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    artifact = next(
+        row
+        for row in manifest_value["artifacts"]
+        if row["artifact_id"] == "csv/subscription_details.csv"
+    )
+    artifact["sha256"] = subscription_hash
+    artifact["size_bytes"] = subscription_size
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+
+    with pytest.raises(
+        TargetSeriesError, match="funding confirmation lacks an exact held NAV"
+    ):
+        build_matrixport_targets(
+            base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
+        )
 
 
 def test_matrixport_target_can_replace_one_generation_bound_series(
     tmp_path: Path,
 ) -> None:
-    base, manifest, nav, holdings = _sources(tmp_path)
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
     manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
     manifest_value["as_of_date"] = "2026-01-03"
     manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
@@ -127,13 +203,14 @@ def test_matrixport_target_can_replace_one_generation_bound_series(
         manifest,
         nav,
         holdings,
+        subscriptions,
         "P1",
         "Robuxio",
         replace_existing=True,
     )
     rows = list(csv.DictReader(io.StringIO(targets.decode("utf-8"))))
     robuxio = [row for row in rows if row["series_id"] == "Robuxio"]
-    assert [row["date"] for row in robuxio] == ["2026-01-02", "2026-01-03"]
+    assert [row["date"] for row in robuxio] == ["2026-01-03"]
     proof = json.loads(proof_bytes)
     assert proof["replacement"] == {
         "enabled": True,
@@ -165,9 +242,9 @@ def test_matrixport_target_can_replace_one_generation_bound_series(
 
 
 def test_decomposition_inputs_rebind_exact_sources(tmp_path: Path) -> None:
-    base, manifest, nav, holdings = _sources(tmp_path)
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
     targets, proof = build_matrixport_targets(
-        base, manifest, nav, holdings, "P1", "Robuxio"
+        base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
     )
     factors = tmp_path / "factors.csv"
     factor_hash, factor_size = _write(factors, "date,RF,F1\n2026-01-01,0,0\n")
@@ -578,6 +655,8 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
         json.dumps(
             {
                 "as_of_date": "2026-01-06",
+                "builder": "portfolio-strategy-history",
+                "builder_version": "1.2.0",
                 "bundle_id": "b" * 64,
                 "returns_artifact": {
                     "sha256": hashlib.sha256(history_returns.read_bytes()).hexdigest(),
@@ -586,14 +665,21 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
                 "schema_version": 1,
                 "history_dispositions": [
                     {
-                        "history_status": "UNAVAILABLE_EXPORT_DEFECT",
-                        "implementation_reconciliation_status": (
-                            "BLOCKED_HISTORY_EXPORT_DEFECT"
+                        "history_status": (
+                            "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED"
                         ),
-                        "reason": "Exact connected model history was not exported.",
+                        "implementation_reconciliation_status": (
+                            "BLOCKED_RETURN_TRANSFORM; SEPARATE_FROM_ACCOUNT_LIVE"
+                        ),
+                        "reason": (
+                            "Exact provider-live history is not an exact-version "
+                            "backtest and remains comparison only."
+                        ),
                         "required_for_analysis": True,
                         "series_id": "Missing",
-                        "status": ("EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED"),
+                        "status": (
+                            "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_REQUIRED"
+                        ),
                         "strategy_version": "missing-current:v1",
                     }
                 ],
@@ -687,13 +773,24 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
         item for item in proof["series_mappings"] if item["series_id"] == "Missing"
     )
     assert missing["live_observations"] == 0
-    assert missing["status"] == ("EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED")
+    assert missing["status"] == (
+        "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_REQUIRED"
+    )
     assert missing["history_disposition_reason"] == (
-        "Exact connected model history was not exported."
+        "Exact provider-live history is not an exact-version backtest and remains "
+        "comparison only."
     )
     assert proof["simulation_coverage"]["relationship_type"] == "live_sim_twin"
     assert proof["strategy_history_bundle"]["verification"] == "VERIFIED"
     assert manifest_bytes == manifest.read_bytes()
+
+    stale_history_manifest = json.loads(history_manifest.read_text(encoding="utf-8"))
+    stale_history_manifest["builder_version"] = "1.1.0"
+    history_manifest.write_text(json.dumps(stale_history_manifest), encoding="utf-8")
+    with pytest.raises(
+        TargetSeriesError, match="strategy history builder version is unsupported"
+    ):
+        target_series._strategy_history_returns(history_manifest, history_returns)
 
     wrong_relationship = tmp_path / "wrong-relationships.parquet"
     pq.write_table(

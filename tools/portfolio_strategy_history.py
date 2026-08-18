@@ -36,6 +36,7 @@ RETURN_FIELDS: Final = (
     "strategy_version",
 )
 SCHEMA_VERSION: Final = 1
+BUILDER_VERSION: Final = "1.3.0"
 _SHEET_NS: Final = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS: Final = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PKG_REL_NS: Final = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -453,7 +454,7 @@ def _verified_generation_artifact(
 
 
 def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]:
-    """Prove the exact EU export gap and retain deliberate non-history decisions.
+    """Classify the exact EU capture and retain deliberate non-history decisions.
 
     Provider entity identifiers are used only in memory to test exact capture.
     They are never written to the bundle. Similar European books are inventoried
@@ -490,17 +491,35 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
         raise StrategyHistoryError("Portfolio123 generation identity differs")
 
     metadata = parquet.read_table(metadata_path).to_pylist()
-    connected = [
+    connected_rows = [
         row
         for row in metadata
         if "eu multifactor microcap" in str(row.get("name") or "").casefold()
         and str(row.get("isAccountLive") or "").casefold() == "true"
     ]
-    if len(connected) != 1:
+    connected_by_signature: dict[str, dict[str, object]] = {}
+    for row in connected_rows:
+        signature = {
+            field: row.get(field)
+            for field in (
+                "assetName",
+                "assetUid",
+                "currency",
+                "inceptionDt",
+                "isAccountLive",
+                "name",
+                "portfolioUid",
+                "posCnt",
+                "strategyTotalHoldCount",
+            )
+        }
+        key = hashlib.sha256(canonical_json_bytes(signature)).hexdigest()
+        connected_by_signature[key] = row
+    if len(connected_by_signature) != 1:
         raise StrategyHistoryError(
             "Portfolio123 connected EU model metadata is not unique"
         )
-    exact = connected[0]
+    exact = next(iter(connected_by_signature.values()))
     exact_ids = {
         str(exact.get(field) or "").strip()
         for field in ("assetUid", "portfolioUid")
@@ -509,21 +528,55 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
     if not exact_ids:
         raise StrategyHistoryError("Portfolio123 connected EU model lacks identity")
 
-    equity = parquet.read_table(
-        equity_path,
-        columns=["_entity_id", "Date", "100 EUR Ret", "100 USD Ret", "# Positions"],
-    ).to_pylist()
+    equity = parquet.read_table(equity_path).to_pylist()
     daily = parquet.read_table(
         daily_path, columns=["entity_id", "period_date", "model_return"]
     ).to_pylist()
     exact_equity = [
-        row for row in equity if str(row.get("_entity_id") or "") in exact_ids
+        row
+        for row in equity
+        if str(row.get("_entity_id") or "") in exact_ids
+        and row.get("Total Equity") not in (None, "")
     ]
     exact_daily = [row for row in daily if str(row.get("entity_id") or "") in exact_ids]
-    if exact_equity or exact_daily:
-        raise StrategyHistoryError(
-            "Portfolio123 exact EU history is now present; admit it before publishing"
-        )
+    provider_summary: dict[str, object] | None = None
+    if exact_equity:
+        observations: dict[date, tuple[Decimal, Decimal]] = {}
+        for row in exact_equity:
+            try:
+                observed = date.fromisoformat(str(row.get("Date") or ""))
+            except ValueError as exc:
+                raise StrategyHistoryError(
+                    "Portfolio123 exact EU provider date is invalid"
+                ) from exc
+            equity_value = _decimal(
+                row.get("Total Equity"), "Portfolio123 exact EU equity"
+            )
+            cash_added = _decimal(
+                row.get("Cash Added") or 0, "Portfolio123 exact EU cash added"
+            )
+            if equity_value <= 0:
+                raise StrategyHistoryError(
+                    "Portfolio123 exact EU equity must be positive"
+                )
+            value = (equity_value, cash_added)
+            if observed in observations and observations[observed] != value:
+                raise StrategyHistoryError(
+                    "Portfolio123 exact EU curve has conflicting duplicate dates"
+                )
+            observations[observed] = value
+        ordered = sorted(observations.items())
+        if len(ordered) < 2:
+            raise StrategyHistoryError(
+                "Portfolio123 exact EU provider history is insufficient"
+            )
+        provider_summary = {
+            "cash_added_semantics": "UNRESOLVED_RETURN_TRANSFORM",
+            "observed_end": ordered[-1][0].isoformat(),
+            "observed_start": ordered[0][0].isoformat(),
+            "raw_observations": len(ordered),
+            "return_observations": 0,
+        }
 
     registry = {
         str(row.get("entity_id") or ""): str(row.get("canonical_name") or "")
@@ -538,7 +591,11 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
             row
             for row in equity
             if str(row.get("_entity_id") or "") == entity_id
-            and (row.get("100 EUR Ret") or row.get("100 USD Ret"))
+            and (
+                row.get("Total Equity")
+                or row.get("100 EUR Ret")
+                or row.get("100 USD Ret")
+            )
         ]
         if not rows:
             continue
@@ -582,29 +639,54 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
             "strategy_name": str(exact.get("assetName") or ""),
         },
     )
+    if provider_summary is None:
+        exact_disposition: dict[str, object] = {
+            "action": "CAPTURE_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_HISTORY",
+            "exact_equity_curve_rows": 0,
+            "exact_normalized_daily_rows": len(exact_daily),
+            "history_status": "UNAVAILABLE_EXACT_PROVIDER_LIVE_NOT_CAPTURED",
+            "implementation_reconciliation_status": "BLOCKED_HISTORY_CAPTURE",
+            "reason": (
+                "The exact connected live EU model is identified, but its provider-live "
+                "equity curve is not captured. Different European books remain "
+                "inadmissible substitutes."
+            ),
+            "status": "NOT_CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE",
+        }
+    else:
+        exact_disposition = {
+            "action": "DEFINE_AND_ACCEPT_PROVIDER_RETURN_TRANSFORM_IN_320",
+            "exact_equity_curve_rows": len(exact_equity),
+            "exact_normalized_daily_rows": len(exact_daily),
+            "history_status": (
+                "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED"
+            ),
+            "implementation_reconciliation_status": (
+                "BLOCKED_RETURN_TRANSFORM; SEPARATE_FROM_ACCOUNT_LIVE"
+            ),
+            "provider_live": provider_summary,
+            "reason": (
+                "The exact connected-model equity curve is captured, but the HAR Cash "
+                "Added field is not accepted as a per-period external flow. The curve "
+                "remains PROVIDER_LIVE and cannot be return-materialized until #320 "
+                "accepts its transform; it never overwrites the IBKR ACCOUNT_LIVE path."
+            ),
+            "status": (
+                "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_REQUIRED"
+            ),
+        }
     return [
         {
-            "action": "RECOVER_EXACT_CONNECTED_MODEL_HISTORY_FROM_HAR_EXPORT",
+            **exact_disposition,
             "connected_model_currency": str(exact.get("currency") or ""),
             "connected_model_holding_count": int(
                 str(exact.get("strategyTotalHoldCount") or exact.get("posCnt") or 0)
             ),
             "connected_model_inception": str(exact.get("inceptionDt") or ""),
-            "exact_equity_curve_rows": 0,
-            "exact_normalized_daily_rows": 0,
-            "history_status": "UNAVAILABLE_EXPORT_DEFECT",
-            "implementation_reconciliation_status": "BLOCKED_HISTORY_EXPORT_DEFECT",
-            "reason": (
-                "The published HAR generation identifies the exact connected live EU "
-                "model but captured no equity-curve or normalized daily-return rows for "
-                "that entity. Other long European curves are different books and are "
-                "not admissible substitutes."
-            ),
             "required_for_analysis": True,
             "retained_but_not_admitted": alternatives,
             "series_id": "EU [P123]",
             "source_artifacts": source_artifacts,
-            "status": "EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED",
             "strategy_version": eu_version,
         },
         {
@@ -1632,7 +1714,7 @@ def _qsi(
     return accepted, definition
 
 
-def _volatis(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
+def _volatis_disposition(path: Path, *, accepted_as_of: date) -> dict[str, object]:
     source = _source_identity(path, "quantbase-volatis-pricehistory")
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -1643,6 +1725,8 @@ def _volatis(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
     except (OSError, UnicodeDecodeError) as exc:
         raise StrategyHistoryError("Volatis pricehistory source is invalid") from exc
     values: list[tuple[date, Decimal]] = []
+    source_observed_end: date | None = None
+    excluded_after_as_of = 0
     previous_value: Decimal | None = None
     previous_basis: Decimal | None = None
     for raw in raw_rows:
@@ -1650,6 +1734,14 @@ def _volatis(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
         value = _decimal(raw.get("value"), "Volatis value")
         basis = _decimal(raw.get("cost_basis"), "Volatis cost basis")
         if value <= 0 or basis <= 0:
+            continue
+        source_observed_end = (
+            observed
+            if source_observed_end is None
+            else max(source_observed_end, observed)
+        )
+        if observed > accepted_as_of:
+            excluded_after_as_of += 1
             continue
         if previous_value is None or previous_basis is None:
             period_return = value / basis - Decimal(1)
@@ -1668,19 +1760,32 @@ def _volatis(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
             "source_sha256": source["sha256"],
         },
     )
-    accepted = _return_rows("Volatis Strategy", version, values)
-    return accepted, _definition(
-        series_id="Volatis Strategy",
-        version=version,
-        rows=accepted,
-        history_status="ACCEPTED_PROVIDER_MODEL_HISTORY",
-        compatibility_basis="SAME_QUANTBASE_FUND_PRICEHISTORY_AS_ASSIGNED_LIVE_STRATEGY",
-        frequency="DAILY_CALENDAR",
-        implementation_status="SAME_PROVIDER_ACCOUNT_PATH",
-        method="COST_BASIS_FLOW_ADJUSTED_PROVIDER_PRICEHISTORY",
-        source=source,
-        coverage_disposition="COMPLETE_WITHIN_SHORT_PROVIDER_HISTORY_BOUNDARY",
-    )
+    disposition: dict[str, object] = {
+        "action": "USE_ACCOUNT_LIVE_ADAPTER; DO_NOT_ADMIT_AS_BACKTEST",
+        "history_status": "UNAVAILABLE_BACKTEST_NOT_PROVED",
+        "implementation_reconciliation_status": "SAME_PROVIDER_ACCOUNT_PATH",
+        "observed_end": values[-1][0].isoformat(),
+        "observed_start": values[0][0].isoformat(),
+        "provider_live_return_observations": len(values),
+        "reason": (
+            "The Quantbase price history is the current provider/account path, not a "
+            "backtest. The account-live adapter owns its flow-adjusted returns; no "
+            "duplicate economic return series is emitted by the backtest bundle."
+        ),
+        "required_for_analysis": True,
+        "series_id": "Volatis Strategy",
+        "source_artifacts": [source],
+        "status": "CAPTURED_PROVIDER_LIVE_NOT_BACKTEST",
+        "strategy_version": version,
+    }
+    if excluded_after_as_of:
+        assert source_observed_end is not None
+        disposition["coverage_disposition"] = (
+            "COMPLETE_THROUGH_DECLARED_AS_OF_WITH_LATER_SOURCE_ROWS_EXCLUDED"
+        )
+        disposition["source_observed_end"] = source_observed_end.isoformat()
+        disposition["source_rows_excluded_after_as_of"] = excluded_after_as_of
+    return disposition
 
 
 def build_bundle(
@@ -1705,6 +1810,9 @@ def build_bundle(
         accepted_as_of = date.fromisoformat(as_of_date)
     except ValueError as exc:
         raise StrategyHistoryError("as_of_date is invalid") from exc
+    volatis_disposition = _volatis_disposition(
+        volatis_pricehistory_csv, accepted_as_of=accepted_as_of
+    )
     parts = (
         _grizzly(
             grizzly_workbook,
@@ -1734,7 +1842,6 @@ def build_bundle(
             price_extension_json=price_extension_json,
             as_of_date=accepted_as_of,
         ),
-        _volatis(volatis_pricehistory_csv),
     )
     rows = [row for accepted, _ in parts for row in accepted]
     rows.sort(key=lambda item: (item["series_id"], item["date"]))
@@ -1748,7 +1855,7 @@ def build_bundle(
     manifest: dict[str, object] = {
         "as_of_date": accepted_as_of.isoformat(),
         "builder": "portfolio-strategy-history",
-        "builder_version": "1.1.0",
+        "builder_version": BUILDER_VERSION,
         "returns_artifact": {
             "artifact_id": "strategy-history/returns.csv",
             "sha256": hashlib.sha256(returns_content).hexdigest(),
@@ -1758,10 +1865,12 @@ def build_bundle(
         "series": [definition for _, definition in parts],
         "verification": "VERIFIED",
     }
+    history_dispositions = [volatis_disposition]
     if portfolio123_generation_root is not None:
-        manifest["history_dispositions"] = _p123_history_dispositions(
-            portfolio123_generation_root
+        history_dispositions.extend(
+            _p123_history_dispositions(portfolio123_generation_root)
         )
+    manifest["history_dispositions"] = history_dispositions
     manifest["bundle_id"] = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
     return returns_content, canonical_json_bytes(manifest)
 

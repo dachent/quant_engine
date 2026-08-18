@@ -4,7 +4,9 @@ The JSON contract is the sole handwritten authority.  Markdown and JSON views
 are deterministic derivatives of its canonical bytes; they are never inputs.
 Normal validation and rendering perform no network, credential, governed-data,
 or publication work.  The explicit ``verify-owner-evidence`` command performs
-one bounded authenticated GitHub CLI read for each owner-evidence comment.
+one bounded authenticated GitHub CLI read for each owner-evidence comment. The
+explicit ``verify-history-evidence`` command resolves and hashes #319 receipts
+through caller-supplied governed local roots without emitting source values.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from datetime import date
 from decimal import Decimal
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 from typing import Any, Final, Mapping, Sequence
@@ -112,6 +114,23 @@ REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS: Final = frozenset(
         "schwab-account-generation",
     }
 )
+HISTORY_CORRECTION_LAYERS: Final = {
+    "p123-eu": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
+    "robuxio-crypto": frozenset(
+        {"ACCOUNT_LIVE", "PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"}
+    ),
+    "volatis-strategy": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
+}
+HISTORY_SPLICE_POLICY: Final = (
+    "SELECT_ONE_ACCEPTED_LIVE_LAYER; BACKTEST_ONLY_WHEN_EXACT_VERSION_MATCHED_AND_"
+    "STRICTLY_BEFORE_LIVE_INCEPTION; NEVER_RELABEL_PROVIDER_EVIDENCE_AS_ACCOUNT_LIVE"
+)
+HISTORY_EVIDENCE_ROOTS: Final = frozenset(
+    {"MATRIXPORT", "PORTFOLIO123", "PROVIDER_LEDGER", "QUANTBASE"}
+)
+HISTORY_RECEIPT_LOCATORS: Final = frozenset(
+    {"CURRENT_POINTER", "GENERATION_ARTIFACT", "GENERATION_MANIFEST"}
+)
 _HASH_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA_RE: Final = re.compile(r"^[0-9a-f]{40}$")
 _SEMVER_RE: Final = re.compile(r"^[1-9][0-9]*\.[0-9]+\.[0-9]+$")
@@ -144,6 +163,171 @@ def _load_json(path: Path, name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise FinancialMvpContractError(f"{name} must be an object")
     return value
+
+
+def _evidence_file(root: Path, selector: str, name: str) -> Path:
+    """Resolve one public-safe selector inside an explicit governed root."""
+
+    if root.is_symlink() or not root.is_dir():
+        raise FinancialMvpContractError(f"history authority root is invalid: {name}")
+    relative = PurePosixPath(selector)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise FinancialMvpContractError(f"history evidence selector is invalid: {name}")
+    candidate = root.joinpath(*relative.parts)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise FinancialMvpContractError(
+                f"history evidence selector traverses a symlink: {name}"
+            )
+    if not candidate.is_file():
+        raise FinancialMvpContractError(f"history evidence file is missing: {name}")
+    try:
+        candidate.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise FinancialMvpContractError(
+            f"history evidence escapes its authority root: {name}"
+        ) from exc
+    return candidate
+
+
+def _file_identity(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+            size += len(block)
+    return digest.hexdigest(), size
+
+
+def _verify_history_receipt(
+    receipt: Mapping[str, Any], authority_roots: Mapping[str, Path]
+) -> None:
+    role = _text(receipt["artifact_role"], "history receipt artifact_role")
+    authority_root = _text(receipt["authority_root"], "history receipt authority_root")
+    if authority_root not in HISTORY_EVIDENCE_ROOTS:
+        raise FinancialMvpContractError(f"history receipt root differs: {role}")
+    root = authority_roots.get(authority_root)
+    if root is None:
+        raise FinancialMvpContractError(
+            f"history evidence root was not supplied: {authority_root}"
+        )
+    generation_id = _hash(receipt["generation_id"], "history receipt generation")
+    selector = _text(receipt["artifact_selector"], "history artifact selector")
+    locator = _text(receipt["locator_kind"], "history receipt locator_kind")
+    manifest_artifact_id = _optional_text(
+        receipt["manifest_artifact_id"], "history manifest artifact id"
+    )
+    if locator not in HISTORY_RECEIPT_LOCATORS:
+        raise FinancialMvpContractError(f"history receipt locator differs: {role}")
+    expected_hash = _hash(receipt["sha256"], "history receipt sha256")
+
+    pointer_path = _evidence_file(root, "CURRENT.json", f"{authority_root}/CURRENT")
+    pointer = _load_json(pointer_path, f"{authority_root} current pointer")
+    if (
+        pointer.get("state") != "PUBLISHED"
+        or pointer.get("generation_id") != generation_id
+    ):
+        raise FinancialMvpContractError(
+            f"history receipt generation is not the published current authority: {role}"
+        )
+    generation_selector = f"generations/{generation_id}/generation.json"
+    manifest_path = _evidence_file(
+        root, generation_selector, f"{authority_root}/{generation_id}/manifest"
+    )
+    manifest_hash, _manifest_size = _file_identity(manifest_path)
+    if pointer.get("manifest_sha256") != manifest_hash:
+        raise FinancialMvpContractError(
+            f"history authority pointer/manifest identity differs: {role}"
+        )
+    manifest = _load_json(manifest_path, f"{authority_root} generation manifest")
+    if (
+        manifest.get("verification") != "VERIFIED"
+        or manifest.get("generation_id") != generation_id
+    ):
+        raise FinancialMvpContractError(
+            f"history evidence generation is not verified: {role}"
+        )
+
+    if locator == "CURRENT_POINTER":
+        if selector != "CURRENT.json" or manifest_artifact_id is not None:
+            raise FinancialMvpContractError(
+                f"history current-pointer selector differs: {role}"
+            )
+        actual_hash, _actual_size = _file_identity(pointer_path)
+    elif locator == "GENERATION_MANIFEST":
+        if selector != generation_selector or manifest_artifact_id is not None:
+            raise FinancialMvpContractError(
+                f"history generation-manifest selector differs: {role}"
+            )
+        actual_hash = manifest_hash
+    else:
+        if manifest_artifact_id is None:
+            raise FinancialMvpContractError(
+                f"history generation artifact lacks a manifest selector: {role}"
+            )
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, list):
+            raise FinancialMvpContractError(
+                f"history generation artifacts are invalid: {role}"
+            )
+        matches = [
+            item
+            for item in artifacts
+            if isinstance(item, dict)
+            and item.get("artifact_id") == manifest_artifact_id
+        ]
+        if len(matches) != 1:
+            raise FinancialMvpContractError(
+                f"history artifact selector is not unique: {role}"
+            )
+        artifact_path = _evidence_file(
+            root,
+            selector,
+            f"{authority_root}/{generation_id}/{role}",
+        )
+        actual_hash, actual_size = _file_identity(artifact_path)
+        artifact = matches[0]
+        if (
+            artifact.get("sha256") != actual_hash
+            or artifact.get("size_bytes") != actual_size
+        ):
+            raise FinancialMvpContractError(
+                f"history artifact differs from its generation manifest: {role}"
+            )
+    if actual_hash != expected_hash:
+        raise FinancialMvpContractError(
+            f"history receipt differs from governed evidence bytes: {role}"
+        )
+
+
+def verify_history_evidence(
+    contract: Mapping[str, Any], authority_roots: Mapping[str, Path]
+) -> dict[str, object]:
+    """Resolve and hash every #319 receipt without exposing source values."""
+
+    history = _object(contract["history_corrections"], "history_corrections")
+    corrections = _objects(history["corrections"], "history corrections")
+    verified = 0
+    used_roots: set[str] = set()
+    for correction in corrections:
+        receipts = _objects(correction["source_receipts"], "history source_receipts")
+        for receipt in receipts:
+            _verify_history_receipt(receipt, authority_roots)
+            verified += 1
+            used_roots.add(str(receipt["authority_root"]))
+    return {
+        "authority_roots": sorted(used_roots),
+        "contract_sha256": contract_digest(contract),
+        "status": "VALID",
+        "verified_receipts": verified,
+    }
 
 
 def schema_errors(
@@ -1275,6 +1459,460 @@ def _validate_strategies(
                 )
 
 
+def _validate_history_corrections(
+    policy: Mapping[str, Any],
+    strategies: list[dict[str, Any]],
+    sources: list[dict[str, Any]],
+    registry_ids: set[str],
+) -> None:
+    _strict_keys(
+        policy,
+        {"corrections", "owner_issue", "policy_id", "policy_version", "splice_policy"},
+        "history_corrections",
+    )
+    if policy["policy_id"] != "PORT-HISTORY-TRUTH-1":
+        raise FinancialMvpContractError("history correction policy identity differs")
+    if policy["policy_version"] != 1 or policy["owner_issue"] != 319:
+        raise FinancialMvpContractError(
+            "history correction policy owner/version differs"
+        )
+    if policy["splice_policy"] != HISTORY_SPLICE_POLICY:
+        raise FinancialMvpContractError("history splice policy is unapproved")
+
+    source_by_id = {str(row.get("source_id")): row for row in sources}
+    strategy_by_id = {str(row.get("strategy_id")): row for row in strategies}
+    correction_ids: set[str] = set()
+    observed_layers: dict[str, set[str]] = {
+        strategy_id: set() for strategy_id in HISTORY_CORRECTION_LAYERS
+    }
+    account_live_starts: dict[str, date] = {}
+    funding_dates: dict[str, date] = {}
+    rows = _objects(policy["corrections"], "history_corrections.corrections")
+    for row in rows:
+        _strict_keys(
+            row,
+            {
+                "blockers",
+                "capture",
+                "correction_id",
+                "disposition_reason",
+                "evidence_layer",
+                "funding_event",
+                "history_existence",
+                "interval",
+                "mode_admission",
+                "readiness",
+                "source_id",
+                "source_receipts",
+                "strategy_id",
+                "strategy_version",
+            },
+            "history correction",
+        )
+        correction_id = _text(row["correction_id"], "history correction id")
+        if correction_id in correction_ids:
+            raise FinancialMvpContractError(
+                f"duplicate history correction: {correction_id}"
+            )
+        correction_ids.add(correction_id)
+        strategy_id = _text(row["strategy_id"], "history correction strategy_id")
+        if strategy_id not in registry_ids or strategy_id not in observed_layers:
+            raise FinancialMvpContractError(
+                f"history correction has unknown/unaffected strategy: {strategy_id}"
+            )
+        layer = _text(row["evidence_layer"], "history correction evidence_layer")
+        if layer not in HISTORY_CORRECTION_LAYERS[strategy_id]:
+            raise FinancialMvpContractError(
+                f"history correction has unexpected layer: {strategy_id}/{layer}"
+            )
+        if layer in observed_layers[strategy_id]:
+            raise FinancialMvpContractError(
+                f"overlapping history correction layer: {strategy_id}/{layer}"
+            )
+        observed_layers[strategy_id].add(layer)
+        source_id = _text(row["source_id"], "history correction source_id")
+        source = source_by_id.get(source_id)
+        if source is None:
+            raise FinancialMvpContractError(
+                f"history correction references unknown source: {source_id}"
+            )
+
+        existence = _object(row["history_existence"], "history existence")
+        _strict_keys(existence, {"authority", "status"}, "history existence")
+        existence_status = _text(existence["status"], "history existence status")
+        if existence_status not in {"EXISTS", "DOES_NOT_EXIST", "UNRESOLVED"}:
+            raise FinancialMvpContractError("history existence status differs")
+        _text(existence["authority"], "history existence authority")
+
+        capture = _object(row["capture"], "history capture")
+        _strict_keys(
+            capture,
+            {"as_of", "capture_defect", "generation_id", "generation_sha256", "status"},
+            "history capture",
+        )
+        capture_status = _text(capture["status"], "history capture status")
+        if capture_status not in {"CAPTURED_GOVERNED", "NOT_CAPTURED", "UNRESOLVED"}:
+            raise FinancialMvpContractError("history capture status differs")
+        capture_defect = _optional_text(capture["capture_defect"], "capture defect")
+        generation_id = _optional_hash(capture["generation_id"], "history generation")
+        generation_sha = _optional_hash(
+            capture["generation_sha256"], "history generation sha256"
+        )
+        generation_as_of = _optional_date(capture["as_of"], "history generation as_of")
+        has_generation = all(
+            value is not None
+            for value in (generation_id, generation_sha, generation_as_of)
+        )
+        if capture_status == "CAPTURED_GOVERNED":
+            if existence_status != "EXISTS" or not has_generation:
+                raise FinancialMvpContractError(
+                    f"history capture conflates existence/generation: {correction_id}"
+                )
+            if capture_defect is not None:
+                raise FinancialMvpContractError(
+                    f"captured history retains a capture defect: {correction_id}"
+                )
+            source_generation = _object(
+                source["current_generation"], "history source current_generation"
+            )
+            if (
+                source_generation["generation_id"] != generation_id
+                or source_generation["sha256"] != generation_sha
+                or source_generation["as_of"] != capture["as_of"]
+            ):
+                raise FinancialMvpContractError(
+                    f"history correction generation differs from source: {correction_id}"
+                )
+        elif has_generation or any(
+            value is not None
+            for value in (generation_id, generation_sha, generation_as_of)
+        ):
+            raise FinancialMvpContractError(
+                f"uncaptured history asserts a generation: {correction_id}"
+            )
+        elif capture_status == "NOT_CAPTURED" and capture_defect is None:
+            raise FinancialMvpContractError(
+                f"not-captured history lacks a named defect: {correction_id}"
+            )
+
+        version = _object(row["strategy_version"], "history strategy_version")
+        _strict_keys(
+            version,
+            {"authority", "compatibility", "status", "version_ref"},
+            "history strategy_version",
+        )
+        version_status = _text(version["status"], "history version status")
+        if version_status not in {"EVIDENCED", "NOT_APPLICABLE", "UNRESOLVED"}:
+            raise FinancialMvpContractError("history strategy version status differs")
+        version_ref = _optional_text(version["version_ref"], "history version_ref")
+        compatibility = _text(version["compatibility"], "history compatibility")
+        if compatibility not in {
+            "ACCOUNT_OWNED",
+            "EXACT_MATCH",
+            "NOT_APPLICABLE",
+            "UNRESOLVED",
+        }:
+            raise FinancialMvpContractError("history version compatibility differs")
+        _text(version["authority"], "history version authority")
+        if version_status == "EVIDENCED" and version_ref is None:
+            raise FinancialMvpContractError(
+                f"evidenced history version lacks identity: {correction_id}"
+            )
+        if version_status != "EVIDENCED" and version_ref is not None:
+            raise FinancialMvpContractError(
+                f"unresolved history version asserts identity: {correction_id}"
+            )
+        if (
+            compatibility in {"ACCOUNT_OWNED", "EXACT_MATCH"}
+            and version_status != "EVIDENCED"
+        ):
+            raise FinancialMvpContractError(
+                f"compatible history lacks evidenced version: {correction_id}"
+            )
+
+        interval = _object(row["interval"], "history interval")
+        _strict_keys(
+            interval,
+            {
+                "assignment_date",
+                "effective_end",
+                "effective_start",
+                "observed_end",
+                "observed_start",
+            },
+            "history interval",
+        )
+        assignment_date = _optional_date(interval["assignment_date"], "assignment date")
+        observed_start = _optional_date(
+            interval["observed_start"], "history observed_start"
+        )
+        observed_end = _optional_date(interval["observed_end"], "history observed_end")
+        effective_start = _optional_date(
+            interval["effective_start"], "history effective_start"
+        )
+        effective_end = _optional_date(
+            interval["effective_end"], "history effective_end"
+        )
+        if (
+            observed_start is not None
+            and observed_end is not None
+            and observed_end < observed_start
+        ):
+            raise FinancialMvpContractError(
+                f"history observed interval is reversed: {correction_id}"
+            )
+        if (
+            effective_start is not None
+            and effective_end is not None
+            and effective_end < effective_start
+        ):
+            raise FinancialMvpContractError(
+                f"history effective interval is reversed: {correction_id}"
+            )
+
+        funding = _object(row["funding_event"], "history funding_event")
+        _strict_keys(
+            funding,
+            {"account_live_start", "authority", "event_date", "status"},
+            "history funding_event",
+        )
+        funding_status = _text(funding["status"], "history funding status")
+        funding_date = _optional_date(
+            funding["event_date"], "history funding event_date"
+        )
+        account_live_start = _optional_date(
+            funding["account_live_start"], "history account_live_start"
+        )
+        funding_authority = _text(funding["authority"], "history funding authority")
+        if layer == "ACCOUNT_LIVE":
+            if funding_status == "NOT_APPLICABLE":
+                raise FinancialMvpContractError(
+                    f"account-live correction lacks funding disposition: {correction_id}"
+                )
+            if funding_status == "EVIDENCED":
+                if funding_date is None or account_live_start is None:
+                    raise FinancialMvpContractError(
+                        f"evidenced funding lacks dates: {correction_id}"
+                    )
+                if "ASSIGNMENT" in funding_authority.upper():
+                    raise FinancialMvpContractError(
+                        f"assignment date cannot be funding authority: {correction_id}"
+                    )
+                if account_live_start != funding_date:
+                    raise FinancialMvpContractError(
+                        f"account-live start differs from funding: {correction_id}"
+                    )
+                if observed_start is None or observed_start < account_live_start:
+                    raise FinancialMvpContractError(
+                        f"account-live observations precede funding: {correction_id}"
+                    )
+                account_live_starts[strategy_id] = account_live_start
+                funding_dates[strategy_id] = funding_date
+        elif funding_status != "NOT_APPLICABLE" or any(
+            value is not None for value in (funding_date, account_live_start)
+        ):
+            raise FinancialMvpContractError(
+                f"non-account history asserts funding: {correction_id}"
+            )
+        if (
+            assignment_date is not None
+            and funding_status == "EVIDENCED"
+            and funding_date is None
+        ):
+            raise FinancialMvpContractError(
+                f"assignment date substituted for funding: {correction_id}"
+            )
+
+        modes = _object(row["mode_admission"], "history mode_admission")
+        _strict_keys(
+            modes, {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}, "history mode_admission"
+        )
+        live_only = _text(modes["LIVE_ONLY"], "history LIVE_ONLY admission")
+        hybrid = _text(
+            modes["LIVE_PLUS_BACKTEST"], "history LIVE_PLUS_BACKTEST admission"
+        )
+        if layer in {"PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"} and (
+            live_only != "EXCLUDE_COMPARISON_ONLY"
+            or hybrid != "EXCLUDE_COMPARISON_ONLY"
+        ):
+            raise FinancialMvpContractError(
+                f"provider history was relabeled into an accepted mode: {correction_id}"
+            )
+        if (
+            layer == "ACCOUNT_LIVE"
+            and funding_status == "EVIDENCED"
+            and (
+                live_only != "INCLUDE_SELECTED_LIVE"
+                or hybrid != "INCLUDE_SELECTED_LIVE"
+            )
+        ):
+            raise FinancialMvpContractError(
+                f"evidenced account-live history is not selected live: {correction_id}"
+            )
+        if layer == "BACKTEST":
+            if live_only != "NOT_APPLICABLE":
+                raise FinancialMvpContractError(
+                    f"backtest entered LIVE_ONLY: {correction_id}"
+                )
+            if hybrid == "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY" and (
+                capture_status != "CAPTURED_GOVERNED"
+                or version_status != "EVIDENCED"
+                or compatibility != "EXACT_MATCH"
+            ):
+                raise FinancialMvpContractError(
+                    f"incompatible backtest entered hybrid mode: {correction_id}"
+                )
+
+        receipts = _objects(row["source_receipts"], "history source_receipts")
+        if not receipts:
+            raise FinancialMvpContractError(
+                f"history correction lacks receipts: {correction_id}"
+            )
+        receipt_keys: set[tuple[str, str]] = set()
+        receipt_hashes: set[str] = set()
+        for receipt in receipts:
+            _strict_keys(
+                receipt,
+                {
+                    "artifact_role",
+                    "artifact_selector",
+                    "authority_root",
+                    "generation_id",
+                    "locator_kind",
+                    "manifest_artifact_id",
+                    "sha256",
+                },
+                "history source receipt",
+            )
+            role = _text(receipt["artifact_role"], "history receipt artifact_role")
+            digest = _hash(receipt["sha256"], "history receipt sha256")
+            _no_private_locator(
+                receipt["artifact_selector"], "history receipt artifact_selector"
+            )
+            receipt_root = _text(
+                receipt["authority_root"], "history receipt authority_root"
+            )
+            if receipt_root not in HISTORY_EVIDENCE_ROOTS:
+                raise FinancialMvpContractError(
+                    f"history receipt root differs: {correction_id}"
+                )
+            _hash(receipt["generation_id"], "history receipt generation_id")
+            locator = _text(receipt["locator_kind"], "history receipt locator_kind")
+            if locator not in HISTORY_RECEIPT_LOCATORS:
+                raise FinancialMvpContractError(
+                    f"history receipt locator differs: {correction_id}"
+                )
+            manifest_artifact_id = _optional_text(
+                receipt["manifest_artifact_id"], "history manifest artifact id"
+            )
+            if manifest_artifact_id is not None:
+                _no_private_locator(
+                    manifest_artifact_id, "history manifest artifact id"
+                )
+            if (locator == "GENERATION_ARTIFACT") != (manifest_artifact_id is not None):
+                raise FinancialMvpContractError(
+                    f"history receipt manifest selector differs: {correction_id}"
+                )
+            if (role, digest) in receipt_keys:
+                raise FinancialMvpContractError(
+                    f"duplicate history receipt: {correction_id}"
+                )
+            receipt_keys.add((role, digest))
+            receipt_hashes.add(digest)
+        if generation_sha is not None and generation_sha not in receipt_hashes:
+            raise FinancialMvpContractError(
+                f"history generation is not receipt-bound: {correction_id}"
+            )
+        _text(row["disposition_reason"], "history disposition_reason")
+        readiness = _text(row["readiness"], "history readiness")
+        blockers = _blockers(row["blockers"], "history blockers")
+        if readiness == "READY" and blockers:
+            raise FinancialMvpContractError(
+                f"ready history correction retains blockers: {correction_id}"
+            )
+        if readiness == "REQUIRED_NOT_READY" and not blockers:
+            raise FinancialMvpContractError(
+                f"history correction lacks blocker: {correction_id}"
+            )
+        if readiness == "READY" and capture_status != "CAPTURED_GOVERNED":
+            raise FinancialMvpContractError(
+                f"ready history correction is uncaptured: {correction_id}"
+            )
+
+    for strategy_id, expected_layers in HISTORY_CORRECTION_LAYERS.items():
+        if observed_layers[strategy_id] != set(expected_layers):
+            raise FinancialMvpContractError(
+                f"history correction layers differ for {strategy_id}"
+            )
+
+    for row in rows:
+        if row["evidence_layer"] != "BACKTEST":
+            continue
+        if row["mode_admission"]["LIVE_PLUS_BACKTEST"] != (
+            "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+        ):
+            continue
+        account_start = account_live_starts.get(str(row["strategy_id"]))
+        backtest_end = _optional_date(
+            row["interval"]["observed_end"], "backtest observed_end"
+        )
+        if (
+            account_start is None
+            or backtest_end is None
+            or backtest_end >= account_start
+        ):
+            raise FinancialMvpContractError(
+                f"backtest is not strictly before live inception: {row['correction_id']}"
+            )
+
+    for strategy_id, funding_date in funding_dates.items():
+        strategy = strategy_by_id[strategy_id]
+        membership = _object(
+            strategy["funded_membership"], "strategy funded_membership"
+        )
+        if (
+            membership["status"] != "EVIDENCED"
+            or membership["effective_start"] != funding_date.isoformat()
+        ):
+            raise FinancialMvpContractError(
+                f"history funding does not propagate to strategy membership: {strategy_id}"
+            )
+
+    correction_by_id = {str(row["correction_id"]): row for row in rows}
+    p123_provider = correction_by_id["p123-eu-provider-live"]
+    if p123_provider["readiness"] != "REQUIRED_NOT_READY" or p123_provider[
+        "blockers"
+    ] != [320]:
+        raise FinancialMvpContractError(
+            "P123 EU provider history bypasses its unaccepted return transform"
+        )
+    p123_account = correction_by_id["p123-eu-account-live"]
+    p123_funding_authority = _text(
+        p123_account["funding_event"]["authority"], "P123 EU funding authority"
+    )
+    if (
+        "INTERNAL_TRANSFER_IN" not in p123_funding_authority
+        or "ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT" not in p123_funding_authority
+        or "EXTERNAL_FLOW" in p123_funding_authority
+    ):
+        raise FinancialMvpContractError(
+            "P123 EU membership transfer was misclassified as external capital"
+        )
+    volatis_provider = correction_by_id["volatis-provider-live"]
+    volatis_account = correction_by_id["volatis-account-live"]
+    if (
+        volatis_provider["interval"]["observed_start"] != "2024-10-15"
+        or volatis_provider["interval"]["effective_start"] != "2024-10-15"
+        or volatis_account["funding_event"]["event_date"] != "2024-10-15"
+        or volatis_account["funding_event"]["account_live_start"] != "2024-10-15"
+        or volatis_account["interval"]["effective_start"] != "2024-10-15"
+        or volatis_account["interval"]["observed_start"] != "2024-10-16"
+    ):
+        raise FinancialMvpContractError(
+            "Volatis membership/return boundary differs from valued governed evidence"
+        )
+
+
 def _validate_outcomes(outcomes: list[dict[str, Any]]) -> None:
     if [row.get("outcome_id") for row in outcomes] != list(OUTCOME_IDS):
         raise FinancialMvpContractError(
@@ -1758,7 +2396,12 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
         version_status = _text(
             strategy_version["status"], "source_segment.strategy_version.status"
         )
-        if version_status not in {"EVIDENCED", "NOT_APPLICABLE", "UNRESOLVED"}:
+        if version_status not in {
+            "EVIDENCED",
+            "MIXED",
+            "NOT_APPLICABLE",
+            "UNRESOLVED",
+        }:
             raise FinancialMvpContractError(
                 f"source strategy-version status differs: {source_id}"
             )
@@ -1773,9 +2416,13 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
                     f"source {source_id} has unknown strategy-version subject: {strategy_id}"
                 )
             _text(version_ref, f"source strategy version {strategy_id}")
-        if version_status != "EVIDENCED" and version_refs:
+        if version_status in {"NOT_APPLICABLE", "UNRESOLVED"} and version_refs:
             raise FinancialMvpContractError(
                 f"source {source_id} asserts unresolved/not-applicable version refs"
+            )
+        if version_status in {"EVIDENCED", "MIXED"} and not version_refs:
+            raise FinancialMvpContractError(
+                f"source {source_id} claims evidenced versions without identities"
             )
         classes = _strings(row["data_classes"], "source_segment.data_classes")
         if not classes:
@@ -1804,6 +2451,26 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
         if unknown:
             raise FinancialMvpContractError(
                 f"source segment {source_id} references unknown strategies: {sorted(unknown)}"
+            )
+        unbound_versions = set(version_refs) - set(strategy_ids)
+        if unbound_versions:
+            raise FinancialMvpContractError(
+                f"source {source_id} has version refs outside its subjects: "
+                f"{sorted(unbound_versions)}"
+            )
+        version_subjects = set(strategy_ids)
+        evidenced_subjects = set(version_refs)
+        if version_status == "EVIDENCED" and evidenced_subjects != version_subjects:
+            missing_version_subjects = sorted(version_subjects - evidenced_subjects)
+            raise FinancialMvpContractError(
+                "source "
+                f"{source_id} lacks evidenced version refs for subjects: "
+                f"{missing_version_subjects}"
+            )
+        if version_status == "MIXED" and not (evidenced_subjects < version_subjects):
+            raise FinancialMvpContractError(
+                f"source {source_id} mixed version status requires a nonempty proper "
+                "subset of subject refs"
             )
         _text(row["authority"], "source_segment.authority")
         _no_private_locator(
@@ -2628,14 +3295,15 @@ def validate_contract(
             "contract_schema_version",
             "financial_outcomes",
             "golden_case",
+            "history_corrections",
             "product",
             "source_segments",
             "strategies",
         },
         "financial MVP contract",
     )
-    if contract["contract_schema_version"] != 1:
-        raise FinancialMvpContractError("contract_schema_version must be 1")
+    if contract["contract_schema_version"] != 2:
+        raise FinancialMvpContractError("contract_schema_version must be 2")
     if contract["$schema"] != (
         "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     ):
@@ -2649,6 +3317,12 @@ def validate_contract(
     _validate_outcomes(outcomes)
     sources = _objects(contract["source_segments"], "source_segments")
     _validate_sources(sources, set(registry_ids))
+    _validate_history_corrections(
+        _object(contract["history_corrections"], "history_corrections"),
+        strategies,
+        sources,
+        set(registry_ids),
+    )
     _validate_golden_case(_object(contract["golden_case"], "golden_case"))
     return dict(contract)
 
@@ -2680,6 +3354,8 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
     outcomes = _objects(contract["financial_outcomes"], "financial_outcomes")
     strategies = _objects(contract["strategies"], "strategies")
     sources = _objects(contract["source_segments"], "source_segments")
+    history = _object(contract["history_corrections"], "history_corrections")
+    history_rows = _objects(history["corrections"], "history corrections")
     lines = [
         "# Current financial MVP",
         "",
@@ -2847,6 +3523,58 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
     lines.extend(
         [
             "",
+            "## Truthful strategy-history corrections — #319",
+            "",
+            f"- Policy: `{history['policy_id']}` version `{history['policy_version']}`",
+            f"- Splice: `{history['splice_policy']}`",
+            "",
+            "| Correction | Strategy | Layer | Existence | Capture | Observed interval | Funding / live start | Version compatibility | LIVE_ONLY | LIVE_PLUS_BACKTEST | Readiness | Source | Evidence receipts |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+    )
+    for row in history_rows:
+        interval = row["interval"]
+        observed = (
+            f"{interval['observed_start'] or '—'}..{interval['observed_end'] or '—'}"
+        )
+        funding = row["funding_event"]
+        funding_text = (
+            f"{funding['event_date'] or '—'} / {funding['account_live_start'] or '—'}"
+        )
+        capture = row["capture"]
+        capture_text = capture["status"]
+        if capture["capture_defect"]:
+            capture_text += f": {capture['capture_defect']}"
+        receipt_text = "; ".join(
+            f"{receipt['authority_root']}:{receipt['artifact_selector']}@"
+            f"{receipt['sha256'][:12]}"
+            for receipt in row["source_receipts"]
+        )
+        lines.append(
+            "| "
+            + " | ".join(
+                str(value).replace("|", "\\|")
+                for value in (
+                    row["correction_id"],
+                    row["strategy_id"],
+                    row["evidence_layer"],
+                    row["history_existence"]["status"],
+                    capture_text,
+                    observed,
+                    funding_text,
+                    row["strategy_version"]["compatibility"],
+                    row["mode_admission"]["LIVE_ONLY"],
+                    row["mode_admission"]["LIVE_PLUS_BACKTEST"],
+                    row["readiness"],
+                    row["source_id"],
+                    receipt_text,
+                )
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
             "## Source timing",
             "",
             "| Source | Cadence | Calendar | Max age days | Publication lag days | Freshness rule |",
@@ -2887,6 +3615,13 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
         ]
         consumers = source["consumers"] or ["NO_CONSUMER"]
         for strategy_id in strategy_ids:
+            version_refs = source["strategy_version"]["version_refs"]
+            subject_version_ref = version_refs.get(strategy_id)
+            source_version_status = source["strategy_version"]["status"]
+            if source_version_status == "MIXED":
+                source_version_status = (
+                    "EVIDENCED" if subject_version_ref is not None else "UNRESOLVED"
+                )
             for data_class in source["data_classes"]:
                 for consumer in consumers:
                     matrix_rows.append(
@@ -2898,15 +3633,15 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                             "data_class": data_class,
                             "source_id": source["source_id"],
                             "source_version": source["source_version"],
-                            "strategy_version_status": source["strategy_version"][
-                                "status"
-                            ],
+                            "strategy_version_status": source_version_status,
                             "strategy_version_binding": source["strategy_version"][
                                 "binding"
                             ],
-                            "strategy_version_refs": source["strategy_version"][
-                                "version_refs"
-                            ],
+                            "strategy_version_refs": (
+                                {strategy_id: subject_version_ref}
+                                if subject_version_ref is not None
+                                else {}
+                            ),
                             "authority": source["authority"],
                             "endpoint_or_artifact_selector": source[
                                 "endpoint_or_artifact_selector"
@@ -2961,6 +3696,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                     decision_id: receipts[decision_id]["payload_sha256"]
                     for decision_id in OWNER_DECISION_IDS
                 },
+                "history_corrections": history,
                 "product_version": product["product_version"],
                 "rows": matrix_rows,
             }
@@ -3010,12 +3746,17 @@ def _parser() -> argparse.ArgumentParser:
             "generate",
             "check",
             "decision-digests",
+            "verify-history-evidence",
             "verify-owner-evidence",
         ),
     )
     parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_VIEW_ROOT)
+    parser.add_argument("--matrixport-root", type=Path)
+    parser.add_argument("--portfolio123-root", type=Path)
+    parser.add_argument("--provider-ledger-root", type=Path)
+    parser.add_argument("--quantbase-root", type=Path)
     return parser
 
 
@@ -3038,7 +3779,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     contract = load_contract(args.contract, args.registry)
     result: Mapping[str, object]
-    if args.command == "verify-owner-evidence":
+    if args.command == "verify-history-evidence":
+        roots = {
+            "MATRIXPORT": args.matrixport_root,
+            "PORTFOLIO123": args.portfolio123_root,
+            "PROVIDER_LEDGER": args.provider_ledger_root,
+            "QUANTBASE": args.quantbase_root,
+        }
+        missing = sorted(name for name, path in roots.items() if path is None)
+        if missing:
+            raise FinancialMvpContractError(
+                f"history evidence roots were not supplied: {missing}"
+            )
+        result = verify_history_evidence(
+            contract,
+            {name: path for name, path in roots.items() if path is not None},
+        )
+    elif args.command == "verify-owner-evidence":
         comments = fetch_owner_evidence_comments(contract)
         reconcile_owner_receipt_evidence(contract, comments)
         result = {

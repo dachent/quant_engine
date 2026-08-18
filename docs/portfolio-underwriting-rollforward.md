@@ -160,11 +160,14 @@ display all three intervals and the limiting input.
 
 Pass the emitted manifest and returns to `portfolio_target_series.py` with
 `--strategy-history-manifest` and `--strategy-history-returns`. Its
-`evidence-proof.json` is the release history contract. It must contain nine
-series rows and these explicit non-silent dispositions: EU is an exact-model
-HAR export defect; EchoTrade is deprecated with no retained history; Composer
-is immaterial and its history is not connected. Similar long EU curves are
-different model books and cannot substitute for the connected EU model.
+`evidence-proof.json` is the release history contract. It must retain explicit,
+non-silent dispositions: the exact Portfolio123 EU connected-model
+provider-live curve is captured but its return transform and exact-version
+backtest are not accepted;
+Volatis provider/account-live history is not a backtest; EchoTrade is
+deprecated with no retained history; and Composer is immaterial and its
+history is not connected. Similar long EU curves are different model books and
+cannot substitute for the connected EU model.
 
 Recompute the separate trade/implementation evidence for AI Factor,
 GrizzlyBears, and TuringTrader. Portfolio123 remains HAR-first; this command
@@ -435,8 +438,9 @@ unavailable until their source facts are admitted:
 
 - authoritative design artifacts and exact strategy versions for strategies
   currently represented only by an inferred economic archetype;
-- repair of the exact connected EU Portfolio123 HAR export; retained long EU
-  curves from other model books are evidence of the export gap, not substitutes;
+- an accepted return transform for the captured exact connected EU Portfolio123
+  curve and its exact-version backtest; retained long EU curves from other model
+  books are different histories, not substitutes;
 - version-matched pre-live history for Robuxio if it becomes available and is
   admitted; EchoTrade and Composer are governed non-required dispositions;
 - complete daily account cash and fee paths, plus order/fill timestamps and

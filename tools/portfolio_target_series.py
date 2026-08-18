@@ -37,6 +37,15 @@ TARGET_FIELDS: Final = (
 )
 MATRIXPORT_NAV_FIELDS: Final = frozenset({"nav", "product_id", "timestamp_utc"})
 MATRIXPORT_HOLDING_FIELDS: Final = frozenset({"product_id", "shares"})
+MATRIXPORT_SUBSCRIPTION_FIELDS: Final = frozenset(
+    {
+        "confirm_nav_time_utc",
+        "product_id",
+        "status",
+        "subscription_share",
+        "subscription_time_utc",
+    }
+)
 QUANTBASE_HISTORY_FIELDS: Final = frozenset(
     {"time", "value", "cost_basis", "profit_loss"}
 )
@@ -46,12 +55,13 @@ QUANTBASE_ACTIVITY_FIELDS: Final = frozenset(
 CORRELATION_FIELDS: Final = ("series_id", "date", "return", "evidence_layer")
 CORRELATION_FIELDS_V2: Final = (*CORRELATION_FIELDS, "strategy_version")
 STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
+STRATEGY_HISTORY_BUILDER_VERSION: Final = "1.2.0"
+MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-2"
 STRATEGY_HISTORY_STATUSES: Final = frozenset(
     {
         "ACCEPTED_EXACT_VERSION_HISTORY",
         "ACCEPTED_EXACT_VERSION_PLUS_GOVERNED_SIGNAL_PRICE_EXTENSION",
         "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
-        "ACCEPTED_PROVIDER_MODEL_HISTORY",
     }
 )
 
@@ -195,6 +205,7 @@ def _base_rows(
 def _matrixport_returns(
     nav_path: Path,
     holdings_path: Path,
+    subscription_path: Path,
     product_id: str,
     series_id: str,
 ) -> tuple[list[dict[str, str]], dict[str, object]]:
@@ -211,6 +222,41 @@ def _matrixport_returns(
         )
     shares = _positive_decimal(holdings[0]["shares"], "Matrixport holding shares")
 
+    funded: list[tuple[date, date]] = []
+    for row in _csv_rows(
+        subscription_path,
+        MATRIXPORT_SUBSCRIPTION_FIELDS,
+        "Matrixport subscriptions",
+    ):
+        if row["product_id"] != product_id or row["status"] != "300":
+            continue
+        try:
+            subscription_share = Decimal(row["subscription_share"])
+        except (InvalidOperation, ValueError) as exc:
+            raise TargetSeriesError(
+                "Matrixport subscription share must be decimal"
+            ) from exc
+        if not subscription_share.is_finite() or subscription_share <= 0:
+            continue
+        funded.append(
+            (
+                _utc_day(row["subscription_time_utc"]),
+                _utc_day(row["confirm_nav_time_utc"]),
+            )
+        )
+    if not funded:
+        raise TargetSeriesError(
+            "Matrixport product lacks a successful positive subscription"
+        )
+    subscription_initiated_date, funding_event_date = min(
+        funded, key=lambda item: item[1]
+    )
+    if funding_event_date < subscription_initiated_date:
+        raise TargetSeriesError(
+            "Matrixport subscription confirmation precedes its initiation"
+        )
+    account_live_start = funding_event_date
+
     observations: dict[date, Decimal] = {}
     for row in _csv_rows(nav_path, MATRIXPORT_NAV_FIELDS, "Matrixport daily NAV"):
         if row["product_id"] != product_id:
@@ -226,10 +272,23 @@ def _matrixport_returns(
         raise TargetSeriesError("Matrixport product lacks a usable NAV history")
 
     ordered = sorted(observations.items())
+    if account_live_start not in observations:
+        raise TargetSeriesError(
+            "Matrixport funding confirmation lacks an exact held NAV observation"
+        )
     returns: list[dict[str, str]] = []
     previous = ordered[0][1]
+    provider_return_observations = 0
+    boundary_return_excluded = False
     for day, nav in ordered[1:]:
         value = nav / previous - Decimal(1)
+        previous = nav
+        if day < account_live_start:
+            provider_return_observations += 1
+            continue
+        if day == account_live_start:
+            boundary_return_excluded = True
+            continue
         returns.append(
             {
                 "series_id": series_id,
@@ -241,13 +300,32 @@ def _matrixport_returns(
                 "cost": "",
             }
         )
-        previous = nav
+    account_nav_dates = [day for day, _nav in ordered if day >= account_live_start]
+    provider_nav_dates = [day for day, _nav in ordered if day < account_live_start]
+    if len(account_nav_dates) < 2 or not returns:
+        raise TargetSeriesError(
+            "Matrixport funded product lacks a measurable account-live history"
+        )
     return returns, {
+        "account_live_start": account_live_start.isoformat(),
+        "account_nav_observations": len(account_nav_dates),
+        "boundary_return_excluded": boundary_return_excluded,
+        "funding_event_date": funding_event_date.isoformat(),
         "holding_shares": format(shares.normalize(), "f"),
         "nav_observations": len(ordered),
-        "observed_start": ordered[0][0].isoformat(),
-        "observed_end": ordered[-1][0].isoformat(),
+        "nav_observed_start": ordered[0][0].isoformat(),
+        "nav_observed_end": ordered[-1][0].isoformat(),
+        "observed_start": returns[0]["date"],
+        "observed_end": returns[-1]["date"],
+        "provider_live_observed_end": (
+            provider_nav_dates[-1].isoformat() if provider_nav_dates else None
+        ),
+        "provider_live_observed_start": (
+            provider_nav_dates[0].isoformat() if provider_nav_dates else None
+        ),
+        "provider_live_return_observations": provider_return_observations,
         "return_observations": len(returns),
+        "subscription_initiated_date": subscription_initiated_date.isoformat(),
     }
 
 
@@ -500,6 +578,7 @@ def build_matrixport_targets(
     manifest_path: Path,
     nav_path: Path,
     holdings_path: Path,
+    subscription_path: Path,
     product_id: str,
     series_id: str,
     *,
@@ -514,12 +593,15 @@ def build_matrixport_targets(
     artifacts = _manifest_artifacts(manifest.get("artifacts"))
     nav_artifact = _verify_artifact(nav_path, artifacts, "csv/nav_daily.csv")
     holding_artifact = _verify_artifact(holdings_path, artifacts, "csv/holdings.csv")
+    subscription_artifact = _verify_artifact(
+        subscription_path, artifacts, "csv/subscription_details.csv"
+    )
 
     base, existing = _base_rows(
         base_targets, series_id, replace_existing=replace_existing
     )
     provider_rows, coverage = _matrixport_returns(
-        nav_path, holdings_path, product_id, series_id
+        nav_path, holdings_path, subscription_path, product_id, series_id
     )
     combined = sorted(
         [*base, *provider_rows], key=lambda row: (row["series_id"], row["date"])
@@ -527,7 +609,7 @@ def build_matrixport_targets(
     target_content = _target_bytes(combined)
     base_hash, base_size = _sha256(base_targets)
     proof: dict[str, object] = {
-        "builder": "portfolio-target-series/matrixport-1",
+        "builder": MATRIXPORT_TARGET_BUILDER,
         "generation_id": generation_id,
         "generation_as_of_date": str(manifest.get("as_of_date", "")),
         "series_id": series_id,
@@ -545,6 +627,11 @@ def build_matrixport_targets(
                 "artifact_id": holding_artifact.artifact_id,
                 "sha256": holding_artifact.sha256,
                 "size_bytes": holding_artifact.size_bytes,
+            },
+            "matrixport_subscription": {
+                "artifact_id": subscription_artifact.artifact_id,
+                "sha256": subscription_artifact.sha256,
+                "size_bytes": subscription_artifact.size_bytes,
             },
         },
         "replacement": {
@@ -576,9 +663,7 @@ def build_matrixport_strategy_evidence(
         proof = json.loads(matrixport_proof_content)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TargetSeriesError("Matrixport source proof is invalid") from exc
-    if not isinstance(proof, dict) or proof.get("builder") != (
-        "portfolio-target-series/matrixport-1"
-    ):
+    if not isinstance(proof, dict) or proof.get("builder") != MATRIXPORT_TARGET_BUILDER:
         raise TargetSeriesError("Matrixport source proof contract differs")
     generation_as_of = str(proof.get("generation_as_of_date", ""))
     try:
@@ -1148,6 +1233,11 @@ def _strategy_history_returns(
     manifest = _load_json(manifest_path, "strategy history manifest")
     if manifest.get("schema_version") != STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION:
         raise TargetSeriesError("strategy history manifest schema is unsupported")
+    if (
+        manifest.get("builder") != "portfolio-strategy-history"
+        or manifest.get("builder_version") != STRATEGY_HISTORY_BUILDER_VERSION
+    ):
+        raise TargetSeriesError("strategy history builder version is unsupported")
     if manifest.get("verification") != "VERIFIED":
         raise TargetSeriesError("strategy history bundle is not verified")
     try:
@@ -1238,7 +1328,11 @@ def _strategy_history_returns(
         if (
             not series_id
             or not status
-            or not history_status.startswith("UNAVAILABLE_")
+            or not (
+                history_status.startswith("UNAVAILABLE_")
+                or history_status
+                == "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED"
+            )
             or not version
             or not implementation
             or not reason
@@ -1981,6 +2075,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--nav", type=Path)
     parser.add_argument("--holdings", type=Path)
+    parser.add_argument("--subscriptions", type=Path)
     parser.add_argument("--product-id")
     parser.add_argument("--series-id")
     parser.add_argument("--replace-series", action="store_true")
@@ -2295,7 +2390,14 @@ def main() -> int:
         else:
             _required(
                 args,
-                ("manifest", "nav", "holdings", "product_id", "series_id"),
+                (
+                    "manifest",
+                    "nav",
+                    "holdings",
+                    "subscriptions",
+                    "product_id",
+                    "series_id",
+                ),
                 "Matrixport normalization",
             )
             targets, proof = build_matrixport_targets(
@@ -2303,6 +2405,7 @@ def main() -> int:
                 args.manifest,
                 args.nav,
                 args.holdings,
+                args.subscriptions,
                 args.product_id,
                 args.series_id,
                 replace_existing=args.replace_series,
