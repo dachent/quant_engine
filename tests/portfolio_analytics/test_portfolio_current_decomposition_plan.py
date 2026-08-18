@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import sys
 from typing import Any
 
@@ -32,6 +33,21 @@ if ENGINE_SPEC is None or ENGINE_SPEC.loader is None:
 engine = importlib.util.module_from_spec(ENGINE_SPEC)
 sys.modules[ENGINE_SPEC.name] = engine
 ENGINE_SPEC.loader.exec_module(engine)
+
+HISTORY_TEST_PATH = (
+    REPOSITORY_ROOT
+    / "tests"
+    / "portfolio_analytics"
+    / ("test_portfolio_layered_history.py")
+)
+HISTORY_TEST_SPEC = importlib.util.spec_from_file_location(
+    "portfolio_layered_history_fixture_for_current_plan", HISTORY_TEST_PATH
+)
+if HISTORY_TEST_SPEC is None or HISTORY_TEST_SPEC.loader is None:
+    raise RuntimeError("unable to load layered history fixture")
+history_tests = importlib.util.module_from_spec(HISTORY_TEST_SPEC)
+sys.modules[HISTORY_TEST_SPEC.name] = history_tests
+HISTORY_TEST_SPEC.loader.exec_module(history_tests)
 
 
 def _canonical(value: object) -> bytes:
@@ -180,6 +196,11 @@ def _reidentify_public_manifest(manifest: dict[str, Any]) -> None:
 def _fixture(tmp_path: Path) -> dict[str, Any]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     days = _weekdays(80)
+    history_fixture = history_tests._history_fixture(tmp_path / "layered-source")
+    history_artifacts, history_manifest = history_tests._build(history_fixture)
+    history_generation = history_tests.write_layered_history_generation(
+        tmp_path / "layered-generations", history_artifacts, history_manifest
+    )
     base_root = tmp_path / "base"
     base_root.mkdir()
     targets = base_root / "targets.csv"
@@ -239,8 +260,8 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
         "schema_version": 1,
         "split_policy": {
             "holdout_fraction": "0.20",
-            "minimum_holdout_observations": 20,
-            "minimum_training_observations_per_factor": 20,
+            "minimum_holdout_observations": 1,
+            "minimum_training_observations_per_factor": 1,
             "cv_folds": 3,
             "parsimony_tolerance": "0.01",
             "ridge_candidates": ["0", "0.0001"],
@@ -274,8 +295,8 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
         },
         "strategies": [
             {
-                "strategy_id": "us",
-                "series_id": "strategy-us",
+                "strategy_id": "qsi",
+                "series_id": "QSI",
                 "default_disposition": "OUT_OF_SCOPE",
                 "assignments": [
                     {
@@ -291,8 +312,8 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                 ],
             },
             {
-                "strategy_id": "style",
-                "series_id": "strategy-style",
+                "strategy_id": "tt-portfolio",
+                "series_id": "TT Portfolio",
                 "default_disposition": "OUT_OF_SCOPE",
                 "assignments": [
                     {
@@ -351,6 +372,8 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     return {
         "plan_path": plan,
         "catalog_path": catalog,
+        "financial_mvp_contract_path": history_fixture["contract_path"],
+        "layered_history_generation_path": history_generation,
         "base_spec_path": base_spec,
         "base_source_root": base_root,
         "market_paths": market_paths,
@@ -369,7 +392,28 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     )
 
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
+    assert manifest["policies"]["holdout"] == {
+        "fraction": "0.20",
+        "minimum_observations": 1,
+        "selection": "TRAILING_SEALED_HOLDOUT",
+    }
+    assert manifest["policies"]["model_dimension"] == {
+        "absolute_minimum_training_observations": 3,
+        "minimum_training_observations_per_factor": 1,
+    }
     assert manifest["evaluation_date"] == inputs["evaluation_date"]
+    assert manifest["layered_history"]["mode"] == "LIVE_ONLY"
+    assert manifest["layered_history"]["generation_id"] == (
+        inputs["layered_history_generation_path"].name
+    )
+    assert "inputs/base/targets.csv" not in outputs
+    selected_targets = list(
+        csv.DictReader(
+            outputs["inputs/history/selected-targets.csv"].decode("utf-8").splitlines()
+        )
+    )
+    assert {row["series_id"] for row in selected_targets} == {"QSI", "TT Portfolio"}
+    assert {row["evidence_layer"] for row in selected_targets} == {"ACCOUNT_LIVE"}
     assert {item["analysis_lens"] for item in manifest["specs"]} == {
         "ECONOMIC_FACTOR",
         "ETF_STYLE",
@@ -389,6 +433,24 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         assert factor["selection_rationale"]
         assert factor["redundancy_policy"].startswith("TRAIN_ONLY")
         assert factor["source_id"] == "UNAVAILABLE_NOT_DECLARED"
+    economic_targets = list(
+        csv.DictReader(
+            outputs["inputs/lenses/economic-targets.csv"].decode("utf-8").splitlines()
+        )
+    )
+    assert economic_targets == [
+        row for row in selected_targets if row["series_id"] == "QSI"
+    ]
+    coverage = json.loads(outputs["inputs/history/coverage.json"])
+    coverage_by_strategy = {row["strategy_id"]: row for row in coverage["strategies"]}
+    assert (
+        coverage_by_strategy["composer-holy-grail"]["modes"]["LIVE_ONLY"]["status"]
+        == "REQUIRED_NOT_READY"
+    )
+    assert (
+        coverage_by_strategy["echotrade-growth-pivots"]["modes"]["LIVE_ONLY"]["status"]
+        == "REQUIRED_NOT_READY"
+    )
 
 
 def test_write_is_content_addressed_and_idempotent(tmp_path: Path) -> None:
@@ -406,6 +468,394 @@ def test_write_is_content_addressed_and_idempotent(tmp_path: Path) -> None:
     )
     with pytest.raises(planner.CurrentPlanError, match="differs from exact rebuild"):
         planner.write_bundle(output_root=output_root, **kwargs)
+
+
+def test_layered_history_tampering_and_uncontrolled_contract_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _fixture(tmp_path)
+    strategies = planner._resolved_strategies(inputs["plan_document"])
+    generation_root = inputs["layered_history_generation_path"]
+
+    for name in ("projection", "coverage", "receipt", "inventory"):
+        tampered_root = tmp_path / f"tampered-{name}"
+        shutil.copytree(generation_root, tampered_root)
+        if name == "projection":
+            path = tampered_root / "live-only.csv"
+            path.write_bytes(path.read_bytes() + b"tampered\n")
+        elif name == "coverage":
+            payload = json.loads((tampered_root / "coverage.json").read_text())
+            payload["uncontrolled"] = True
+            _write_json(tampered_root / "coverage.json", payload)
+        elif name == "receipt":
+            payload = json.loads((tampered_root / "generation.json").read_text())
+            payload["builder_version"] = "uncontrolled"
+            _write_json(tampered_root / "generation.json", payload)
+        else:
+            (tampered_root / "extra.txt").write_text("uncontrolled", encoding="utf-8")
+        with pytest.raises(
+            planner.CurrentPlanError, match="layered history verification failed"
+        ):
+            planner._layered_history_targets(
+                generation_root=tampered_root,
+                contract_path=inputs["financial_mvp_contract_path"],
+                strategies=strategies,
+                evidence_mode="LIVE_ONLY",
+                evaluated_on=date.fromisoformat(inputs["evaluation_date"]),
+            )
+
+    contract_path = tmp_path / "uncontrolled-contract.json"
+    contract = json.loads(
+        inputs["financial_mvp_contract_path"].read_text(encoding="utf-8")
+    )
+    contract["uncontrolled_policy"] = True
+    _write_json(contract_path, contract)
+
+    class _CachedBypassVerifier:
+        @staticmethod
+        def verify_layered_history_generation(
+            _generation_root: Path, _contract_path: Path
+        ) -> dict[str, str]:
+            return {
+                "generation_id": generation_root.name,
+                "verification": "VALID",
+            }
+
+    monkeypatch.setitem(
+        sys.modules,
+        "portfolio_target_series_for_current_decomposition_plan",
+        _CachedBypassVerifier,
+    )
+    with pytest.raises(
+        planner.CurrentPlanError, match="layered history verification failed"
+    ):
+        planner._layered_history_targets(
+            generation_root=generation_root,
+            contract_path=contract_path,
+            strategies=strategies,
+            evidence_mode="LIVE_ONLY",
+            evaluated_on=date.fromisoformat(inputs["evaluation_date"]),
+        )
+
+
+def test_live_plus_backtest_requires_exact_available_mode(tmp_path: Path) -> None:
+    inputs = _fixture(tmp_path)
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match=(
+            "LIVE_PLUS_BACKTEST is not ready for qsi: "
+            "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
+        ),
+    ):
+        planner.build_bundle(
+            evidence_mode="LIVE_PLUS_BACKTEST",
+            **{key: value for key, value in inputs.items() if key != "plan_document"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("duplicate", "duplicate series date"),
+        ("wrong_layer", "evidence layer differs from mode"),
+        ("future", "beyond the evaluation date"),
+    ),
+)
+def test_planner_independently_rejects_invalid_selected_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+) -> None:
+    generation_id = "1" * 64
+    generation_root = tmp_path / "generation"
+    generation_root.mkdir()
+    _write_json(
+        generation_root / "generation.json",
+        {"as_of_date": "2026-01-10", "generation_id": generation_id},
+    )
+    _write_json(
+        generation_root / "coverage.json",
+        {
+            "strategies": [
+                {
+                    "strategy_id": "qsi",
+                    "series_id": "QSI",
+                    "strategy_version": {"history_generation_ref": "qsi:v1"},
+                    "modes": {
+                        "LIVE_ONLY": {"status": "AVAILABLE", "reason": "AVAILABLE"}
+                    },
+                    "segments": [
+                        {
+                            "evidence_layer": "ACCOUNT_LIVE",
+                            "mode_admission": "INCLUDE_SELECTED_LIVE",
+                            "observed_start": "2026-01-09",
+                            "return_observations": 1,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    _write_json(tmp_path / "contract.json", {"contract_schema_version": 4})
+    selected_date = "2026-01-11" if mutation == "future" else "2026-01-09"
+    selected_layer = "BACKTEST" if mutation == "wrong_layer" else "ACCOUNT_LIVE"
+    projection_rows = [["QSI", selected_date, "0.001", selected_layer, "qsi:v1"]]
+    if mutation == "duplicate":
+        projection_rows.append(list(projection_rows[0]))
+    (generation_root / "live-only.csv").write_bytes(
+        planner._csv_bytes(planner.LAYERED_PROJECTION_HEADERS, projection_rows)
+    )
+    segment_row = [
+        "qsi",
+        "QSI",
+        selected_date,
+        "0.001",
+        selected_layer,
+        "qsi:v1",
+        "qsi-live",
+        "provider-ledger-account-live",
+        "2" * 64,
+        "INCLUDE_SELECTED_LIVE",
+        "NET",
+        "TOTAL",
+        "WEEKDAY_SOURCE_CALENDAR",
+        "DAILY",
+    ]
+    (generation_root / "segments.csv").write_bytes(
+        planner._csv_bytes(planner.LAYERED_SEGMENT_HEADERS, [segment_row])
+    )
+
+    class _AcceptedVerifier:
+        @staticmethod
+        def verify_layered_history_generation(
+            _generation_root: Path, _contract_path: Path
+        ) -> dict[str, str]:
+            return {"generation_id": generation_id, "verification": "VALID"}
+
+    monkeypatch.setattr(planner, "_layered_history_module", _AcceptedVerifier)
+    with pytest.raises(planner.CurrentPlanError, match=message):
+        planner._layered_history_targets(
+            generation_root=generation_root,
+            contract_path=tmp_path / "contract.json",
+            strategies=[
+                {
+                    "strategy_id": "qsi",
+                    "series_id": "QSI",
+                    "assignments": [{"source_key": "economic"}],
+                }
+            ],
+            evidence_mode="LIVE_ONLY",
+            evaluated_on=date(2026, 1, 10),
+        )
+
+
+def test_available_hybrid_projection_is_selected_without_legacy_override(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixture(tmp_path)
+    baseline_outputs, baseline_manifest = planner.build_bundle(
+        **{key: value for key, value in inputs.items() if key != "plan_document"}
+    )
+
+    history_fixture = history_tests._history_fixture(tmp_path / "hybrid-source")
+    contract = json.loads(history_fixture["contract_path"].read_text(encoding="utf-8"))
+    version = "synthetic-qsi:v1"
+    strategy = next(
+        row for row in contract["strategies"] if row["strategy_id"] == "qsi"
+    )
+    strategy["strategy_version"] = {"status": "EVIDENCED", "version_ref": version}
+    returns_path = tmp_path / "hybrid-strategy-history.csv"
+    returns_content = history_tests._csv_bytes(
+        history_tests.target_series.CORRELATION_FIELDS_V2,
+        [
+            {
+                "date": "2024-01-02",
+                "evidence_layer": "BACKTEST",
+                "return": "0.01",
+                "series_id": "QSI",
+                "strategy_version": version,
+            },
+            {
+                "date": "2024-01-03",
+                "evidence_layer": "BACKTEST",
+                "return": "-0.005",
+                "series_id": "QSI",
+                "strategy_version": version,
+            },
+        ],
+    )
+    returns_path.write_bytes(returns_content)
+    strategy_manifest = {
+        "as_of_date": history_fixture["as_of_date"],
+        "builder": "portfolio-strategy-history",
+        "builder_version": "1.4.0",
+        "history_dispositions": [],
+        "returns_artifact": {
+            "artifact_id": "strategy-history/returns.csv",
+            "sha256": hashlib.sha256(returns_content).hexdigest(),
+            "size_bytes": len(returns_content),
+        },
+        "schema_version": 1,
+        "series": [
+            {
+                "compatibility_basis": "SYNTHETIC_OWNER_ACCEPTED_VERSION",
+                "frequency": "DAILY_TRADING",
+                "history_status": "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+                "implementation_reconciliation_status": "RECONCILED_SYNTHETIC",
+                "observed_end": "2024-01-03",
+                "observed_start": "2024-01-02",
+                "required_for_analysis": True,
+                "return_observations": 2,
+                "series_id": "QSI",
+                "strategy_version": version,
+            }
+        ],
+        "verification": "VERIFIED",
+    }
+    strategy_manifest["bundle_id"] = hashlib.sha256(
+        _canonical(strategy_manifest)
+    ).hexdigest()
+    strategy_manifest_path = _write_json(
+        tmp_path / "hybrid-strategy-history.json", strategy_manifest
+    )
+    history_fixture["strategy_history_manifest_path"] = strategy_manifest_path
+    history_fixture["strategy_history_returns_path"] = returns_path
+
+    backtest_source = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "strategy-backtests"
+    )
+    backtest_source["strategy_version"] = {
+        "binding": "EXACT_VERSION_COMPATIBILITY_REQUIRED",
+        "status": "MIXED",
+        "version_refs": {"qsi": version},
+    }
+    backtest_source["current_generation"] = {
+        "as_of": history_fixture["as_of_date"],
+        "generation_id": strategy_manifest["bundle_id"],
+        "sha256": hashlib.sha256(strategy_manifest_path.read_bytes()).hexdigest(),
+    }
+    backtest_source["existence_status"] = "EXISTS"
+    backtest_source["capture_status"] = "CAPTURED_GOVERNED"
+    backtest_source["interval"]["observed_start"] = "2024-01-02"
+    backtest_source["interval"]["observed_end"] = "2024-01-03"
+    live_source = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "owner-account-live-history"
+    )
+    live_source["strategy_version"]["version_refs"]["qsi"] = version
+    for identity in contract["history_corrections"]["materialized_segment_identities"]:
+        if identity["strategy_id"] == "qsi":
+            identity["strategy_version"] = version
+    _write_json(history_fixture["contract_path"], contract)
+    history_tests._refresh_materialized_segment_identities(history_fixture)
+    history_artifacts, history_manifest_content = history_tests._build(history_fixture)
+    hybrid_generation = history_tests.write_layered_history_generation(
+        tmp_path / "hybrid-generations", history_artifacts, history_manifest_content
+    )
+    assert (
+        history_tests.verify_layered_history_generation(
+            hybrid_generation, history_fixture["contract_path"]
+        )["verification"]
+        == "VALID"
+    )
+
+    inputs["plan_document"]["strategies"] = [inputs["plan_document"]["strategies"][0]]
+    _write_json(inputs["plan_path"], inputs["plan_document"])
+    inputs["financial_mvp_contract_path"] = history_fixture["contract_path"]
+    inputs["layered_history_generation_path"] = hybrid_generation
+    outputs, manifest = planner.build_bundle(
+        evidence_mode="LIVE_PLUS_BACKTEST",
+        **{key: value for key, value in inputs.items() if key != "plan_document"},
+    )
+    economic = json.loads(outputs["specs/economic.json"])
+    targets = list(
+        csv.DictReader(
+            outputs["inputs/lenses/economic-targets.csv"].decode("utf-8").splitlines()
+        )
+    )
+    assert {row["evidence_layer"] for row in targets} == {
+        "ACCOUNT_LIVE",
+        "BACKTEST",
+    }
+    assert economic["series_composition"]["QSI"]["backtest_observations_used"] == 2
+    assert manifest["layered_history"]["mode"] == "LIVE_PLUS_BACKTEST"
+    assert "inputs/history/live-plus-backtest.csv" in outputs
+    assert "inputs/history/live-only.csv" not in outputs
+    assert (
+        hashlib.sha256(outputs["inputs/history/live-plus-backtest.csv"]).hexdigest()
+        == manifest["layered_history"]["projection_sha256"]
+    )
+    assert (
+        hashlib.sha256(outputs["inputs/history/coverage.json"]).hexdigest()
+        == (manifest["layered_history"]["coverage_sha256"])
+    )
+    assert (
+        hashlib.sha256(outputs["inputs/history/generation.json"]).hexdigest()
+        == (manifest["layered_history"]["generation_receipt_sha256"])
+    )
+    provenance = {item["artifact_id"]: item for item in economic["provenance_sources"]}
+    for name in (
+        "coverage.json",
+        "generation.json",
+        "live-plus-backtest.csv",
+        "segments.csv",
+        "selected-targets.csv",
+    ):
+        relative = f"inputs/history/{name}"
+        assert provenance[f"history/{name}"]["relative_path"] == relative
+        assert (
+            provenance[f"history/{name}"]["expected_sha256"]
+            == hashlib.sha256(outputs[relative]).hexdigest()
+        )
+    assert (
+        outputs["inputs/history/selected-targets.csv"]
+        != baseline_outputs["inputs/history/selected-targets.csv"]
+    )
+    assert manifest["bundle_id"] != baseline_manifest["bundle_id"]
+
+
+def test_legacy_target_substitution_cannot_change_selected_history(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    baseline_outputs, baseline_manifest = planner.build_bundle(**kwargs)
+
+    legacy_path = inputs["base_source_root"] / "targets.csv"
+    legacy_path.write_text(
+        ",".join(planner.TARGET_HEADERS)
+        + "\nlegacy-poison,2099-01-01,9,ACCOUNT_LIVE,GROSS,PRICE,999\n",
+        encoding="utf-8",
+    )
+    base_spec = json.loads(inputs["base_spec_path"].read_text(encoding="utf-8"))
+    base_spec["target_source"] = _definition(legacy_path, "legacy-poison")
+    _write_json(inputs["base_spec_path"], base_spec)
+
+    changed_outputs, changed_manifest = planner.build_bundle(**kwargs)
+    assert (
+        changed_outputs["inputs/history/selected-targets.csv"]
+        == (baseline_outputs["inputs/history/selected-targets.csv"])
+    )
+    assert (
+        changed_outputs["specs/economic.json"]
+        == baseline_outputs["specs/economic.json"]
+    )
+    assert changed_manifest["layered_history"] == baseline_manifest["layered_history"]
+    assert changed_manifest["bundle_id"] != baseline_manifest["bundle_id"]
+    assert all(
+        b"legacy-poison" not in content
+        for path, content in changed_outputs.items()
+        if path != "inputs/governance/base-decomposition-spec.json"
+    )
+
+    base_spec["target_source"]["relative_path"] = r"C:\private\targets.csv"
+    _write_json(inputs["base_spec_path"], base_spec)
+    with pytest.raises(planner.CurrentPlanError, match="portable relative path"):
+        planner.build_bundle(**kwargs)
 
 
 def test_generated_specs_execute_under_the_closed_engine_contract(
@@ -433,7 +883,9 @@ def test_generated_specs_execute_under_the_closed_engine_contract(
         assert len(result["model_selections"]) == 1
 
 
-def test_plan_preserves_target_end_beyond_publication_lag(tmp_path: Path) -> None:
+def test_plan_preserves_target_end_beyond_publication_lag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     inputs = _fixture(tmp_path)
     factor_days = _weekdays_through(date(2026, 1, 2), date(2026, 6, 30))
     target_days = _weekdays_through(date(2026, 1, 2), date(2026, 8, 17))
@@ -455,26 +907,38 @@ def test_plan_preserves_target_end_beyond_publication_lag(tmp_path: Path) -> Non
     )
     inputs["evaluation_date"] = "2026-08-17"
 
-    target_path = inputs["base_source_root"] / "targets.csv"
-    with target_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(planner.TARGET_HEADERS)
-        for series in ("strategy-us", "strategy-style"):
-            for index, observed in enumerate(target_days, 1):
-                writer.writerow(
-                    (
-                        series,
-                        observed.isoformat(),
-                        f"{index / 100000:.12f}",
-                        "ACCOUNT_LIVE",
-                        "NET",
-                        "TOTAL",
-                        "",
-                    )
-                )
-    base_spec = json.loads(inputs["base_spec_path"].read_text(encoding="utf-8"))
-    base_spec["target_source"] = _definition(target_path, "target-fixture")
-    _write_json(inputs["base_spec_path"], base_spec)
+    original = planner._layered_history_targets
+
+    def _long_history(**kwargs: Any) -> dict[str, Any]:
+        result = original(**kwargs)
+        rows = [
+            {
+                "series_id": series_id,
+                "date": observed.isoformat(),
+                "return": f"{index / 100000:.12f}",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return_basis": "NET",
+                "return_type": "TOTAL",
+                "cost": "",
+            }
+            for series_id in ("QSI", "TT Portfolio")
+            for index, observed in enumerate(target_days, 1)
+        ]
+        content = planner._csv_bytes(
+            planner.TARGET_HEADERS,
+            [[row[header] for header in planner.TARGET_HEADERS] for row in rows],
+        )
+        result["rows"] = rows
+        result["target_content"] = content
+        result["contents"]["selected-targets.csv"] = content
+        result["identity"]["selected_targets_sha256"] = hashlib.sha256(
+            content
+        ).hexdigest()
+        for value in result["composition"].values():
+            value["live_observations"] = len(target_days)
+        return result
+
+    monkeypatch.setattr(planner, "_layered_history_targets", _long_history)
 
     outputs, _manifest = planner.build_bundle(
         **{key: value for key, value in inputs.items() if key != "plan_document"}
@@ -580,9 +1044,40 @@ def test_public_manifest_cannot_be_reused_by_a_later_planning_run(
 
 
 def test_public_factor_required_columns_must_be_complete_at_admitted_boundary(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     inputs = _fixture(tmp_path)
+    target_days = _weekdays(80)
+    original = planner._layered_history_targets
+
+    def _history_through_boundary(**kwargs: Any) -> dict[str, Any]:
+        result = original(**kwargs)
+        rows = [
+            {
+                "series_id": series_id,
+                "date": observed.isoformat(),
+                "return": f"{index / 100000:.12f}",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return_basis": "NET",
+                "return_type": "TOTAL",
+                "cost": "",
+            }
+            for series_id in ("QSI", "TT Portfolio")
+            for index, observed in enumerate(target_days, 1)
+        ]
+        content = planner._csv_bytes(
+            planner.TARGET_HEADERS,
+            [[row[header] for header in planner.TARGET_HEADERS] for row in rows],
+        )
+        result["rows"] = rows
+        result["target_content"] = content
+        result["contents"]["selected-targets.csv"] = content
+        result["identity"]["selected_targets_sha256"] = hashlib.sha256(
+            content
+        ).hexdigest()
+        return result
+
+    monkeypatch.setattr(planner, "_layered_history_targets", _history_through_boundary)
     market_path = inputs["market_paths"]["us_factors"]
     rows = list(csv.reader(market_path.read_text(encoding="utf-8").splitlines()))
     rows[-1][2] = ""
@@ -608,20 +1103,13 @@ def test_target_observations_cannot_extend_beyond_evaluation_date(
     tmp_path: Path,
 ) -> None:
     inputs = _fixture(tmp_path)
-    target_path = inputs["base_source_root"] / "targets.csv"
-    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
-    rows[-1][1] = (
-        date.fromisoformat(inputs["evaluation_date"]) + timedelta(days=1)
-    ).isoformat()
-    with target_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerows(rows)
-    base_spec = json.loads(inputs["base_spec_path"].read_text(encoding="utf-8"))
-    base_spec["target_source"] = _definition(target_path, "target-fixture")
-    _write_json(inputs["base_spec_path"], base_spec)
-    with pytest.raises(planner.CurrentPlanError, match="beyond the evaluation date"):
-        planner.build_bundle(
-            **{key: value for key, value in inputs.items() if key != "plan_document"}
+    with pytest.raises(planner.CurrentPlanError, match="exceeds the evaluation date"):
+        planner._layered_history_targets(
+            generation_root=inputs["layered_history_generation_path"],
+            contract_path=inputs["financial_mvp_contract_path"],
+            strategies=planner._resolved_strategies(inputs["plan_document"]),
+            evidence_mode="LIVE_ONLY",
+            evaluated_on=date(2026, 1, 9),
         )
 
 
