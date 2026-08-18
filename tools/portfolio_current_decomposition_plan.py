@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.15.0"
+BUILDER_VERSION = "0.16.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -1070,6 +1070,66 @@ def _source_dispositions(
     return result
 
 
+def _validate_plan_authority(
+    plan: Mapping[str, Any],
+    plan_content: bytes,
+    financial_mvp_contract: Mapping[str, Any],
+) -> None:
+    """Bind the operational plan to the product contract's governed bytes."""
+
+    matching = [
+        source
+        for source in _objects(
+            financial_mvp_contract.get("source_segments"),
+            "financial MVP source segments",
+        )
+        if _text(source.get("source_id"), "financial MVP source_id")
+        == "current-strategy-registry"
+    ]
+    if len(matching) != 1:
+        raise CurrentPlanError(
+            "current strategy plan authority is missing or duplicated"
+        )
+    authority = matching[0]
+    plan_schema = plan.get("schema_version")
+    if not isinstance(plan_schema, int) or plan_schema < 1:
+        raise CurrentPlanError("plan.schema_version must be a positive integer")
+    schema = _object(authority.get("schema"), "current strategy plan schema")
+    if (
+        authority.get("source_version") != f"decomposition-plan-v{plan_schema}"
+        or schema.get("name") != "current-strategy-decomposition-plan"
+        or schema.get("version") != str(plan_schema)
+        or authority.get("endpoint_or_artifact_selector")
+        != "docs/analytics/current-strategy-decomposition-plan.json"
+        or authority.get("existence_status") != "EXISTS"
+        or authority.get("capture_status") != "CAPTURED_GOVERNED"
+        or authority.get("product_requirement") != "REQUIRED"
+    ):
+        raise CurrentPlanError("current strategy plan authority differs")
+    consumers = authority.get("consumers")
+    if not isinstance(consumers, list) or "DECOMPOSITION" not in consumers:
+        raise CurrentPlanError("current strategy plan authority differs")
+    data_classes = authority.get("data_classes")
+    admission = _object(authority.get("admission"), "current strategy plan admission")
+    facts = admission.get("facts")
+    if (
+        not isinstance(data_classes, list)
+        or "DECOMPOSITION_APPLICABILITY" not in data_classes
+        or not isinstance(facts, list)
+        or "DECOMPOSITION_APPLICABILITY" not in facts
+    ):
+        raise CurrentPlanError("current strategy plan applicability authority differs")
+    generation = _object(
+        authority.get("current_generation"), "current strategy plan generation"
+    )
+    plan_sha256 = _sha256(plan_content)
+    if (
+        generation.get("generation_id") != plan_sha256
+        or generation.get("sha256") != plan_sha256
+    ):
+        raise CurrentPlanError("current strategy plan authority digest differs")
+
+
 def _validate_strategy_perimeter(
     strategies: Sequence[Mapping[str, Any]],
     financial_mvp_contract: Mapping[str, Any],
@@ -1932,6 +1992,7 @@ def build_bundle(
             }
         )
 
+    _validate_plan_authority(plan, plan_content, financial_mvp_contract)
     disposition_result = {
         "schema_version": 1,
         "candidate_dispositions": sorted(

@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import shutil
 import sys
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -231,14 +231,13 @@ def _bind_fixture_source_dispositions(plan: dict[str, Any]) -> None:
         }
 
 
-def _fixture(tmp_path: Path) -> dict[str, Any]:
+def _fixture(
+    tmp_path: Path,
+    plan_mutator: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     days = _weekdays(80)
     history_fixture = history_tests._history_fixture(tmp_path / "layered-source")
-    history_artifacts, history_manifest = history_tests._build(history_fixture)
-    history_generation = history_tests.write_layered_history_generation(
-        tmp_path / "layered-generations", history_artifacts, history_manifest
-    )
     base_root = tmp_path / "base"
     base_root.mkdir()
     targets = base_root / "targets.csv"
@@ -377,8 +376,44 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                 "assignments": [],
             }
         )
+    if plan_mutator is not None:
+        plan_mutator(plan_document)
     _bind_fixture_source_dispositions(plan_document)
     plan = _write_json(tmp_path / "plan.json", plan_document)
+    plan_sha256 = hashlib.sha256(plan.read_bytes()).hexdigest()
+    registry = next(
+        source
+        for source in contract_document["source_segments"]
+        if source["source_id"] == "current-strategy-registry"
+    )
+    registry.update(
+        source_version="decomposition-plan-v2",
+        data_classes=["STRATEGY_VERSION", "DECOMPOSITION_APPLICABILITY"],
+        endpoint_or_artifact_selector=(
+            "docs/analytics/current-strategy-decomposition-plan.json"
+        ),
+        schema={"name": "current-strategy-decomposition-plan", "version": "2"},
+        current_generation={
+            "generation_id": plan_sha256,
+            "sha256": plan_sha256,
+            "as_of": "2026-08-18",
+        },
+    )
+    registry["admission"] = {
+        "transform": "portfolio-current-product-strategy-census",
+        "version": "2",
+        "facts": [
+            "STRATEGY_ID",
+            "STRATEGY_ARCHETYPE",
+            "STRATEGY_VERSION_REQUIREMENT",
+            "DECOMPOSITION_APPLICABILITY",
+        ],
+    }
+    _write_json(history_fixture["contract_path"], contract_document)
+    history_artifacts, history_manifest = history_tests._build(history_fixture)
+    history_generation = history_tests.write_layered_history_generation(
+        tmp_path / "layered-generations", history_artifacts, history_manifest
+    )
     market_paths = {
         "us_factors": tmp_path / "us.csv",
         "europe_factors": tmp_path / "eu.csv",
@@ -444,7 +479,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
 
-    assert manifest["builder_version"] == "0.15.0"
+    assert manifest["builder_version"] == "0.16.0"
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
         "fraction": "0.20",
@@ -657,6 +692,41 @@ def test_full_build_rejects_assignment_and_cell_authority_rewrites(
     with pytest.raises(
         planner.CurrentPlanError,
         match="assignment source key is unknown",
+    ):
+        planner.build_bundle(**kwargs)
+
+    coherent_false_rnr = json.loads(json.dumps(baseline))
+    qsi = next(
+        row for row in coherent_false_rnr["strategies"] if row["strategy_id"] == "qsi"
+    )
+    qsi["assignments"] = []
+    for cell in qsi["source_dispositions"].values():
+        cell.update(
+            readiness="REQUIRED_NOT_READY",
+            reason="REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED",
+            authority="UNAUTHORIZED_SEMANTIC_REWRITE",
+        )
+    _write_json(inputs["plan_path"], coherent_false_rnr)
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match="current strategy plan authority digest differs",
+    ):
+        planner.build_bundle(**kwargs)
+
+    deleted_source = json.loads(json.dumps(baseline))
+    deleted_source["sources"].pop("economic")
+    for strategy in deleted_source["strategies"]:
+        strategy["source_dispositions"].pop("economic")
+        if "assignments" in strategy:
+            strategy["assignments"] = [
+                assignment
+                for assignment in strategy["assignments"]
+                if assignment["source_key"] != "economic"
+            ]
+    _write_json(inputs["plan_path"], deleted_source)
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match="current strategy plan authority digest differs",
     ):
         planner.build_bundle(**kwargs)
 
@@ -873,25 +943,21 @@ def test_latest_common_complete_date_uses_exact_intersection_not_minimum_tail() 
 def test_models_use_independent_common_boundaries_without_global_target_truncation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    inputs = _fixture(tmp_path)
-    plan_document = inputs["plan_document"]
-    tt = next(
-        row
-        for row in plan_document["strategies"]
-        if row["strategy_id"] == "tt-portfolio"
-    )
-    tt["assignments"].append(
-        {
-            "source_key": "economic",
-            "constraint": "UNCONSTRAINED",
-            "factor_sets": [["MKT_RF"], ["MKT_RF", "SMB"]],
-        }
-    )
-    tt["source_dispositions"]["economic"].update(
-        readiness="READY_TO_MODEL",
-        reason="APPLICABLE_SYNTHETIC_BOUNDARY_FIXTURE",
-    )
-    _write_json(inputs["plan_path"], plan_document)
+    def _assign_economic(plan_document: dict[str, Any]) -> None:
+        tt = next(
+            row
+            for row in plan_document["strategies"]
+            if row["strategy_id"] == "tt-portfolio"
+        )
+        tt["assignments"].append(
+            {
+                "source_key": "economic",
+                "constraint": "UNCONSTRAINED",
+                "factor_sets": [["MKT_RF"], ["MKT_RF", "SMB"]],
+            }
+        )
+
+    inputs = _fixture(tmp_path, plan_mutator=_assign_economic)
     factor_rows = list(
         csv.DictReader(
             inputs["market_paths"]["us_factors"]
@@ -1226,6 +1292,22 @@ def test_available_hybrid_projection_is_selected_without_legacy_override(
     for identity in contract["history_corrections"]["materialized_segment_identities"]:
         if identity["strategy_id"] == "qsi":
             identity["strategy_version"] = version
+    for plan_strategy in inputs["plan_document"]["strategies"][1:]:
+        plan_strategy.pop("inherit_assignments_from", None)
+        plan_strategy["assignments"] = []
+    _bind_fixture_source_dispositions(inputs["plan_document"])
+    _write_json(inputs["plan_path"], inputs["plan_document"])
+    plan_sha256 = hashlib.sha256(inputs["plan_path"].read_bytes()).hexdigest()
+    registry = next(
+        source
+        for source in contract["source_segments"]
+        if source["source_id"] == "current-strategy-registry"
+    )
+    registry["current_generation"] = {
+        "as_of": history_fixture["as_of_date"],
+        "generation_id": plan_sha256,
+        "sha256": plan_sha256,
+    }
     _write_json(history_fixture["contract_path"], contract)
     history_tests._refresh_materialized_segment_identities(history_fixture)
     history_artifacts, history_manifest_content = history_tests._build(history_fixture)
@@ -1239,11 +1321,6 @@ def test_available_hybrid_projection_is_selected_without_legacy_override(
         == "VALID"
     )
 
-    for strategy in inputs["plan_document"]["strategies"][1:]:
-        strategy.pop("inherit_assignments_from", None)
-        strategy["assignments"] = []
-    _bind_fixture_source_dispositions(inputs["plan_document"])
-    _write_json(inputs["plan_path"], inputs["plan_document"])
     inputs["financial_mvp_contract_path"] = history_fixture["contract_path"]
     inputs["layered_history_generation_path"] = hybrid_generation
     outputs, manifest = planner.build_bundle(
