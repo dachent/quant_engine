@@ -18,6 +18,7 @@ from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import math
@@ -63,7 +64,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.8.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.9.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 LAYERED_HISTORY_MODE_POLICY: Final = {
     "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
@@ -94,11 +95,15 @@ MATRIXPORT_RETURN_TRANSFORM_CAPABILITIES: Final = {
         }
     )
 }
+LAYERED_HISTORY_REPOSITORY_DEPENDENCIES: Final = (
+    "docs/analytics/current-strategy-decomposition-plan.json",
+    "packages/core/src/quant_engine/core/contracts.py",
+    "schemas/portfolio/financial-mvp-source-contract.schema.json",
+    "tools/portfolio_financial_mvp_contract.py",
+)
 
 
-@lru_cache(maxsize=1)
-def _trusted_layered_history_code_identity() -> tuple[str, str]:
-    repository_root = Path(__file__).resolve().parents[1]
+def _clean_git_environment() -> dict[str, str]:
     repository_selection_variables = frozenset(
         {
             "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -113,11 +118,16 @@ def _trusted_layered_history_code_identity() -> tuple[str, str]:
             "GIT_WORK_TREE",
         }
     )
-    clean_environment = {
+    return {
         key: value
         for key, value in os.environ.items()
         if key.upper() not in repository_selection_variables
     }
+
+
+@lru_cache(maxsize=1)
+def _trusted_layered_history_code_identity() -> tuple[str, str]:
+    repository_root = Path(__file__).resolve().parents[1]
     try:
         completed = subprocess.run(
             [
@@ -130,7 +140,7 @@ def _trusted_layered_history_code_identity() -> tuple[str, str]:
             ],
             capture_output=True,
             check=False,
-            env=clean_environment,
+            env=_clean_git_environment(),
             text=True,
             timeout=10,
         )
@@ -150,6 +160,61 @@ def _trusted_layered_history_code_identity() -> tuple[str, str]:
         raise TargetSeriesError("layered history repository identity is unavailable")
     tool_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     return repository_sha, tool_sha256
+
+
+@lru_cache(maxsize=1)
+def _committed_layered_history_dependency_sha256s() -> dict[str, str]:
+    repository_root = Path(__file__).resolve().parents[1]
+    repository_sha, _tool_sha256 = _trusted_layered_history_code_identity()
+    identities: dict[str, str] = {}
+    for relative_path in LAYERED_HISTORY_REPOSITORY_DEPENDENCIES:
+        try:
+            completed = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository_root),
+                    "show",
+                    f"{repository_sha}:{relative_path}",
+                ],
+                capture_output=True,
+                check=False,
+                env=_clean_git_environment(),
+                timeout=10,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            raise TargetSeriesError(
+                "layered history committed dependency is unavailable"
+            ) from exc
+        if completed.returncode != 0:
+            raise TargetSeriesError(
+                "layered history committed dependency is unavailable"
+            )
+        identities[relative_path] = hashlib.sha256(completed.stdout).hexdigest()
+    return identities
+
+
+def _require_trusted_layered_history_dependencies() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    expected = _committed_layered_history_dependency_sha256s()
+    for relative_path, expected_sha256 in expected.items():
+        path = repository_root.joinpath(*relative_path.split("/"))
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256
+        ):
+            raise TargetSeriesError(
+                f"layered history repository dependency differs: {relative_path}"
+            )
+    imported_core_path = inspect.getsourcefile(canonical_json_bytes)
+    core_dependency = "packages/core/src/quant_engine/core/contracts.py"
+    if (
+        imported_core_path is None
+        or hashlib.sha256(Path(imported_core_path).read_bytes()).hexdigest()
+        != expected[core_dependency]
+    ):
+        raise TargetSeriesError("layered history imported core dependency differs")
 
 
 LAYERED_HISTORY_SEGMENT_FIELDS: Final = (
@@ -1457,6 +1522,7 @@ def _history_contract(
     dict[str, dict[str, Any]],
     dict[str, dict[str, Any]],
 ]:
+    _require_trusted_layered_history_dependencies()
     validator_path = Path(__file__).with_name("portfolio_financial_mvp_contract.py")
     spec = importlib.util.spec_from_file_location(
         "_portfolio_financial_mvp_contract_for_history", validator_path
@@ -1467,6 +1533,25 @@ def _history_contract(
     sys.modules[spec.name] = validator
     try:
         spec.loader.exec_module(validator)
+        validator_canonical_json_bytes = getattr(
+            validator, "canonical_json_bytes", None
+        )
+        validator_core_path = (
+            inspect.getsourcefile(validator_canonical_json_bytes)
+            if callable(validator_canonical_json_bytes)
+            else None
+        )
+        committed_core_sha256 = _committed_layered_history_dependency_sha256s()[
+            "packages/core/src/quant_engine/core/contracts.py"
+        ]
+        if (
+            validator_core_path is None
+            or hashlib.sha256(Path(validator_core_path).read_bytes()).hexdigest()
+            != committed_core_sha256
+        ):
+            raise TargetSeriesError(
+                "financial MVP validator imported core dependency differs"
+            )
         contract = _load_json(path, "financial MVP source contract")
         schema = _load_json(
             validator_path.parents[1]
@@ -3782,6 +3867,8 @@ def validate_layered_history_generation(
         LAYERED_HISTORY_SEGMENT_FIELDS,
         "layered history segments",
     )
+    if artifacts["segments.csv"] != _segment_view_bytes(segments):
+        raise TargetSeriesError("layered history segments serialization differs")
     canonical_segments = sorted(
         segments,
         key=lambda row: (
@@ -3803,6 +3890,8 @@ def validate_layered_history_generation(
     excluded = _csv_content_rows(
         artifacts["excluded.csv"], TARGET_FIELDS, "excluded history evidence"
     )
+    if artifacts["excluded.csv"] != _target_bytes(excluded):
+        raise TargetSeriesError("excluded history evidence serialization differs")
     canonical_excluded = sorted(
         excluded, key=lambda row: (row["series_id"], row["date"])
     )
@@ -3811,14 +3900,20 @@ def validate_layered_history_generation(
     live_only = _csv_content_rows(
         artifacts["live-only.csv"], CORRELATION_FIELDS_V2, "LIVE_ONLY history"
     )
+    if artifacts["live-only.csv"] != _correlation_view_bytes(live_only):
+        raise TargetSeriesError("LIVE_ONLY history serialization differs")
     hybrid = _csv_content_rows(
         artifacts["live-plus-backtest.csv"],
         CORRELATION_FIELDS_V2,
         "LIVE_PLUS_BACKTEST history",
     )
+    if artifacts["live-plus-backtest.csv"] != _correlation_view_bytes(hybrid):
+        raise TargetSeriesError("LIVE_PLUS_BACKTEST history serialization differs")
     returns = _csv_content_rows(
         artifacts["returns.csv"], CORRELATION_FIELDS_V2, "correlation history"
     )
+    if artifacts["returns.csv"] != _correlation_view_bytes(returns):
+        raise TargetSeriesError("correlation history serialization differs")
     output_counts = {
         "segments.csv": len(segments),
         "excluded.csv": len(excluded),

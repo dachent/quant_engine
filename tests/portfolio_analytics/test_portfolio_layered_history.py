@@ -983,6 +983,44 @@ def test_layered_history_code_identity_ignores_inherited_git_selection(
     assert target_series._trusted_layered_history_code_identity() == trusted_identity
 
 
+def test_layered_history_rejects_repository_dependency_outside_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    committed = dict(target_series._committed_layered_history_dependency_sha256s())
+    committed["tools/portfolio_financial_mvp_contract.py"] = "0" * 64
+    monkeypatch.setattr(
+        target_series,
+        "_committed_layered_history_dependency_sha256s",
+        lambda: committed,
+    )
+    with pytest.raises(TargetSeriesError, match="repository dependency differs"):
+        _build(fixture)
+
+
+def test_layered_history_rejects_dynamic_validator_with_different_core(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    fake_core_path = tmp_path / "foreign_core" / "contracts.py"
+    fake_core_path.parent.mkdir()
+    fake_core_path.write_text(
+        "import json\n"
+        "def canonical_json_bytes(value):\n"
+        "    return json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8') + b'\\n'\n",
+        encoding="utf-8",
+    )
+    fake_spec = importlib.util.spec_from_file_location(
+        "quant_engine.core.contracts", fake_core_path
+    )
+    assert fake_spec is not None and fake_spec.loader is not None
+    fake_core = importlib.util.module_from_spec(fake_spec)
+    fake_spec.loader.exec_module(fake_core)
+    monkeypatch.setitem(sys.modules, "quant_engine.core.contracts", fake_core)
+    with pytest.raises(TargetSeriesError, match="financial MVP contract is invalid"):
+        _build(fixture)
+
+
 def test_layered_history_generation_is_deterministic_and_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -991,13 +1029,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.8.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.9.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.8.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.9.0"}
     assert (
         "strategy-history"
         in generation_schema["properties"]["source_manifests"]["properties"]
@@ -1153,6 +1191,44 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
         validate_layered_history_generation(
             artifacts=artifacts,
             manifest_content=_reidentify_manifest(rewritten_tool),
+            contract_path=fixture["contract_path"],
+        )
+
+    crlf_artifacts = dict(artifacts)
+    crlf_manifest = json.loads(manifest_content)
+    crlf_segments = artifacts["segments.csv"].replace(b"\n", b"\r\n")
+    _replace_output(crlf_artifacts, crlf_manifest, "segments.csv", crlf_segments)
+    with pytest.raises(TargetSeriesError, match="segments serialization differs"):
+        validate_layered_history_generation(
+            artifacts=crlf_artifacts,
+            manifest_content=_reidentify_manifest(crlf_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    quoted_artifacts = dict(artifacts)
+    quoted_manifest = json.loads(manifest_content)
+    quoted_rows = list(
+        csv.DictReader(io.StringIO(artifacts["live-only.csv"].decode("utf-8")))
+    )
+    quoted_buffer = io.StringIO(newline="")
+    quoted_writer = csv.DictWriter(
+        quoted_buffer,
+        fieldnames=target_series.CORRELATION_FIELDS_V2,
+        lineterminator="\n",
+        quoting=csv.QUOTE_ALL,
+    )
+    quoted_writer.writeheader()
+    quoted_writer.writerows(quoted_rows)
+    _replace_output(
+        quoted_artifacts,
+        quoted_manifest,
+        "live-only.csv",
+        quoted_buffer.getvalue().encode("utf-8"),
+    )
+    with pytest.raises(TargetSeriesError, match="history serialization differs"):
+        validate_layered_history_generation(
+            artifacts=quoted_artifacts,
+            manifest_content=_reidentify_manifest(quoted_manifest),
             contract_path=fixture["contract_path"],
         )
 
