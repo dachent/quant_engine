@@ -60,7 +60,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.4.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.5.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 MATRIXPORT_GAP_KINDS: Final = (
     "nav_missing_date",
@@ -1919,6 +1919,71 @@ def _row_identity(rows: Sequence[Mapping[str, str]]) -> dict[str, object]:
     }
 
 
+def _materialized_segment_identities(
+    rows: Sequence[Mapping[str, str]],
+    sources: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, object]]:
+    """Bind each value-bearing segment to its current governed source receipt."""
+
+    result: list[dict[str, object]] = []
+    for segment_id in sorted({row["segment_id"] for row in rows}):
+        selected = [row for row in rows if row["segment_id"] == segment_id]
+        first = selected[0]
+        static_fields = (
+            "calendar",
+            "evidence_layer",
+            "frequency",
+            "mode_admission",
+            "return_basis",
+            "return_type",
+            "segment_id",
+            "source_generation_id",
+            "source_id",
+            "strategy_id",
+            "strategy_version",
+        )
+        if any(
+            tuple(row[field] for field in static_fields)
+            != tuple(first[field] for field in static_fields)
+            for row in selected
+        ):
+            raise TargetSeriesError(
+                f"layered history segment has mixed authority: {segment_id}"
+            )
+        source = sources.get(first["source_id"])
+        generation = source.get("current_generation") if source is not None else None
+        if not isinstance(generation, dict) or (
+            generation.get("generation_id") != first["source_generation_id"]
+            or not isinstance(generation.get("sha256"), str)
+        ):
+            raise TargetSeriesError(
+                f"layered history segment source receipt differs: {segment_id}"
+            )
+        identity = _row_identity(selected)
+        result.append(
+            {
+                "calendar": first["calendar"],
+                "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+                "evidence_layer": first["evidence_layer"],
+                "frequency": first["frequency"],
+                "mode_admission": first["mode_admission"],
+                "observed_end": identity["observed_end"],
+                "observed_start": identity["observed_start"],
+                "return_basis": first["return_basis"],
+                "return_observations": identity["return_observations"],
+                "return_type": first["return_type"],
+                "segment_id": segment_id,
+                "sha256": identity["sha256"],
+                "source_generation_id": first["source_generation_id"],
+                "source_generation_sha256": generation["sha256"],
+                "source_id": first["source_id"],
+                "strategy_id": first["strategy_id"],
+                "strategy_version": first["strategy_version"],
+            }
+        )
+    return result
+
+
 def _target_row_identity(rows: Sequence[Mapping[str, str]]) -> dict[str, object]:
     """Hash rejected target rows without inventing a strategy-version identity."""
 
@@ -3504,6 +3569,13 @@ def validate_layered_history_generation(
     )
     if segments != canonical_segments:
         raise TargetSeriesError("layered history segment ordering differs")
+    actual_segment_identities = _materialized_segment_identities(segments, sources)
+    if actual_segment_identities != contract["history_corrections"].get(
+        "materialized_segment_identities"
+    ):
+        raise TargetSeriesError(
+            "layered history segment values differ from product authority"
+        )
     excluded = _csv_content_rows(
         artifacts["excluded.csv"], TARGET_FIELDS, "excluded history evidence"
     )
@@ -3702,6 +3774,13 @@ def validate_layered_history_generation(
         summaries = raw.get("segments")
         if not isinstance(summaries, list):
             raise TargetSeriesError("layered history segment coverage is absent")
+        summary_ids = [
+            str(item.get("segment_id", ""))
+            for item in summaries
+            if isinstance(item, dict)
+        ]
+        if len(summary_ids) != len(summaries) or summary_ids != sorted(summary_ids):
+            raise TargetSeriesError("layered history segment coverage ordering differs")
         actual_rows = rows_by_strategy[strategy_id]
         if strategy_id == "echotrade-growth-pivots" and actual_rows:
             raise TargetSeriesError("EchoTrade event-only history was admitted")

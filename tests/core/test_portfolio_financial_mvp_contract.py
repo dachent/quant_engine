@@ -121,7 +121,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "ac878e9433318fdef635d333942bcacf55ef51725e2c08b06f9ad5438dc394c4"
+        "f63e93d60098ccd206bd20de21e95568e9de1eb19d68f043a999d5146bb4e5a9"
     )
 
 
@@ -591,6 +591,33 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     assert history["owner_issue"] == 319
     rows = history["corrections"]
     assert len(rows) == 10
+    segment_identities = history["materialized_segment_identities"]
+    assert [row["segment_id"] for row in segment_identities] == sorted(
+        row["segment_id"] for row in segment_identities
+    )
+    assert {row["segment_id"] for row in segment_identities} == {
+        "grizzlybears-vtma:account-live",
+        "p123-ai-factor:account-live",
+        "p123-eu:account-live",
+        "qsi:account-live",
+        "robuxio-crypto:account-live",
+        "robuxio-crypto:provider-live-before-funding",
+        "tt-portfolio:account-live",
+        "volatis-strategy:account-live",
+    }
+    sources = {row["source_id"]: row for row in contract["source_segments"]}
+    for identity in segment_identities:
+        generation = sources[identity["source_id"]]["current_generation"]
+        assert (
+            identity["source_generation_id"],
+            identity["source_generation_sha256"],
+        ) == (generation["generation_id"], generation["sha256"])
+        assert identity["canonicalization"] == (
+            "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1"
+        )
+    rendered = contract_tool.render_views(contract)
+    assert b"### Materialized segment value authority" in rendered.summary_markdown
+    assert segment_identities[0]["sha256"].encode("utf-8") in rendered.summary_markdown
     assert {(row["strategy_id"], row["evidence_layer"]) for row in rows} == {
         ("robuxio-crypto", "PROVIDER_TRACK_RECORD"),
         ("robuxio-crypto", "PROVIDER_LIVE"),
@@ -689,6 +716,26 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         in p123_provider["disposition_reason"]
     )
     assert "No provider-live return is admitted" in p123_provider["disposition_reason"]
+
+    reordered = copy.deepcopy(contract)
+    reordered["history_corrections"]["materialized_segment_identities"][0:2] = reversed(
+        reordered["history_corrections"]["materialized_segment_identities"][0:2]
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="segment identities are not canonical",
+    ):
+        _validate(reordered)
+
+    wrong_receipt = copy.deepcopy(contract)
+    wrong_receipt["history_corrections"]["materialized_segment_identities"][0][
+        "source_generation_sha256"
+    ] = "0" * 64
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="source receipt differs",
+    ):
+        _validate(wrong_receipt)
 
 
 def test_history_correction_omission_and_capture_conflation_fail() -> None:

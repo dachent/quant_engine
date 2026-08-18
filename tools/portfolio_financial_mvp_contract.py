@@ -1468,7 +1468,14 @@ def _validate_history_corrections(
 ) -> None:
     _strict_keys(
         policy,
-        {"corrections", "owner_issue", "policy_id", "policy_version", "splice_policy"},
+        {
+            "corrections",
+            "materialized_segment_identities",
+            "owner_issue",
+            "policy_id",
+            "policy_version",
+            "splice_policy",
+        },
         "history_corrections",
     )
     if policy["policy_id"] != "PORT-HISTORY-TRUTH-1":
@@ -1482,6 +1489,145 @@ def _validate_history_corrections(
 
     source_by_id = {str(row.get("source_id")): row for row in sources}
     strategy_by_id = {str(row.get("strategy_id")): row for row in strategies}
+    segment_rows = _objects(
+        policy["materialized_segment_identities"],
+        "history_corrections.materialized_segment_identities",
+    )
+    segment_ids: list[str] = []
+    for row in segment_rows:
+        _strict_keys(
+            row,
+            {
+                "calendar",
+                "canonicalization",
+                "evidence_layer",
+                "frequency",
+                "mode_admission",
+                "observed_end",
+                "observed_start",
+                "return_basis",
+                "return_observations",
+                "return_type",
+                "segment_id",
+                "sha256",
+                "source_generation_id",
+                "source_generation_sha256",
+                "source_id",
+                "strategy_id",
+                "strategy_version",
+            },
+            "materialized history segment identity",
+        )
+        segment_id = _text(row["segment_id"], "history segment_id")
+        strategy_id = _text(row["strategy_id"], "history segment strategy_id")
+        source_id = _text(row["source_id"], "history segment source_id")
+        source = source_by_id.get(source_id)
+        if strategy_id not in strategy_by_id or source is None:
+            raise FinancialMvpContractError(
+                f"materialized history segment has unknown authority: {segment_id}"
+            )
+        if not segment_id.startswith(f"{strategy_id}:"):
+            raise FinancialMvpContractError(
+                f"materialized history segment identity differs: {segment_id}"
+            )
+        subjects = _object(source["subjects"], "history segment source subjects")
+        subject_ids = _strings(
+            subjects["strategy_ids"], "history segment source strategy_ids"
+        )
+        if strategy_id not in subject_ids:
+            raise FinancialMvpContractError(
+                f"materialized history segment is outside source subjects: {segment_id}"
+            )
+        if row["canonicalization"] != "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1":
+            raise FinancialMvpContractError(
+                f"materialized history segment canonicalization differs: {segment_id}"
+            )
+        segment_observed_start = _date(
+            row["observed_start"], "history segment observed_start"
+        )
+        segment_observed_end = _date(
+            row["observed_end"], "history segment observed_end"
+        )
+        if segment_observed_end < segment_observed_start:
+            raise FinancialMvpContractError(
+                f"materialized history segment interval is reversed: {segment_id}"
+            )
+        observations = row["return_observations"]
+        if (
+            not isinstance(observations, int)
+            or isinstance(observations, bool)
+            or observations < 1
+        ):
+            raise FinancialMvpContractError(
+                f"materialized history segment observation count differs: {segment_id}"
+            )
+        _hash(row["sha256"], "history segment sha256")
+        source_generation_id = _hash(
+            row["source_generation_id"], "history segment source_generation_id"
+        )
+        source_generation_sha = _hash(
+            row["source_generation_sha256"],
+            "history segment source_generation_sha256",
+        )
+        current_generation = _object(
+            source["current_generation"], "history segment source current_generation"
+        )
+        if (
+            current_generation.get("generation_id"),
+            current_generation.get("sha256"),
+        ) != (source_generation_id, source_generation_sha):
+            raise FinancialMvpContractError(
+                f"materialized history segment source receipt differs: {segment_id}"
+            )
+        temporal = _object(source["temporal"], "history segment source temporal")
+        if (row["calendar"], row["frequency"]) != (
+            temporal["calendar"],
+            temporal["cadence"],
+        ):
+            raise FinancialMvpContractError(
+                f"materialized history segment temporal authority differs: {segment_id}"
+            )
+        version = _object(
+            source["strategy_version"], "history segment source strategy_version"
+        )
+        version_refs = _object(
+            version["version_refs"], "history segment source version_refs"
+        )
+        expected_version = version_refs.get(strategy_id) or "UNRESOLVED"
+        if row["strategy_version"] != expected_version:
+            raise FinancialMvpContractError(
+                f"materialized history segment version differs: {segment_id}"
+            )
+        layer = _text(row["evidence_layer"], "history segment evidence_layer")
+        admission = _text(row["mode_admission"], "history segment mode_admission")
+        if layer not in {
+            "ACCOUNT_LIVE",
+            "BACKTEST",
+            "PROVIDER_LIVE",
+        } or admission not in {
+            "EXCLUDE_COMPARISON_ONLY",
+            "INCLUDE_SELECTED_LIVE",
+            "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+            "REQUIRED_NOT_READY_OVERLAP",
+        }:
+            raise FinancialMvpContractError(
+                f"materialized history segment admission differs: {segment_id}"
+            )
+        if (layer == "ACCOUNT_LIVE") != (admission == "INCLUDE_SELECTED_LIVE"):
+            raise FinancialMvpContractError(
+                f"materialized history segment selected-live authority differs: {segment_id}"
+            )
+        if layer == "PROVIDER_LIVE" and admission != "EXCLUDE_COMPARISON_ONLY":
+            raise FinancialMvpContractError(
+                f"materialized provider history entered an admitted mode: {segment_id}"
+            )
+        _text(row["return_basis"], "history segment return_basis")
+        _text(row["return_type"], "history segment return_type")
+        segment_ids.append(segment_id)
+    if segment_ids != sorted(segment_ids) or len(segment_ids) != len(set(segment_ids)):
+        raise FinancialMvpContractError(
+            "materialized history segment identities are not canonical"
+        )
     correction_ids: set[str] = set()
     observed_layers: dict[str, set[str]] = {
         strategy_id: set() for strategy_id in HISTORY_CORRECTION_LAYERS
@@ -3461,8 +3607,8 @@ def validate_contract(
         },
         "financial MVP contract",
     )
-    if contract["contract_schema_version"] != 2:
-        raise FinancialMvpContractError("contract_schema_version must be 2")
+    if contract["contract_schema_version"] != 3:
+        raise FinancialMvpContractError("contract_schema_version must be 3")
     if contract["$schema"] != (
         "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     ):
@@ -3515,6 +3661,10 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
     sources = _objects(contract["source_segments"], "source_segments")
     history = _object(contract["history_corrections"], "history_corrections")
     history_rows = _objects(history["corrections"], "history corrections")
+    materialized_segments = _objects(
+        history["materialized_segment_identities"],
+        "materialized history segment identities",
+    )
     lines = [
         "# Current financial MVP",
         "",
@@ -3738,6 +3888,35 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                     rejected_identity_text,
                 )
             )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "### Materialized segment value authority",
+            "",
+            "Each segment hash is calculated from canonical return rows and bound to the current governed source-generation manifest. A coherent output rewrite cannot replace these independently controlled contract bytes.",
+            "",
+            "| Segment | Strategy | Layer / admission | Observed interval | Returns | Value SHA-256 | Source receipt |",
+            "|---|---|---|---|---:|---|---|",
+        ]
+    )
+    for row in materialized_segments:
+        materialized_cells = (
+            row["segment_id"],
+            row["strategy_id"],
+            f"{row['evidence_layer']} / {row['mode_admission']}",
+            f"{row['observed_start']}..{row['observed_end']}",
+            row["return_observations"],
+            row["sha256"],
+            (
+                f"{row['source_id']}@{row['source_generation_id'][:12]} / "
+                f"{row['source_generation_sha256'][:12]}"
+            ),
+        )
+        lines.append(
+            "| "
+            + " | ".join(str(value).replace("|", "\\|") for value in materialized_cells)
             + " |"
         )
     lines.extend(

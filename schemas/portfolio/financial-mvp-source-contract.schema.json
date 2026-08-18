@@ -18,7 +18,7 @@
     "$schema": {
       "const": "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     },
-    "contract_schema_version": {"const": 2},
+    "contract_schema_version": {"const": 3},
     "product": {"$ref": "#/$defs/product"},
     "strategies": {
       "type": "array",
@@ -324,6 +324,7 @@
       "additionalProperties": false,
       "required": [
         "corrections",
+        "materialized_segment_identities",
         "owner_issue",
         "policy_id",
         "policy_version",
@@ -340,7 +341,63 @@
           "type": "array",
           "minItems": 1,
           "items": {"$ref": "#/$defs/history_correction"}
+        },
+        "materialized_segment_identities": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/materialized_segment_identity"}
         }
+      }
+    },
+    "materialized_segment_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calendar",
+        "canonicalization",
+        "evidence_layer",
+        "frequency",
+        "mode_admission",
+        "observed_end",
+        "observed_start",
+        "return_basis",
+        "return_observations",
+        "return_type",
+        "segment_id",
+        "sha256",
+        "source_generation_id",
+        "source_generation_sha256",
+        "source_id",
+        "strategy_id",
+        "strategy_version"
+      ],
+      "properties": {
+        "calendar": {"$ref": "#/$defs/nonempty_string"},
+        "canonicalization": {"const": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1"},
+        "evidence_layer": {
+          "enum": ["ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"]
+        },
+        "frequency": {"$ref": "#/$defs/nonempty_string"},
+        "mode_admission": {
+          "enum": [
+            "EXCLUDE_COMPARISON_ONLY",
+            "INCLUDE_SELECTED_LIVE",
+            "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+            "REQUIRED_NOT_READY_OVERLAP"
+          ]
+        },
+        "observed_end": {"type": "string", "format": "date"},
+        "observed_start": {"type": "string", "format": "date"},
+        "return_basis": {"$ref": "#/$defs/nonempty_string"},
+        "return_observations": {"type": "integer", "minimum": 1},
+        "return_type": {"$ref": "#/$defs/nonempty_string"},
+        "segment_id": {"$ref": "#/$defs/nonempty_string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_generation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_generation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_id": {"$ref": "#/$defs/nonempty_string"},
+        "strategy_id": {"$ref": "#/$defs/nonempty_string"},
+        "strategy_version": {"$ref": "#/$defs/nonempty_string"}
       }
     },
     "history_correction": {

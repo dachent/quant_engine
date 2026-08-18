@@ -719,9 +719,20 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
     matrixport_source["declared_gap_policy"] = _matrixport_gap_policy("2025-12-09")
     _append_p123_performance_receipt(contract, p123_manifest, performance_path)
     contract_path = tmp_path / "contract.json"
+    sources_by_id = {row["source_id"]: row for row in contract["source_segments"]}
+    for identity in contract["history_corrections"]["materialized_segment_identities"]:
+        generation = sources_by_id[identity["source_id"]]["current_generation"]
+        identity["source_generation_id"] = generation["generation_id"]
+        identity["source_generation_sha256"] = generation["sha256"]
+        version_refs = sources_by_id[identity["source_id"]]["strategy_version"][
+            "version_refs"
+        ]
+        identity["strategy_version"] = (
+            version_refs.get(identity["strategy_id"]) or "UNRESOLVED"
+        )
     _write_json(contract_path, contract)
 
-    return {
+    fixture = {
         "as_of_date": as_of,
         "contract_path": contract_path,
         "provider_ledger_pointer_path": ledger_pointer,
@@ -746,6 +757,8 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         "portfolio123_returns_path": returns_path,
         "portfolio123_relationships_path": relationships_path,
     }
+    _refresh_materialized_segment_identities(fixture)
+    return fixture
 
 
 def _build(fixture: dict[str, Any]) -> tuple[dict[str, bytes], bytes]:
@@ -753,6 +766,31 @@ def _build(fixture: dict[str, Any]) -> tuple[dict[str, bytes], bytes]:
         repository_sha="a" * 40,
         **fixture,
     )
+
+
+def _refresh_materialized_segment_identities(fixture: dict[str, Any]) -> None:
+    contract_path = fixture["contract_path"]
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    sources = {row["source_id"]: row for row in contract["source_segments"]}
+    for identity in contract["history_corrections"]["materialized_segment_identities"]:
+        generation = sources[identity["source_id"]]["current_generation"]
+        identity["source_generation_id"] = generation["generation_id"]
+        identity["source_generation_sha256"] = generation["sha256"]
+        version_refs = sources[identity["source_id"]]["strategy_version"][
+            "version_refs"
+        ]
+        identity["strategy_version"] = (
+            version_refs.get(identity["strategy_id"]) or "UNRESOLVED"
+        )
+    _write_json(contract_path, contract)
+    artifacts, _manifest_content = _build(fixture)
+    rows = list(csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8"))))
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    sources = {row["source_id"]: row for row in contract["source_segments"]}
+    contract["history_corrections"]["materialized_segment_identities"] = (
+        target_series._materialized_segment_identities(rows, sources)
+    )
+    _write_json(contract_path, contract)
 
 
 def _matrixport_exclusions(*dates: str) -> list[dict[str, str]]:
@@ -837,6 +875,7 @@ def _inject_matrixport_gap(fixture: dict[str, Any], missing_date: str) -> None:
     )
     source["declared_gap_policy"] = _matrixport_gap_policy(missing_date)
     _write_json(contract_path, contract)
+    _refresh_materialized_segment_identities(fixture)
 
 
 def _reidentify_manifest(manifest: dict[str, Any]) -> bytes:
@@ -876,13 +915,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.4.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.5.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.4.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.5.0"}
 
     result = validate_layered_history_generation(
         artifacts=artifacts,
@@ -1093,6 +1132,7 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
         "Growth at Market Pivot Points [EchoTrade]",
     )
     _write_json(fixture["contract_path"], contract)
+    _refresh_materialized_segment_identities(fixture)
 
     changed_artifacts, changed_manifest = _build(fixture)
     changed_coverage = json.loads(changed_artifacts["coverage.json"])
@@ -1228,6 +1268,7 @@ def test_layered_history_propagates_one_authoritative_gap_policy_edit(
         "MATRIXPORT",
     )
     _write_json(contract_path, contract)
+    _refresh_materialized_segment_identities(fixture)
 
     artifacts, manifest_content = _build(fixture)
     result = validate_layered_history_generation(
@@ -1399,6 +1440,106 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
             contract_path=fixture["contract_path"],
         )
 
+    nested_order_artifacts = dict(artifacts)
+    nested_order_manifest = json.loads(manifest_content)
+    nested_order_coverage = json.loads(artifacts["coverage.json"])
+    robuxio_coverage = next(
+        row
+        for row in nested_order_coverage["strategies"]
+        if row["strategy_id"] == "robuxio-crypto"
+    )
+    robuxio_coverage["segments"][0], robuxio_coverage["segments"][1] = (
+        robuxio_coverage["segments"][1],
+        robuxio_coverage["segments"][0],
+    )
+    _replace_output(
+        nested_order_artifacts,
+        nested_order_manifest,
+        "coverage.json",
+        canonical_json_bytes(nested_order_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="segment coverage ordering differs"):
+        validate_layered_history_generation(
+            artifacts=nested_order_artifacts,
+            manifest_content=_reidentify_manifest(nested_order_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    return_rewrite_artifacts = dict(artifacts)
+    return_rewrite_manifest = json.loads(manifest_content)
+    return_rewrite_segments = list(
+        csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8")))
+    )
+    rewritten_row = next(
+        row
+        for row in return_rewrite_segments
+        if row["segment_id"] == "qsi:account-live"
+    )
+    rewritten_row["return"] = "0.123456789"
+    _replace_output(
+        return_rewrite_artifacts,
+        return_rewrite_manifest,
+        "segments.csv",
+        _csv_bytes(
+            target_series.LAYERED_HISTORY_SEGMENT_FIELDS,
+            return_rewrite_segments,
+        ),
+    )
+    for name in ("returns.csv", "live-only.csv", "live-plus-backtest.csv"):
+        projection = list(csv.DictReader(io.StringIO(artifacts[name].decode("utf-8"))))
+        matching = next(
+            row
+            for row in projection
+            if (
+                row["series_id"],
+                row["date"],
+                row["evidence_layer"],
+                row["strategy_version"],
+            )
+            == (
+                rewritten_row["series_id"],
+                rewritten_row["date"],
+                rewritten_row["evidence_layer"],
+                rewritten_row["strategy_version"],
+            )
+        )
+        matching["return"] = rewritten_row["return"]
+        _replace_output(
+            return_rewrite_artifacts,
+            return_rewrite_manifest,
+            name,
+            _csv_bytes(target_series.CORRELATION_FIELDS_V2, projection),
+        )
+    return_rewrite_coverage = json.loads(artifacts["coverage.json"])
+    rewritten_summary = next(
+        summary
+        for strategy in return_rewrite_coverage["strategies"]
+        if strategy["strategy_id"] == "qsi"
+        for summary in strategy["segments"]
+        if summary["segment_id"] == "qsi:account-live"
+    )
+    rewritten_summary.update(
+        target_series._row_identity(
+            [
+                row
+                for row in return_rewrite_segments
+                if row["segment_id"] == "qsi:account-live"
+            ]
+        )
+    )
+    _replace_output(
+        return_rewrite_artifacts,
+        return_rewrite_manifest,
+        "coverage.json",
+        canonical_json_bytes(return_rewrite_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="values differ from product authority"):
+        validate_layered_history_generation(
+            artifacts=return_rewrite_artifacts,
+            manifest_content=_reidentify_manifest(return_rewrite_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
     invalid_contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
     invalid_contract["uncontrolled_policy"] = "ACCEPT"
     _write_json(fixture["contract_path"], invalid_contract)
@@ -1490,7 +1631,7 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         "coverage.json",
         canonical_json_bytes(relabelled_coverage),
     )
-    with pytest.raises(TargetSeriesError, match="segment authority differs"):
+    with pytest.raises(TargetSeriesError, match="segment source receipt differs"):
         validate_layered_history_generation(
             artifacts=relabelled_artifacts,
             manifest_content=_reidentify_manifest(relabelled_manifest),
@@ -1568,7 +1709,7 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         "coverage.json",
         canonical_json_bytes(gap_coverage),
     )
-    with pytest.raises(TargetSeriesError, match="unexplained live gap"):
+    with pytest.raises(TargetSeriesError, match="product authority"):
         validate_layered_history_generation(
             artifacts=gap_artifacts,
             manifest_content=_reidentify_manifest(gap_manifest),
