@@ -158,16 +158,69 @@ fall inside the current run window, and the retained observations must include
 the latest month whose 45-day publication deadline has elapsed. The panel must
 display all three intervals and the limiting input.
 
-Pass the emitted manifest and returns to `portfolio_target_series.py` with
-`--strategy-history-manifest` and `--strategy-history-returns`. Its
-`evidence-proof.json` is the release history contract. It must retain explicit,
-non-silent dispositions: the exact Portfolio123 EU connected-model
-provider-live curve is captured but its return transform and exact-version
-backtest are not accepted;
+Pass any current exact-version backtest manifest and returns to
+`portfolio_target_series.py` with `--strategy-history-manifest` and
+`--strategy-history-returns`. The content-addressed layered-history
+`generation.json` is the sole candidate history receipt; `segments.csv`,
+`returns.csv`, `live-only.csv`, `live-plus-backtest.csv`, and `coverage.json`
+are deterministic hash-bound views. It must retain explicit, non-silent
+dispositions: the exact Portfolio123 EU connected-model provider-managed
+Strategy performance level supports a deterministic candidate
+`P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1`, but no provider-live
+return or `Cash Added` interpretation is admitted pending #303 and no
+exact-version backtest is accepted;
 Volatis provider/account-live history is not a backtest; EchoTrade is
 deprecated with no retained history; and Composer is immaterial and its
 history is not connected. Similar long EU curves are different model books and
 cannot substitute for the connected EU model.
+
+The receipt embeds the four canonical upstream current pointers and generation
+manifests (not source values) so verification can recheck publication state,
+manifest identity, and every declared source artifact hash and size against a
+contract-bound current generation without a second handwritten manifest.
+
+Build or verify the candidate generation with the existing target-series tool.
+Every private selector is supplied at runtime and used only in memory; the
+receipt contains redacted strategy IDs and hashes, never roots or provider IDs.
+
+```powershell
+& $enginePython tools\portfolio_target_series.py `
+  --layered-history-generation `
+  --financial-mvp-contract contracts\portfolio-financial-mvp-source-v1.json `
+  --repository-sha '<exact-code-sha>' `
+  --as-of-date $asOfDate `
+  --provider-ledger-current '<provider-ledger-CURRENT.json>' `
+  --provider-ledger-manifest '<provider-ledger-generation.json>' `
+  --provider-ledger-catalog '<provider-ledger.json>' `
+  --matrixport-current '<Matrixport-CURRENT.json>' `
+  --manifest '<Matrixport-generation.json>' `
+  --nav '<Matrixport-nav.csv>' `
+  --holdings '<Matrixport-holdings.csv>' `
+  --subscriptions '<Matrixport-subscriptions.csv>' `
+  --product-id '<local-product-id>' `
+  --quantbase-current '<Quantbase-CURRENT.json>' `
+  --quantbase-manifest '<Quantbase-generation.json>' `
+  --quantbase-history '<Volatis-history.csv>' `
+  --quantbase-activity '<Quantbase-activity.csv>' `
+  --quantbase-fund-id '<local-fund-id>' `
+  --portfolio123-current '<Portfolio123-CURRENT.json>' `
+  --portfolio123-manifest '<Portfolio123-generation.json>' `
+  --portfolio123-metadata '<har-managed-metadata.parquet>' `
+  --portfolio123-performance '<har-managed-performance.parquet>' `
+  --portfolio123-equity '<har-equity-curve.parquet>' `
+  --portfolio123-returns '<returns-daily.parquet>' `
+  --portfolio123-relationships '<strategy-relationships.parquet>' `
+  --output-root '<candidate-history-root>'
+
+& $enginePython tools\portfolio_target_series.py `
+  --verify-layered-history '<candidate-generation-root>' `
+  --financial-mvp-contract contracts\portfolio-financial-mvp-source-v1.json
+```
+
+`--require-mode LIVE_ONLY` or `--require-mode LIVE_PLUS_BACKTEST` makes a
+required strategy disposition fail the command. Normal verification accepts an
+exact `REQUIRED_NOT_READY` disposition so scheduling can name the missing
+strategy without treating the mode as financially accepted.
 
 Recompute the separate trade/implementation evidence for AI Factor,
 GrizzlyBears, and TuringTrader. Portfolio123 remains HAR-first; this command
@@ -438,9 +491,10 @@ unavailable until their source facts are admitted:
 
 - authoritative design artifacts and exact strategy versions for strategies
   currently represented only by an inferred economic archetype;
-- an accepted return transform for the captured exact connected EU Portfolio123
-  curve and its exact-version backtest; retained long EU curves from other model
-  books are different histories, not substitutes;
+- an admit-or-declare decision for the deterministic candidate return transform
+  of the captured exact connected EU Portfolio123 model, plus its exact-version
+  backtest; retained long EU curves from other model books are different
+  histories, not substitutes;
 - version-matched pre-live history for Robuxio if it becomes available and is
   admitted; EchoTrade and Composer are governed non-required dispositions;
 - complete daily account cash and fee paths, plus order/fill timestamps and

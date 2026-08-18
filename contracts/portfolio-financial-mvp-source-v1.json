@@ -46,7 +46,7 @@
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "Exact connected-model version and funded membership remain census/history inputs; no financial outcome may silently omit the strategy.",
-      "blockers": [302, 319, 320, 324, 318, 328, 336],
+      "blockers": [302, 320, 324, 318, 328, 336],
       "effective_product_interval": {"effective_start": "2026-08-17", "effective_end": null},
       "strategy_version": {"status": "UNRESOLVED", "version_ref": null},
       "funded_membership": {"status": "REQUIRED_NOT_READY", "authority": "ACCEPTED_FUNDING_AND_ACCOUNT_EVIDENCE", "effective_start": null, "effective_end": null},
@@ -56,8 +56,8 @@
       "strategy_id": "p123-eu",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
-      "readiness_reason": "The exact connected P123 EU model and owner funding boundary are evidenced; the exact-version backtest capture, corrected history build, and downstream outcomes remain required.",
-      "blockers": [302, 319, 320, 324, 318, 328, 336],
+      "readiness_reason": "The exact connected P123 EU model and owner funding boundary are evidenced. The provider-performance return transform remains derived but not admitted pending #303; the accepted layered-history generation, exact-version backtest capture, and downstream outcomes remain required.",
+      "blockers": [302, 320, 324, 318, 328, 336],
       "effective_product_interval": {"effective_start": "2026-08-17", "effective_end": null},
       "strategy_version": {"status": "EVIDENCED", "version_ref": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"},
       "funded_membership": {"status": "EVIDENCED", "authority": "HASH_BOUND_IBKR_INTERNAL_TRANSFER_MEMBERSHIP_AND_ACCOUNT_NAV; ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT; PORT-HISTORY-TRUTH-1", "effective_start": "2025-11-20", "effective_end": null},
@@ -68,7 +68,7 @@
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "Current version, funded membership, complete histories, benchmark, and calendar policy remain required inputs.",
-      "blockers": [302, 319, 320, 324, 318, 328, 336],
+      "blockers": [302, 320, 324, 318, 328, 336],
       "effective_product_interval": {"effective_start": "2026-08-17", "effective_end": null},
       "strategy_version": {"status": "UNRESOLVED", "version_ref": null},
       "funded_membership": {"status": "REQUIRED_NOT_READY", "authority": "ACCEPTED_FUNDING_AND_ACCOUNT_EVIDENCE", "effective_start": null, "effective_end": null},
@@ -79,7 +79,7 @@
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "Current version, funded membership, provider disposition, benchmark, and complete histories remain unresolved.",
-      "blockers": [302, 319, 320, 324, 318, 328, 336],
+      "blockers": [302, 320, 324, 318, 328, 336],
       "effective_product_interval": {"effective_start": "2026-08-17", "effective_end": null},
       "strategy_version": {"status": "UNRESOLVED", "version_ref": null},
       "funded_membership": {"status": "REQUIRED_NOT_READY", "authority": "ACCEPTED_FUNDING_AND_ACCOUNT_EVIDENCE", "effective_start": null, "effective_end": null},
@@ -89,8 +89,8 @@
       "strategy_id": "volatis-strategy",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
-      "readiness_reason": "The current Quantbase generation and first capital-reconciled funding boundary are evidenced; version, backtest inventory, corrected build, and downstream outcomes remain required.",
-      "blockers": [302, 319, 320, 324, 318, 328, 336],
+      "readiness_reason": "The current Quantbase generation and first capital-reconciled funding boundary are evidenced; the accepted layered-history generation, exact-version backtest inventory, and downstream outcomes remain required.",
+      "blockers": [302, 320, 324, 318, 328, 336],
       "effective_product_interval": {"effective_start": "2026-08-17", "effective_end": null},
       "strategy_version": {"status": "EVIDENCED", "version_ref": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7"},
       "funded_membership": {"status": "EVIDENCED", "authority": "HASH_BOUND_QUANTBASE_FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS; PORT-HISTORY-TRUTH-1", "effective_start": "2024-10-15", "effective_end": null},
@@ -101,7 +101,7 @@
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "Funded membership, complete account-live history, benchmark, and volatility/leveraged-equity applicability remain unresolved.",
-      "blockers": [302, 319, 320, 324, 318, 328, 336],
+      "blockers": [302, 320, 324, 318, 328, 336],
       "effective_product_interval": {"effective_start": "2026-08-17", "effective_end": null},
       "strategy_version": {"status": "UNRESOLVED", "version_ref": null},
       "funded_membership": {"status": "REQUIRED_NOT_READY", "authority": "ACCEPTED_FUNDING_AND_ACCOUNT_EVIDENCE", "effective_start": null, "effective_end": null},
@@ -111,8 +111,8 @@
       "strategy_id": "robuxio-crypto",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
-      "readiness_reason": "The current Matrixport generation and 2025-12-06 owner-live boundary are evidenced; exact strategy version, corrected build, crypto candidates, calendar policy, and downstream outcomes remain required.",
-      "blockers": [302, 319, 320, 324, 318, 328, 336],
+      "readiness_reason": "The current Matrixport generation and 2025-12-06 owner-live boundary are evidenced; two unexplained account-live gaps block the accepted layered-history generation, and exact strategy version, crypto candidates, calendar policy, and downstream outcomes remain required.",
+      "blockers": [302, 320, 324, 318, 328, 336],
       "effective_product_interval": {"effective_start": "2026-08-17", "effective_end": null},
       "strategy_version": {"status": "EVIDENCED", "version_ref": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041"},
       "funded_membership": {"status": "EVIDENCED", "authority": "HASH_BOUND_MATRIXPORT_SUCCESSFUL_SUBSCRIPTION_AND_FIRST_CONFIRMED_NAV; PORT-HISTORY-TRUTH-1", "effective_start": "2025-12-06", "effective_end": null},
@@ -123,7 +123,7 @@
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "The accepted HWM policy excludes this de-minimis sleeve only from HWM; product-wide capital, decomposition, and dependence disposition remains explicit and unresolved.",
-      "blockers": [302, 318, 328, 336],
+      "blockers": [302, 320, 318, 328, 336],
       "effective_product_interval": {"effective_start": "2026-08-17", "effective_end": null},
       "strategy_version": {"status": "UNRESOLVED", "version_ref": null},
       "funded_membership": {"status": "REQUIRED_NOT_READY", "authority": "ACCEPTED_FUNDING_AND_ACCOUNT_EVIDENCE; PORT-HWM-3_EXCLUDES_ONLY_THE_HWM_OUTCOME", "effective_start": null, "effective_end": null},
@@ -134,7 +134,7 @@
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "The accepted HWM policy excludes this de-minimis sleeve only from HWM; product-wide capital, decomposition, and dependence disposition remains explicit and unresolved.",
-      "blockers": [302, 318, 328, 336],
+      "blockers": [302, 320, 318, 328, 336],
       "effective_product_interval": {"effective_start": "2026-08-17", "effective_end": null},
       "strategy_version": {"status": "UNRESOLVED", "version_ref": null},
       "funded_membership": {"status": "REQUIRED_NOT_READY", "authority": "ACCEPTED_FUNDING_AND_ACCOUNT_EVIDENCE; PORT-HWM-3_EXCLUDES_ONLY_THE_HWM_OUTCOME", "effective_start": null, "effective_end": null},
@@ -164,7 +164,7 @@
         ],
         "disposition_reason": "History existence is not capture. The uncaptured provider report remains comparison evidence and cannot become owner account-live or hybrid backtest input.",
         "readiness": "REQUIRED_NOT_READY",
-        "blockers": [320]
+        "blockers": [302, 303]
       },
       {
         "correction_id": "robuxio-provider-live-before-funding",
@@ -221,14 +221,14 @@
         ],
         "disposition_reason": "The exact provider-live model is captured, but the exact-version backtest is not. Other European books are different models and cannot be substituted.",
         "readiness": "REQUIRED_NOT_READY",
-        "blockers": [320]
+        "blockers": [302, 303]
       },
       {
         "correction_id": "p123-eu-provider-live",
         "strategy_id": "p123-eu",
         "source_id": "portfolio123-model-generation",
         "evidence_layer": "PROVIDER_LIVE",
-        "history_existence": {"status": "EXISTS", "authority": "EXACT_CONNECTED_MODEL_HAR_EQUITY_CURVE"},
+        "history_existence": {"status": "EXISTS", "authority": "EXACT_CONNECTED_MODEL_HAR_MANAGED_STRATEGY_PERFORMANCE_WITH_EQUITY_CURVE_RECONCILIATION"},
         "capture": {"status": "CAPTURED_GOVERNED", "capture_defect": null, "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1", "generation_sha256": "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907", "as_of": "2026-08-14"},
         "strategy_version": {"status": "EVIDENCED", "version_ref": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb", "compatibility": "EXACT_MATCH", "authority": "DEDUPLICATED_CONNECTED_MODEL_IDENTITY_AND_GENERATION_HASH"},
         "interval": {"assignment_date": "2025-11-12", "observed_start": "2025-11-13", "observed_end": "2026-08-13", "effective_start": "2025-11-13", "effective_end": "2026-08-13"},
@@ -237,11 +237,12 @@
         "source_receipts": [
           {"artifact_role": "portfolio123-generation-manifest", "artifact_selector": "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1/generation.json", "authority_root": "PORTFOLIO123", "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1", "locator_kind": "GENERATION_MANIFEST", "manifest_artifact_id": null, "sha256": "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907"},
           {"artifact_role": "portfolio123-managed-metadata", "artifact_selector": "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1/tables/har_managed_metadata.parquet", "authority_root": "PORTFOLIO123", "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1", "locator_kind": "GENERATION_ARTIFACT", "manifest_artifact_id": "tables/har_managed_metadata.parquet", "sha256": "bf40e5b0502c2b8f4795279da6279a70e0062b7d26af308697bf6f6c6a583329"},
+          {"artifact_role": "portfolio123-managed-performance", "artifact_selector": "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1/tables/har_managed_performance.parquet", "authority_root": "PORTFOLIO123", "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1", "locator_kind": "GENERATION_ARTIFACT", "manifest_artifact_id": "tables/har_managed_performance.parquet", "sha256": "6fe41e9c558d37df4e69c273ff67781284af03d1daedd0877799976ad86e29b8"},
           {"artifact_role": "portfolio123-equity-curve", "artifact_selector": "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1/tables/har_equity_curve.parquet", "authority_root": "PORTFOLIO123", "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1", "locator_kind": "GENERATION_ARTIFACT", "manifest_artifact_id": "tables/har_equity_curve.parquet", "sha256": "b87f760a1cd369bfd40ebc5e8db6b44e3626f9b4c53950e3d1e8c7ea0abf2b4e"}
         ],
-        "disposition_reason": "The exact curve is captured provider-live comparison evidence and remains separate from the IBKR owner account-live path. The captured Cash Added field cannot be treated as a per-period external flow; #320 must accept an authoritative return transform before the curve is materialized.",
+        "disposition_reason": "The exact provider-managed Strategy performance level is captured and a deterministic candidate P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1 is reproducible. Cash Added reconciles to the equity curve but its financial interpretation is not approved and is not used in the candidate return formula. No provider-live return is admitted; #303 must admit or declare the transform while preserving separation from the IBKR owner account-live path.",
         "readiness": "REQUIRED_NOT_READY",
-        "blockers": [320]
+        "blockers": [303]
       },
       {
         "correction_id": "p123-eu-account-live",
@@ -279,7 +280,7 @@
         ],
         "disposition_reason": "The current price path is provider/account live, not a backtest. A hybrid backtest remains unavailable until exact-version evidence is captured.",
         "readiness": "REQUIRED_NOT_READY",
-        "blockers": [320]
+        "blockers": [302, 303]
       },
       {
         "correction_id": "volatis-provider-live",
@@ -329,7 +330,7 @@
       "owner_issue": 324,
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [319, 320, 324],
+      "blockers": [320, 324],
       "accepted_statuses": ["AVAILABLE"],
       "consumers": ["REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
       "calculation_contract": {
@@ -609,7 +610,7 @@
       "owner_issue": 328,
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [319, 320, 328],
+      "blockers": [320, 328],
       "accepted_statuses": ["AVAILABLE", "DIAGNOSTIC_ONLY", "NOT_APPLICABLE_OWNER_APPROVED"],
       "consumers": ["REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
       "calculation_contract": {
@@ -626,7 +627,7 @@
       "owner_issue": 336,
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [319, 320, 336],
+      "blockers": [320, 336],
       "accepted_statuses": ["AVAILABLE", "GENUINE_SAMPLE_INSUFFICIENCY_OWNER_APPROVED"],
       "consumers": ["REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
       "calculation_contract": {
@@ -689,7 +690,7 @@
       "capture_status": "CAPTURED_GOVERNED",
       "absence_behavior": "FAIL_VERSION_COMPATIBILITY_AND_ANY_REQUIRED_DESIGN_DEPENDENT_CELL",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [302, 319, 328],
+      "blockers": [302, 328],
       "invalidated_outputs": ["DECOMPOSITION", "DEPENDENCE", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
       "owner_policy_decision": "The committed attribution hypotheses are not proof of design or version; required provider/owner evidence remains explicit and cannot be replaced by labels."
     },
@@ -716,7 +717,7 @@
       "capture_status": "UNRESOLVED",
       "absence_behavior": "LIVE_ONLY_REMAINS_REQUIRED; LIVE_PLUS_BACKTEST_FAILS_UNLESS_OWNER_ACCEPTS_NOT_APPLICABLE_FOR_THE_STRATEGY",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [319, 320],
+      "blockers": [302, 303],
       "invalidated_outputs": ["LAYERED_HISTORY_LIVE_PLUS_BACKTEST", "DECOMPOSITION", "DEPENDENCE", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
       "owner_policy_decision": "Backtest existence, capture, and version compatibility are separate facts; backtest never fills a post-inception live gap."
     },
@@ -743,9 +744,9 @@
       "capture_status": "UNRESOLVED",
       "absence_behavior": "FAIL_ANY_REQUIRED_PROVIDER_HISTORY_CELL_WITH_A_NAMED_CAPTURE_OR_EXISTENCE_STATUS",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [319, 320],
+      "blockers": [302, 303],
       "invalidated_outputs": ["LAYERED_HISTORY", "DECOMPOSITION", "DEPENDENCE", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
-      "owner_policy_decision": "Provider track record remains distinct from provider-live and owner account-live; #319 owns existence, capture, product use, and any permitted splice."
+      "owner_policy_decision": "Accepted #319 policy keeps provider track record distinct from provider-live and owner account-live. #302 and #303 own the remaining exact-version census and admit-or-declare decisions; no layer may be silently substituted."
     },
     {
       "source_id": "provider-live-history",
@@ -770,9 +771,9 @@
       "capture_status": "UNRESOLVED",
       "absence_behavior": "FAIL_ANY_REQUIRED_PROVIDER_LIVE_CELL_WITH_A_NAMED_CAPTURE_OR_EXISTENCE_STATUS",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [319, 320],
+      "blockers": [302, 303],
       "invalidated_outputs": ["LAYERED_HISTORY", "DECOMPOSITION", "DEPENDENCE", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
-      "owner_policy_decision": "Provider-live remains distinct from provider track record and owner account-live; #319 owns existence, capture, product use, and any permitted splice."
+      "owner_policy_decision": "Accepted #319 policy keeps provider-live distinct from provider track record and owner account-live. #302 and #303 own the remaining exact-version census and admit-or-declare decisions; no layer may be silently substituted."
     },
     {
       "source_id": "portfolio123-model-generation",
@@ -789,7 +790,7 @@
       "units": {"measurement": "DAILY_DECIMAL_RETURN_AND_MODEL_EVIDENCE", "currency": "MODEL_DECLARED"},
       "temporal": {"timezone": "PROVIDER_DECLARED", "calendar": "MODEL_DECLARED", "cadence": "MODEL_CAPTURE"},
       "freshness": {"max_age_days": 7, "publication_lag_days": 2, "rule": "EXACT_CONNECTED_MODEL_THROUGH_ACCEPTED_PROVIDER_BOUNDARY"},
-      "admission": {"transform": "provider-ledger-portfolio123-evidence", "version": "1", "facts": ["PROVIDER_LIVE_SEGMENT", "STRATEGY_VERSION_REFERENCE"]},
+      "admission": {"transform": "provider-ledger-portfolio123-evidence", "version": "1", "facts": ["STRATEGY_VERSION_REFERENCE", "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1_CANDIDATE"]},
       "product_requirement": "REQUIRED",
       "consumers": ["DECOMPOSITION", "DEPENDENCE", "REPORT", "RELEASE_RECEIPT"],
       "current_generation": {"generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1", "sha256": "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907", "as_of": "2026-08-14"},
@@ -797,9 +798,9 @@
       "capture_status": "CAPTURED_GOVERNED",
       "absence_behavior": "FAIL_P123_VERSION_COMPATIBILITY_AND_ANY_REQUIRED_PROVIDER_HISTORY_CELL",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [319, 320],
+      "blockers": [302, 303],
       "invalidated_outputs": ["LAYERED_HISTORY", "DECOMPOSITION", "DEPENDENCE", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
-      "owner_policy_decision": "The current HAR generation captures the exact P123 EU connected-model provider-live curve and version. It remains distinct from IBKR account-live; the exact-version backtest remains not captured."
+      "owner_policy_decision": "The current HAR generation captures the exact P123 EU connected-model provider-managed Strategy performance level and version. The layered-history builder may prove a deterministic candidate level-to-return derivation, but no provider-live return or Cash Added interpretation is admitted until #303 records admit-or-declare authority. The exact-version backtest remains not captured, and P123 AI version authority remains with #302."
     },
     {
       "source_id": "owner-account-live-history",
@@ -824,7 +825,7 @@
       "capture_status": "CAPTURED_GOVERNED",
       "absence_behavior": "FAIL_HWM_CAPITAL_HISTORY_AND_ANY_REQUIRED_LIVE_ANALYSIS_CELL",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [302, 319, 320, 324, 318],
+      "blockers": [302, 320, 324, 318],
       "invalidated_outputs": ["LAYERED_HISTORY", "HWM", "INVESTED_CAPITAL", "DECOMPOSITION", "DEPENDENCE", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
       "owner_policy_decision": "Exact private generation, funded membership, account-live start, and flow compatibility must be accepted without exposing identifiers or values."
     },
@@ -905,7 +906,7 @@
       "capture_status": "UNRESOLVED",
       "absence_behavior": "FAIL_ANY_CENSUS_BOUND_FACT_AND_ITS_CONSUMERS",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [302, 303, 319, 320, 324, 318],
+      "blockers": [302, 303, 324, 318],
       "invalidated_outputs": ["PROVIDER_LEDGER", "LAYERED_HISTORY", "HWM", "INVESTED_CAPITAL", "DECOMPOSITION", "DEPENDENCE", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
       "owner_policy_decision": "Exact account-to-strategy bindings and funded intervals remain private census facts; provider availability alone grants no product membership."
     },
@@ -932,7 +933,7 @@
       "capture_status": "CAPTURED_GOVERNED",
       "absence_behavior": "FAIL_ROBUXIO_HWM_CAPITAL_LIVE_HISTORY_AND_ANALYTICS",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [319, 320, 324, 318],
+      "blockers": [320, 324, 318],
       "invalidated_outputs": ["PROVIDER_LEDGER", "LAYERED_HISTORY", "HWM", "INVESTED_CAPITAL", "DECOMPOSITION", "DEPENDENCE", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
       "owner_policy_decision": "The exact Matrixport generation is captured. Provider NAV before confirmed funding remains PROVIDER_LIVE; ACCOUNT_LIVE returns begin only after the 2025-12-06 held observation."
     },
@@ -959,7 +960,7 @@
       "capture_status": "CAPTURED_GOVERNED",
       "absence_behavior": "FAIL_VOLATIS_HWM_CAPITAL_HISTORY_AND_ANALYTICS",
       "readiness": "REQUIRED_NOT_READY",
-      "blockers": [319, 320, 324, 318],
+      "blockers": [320, 324, 318],
       "invalidated_outputs": ["PROVIDER_LEDGER", "LAYERED_HISTORY", "HWM", "INVESTED_CAPITAL", "DECOMPOSITION", "DEPENDENCE", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
       "owner_policy_decision": "The exact Quantbase generation is captured. The 2024-10-13 purchase lacks an accepted event-time value and therefore does not establish funded membership. The first capital-reconciled positive NAV and cost basis prove membership on 2024-10-15; measurable account returns begin on 2024-10-16."
     },

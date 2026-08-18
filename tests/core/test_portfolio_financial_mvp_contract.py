@@ -120,7 +120,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "b520bcefdd197d5f04a91c628afcbaef72f5efaa82dd40b5c7d5b702c196065c"
+        "9ff108b2de52ba94442e6975a20e46bcfcda86ca79e0f271d4929dd783ae46ee"
     )
 
 
@@ -561,7 +561,16 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     )
     assert "EXTERNAL_FLOW" not in p123_live["funding_event"]["authority"]
     assert p123_provider["readiness"] == "REQUIRED_NOT_READY"
-    assert p123_provider["blockers"] == [320]
+    assert p123_provider["blockers"] == [303]
+    assert any(
+        receipt["manifest_artifact_id"] == "tables/har_managed_performance.parquet"
+        for receipt in p123_provider["source_receipts"]
+    )
+    assert (
+        "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1"
+        in p123_provider["disposition_reason"]
+    )
+    assert "No provider-live return is admitted" in p123_provider["disposition_reason"]
 
 
 def test_history_correction_omission_and_capture_conflation_fail() -> None:
@@ -609,15 +618,27 @@ def test_provider_history_cannot_be_relabelled_or_assignment_funded() -> None:
 
 
 def test_history_truth_recurrence_mutations_fail_closed() -> None:
-    p123_materialized = copy.deepcopy(_contract())
-    provider = _history_correction(p123_materialized, "p123-eu-provider-live")
-    provider["readiness"] = "READY"
-    provider["blockers"] = []
+    p123_wrong_owner = copy.deepcopy(_contract())
+    provider = _history_correction(p123_wrong_owner, "p123-eu-provider-live")
+    provider["blockers"] = [320]
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
-        match="unaccepted return transform",
+        match="unadmitted transform disposition",
     ):
-        _validate(p123_materialized)
+        _validate(p123_wrong_owner)
+
+    p123_unbound_transform = copy.deepcopy(_contract())
+    provider = _history_correction(p123_unbound_transform, "p123-eu-provider-live")
+    provider["source_receipts"] = [
+        receipt
+        for receipt in provider["source_receipts"]
+        if receipt["manifest_artifact_id"] != "tables/har_managed_performance.parquet"
+    ]
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="unadmitted transform disposition",
+    ):
+        _validate(p123_unbound_transform)
 
     p123_external = copy.deepcopy(_contract())
     account = _history_correction(p123_external, "p123-eu-account-live")

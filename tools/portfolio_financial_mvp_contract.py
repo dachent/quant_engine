@@ -1880,11 +1880,25 @@ def _validate_history_corrections(
 
     correction_by_id = {str(row["correction_id"]): row for row in rows}
     p123_provider = correction_by_id["p123-eu-provider-live"]
-    if p123_provider["readiness"] != "REQUIRED_NOT_READY" or p123_provider[
-        "blockers"
-    ] != [320]:
+    p123_receipts = {
+        str(receipt["manifest_artifact_id"]): receipt
+        for receipt in p123_provider["source_receipts"]
+        if isinstance(receipt, dict) and receipt.get("manifest_artifact_id")
+    }
+    p123_disposition = _text(
+        p123_provider["disposition_reason"], "P123 EU provider disposition"
+    )
+    if (
+        p123_provider["readiness"] != "REQUIRED_NOT_READY"
+        or p123_provider["blockers"] != [303]
+        or "tables/har_managed_performance.parquet" not in p123_receipts
+        or "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1"
+        not in p123_disposition
+        or "financial interpretation is not approved" not in p123_disposition
+        or "No provider-live return is admitted" not in p123_disposition
+    ):
         raise FinancialMvpContractError(
-            "P123 EU provider history bypasses its unaccepted return transform"
+            "P123 EU provider history bypasses its unadmitted transform disposition"
         )
     p123_account = correction_by_id["p123-eu-account-live"]
     p123_funding_authority = _text(
