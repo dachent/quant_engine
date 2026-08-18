@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "as_of_policy": "MIN_TARGET_AND_SOURCE_LAST_OBSERVATION",
   "split_policy": {
     "holdout_fraction": "0.20",
@@ -7,7 +7,12 @@
     "minimum_training_observations_per_factor": 20,
     "cv_folds": 3,
     "parsimony_tolerance": "0.01",
-    "ridge_candidates": ["0", "0.000001", "0.0001"]
+    "ridge_candidates": ["0", "0.000001", "0.0001"],
+    "dynamic": {
+      "constraint": "UNCONSTRAINED",
+      "state_ridge": "0.0000000001",
+      "smoothness_candidates": ["0.00000001", "0.0000001", "0.000001", "0.00001"]
+    }
   },
   "sources": {
     "us-economic": {

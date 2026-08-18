@@ -121,21 +121,22 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "e17851ad84ccf76988050af36e63c396cb8b98312957c8ef7d74f0ff870c6a2c"
+        "00309632bf3afc35f4c3582883ffa765131e75d4a2a2999b59e6eb369f939512"
     )
 
 
 def test_current_strategy_registry_binds_exact_applicability_plan_bytes() -> None:
     source = _source(_contract(), "current-strategy-registry")
     digest = hashlib.sha256(REGISTRY_PATH.read_bytes()).hexdigest()
-    assert source["source_version"] == "decomposition-plan-v2"
+    assert source["source_version"] == "decomposition-plan-v3"
     assert source["schema"] == {
         "name": "current-strategy-decomposition-plan",
-        "version": "2",
+        "version": "3",
     }
     assert source["data_classes"] == [
         "STRATEGY_VERSION",
         "DECOMPOSITION_APPLICABILITY",
+        "DECOMPOSITION_SURFACE_POLICY",
     ]
     assert source["current_generation"] == {
         "generation_id": digest,
