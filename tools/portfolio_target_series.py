@@ -4494,6 +4494,8 @@ def validate_layered_history_generation(
             else frozenset()
         )
         expected_data_age: dict[str, object] | None = None
+        live_status: str
+        live_reason: str | None
         if not live_rows:
             live_status = "REQUIRED_NOT_READY"
             live_reason = (
@@ -4561,7 +4563,7 @@ def validate_layered_history_generation(
                 hybrid_reason = "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
             else:
                 hybrid_reason = "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED"
-        expected_modes = {
+        expected_modes: dict[str, dict[str, str | None]] = {
             "LIVE_ONLY": {"reason": live_reason, "status": live_status},
             "LIVE_PLUS_BACKTEST": {
                 "reason": hybrid_reason,
@@ -4916,8 +4918,8 @@ def validate_layered_history_generation(
             f"layered history mode status {mode}",
         )
         not_ready: list[str] = []
-        for strategy_id, expected_modes in expected_modes_by_strategy.items():
-            if expected_modes[mode]["status"] == "REQUIRED_NOT_READY":
+        for strategy_id, expected_strategy_modes in expected_modes_by_strategy.items():
+            if expected_strategy_modes[mode]["status"] == "REQUIRED_NOT_READY":
                 not_ready.append(strategy_id)
         not_ready.sort()
         if status.get("required_not_ready_strategy_ids") != not_ready or status.get(
