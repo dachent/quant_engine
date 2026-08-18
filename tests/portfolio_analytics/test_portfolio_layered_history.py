@@ -1044,13 +1044,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.11.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.12.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.11.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.12.0"}
     assert (
         "strategy-history"
         in generation_schema["properties"]["source_manifests"]["properties"]
@@ -1417,6 +1417,7 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
 
 def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     baseline_artifacts, baseline_manifest_content = _build(fixture)
@@ -1522,6 +1523,72 @@ def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage
     )
     assert result["verification"] == "VALID"
     assert corrected_manifest["generation_id"] != baseline_manifest["generation_id"]
+
+    baseline_robuxio = next(
+        row
+        for row in baseline_coverage["strategies"]
+        if row["strategy_id"] == "robuxio-crypto"
+    )
+    corrected_robuxio = next(
+        row
+        for row in corrected_coverage["strategies"]
+        if row["strategy_id"] == "robuxio-crypto"
+    )
+    baseline_robuxio_segments = {
+        row["segment_id"]: row for row in baseline_robuxio["segments"]
+    }
+    corrected_robuxio_segments = {
+        row["segment_id"]: row for row in corrected_robuxio["segments"]
+    }
+    provider_segment_id = "robuxio-crypto:provider-live-before-funding"
+    account_segment_id = "robuxio-crypto:account-live"
+    assert (
+        corrected_robuxio_segments[provider_segment_id]["sha256"]
+        != baseline_robuxio_segments[provider_segment_id]["sha256"]
+    )
+    assert (
+        corrected_robuxio_segments[account_segment_id]["sha256"]
+        != baseline_robuxio_segments[account_segment_id]["sha256"]
+    )
+    assert (
+        baseline_robuxio_segments[provider_segment_id]["observed_start"],
+        baseline_robuxio_segments[provider_segment_id]["observed_end"],
+    ) == ("2025-12-02", "2025-12-05")
+    assert (
+        corrected_robuxio_segments[provider_segment_id]["observed_start"],
+        corrected_robuxio_segments[provider_segment_id]["observed_end"],
+    ) == ("2025-12-02", "2025-12-06")
+    assert (
+        baseline_robuxio_segments[account_segment_id]["observed_start"],
+        corrected_robuxio_segments[account_segment_id]["observed_start"],
+    ) == ("2025-12-07", "2025-12-08")
+
+    original_provider_returns = target_series._matrixport_provider_returns
+
+    def stale_provider_returns(
+        nav_path: Path,
+        product_id: str,
+        series_id: str,
+        _account_live_start: object,
+    ) -> list[dict[str, str]]:
+        return original_provider_returns(
+            nav_path,
+            product_id,
+            series_id,
+            target_series.date(2025, 12, 6),
+        )
+
+    monkeypatch.setattr(
+        target_series, "_matrixport_provider_returns", stale_provider_returns
+    )
+    with pytest.raises(
+        TargetSeriesError,
+        match="Robuxio provider-live interval differs from contract",
+    ):
+        _build(fixture)
+    monkeypatch.setattr(
+        target_series, "_matrixport_provider_returns", original_provider_returns
+    )
 
     baseline_segments = {
         row["strategy_id"]: {

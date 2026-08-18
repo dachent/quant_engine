@@ -64,7 +64,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.11.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.12.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 LAYERED_HISTORY_MODE_POLICY: Final = {
     "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
@@ -2672,6 +2672,27 @@ def build_layered_history_generation(
         robuxio_series,
         date.fromisoformat(str(robuxio_coverage["account_live_start"])),
     )
+    robuxio_provider_interval = corrections["robuxio-provider-live-before-funding"].get(
+        "interval"
+    )
+    if not isinstance(robuxio_provider_interval, dict):
+        raise TargetSeriesError(
+            "Robuxio provider-live interval is absent from contract"
+        )
+    try:
+        provider_observed_start = date.fromisoformat(
+            str(robuxio_provider_interval["observed_start"])
+        )
+        provider_observed_end = date.fromisoformat(
+            str(robuxio_provider_interval["observed_end"])
+        )
+    except (KeyError, ValueError) as exc:
+        raise TargetSeriesError("Robuxio provider-live interval is invalid") from exc
+    if (robuxio_provider[0]["date"], robuxio_provider[-1]["date"]) != (
+        (provider_observed_start + timedelta(days=1)).isoformat(),
+        provider_observed_end.isoformat(),
+    ):
+        raise TargetSeriesError("Robuxio provider-live interval differs from contract")
 
     quantbase_artifacts = _manifest_artifacts(quantbase_manifest.get("artifacts"))
     _verify_artifact(
@@ -4861,11 +4882,21 @@ def validate_layered_history_generation(
         key=lambda row: row["date"],
     )
     robuxio_interval = _correction_interval("robuxio-account-live-after-funding")
+    robuxio_provider_interval = _correction_interval(
+        "robuxio-provider-live-before-funding"
+    )
     funding_start = date.fromisoformat(str(robuxio_interval["effective_start"]))
+    provider_observed_start = date.fromisoformat(
+        str(robuxio_provider_interval["observed_start"])
+    )
     if (
         not robuxio_live
+        or not robuxio_provider
         or robuxio_live[0]["date"] != robuxio_interval["observed_start"]
         or robuxio_live[-1]["date"] != robuxio_interval["observed_end"]
+        or robuxio_provider[0]["date"]
+        != (provider_observed_start + timedelta(days=1)).isoformat()
+        or robuxio_provider[-1]["date"] != robuxio_provider_interval["observed_end"]
         or any(date.fromisoformat(row["date"]) <= funding_start for row in robuxio_live)
         or any(
             date.fromisoformat(row["date"]) >= funding_start for row in robuxio_provider
