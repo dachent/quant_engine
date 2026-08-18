@@ -406,6 +406,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
 
+    assert manifest["builder_version"] == "0.9.0"
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
         "fraction": "0.20",
@@ -1269,6 +1270,80 @@ def test_market_source_age_warns_in_development_and_fails_release_qc(
             assurance_profile="RELEASE_QC",
             **{key: value for key, value in inputs.items() if key != "plan_document"},
         )
+
+
+def test_style_and_sector_may_have_different_pre_history(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixture(tmp_path)
+    sector_path = inputs["market_paths"]["sector_returns"]
+    rows = list(csv.reader(sector_path.read_text(encoding="utf-8").splitlines()))
+    first_day = date.fromisoformat(rows[1][0])
+    rows.insert(1, [(first_day - timedelta(days=1)).isoformat(), *rows[1][1:]])
+    with sector_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+
+    manifest_path = inputs["sector_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    content = sector_path.read_bytes()
+    manifest["output"]["sha256"] = hashlib.sha256(content).hexdigest()
+    manifest["output"]["size_bytes"] = len(content)
+    _write_json(manifest_path, manifest)
+
+    planner.build_bundle(
+        **{key: value for key, value in inputs.items() if key != "plan_document"}
+    )
+
+
+def test_style_and_sector_shared_calendar_mismatch_is_rejected(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixture(tmp_path)
+    sector_path = inputs["market_paths"]["sector_returns"]
+    rows = list(csv.reader(sector_path.read_text(encoding="utf-8").splitlines()))
+    rows.pop(2)
+    with sector_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+
+    manifest_path = inputs["sector_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    content = sector_path.read_bytes()
+    manifest["output"]["sha256"] = hashlib.sha256(content).hexdigest()
+    manifest["output"]["size_bytes"] = len(content)
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(
+        planner.CurrentPlanError, match="shared market calendars differ"
+    ):
+        planner.build_bundle(
+            **{key: value for key, value in inputs.items() if key != "plan_document"}
+        )
+
+
+def test_market_pre_inception_missing_cells_are_excluded_from_projection(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixture(tmp_path)
+    style_path = inputs["market_paths"]["style_returns"]
+    rows = list(csv.reader(style_path.read_text(encoding="utf-8").splitlines()))
+    rows[1][2] = ""
+    with style_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+
+    manifest_path = inputs["style_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    content = style_path.read_bytes()
+    manifest["output"]["sha256"] = hashlib.sha256(content).hexdigest()
+    manifest["output"]["size_bytes"] = len(content)
+    _write_json(manifest_path, manifest)
+
+    outputs, _manifest = planner.build_bundle(
+        **{key: value for key, value in inputs.items() if key != "plan_document"}
+    )
+    projected = list(
+        csv.DictReader(outputs["inputs/lenses/style-factors.csv"].decode().splitlines())
+    )
+    assert projected[0]["date"] == rows[2][0]
 
 
 def test_public_factor_required_columns_must_be_complete_at_admitted_boundary(

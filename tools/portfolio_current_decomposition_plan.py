@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.8.0"
+BUILDER_VERSION = "0.9.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -1079,17 +1079,18 @@ def _complete_dates(
 ) -> tuple[date, ...]:
     seen: set[date] = set()
     result: list[date] = []
+    previous: date | None = None
     for index, row in enumerate(rows, 2):
         observed = _day(row.get("date"), f"{source_name} line {index} date")
         if observed in seen:
             raise CurrentPlanError(f"{source_name} has a duplicate date")
+        if previous is not None and observed <= previous:
+            raise CurrentPlanError(f"{source_name} dates are not increasing")
         seen.add(observed)
+        previous = observed
         missing = [column for column in required if not row.get(column, "").strip()]
         if missing:
-            raise CurrentPlanError(
-                f"{source_name} has an incomplete required observation: "
-                f"{observed.isoformat()}"
-            )
+            continue
         result.append(observed)
     if not result:
         raise CurrentPlanError(f"{source_name} has no complete observations")
@@ -1304,10 +1305,28 @@ def build_bundle(
         headers, rows = _read_csv(path, f"market input {key}")
         market_headers[key] = headers
         market_rows[key] = rows
-    style_dates = tuple(row["date"] for row in market_rows["style_returns"])
-    sector_dates = tuple(row["date"] for row in market_rows["sector_returns"])
-    if style_dates != sector_dates:
-        raise CurrentPlanError("style and sector market calendars differ")
+    style_dates = tuple(
+        _day(row.get("date"), f"style_returns line {index} date")
+        for index, row in enumerate(market_rows["style_returns"], 2)
+    )
+    sector_dates = tuple(
+        _day(row.get("date"), f"sector_returns line {index} date")
+        for index, row in enumerate(market_rows["sector_returns"], 2)
+    )
+    if not style_dates or not sector_dates:
+        raise CurrentPlanError("style and sector market calendars must be non-empty")
+    shared_start = max(style_dates[0], sector_dates[0])
+    shared_end = min(style_dates[-1], sector_dates[-1])
+    if shared_start > shared_end:
+        raise CurrentPlanError("style and sector market calendars do not overlap")
+    shared_style_dates = tuple(
+        observed for observed in style_dates if shared_start <= observed <= shared_end
+    )
+    shared_sector_dates = tuple(
+        observed for observed in sector_dates if shared_start <= observed <= shared_end
+    )
+    if shared_style_dates != shared_sector_dates:
+        raise CurrentPlanError("style and sector shared market calendars differ")
 
     universes = _catalog_universes(catalog)
     source_plans = {
