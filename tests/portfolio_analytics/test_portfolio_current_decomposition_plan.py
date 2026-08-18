@@ -406,7 +406,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
 
-    assert manifest["builder_version"] == "0.9.0"
+    assert manifest["builder_version"] == "0.10.0"
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
         "fraction": "0.20",
@@ -1344,6 +1344,33 @@ def test_market_pre_inception_missing_cells_are_excluded_from_projection(
         csv.DictReader(outputs["inputs/lenses/style-factors.csv"].decode().splitlines())
     )
     assert projected[0]["date"] == rows[2][0]
+
+
+@pytest.mark.parametrize("row_index", (2, -1))
+def test_market_missing_cell_after_completeness_boundary_is_rejected(
+    tmp_path: Path, row_index: int
+) -> None:
+    inputs = _fixture(tmp_path)
+    style_path = inputs["market_paths"]["style_returns"]
+    rows = list(csv.reader(style_path.read_text(encoding="utf-8").splitlines()))
+    rows[row_index][2] = ""
+    with style_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+
+    manifest_path = inputs["style_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    content = style_path.read_bytes()
+    manifest["output"]["sha256"] = hashlib.sha256(content).hexdigest()
+    manifest["output"]["size_bytes"] = len(content)
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match="incomplete required observation after its completeness boundary",
+    ):
+        planner.build_bundle(
+            **{key: value for key, value in inputs.items() if key != "plan_document"}
+        )
 
 
 def test_public_factor_required_columns_must_be_complete_at_admitted_boundary(

@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.9.0"
+BUILDER_VERSION = "0.10.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -1080,6 +1080,7 @@ def _complete_dates(
     seen: set[date] = set()
     result: list[date] = []
     previous: date | None = None
+    completeness_started = False
     for index, row in enumerate(rows, 2):
         observed = _day(row.get("date"), f"{source_name} line {index} date")
         if observed in seen:
@@ -1090,7 +1091,13 @@ def _complete_dates(
         previous = observed
         missing = [column for column in required if not row.get(column, "").strip()]
         if missing:
+            if completeness_started:
+                raise CurrentPlanError(
+                    f"{source_name} has an incomplete required observation after "
+                    f"its completeness boundary: {observed.isoformat()}"
+                )
             continue
+        completeness_started = True
         result.append(observed)
     if not result:
         raise CurrentPlanError(f"{source_name} has no complete observations")
