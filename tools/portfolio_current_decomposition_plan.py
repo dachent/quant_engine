@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.12.0"
+BUILDER_VERSION = "0.13.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -390,6 +390,10 @@ def _layered_history_targets(
     history_as_of = _day(manifest.get("as_of_date"), "layered history as_of_date")
     if history_as_of > evaluated_on:
         raise CurrentPlanError("layered history exceeds the evaluation date")
+    if assurance_profile == "RELEASE_QC" and history_as_of != evaluated_on:
+        raise CurrentPlanError(
+            "release QC requires a layered history receipt for the evaluation date"
+        )
 
     coverage_rows = _objects(coverage.get("strategies"), "layered strategies")
     coverage_by_strategy: dict[str, dict[str, Any]] = {}
@@ -617,15 +621,12 @@ def _layered_history_targets(
                 "cost": "",
             }
         )
-    target_rows = [
-        row
-        for row in target_rows
-        if _day(row["date"], "layered target date") <= common_complete_through
-    ]
     target_rows.sort(key=lambda item: (item["series_id"], item["date"]))
     for series_id, value in composition.items():
         value.pop("expected_observations", None)
-        value["calculation_complete_through"] = common_complete_through.isoformat()
+        value["accepted_history_complete_through"] = max(
+            projection_dates_by_series[series_id]
+        ).isoformat()
         value["calculation_observations_used"] = sum(
             row["series_id"] == series_id for row in target_rows
         )
@@ -644,7 +645,9 @@ def _layered_history_targets(
             "selected-targets.csv": target_content,
         },
         "identity": {
-            "as_of_date": common_complete_through.isoformat(),
+            "as_of_date": max(
+                max(observed) for observed in projection_dates_by_series.values()
+            ).isoformat(),
             "assurance_profile": assurance_profile,
             "assurance_profile_policy": profile_policy,
             "calculation_boundary": calculation_age,
@@ -1511,32 +1514,6 @@ def build_bundle(
             for strategy, _assignment in source_assignments
         }
         complete_date_set = set(complete_dates)
-        required_date_sets = [complete_date_set]
-        required_date_sets.extend(
-            set(targets_by_series[series_id]) for series_id in sorted(assigned_series)
-        )
-        analysis_as_of = _latest_common_complete_date(
-            required_date_sets,
-            evaluated_on=evaluated_on,
-            name=f"source {source_key}",
-        )
-        limiting_inputs = [
-            f"target:{series_id}"
-            for series_id in sorted(assigned_series)
-            if targets_by_series[series_id][-1] == analysis_as_of
-        ]
-        if complete_dates[-1] == analysis_as_of:
-            limiting_inputs.append(f"factor:{input_key}")
-        if not limiting_inputs:
-            limiting_inputs = [
-                f"target:{series_id}" for series_id in sorted(assigned_series)
-            ] + [f"factor:{input_key}"]
-        calculation_age = _age_disposition(
-            complete_through=analysis_as_of,
-            evaluated_on=evaluated_on,
-            warning_after_days=0,
-            limiting_inputs=limiting_inputs,
-        )
         if input_key in public_factor_boundaries:
             if (
                 source_plan.get("freshness_policy_id")
@@ -1554,17 +1531,125 @@ def build_bundle(
                 raise CurrentPlanError(
                     f"source {source_key} is incomplete at the admitted boundary"
                 )
-            factor_as_of = analysis_as_of
-            maximum_factor_staleness_days = 0
-        else:
-            factor_as_of = analysis_as_of
-            maximum_factor_staleness_days = 0
+        maximum_factor_staleness_days = 0
+
+        model_date_cache: dict[tuple[str, ...], tuple[date, ...]] = {}
+        model_boundaries: dict[str, date] = {}
+        model_calculation_boundaries: dict[str, dict[str, object]] = {}
+        models: list[dict[str, object]] = []
+        for strategy, assignment in source_assignments:
+            strategy_id = _text(strategy.get("strategy_id"), "strategy_id")
+            series_id = _text(strategy.get("series_id"), "series_id")
+            factor_sets = cast(
+                tuple[tuple[str, ...], ...], assignment["resolved_factor_sets"]
+            )
+            constraint = _text(assignment.get("constraint"), "assignment.constraint")
+            for index, factors in enumerate(factor_sets, 1):
+                model_id = f"{strategy_id}-{source_key}-{index:02d}"
+                factor_columns = tuple(columns[factor] for factor in factors)
+                model_required = (risk_free, *factor_columns)
+                model_dates = model_date_cache.get(model_required)
+                if model_dates is None:
+                    model_dates = _complete_dates(
+                        market_rows[input_key],
+                        model_required,
+                        f"market input {input_key} model {model_id}",
+                        allowed_missing_after_start=(
+                            frozenset(factor_columns)
+                            if input_key == "us_industries"
+                            else frozenset()
+                        ),
+                        always_required=(
+                            frozenset((risk_free,))
+                            if input_key == "us_industries"
+                            else frozenset()
+                        ),
+                    )
+                    model_date_cache[model_required] = model_dates
+                model_as_of = _latest_common_complete_date(
+                    [set(targets_by_series[series_id]), set(model_dates)],
+                    evaluated_on=evaluated_on,
+                    name=f"model {model_id}",
+                )
+                aligned = sorted(
+                    set(targets_by_series[series_id]).intersection(model_dates)
+                )
+                aligned = [observed for observed in aligned if observed <= model_as_of]
+                proposed_test = int(
+                    (Decimal(len(aligned)) * holdout_fraction).to_integral_value(
+                        rounding=ROUND_CEILING
+                    )
+                )
+                test_count = max(minimum_holdout, proposed_test)
+                if len(aligned) - test_count < 3:
+                    raise CurrentPlanError(
+                        f"{series_id} has insufficient aligned history for {model_id}"
+                    )
+                train_end = aligned[-test_count - 1]
+                test_start = aligned[-test_count]
+                limiting_inputs = []
+                if targets_by_series[series_id][-1] == model_as_of:
+                    limiting_inputs.append(f"target:{series_id}")
+                if model_dates[-1] == model_as_of:
+                    limiting_inputs.append(
+                        f"factor:{input_key}:{','.join(factors)}:{risk_free}"
+                    )
+                if not limiting_inputs:
+                    limiting_inputs = [
+                        f"target:{series_id}",
+                        f"factor:{input_key}:{','.join(factors)}:{risk_free}",
+                    ]
+                model_boundaries[model_id] = model_as_of
+                model_calculation_boundaries[model_id] = _age_disposition(
+                    complete_through=model_as_of,
+                    evaluated_on=evaluated_on,
+                    warning_after_days=0,
+                    limiting_inputs=limiting_inputs,
+                )
+                models.append(
+                    {
+                        "as_of_date": model_as_of.isoformat(),
+                        "constraint": constraint,
+                        "cost_coverage": "INCOMPLETE",
+                        "cv_folds": cv_folds,
+                        "factor_ids": list(factors),
+                        "minimum_test_observations": minimum_holdout,
+                        "minimum_train_observations": max(
+                            3, minimum_per_factor * len(factors)
+                        ),
+                        "model_id": model_id,
+                        "parsimony_tolerance": tolerance,
+                        "periods_per_year": 252,
+                        "ridge_candidates": list(ridge),
+                        "series_id": series_id,
+                        "test_start": test_start.isoformat(),
+                        "train_end": train_end.isoformat(),
+                    }
+                )
+        if not models:
+            raise CurrentPlanError(f"source {source_key} has no planned models")
+        analysis_as_of = max(model_boundaries.values())
+        oldest_model_boundary = min(model_boundaries.values())
+        calculation_age = _age_disposition(
+            complete_through=oldest_model_boundary,
+            evaluated_on=evaluated_on,
+            warning_after_days=0,
+            limiting_inputs=sorted(
+                f"model:{model_id}"
+                for model_id, boundary in model_boundaries.items()
+                if boundary == oldest_model_boundary
+            ),
+        )
+        factor_input_start = min(
+            min(observed) for observed in model_date_cache.values()
+        )
         projected_factor_rows = [
             [row["date"], *(row[column] for column in required)]
             for row in market_rows[input_key]
             if (observed := _day(row["date"], f"market input {input_key} date"))
-            in complete_date_set
-            and observed <= factor_as_of
+            >= factor_input_start
+            and observed <= analysis_as_of
+            and row[risk_free].strip()
         ]
         projected_factor_content = _csv_bytes(
             ("date", *required), projected_factor_rows
@@ -1595,52 +1680,24 @@ def build_bundle(
             projected_target_content,
             "portfolio-decomposition-target-series",
         )
-        models: list[dict[str, object]] = []
-        for strategy, assignment in source_assignments:
-            series_id = _text(strategy.get("series_id"), "series_id")
-            aligned = sorted(
-                set(targets_by_series[series_id]).intersection(complete_dates)
-            )
-            aligned = [observed for observed in aligned if observed <= analysis_as_of]
-            proposed_test = int(
-                (Decimal(len(aligned)) * holdout_fraction).to_integral_value(
-                    rounding=ROUND_CEILING
-                )
-            )
-            test_count = max(minimum_holdout, proposed_test)
-            if len(aligned) - test_count < 3:
-                raise CurrentPlanError(f"{series_id} has insufficient aligned history")
-            train_end = aligned[-test_count - 1]
-            test_start = aligned[-test_count]
-            factor_sets = cast(
-                tuple[tuple[str, ...], ...], assignment["resolved_factor_sets"]
-            )
-            constraint = _text(assignment.get("constraint"), "assignment.constraint")
-            for index, factors in enumerate(factor_sets, 1):
-                models.append(
-                    {
-                        "constraint": constraint,
-                        "cost_coverage": "INCOMPLETE",
-                        "cv_folds": cv_folds,
-                        "factor_ids": list(factors),
-                        "minimum_test_observations": minimum_holdout,
-                        "minimum_train_observations": max(
-                            3, minimum_per_factor * len(factors)
-                        ),
-                        "model_id": (
-                            f"{strategy['strategy_id']}-{source_key}-{index:02d}"
-                        ),
-                        "parsimony_tolerance": tolerance,
-                        "periods_per_year": 252,
-                        "ridge_candidates": list(ridge),
-                        "series_id": series_id,
-                        "test_start": test_start.isoformat(),
-                        "train_end": train_end.isoformat(),
-                    }
-                )
         factor_definitions: list[dict[str, object]] = []
         for candidate_id in candidates:
             candidate_record = candidate_records[candidate_id]
+            candidate_column = columns[candidate_id]
+            candidate_effective_dates = [
+                _day(row["date"], f"market input {input_key} date")
+                for row in market_rows[input_key]
+                if row[candidate_column].strip()
+                and row[risk_free].strip()
+                and factor_input_start
+                <= _day(row["date"], f"market input {input_key} date")
+                <= analysis_as_of
+            ]
+            if not candidate_effective_dates:
+                raise CurrentPlanError(
+                    f"source {source_key} candidate has no effective observations: "
+                    f"{candidate_id}"
+                )
             source_id = str(
                 candidate_record.get("source_id") or "UNAVAILABLE_NOT_DECLARED"
             ).strip()
@@ -1654,12 +1711,12 @@ def build_bundle(
                 )
             factor_definitions.append(
                 {
-                    "column": columns[candidate_id],
+                    "column": candidate_column,
                     "economic_family": str(
                         candidate_record.get("economic_family") or "UNCLASSIFIED"
                     ).strip(),
-                    "effective_end": str(projected_factor_rows[-1][0]),
-                    "effective_start": str(projected_factor_rows[0][0]),
+                    "effective_end": candidate_effective_dates[-1].isoformat(),
+                    "effective_start": candidate_effective_dates[0].isoformat(),
                     "factor_id": candidate_id,
                     "raw_orthogonal": raw_orthogonal,
                     "redundancy_policy": (
@@ -1705,6 +1762,10 @@ def build_bundle(
                 "as_of_date": spec["as_of_date"],
                 "data_boundary": calculation_age,
                 "model_count": len(models),
+                "model_calculation_boundaries": {
+                    model_id: model_calculation_boundaries[model_id]
+                    for model_id in sorted(model_calculation_boundaries)
+                },
                 "path": relative,
                 "sha256": _sha256(content),
                 "size_bytes": len(content),

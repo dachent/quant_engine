@@ -406,7 +406,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
 
-    assert manifest["builder_version"] == "0.12.0"
+    assert manifest["builder_version"] == "0.13.0"
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
         "fraction": "0.20",
@@ -639,7 +639,7 @@ def test_layered_history_age_warns_in_development_and_fails_release_qc(
 
     with pytest.raises(
         planner.CurrentPlanError,
-        match="release QC requires a current layered history live source for qsi",
+        match="release QC requires a layered history receipt for the evaluation date",
     ):
         planner._layered_history_targets(
             generation_root=inputs["layered_history_generation_path"],
@@ -651,6 +651,35 @@ def test_layered_history_age_warns_in_development_and_fails_release_qc(
         )
 
 
+def test_release_qc_rejects_prior_layered_receipt_even_within_age_limit(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixture(tmp_path)
+    generation = json.loads(
+        (inputs["layered_history_generation_path"] / "generation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    evaluated_on = date.fromisoformat(generation["as_of_date"]) + timedelta(days=1)
+    kwargs = {
+        "generation_root": inputs["layered_history_generation_path"],
+        "contract_path": inputs["financial_mvp_contract_path"],
+        "strategies": planner._resolved_strategies(inputs["plan_document"]),
+        "evidence_mode": "LIVE_ONLY",
+        "evaluated_on": evaluated_on,
+    }
+
+    development = planner._layered_history_targets(
+        assurance_profile="DEVELOPMENT", **kwargs
+    )
+    assert development["identity"]["generation_as_of_date"] == generation["as_of_date"]
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match="release QC requires a layered history receipt for the evaluation date",
+    ):
+        planner._layered_history_targets(assurance_profile="RELEASE_QC", **kwargs)
+
+
 def test_latest_common_complete_date_uses_exact_intersection_not_minimum_tail() -> None:
     first = {date(2026, 1, 1), date(2026, 1, 3)}
     second = {date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 4)}
@@ -660,6 +689,120 @@ def test_latest_common_complete_date_uses_exact_intersection_not_minimum_tail() 
         evaluated_on=date(2026, 1, 4),
         name="disconfirm minimum tail",
     ) == date(2026, 1, 1)
+
+
+def test_models_use_independent_common_boundaries_without_global_target_truncation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _fixture(tmp_path)
+    plan_document = inputs["plan_document"]
+    tt = next(
+        row
+        for row in plan_document["strategies"]
+        if row["strategy_id"] == "tt-portfolio"
+    )
+    tt["assignments"].append(
+        {
+            "source_key": "economic",
+            "constraint": "UNCONSTRAINED",
+            "factor_sets": [["MKT_RF"], ["MKT_RF", "SMB"]],
+        }
+    )
+    _write_json(inputs["plan_path"], plan_document)
+    factor_rows = list(
+        csv.DictReader(
+            inputs["market_paths"]["us_factors"]
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+    )
+    factor_dates = [date.fromisoformat(row["date"]) for row in factor_rows]
+    qsi_dates = factor_dates[:-5]
+    tt_dates = factor_dates
+    original = planner._layered_history_targets
+
+    def _different_target_tails(**kwargs: Any) -> dict[str, Any]:
+        result = original(**kwargs)
+        dates_by_series = {"QSI": qsi_dates, "TT Portfolio": tt_dates}
+        rows = [
+            {
+                "series_id": series_id,
+                "date": observed.isoformat(),
+                "return": f"{index / 100000:.12f}",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return_basis": "NET",
+                "return_type": "TOTAL",
+                "cost": "",
+            }
+            for series_id, observed_dates in dates_by_series.items()
+            for index, observed in enumerate(observed_dates, 1)
+        ]
+        content = planner._csv_bytes(
+            planner.TARGET_HEADERS,
+            [[row[header] for header in planner.TARGET_HEADERS] for row in rows],
+        )
+        result["rows"] = rows
+        result["target_content"] = content
+        result["contents"]["selected-targets.csv"] = content
+        result["identity"]["selected_targets_sha256"] = hashlib.sha256(
+            content
+        ).hexdigest()
+        for series_id, observed_dates in dates_by_series.items():
+            value = result["composition"][series_id]
+            value["accepted_history_complete_through"] = observed_dates[-1].isoformat()
+            value["calculation_observations_used"] = len(observed_dates)
+            value["live_observations"] = len(observed_dates)
+        return result
+
+    monkeypatch.setattr(planner, "_layered_history_targets", _different_target_tails)
+    outputs, manifest = planner.build_bundle(
+        **{key: value for key, value in inputs.items() if key != "plan_document"}
+    )
+    economic = json.loads(outputs["specs/economic.json"])
+    boundaries = {row["series_id"]: row["as_of_date"] for row in economic["models"]}
+    assert boundaries == {
+        "QSI": qsi_dates[-1].isoformat(),
+        "TT Portfolio": tt_dates[-1].isoformat(),
+    }
+    assert economic["as_of_date"] == tt_dates[-1].isoformat()
+    selected = list(
+        csv.DictReader(
+            outputs["inputs/history/selected-targets.csv"].decode("utf-8").splitlines()
+        )
+    )
+    assert max(row["date"] for row in selected if row["series_id"] == "QSI") == (
+        qsi_dates[-1].isoformat()
+    )
+    assert (
+        max(row["date"] for row in selected if row["series_id"] == "TT Portfolio")
+        == tt_dates[-1].isoformat()
+    )
+    per_model = next(
+        row for row in manifest["specs"] if row["source_key"] == "economic"
+    )["model_calculation_boundaries"]
+    assert per_model["qsi-economic-01"]["complete_through"] == (
+        qsi_dates[-1].isoformat()
+    )
+    assert per_model["tt-portfolio-economic-01"]["complete_through"] == (
+        tt_dates[-1].isoformat()
+    )
+
+    source_root = tmp_path / "per-model-materialized"
+    for relative, content in outputs.items():
+        path = source_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    result, _generation, _content = engine.build_decomposition(
+        source_root / "specs/economic.json", source_root
+    )
+    result_boundaries = {
+        row["series_id"]: row["model_as_of_date"] for row in result["model_results"]
+    }
+    assert result_boundaries == boundaries
+    assert {
+        row["series_id"]: row["coverage"]["target_observed_end"]
+        for row in result["model_results"]
+    } == boundaries
 
 
 @pytest.mark.parametrize(
@@ -1119,7 +1262,7 @@ def test_plan_preserves_target_end_beyond_publication_lag(
         "age_days": 48,
         "complete_through": "2026-06-30",
         "evaluated_on": "2026-08-17",
-        "limiting_inputs": ["factor:us_factors"],
+        "limiting_inputs": ["model:qsi-economic-01", "model:qsi-economic-02"],
         "status": "WARN_COMPLETE_DATA_AGE",
         "warning_after_days": 0,
     }
