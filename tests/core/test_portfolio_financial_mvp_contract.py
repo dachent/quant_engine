@@ -563,9 +563,7 @@ def test_proposed_market_candidates_are_not_promoted_to_authority() -> None:
 def test_public_factor_run_and_publication_timing_propagate_to_every_view() -> None:
     contract = _contract()
     source = _source(contract, "public-economic-and-industry-factors")
-    expected_cadence = (
-        "DAILY_TO_WEEKLY_FULL_PIPELINE; CAPTURE_EVERY_SCHEDULED_RUN"
-    )
+    expected_cadence = "DAILY_TO_WEEKLY_FULL_PIPELINE; CAPTURE_EVERY_SCHEDULED_RUN"
     expected_rule = (
         "CURRENT_RUN_CAPTURE_REQUIRED; MONTHLY_PROVIDER_PUBLICATION; "
         "REQUIRE_DAILY_OBSERVATIONS_THROUGH_LATEST_MONTH_END_WHOSE_45_"
