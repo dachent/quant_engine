@@ -121,7 +121,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "f63e93d60098ccd206bd20de21e95568e9de1eb19d68f043a999d5146bb4e5a9"
+        "e55b280162a1ed219f588ee7e7394509b9a7e9cfb0f944e549c6d9be78964b5c"
     )
 
 
@@ -190,6 +190,19 @@ def test_strategy_perimeter_matches_discoverable_registry_without_disappearing_r
     assert all(
         row["readiness"] == "REQUIRED_NOT_READY" for row in contract["strategies"]
     )
+    assert {
+        row["strategy_id"]: row["history_series_id"] for row in contract["strategies"]
+    } == {
+        "composer-holy-grail": None,
+        "echotrade-growth-pivots": "Growth at Market Pivot Points [EchoTrade]",
+        "grizzlybears-vtma": "GrizzlyBears VTMA",
+        "p123-ai-factor": "AI Factor [P123]",
+        "p123-eu": "EU [P123]",
+        "qsi": "QSI",
+        "robuxio-crypto": "Robuxio Crypto (High Sharpe High Vol)",
+        "tt-portfolio": "TT Portfolio",
+        "volatis-strategy": "Volatis Strategy",
+    }
     hwm_exclusions = {
         row["strategy_id"]
         for row in contract["strategies"]

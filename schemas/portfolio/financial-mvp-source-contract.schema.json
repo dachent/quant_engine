@@ -238,6 +238,7 @@
         "blockers",
         "effective_product_interval",
         "funded_membership",
+        "history_series_id",
         "outcome_dispositions",
         "product_requirement",
         "readiness",
@@ -247,6 +248,10 @@
       ],
       "properties": {
         "strategy_id": {"$ref": "#/$defs/nonempty_string"},
+        "history_series_id": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
         "product_requirement": {"$ref": "#/$defs/requirement"},
         "readiness": {"$ref": "#/$defs/readiness"},
         "readiness_reason": {"$ref": "#/$defs/nonempty_string"},

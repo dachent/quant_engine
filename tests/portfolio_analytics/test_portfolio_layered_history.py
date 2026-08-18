@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import importlib.util
@@ -922,6 +923,10 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
         ).read_text(encoding="utf-8")
     )
     assert generation_schema["properties"]["builder_version"] == {"const": "1.5.0"}
+    assert (
+        "strategy-history"
+        in generation_schema["properties"]["source_manifests"]["properties"]
+    )
 
     result = validate_layered_history_generation(
         artifacts=artifacts,
@@ -1378,6 +1383,118 @@ def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version
     }
 
 
+def test_layered_history_registers_optional_strategy_history_manifest(
+    tmp_path: Path,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    returns_path = tmp_path / "strategy-history-returns.csv"
+    returns_content = _csv_bytes(
+        target_series.CORRELATION_FIELDS_V2,
+        [
+            {
+                "date": "2024-01-01",
+                "evidence_layer": "BACKTEST",
+                "return": "0.01",
+                "series_id": "QSI",
+                "strategy_version": "synthetic-qsi:v1",
+            },
+            {
+                "date": "2024-01-02",
+                "evidence_layer": "BACKTEST",
+                "return": "-0.005",
+                "series_id": "QSI",
+                "strategy_version": "synthetic-qsi:v1",
+            },
+        ],
+    )
+    returns_path.write_bytes(returns_content)
+    strategy_manifest = {
+        "as_of_date": fixture["as_of_date"],
+        "builder": "portfolio-strategy-history",
+        "builder_version": "1.4.0",
+        "history_dispositions": [],
+        "returns_artifact": {
+            "artifact_id": "strategy-history/returns.csv",
+            "sha256": hashlib.sha256(returns_content).hexdigest(),
+            "size_bytes": len(returns_content),
+        },
+        "schema_version": 1,
+        "series": [
+            {
+                "compatibility_basis": "SYNTHETIC_CURRENT_SPECIFICATION",
+                "frequency": "DAILY_TRADING",
+                "history_status": "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+                "implementation_reconciliation_status": "UNRESOLVED",
+                "observed_end": "2024-01-02",
+                "observed_start": "2024-01-01",
+                "required_for_analysis": True,
+                "return_observations": 2,
+                "series_id": "QSI",
+                "strategy_version": "synthetic-qsi:v1",
+            }
+        ],
+        "verification": "VERIFIED",
+    }
+    strategy_manifest["bundle_id"] = hashlib.sha256(
+        canonical_json_bytes(strategy_manifest)
+    ).hexdigest()
+    manifest_path = tmp_path / "strategy-history-manifest.json"
+    _write_json(manifest_path, strategy_manifest)
+    fixture["strategy_history_manifest_path"] = manifest_path
+    fixture["strategy_history_returns_path"] = returns_path
+
+    artifacts, manifest_content = _build(fixture)
+    result = validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_content,
+        contract_path=fixture["contract_path"],
+    )
+    assert result["verification"] == "VALID"
+    generation = json.loads(manifest_content)
+    assert generation["source_manifests"]["strategy-history"] == (
+        manifest_path.read_text(encoding="utf-8")
+    )
+    inputs = {row["input_id"]: row for row in generation["inputs"]}
+    assert (
+        inputs["strategy-history-manifest"]["generation_id"]
+        == (strategy_manifest["bundle_id"])
+    )
+    assert inputs["strategy-history-returns"]["artifact_id"] == (
+        "strategy-history/returns.csv"
+    )
+
+    missing_artifact_id = copy.deepcopy(strategy_manifest)
+    missing_artifact_id["returns_artifact"].pop("artifact_id")
+    missing_artifact_id.pop("bundle_id")
+    missing_artifact_id["bundle_id"] = hashlib.sha256(
+        canonical_json_bytes(missing_artifact_id)
+    ).hexdigest()
+    _write_json(manifest_path, missing_artifact_id)
+    with pytest.raises(TargetSeriesError, match="returns artifact keys differ"):
+        _build(fixture)
+
+    wrong_artifact_id = copy.deepcopy(strategy_manifest)
+    wrong_artifact_id["returns_artifact"]["artifact_id"] = "other/returns.csv"
+    wrong_artifact_id.pop("bundle_id")
+    wrong_artifact_id["bundle_id"] = hashlib.sha256(
+        canonical_json_bytes(wrong_artifact_id)
+    ).hexdigest()
+    _write_json(manifest_path, wrong_artifact_id)
+    with pytest.raises(TargetSeriesError, match="returns artifact ID differs"):
+        _build(fixture)
+
+    invalid_bundle = dict(strategy_manifest)
+    invalid_bundle["bundle_id"] = "0" * 64
+    _write_json(manifest_path, invalid_bundle)
+    invalid_artifacts, invalid_manifest = _build(fixture)
+    with pytest.raises(TargetSeriesError, match="bundle identity differs"):
+        validate_layered_history_generation(
+            artifacts=invalid_artifacts,
+            manifest_content=invalid_manifest,
+            contract_path=fixture["contract_path"],
+        )
+
+
 def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
     tmp_path: Path,
 ) -> None:
@@ -1484,6 +1601,92 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         validate_layered_history_generation(
             artifacts=duplicate_summary_artifacts,
             manifest_content=_reidentify_manifest(duplicate_summary_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    noncanonical_coverage_artifacts = dict(artifacts)
+    noncanonical_coverage_manifest = json.loads(manifest_content)
+    noncanonical_coverage = json.dumps(
+        json.loads(artifacts["coverage.json"]), indent=2
+    ).encode("utf-8")
+    _replace_output(
+        noncanonical_coverage_artifacts,
+        noncanonical_coverage_manifest,
+        "coverage.json",
+        noncanonical_coverage,
+    )
+    with pytest.raises(TargetSeriesError, match="coverage is not canonical"):
+        validate_layered_history_generation(
+            artifacts=noncanonical_coverage_artifacts,
+            manifest_content=_reidentify_manifest(noncanonical_coverage_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    extra_coverage_artifacts = dict(artifacts)
+    extra_coverage_manifest = json.loads(manifest_content)
+    extra_coverage = json.loads(artifacts["coverage.json"])
+    extra_coverage["uncontrolled_policy"] = "ACCEPT"
+    _replace_output(
+        extra_coverage_artifacts,
+        extra_coverage_manifest,
+        "coverage.json",
+        canonical_json_bytes(extra_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="coverage keys differ"):
+        validate_layered_history_generation(
+            artifacts=extra_coverage_artifacts,
+            manifest_content=_reidentify_manifest(extra_coverage_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    nested_extra_artifacts = dict(artifacts)
+    nested_extra_manifest = json.loads(manifest_content)
+    nested_extra_coverage = json.loads(artifacts["coverage.json"])
+    nested_extra_coverage["strategies"][0]["uncontrolled_policy"] = "ACCEPT"
+    _replace_output(
+        nested_extra_artifacts,
+        nested_extra_manifest,
+        "coverage.json",
+        canonical_json_bytes(nested_extra_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="strategy coverage keys differ"):
+        validate_layered_history_generation(
+            artifacts=nested_extra_artifacts,
+            manifest_content=_reidentify_manifest(nested_extra_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    mode_policy_artifacts = dict(artifacts)
+    mode_policy_manifest = json.loads(manifest_content)
+    mode_policy_coverage = json.loads(artifacts["coverage.json"])
+    mode_policy_coverage["mode_policy"]["comparison_layers_in_modes"] = True
+    _replace_output(
+        mode_policy_artifacts,
+        mode_policy_manifest,
+        "coverage.json",
+        canonical_json_bytes(mode_policy_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="mode policy differs"):
+        validate_layered_history_generation(
+            artifacts=mode_policy_artifacts,
+            manifest_content=_reidentify_manifest(mode_policy_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    correction_set_artifacts = dict(artifacts)
+    correction_set_manifest = json.loads(manifest_content)
+    correction_set_coverage = json.loads(artifacts["coverage.json"])
+    correction_set_coverage["correction_resolutions"]["uncontrolled"] = {}
+    _replace_output(
+        correction_set_artifacts,
+        correction_set_manifest,
+        "coverage.json",
+        canonical_json_bytes(correction_set_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="correction resolutions are absent"):
+        validate_layered_history_generation(
+            artifacts=correction_set_artifacts,
+            manifest_content=_reidentify_manifest(correction_set_manifest),
             contract_path=fixture["contract_path"],
         )
 
@@ -1602,6 +1805,28 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         validate_layered_history_generation(
             artifacts=reason_artifacts,
             manifest_content=_reidentify_manifest(reason_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    series_artifacts = dict(artifacts)
+    series_manifest = json.loads(manifest_content)
+    series_coverage = json.loads(series_artifacts["coverage.json"])
+    composer_coverage = next(
+        row
+        for row in series_coverage["strategies"]
+        if row["strategy_id"] == "composer-holy-grail"
+    )
+    composer_coverage["series_id"] = "SYNTHETIC_UNCONTROLLED_SERIES"
+    _replace_output(
+        series_artifacts,
+        series_manifest,
+        "coverage.json",
+        canonical_json_bytes(series_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="series identity differs"):
+        validate_layered_history_generation(
+            artifacts=series_artifacts,
+            manifest_content=_reidentify_manifest(series_manifest),
             contract_path=fixture["contract_path"],
         )
 

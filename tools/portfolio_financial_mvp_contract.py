@@ -1354,6 +1354,7 @@ def _validate_strategies(
                 "blockers",
                 "effective_product_interval",
                 "funded_membership",
+                "history_series_id",
                 "outcome_dispositions",
                 "product_requirement",
                 "readiness",
@@ -1364,6 +1365,7 @@ def _validate_strategies(
             "strategy",
         )
         strategy_id = _text(row["strategy_id"], "strategy.strategy_id")
+        _optional_text(row["history_series_id"], "strategy.history_series_id")
         requirement = _text(row["product_requirement"], "strategy.product_requirement")
         if requirement not in {"REQUIRED", "OPTIONAL", "EXCLUDED"}:
             raise FinancialMvpContractError(
@@ -3815,8 +3817,8 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             "",
             "## Current perimeter",
             "",
-            "| Strategy | Requirement | Readiness | Version | Funded membership | Blockers |",
-            "|---|---|---|---|---|---|",
+            "| Strategy | History series | Requirement | Readiness | Version | Funded membership | Blockers |",
+            "|---|---|---|---|---|---|---|",
         ]
     )
     for row in strategies:
@@ -3824,8 +3826,10 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
         membership = row["funded_membership"]
         blockers = ", ".join(f"#{value}" for value in row["blockers"]) or "None"
         version_text = version["version_ref"] or version["status"]
+        history_series = row["history_series_id"] or "NOT_CAPTURED"
         lines.append(
-            f"| {row['strategy_id']} | {row['product_requirement']} | "
+            f"| {row['strategy_id']} | {history_series} | "
+            f"{row['product_requirement']} | "
             f"{row['readiness']} | {version_text} | {membership['status']} | "
             f"{blockers} |"
         )

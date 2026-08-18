@@ -43,6 +43,7 @@
   "strategies": [
     {
       "strategy_id": "p123-ai-factor",
+      "history_series_id": "AI Factor [P123]",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "Exact connected-model version and funded membership remain census/history inputs; no financial outcome may silently omit the strategy.",
@@ -54,6 +55,7 @@
     },
     {
       "strategy_id": "p123-eu",
+      "history_series_id": "EU [P123]",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "The exact connected P123 EU model and owner funding boundary are evidenced. The provider-performance return transform remains derived but not admitted pending #303; the accepted layered-history generation, exact-version backtest capture, and downstream outcomes remain required.",
@@ -65,6 +67,7 @@
     },
     {
       "strategy_id": "qsi",
+      "history_series_id": "QSI",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "Current version, funded membership, complete histories, benchmark, and calendar policy remain required inputs.",
@@ -76,6 +79,7 @@
     },
     {
       "strategy_id": "tt-portfolio",
+      "history_series_id": "TT Portfolio",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "Current version, funded membership, provider disposition, benchmark, and complete histories remain unresolved.",
@@ -87,6 +91,7 @@
     },
     {
       "strategy_id": "volatis-strategy",
+      "history_series_id": "Volatis Strategy",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "The current Quantbase generation and first capital-reconciled funding boundary are evidenced; the accepted layered-history generation, exact-version backtest inventory, and downstream outcomes remain required.",
@@ -98,6 +103,7 @@
     },
     {
       "strategy_id": "grizzlybears-vtma",
+      "history_series_id": "GrizzlyBears VTMA",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "Funded membership, complete account-live history, benchmark, and volatility/leveraged-equity applicability remain unresolved.",
@@ -109,6 +115,7 @@
     },
     {
       "strategy_id": "robuxio-crypto",
+      "history_series_id": "Robuxio Crypto (High Sharpe High Vol)",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "The current Matrixport generation, exact strategy version, 2025-12-06 owner-live boundary, and #287-declared source omissions on 2026-01-27 and 2026-07-03 are evidenced. The layered-history rule admits only exact adjacent-day returns, omits each missing source date and its first post-gap spanning-return endpoint, and resumes from the next exact one-day interval; funded census, HWM, invested capital, crypto applicability, and dependence remain required.",
@@ -120,6 +127,7 @@
     },
     {
       "strategy_id": "echotrade-growth-pivots",
+      "history_series_id": "Growth at Market Pivot Points [EchoTrade]",
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "The accepted HWM policy excludes this de-minimis sleeve only from HWM. The captured 2025 rows are event-to-event reconstructions on fill dates using last-trade marks, not admissible daily NAV returns; funded membership, current daily history, capital, decomposition, and dependence remain required.",
@@ -131,6 +139,7 @@
     },
     {
       "strategy_id": "composer-holy-grail",
+      "history_series_id": null,
       "product_requirement": "REQUIRED",
       "readiness": "REQUIRED_NOT_READY",
       "readiness_reason": "The accepted HWM policy excludes this de-minimis sleeve only from HWM; product-wide capital, decomposition, and dependence disposition remains explicit and unresolved.",
