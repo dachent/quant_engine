@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.13.0"
+BUILDER_VERSION = "0.14.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -1040,6 +1040,86 @@ def _resolved_strategies(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     return resolved
 
 
+def _validate_strategy_perimeter(
+    strategies: Sequence[Mapping[str, Any]],
+    financial_mvp_contract: Mapping[str, Any],
+) -> None:
+    contract_rows = _objects(
+        financial_mvp_contract.get("strategies"),
+        "financial MVP strategies",
+    )
+    contract_by_id = {
+        _text(row.get("strategy_id"), "financial MVP strategy_id"): row
+        for row in contract_rows
+    }
+    if len(contract_by_id) != len(contract_rows):
+        raise CurrentPlanError("financial MVP strategy IDs are duplicated")
+    plan_by_id = {
+        _text(row.get("strategy_id"), "plan strategy_id"): row for row in strategies
+    }
+    if len(plan_by_id) != len(strategies):
+        raise CurrentPlanError("plan strategy IDs are duplicated")
+    if set(plan_by_id) != set(contract_by_id):
+        missing = sorted(set(contract_by_id) - set(plan_by_id))
+        extra = sorted(set(plan_by_id) - set(contract_by_id))
+        raise CurrentPlanError(
+            f"plan strategy perimeter differs; missing={missing}, extra={extra}"
+        )
+
+    for strategy_id, contract_row in sorted(contract_by_id.items()):
+        plan_row = plan_by_id[strategy_id]
+        contract_series_id = contract_row.get("history_series_id")
+        if contract_series_id is not None and _text(
+            plan_row.get("series_id"), f"{strategy_id}.series_id"
+        ) != _text(contract_series_id, f"{strategy_id}.history_series_id"):
+            raise CurrentPlanError(
+                f"plan history series differs from the financial MVP contract: "
+                f"{strategy_id}"
+            )
+        if (
+            _text(
+                contract_row.get("product_requirement"),
+                f"{strategy_id}.product_requirement",
+            )
+            != "REQUIRED"
+        ):
+            raise CurrentPlanError(
+                f"financial MVP strategy is not a required product member: {strategy_id}"
+            )
+        outcome_dispositions = _object(
+            contract_row.get("outcome_dispositions"),
+            f"{strategy_id}.outcome_dispositions",
+        )
+        decomposition_disposition = _text(
+            outcome_dispositions.get("DECOMPOSITION"),
+            f"{strategy_id}.DECOMPOSITION",
+        )
+        assignments = _objects(plan_row.get("assignments", []), "assignments")
+        default_disposition = _text(
+            plan_row.get("default_disposition"),
+            f"{strategy_id}.default_disposition",
+        )
+        if decomposition_disposition == "REQUIRED":
+            if not assignments and not default_disposition.startswith(
+                "REQUIRED_NOT_READY_"
+            ):
+                raise CurrentPlanError(
+                    "required decomposition strategy without assignments must be "
+                    f"REQUIRED_NOT_READY: {strategy_id}"
+                )
+        elif decomposition_disposition == "NOT_APPLICABLE_OWNER_APPROVED":
+            if assignments or default_disposition != decomposition_disposition:
+                raise CurrentPlanError(
+                    "owner-approved decomposition non-applicability differs: "
+                    f"{strategy_id}"
+                )
+        else:
+            raise CurrentPlanError(
+                "financial MVP decomposition disposition is unsupported: "
+                f"{strategy_id}={decomposition_disposition}"
+            )
+
+
 def _factor_sets(
     assignment: Mapping[str, Any], candidates: Sequence[str], name: str
 ) -> tuple[tuple[str, ...], ...]:
@@ -1250,6 +1330,7 @@ def build_bundle(
     }
     if len(contract_sources) != len(financial_mvp_contract.get("source_segments", [])):
         raise CurrentPlanError("financial MVP source IDs are duplicated")
+    _validate_strategy_perimeter(strategies, financial_mvp_contract)
     for name, content in history_contents.items():
         outputs[f"inputs/history/{name}"] = content
     generated_provenance: list[dict[str, object]] = []

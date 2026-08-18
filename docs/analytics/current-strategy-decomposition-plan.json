@@ -199,19 +199,19 @@
       "strategy_id": "robuxio-crypto",
       "series_id": "Robuxio Crypto (High Sharpe High Vol)",
       "archetype": "CRYPTO_TACTICAL",
-      "default_disposition": "UNAVAILABLE_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
+      "default_disposition": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
     },
     {
       "strategy_id": "echotrade-growth-pivots",
       "series_id": "Growth at Market Pivot Points [EchoTrade]",
       "archetype": "UNVERIFIED_SIGNAL",
-      "default_disposition": "UNAVAILABLE_INSUFFICIENT_TARGET_HISTORY"
+      "default_disposition": "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV"
     },
     {
       "strategy_id": "composer-holy-grail",
       "series_id": "[Composer] - The Holy Grail (Buy Copy)",
       "archetype": "DROPPED_IMMATERIAL",
-      "default_disposition": "DROPPED_IMMATERIAL_CURRENT_SCOPE"
+      "default_disposition": "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY"
     }
   ]
 }

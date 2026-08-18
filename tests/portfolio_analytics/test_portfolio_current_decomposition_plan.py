@@ -340,6 +340,23 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
             },
         ],
     }
+    contract_document = json.loads(
+        history_fixture["contract_path"].read_text(encoding="utf-8")
+    )
+    planned_strategy_ids = {row["strategy_id"] for row in plan_document["strategies"]}
+    for contract_strategy in contract_document["strategies"]:
+        strategy_id = contract_strategy["strategy_id"]
+        if strategy_id in planned_strategy_ids:
+            continue
+        plan_document["strategies"].append(
+            {
+                "strategy_id": strategy_id,
+                "series_id": contract_strategy["history_series_id"]
+                or f"UNRESOLVED::{strategy_id}",
+                "default_disposition": "REQUIRED_NOT_READY_SYNTHETIC_FIXTURE",
+                "assignments": [],
+            }
+        )
     plan = _write_json(tmp_path / "plan.json", plan_document)
     market_paths = {
         "us_factors": tmp_path / "us.csv",
@@ -406,7 +423,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
 
-    assert manifest["builder_version"] == "0.13.0"
+    assert manifest["builder_version"] == "0.14.0"
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
         "fraction": "0.20",
@@ -449,7 +466,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     )
     assert history_provenance["history/segments.csv"]["schema_version"] == "1"
     dispositions = json.loads(outputs["candidate-dispositions.json"])
-    assert len(dispositions["candidate_dispositions"]) == 12
+    assert len(dispositions["candidate_dispositions"]) == 54
     economic = json.loads(outputs["specs/economic.json"])
     assert economic["models"][0]["test_start"] > economic["models"][0]["train_end"]
     assert {factor["factor_id"] for factor in economic["factor_source"]["factors"]} == {
@@ -480,6 +497,59 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         coverage_by_strategy["echotrade-growth-pivots"]["modes"]["LIVE_ONLY"]["status"]
         == "REQUIRED_NOT_READY"
     )
+
+
+def test_required_decomposition_perimeter_cannot_be_dropped_or_omitted() -> None:
+    plan = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "docs"
+            / "analytics"
+            / "current-strategy-decomposition-plan.json"
+        ).read_text(encoding="utf-8")
+    )
+    contract = json.loads(
+        (
+            REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    strategies = planner._resolved_strategies(plan)
+    planner._validate_strategy_perimeter(strategies, contract)
+    defaults = {row["strategy_id"]: row["default_disposition"] for row in strategies}
+    assert defaults["composer-holy-grail"] == (
+        "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY"
+    )
+    assert defaults["echotrade-growth-pivots"] == (
+        "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV"
+    )
+    assert defaults["robuxio-crypto"] == (
+        "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
+    )
+
+    dropped = json.loads(json.dumps(plan))
+    next(
+        row
+        for row in dropped["strategies"]
+        if row["strategy_id"] == "composer-holy-grail"
+    )["default_disposition"] = "DROPPED_IMMATERIAL_CURRENT_SCOPE"
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match="required decomposition strategy without assignments",
+    ):
+        planner._validate_strategy_perimeter(
+            planner._resolved_strategies(dropped), contract
+        )
+
+    omitted = json.loads(json.dumps(plan))
+    omitted["strategies"] = [
+        row
+        for row in omitted["strategies"]
+        if row["strategy_id"] != "echotrade-growth-pivots"
+    ]
+    with pytest.raises(planner.CurrentPlanError, match="strategy perimeter differs"):
+        planner._validate_strategy_perimeter(
+            planner._resolved_strategies(omitted), contract
+        )
 
 
 def test_write_is_content_addressed_and_idempotent(tmp_path: Path) -> None:
@@ -1056,7 +1126,10 @@ def test_available_hybrid_projection_is_selected_without_legacy_override(
         == "VALID"
     )
 
-    inputs["plan_document"]["strategies"] = [inputs["plan_document"]["strategies"][0]]
+    for strategy in inputs["plan_document"]["strategies"][1:]:
+        strategy.pop("inherit_assignments_from", None)
+        strategy["assignments"] = []
+        strategy["default_disposition"] = "REQUIRED_NOT_READY_SYNTHETIC_HYBRID_FIXTURE"
     _write_json(inputs["plan_path"], inputs["plan_document"])
     inputs["financial_mvp_contract_path"] = history_fixture["contract_path"]
     inputs["layered_history_generation_path"] = hybrid_generation
