@@ -887,6 +887,10 @@ def test_models_use_independent_common_boundaries_without_global_target_truncati
             "factor_sets": [["MKT_RF"], ["MKT_RF", "SMB"]],
         }
     )
+    tt["source_dispositions"]["economic"].update(
+        readiness="READY_TO_MODEL",
+        reason="APPLICABLE_SYNTHETIC_BOUNDARY_FIXTURE",
+    )
     _write_json(inputs["plan_path"], plan_document)
     factor_rows = list(
         csv.DictReader(
