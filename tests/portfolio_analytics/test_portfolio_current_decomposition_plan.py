@@ -175,7 +175,7 @@ def _public_factor_manifest(
             }
         )
     manifest: dict[str, object] = {
-        "schema_version": 3,
+        "schema_version": 2,
         "builder": planner.PUBLIC_FACTOR_BUILDER,
         "builder_version": planner.PUBLIC_FACTOR_BUILDER_VERSION,
         "catalog": {"sha256": catalog_sha256},
@@ -295,7 +295,7 @@ def _fixture(
         },
     )
     plan_document = {
-        "schema_version": 2,
+        "schema_version": 3,
         "split_policy": {
             "holdout_fraction": "0.20",
             "minimum_holdout_observations": 1,
@@ -626,7 +626,9 @@ def test_dynamic_surface_policy_and_grid_fail_closed(tmp_path: Path) -> None:
 
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     outcome = next(
-        row for row in contract["outcomes"] if row["outcome_id"] == "DECOMPOSITION"
+        row
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "DECOMPOSITION"
     )
     outcome["calculation_contract"]["surfaces"] = ["STATIC"]
     with pytest.raises(planner.CurrentPlanError, match="surfaces differ"):
@@ -1097,12 +1099,14 @@ def test_models_use_independent_common_boundaries_without_global_target_truncati
         == tt_dates[-1].isoformat()
     )
     per_model = next(
-        row for row in manifest["specs"] if row["source_key"] == "economic"
+        row
+        for row in manifest["specs"]
+        if row["source_key"] == "economic" and row["surface"] == "STATIC"
     )["model_calculation_boundaries"]
-    assert per_model["qsi-economic-01"]["complete_through"] == (
+    assert per_model["qsi-economic-01-static"]["complete_through"] == (
         qsi_dates[-1].isoformat()
     )
-    assert per_model["tt-portfolio-economic-01"]["complete_through"] == (
+    assert per_model["tt-portfolio-economic-01-static"]["complete_through"] == (
         tt_dates[-1].isoformat()
     )
 
@@ -1594,7 +1598,7 @@ def test_plan_preserves_target_end_beyond_publication_lag(
     assert target_rows[-1]["date"] == "2026-06-30"
     assert retained_history_rows[-1]["date"] == "2026-08-17"
     assert economic["maximum_factor_staleness_days"] == 0
-    assert manifest["data_age"]["spec_calculation_boundaries"]["economic"] == {
+    expected_boundary = {
         "age_days": 48,
         "complete_through": "2026-06-30",
         "evaluated_on": "2026-08-17",
@@ -1602,6 +1606,17 @@ def test_plan_preserves_target_end_beyond_publication_lag(
         "status": "WARN_COMPLETE_DATA_AGE",
         "warning_after_days": 0,
     }
+    boundaries = manifest["data_age"]["spec_calculation_boundaries"]
+    assert set(boundaries) == {
+        "economic:DYNAMIC_FLS",
+        "economic:STATIC",
+        "sector:DYNAMIC_FLS",
+        "sector:STATIC",
+        "style:DYNAMIC_FLS",
+        "style:STATIC",
+    }
+    assert boundaries["economic:STATIC"] == expected_boundary
+    assert boundaries["economic:DYNAMIC_FLS"] == expected_boundary
 
     source_root = tmp_path / "publication-lag-materialized"
     for relative, content in outputs.items():

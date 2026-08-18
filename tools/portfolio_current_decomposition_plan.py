@@ -1139,7 +1139,8 @@ def _required_decomposition_surfaces(
     matching = [
         outcome
         for outcome in _objects(
-            financial_mvp_contract.get("outcomes"), "financial MVP outcomes"
+            financial_mvp_contract.get("financial_outcomes"),
+            "financial MVP outcomes",
         )
         if outcome.get("outcome_id") == "DECOMPOSITION"
     ]
