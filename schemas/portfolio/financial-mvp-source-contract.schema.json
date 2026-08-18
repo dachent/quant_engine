@@ -794,7 +794,7 @@
           "properties": {
             "binding": {"$ref": "#/$defs/nonempty_string"},
             "status": {
-              "enum": ["EVIDENCED", "NOT_APPLICABLE", "UNRESOLVED"]
+              "enum": ["EVIDENCED", "MIXED", "NOT_APPLICABLE", "UNRESOLVED"]
             },
             "version_refs": {
               "type": "object",

@@ -777,7 +777,7 @@
     {
       "source_id": "portfolio123-model-generation",
       "source_version": "portfolio123-generation-v1",
-      "strategy_version": {"status": "EVIDENCED", "binding": "EXACT_CONNECTED_MODEL_VERSION_REQUIRED", "version_refs": {"p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"}},
+      "strategy_version": {"status": "MIXED", "binding": "EXACT_CONNECTED_MODEL_VERSION_REQUIRED", "version_refs": {"p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"}},
       "subjects": {"account_scope": "PORTFOLIO123_MODELS_NOT_OWNER_ACCOUNTS", "strategy_ids": ["p123-ai-factor", "p123-eu"]},
       "data_classes": ["PROVIDER_LIVE_RETURN"],
       "authority": "PORTFOLIO123_EXACT_CONNECTED_MODEL_GENERATION",
@@ -804,7 +804,7 @@
     {
       "source_id": "owner-account-live-history",
       "source_version": "history-segment-v1",
-      "strategy_version": {"status": "EVIDENCED", "binding": "EFFECTIVE_FUNDED_SUBJECT_VERSION_REQUIRED", "version_refs": {"p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb", "robuxio-crypto": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041", "volatis-strategy": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7"}},
+      "strategy_version": {"status": "MIXED", "binding": "EFFECTIVE_FUNDED_SUBJECT_VERSION_REQUIRED", "version_refs": {"p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb", "robuxio-crypto": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041", "volatis-strategy": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7"}},
       "subjects": {"account_scope": "CURRENT_OWNER_ACCOUNTS_FROM_ACCEPTED_CENSUS", "strategy_ids": ["p123-ai-factor", "p123-eu", "qsi", "tt-portfolio", "volatis-strategy", "grizzlybears-vtma", "robuxio-crypto", "echotrade-growth-pivots", "composer-holy-grail"]},
       "data_classes": ["ACCOUNT_NAV", "CAPITAL_ANCHOR", "FINANCING_LIABILITY", "LEVERAGE_EXPOSURE", "FINANCING_COST"],
       "authority": "OWNER_ACCOUNT_LEDGER_AND_ACTUAL_FUNDING_EVENTS",

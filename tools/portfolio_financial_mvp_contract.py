@@ -2396,7 +2396,12 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
         version_status = _text(
             strategy_version["status"], "source_segment.strategy_version.status"
         )
-        if version_status not in {"EVIDENCED", "NOT_APPLICABLE", "UNRESOLVED"}:
+        if version_status not in {
+            "EVIDENCED",
+            "MIXED",
+            "NOT_APPLICABLE",
+            "UNRESOLVED",
+        }:
             raise FinancialMvpContractError(
                 f"source strategy-version status differs: {source_id}"
             )
@@ -2411,11 +2416,11 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
                     f"source {source_id} has unknown strategy-version subject: {strategy_id}"
                 )
             _text(version_ref, f"source strategy version {strategy_id}")
-        if version_status != "EVIDENCED" and version_refs:
+        if version_status in {"NOT_APPLICABLE", "UNRESOLVED"} and version_refs:
             raise FinancialMvpContractError(
                 f"source {source_id} asserts unresolved/not-applicable version refs"
             )
-        if version_status == "EVIDENCED" and not version_refs:
+        if version_status in {"EVIDENCED", "MIXED"} and not version_refs:
             raise FinancialMvpContractError(
                 f"source {source_id} claims evidenced versions without identities"
             )
@@ -2452,6 +2457,20 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
             raise FinancialMvpContractError(
                 f"source {source_id} has version refs outside its subjects: "
                 f"{sorted(unbound_versions)}"
+            )
+        version_subjects = set(strategy_ids)
+        evidenced_subjects = set(version_refs)
+        if version_status == "EVIDENCED" and evidenced_subjects != version_subjects:
+            missing_version_subjects = sorted(version_subjects - evidenced_subjects)
+            raise FinancialMvpContractError(
+                "source "
+                f"{source_id} lacks evidenced version refs for subjects: "
+                f"{missing_version_subjects}"
+            )
+        if version_status == "MIXED" and not (evidenced_subjects < version_subjects):
+            raise FinancialMvpContractError(
+                f"source {source_id} mixed version status requires a nonempty proper "
+                "subset of subject refs"
             )
         _text(row["authority"], "source_segment.authority")
         _no_private_locator(
@@ -3596,6 +3615,13 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
         ]
         consumers = source["consumers"] or ["NO_CONSUMER"]
         for strategy_id in strategy_ids:
+            version_refs = source["strategy_version"]["version_refs"]
+            subject_version_ref = version_refs.get(strategy_id)
+            source_version_status = source["strategy_version"]["status"]
+            if source_version_status == "MIXED":
+                source_version_status = (
+                    "EVIDENCED" if subject_version_ref is not None else "UNRESOLVED"
+                )
             for data_class in source["data_classes"]:
                 for consumer in consumers:
                     matrix_rows.append(
@@ -3607,15 +3633,15 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                             "data_class": data_class,
                             "source_id": source["source_id"],
                             "source_version": source["source_version"],
-                            "strategy_version_status": source["strategy_version"][
-                                "status"
-                            ],
+                            "strategy_version_status": source_version_status,
                             "strategy_version_binding": source["strategy_version"][
                                 "binding"
                             ],
-                            "strategy_version_refs": source["strategy_version"][
-                                "version_refs"
-                            ],
+                            "strategy_version_refs": (
+                                {strategy_id: subject_version_ref}
+                                if subject_version_ref is not None
+                                else {}
+                            ),
                             "authority": source["authority"],
                             "endpoint_or_artifact_selector": source[
                                 "endpoint_or_artifact_selector"

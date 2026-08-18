@@ -36,7 +36,7 @@ RETURN_FIELDS: Final = (
     "strategy_version",
 )
 SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.2.0"
+BUILDER_VERSION: Final = "1.3.0"
 _SHEET_NS: Final = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS: Final = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PKG_REL_NS: Final = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -1714,7 +1714,7 @@ def _qsi(
     return accepted, definition
 
 
-def _volatis_disposition(path: Path) -> dict[str, object]:
+def _volatis_disposition(path: Path, *, accepted_as_of: date) -> dict[str, object]:
     source = _source_identity(path, "quantbase-volatis-pricehistory")
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -1725,6 +1725,8 @@ def _volatis_disposition(path: Path) -> dict[str, object]:
     except (OSError, UnicodeDecodeError) as exc:
         raise StrategyHistoryError("Volatis pricehistory source is invalid") from exc
     values: list[tuple[date, Decimal]] = []
+    source_observed_end: date | None = None
+    excluded_after_as_of = 0
     previous_value: Decimal | None = None
     previous_basis: Decimal | None = None
     for raw in raw_rows:
@@ -1732,6 +1734,14 @@ def _volatis_disposition(path: Path) -> dict[str, object]:
         value = _decimal(raw.get("value"), "Volatis value")
         basis = _decimal(raw.get("cost_basis"), "Volatis cost basis")
         if value <= 0 or basis <= 0:
+            continue
+        source_observed_end = (
+            observed
+            if source_observed_end is None
+            else max(source_observed_end, observed)
+        )
+        if observed > accepted_as_of:
+            excluded_after_as_of += 1
             continue
         if previous_value is None or previous_basis is None:
             period_return = value / basis - Decimal(1)
@@ -1750,7 +1760,7 @@ def _volatis_disposition(path: Path) -> dict[str, object]:
             "source_sha256": source["sha256"],
         },
     )
-    return {
+    disposition: dict[str, object] = {
         "action": "USE_ACCOUNT_LIVE_ADAPTER; DO_NOT_ADMIT_AS_BACKTEST",
         "history_status": "UNAVAILABLE_BACKTEST_NOT_PROVED",
         "implementation_reconciliation_status": "SAME_PROVIDER_ACCOUNT_PATH",
@@ -1768,6 +1778,14 @@ def _volatis_disposition(path: Path) -> dict[str, object]:
         "status": "CAPTURED_PROVIDER_LIVE_NOT_BACKTEST",
         "strategy_version": version,
     }
+    if excluded_after_as_of:
+        assert source_observed_end is not None
+        disposition["coverage_disposition"] = (
+            "COMPLETE_THROUGH_DECLARED_AS_OF_WITH_LATER_SOURCE_ROWS_EXCLUDED"
+        )
+        disposition["source_observed_end"] = source_observed_end.isoformat()
+        disposition["source_rows_excluded_after_as_of"] = excluded_after_as_of
+    return disposition
 
 
 def build_bundle(
@@ -1792,7 +1810,9 @@ def build_bundle(
         accepted_as_of = date.fromisoformat(as_of_date)
     except ValueError as exc:
         raise StrategyHistoryError("as_of_date is invalid") from exc
-    volatis_disposition = _volatis_disposition(volatis_pricehistory_csv)
+    volatis_disposition = _volatis_disposition(
+        volatis_pricehistory_csv, accepted_as_of=accepted_as_of
+    )
     parts = (
         _grizzly(
             grizzly_workbook,

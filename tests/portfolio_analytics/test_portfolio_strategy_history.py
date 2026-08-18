@@ -356,7 +356,8 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
         "time,value,cost_basis,profit_loss\n"
         "10/15/2024,990,1000,-0.01\n"
         "10/16/2024,1000,1000,0\n"
-        "10/17/2024,1010,1000,0.01\n",
+        "10/17/2024,1010,1000,0.01\n"
+        "08/04/2026,1100,1000,0.1\n",
         encoding="utf-8",
     )
 
@@ -375,7 +376,7 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
 
     assert manifest["verification"] == "VERIFIED"
     assert manifest["builder"] == "portfolio-strategy-history"
-    assert manifest["builder_version"] == "1.2.0"
+    assert manifest["builder_version"] == "1.3.0"
     assert {item["series_id"] for item in manifest["series"]} == {
         "GrizzlyBears VTMA",
         "QSI",
@@ -421,6 +422,10 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
     assert dispositions["Volatis Strategy"]["history_status"] == (
         "UNAVAILABLE_BACKTEST_NOT_PROVED"
     )
+    assert dispositions["Volatis Strategy"]["observed_end"] == "2024-10-17"
+    assert dispositions["Volatis Strategy"]["provider_live_return_observations"] == 3
+    assert dispositions["Volatis Strategy"]["source_observed_end"] == "2026-08-04"
+    assert dispositions["Volatis Strategy"]["source_rows_excluded_after_as_of"] == 1
     assert (
         dispositions["Growth at Market Pivot Points [EchoTrade]"][
             "required_for_analysis"

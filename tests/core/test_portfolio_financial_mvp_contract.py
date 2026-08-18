@@ -120,7 +120,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "fb61e533d83f3987c7dd7345f58c93cb07c2c3ffee902dd9ed548a057dc97a4a"
+        "b520bcefdd197d5f04a91c628afcbaef72f5efaa82dd40b5c7d5b702c196065c"
     )
 
 
@@ -835,6 +835,44 @@ def test_source_strategy_version_and_cost_are_explicit() -> None:
     assert any(
         "STRATEGY_COST" in row["data_classes"] for row in contract["source_segments"]
     )
+    p123 = _source(contract, "portfolio123-model-generation")
+    assert p123["strategy_version"]["status"] == "MIXED"
+
+    matrix = json.loads(contract_tool.render_views(contract).source_matrix_json)["rows"]
+    p123_rows = [
+        row for row in matrix if row["source_id"] == "portfolio123-model-generation"
+    ]
+    assert {
+        strategy_id: {
+            row["strategy_version_status"]
+            for row in p123_rows
+            if row["strategy_id"] == strategy_id
+        }
+        for strategy_id in ("p123-ai-factor", "p123-eu")
+    } == {
+        "p123-ai-factor": {"UNRESOLVED"},
+        "p123-eu": {"EVIDENCED"},
+    }
+    assert all(
+        row["strategy_version_refs"] == {}
+        for row in p123_rows
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    assert all(
+        row["strategy_version_refs"] == p123["strategy_version"]["version_refs"]
+        for row in p123_rows
+        if row["strategy_id"] == "p123-eu"
+    )
+
+    mutated = copy.deepcopy(contract)
+    _source(mutated, "portfolio123-model-generation")["strategy_version"]["status"] = (
+        "EVIDENCED"
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="lacks evidenced version refs for subjects.*p123-ai-factor",
+    ):
+        _validate(mutated)
 
     mutated = copy.deepcopy(contract)
     _source(mutated, "strategy-backtests")["strategy_version"]["version_refs"] = {
