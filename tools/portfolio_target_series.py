@@ -64,7 +64,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.10.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.11.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 LAYERED_HISTORY_MODE_POLICY: Final = {
     "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
@@ -3022,11 +3022,25 @@ def build_layered_history_generation(
         max_age = (
             freshness_max_age if isinstance(freshness_max_age, int) else default_max_age
         )
-        tail_stale = (
-            bool(live_rows)
-            and (accepted_as_of - date.fromisoformat(live_rows[-1]["date"])).days
-            > max_age
-        )
+        live_data_age: dict[str, object] | None = None
+        if live_rows:
+            complete_through = date.fromisoformat(live_rows[-1]["date"])
+            age_days = (accepted_as_of - complete_through).days
+            if age_days < 0:
+                raise TargetSeriesError(
+                    f"account-live history exceeds accepted as-of: {strategy_id}"
+                )
+            live_data_age = {
+                "age_days": age_days,
+                "complete_through": complete_through.isoformat(),
+                "evaluated_on": accepted_as_of.isoformat(),
+                "status": (
+                    "WARN_COMPLETE_DATA_AGE"
+                    if age_days > max_age
+                    else "CURRENT_WITHIN_AGE_THRESHOLD"
+                ),
+                "warning_after_days": max_age,
+            }
         live_state = "AVAILABLE"
         live_reason: str | None = None
         declared_unavailable_dates = (
@@ -3050,9 +3064,10 @@ def build_layered_history_generation(
             "REQUIRED_NOT_READY"
         ):
             raise TargetSeriesError(f"unexplained account-live gap: {strategy_id}")
-        elif tail_stale:
-            live_state = "REQUIRED_NOT_READY"
-            live_reason = "REQUIRED_ACCOUNT_LIVE_TAIL_STALE"
+        elif live_data_age is not None and live_data_age["status"] == (
+            "WARN_COMPLETE_DATA_AGE"
+        ):
+            live_reason = "WARN_ACCOUNT_LIVE_COMPLETE_DATA_AGE"
         if live_state == "REQUIRED_NOT_READY":
             live_not_ready.append(strategy_id)
         backtest_rows = admitted_backtests.get(strategy_id, [])
@@ -3114,6 +3129,7 @@ def build_layered_history_generation(
                     }
                 ),
                 "funded_membership": strategy.get("funded_membership"),
+                "data_age": live_data_age,
                 "modes": {
                     "LIVE_ONLY": {"reason": live_reason, "status": live_state},
                     "LIVE_PLUS_BACKTEST": {
@@ -4248,6 +4264,7 @@ def validate_layered_history_generation(
             frozenset(
                 {
                     "blockers",
+                    "data_age",
                     "funded_membership",
                     "modes",
                     "product_readiness",
@@ -4476,6 +4493,7 @@ def validate_layered_history_generation(
             if strategy_id == "robuxio-crypto"
             else frozenset()
         )
+        expected_data_age: dict[str, object] | None = None
         if not live_rows:
             live_status = "REQUIRED_NOT_READY"
             live_reason = (
@@ -4497,14 +4515,31 @@ def validate_layered_history_generation(
             )
             if not isinstance(max_age, int):
                 raise TargetSeriesError("layered history source freshness differs")
-            if (
-                accepted_as_of - date.fromisoformat(live_rows[-1]["date"])
-            ).days > max_age:
-                live_status = "REQUIRED_NOT_READY"
-                live_reason = "REQUIRED_ACCOUNT_LIVE_TAIL_STALE"
-            else:
-                live_status = "AVAILABLE"
-                live_reason = None
+            complete_through = date.fromisoformat(live_rows[-1]["date"])
+            age_days = (accepted_as_of - complete_through).days
+            if age_days < 0:
+                raise TargetSeriesError(
+                    f"layered history exceeds accepted as-of: {strategy_id}"
+                )
+            expected_data_age = {
+                "age_days": age_days,
+                "complete_through": complete_through.isoformat(),
+                "evaluated_on": accepted_as_of.isoformat(),
+                "status": (
+                    "WARN_COMPLETE_DATA_AGE"
+                    if age_days > max_age
+                    else "CURRENT_WITHIN_AGE_THRESHOLD"
+                ),
+                "warning_after_days": max_age,
+            }
+            live_status = "AVAILABLE"
+            live_reason = (
+                "WARN_ACCOUNT_LIVE_COMPLETE_DATA_AGE"
+                if expected_data_age["status"] == "WARN_COMPLETE_DATA_AGE"
+                else None
+            )
+        if raw.get("data_age") != expected_data_age:
+            raise TargetSeriesError("layered history strategy data age differs")
         hybrid_status = live_status
         hybrid_reason = live_reason
         admitted_backtest = any(

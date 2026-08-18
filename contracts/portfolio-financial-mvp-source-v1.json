@@ -1,15 +1,39 @@
 {
   "$schema": "../schemas/portfolio/financial-mvp-source-contract.schema.json",
-  "contract_schema_version": 4,
+  "contract_schema_version": 5,
   "product": {
     "product_id": "FINANCIAL_MVP",
-    "product_version": "1.3.0",
+    "product_version": "1.4.0",
     "runtime_profile": "PORTFOLIO_SOURCE_TO_PANEL_V1",
     "operator_outcome": "One governed as-held portfolio product with numerical HWM and drawdowns, daily and current invested capital excluding gains, applicable decomposition, and complete dependence analysis.",
     "as_of_policy": {
-      "policy_id": "LATEST_COMMON_ACCEPTED_SOURCE_BOUNDARY_WITH_DECLARED_PROVIDER_LAG",
-      "calendar_cutoff": "Each source is evaluated on its declared calendar; no silent common-date truncation, weekend zero, or forward fill.",
-      "publication_lag_rule": "A required source is current only through its declared cadence, maximum age, publication lag, and accepted calendar boundary."
+      "policy_id": "LATEST_COMMON_COMPLETE_ACCEPTED_BOUNDARY_WARN_ON_AGE_V2",
+      "calculation_boundary": {
+        "scope": "REQUIRED_INPUTS_OF_EACH_CALCULATION",
+        "rule": "LATEST_COMMON_COMPLETE_ACCEPTED_DATE_ACROSS_REQUIRED_CALCULATION_INPUTS",
+        "calendar_rule": "Intersect accepted complete observation dates under each required input's declared calendar and gap policy; never fill, zero, relabel, or use a future observation.",
+        "post_boundary_rows": "RETAIN_IN_SOURCE_EVIDENCE_EXCLUDE_FROM_CALCULATION",
+        "age_disposition": "WARN_WITH_COMPLETE_THROUGH_DATE_AGE_DAYS_THRESHOLD_AND_LIMITING_INPUTS",
+        "completeness_failure_disposition": "FAIL_CLOSED",
+        "required_evidence": [
+          "EVALUATED_ON_DATE",
+          "COMPLETE_THROUGH_DATE",
+          "AGE_DAYS",
+          "WARNING_AFTER_DAYS",
+          "LIMITING_INPUTS"
+        ]
+      },
+      "decision_evidence": {
+        "authority_issue": 320,
+        "evidence_url": "https://github.com/dachent/quant_engine/issues/320#issuecomment-5328916249",
+        "recorded_on": "2026-08-18"
+      },
+      "execution_profiles": {
+        "DEVELOPMENT": "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING",
+        "WORKSTATION_QC": "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING",
+        "RELEASE_QC": "CURRENT_RELEASE_RECEIPTS_REQUIRED_WITH_CALCULATION_AGE_DISCLOSED"
+      },
+      "publication_lag_rule": "Cadence, maximum age, and publication lag determine warning telemetry and limiting-input disclosure; age alone does not invalidate a complete historical calculation or require a development refresh."
     },
     "repository_compatibility": {
       "minimum_main_sha": "3ea0b1c32ace01cffd7b375e92703f677d8e9beb",

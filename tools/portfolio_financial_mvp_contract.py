@@ -1293,10 +1293,99 @@ def _validate_product(product: Mapping[str, Any]) -> None:
     _text(product["operator_outcome"], "product.operator_outcome")
     as_of = _object(product["as_of_policy"], "product.as_of_policy")
     _strict_keys(
-        as_of, {"calendar_cutoff", "policy_id", "publication_lag_rule"}, "as_of_policy"
+        as_of,
+        {
+            "calculation_boundary",
+            "decision_evidence",
+            "execution_profiles",
+            "policy_id",
+            "publication_lag_rule",
+        },
+        "as_of_policy",
     )
-    for key in as_of:
-        _text(as_of[key], f"as_of_policy.{key}")
+    if (
+        _text(as_of["policy_id"], "as_of_policy.policy_id")
+        != "LATEST_COMMON_COMPLETE_ACCEPTED_BOUNDARY_WARN_ON_AGE_V2"
+    ):
+        raise FinancialMvpContractError("as_of policy identity differs")
+    boundary = _object(
+        as_of["calculation_boundary"], "as_of_policy.calculation_boundary"
+    )
+    _strict_keys(
+        boundary,
+        {
+            "age_disposition",
+            "calendar_rule",
+            "completeness_failure_disposition",
+            "post_boundary_rows",
+            "required_evidence",
+            "rule",
+            "scope",
+        },
+        "as_of_policy.calculation_boundary",
+    )
+    if (
+        boundary["rule"]
+        != "LATEST_COMMON_COMPLETE_ACCEPTED_DATE_ACROSS_REQUIRED_CALCULATION_INPUTS"
+    ):
+        raise FinancialMvpContractError("calculation boundary rule differs")
+    if (
+        boundary["age_disposition"]
+        != "WARN_WITH_COMPLETE_THROUGH_DATE_AGE_DAYS_THRESHOLD_AND_LIMITING_INPUTS"
+    ):
+        raise FinancialMvpContractError("calculation boundary age disposition differs")
+    if boundary["completeness_failure_disposition"] != "FAIL_CLOSED":
+        raise FinancialMvpContractError(
+            "calculation completeness must remain fail-closed"
+        )
+    if boundary["scope"] != "REQUIRED_INPUTS_OF_EACH_CALCULATION":
+        raise FinancialMvpContractError("calculation boundary scope differs")
+    if (
+        boundary["post_boundary_rows"]
+        != "RETAIN_IN_SOURCE_EVIDENCE_EXCLUDE_FROM_CALCULATION"
+    ):
+        raise FinancialMvpContractError("post-boundary row disposition differs")
+    if boundary["required_evidence"] != [
+        "EVALUATED_ON_DATE",
+        "COMPLETE_THROUGH_DATE",
+        "AGE_DAYS",
+        "WARNING_AFTER_DAYS",
+        "LIMITING_INPUTS",
+    ]:
+        raise FinancialMvpContractError("calculation boundary evidence differs")
+    _text(boundary["calendar_rule"], "calculation_boundary.calendar_rule")
+    decision_evidence = _object(
+        as_of["decision_evidence"], "as_of_policy.decision_evidence"
+    )
+    _strict_keys(
+        decision_evidence,
+        {"authority_issue", "evidence_url", "recorded_on"},
+        "as_of_policy.decision_evidence",
+    )
+    if decision_evidence["authority_issue"] != 320:
+        raise FinancialMvpContractError("as_of policy authority issue differs")
+    evidence_url = _text(decision_evidence["evidence_url"], "as_of_policy.evidence_url")
+    if not evidence_url.startswith(
+        "https://github.com/dachent/quant_engine/issues/320#issuecomment-"
+    ):
+        raise FinancialMvpContractError("as_of policy evidence URL differs")
+    _date(decision_evidence["recorded_on"], "as_of_policy.recorded_on")
+    profiles = _object(as_of["execution_profiles"], "as_of_policy.execution_profiles")
+    _strict_keys(
+        profiles,
+        {"DEVELOPMENT", "WORKSTATION_QC", "RELEASE_QC"},
+        "execution_profiles",
+    )
+    if (
+        profiles["DEVELOPMENT"]
+        != "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING"
+        or profiles["WORKSTATION_QC"]
+        != "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING"
+        or profiles["RELEASE_QC"]
+        != "CURRENT_RELEASE_RECEIPTS_REQUIRED_WITH_CALCULATION_AGE_DISCLOSED"
+    ):
+        raise FinancialMvpContractError("as_of execution profiles differ")
+    _text(as_of["publication_lag_rule"], "as_of_policy.publication_lag_rule")
     compatibility = _object(
         product["repository_compatibility"], "product.repository_compatibility"
     )
@@ -3727,8 +3816,8 @@ def validate_contract(
         },
         "financial MVP contract",
     )
-    if contract["contract_schema_version"] != 4:
-        raise FinancialMvpContractError("contract_schema_version must be 4")
+    if contract["contract_schema_version"] != 5:
+        raise FinancialMvpContractError("contract_schema_version must be 5")
     if contract["$schema"] != (
         "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     ):
@@ -3794,6 +3883,21 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
         f"- Canonical contract SHA-256: `{digest}`",
         f"- Runtime profile: `{product['runtime_profile']}`",
         f"- Publication: `{product['publication_boundary']['status']}`",
+        "",
+        "## Calculation boundary and data age",
+        "",
+        f"- Policy: `{product['as_of_policy']['policy_id']}`",
+        f"- Boundary: `{product['as_of_policy']['calculation_boundary']['rule']}`",
+        f"- Scope: `{product['as_of_policy']['calculation_boundary']['scope']}`",
+        f"- Post-boundary rows: `{product['as_of_policy']['calculation_boundary']['post_boundary_rows']}`",
+        f"- Age disposition: `{product['as_of_policy']['calculation_boundary']['age_disposition']}`",
+        f"- Completeness failure: `{product['as_of_policy']['calculation_boundary']['completeness_failure_disposition']}`",
+        f"- Development profile: `{product['as_of_policy']['execution_profiles']['DEVELOPMENT']}`",
+        f"- Workstation-QC profile: `{product['as_of_policy']['execution_profiles']['WORKSTATION_QC']}`",
+        f"- Release-QC profile: `{product['as_of_policy']['execution_profiles']['RELEASE_QC']}`",
+        f"- Owner evidence: {product['as_of_policy']['decision_evidence']['evidence_url']}",
+        f"- Calendar rule: {product['as_of_policy']['calculation_boundary']['calendar_rule']}",
+        f"- Publication-lag rule: {product['as_of_policy']['publication_lag_rule']}",
         "",
         "## Required outcomes",
         "",
@@ -4067,7 +4171,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             "",
             "## Source timing",
             "",
-            "| Source | Cadence | Calendar | Max age days | Publication lag days | Freshness rule |",
+            "| Source | Cadence | Calendar | Age warning threshold days | Publication lag days | Freshness rule |",
             "|---|---|---|---:|---:|---|",
         ]
     )
@@ -4186,6 +4290,9 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                             "calendar": source["temporal"]["calendar"],
                             "cadence": source["temporal"]["cadence"],
                             "max_age_days": source["freshness"]["max_age_days"],
+                            "age_disposition": product["as_of_policy"][
+                                "calculation_boundary"
+                            ]["age_disposition"],
                             "publication_lag_days": source["freshness"][
                                 "publication_lag_days"
                             ],
@@ -4220,6 +4327,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                     for decision_id in OWNER_DECISION_IDS
                 },
                 "history_corrections": history,
+                "as_of_policy": product["as_of_policy"],
                 "product_version": product["product_version"],
                 "rows": matrix_rows,
             }

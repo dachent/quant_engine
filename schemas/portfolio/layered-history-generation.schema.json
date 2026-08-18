@@ -25,7 +25,7 @@
     "$schema": {"type": "string", "minLength": 1},
     "schema_version": {"const": 1},
     "builder": {"const": "portfolio-target-series/layered-history-1"},
-    "builder_version": {"const": "1.10.0"},
+    "builder_version": {"const": "1.11.0"},
     "generation_id": {"$ref": "#/$defs/sha256"},
     "as_of_date": {"type": "string", "format": "date"},
     "repository_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},

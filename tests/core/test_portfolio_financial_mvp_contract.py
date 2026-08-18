@@ -121,7 +121,66 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "dae5e6078ead80cabd516d8d736250519937040a6e9486a4727e2488edc9252c"
+        "a82026cfa2effd6e55c50bd07337305f1acd9785f30f37080db36feed46c583b"
+    )
+
+
+def test_calculation_boundary_policy_separates_completeness_from_age() -> None:
+    contract = _contract()
+    policy = contract["product"]["as_of_policy"]
+    boundary = policy["calculation_boundary"]
+    assert boundary == {
+        "scope": "REQUIRED_INPUTS_OF_EACH_CALCULATION",
+        "rule": (
+            "LATEST_COMMON_COMPLETE_ACCEPTED_DATE_ACROSS_REQUIRED_CALCULATION_INPUTS"
+        ),
+        "calendar_rule": (
+            "Intersect accepted complete observation dates under each required "
+            "input's declared calendar and gap policy; never fill, zero, relabel, "
+            "or use a future observation."
+        ),
+        "post_boundary_rows": ("RETAIN_IN_SOURCE_EVIDENCE_EXCLUDE_FROM_CALCULATION"),
+        "age_disposition": (
+            "WARN_WITH_COMPLETE_THROUGH_DATE_AGE_DAYS_THRESHOLD_AND_LIMITING_INPUTS"
+        ),
+        "completeness_failure_disposition": "FAIL_CLOSED",
+        "required_evidence": [
+            "EVALUATED_ON_DATE",
+            "COMPLETE_THROUGH_DATE",
+            "AGE_DAYS",
+            "WARNING_AFTER_DAYS",
+            "LIMITING_INPUTS",
+        ],
+    }
+    assert policy["execution_profiles"] == {
+        "DEVELOPMENT": (
+            "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING"
+        ),
+        "WORKSTATION_QC": (
+            "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING"
+        ),
+        "RELEASE_QC": (
+            "CURRENT_RELEASE_RECEIPTS_REQUIRED_WITH_CALCULATION_AGE_DISCLOSED"
+        ),
+    }
+
+    invalid = copy.deepcopy(contract)
+    invalid["product"]["as_of_policy"]["calculation_boundary"][
+        "completeness_failure_disposition"
+    ] = "WARN"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="calculation completeness must remain fail-closed",
+    ):
+        _validate(invalid)
+
+    rendered = contract_tool.render_views(contract)
+    assert b"LATEST_COMMON_COMPLETE_ACCEPTED_DATE" in rendered.summary_markdown
+    assert b"WARN_WITH_COMPLETE_THROUGH_DATE" in rendered.summary_markdown
+    matrix = json.loads(rendered.source_matrix_json)
+    assert matrix["as_of_policy"] == policy
+    assert all(
+        row["age_disposition"] == boundary["age_disposition"] for row in matrix["rows"]
     )
 
 

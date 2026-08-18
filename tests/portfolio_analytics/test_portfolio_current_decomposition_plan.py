@@ -197,16 +197,6 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     days = _weekdays(80)
     history_fixture = history_tests._history_fixture(tmp_path / "layered-source")
-    history_contract = json.loads(
-        history_fixture["contract_path"].read_text(encoding="utf-8")
-    )
-    owner_history = next(
-        source
-        for source in history_contract["source_segments"]
-        if source["source_id"] == "owner-account-live-history"
-    )
-    owner_history["freshness"]["max_age_days"] = 730
-    _write_json(history_fixture["contract_path"], history_contract)
     history_artifacts, history_manifest = history_tests._build(history_fixture)
     history_generation = history_tests.write_layered_history_generation(
         tmp_path / "layered-generations", history_artifacts, history_manifest
@@ -576,7 +566,7 @@ def test_live_plus_backtest_requires_exact_available_mode(tmp_path: Path) -> Non
         )
 
 
-def test_layered_history_freshness_is_revalidated_at_planning_date(
+def test_layered_history_age_warns_in_development_and_fails_release_qc(
     tmp_path: Path,
 ) -> None:
     inputs = _fixture(tmp_path)
@@ -603,12 +593,37 @@ def test_layered_history_freshness_is_revalidated_at_planning_date(
     stale_date = date.fromisoformat(live["observed_end"]) + timedelta(
         days=max_age_days + 1
     )
+    result = planner._layered_history_targets(
+        generation_root=inputs["layered_history_generation_path"],
+        contract_path=inputs["financial_mvp_contract_path"],
+        strategies=planner._resolved_strategies(inputs["plan_document"]),
+        evidence_mode="LIVE_ONLY",
+        evaluated_on=stale_date,
+        assurance_profile="DEVELOPMENT",
+    )
+    qsi_age = next(
+        row
+        for row in result["identity"]["source_age_dispositions"]
+        if row["strategy_id"] == "qsi"
+    )
+    assert qsi_age == {
+        "age_days": max_age_days + 1,
+        "complete_through": live["observed_end"],
+        "evaluated_on": stale_date.isoformat(),
+        "limiting_inputs": ["qsi:owner-account-live-history"],
+        "status": "WARN_COMPLETE_DATA_AGE",
+        "warning_after_days": max_age_days,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "source_id": "owner-account-live-history",
+        "strategy_id": "qsi",
+    }
+    assert result["identity"]["calculation_boundary"]["status"] == (
+        "WARN_COMPLETE_DATA_AGE"
+    )
+
     with pytest.raises(
         planner.CurrentPlanError,
-        match=(
-            "live source is stale at the evaluation date for qsi: "
-            "owner-account-live-history"
-        ),
+        match="release QC requires a current layered history live source for qsi",
     ):
         planner._layered_history_targets(
             generation_root=inputs["layered_history_generation_path"],
@@ -616,6 +631,7 @@ def test_layered_history_freshness_is_revalidated_at_planning_date(
             strategies=planner._resolved_strategies(inputs["plan_document"]),
             evidence_mode="LIVE_ONLY",
             evaluated_on=stale_date,
+            assurance_profile="RELEASE_QC",
         )
 
 
@@ -686,7 +702,17 @@ def test_planner_independently_rejects_invalid_selected_projection(
     _write_json(
         tmp_path / "contract.json",
         {
-            "contract_schema_version": 4,
+            "contract_schema_version": 5,
+            "product": {
+                "as_of_policy": {
+                    "execution_profiles": {
+                        "DEVELOPMENT": (
+                            "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_"
+                            "STRUCTURED_AGE_WARNING"
+                        )
+                    }
+                }
+            },
             "source_segments": [
                 {
                     "source_id": "provider-ledger-account-live",
@@ -843,7 +869,6 @@ def test_available_hybrid_projection_is_selected_without_legacy_override(
         for row in contract["source_segments"]
         if row["source_id"] == "owner-account-live-history"
     )
-    live_source["freshness"]["max_age_days"] = 730
     live_source["strategy_version"]["version_refs"]["qsi"] = version
     for identity in contract["history_corrections"]["materialized_segment_identities"]:
         if identity["strategy_id"] == "qsi":
@@ -1055,8 +1080,16 @@ def test_plan_preserves_target_end_beyond_publication_lag(
 
     assert economic["as_of_date"] == target_rows[-1]["date"]
     assert factor_rows[-1]["date"] == "2026-06-30"
-    assert target_rows[-1]["date"] == "2026-08-17"
-    assert economic["maximum_factor_staleness_days"] == 48
+    assert target_rows[-1]["date"] == "2026-06-30"
+    assert economic["maximum_factor_staleness_days"] == 0
+    assert economic["data_boundary"] == {
+        "age_days": 48,
+        "complete_through": "2026-06-30",
+        "evaluated_on": "2026-08-17",
+        "limiting_inputs": ["factor:us_factors"],
+        "status": "WARN_COMPLETE_DATA_AGE",
+        "warning_after_days": 0,
+    }
 
     source_root = tmp_path / "publication-lag-materialized"
     for relative, content in outputs.items():
