@@ -1602,6 +1602,7 @@ def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage
         }
         for row in corrected_coverage["strategies"]
     }
+    assert baseline_segments.keys() == corrected_segments.keys()
     assert corrected_segments["robuxio-crypto"] != baseline_segments["robuxio-crypto"]
     assert {
         strategy_id: segments
@@ -1615,6 +1616,7 @@ def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage
 
     baseline_resolutions = baseline_coverage["correction_resolutions"]
     corrected_resolutions = corrected_coverage["correction_resolutions"]
+    assert baseline_resolutions.keys() == corrected_resolutions.keys()
     assert (
         corrected_resolutions["robuxio-account-live-after-funding"]
         != baseline_resolutions["robuxio-account-live-after-funding"]
@@ -1631,6 +1633,7 @@ def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage
 
     baseline_inputs = {row["input_id"]: row for row in baseline_manifest["inputs"]}
     corrected_inputs = {row["input_id"]: row for row in corrected_manifest["inputs"]}
+    assert baseline_inputs.keys() == corrected_inputs.keys()
     assert {
         input_id
         for input_id in baseline_inputs
@@ -1652,6 +1655,11 @@ def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage
             == baseline_inputs[input_id]["size_bytes"]
         )
     assert corrected_artifacts["excluded.csv"] == baseline_artifacts["excluded.csv"]
+    assert baseline_artifacts.keys() == corrected_artifacts.keys()
+    assert (
+        baseline_manifest["source_manifests"].keys()
+        == corrected_manifest["source_manifests"].keys()
+    )
     assert {
         name
         for name in baseline_artifacts
@@ -1663,6 +1671,10 @@ def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage
         "returns.csv",
         "segments.csv",
     }
+    assert (
+        baseline_manifest["source_pointers"].keys()
+        == corrected_manifest["source_pointers"].keys()
+    )
     assert {
         name
         for name in baseline_manifest["source_manifests"]
@@ -1675,6 +1687,39 @@ def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage
         if baseline_manifest["source_pointers"][name]
         != corrected_manifest["source_pointers"][name]
     } == {"matrixport"}
+
+
+def test_layered_history_provider_interval_matches_current_product_authority() -> None:
+    contract = json.loads(
+        (ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    provider_correction = next(
+        row
+        for row in contract["history_corrections"]["corrections"]
+        if row["correction_id"] == "robuxio-provider-live-before-funding"
+    )
+    provider_segment = next(
+        row
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+        if row["segment_id"] == "robuxio-crypto:provider-live-before-funding"
+    )
+    target_series._validate_robuxio_provider_interval(
+        [
+            {"date": provider_segment["observed_start"]},
+            {"date": provider_segment["observed_end"]},
+        ],
+        provider_correction["interval"],
+    )
+    assert (
+        provider_segment["observed_start"]
+        > provider_correction["interval"]["observed_start"]
+    )
+    assert (
+        provider_segment["observed_end"]
+        == provider_correction["interval"]["observed_end"]
+    )
 
 
 def test_complete_account_history_age_is_warning_not_unavailability(

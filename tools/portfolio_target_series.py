@@ -1828,6 +1828,22 @@ def _matrixport_provider_returns(
     return rows
 
 
+def _validate_robuxio_provider_interval(
+    rows: Sequence[Mapping[str, str]], interval: Mapping[str, Any]
+) -> None:
+    if not rows:
+        raise TargetSeriesError("Matrixport provider-live history is unavailable")
+    try:
+        provider_observed_start = date.fromisoformat(str(interval["observed_start"]))
+        provider_observed_end = date.fromisoformat(str(interval["observed_end"]))
+        first_return = date.fromisoformat(rows[0]["date"])
+        last_return = date.fromisoformat(rows[-1]["date"])
+    except (KeyError, ValueError) as exc:
+        raise TargetSeriesError("Robuxio provider-live interval is invalid") from exc
+    if first_return <= provider_observed_start or last_return != provider_observed_end:
+        raise TargetSeriesError("Robuxio provider-live interval differs from contract")
+
+
 def _weekday_dates(start: date, end: date) -> list[date]:
     if end < start:
         raise TargetSeriesError("provider performance interval is reversed")
@@ -2679,20 +2695,7 @@ def build_layered_history_generation(
         raise TargetSeriesError(
             "Robuxio provider-live interval is absent from contract"
         )
-    try:
-        provider_observed_start = date.fromisoformat(
-            str(robuxio_provider_interval["observed_start"])
-        )
-        provider_observed_end = date.fromisoformat(
-            str(robuxio_provider_interval["observed_end"])
-        )
-    except (KeyError, ValueError) as exc:
-        raise TargetSeriesError("Robuxio provider-live interval is invalid") from exc
-    if (robuxio_provider[0]["date"], robuxio_provider[-1]["date"]) != (
-        (provider_observed_start + timedelta(days=1)).isoformat(),
-        provider_observed_end.isoformat(),
-    ):
-        raise TargetSeriesError("Robuxio provider-live interval differs from contract")
+    _validate_robuxio_provider_interval(robuxio_provider, robuxio_provider_interval)
 
     quantbase_artifacts = _manifest_artifacts(quantbase_manifest.get("artifacts"))
     _verify_artifact(
@@ -4886,17 +4889,11 @@ def validate_layered_history_generation(
         "robuxio-provider-live-before-funding"
     )
     funding_start = date.fromisoformat(str(robuxio_interval["effective_start"]))
-    provider_observed_start = date.fromisoformat(
-        str(robuxio_provider_interval["observed_start"])
-    )
+    _validate_robuxio_provider_interval(robuxio_provider, robuxio_provider_interval)
     if (
         not robuxio_live
-        or not robuxio_provider
         or robuxio_live[0]["date"] != robuxio_interval["observed_start"]
         or robuxio_live[-1]["date"] != robuxio_interval["observed_end"]
-        or robuxio_provider[0]["date"]
-        != (provider_observed_start + timedelta(days=1)).isoformat()
-        or robuxio_provider[-1]["date"] != robuxio_provider_interval["observed_end"]
         or any(date.fromisoformat(row["date"]) <= funding_start for row in robuxio_live)
         or any(
             date.fromisoformat(row["date"]) >= funding_start for row in robuxio_provider
