@@ -439,27 +439,22 @@ def _admit_publication_boundary(
     if len(rows) < 2:
         raise PublicSourceError(f"{name} has no normalized observations")
     header, observations = rows[0], rows[1:]
-    dated_rows = [(_date_value(row[0], f"{name} observation date"), row) for row in observations]
+    dated_rows = [
+        (_date_value(row[0], f"{name} observation date"), row) for row in observations
+    ]
     provider_available_end = dated_rows[-1][0]
     eligible_rows = [
         (day, row)
         for day, row in dated_rows
-        if (day.year, day.month)
-        == (eligible_month_end.year, eligible_month_end.month)
-        and (
-            name == OUTPUT_NAMES[2]
-            or all(value != "" for value in row[1:])
-        )
+        if (day.year, day.month) == (eligible_month_end.year, eligible_month_end.month)
+        and (name == OUTPUT_NAMES[2] or all(value != "" for value in row[1:]))
     ]
     if not eligible_rows:
         raise PublicSourceError(
-            f"{name} REQUIRED_PUBLICATION_MONTH_ABSENT: "
-            f"{eligible_month_end:%Y-%m}"
+            f"{name} REQUIRED_PUBLICATION_MONTH_ABSENT: {eligible_month_end:%Y-%m}"
         )
     accepted_observation_end = max(day for day, _row in eligible_rows)
-    admitted_rows = [
-        row for day, row in dated_rows if day <= accepted_observation_end
-    ]
+    admitted_rows = [row for day, row in dated_rows if day <= accepted_observation_end]
     missing_cells = sum(value == "" for row in admitted_rows for value in row[1:])
     return (
         _csv_bytes(header, admitted_rows),

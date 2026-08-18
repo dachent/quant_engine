@@ -407,7 +407,9 @@ def _verify_public_factor_manifest(
         path = market_paths[key]
         expected = outputs.get(path.name)
         if expected is None:
-            raise CurrentPlanError(f"public factor manifest has no output for {path.name}")
+            raise CurrentPlanError(
+                f"public factor manifest has no output for {path.name}"
+            )
         content = path.read_bytes()
         if expected.get("sha256") != _sha256(content) or _integer(
             expected.get("bytes"), f"public factor manifest {path.name} size"
@@ -440,8 +442,7 @@ def _verify_public_factor_manifest(
         )
         if (
             eligible_month_end != _required_observation_month_end(evaluated_on)
-            or freshness.get("eligible_month")
-            != eligible_month_end.strftime("%Y-%m")
+            or freshness.get("eligible_month") != eligible_month_end.strftime("%Y-%m")
             or (accepted_end.year, accepted_end.month)
             != (eligible_month_end.year, eligible_month_end.month)
         ):
@@ -452,7 +453,10 @@ def _verify_public_factor_manifest(
             freshness.get("publication_deadline"),
             f"public factor {path.name} publication deadline",
         )
-        if deadline != eligible_month_end + timedelta(days=45) or deadline > evaluated_on:
+        if (
+            deadline != eligible_month_end + timedelta(days=45)
+            or deadline > evaluated_on
+        ):
             raise CurrentPlanError(
                 f"public factor {path.name} publication deadline has not elapsed"
             )
@@ -812,9 +816,10 @@ def build_bundle(
         analysis_as_of = target_last
         complete_date_set = set(complete_dates)
         if input_key in public_factor_boundaries:
-            if source_plan.get("freshness_policy_id") != PUBLIC_FACTOR_FRESHNESS_POLICY[
-                "policy_id"
-            ]:
+            if (
+                source_plan.get("freshness_policy_id")
+                != PUBLIC_FACTOR_FRESHNESS_POLICY["policy_id"]
+            ):
                 raise CurrentPlanError(
                     f"source {source_key} public factor freshness policy differs"
                 )

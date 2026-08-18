@@ -322,9 +322,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     public_evaluation_date = _month_end(public_end) + timedelta(days=45)
     factor_manifest = _write_json(
         tmp_path / "factor-manifest.json",
-        _public_factor_manifest(
-            catalog_sha256, market_paths, public_evaluation_date
-        ),
+        _public_factor_manifest(catalog_sha256, market_paths, public_evaluation_date),
     )
     style_content = market_paths["style_returns"].read_bytes()
     style_manifest = _write_json(

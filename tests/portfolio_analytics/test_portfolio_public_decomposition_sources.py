@@ -446,9 +446,7 @@ def test_monthly_publication_lag_accepts_june_on_august_17(tmp_path: Path) -> No
         assert output["freshness"]["accepted_observation_end"] == "2026-06-30"
         assert output["last_date"] == "2026-06-30"
     assert (
-        outputs_by_name["us_factors_daily.csv"]["freshness"][
-            "provider_available_end"
-        ]
+        outputs_by_name["us_factors_daily.csv"]["freshness"]["provider_available_end"]
         == "2026-07-01"
     )
     assert (
