@@ -1415,6 +1415,201 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     assert changed_manifest != manifest_content
 
 
+def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage(
+    tmp_path: Path,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    baseline_artifacts, baseline_manifest_content = _build(fixture)
+    baseline_manifest = json.loads(baseline_manifest_content)
+    baseline_coverage = json.loads(baseline_artifacts["coverage.json"])
+    baseline_result = validate_layered_history_generation(
+        artifacts=baseline_artifacts,
+        manifest_content=baseline_manifest_content,
+        contract_path=fixture["contract_path"],
+    )
+    assert baseline_result["verification"] == "VALID"
+
+    subscription_path = fixture["matrixport_subscription_path"]
+    _write_csv(
+        subscription_path,
+        [
+            "confirm_nav_time_utc",
+            "product_id",
+            "status",
+            "subscription_share",
+            "subscription_time_utc",
+        ],
+        [
+            {
+                "confirm_nav_time_utc": "2025-12-07T00:00:00Z",
+                "product_id": "private-product",
+                "status": "300",
+                "subscription_share": "10",
+                "subscription_time_utc": "2025-12-06T20:00:00Z",
+            }
+        ],
+    )
+    matrixport_manifest_path = fixture["matrixport_manifest_path"]
+    matrixport_manifest = json.loads(
+        matrixport_manifest_path.read_text(encoding="utf-8")
+    )
+    matrixport_manifest["generation_id"] = "9" * 64
+    subscription_artifact = next(
+        row
+        for row in matrixport_manifest["artifacts"]
+        if row["artifact_id"] == "csv/subscription_details.csv"
+    )
+    subscription_artifact.update(
+        _artifact(subscription_path, "csv/subscription_details.csv")
+    )
+    _write_json(matrixport_manifest_path, matrixport_manifest)
+    _pointer(
+        fixture["matrixport_pointer_path"],
+        matrixport_manifest["generation_id"],
+        matrixport_manifest_path,
+    )
+
+    contract_path = fixture["contract_path"]
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    _update_correction_interval(
+        contract,
+        "robuxio-provider-live-before-funding",
+        observed_start="2025-12-01",
+        observed_end="2025-12-06",
+        effective_start="2025-12-01",
+        effective_end="2025-12-06",
+    )
+    _update_correction_interval(
+        contract,
+        "robuxio-account-live-after-funding",
+        observed_start="2025-12-08",
+        observed_end="2025-12-11",
+        effective_start="2025-12-07",
+        effective_end=None,
+    )
+    _update_source_generation(
+        contract,
+        "matrixport-account-generation",
+        matrixport_manifest_path,
+        fixture["as_of_date"],
+    )
+    _update_correction_generations(
+        contract,
+        "matrixport-account-generation",
+        matrixport_manifest_path,
+        fixture["as_of_date"],
+        "MATRIXPORT",
+    )
+    _write_json(contract_path, contract)
+    with pytest.raises(
+        TargetSeriesError, match="financial MVP contract is invalid"
+    ) as exc:
+        _build(fixture)
+    assert exc.value.__cause__ is not None
+    assert (
+        "materialized history segment source receipt differs: "
+        "robuxio-crypto:account-live"
+    ) in str(exc.value.__cause__)
+    _refresh_materialized_segment_identities(fixture)
+
+    corrected_artifacts, corrected_manifest_content = _build(fixture)
+    corrected_manifest = json.loads(corrected_manifest_content)
+    corrected_coverage = json.loads(corrected_artifacts["coverage.json"])
+    result = validate_layered_history_generation(
+        artifacts=corrected_artifacts,
+        manifest_content=corrected_manifest_content,
+        contract_path=contract_path,
+    )
+    assert result["verification"] == "VALID"
+    assert corrected_manifest["generation_id"] != baseline_manifest["generation_id"]
+
+    baseline_segments = {
+        row["strategy_id"]: {
+            segment["segment_id"]: segment["sha256"] for segment in row["segments"]
+        }
+        for row in baseline_coverage["strategies"]
+    }
+    corrected_segments = {
+        row["strategy_id"]: {
+            segment["segment_id"]: segment["sha256"] for segment in row["segments"]
+        }
+        for row in corrected_coverage["strategies"]
+    }
+    assert corrected_segments["robuxio-crypto"] != baseline_segments["robuxio-crypto"]
+    assert {
+        strategy_id: segments
+        for strategy_id, segments in corrected_segments.items()
+        if strategy_id != "robuxio-crypto"
+    } == {
+        strategy_id: segments
+        for strategy_id, segments in baseline_segments.items()
+        if strategy_id != "robuxio-crypto"
+    }
+
+    baseline_resolutions = baseline_coverage["correction_resolutions"]
+    corrected_resolutions = corrected_coverage["correction_resolutions"]
+    assert (
+        corrected_resolutions["robuxio-account-live-after-funding"]
+        != baseline_resolutions["robuxio-account-live-after-funding"]
+    )
+    assert {
+        correction_id: resolution
+        for correction_id, resolution in corrected_resolutions.items()
+        if correction_id != "robuxio-account-live-after-funding"
+    } == {
+        correction_id: resolution
+        for correction_id, resolution in baseline_resolutions.items()
+        if correction_id != "robuxio-account-live-after-funding"
+    }
+
+    baseline_inputs = {row["input_id"]: row for row in baseline_manifest["inputs"]}
+    corrected_inputs = {row["input_id"]: row for row in corrected_manifest["inputs"]}
+    assert {
+        input_id
+        for input_id in baseline_inputs
+        if baseline_inputs[input_id] != corrected_inputs[input_id]
+    } == {
+        "financial-mvp-contract",
+        "matrixport-current",
+        "matrixport-holdings",
+        "matrixport-manifest",
+        "matrixport-nav",
+        "matrixport-subscriptions",
+    }
+    for input_id in ("matrixport-holdings", "matrixport-nav"):
+        assert (
+            corrected_inputs[input_id]["sha256"] == baseline_inputs[input_id]["sha256"]
+        )
+        assert (
+            corrected_inputs[input_id]["size_bytes"]
+            == baseline_inputs[input_id]["size_bytes"]
+        )
+    assert corrected_artifacts["excluded.csv"] == baseline_artifacts["excluded.csv"]
+    assert {
+        name
+        for name in baseline_artifacts
+        if baseline_artifacts[name] != corrected_artifacts[name]
+    } == {
+        "coverage.json",
+        "live-only.csv",
+        "live-plus-backtest.csv",
+        "returns.csv",
+        "segments.csv",
+    }
+    assert {
+        name
+        for name in baseline_manifest["source_manifests"]
+        if baseline_manifest["source_manifests"][name]
+        != corrected_manifest["source_manifests"][name]
+    } == {"matrixport"}
+    assert {
+        name
+        for name in baseline_manifest["source_pointers"]
+        if baseline_manifest["source_pointers"][name]
+        != corrected_manifest["source_pointers"][name]
+    } == {"matrixport"}
+
+
 def test_complete_account_history_age_is_warning_not_unavailability(
     tmp_path: Path,
 ) -> None:
