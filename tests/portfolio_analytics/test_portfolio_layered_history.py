@@ -1465,6 +1465,28 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
             contract_path=fixture["contract_path"],
         )
 
+    duplicate_summary_artifacts = dict(artifacts)
+    duplicate_summary_manifest = json.loads(manifest_content)
+    duplicate_summary_coverage = json.loads(artifacts["coverage.json"])
+    robuxio_coverage = next(
+        row
+        for row in duplicate_summary_coverage["strategies"]
+        if row["strategy_id"] == "robuxio-crypto"
+    )
+    robuxio_coverage["segments"].insert(0, dict(robuxio_coverage["segments"][0]))
+    _replace_output(
+        duplicate_summary_artifacts,
+        duplicate_summary_manifest,
+        "coverage.json",
+        canonical_json_bytes(duplicate_summary_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="segment coverage ordering differs"):
+        validate_layered_history_generation(
+            artifacts=duplicate_summary_artifacts,
+            manifest_content=_reidentify_manifest(duplicate_summary_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
     return_rewrite_artifacts = dict(artifacts)
     return_rewrite_manifest = json.loads(manifest_content)
     return_rewrite_segments = list(

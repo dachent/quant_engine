@@ -3779,7 +3779,11 @@ def validate_layered_history_generation(
             for item in summaries
             if isinstance(item, dict)
         ]
-        if len(summary_ids) != len(summaries) or summary_ids != sorted(summary_ids):
+        if (
+            len(summary_ids) != len(summaries)
+            or len(set(summary_ids)) != len(summary_ids)
+            or summary_ids != sorted(summary_ids)
+        ):
             raise TargetSeriesError("layered history segment coverage ordering differs")
         actual_rows = rows_by_strategy[strategy_id]
         if strategy_id == "echotrade-growth-pivots" and actual_rows:
