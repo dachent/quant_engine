@@ -152,11 +152,14 @@ The strategy target, factor source, and exact-common-date model interval are
 separate coverage facts. Preserve target rows through their actual strategy
 end date even when a public factor source publishes later on a monthly lag.
 Kenneth French economic-factor and industry sources use a declared 45-calendar-
-allowance measured from calendar month-end, while every scheduled daily or
-weekly run must acquire new receipts. These are separate gates: a receipt must
-fall inside the current run window, and the retained observations must include
-the latest month whose 45-day publication deadline has elapsed. The panel must
-display all three intervals and the limiting input.
+allowance measured from calendar month-end. A scheduled release-QC/full-
+pipeline run must acquire new receipts inside its declared run window. A
+DEVELOPMENT or WORKSTATION_QC calculation may reuse a fully verified immutable
+receipt, retains the source's original admitted boundary, and displays its age
+as a warning. It calculates only through the latest exact date complete across
+the required strategy, factor, and risk-free inputs; later source rows remain
+evidence and are excluded from that calculation. Missing evidence, unexplained
+gaps, incompatible versions, or no common complete date remain fail-closed.
 
 Pass any current exact-version backtest manifest and returns to
 `portfolio_target_series.py` with `--strategy-history-manifest` and

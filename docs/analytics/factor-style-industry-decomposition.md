@@ -156,22 +156,27 @@ compatible with the decomposition engine: date, risk-free return, then factor
 or industry returns. It never fills, interpolates, or treats missing values as
 zero. Parsed JSON without the matching acquisition receipt fails before model
 planning. The normalizer also binds the declared run interval and evaluation
-date; every source receipt must fall inside that current run window.
+date; every source receipt must fall inside the acquisition run that produced
+the immutable bundle.
 
 Coverage is reported as three separate intervals: the complete retained
 strategy target, the complete model-specific factor source, and their
 exact-common-date aligned regression sample. A model-source publication lag
 must never truncate or relabel the retained strategy interval. Kenneth French
 daily files are monthly-published public sources and use a declared 45-calendar-
-day publication allowance measured from calendar month-end. On each daily or
-weekly pipeline run, the source is captured anew. Observation currency is
-assessed separately: the output must contain the latest month whose month-end
-plus 45 days is on or before the evaluation date. For example, on 2026-08-17,
-June 2026 is required and July 2026 is not yet due. The planning run must use
-the same evaluation date, bind all five source-receipt hashes and the full
-source-bundle identity, and reject a required factor missing at the admitted
-boundary. The aligned end stops at the last admitted provider observation and
-names the factor source as the limiting input.
+day publication allowance measured from calendar month-end. A scheduled
+release-QC/full-pipeline run captures the source anew. A DEVELOPMENT or
+WORKSTATION_QC calculation may reuse an older verified immutable bundle,
+retains its original admitted publication boundary, and records the bundle age
+as a warning; reuse never admits a month that was not eligible in the original
+capture. Observation currency is assessed separately: a release-QC output must
+contain the latest month whose month-end plus 45 days is on or before the
+evaluation date. For example, on 2026-08-17, June 2026 is required and July
+2026 is not yet due. The planner binds all five source-receipt hashes and the
+full source-bundle identity, and rejects a required factor missing at the
+admitted boundary. The aligned end stops at the latest exact date complete in
+every required target, factor, and risk-free input; rows after that boundary
+remain source evidence and are not silently filled or relabeled.
 
 `tools/portfolio_public_style_sources.py` independently verifies the governed
 Yahoo adjusted-history artifact and its sibling source manifest, derives the
