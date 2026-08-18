@@ -479,6 +479,46 @@ def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
     assert calls[2][0][0:2] == ("portfolio_decomposition.py", "publish")
 
 
+def test_legacy_release_composer_rejects_current_surface_plan() -> None:
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="requires #331 exact plan-bundle integration",
+    ):
+        builder._legacy_release_plan_specs(
+            {
+                "specs": [
+                    {
+                        "path": "specs/us-economic.json",
+                        "source_key": "us-economic",
+                        "spec_id": "us-economic:STATIC",
+                        "surface": "STATIC",
+                    },
+                    {
+                        "path": "specs/us-economic-dynamic-fls.json",
+                        "source_key": "us-economic",
+                        "spec_id": "us-economic:DYNAMIC_FLS",
+                        "surface": "DYNAMIC_FLS",
+                    },
+                ]
+            }
+        )
+
+
+def test_legacy_release_composer_rejects_duplicate_source_key() -> None:
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="duplicates a source_key",
+    ):
+        builder._legacy_release_plan_specs(
+            {
+                "specs": [
+                    {"path": "specs/a.json", "source_key": "us-economic"},
+                    {"path": "specs/b.json", "source_key": "us-economic"},
+                ]
+            }
+        )
+
+
 def test_panel_invocations_carry_baseline_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
