@@ -71,5 +71,6 @@ text-field quality (non-placeholder, minimum length) against the registry.
 
 All nine strategies currently have `no_identified_source: true` — no admitted
 economic source of excess return has been established. Six carry `weak`
-confidence (hypotheses pending admitted evidence); three out-of-scope or dropped
-strategies carry `none`.
+confidence (hypotheses pending admitted evidence); three carry `none` because
+the evidence is not sufficient for a current source hypothesis. Those evidence
+states do not override the financial-MVP product perimeter.

@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.14.0"
+BUILDER_VERSION = "0.15.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -1040,9 +1040,40 @@ def _resolved_strategies(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     return resolved
 
 
+def _source_dispositions(
+    strategy: Mapping[str, Any], source_keys: Sequence[str]
+) -> dict[str, dict[str, str]]:
+    strategy_id = _text(strategy.get("strategy_id"), "strategy_id")
+    raw = _object(
+        strategy.get("source_dispositions"),
+        f"{strategy_id}.source_dispositions",
+    )
+    if set(raw) != set(source_keys):
+        missing = sorted(set(source_keys) - set(raw))
+        extra = sorted(set(raw) - set(source_keys))
+        raise CurrentPlanError(
+            f"strategy source disposition keys differ: {strategy_id}; "
+            f"missing={missing}, extra={extra}"
+        )
+    result: dict[str, dict[str, str]] = {}
+    expected_fields = {"requirement", "readiness", "reason", "authority"}
+    for source_key in source_keys:
+        cell = _object(raw[source_key], f"{strategy_id}.{source_key}")
+        if set(cell) != expected_fields:
+            raise CurrentPlanError(
+                f"strategy source disposition fields differ: {strategy_id}.{source_key}"
+            )
+        result[source_key] = {
+            field: _text(cell.get(field), f"{strategy_id}.{source_key}.{field}")
+            for field in sorted(expected_fields)
+        }
+    return result
+
+
 def _validate_strategy_perimeter(
     strategies: Sequence[Mapping[str, Any]],
     financial_mvp_contract: Mapping[str, Any],
+    source_keys: Sequence[str],
 ) -> None:
     contract_rows = _objects(
         financial_mvp_contract.get("strategies"),
@@ -1095,20 +1126,61 @@ def _validate_strategy_perimeter(
             f"{strategy_id}.DECOMPOSITION",
         )
         assignments = _objects(plan_row.get("assignments", []), "assignments")
-        default_disposition = _text(
-            plan_row.get("default_disposition"),
-            f"{strategy_id}.default_disposition",
-        )
+        assignment_keys = {
+            _text(assignment.get("source_key"), f"{strategy_id}.assignment.source_key")
+            for assignment in assignments
+        }
+        if len(assignment_keys) != len(assignments):
+            raise CurrentPlanError(
+                f"strategy assignment source keys are duplicated: {strategy_id}"
+            )
+        if assignment_keys - set(source_keys):
+            raise CurrentPlanError(
+                f"strategy assignment source key is unknown: {strategy_id}"
+            )
+        cells = _source_dispositions(plan_row, source_keys)
         if decomposition_disposition == "REQUIRED":
-            if not assignments and not default_disposition.startswith(
-                "REQUIRED_NOT_READY_"
-            ):
+            ready_sources: set[str] = set()
+            for source_key, cell in cells.items():
+                if cell["requirement"] != "REQUIRED":
+                    raise CurrentPlanError(
+                        "required decomposition cell requirement differs: "
+                        f"{strategy_id}.{source_key}"
+                    )
+                if cell["readiness"] == "READY_TO_MODEL":
+                    if not cell["reason"].startswith("APPLICABLE_"):
+                        raise CurrentPlanError(
+                            "ready decomposition cell reason differs: "
+                            f"{strategy_id}.{source_key}"
+                        )
+                    ready_sources.add(source_key)
+                elif cell["readiness"] == "REQUIRED_NOT_READY":
+                    reason = cell["reason"]
+                    if not reason.startswith("REQUIRED_NOT_READY_") or any(
+                        token in reason
+                        for token in ("DROPPED", "OUT_OF_SCOPE", "NOT_APPLICABLE")
+                    ):
+                        raise CurrentPlanError(
+                            "required-not-ready decomposition reason differs: "
+                            f"{strategy_id}.{source_key}"
+                        )
+                else:
+                    raise CurrentPlanError(
+                        "required decomposition cell readiness differs: "
+                        f"{strategy_id}.{source_key}"
+                    )
+            if assignment_keys != ready_sources:
                 raise CurrentPlanError(
-                    "required decomposition strategy without assignments must be "
-                    f"REQUIRED_NOT_READY: {strategy_id}"
+                    "strategy assignments differ from source disposition authority: "
+                    f"{strategy_id}"
                 )
         elif decomposition_disposition == "NOT_APPLICABLE_OWNER_APPROVED":
-            if assignments or default_disposition != decomposition_disposition:
+            if assignments or any(
+                cell["requirement"] != decomposition_disposition
+                or cell["readiness"] != decomposition_disposition
+                or cell["reason"] != decomposition_disposition
+                for cell in cells.values()
+            ):
                 raise CurrentPlanError(
                     "owner-approved decomposition non-applicability differs: "
                     f"{strategy_id}"
@@ -1265,7 +1337,7 @@ def build_bundle(
     plan, plan_content = _load_json(plan_path, "current strategy plan")
     catalog, catalog_content = _load_json(catalog_path, "source catalog")
     base_spec, base_spec_content = _load_json(base_spec_path, "base specification")
-    if plan.get("schema_version") != 1:
+    if plan.get("schema_version") != 2:
         raise CurrentPlanError("current strategy plan schema is unsupported")
     evaluated_on = _day(evaluation_date, "evaluation_date")
     if assurance_profile not in ASSURANCE_PROFILES:
@@ -1330,7 +1402,13 @@ def build_bundle(
     }
     if len(contract_sources) != len(financial_mvp_contract.get("source_segments", [])):
         raise CurrentPlanError("financial MVP source IDs are duplicated")
-    _validate_strategy_perimeter(strategies, financial_mvp_contract)
+    source_plans = {
+        key: _object(value, f"plan.sources.{key}")
+        for key, value in _object(plan.get("sources"), "plan.sources").items()
+    }
+    _validate_strategy_perimeter(
+        strategies, financial_mvp_contract, tuple(source_plans)
+    )
     for name, content in history_contents.items():
         outputs[f"inputs/history/{name}"] = content
     generated_provenance: list[dict[str, object]] = []
@@ -1433,10 +1511,6 @@ def build_bundle(
         raise CurrentPlanError("style and sector shared market calendars differ")
 
     universes = _catalog_universes(catalog)
-    source_plans = {
-        key: _object(value, f"plan.sources.{key}")
-        for key, value in _object(plan.get("sources"), "plan.sources").items()
-    }
     split = _object(plan.get("split_policy"), "plan.split_policy")
     holdout_fraction = _decimal(
         split.get("holdout_fraction"), "split.holdout_fraction", Decimal("0.01")
@@ -1472,6 +1546,7 @@ def build_bundle(
         }
         if len(assignments) != len(strategy.get("assignments", [])):
             raise CurrentPlanError("a strategy may have only one assignment per source")
+        source_dispositions = _source_dispositions(strategy, tuple(source_plans))
         for source_key, source_plan in source_plans.items():
             universe_id = _text(source_plan.get("universe_id"), "source.universe_id")
             universe = universes.get(universe_id)
@@ -1479,10 +1554,9 @@ def build_bundle(
                 raise CurrentPlanError(f"unknown catalog universe {universe_id}")
             candidates = _candidates(universe, universe_id)
             assignment = assignments.get(source_key)
+            cell = source_dispositions[source_key]
             if assignment is None:
-                disposition = _text(
-                    strategy.get("default_disposition"), "default_disposition"
-                )
+                disposition = cell["readiness"]
             else:
                 sets = _factor_sets(
                     assignment, candidates, f"{strategy_id}.{source_key}"
@@ -1496,6 +1570,7 @@ def build_bundle(
                 candidate_dispositions.append(
                     {
                         "candidate_id": candidate,
+                        "authority": cell["authority"],
                         "disposition": (
                             "SCREENED_OUT_PREDECLARED_DIMENSION_CONTROL"
                             if assignment is not None
@@ -1504,6 +1579,9 @@ def build_bundle(
                             else disposition
                         ),
                         "lens": _text(source_plan.get("lens"), "source.lens"),
+                        "readiness": cell["readiness"],
+                        "reason": cell["reason"],
+                        "requirement": cell["requirement"],
                         "source_key": source_key,
                         "strategy_id": strategy_id,
                     }

@@ -499,7 +499,9 @@ unavailable until their source facts are admitted:
   backtest; retained long EU curves from other model books are different
   histories, not substitutes;
 - version-matched pre-live history for Robuxio if it becomes available and is
-  admitted; EchoTrade and Composer are governed non-required dispositions;
+  admitted; admissible daily target history for EchoTrade and connected
+  account-live target history for Composer, which remain required outside the
+  material HWM denominator;
 - complete daily account cash and fee paths, plus order/fill timestamps and
   slippage evidence, for causal model-to-account gap decomposition;
 - accepted provider/model paths where no exact-common-date comparison exists;

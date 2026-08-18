@@ -208,6 +208,29 @@ def _reidentify_public_manifest(manifest: dict[str, Any]) -> None:
     manifest["bundle_id"] = hashlib.sha256(_canonical(manifest)).hexdigest()
 
 
+def _bind_fixture_source_dispositions(plan: dict[str, Any]) -> None:
+    source_keys = tuple(plan["sources"])
+    for strategy in plan["strategies"]:
+        assigned = {
+            assignment["source_key"] for assignment in strategy.get("assignments", [])
+        }
+        strategy["source_dispositions"] = {
+            source_key: {
+                "requirement": "REQUIRED",
+                "readiness": (
+                    "READY_TO_MODEL" if source_key in assigned else "REQUIRED_NOT_READY"
+                ),
+                "reason": (
+                    "APPLICABLE_SYNTHETIC_FIXTURE_ASSIGNMENT"
+                    if source_key in assigned
+                    else "REQUIRED_NOT_READY_SYNTHETIC_FIXTURE"
+                ),
+                "authority": "SYNTHETIC_FIXTURE",
+            }
+            for source_key in source_keys
+        }
+
+
 def _fixture(tmp_path: Path) -> dict[str, Any]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     days = _weekdays(80)
@@ -272,7 +295,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
         },
     )
     plan_document = {
-        "schema_version": 1,
+        "schema_version": 2,
         "split_policy": {
             "holdout_fraction": "0.20",
             "minimum_holdout_observations": 1,
@@ -312,7 +335,6 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
             {
                 "strategy_id": "qsi",
                 "series_id": "QSI",
-                "default_disposition": "OUT_OF_SCOPE",
                 "assignments": [
                     {
                         "source_key": "economic",
@@ -329,7 +351,6 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
             {
                 "strategy_id": "tt-portfolio",
                 "series_id": "TT Portfolio",
-                "default_disposition": "OUT_OF_SCOPE",
                 "assignments": [
                     {
                         "source_key": "style",
@@ -353,10 +374,10 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
                 "strategy_id": strategy_id,
                 "series_id": contract_strategy["history_series_id"]
                 or f"UNRESOLVED::{strategy_id}",
-                "default_disposition": "REQUIRED_NOT_READY_SYNTHETIC_FIXTURE",
                 "assignments": [],
             }
         )
+    _bind_fixture_source_dispositions(plan_document)
     plan = _write_json(tmp_path / "plan.json", plan_document)
     market_paths = {
         "us_factors": tmp_path / "us.csv",
@@ -423,7 +444,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
 
-    assert manifest["builder_version"] == "0.14.0"
+    assert manifest["builder_version"] == "0.15.0"
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
         "fraction": "0.20",
@@ -467,6 +488,14 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     assert history_provenance["history/segments.csv"]["schema_version"] == "1"
     dispositions = json.loads(outputs["candidate-dispositions.json"])
     assert len(dispositions["candidate_dispositions"]) == 54
+    assert {row["requirement"] for row in dispositions["candidate_dispositions"]} == {
+        "REQUIRED"
+    }
+    assert not any(
+        token in row["disposition"] or token in row["reason"]
+        for row in dispositions["candidate_dispositions"]
+        for token in ("DROPPED", "OUT_OF_SCOPE", "NOT_APPLICABLE")
+    )
     economic = json.loads(outputs["specs/economic.json"])
     assert economic["models"][0]["test_start"] > economic["models"][0]["train_end"]
     assert {factor["factor_id"] for factor in economic["factor_source"]["factors"]} == {
@@ -514,30 +543,41 @@ def test_required_decomposition_perimeter_cannot_be_dropped_or_omitted() -> None
         ).read_text(encoding="utf-8")
     )
     strategies = planner._resolved_strategies(plan)
-    planner._validate_strategy_perimeter(strategies, contract)
-    defaults = {row["strategy_id"]: row["default_disposition"] for row in strategies}
-    assert defaults["composer-holy-grail"] == (
-        "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY"
-    )
-    assert defaults["echotrade-growth-pivots"] == (
-        "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV"
-    )
-    assert defaults["robuxio-crypto"] == (
-        "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
-    )
+    source_keys = tuple(plan["sources"])
+    planner._validate_strategy_perimeter(strategies, contract, source_keys)
+    by_id = {row["strategy_id"]: row for row in strategies}
+    for strategy_id, reason in (
+        (
+            "composer-holy-grail",
+            "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY",
+        ),
+        (
+            "echotrade-growth-pivots",
+            "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV",
+        ),
+        (
+            "robuxio-crypto",
+            "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE",
+        ),
+    ):
+        cells = by_id[strategy_id]["source_dispositions"]
+        assert {cell["reason"] for cell in cells.values()} == {reason}
 
     dropped = json.loads(json.dumps(plan))
-    next(
+    dropped_row = next(
         row
         for row in dropped["strategies"]
         if row["strategy_id"] == "composer-holy-grail"
-    )["default_disposition"] = "DROPPED_IMMATERIAL_CURRENT_SCOPE"
+    )
+    dropped_row["source_dispositions"]["us-economic"]["reason"] = (
+        "REQUIRED_NOT_READY_DROPPED_IMMATERIAL_CURRENT_SCOPE"
+    )
     with pytest.raises(
         planner.CurrentPlanError,
-        match="required decomposition strategy without assignments",
+        match="required-not-ready decomposition reason differs",
     ):
         planner._validate_strategy_perimeter(
-            planner._resolved_strategies(dropped), contract
+            planner._resolved_strategies(dropped), contract, source_keys
         )
 
     omitted = json.loads(json.dumps(plan))
@@ -548,8 +588,77 @@ def test_required_decomposition_perimeter_cannot_be_dropped_or_omitted() -> None
     ]
     with pytest.raises(planner.CurrentPlanError, match="strategy perimeter differs"):
         planner._validate_strategy_perimeter(
-            planner._resolved_strategies(omitted), contract
+            planner._resolved_strategies(omitted), contract, source_keys
         )
+
+
+def test_full_build_rejects_assignment_and_cell_authority_rewrites(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    planner.build_bundle(**kwargs)
+    baseline = inputs["plan_document"]
+
+    missing_assignment = json.loads(json.dumps(baseline))
+    qsi = next(
+        row for row in missing_assignment["strategies"] if row["strategy_id"] == "qsi"
+    )
+    qsi["assignments"] = []
+    _write_json(inputs["plan_path"], missing_assignment)
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match="assignments differ from source disposition authority",
+    ):
+        planner.build_bundle(**kwargs)
+
+    false_reason = json.loads(json.dumps(baseline))
+    qsi = next(row for row in false_reason["strategies"] if row["strategy_id"] == "qsi")
+    qsi["assignments"] = []
+    for cell in qsi["source_dispositions"].values():
+        cell["readiness"] = "REQUIRED_NOT_READY"
+        cell["reason"] = "REQUIRED_NOT_READY_DROPPED_IMMATERIAL_CURRENT_SCOPE"
+    _write_json(inputs["plan_path"], false_reason)
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match="required-not-ready decomposition reason differs",
+    ):
+        planner.build_bundle(**kwargs)
+
+    unauthorized_nonapp = json.loads(json.dumps(baseline))
+    qsi = next(
+        row for row in unauthorized_nonapp["strategies"] if row["strategy_id"] == "qsi"
+    )
+    cell = qsi["source_dispositions"]["style"]
+    cell.update(
+        requirement="NOT_APPLICABLE_OWNER_APPROVED",
+        readiness="NOT_APPLICABLE_OWNER_APPROVED",
+        reason="NOT_APPLICABLE_OWNER_APPROVED",
+    )
+    _write_json(inputs["plan_path"], unauthorized_nonapp)
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match="required decomposition cell requirement differs",
+    ):
+        planner.build_bundle(**kwargs)
+
+    unknown_source = json.loads(json.dumps(baseline))
+    qsi = next(
+        row for row in unknown_source["strategies"] if row["strategy_id"] == "qsi"
+    )
+    qsi["assignments"].append(
+        {
+            "source_key": "unknown-source",
+            "constraint": "UNCONSTRAINED",
+            "factor_sets": [["UNKNOWN"]],
+        }
+    )
+    _write_json(inputs["plan_path"], unknown_source)
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match="assignment source key is unknown",
+    ):
+        planner.build_bundle(**kwargs)
 
 
 def test_write_is_content_addressed_and_idempotent(tmp_path: Path) -> None:
@@ -1129,7 +1238,7 @@ def test_available_hybrid_projection_is_selected_without_legacy_override(
     for strategy in inputs["plan_document"]["strategies"][1:]:
         strategy.pop("inherit_assignments_from", None)
         strategy["assignments"] = []
-        strategy["default_disposition"] = "REQUIRED_NOT_READY_SYNTHETIC_HYBRID_FIXTURE"
+    _bind_fixture_source_dispositions(inputs["plan_document"])
     _write_json(inputs["plan_path"], inputs["plan_document"])
     inputs["financial_mvp_contract_path"] = history_fixture["contract_path"]
     inputs["layered_history_generation_path"] = hybrid_generation

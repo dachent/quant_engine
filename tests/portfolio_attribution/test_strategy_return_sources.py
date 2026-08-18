@@ -9,6 +9,9 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 CONTRACT_PATH = REPOSITORY_ROOT / "contracts" / "strategy-return-sources-v1.json"
+FINANCIAL_MVP_CONTRACT_PATH = (
+    REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+)
 REGISTRY_PATH = (
     REPOSITORY_ROOT / "docs" / "analytics" / "current-strategy-decomposition-plan.json"
 )
@@ -16,7 +19,7 @@ SCHEMA_PATH = (
     REPOSITORY_ROOT / "schemas" / "portfolio" / "strategy-return-sources.schema.json"
 )
 
-OUT_OF_SCOPE_STRATEGIES = {
+NO_CURRENT_SOURCE_HYPOTHESIS_STRATEGIES = {
     "p123-eu",
     "echotrade-growth-pivots",
     "composer-holy-grail",
@@ -253,6 +256,26 @@ def _assert_confidence_by_category(contract: dict) -> None:
             assert conf == "none", f"strategy {sid} should be 'none', got {conf!r}"
 
 
+def _assert_required_product_scope_is_preserved(contract: dict) -> None:
+    product = json.loads(FINANCIAL_MVP_CONTRACT_PATH.read_text(encoding="utf-8"))
+    required = {
+        strategy["strategy_id"]
+        for strategy in product["strategies"]
+        if strategy["product_requirement"] == "REQUIRED"
+    }
+    source_entries = {
+        strategy["strategy_id"]: strategy for strategy in contract["strategies"]
+    }
+    for strategy_id in required:
+        text = json.dumps(source_entries[strategy_id], sort_keys=True).lower()
+        assert "out of scope" not in text, (
+            f"required strategy {strategy_id} is described as out of scope"
+        )
+        assert "dropped" not in text, (
+            f"required strategy {strategy_id} is described as dropped"
+        )
+
+
 def _assert_consistency_rule(contract: dict) -> None:
     """Enforce the if/then/else constraint documented in the schema."""
     for strategy in contract["strategies"]:
@@ -314,6 +337,7 @@ def _assert_valid_contract(
     _assert_strategy_ids(contract)
     _assert_text_fields_quality(contract)
     _assert_confidence_by_category(contract)
+    _assert_required_product_scope_is_preserved(contract)
     _assert_consistency_rule(contract)
     _assert_falsification_distinct(contract)
 
