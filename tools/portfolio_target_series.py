@@ -3792,6 +3792,18 @@ def validate_layered_history_generation(
         "VERIFIED_WITH_REQUIRED_NOT_READY_DISPOSITIONS"
     ):
         raise TargetSeriesError("layered history coverage contract differs")
+    if (
+        coverage.get("as_of_date"),
+        coverage.get("builder"),
+        coverage.get("builder_version"),
+        coverage.get("schema_version"),
+    ) != (
+        accepted_as_of.isoformat(),
+        LAYERED_HISTORY_BUILDER,
+        LAYERED_HISTORY_BUILDER_VERSION,
+        LAYERED_HISTORY_SCHEMA_VERSION,
+    ):
+        raise TargetSeriesError("layered history coverage metadata differs")
     mode_policy = coverage.get("mode_policy")
     if not isinstance(mode_policy, dict):
         raise TargetSeriesError("layered history mode policy differs")
@@ -4347,13 +4359,16 @@ def validate_layered_history_generation(
         ),
         "Portfolio123 EU return transform disposition",
     )
-    if (
-        p123_resolution.get("status"),
-        p123_resolution.get("transform_id"),
-    ) != (
-        "DERIVED_NOT_ADMITTED_PENDING_303",
-        "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
-    ):
+    p123_correction = corrections.get("p123-eu-provider-live")
+    p123_evidence_identity = (
+        p123_correction.get("derived_evidence_identity")
+        if isinstance(p123_correction, dict)
+        else None
+    )
+    if not isinstance(p123_evidence_identity, dict) or p123_resolution != {
+        **p123_evidence_identity,
+        "status": "DERIVED_NOT_ADMITTED_PENDING_303",
+    }:
         raise TargetSeriesError("Portfolio123 EU return transform disposition differs")
     if any(
         row["strategy_id"] == "p123-eu" and row["evidence_layer"] == "PROVIDER_LIVE"

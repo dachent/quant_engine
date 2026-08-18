@@ -121,7 +121,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "e55b280162a1ed219f588ee7e7394509b9a7e9cfb0f944e549c6d9be78964b5c"
+        "540291e750eda7e2428d7e9fbbf80eac8a7155064c1d04089705c90aa5a51ef2"
     )
 
 
@@ -662,6 +662,16 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     assert p123_provider["capture"]["status"] == "CAPTURED_GOVERNED"
     assert p123_provider["strategy_version"]["compatibility"] == "EXACT_MATCH"
     assert p123_provider["interval"]["observed_start"] == "2025-11-13"
+    assert p123_provider["derived_evidence_identity"] == {
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "cash_added_treatment": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
+        "equity_overlap_observations": 157,
+        "observed_end": "2026-08-13",
+        "observed_start": "2025-11-13",
+        "raw_level_observations": 157,
+        "return_observations": 156,
+        "transform_id": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
+    }
     assert (
         _source(contract, "portfolio123-model-generation")["strategy_version"][
             "version_refs"
@@ -828,6 +838,15 @@ def test_history_truth_recurrence_mutations_fail_closed() -> None:
         match="unadmitted transform disposition",
     ):
         _validate(p123_unbound_transform)
+
+    p123_rewritten_identity = copy.deepcopy(_contract())
+    provider = _history_correction(p123_rewritten_identity, "p123-eu-provider-live")
+    provider["derived_evidence_identity"]["return_observations"] = 155
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="derived evidence identity differs",
+    ):
+        _validate(p123_rewritten_identity)
 
     p123_external = copy.deepcopy(_contract())
     account = _history_correction(p123_external, "p123-eu-account-live")

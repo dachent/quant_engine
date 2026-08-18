@@ -664,6 +664,21 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         effective_start="2025-11-14",
         effective_end="2025-11-21",
     )
+    p123_provider_correction = next(
+        row
+        for row in contract["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-eu-provider-live"
+    )
+    p123_provider_correction["derived_evidence_identity"] = {
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "cash_added_treatment": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
+        "equity_overlap_observations": 7,
+        "observed_end": "2025-11-21",
+        "observed_start": "2025-11-14",
+        "raw_level_observations": 7,
+        "return_observations": 6,
+        "transform_id": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
+    }
     _update_correction_interval(
         contract,
         "p123-eu-account-live",
@@ -1639,6 +1654,23 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
             contract_path=fixture["contract_path"],
         )
 
+    metadata_artifacts = dict(artifacts)
+    metadata_manifest = json.loads(manifest_content)
+    metadata_coverage = json.loads(artifacts["coverage.json"])
+    metadata_coverage["builder_version"] = "9.9.9"
+    _replace_output(
+        metadata_artifacts,
+        metadata_manifest,
+        "coverage.json",
+        canonical_json_bytes(metadata_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="coverage metadata differs"):
+        validate_layered_history_generation(
+            artifacts=metadata_artifacts,
+            manifest_content=_reidentify_manifest(metadata_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
     nested_extra_artifacts = dict(artifacts)
     nested_extra_manifest = json.loads(manifest_content)
     nested_extra_coverage = json.loads(artifacts["coverage.json"])
@@ -1687,6 +1719,26 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         validate_layered_history_generation(
             artifacts=correction_set_artifacts,
             manifest_content=_reidentify_manifest(correction_set_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    p123_proof_artifacts = dict(artifacts)
+    p123_proof_manifest = json.loads(manifest_content)
+    p123_proof_coverage = json.loads(artifacts["coverage.json"])
+    p123_proof = p123_proof_coverage["correction_resolutions"]["p123-eu-provider-live"]
+    p123_proof["raw_level_observations"] = 8
+    p123_proof["return_observations"] = 7
+    p123_proof["equity_overlap_observations"] = 8
+    _replace_output(
+        p123_proof_artifacts,
+        p123_proof_manifest,
+        "coverage.json",
+        canonical_json_bytes(p123_proof_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="return transform disposition differs"):
+        validate_layered_history_generation(
+            artifacts=p123_proof_artifacts,
+            manifest_content=_reidentify_manifest(p123_proof_manifest),
             contract_path=fixture["contract_path"],
         )
 

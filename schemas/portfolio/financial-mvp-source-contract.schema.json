@@ -570,6 +570,30 @@
             "source_receipt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
           }
         },
+        "derived_evidence_identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "calendar",
+            "cash_added_treatment",
+            "equity_overlap_observations",
+            "observed_end",
+            "observed_start",
+            "raw_level_observations",
+            "return_observations",
+            "transform_id"
+          ],
+          "properties": {
+            "calendar": {"$ref": "#/$defs/nonempty_string"},
+            "cash_added_treatment": {"$ref": "#/$defs/nonempty_string"},
+            "equity_overlap_observations": {"type": "integer", "minimum": 2},
+            "observed_end": {"type": "string", "format": "date"},
+            "observed_start": {"type": "string", "format": "date"},
+            "raw_level_observations": {"type": "integer", "minimum": 2},
+            "return_observations": {"type": "integer", "minimum": 1},
+            "transform_id": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
         "disposition_reason": {"$ref": "#/$defs/nonempty_string"},
         "readiness": {"$ref": "#/$defs/readiness"},
         "blockers": {"$ref": "#/$defs/blockers"}

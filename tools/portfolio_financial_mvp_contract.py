@@ -1656,6 +1656,8 @@ def _validate_history_corrections(
         }
         if row.get("correction_id") == "echotrade-event-only-account-live-rejected":
             expected_correction_keys.add("rejected_evidence_identity")
+        if row.get("correction_id") == "p123-eu-provider-live":
+            expected_correction_keys.add("derived_evidence_identity")
         _strict_keys(
             row,
             expected_correction_keys,
@@ -2069,6 +2071,53 @@ def _validate_history_corrections(
 
     correction_by_id = {str(row["correction_id"]): row for row in rows}
     p123_provider = correction_by_id["p123-eu-provider-live"]
+    p123_identity = _object(
+        p123_provider["derived_evidence_identity"],
+        "P123 EU derived evidence identity",
+    )
+    _strict_keys(
+        p123_identity,
+        {
+            "calendar",
+            "cash_added_treatment",
+            "equity_overlap_observations",
+            "observed_end",
+            "observed_start",
+            "raw_level_observations",
+            "return_observations",
+            "transform_id",
+        },
+        "P123 EU derived evidence identity",
+    )
+    raw_levels = p123_identity.get("raw_level_observations")
+    derived_returns = p123_identity.get("return_observations")
+    equity_overlap = p123_identity.get("equity_overlap_observations")
+    p123_interval = _object(p123_provider["interval"], "P123 EU provider interval")
+    if (
+        not isinstance(raw_levels, int)
+        or isinstance(raw_levels, bool)
+        or raw_levels < 2
+        or not isinstance(derived_returns, int)
+        or isinstance(derived_returns, bool)
+        or derived_returns != raw_levels - 1
+        or not isinstance(equity_overlap, int)
+        or isinstance(equity_overlap, bool)
+        or equity_overlap != raw_levels
+        or (
+            p123_identity.get("observed_start"),
+            p123_identity.get("observed_end"),
+        )
+        != (p123_interval.get("observed_start"), p123_interval.get("observed_end"))
+    ):
+        raise FinancialMvpContractError("P123 EU derived evidence identity differs")
+    _text(p123_identity["calendar"], "P123 EU derived calendar")
+    _text(
+        p123_identity["cash_added_treatment"],
+        "P123 EU derived Cash Added treatment",
+    )
+    p123_transform_id = _text(
+        p123_identity["transform_id"], "P123 EU derived transform"
+    )
     p123_receipts = {
         str(receipt["manifest_artifact_id"]): receipt
         for receipt in p123_provider["source_receipts"]
@@ -2081,8 +2130,7 @@ def _validate_history_corrections(
         p123_provider["readiness"] != "REQUIRED_NOT_READY"
         or p123_provider["blockers"] != [303]
         or "tables/har_managed_performance.parquet" not in p123_receipts
-        or "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1"
-        not in p123_disposition
+        or p123_transform_id not in p123_disposition
         or "financial interpretation is not approved" not in p123_disposition
         or "No provider-live return is admitted" not in p123_disposition
     ):
@@ -3841,7 +3889,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             f"- Policy: `{history['policy_id']}` version `{history['policy_version']}`",
             f"- Splice: `{history['splice_policy']}`",
             "",
-            "| Correction | Strategy | Layer | Existence | Capture | Observed interval | Funding / live start | Version compatibility | LIVE_ONLY | LIVE_PLUS_BACKTEST | Readiness | Source | Evidence receipts | Rejected evidence identity |",
+            "| Correction | Strategy | Layer | Existence | Capture | Observed interval | Funding / live start | Version compatibility | LIVE_ONLY | LIVE_PLUS_BACKTEST | Readiness | Source | Evidence receipts | Derived / rejected evidence identity |",
             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
     )
@@ -3871,6 +3919,14 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             if isinstance(rejected_identity, dict)
             else "—"
         )
+        derived_identity = row.get("derived_evidence_identity")
+        evidence_identity_text = (
+            f"{derived_identity['raw_level_observations']} levels / "
+            f"{derived_identity['return_observations']} returns / "
+            f"{derived_identity['transform_id']}"
+            if isinstance(derived_identity, dict)
+            else rejected_identity_text
+        )
         lines.append(
             "| "
             + " | ".join(
@@ -3889,7 +3945,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                     row["readiness"],
                     row["source_id"],
                     receipt_text,
-                    rejected_identity_text,
+                    evidence_identity_text,
                 )
             )
             + " |"
