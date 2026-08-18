@@ -1490,24 +1490,27 @@ def _validate_history_corrections(
     funding_dates: dict[str, date] = {}
     rows = _objects(policy["corrections"], "history_corrections.corrections")
     for row in rows:
+        expected_correction_keys = {
+            "blockers",
+            "capture",
+            "correction_id",
+            "disposition_reason",
+            "evidence_layer",
+            "funding_event",
+            "history_existence",
+            "interval",
+            "mode_admission",
+            "readiness",
+            "source_id",
+            "source_receipts",
+            "strategy_id",
+            "strategy_version",
+        }
+        if row.get("correction_id") == "echotrade-event-only-account-live-rejected":
+            expected_correction_keys.add("rejected_evidence_identity")
         _strict_keys(
             row,
-            {
-                "blockers",
-                "capture",
-                "correction_id",
-                "disposition_reason",
-                "evidence_layer",
-                "funding_event",
-                "history_existence",
-                "interval",
-                "mode_admission",
-                "readiness",
-                "source_id",
-                "source_receipts",
-                "strategy_id",
-                "strategy_version",
-            },
+            expected_correction_keys,
             "history correction",
         )
         correction_id = _text(row["correction_id"], "history correction id")
@@ -1824,6 +1827,43 @@ def _validate_history_corrections(
             raise FinancialMvpContractError(
                 f"history generation is not receipt-bound: {correction_id}"
             )
+        if correction_id == "echotrade-event-only-account-live-rejected":
+            rejected_identity = _object(
+                row["rejected_evidence_identity"],
+                "EchoTrade rejected evidence identity",
+            )
+            _strict_keys(
+                rejected_identity,
+                {
+                    "canonicalization",
+                    "return_observations",
+                    "sha256",
+                    "source_receipt_sha256",
+                },
+                "EchoTrade rejected evidence identity",
+            )
+            if (
+                rejected_identity["canonicalization"]
+                != "TARGET_FIELDS_CANONICAL_JSON_V1"
+                or not isinstance(rejected_identity["return_observations"], int)
+                or rejected_identity["return_observations"] < 1
+            ):
+                raise FinancialMvpContractError(
+                    "EchoTrade rejected evidence identity differs"
+                )
+            _hash(rejected_identity["sha256"], "EchoTrade rejected evidence sha256")
+            receipt_sha = _hash(
+                rejected_identity["source_receipt_sha256"],
+                "EchoTrade rejected evidence source receipt",
+            )
+            if receipt_sha not in receipt_hashes or not any(
+                receipt.get("artifact_role") == "provider-ledger-catalog"
+                and receipt.get("sha256") == receipt_sha
+                for receipt in receipts
+            ):
+                raise FinancialMvpContractError(
+                    "EchoTrade rejected evidence is not bound to the provider ledger"
+                )
         _text(row["disposition_reason"], "history disposition_reason")
         readiness = _text(row["readiness"], "history readiness")
         blockers = _blockers(row["blockers"], "history blockers")
@@ -3647,8 +3687,8 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             f"- Policy: `{history['policy_id']}` version `{history['policy_version']}`",
             f"- Splice: `{history['splice_policy']}`",
             "",
-            "| Correction | Strategy | Layer | Existence | Capture | Observed interval | Funding / live start | Version compatibility | LIVE_ONLY | LIVE_PLUS_BACKTEST | Readiness | Source | Evidence receipts |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "| Correction | Strategy | Layer | Existence | Capture | Observed interval | Funding / live start | Version compatibility | LIVE_ONLY | LIVE_PLUS_BACKTEST | Readiness | Source | Evidence receipts | Rejected evidence identity |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
     )
     for row in history_rows:
@@ -3669,6 +3709,14 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             f"{receipt['sha256'][:12]}"
             for receipt in row["source_receipts"]
         )
+        rejected_identity = row.get("rejected_evidence_identity")
+        rejected_identity_text = (
+            f"{rejected_identity['return_observations']} rows@"
+            f"{rejected_identity['sha256'][:12]} from "
+            f"{rejected_identity['source_receipt_sha256'][:12]}"
+            if isinstance(rejected_identity, dict)
+            else "—"
+        )
         lines.append(
             "| "
             + " | ".join(
@@ -3687,6 +3735,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                     row["readiness"],
                     row["source_id"],
                     receipt_text,
+                    rejected_identity_text,
                 )
             )
             + " |"

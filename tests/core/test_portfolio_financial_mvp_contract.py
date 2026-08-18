@@ -121,7 +121,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "4aa3a7b9196d5dae80b325ae0e2b6d35389c140c409abc759a3ad1e321be0271"
+        "ac878e9433318fdef635d333942bcacf55ef51725e2c08b06f9ad5438dc394c4"
     )
 
 
@@ -644,6 +644,18 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
     }
     assert echotrade["funding_event"]["status"] == "UNRESOLVED"
+    rejected_identity = echotrade["rejected_evidence_identity"]
+    provider_ledger_catalog_receipt = next(
+        receipt
+        for receipt in echotrade["source_receipts"]
+        if receipt["artifact_role"] == "provider-ledger-catalog"
+    )
+    assert rejected_identity == {
+        "canonicalization": "TARGET_FIELDS_CANONICAL_JSON_V1",
+        "return_observations": 13,
+        "sha256": "55d339e5299607daf72b44be72a03cc13998d34e81fc42d8e0a756152347ef4f",
+        "source_receipt_sha256": provider_ledger_catalog_receipt["sha256"],
+    }
     assert (
         "EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE"
         in (volatis_live["funding_event"]["authority"])
@@ -724,6 +736,17 @@ def test_provider_history_cannot_be_relabelled_or_assignment_funded() -> None:
 
 
 def test_history_truth_recurrence_mutations_fail_closed() -> None:
+    unbound_echo = copy.deepcopy(_contract())
+    echo = _history_correction(
+        unbound_echo, "echotrade-event-only-account-live-rejected"
+    )
+    echo["rejected_evidence_identity"]["source_receipt_sha256"] = "0" * 64
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="rejected evidence is not bound",
+    ):
+        _validate(unbound_echo)
+
     p123_wrong_owner = copy.deepcopy(_contract())
     provider = _history_correction(p123_wrong_owner, "p123-eu-provider-live")
     provider["blockers"] = [320]

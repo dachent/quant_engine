@@ -156,6 +156,52 @@ def _append_p123_performance_receipt(
     )
 
 
+def _update_echo_rejected_identity(
+    contract: dict[str, Any],
+    manifest: Path,
+    catalog: Path,
+    series_id: str,
+) -> None:
+    generation_id = json.loads(manifest.read_text(encoding="utf-8"))["generation_id"]
+    target_content, _evidence, _proof, _manifest = (
+        target_series.build_provider_ledger_targets(manifest, catalog)
+    )
+    rows = [
+        row
+        for row in target_series._target_rows(target_content)
+        if row["series_id"] == series_id
+    ]
+    identity = target_series._target_row_identity(rows)
+    catalog_sha256 = hashlib.sha256(catalog.read_bytes()).hexdigest()
+    correction = next(
+        row
+        for row in contract["history_corrections"]["corrections"]
+        if row["correction_id"] == "echotrade-event-only-account-live-rejected"
+    )
+    correction["source_receipts"] = [
+        receipt
+        for receipt in correction["source_receipts"]
+        if receipt["artifact_role"] != "provider-ledger-catalog"
+    ]
+    correction["source_receipts"].append(
+        {
+            "artifact_role": "provider-ledger-catalog",
+            "artifact_selector": f"generations/{generation_id}/provider-ledger.json",
+            "authority_root": "PROVIDER_LEDGER",
+            "generation_id": generation_id,
+            "locator_kind": "GENERATION_ARTIFACT",
+            "manifest_artifact_id": "normalized/provider-ledger.json",
+            "sha256": catalog_sha256,
+        }
+    )
+    correction["rejected_evidence_identity"] = {
+        "canonicalization": "TARGET_FIELDS_CANONICAL_JSON_V1",
+        "return_observations": identity["return_observations"],
+        "sha256": identity["sha256"],
+        "source_receipt_sha256": catalog_sha256,
+    }
+
+
 def _update_correction_interval(
     contract: dict[str, Any], correction_id: str, **values: str | None
 ) -> None:
@@ -659,6 +705,12 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         _update_correction_generations(
             contract, source_id, manifest, as_of, authority_root
         )
+    _update_echo_rejected_identity(
+        contract,
+        ledger_manifest,
+        ledger_catalog,
+        series["echotrade-growth-pivots"],
+    )
     matrixport_source = next(
         row
         for row in contract["source_segments"]
@@ -824,13 +876,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.3.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.4.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.3.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.4.0"}
 
     result = validate_layered_history_generation(
         artifacts=artifacts,
@@ -972,6 +1024,40 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
             contract_path=fixture["contract_path"],
         )
 
+    fabricated_echo = dict(artifacts)
+    fabricated_echo_manifest = json.loads(manifest_content)
+    fabricated_echo_rows = list(
+        csv.DictReader(io.StringIO(artifacts["excluded.csv"].decode("utf-8")))
+    )
+    fabricated_echo_rows[0]["return"] = "0.777"
+    fabricated_echo_content = _csv_bytes(
+        target_series.TARGET_FIELDS, fabricated_echo_rows
+    )
+    _replace_output(
+        fabricated_echo,
+        fabricated_echo_manifest,
+        "excluded.csv",
+        fabricated_echo_content,
+    )
+    fabricated_identity = target_series._target_row_identity(fabricated_echo_rows)
+    fabricated_coverage = json.loads(artifacts["coverage.json"])
+    fabricated_resolution = fabricated_coverage["correction_resolutions"][
+        "echotrade-event-only-account-live-rejected"
+    ]
+    fabricated_resolution.update(fabricated_identity)
+    _replace_output(
+        fabricated_echo,
+        fabricated_echo_manifest,
+        "coverage.json",
+        canonical_json_bytes(fabricated_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="product authority"):
+        validate_layered_history_generation(
+            artifacts=fabricated_echo,
+            manifest_content=_reidentify_manifest(fabricated_echo_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
     baseline_coverage = json.loads(artifacts["coverage.json"])
     ledger_catalog_path = fixture["provider_ledger_catalog_path"]
     ledger_catalog = json.loads(ledger_catalog_path.read_text(encoding="utf-8"))
@@ -999,6 +1085,12 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
         ledger_manifest_path,
         fixture["as_of_date"],
         "PROVIDER_LEDGER",
+    )
+    _update_echo_rejected_identity(
+        contract,
+        ledger_manifest_path,
+        ledger_catalog_path,
+        "Growth at Market Pivot Points [EchoTrade]",
     )
     _write_json(fixture["contract_path"], contract)
 
@@ -1284,6 +1376,26 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         validate_layered_history_generation(
             artifacts=reordered_artifacts,
             manifest_content=_reidentify_manifest(reordered_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    reordered_coverage_artifacts = dict(artifacts)
+    reordered_coverage_manifest = json.loads(manifest_content)
+    reordered_coverage = json.loads(artifacts["coverage.json"])
+    reordered_coverage["strategies"][0], reordered_coverage["strategies"][1] = (
+        reordered_coverage["strategies"][1],
+        reordered_coverage["strategies"][0],
+    )
+    _replace_output(
+        reordered_coverage_artifacts,
+        reordered_coverage_manifest,
+        "coverage.json",
+        canonical_json_bytes(reordered_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="coverage ordering differs"):
+        validate_layered_history_generation(
+            artifacts=reordered_coverage_artifacts,
+            manifest_content=_reidentify_manifest(reordered_coverage_manifest),
             contract_path=fixture["contract_path"],
         )
 

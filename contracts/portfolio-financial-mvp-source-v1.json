@@ -337,6 +337,7 @@
           {"artifact_role": "provider-ledger-generation-manifest", "artifact_selector": "generations/4b3de4f4656c236c3334eb76fb091b73c4a1a8afdbc9f3893485ed97403e0e36/generation.json", "authority_root": "PROVIDER_LEDGER", "generation_id": "4b3de4f4656c236c3334eb76fb091b73c4a1a8afdbc9f3893485ed97403e0e36", "locator_kind": "GENERATION_MANIFEST", "manifest_artifact_id": null, "sha256": "33342e04b45ab070ba21bc74884be1b7eb9c1868589e95b435fb320a33330e06"},
           {"artifact_role": "provider-ledger-catalog", "artifact_selector": "generations/4b3de4f4656c236c3334eb76fb091b73c4a1a8afdbc9f3893485ed97403e0e36/provider-ledger.json", "authority_root": "PROVIDER_LEDGER", "generation_id": "4b3de4f4656c236c3334eb76fb091b73c4a1a8afdbc9f3893485ed97403e0e36", "locator_kind": "GENERATION_ARTIFACT", "manifest_artifact_id": "normalized/provider-ledger.json", "sha256": "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"}
         ],
+        "rejected_evidence_identity": {"canonicalization": "TARGET_FIELDS_CANONICAL_JSON_V1", "return_observations": 13, "sha256": "55d339e5299607daf72b44be72a03cc13998d34e81fc42d8e0a756152347ef4f", "source_receipt_sha256": "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"},
         "disposition_reason": "The captured rows occur only on transaction/fill dates and reproduce the event-to-event sparse-pool formula using last-trade marks. They are retained as rejected evidence, not admitted as daily account-live returns.",
         "readiness": "REQUIRED_NOT_READY",
         "blockers": [302, 303, 320]

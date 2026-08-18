@@ -60,7 +60,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.3.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.4.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 MATRIXPORT_GAP_KINDS: Final = (
     "nav_missing_date",
@@ -2212,6 +2212,35 @@ def build_layered_history_generation(
     ):
         raise TargetSeriesError("EchoTrade event-only disposition differs")
     echo_rejected_identity = _target_row_identity(echo_candidate)
+    echo_expected_identity = echo_correction.get("rejected_evidence_identity")
+    provider_ledger_catalog_sha = hashlib.sha256(
+        provider_ledger_catalog_path.read_bytes()
+    ).hexdigest()
+    if (
+        not isinstance(echo_expected_identity, dict)
+        or set(echo_expected_identity)
+        != {
+            "canonicalization",
+            "return_observations",
+            "sha256",
+            "source_receipt_sha256",
+        }
+        or echo_expected_identity.get("canonicalization")
+        != "TARGET_FIELDS_CANONICAL_JSON_V1"
+        or {
+            "return_observations": echo_expected_identity.get("return_observations"),
+            "sha256": echo_expected_identity.get("sha256"),
+        }
+        != {
+            key: echo_rejected_identity[key]
+            for key in ("return_observations", "sha256")
+        }
+        or echo_expected_identity.get("source_receipt_sha256")
+        != provider_ledger_catalog_sha
+    ):
+        raise TargetSeriesError(
+            "EchoTrade rejected evidence differs from product authority"
+        )
     live_by_strategy["echotrade-growth-pivots"] = []
     matrixport_artifacts = _manifest_artifacts(matrixport_manifest.get("artifacts"))
     _verify_artifact(matrixport_nav_path, matrixport_artifacts, "csv/nav_daily.csv")
@@ -3617,6 +3646,10 @@ def validate_layered_history_generation(
     coverage_rows = coverage.get("strategies")
     if not isinstance(coverage_rows, list):
         raise TargetSeriesError("layered history strategy coverage is absent")
+    if any(not isinstance(raw, dict) for raw in coverage_rows) or [
+        str(raw.get("strategy_id", "")) for raw in coverage_rows
+    ] != sorted(str(raw.get("strategy_id", "")) for raw in coverage_rows):
+        raise TargetSeriesError("layered history strategy coverage ordering differs")
     coverage_by_strategy: dict[str, dict[str, object]] = {}
     for raw in coverage_rows:
         if not isinstance(raw, dict):
@@ -3920,6 +3953,12 @@ def validate_layered_history_generation(
     echo_capture = (
         echo_correction.get("capture") if isinstance(echo_correction, dict) else None
     )
+    echo_contract_identity = (
+        echo_correction.get("rejected_evidence_identity")
+        if isinstance(echo_correction, dict)
+        else None
+    )
+    provider_ledger_catalog_input = inputs.get("provider-ledger-catalog")
     echo_series_id = coverage_by_strategy.get("echotrade-growth-pivots", {}).get(
         "series_id"
     )
@@ -3938,6 +3977,25 @@ def validate_layered_history_generation(
     ):
         raise TargetSeriesError("EchoTrade excluded evidence differs")
     expected_echo_identity = _target_row_identity(excluded)
+    if (
+        not isinstance(echo_contract_identity, dict)
+        or echo_contract_identity.get("canonicalization")
+        != "TARGET_FIELDS_CANONICAL_JSON_V1"
+        or not isinstance(provider_ledger_catalog_input, dict)
+        or echo_contract_identity.get("source_receipt_sha256")
+        != provider_ledger_catalog_input.get("sha256")
+        or {
+            "return_observations": echo_contract_identity.get("return_observations"),
+            "sha256": echo_contract_identity.get("sha256"),
+        }
+        != {
+            key: expected_echo_identity[key]
+            for key in ("return_observations", "sha256")
+        }
+    ):
+        raise TargetSeriesError(
+            "EchoTrade excluded evidence differs from product authority"
+        )
     if (
         not isinstance(echo_resolution, dict)
         or set(echo_resolution)
