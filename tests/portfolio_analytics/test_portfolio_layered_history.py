@@ -1606,6 +1606,23 @@ def test_layered_history_registers_optional_strategy_history_manifest(
         "strategy-history/returns.csv"
     )
 
+    optional_as_of_rewrite = copy.deepcopy(generation)
+    optional_returns_input = next(
+        row
+        for row in optional_as_of_rewrite["inputs"]
+        if row["input_id"] == "strategy-history-returns"
+    )
+    optional_returns_input["as_of_date"] = "1999-12-31"
+    with pytest.raises(
+        TargetSeriesError,
+        match="input source authority differs: strategy-history-returns",
+    ):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(optional_as_of_rewrite),
+            contract_path=fixture["contract_path"],
+        )
+
     missing_artifact_id = copy.deepcopy(strategy_manifest)
     missing_artifact_id["returns_artifact"].pop("artifact_id")
     missing_artifact_id.pop("bundle_id")
@@ -1700,6 +1717,36 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         validate_layered_history_generation(
             artifacts=artifacts,
             manifest_content=_reidentify_manifest(input_contract_rewrite),
+            contract_path=fixture["contract_path"],
+        )
+
+    input_as_of_rewrite = json.loads(manifest_content)
+    matrixport_nav_input = next(
+        row
+        for row in input_as_of_rewrite["inputs"]
+        if row["input_id"] == "matrixport-nav"
+    )
+    matrixport_nav_input["as_of_date"] = "1999-12-31"
+    with pytest.raises(
+        TargetSeriesError, match="input source authority differs: matrixport-nav"
+    ):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(input_as_of_rewrite),
+            contract_path=fixture["contract_path"],
+        )
+
+    product_as_of_rewrite = json.loads(manifest_content)
+    product_input = next(
+        row
+        for row in product_as_of_rewrite["inputs"]
+        if row["input_id"] == "financial-mvp-contract"
+    )
+    product_input["as_of_date"] = "1999-12-31"
+    with pytest.raises(TargetSeriesError, match="product input provenance differs"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(product_as_of_rewrite),
             contract_path=fixture["contract_path"],
         )
 

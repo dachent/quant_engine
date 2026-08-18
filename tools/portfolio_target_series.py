@@ -3389,6 +3389,12 @@ def validate_layered_history_generation(
             raise TargetSeriesError(
                 f"layered history input contract differs: {input_id}"
             )
+    contract_input = inputs["financial-mvp-contract"]
+    if (
+        contract_input.get("as_of_date") is not None
+        or contract_input.get("generation_id") is not None
+    ):
+        raise TargetSeriesError("layered history product input provenance differs")
     expected_manifests = {
         "provider-ledger-manifest": sources["owner-account-live-history"],
         "matrixport-manifest": sources["matrixport-account-generation"],
@@ -3417,8 +3423,7 @@ def validate_layered_history_generation(
             raise TargetSeriesError(
                 f"layered history current input differs: {input_id}"
             )
-    contract_input = inputs.get("financial-mvp-contract")
-    if contract_input is None or (
+    if (
         contract_input.get("artifact_role"),
         contract_input.get("sha256"),
         contract_input.get("size_bytes"),
@@ -3487,6 +3492,51 @@ def validate_layered_history_generation(
                 f"layered history source manifest identity differs: {source_name}"
             )
         source_manifests[source_name] = parsed
+    input_source_names = {
+        "provider-ledger-current": "provider-ledger",
+        "provider-ledger-manifest": "provider-ledger",
+        "provider-ledger-catalog": "provider-ledger",
+        "matrixport-current": "matrixport",
+        "matrixport-manifest": "matrixport",
+        "matrixport-nav": "matrixport",
+        "matrixport-holdings": "matrixport",
+        "matrixport-subscriptions": "matrixport",
+        "quantbase-current": "quantbase",
+        "quantbase-manifest": "quantbase",
+        "quantbase-history": "quantbase",
+        "quantbase-activity": "quantbase",
+        "portfolio123-current": "portfolio123",
+        "portfolio123-manifest": "portfolio123",
+        "portfolio123-metadata": "portfolio123",
+        "portfolio123-performance": "portfolio123",
+        "portfolio123-equity": "portfolio123",
+        "portfolio123-returns": "portfolio123",
+        "portfolio123-relationships": "portfolio123",
+    }
+    if "strategy-history" in source_manifests:
+        input_source_names.update(
+            {
+                "strategy-history-manifest": "strategy-history",
+                "strategy-history-returns": "strategy-history",
+            }
+        )
+    if set(input_source_names) != set(inputs) - {"financial-mvp-contract"}:
+        raise TargetSeriesError("layered history input source mapping differs")
+    for input_id, source_name in input_source_names.items():
+        authority_manifest = source_manifests[source_name]
+        generation_key = (
+            "bundle_id" if source_name == "strategy-history" else "generation_id"
+        )
+        if (
+            inputs[input_id].get("generation_id"),
+            inputs[input_id].get("as_of_date"),
+        ) != (
+            authority_manifest.get(generation_key),
+            authority_manifest.get("as_of_date"),
+        ):
+            raise TargetSeriesError(
+                f"layered history input source authority differs: {input_id}"
+            )
     matrixport_gap_policy = sources["matrixport-account-generation"].get(
         "declared_gap_policy"
     )
