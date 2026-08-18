@@ -121,7 +121,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "7f870c630b2cb570a6a51df2257f6be47a60f170ae92c063e2fc9fddca59ccb0"
+        "dae5e6078ead80cabd516d8d736250519937040a6e9486a4727e2488edc9252c"
     )
 
 
@@ -603,7 +603,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     assert history["policy_id"] == "PORT-HISTORY-TRUTH-1"
     assert history["owner_issue"] == 319
     rows = history["corrections"]
-    assert len(rows) == 10
+    assert len(rows) == 11
     segment_identities = history["materialized_segment_identities"]
     assert [row["segment_id"] for row in segment_identities] == sorted(
         row["segment_id"] for row in segment_identities
@@ -635,6 +635,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         ("robuxio-crypto", "PROVIDER_TRACK_RECORD"),
         ("robuxio-crypto", "PROVIDER_LIVE"),
         ("robuxio-crypto", "ACCOUNT_LIVE"),
+        ("p123-ai-factor", "BACKTEST"),
         ("p123-eu", "BACKTEST"),
         ("p123-eu", "PROVIDER_LIVE"),
         ("p123-eu", "ACCOUNT_LIVE"),
@@ -684,6 +685,23 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
             "version_refs"
         ]["p123-eu"]
         == p123_provider["strategy_version"]["version_ref"]
+    )
+    p123_ai_backtest = _history_correction(contract, "p123-ai-backtest-candidate")
+    assert p123_ai_backtest["derived_backtest_identity"] == {
+        "index_observations": 1599,
+        "observed_end": "2026-06-26",
+        "observed_start": "2020-05-12",
+        "relationship_type": "live_sim_twin",
+        "return_observations": 1598,
+        "source_labels": ["api"],
+    }
+    assert p123_ai_backtest["mode_admission"] == {
+        "LIVE_ONLY": "NOT_APPLICABLE",
+        "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY",
+    }
+    assert (
+        b"1599 index levels / 1598 returns / 2020-05-12..2026-06-26 / "
+        b"live_sim_twin / sources: api" in rendered_history
     )
     p123_backtest = _history_correction(contract, "p123-eu-backtest-not-captured")
     assert p123_backtest["history_existence"]["status"] == "EXISTS"
@@ -863,6 +881,30 @@ def test_history_truth_recurrence_mutations_fail_closed() -> None:
         match="derived evidence identity differs",
     ):
         _validate(p123_impossible_overlap)
+
+    p123_ai_rewritten_identity = copy.deepcopy(_contract())
+    ai_backtest = _history_correction(
+        p123_ai_rewritten_identity, "p123-ai-backtest-candidate"
+    )
+    ai_backtest["derived_backtest_identity"]["observed_start"] = "2020-05-13"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="derived backtest identity differs",
+    ):
+        _validate(p123_ai_rewritten_identity)
+
+    p123_ai_unbound = copy.deepcopy(_contract())
+    ai_backtest = _history_correction(p123_ai_unbound, "p123-ai-backtest-candidate")
+    ai_backtest["source_receipts"] = [
+        receipt
+        for receipt in ai_backtest["source_receipts"]
+        if receipt["manifest_artifact_id"] != "tables/strategy_relationships.parquet"
+    ]
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="unresolved version disposition",
+    ):
+        _validate(p123_ai_unbound)
 
     p123_external = copy.deepcopy(_contract())
     account = _history_correction(p123_external, "p123-eu-account-live")

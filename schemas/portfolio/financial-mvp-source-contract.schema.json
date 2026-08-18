@@ -18,7 +18,7 @@
     "$schema": {
       "const": "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     },
-    "contract_schema_version": {"const": 3},
+    "contract_schema_version": {"const": 4},
     "product": {"$ref": "#/$defs/product"},
     "strategies": {
       "type": "array",
@@ -592,6 +592,31 @@
             "raw_level_observations": {"type": "integer", "minimum": 2},
             "return_observations": {"type": "integer", "minimum": 1},
             "transform_id": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "derived_backtest_identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "index_observations",
+            "observed_end",
+            "observed_start",
+            "relationship_type",
+            "return_observations",
+            "source_labels"
+          ],
+          "properties": {
+            "index_observations": {"type": "integer", "minimum": 2},
+            "observed_end": {"type": "string", "format": "date"},
+            "observed_start": {"type": "string", "format": "date"},
+            "relationship_type": {"$ref": "#/$defs/nonempty_string"},
+            "return_observations": {"type": "integer", "minimum": 1},
+            "source_labels": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/nonempty_string"}
+            }
           }
         },
         "disposition_reason": {"$ref": "#/$defs/nonempty_string"},

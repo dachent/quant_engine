@@ -60,7 +60,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.5.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.6.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 LAYERED_HISTORY_MODE_POLICY: Final = {
     "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
@@ -1470,6 +1470,7 @@ def _history_contract(
     required_corrections = {
         "robuxio-provider-live-before-funding",
         "robuxio-account-live-after-funding",
+        "p123-ai-backtest-candidate",
         "p123-eu-backtest-not-captured",
         "p123-eu-provider-live",
         "p123-eu-account-live",
@@ -3193,6 +3194,8 @@ def validate_layered_history_generation(
         ) from exc
     if not isinstance(manifest, dict):
         raise TargetSeriesError("layered history generation manifest must be an object")
+    if manifest_content != canonical_json_bytes(manifest):
+        raise TargetSeriesError("layered history generation manifest is not canonical")
     _require_exact_keys(
         manifest,
         frozenset(
@@ -4310,16 +4313,16 @@ def validate_layered_history_generation(
         expected_p123_ai_status = (
             "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
         )
-    if (
-        p123_ai_resolution.get("status") != expected_p123_ai_status
-        or p123_ai_resolution.get("relationship_type") != "live_sim_twin"
-        or not isinstance(p123_ai_resolution.get("source_labels"), list)
-        or not isinstance(p123_ai_resolution.get("index_observations"), int)
-        or not isinstance(p123_ai_resolution.get("return_observations"), int)
-        or p123_ai_resolution["index_observations"] < 2
-        or p123_ai_resolution["return_observations"]
-        != p123_ai_resolution["index_observations"] - 1
-    ):
+    p123_ai_correction = corrections.get("p123-ai-backtest-candidate")
+    p123_ai_identity = (
+        p123_ai_correction.get("derived_backtest_identity")
+        if isinstance(p123_ai_correction, dict)
+        else None
+    )
+    if not isinstance(p123_ai_identity, dict) or p123_ai_resolution != {
+        **p123_ai_identity,
+        "status": expected_p123_ai_status,
+    }:
         raise TargetSeriesError("Portfolio123 AI backtest disposition differs")
     robuxio_resolution = resolutions.get("robuxio-account-live-after-funding")
     if not isinstance(robuxio_resolution, dict):
@@ -4390,6 +4393,29 @@ def validate_layered_history_generation(
         ),
         "Volatis account-live resolution",
     )
+    volatis_correction = corrections.get("volatis-account-live")
+    volatis_interval = (
+        volatis_correction.get("interval")
+        if isinstance(volatis_correction, dict)
+        else None
+    )
+    volatis_funding = (
+        volatis_correction.get("funding_event")
+        if isinstance(volatis_correction, dict)
+        else None
+    )
+    if (
+        not isinstance(volatis_interval, dict)
+        or not isinstance(volatis_funding, dict)
+        or volatis_resolution
+        != {
+            "observed_end": volatis_interval.get("observed_end"),
+            "observed_start": volatis_interval.get("observed_start"),
+            "source_first_positive_value_date": volatis_funding.get("event_date"),
+            "status": "RESOLVED_BY_PIPE_HISTORY_001",
+        }
+    ):
+        raise TargetSeriesError("Volatis account-live resolution differs")
 
     def _correction_interval(correction_id: str) -> Mapping[str, Any]:
         value = corrections[correction_id].get("interval")

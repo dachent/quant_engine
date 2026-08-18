@@ -157,6 +157,53 @@ def _append_p123_performance_receipt(
     )
 
 
+def _append_p123_ai_receipts(
+    contract: dict[str, Any],
+    manifest: Path,
+    returns_path: Path,
+    relationships_path: Path,
+) -> None:
+    generation_id = json.loads(manifest.read_text(encoding="utf-8"))["generation_id"]
+    correction = next(
+        row
+        for row in contract["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-ai-backtest-candidate"
+    )
+    for artifact_role, artifact_id, path in (
+        (
+            "portfolio123-simulation-returns",
+            "tables/returns_daily.parquet",
+            returns_path,
+        ),
+        (
+            "portfolio123-strategy-relationships",
+            "tables/strategy_relationships.parquet",
+            relationships_path,
+        ),
+    ):
+        correction["source_receipts"].append(
+            {
+                "artifact_role": artifact_role,
+                "artifact_selector": f"generations/{generation_id}/{artifact_id}",
+                "authority_root": "PORTFOLIO123",
+                "generation_id": generation_id,
+                "locator_kind": "GENERATION_ARTIFACT",
+                "manifest_artifact_id": artifact_id,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+    _rows, identity = target_series._portfolio123_simulation_returns(
+        returns_path,
+        relationships_path,
+        "live-ai",
+        "sim-ai",
+        "AI Factor [P123]",
+    )
+    correction["derived_backtest_identity"] = identity
+    correction["interval"]["observed_start"] = identity["observed_start"]
+    correction["interval"]["observed_end"] = identity["observed_end"]
+
+
 def _update_echo_rejected_identity(
     contract: dict[str, Any],
     manifest: Path,
@@ -734,6 +781,7 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
     )
     matrixport_source["declared_gap_policy"] = _matrixport_gap_policy("2025-12-09")
     _append_p123_performance_receipt(contract, p123_manifest, performance_path)
+    _append_p123_ai_receipts(contract, p123_manifest, returns_path, relationships_path)
     contract_path = tmp_path / "contract.json"
     sources_by_id = {row["source_id"]: row for row in contract["source_segments"]}
     for identity in contract["history_corrections"]["materialized_segment_identities"]:
@@ -931,13 +979,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.5.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.6.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.5.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.6.0"}
     assert (
         "strategy-history"
         in generation_schema["properties"]["source_manifests"]["properties"]
@@ -1373,6 +1421,12 @@ def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version
     _append_p123_performance_receipt(
         contract, manifest_path, fixture["portfolio123_performance_path"]
     )
+    _append_p123_ai_receipts(
+        contract,
+        manifest_path,
+        returns_path,
+        fixture["portfolio123_relationships_path"],
+    )
     _write_json(fixture["contract_path"], contract)
 
     artifacts, _manifest_content = _build(fixture)
@@ -1515,6 +1569,16 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
 ) -> None:
     fixture = _history_fixture(tmp_path)
     artifacts, manifest_content = _build(fixture)
+
+    noncanonical_manifest = json.dumps(json.loads(manifest_content), indent=2).encode(
+        "utf-8"
+    )
+    with pytest.raises(TargetSeriesError, match="generation manifest is not canonical"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=noncanonical_manifest,
+            contract_path=fixture["contract_path"],
+        )
 
     pointer_rewrite = json.loads(manifest_content)
     current_input = next(
@@ -1739,6 +1803,53 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         validate_layered_history_generation(
             artifacts=p123_proof_artifacts,
             manifest_content=_reidentify_manifest(p123_proof_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    p123_ai_artifacts = dict(artifacts)
+    p123_ai_manifest = json.loads(manifest_content)
+    p123_ai_coverage = json.loads(artifacts["coverage.json"])
+    p123_ai_proof = p123_ai_coverage["correction_resolutions"]["p123-ai-backtest"]
+    p123_ai_proof["observed_start"] = "2025-12-31"
+    p123_ai_proof["index_observations"] = 3
+    p123_ai_proof["return_observations"] = 2
+    _replace_output(
+        p123_ai_artifacts,
+        p123_ai_manifest,
+        "coverage.json",
+        canonical_json_bytes(p123_ai_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="AI backtest disposition differs"):
+        validate_layered_history_generation(
+            artifacts=p123_ai_artifacts,
+            manifest_content=_reidentify_manifest(p123_ai_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+    volatis_artifacts = dict(artifacts)
+    volatis_manifest = json.loads(manifest_content)
+    volatis_coverage = json.loads(artifacts["coverage.json"])
+    volatis_proof = volatis_coverage["correction_resolutions"]["volatis-account-live"]
+    volatis_proof.update(
+        {
+            "observed_end": "2024-10-23",
+            "observed_start": "2024-10-17",
+            "source_first_positive_value_date": "2024-10-16",
+            "status": "OWNER_APPROVED_NOT_APPLICABLE",
+        }
+    )
+    _replace_output(
+        volatis_artifacts,
+        volatis_manifest,
+        "coverage.json",
+        canonical_json_bytes(volatis_coverage),
+    )
+    with pytest.raises(
+        TargetSeriesError, match="Volatis account-live resolution differs"
+    ):
+        validate_layered_history_generation(
+            artifacts=volatis_artifacts,
+            manifest_content=_reidentify_manifest(volatis_manifest),
             contract_path=fixture["contract_path"],
         )
 
@@ -2055,6 +2166,12 @@ def test_layered_history_rejects_conflicting_p123_performance_capture(
         "PORTFOLIO123",
     )
     _append_p123_performance_receipt(contract, manifest_path, performance_path)
+    _append_p123_ai_receipts(
+        contract,
+        manifest_path,
+        fixture["portfolio123_returns_path"],
+        fixture["portfolio123_relationships_path"],
+    )
     _write_json(fixture["contract_path"], contract)
 
     with pytest.raises(TargetSeriesError, match="conflicting captures"):

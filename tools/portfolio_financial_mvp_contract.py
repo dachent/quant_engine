@@ -116,6 +116,7 @@ REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS: Final = frozenset(
 )
 HISTORY_CORRECTION_LAYERS: Final = {
     "echotrade-growth-pivots": frozenset({"ACCOUNT_LIVE"}),
+    "p123-ai-factor": frozenset({"BACKTEST"}),
     "p123-eu": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
     "robuxio-crypto": frozenset(
         {"ACCOUNT_LIVE", "PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"}
@@ -1658,6 +1659,8 @@ def _validate_history_corrections(
             expected_correction_keys.add("rejected_evidence_identity")
         if row.get("correction_id") == "p123-eu-provider-live":
             expected_correction_keys.add("derived_evidence_identity")
+        if row.get("correction_id") == "p123-ai-backtest-candidate":
+            expected_correction_keys.add("derived_backtest_identity")
         _strict_keys(
             row,
             expected_correction_keys,
@@ -2070,6 +2073,72 @@ def _validate_history_corrections(
             )
 
     correction_by_id = {str(row["correction_id"]): row for row in rows}
+    p123_ai_backtest = correction_by_id["p123-ai-backtest-candidate"]
+    p123_ai_identity = _object(
+        p123_ai_backtest["derived_backtest_identity"],
+        "P123 AI derived backtest identity",
+    )
+    _strict_keys(
+        p123_ai_identity,
+        {
+            "index_observations",
+            "observed_end",
+            "observed_start",
+            "relationship_type",
+            "return_observations",
+            "source_labels",
+        },
+        "P123 AI derived backtest identity",
+    )
+    index_observations = p123_ai_identity.get("index_observations")
+    return_observations = p123_ai_identity.get("return_observations")
+    p123_ai_interval = _object(
+        p123_ai_backtest["interval"], "P123 AI backtest interval"
+    )
+    source_labels = p123_ai_identity.get("source_labels")
+    if (
+        not isinstance(index_observations, int)
+        or isinstance(index_observations, bool)
+        or index_observations < 2
+        or not isinstance(return_observations, int)
+        or isinstance(return_observations, bool)
+        or return_observations != index_observations - 1
+        or (
+            p123_ai_identity.get("observed_start"),
+            p123_ai_identity.get("observed_end"),
+        )
+        != (
+            p123_ai_interval.get("observed_start"),
+            p123_ai_interval.get("observed_end"),
+        )
+        or p123_ai_identity.get("relationship_type") != "live_sim_twin"
+        or not isinstance(source_labels, list)
+        or not source_labels
+        or source_labels != sorted(set(source_labels))
+        or not all(isinstance(item, str) and item.strip() for item in source_labels)
+    ):
+        raise FinancialMvpContractError("P123 AI derived backtest identity differs")
+    p123_ai_receipts = {
+        str(receipt["manifest_artifact_id"]): receipt
+        for receipt in p123_ai_backtest["source_receipts"]
+        if isinstance(receipt, dict) and receipt.get("manifest_artifact_id")
+    }
+    if (
+        p123_ai_backtest["readiness"] != "REQUIRED_NOT_READY"
+        or p123_ai_backtest["blockers"] != [302, 303]
+        or p123_ai_backtest["strategy_version"]["status"] != "UNRESOLVED"
+        or p123_ai_backtest["strategy_version"]["compatibility"] != "UNRESOLVED"
+        or p123_ai_backtest["mode_admission"]
+        != {"LIVE_ONLY": "NOT_APPLICABLE", "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"}
+        or {
+            "tables/returns_daily.parquet",
+            "tables/strategy_relationships.parquet",
+        }
+        - set(p123_ai_receipts)
+    ):
+        raise FinancialMvpContractError(
+            "P123 AI backtest bypasses its unresolved version disposition"
+        )
     p123_provider = correction_by_id["p123-eu-provider-live"]
     p123_identity = _object(
         p123_provider["derived_evidence_identity"],
@@ -3658,8 +3727,8 @@ def validate_contract(
         },
         "financial MVP contract",
     )
-    if contract["contract_schema_version"] != 3:
-        raise FinancialMvpContractError("contract_schema_version must be 3")
+    if contract["contract_schema_version"] != 4:
+        raise FinancialMvpContractError("contract_schema_version must be 4")
     if contract["$schema"] != (
         "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     ):
@@ -3921,6 +3990,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             else "—"
         )
         derived_identity = row.get("derived_evidence_identity")
+        derived_backtest_identity = row.get("derived_backtest_identity")
         evidence_identity_text = (
             f"{derived_identity['raw_level_observations']} levels / "
             f"{derived_identity['return_observations']} returns / "
@@ -3929,7 +3999,16 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             f"{derived_identity['cash_added_treatment']} / "
             f"{derived_identity['transform_id']}"
             if isinstance(derived_identity, dict)
-            else rejected_identity_text
+            else (
+                f"{derived_backtest_identity['index_observations']} index levels / "
+                f"{derived_backtest_identity['return_observations']} returns / "
+                f"{derived_backtest_identity['observed_start']}.."
+                f"{derived_backtest_identity['observed_end']} / "
+                f"{derived_backtest_identity['relationship_type']} / "
+                f"sources: {','.join(derived_backtest_identity['source_labels'])}"
+                if isinstance(derived_backtest_identity, dict)
+                else rejected_identity_text
+            )
         )
         lines.append(
             "| "

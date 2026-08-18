@@ -1,9 +1,9 @@
 {
   "$schema": "../schemas/portfolio/financial-mvp-source-contract.schema.json",
-  "contract_schema_version": 3,
+  "contract_schema_version": 4,
   "product": {
     "product_id": "FINANCIAL_MVP",
-    "product_version": "1.2.0",
+    "product_version": "1.3.0",
     "runtime_profile": "PORTFOLIO_SOURCE_TO_PANEL_V1",
     "operator_outcome": "One governed as-held portfolio product with numerical HWM and drawdowns, daily and current invested capital excluding gains, applicable decomposition, and complete dependence analysis.",
     "as_of_policy": {
@@ -366,6 +366,27 @@
         "disposition_reason": "Funding becomes effective on the first confirmed held observation. The boundary return is excluded; measurable account-live returns begin the following day.",
         "readiness": "READY",
         "blockers": []
+      },
+      {
+        "correction_id": "p123-ai-backtest-candidate",
+        "strategy_id": "p123-ai-factor",
+        "source_id": "portfolio123-model-generation",
+        "evidence_layer": "BACKTEST",
+        "history_existence": {"status": "EXISTS", "authority": "HASH_BOUND_PORTFOLIO123_SIMULATION_RETURNS_AND_LIVE_SIM_TWIN_RELATIONSHIP"},
+        "capture": {"status": "CAPTURED_GOVERNED", "capture_defect": null, "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1", "generation_sha256": "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907", "as_of": "2026-08-14"},
+        "strategy_version": {"status": "UNRESOLVED", "version_ref": null, "compatibility": "UNRESOLVED", "authority": "CURRENT_PRODUCT_EXACT_VERSION_AND_LIVE_SIM_TWIN_COMPATIBILITY_NOT_APPROVED"},
+        "interval": {"assignment_date": null, "observed_start": "2020-05-12", "observed_end": "2026-06-26", "effective_start": null, "effective_end": null},
+        "funding_event": {"status": "NOT_APPLICABLE", "event_date": null, "account_live_start": null, "authority": "BACKTEST_IS_NOT_OWNER_FUNDING"},
+        "mode_admission": {"LIVE_ONLY": "NOT_APPLICABLE", "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"},
+        "source_receipts": [
+          {"artifact_role": "portfolio123-generation-manifest", "artifact_selector": "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1/generation.json", "authority_root": "PORTFOLIO123", "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1", "locator_kind": "GENERATION_MANIFEST", "manifest_artifact_id": null, "sha256": "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907"},
+          {"artifact_role": "portfolio123-simulation-returns", "artifact_selector": "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1/tables/returns_daily.parquet", "authority_root": "PORTFOLIO123", "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1", "locator_kind": "GENERATION_ARTIFACT", "manifest_artifact_id": "tables/returns_daily.parquet", "sha256": "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e"},
+          {"artifact_role": "portfolio123-strategy-relationships", "artifact_selector": "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1/tables/strategy_relationships.parquet", "authority_root": "PORTFOLIO123", "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1", "locator_kind": "GENERATION_ARTIFACT", "manifest_artifact_id": "tables/strategy_relationships.parquet", "sha256": "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc"}
+        ],
+        "derived_backtest_identity": {"index_observations": 1599, "observed_end": "2026-06-26", "observed_start": "2020-05-12", "relationship_type": "live_sim_twin", "return_observations": 1598, "source_labels": ["api"]},
+        "disposition_reason": "The governed generation contains one hash-bound live/simulation twin and a reproducible model-return candidate. The current product version and compatibility remain unresolved, so the candidate is retained as evidence but cannot enter LIVE_ONLY or LIVE_PLUS_BACKTEST.",
+        "readiness": "REQUIRED_NOT_READY",
+        "blockers": [302, 303]
       },
       {
         "correction_id": "p123-eu-backtest-not-captured",
