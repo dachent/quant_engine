@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.10.0"
+BUILDER_VERSION = "0.11.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -1075,7 +1075,11 @@ def _factor_sets(
 
 
 def _complete_dates(
-    rows: Sequence[Mapping[str, str]], required: Sequence[str], source_name: str
+    rows: Sequence[Mapping[str, str]],
+    required: Sequence[str],
+    source_name: str,
+    *,
+    allow_declared_provider_missing: bool = False,
 ) -> tuple[date, ...]:
     seen: set[date] = set()
     result: list[date] = []
@@ -1091,7 +1095,7 @@ def _complete_dates(
         previous = observed
         missing = [column for column in required if not row.get(column, "").strip()]
         if missing:
-            if completeness_started:
+            if completeness_started and not allow_declared_provider_missing:
                 raise CurrentPlanError(
                     f"{source_name} has an incomplete required observation after "
                     f"its completeness boundary: {observed.isoformat()}"
@@ -1433,7 +1437,10 @@ def build_bundle(
         if not set(("date", *required)).issubset(market_headers[input_key]):
             raise CurrentPlanError(f"market input {input_key} lacks planned columns")
         complete_dates = _complete_dates(
-            market_rows[input_key], required, f"market input {input_key}"
+            market_rows[input_key],
+            required,
+            f"market input {input_key}",
+            allow_declared_provider_missing=input_key == "us_industries",
         )
         contract_source_id = MARKET_CONTRACT_SOURCE_IDS.get(input_key)
         if contract_source_id is not None:
