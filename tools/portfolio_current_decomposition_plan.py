@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.16.0"
+BUILDER_VERSION = "0.17.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -45,6 +45,7 @@ LENSES = (
     "RETURN_INDUSTRY",
     "RETURN_SECTOR",
 )
+SURFACES = ("STATIC", "DYNAMIC_FLS")
 INPUT_KEYS = (
     "us_factors",
     "europe_factors",
@@ -1130,6 +1131,36 @@ def _validate_plan_authority(
         raise CurrentPlanError("current strategy plan authority digest differs")
 
 
+def _required_decomposition_surfaces(
+    financial_mvp_contract: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return the exact product-required surface set from the #330 authority."""
+
+    matching = [
+        outcome
+        for outcome in _objects(
+            financial_mvp_contract.get("financial_outcomes"),
+            "financial MVP outcomes",
+        )
+        if outcome.get("outcome_id") == "DECOMPOSITION"
+    ]
+    if len(matching) != 1:
+        raise CurrentPlanError("financial MVP decomposition outcome is missing")
+    calculation = _object(
+        matching[0].get("calculation_contract"),
+        "financial MVP decomposition calculation contract",
+    )
+    raw_surfaces = calculation.get("surfaces")
+    if not isinstance(raw_surfaces, list):
+        raise CurrentPlanError("financial MVP decomposition surfaces must be an array")
+    surfaces = tuple(
+        _text(item, "financial MVP decomposition surface") for item in raw_surfaces
+    )
+    if len(surfaces) != len(set(surfaces)) or set(surfaces) != set(SURFACES):
+        raise CurrentPlanError("financial MVP decomposition surfaces differ")
+    return tuple(surface for surface in SURFACES if surface in surfaces)
+
+
 def _validate_strategy_perimeter(
     strategies: Sequence[Mapping[str, Any]],
     financial_mvp_contract: Mapping[str, Any],
@@ -1397,7 +1428,7 @@ def build_bundle(
     plan, plan_content = _load_json(plan_path, "current strategy plan")
     catalog, catalog_content = _load_json(catalog_path, "source catalog")
     base_spec, base_spec_content = _load_json(base_spec_path, "base specification")
-    if plan.get("schema_version") != 2:
+    if plan.get("schema_version") != 3:
         raise CurrentPlanError("current strategy plan schema is unsupported")
     evaluated_on = _day(evaluation_date, "evaluation_date")
     if assurance_profile not in ASSURANCE_PROFILES:
@@ -1453,6 +1484,7 @@ def build_bundle(
         raise CurrentPlanError(
             "verified financial MVP contract is unavailable"
         ) from exc
+    required_surfaces = _required_decomposition_surfaces(financial_mvp_contract)
     contract_sources = {
         _text(source.get("source_id"), "financial MVP source_id"): source
         for source in _objects(
@@ -1497,6 +1529,7 @@ def build_bundle(
                 "inputs/governance/current-strategy-decomposition-plan.json",
                 plan_content,
                 "current-strategy-decomposition-plan",
+                str(plan["schema_version"]),
             ),
             _provenance_definition(
                 "catalog/decomposition-source-catalog.json",
@@ -1590,6 +1623,41 @@ def build_bundle(
     ridge = split.get("ridge_candidates")
     if not isinstance(ridge, list) or not ridge:
         raise CurrentPlanError("split.ridge_candidates must be a non-empty array")
+    normalized_ridge = tuple(
+        _decimal(candidate, f"split.ridge_candidates[{index}]", Decimal("0"))
+        for index, candidate in enumerate(ridge)
+    )
+    if len(normalized_ridge) != len(set(normalized_ridge)):
+        raise CurrentPlanError("split.ridge_candidates are numerically duplicated")
+    dynamic = _object(split.get("dynamic"), "split.dynamic")
+    if set(dynamic) != {"constraint", "smoothness_candidates", "state_ridge"}:
+        raise CurrentPlanError("split.dynamic fields differ")
+    dynamic_constraint = _text(dynamic.get("constraint"), "split.dynamic.constraint")
+    if dynamic_constraint != "UNCONSTRAINED":
+        raise CurrentPlanError("split.dynamic.constraint must be UNCONSTRAINED")
+    dynamic_state_ridge = _text(dynamic.get("state_ridge"), "split.dynamic.state_ridge")
+    _decimal(dynamic_state_ridge, "split.dynamic.state_ridge", Decimal("0"))
+    raw_smoothness = dynamic.get("smoothness_candidates")
+    if not isinstance(raw_smoothness, list) or not raw_smoothness:
+        raise CurrentPlanError(
+            "split.dynamic.smoothness_candidates must be a non-empty array"
+        )
+    dynamic_smoothness = tuple(
+        _text(value, f"split.dynamic.smoothness_candidates[{index}]")
+        for index, value in enumerate(raw_smoothness)
+    )
+    normalized_smoothness = tuple(
+        _decimal(
+            candidate,
+            f"split.dynamic.smoothness_candidates[{index}]",
+            Decimal("0.000000000001"),
+        )
+        for index, candidate in enumerate(dynamic_smoothness)
+    )
+    if len(normalized_smoothness) != len(set(normalized_smoothness)):
+        raise CurrentPlanError(
+            "split.dynamic.smoothness_candidates are numerically duplicated"
+        )
 
     assignments_by_source: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     candidate_dispositions: list[dict[str, object]] = []
@@ -1627,25 +1695,30 @@ def build_bundle(
                 )
                 disposition = "PLANNED_MODEL_CANDIDATE"
             for candidate in candidates:
-                candidate_dispositions.append(
-                    {
-                        "candidate_id": candidate,
-                        "authority": cell["authority"],
-                        "disposition": (
-                            "SCREENED_OUT_PREDECLARED_DIMENSION_CONTROL"
-                            if assignment is not None
-                            and candidate
-                            in set(assignment.get("screened_out_candidates", []))
-                            else disposition
-                        ),
-                        "lens": _text(source_plan.get("lens"), "source.lens"),
-                        "readiness": cell["readiness"],
-                        "reason": cell["reason"],
-                        "requirement": cell["requirement"],
-                        "source_key": source_key,
-                        "strategy_id": strategy_id,
-                    }
-                )
+                for surface in required_surfaces:
+                    surface_readiness = cell["readiness"]
+                    surface_reason = cell["reason"]
+                    surface_disposition = (
+                        "SCREENED_OUT_PREDECLARED_DIMENSION_CONTROL"
+                        if assignment is not None
+                        and candidate
+                        in set(assignment.get("screened_out_candidates", []))
+                        else disposition
+                    )
+                    candidate_dispositions.append(
+                        {
+                            "candidate_id": candidate,
+                            "authority": cell["authority"],
+                            "disposition": surface_disposition,
+                            "lens": _text(source_plan.get("lens"), "source.lens"),
+                            "readiness": surface_readiness,
+                            "reason": surface_reason,
+                            "requirement": cell["requirement"],
+                            "source_key": source_key,
+                            "strategy_id": strategy_id,
+                            "surface": surface,
+                        }
+                    )
 
     specs: list[dict[str, object]] = []
     market_source_ages: dict[str, dict[str, object]] = {}
@@ -1755,7 +1828,7 @@ def build_bundle(
         model_date_cache: dict[tuple[str, ...], tuple[date, ...]] = {}
         model_boundaries: dict[str, date] = {}
         model_calculation_boundaries: dict[str, dict[str, object]] = {}
-        models: list[dict[str, object]] = []
+        model_blueprints: list[dict[str, object]] = []
         for strategy, assignment in source_assignments:
             strategy_id = _text(strategy.get("strategy_id"), "strategy_id")
             series_id = _text(strategy.get("series_id"), "series_id")
@@ -1825,7 +1898,7 @@ def build_bundle(
                     warning_after_days=0,
                     limiting_inputs=limiting_inputs,
                 )
-                models.append(
+                model_blueprints.append(
                     {
                         "as_of_date": model_as_of.isoformat(),
                         "constraint": constraint,
@@ -1845,7 +1918,7 @@ def build_bundle(
                         "train_end": train_end.isoformat(),
                     }
                 )
-        if not models:
+        if not model_blueprints:
             raise CurrentPlanError(f"source {source_key} has no planned models")
         analysis_as_of = max(model_boundaries.values())
         oldest_model_boundary = min(model_boundaries.values())
@@ -1950,56 +2023,84 @@ def build_bundle(
                     "source_id": source_id,
                 }
             )
-        spec = {
-            "analysis_lens": lens,
-            "as_of_date": analysis_as_of.isoformat(),
-            "evidence_mode": evidence_mode,
-            "factor_source": {
-                "artifact_id": f"market/{source_key}.csv",
-                "date_column": "date",
-                "expected_sha256": _sha256(projected_factor_content),
-                "expected_size_bytes": len(projected_factor_content),
-                "factors": factor_definitions,
-                "relative_path": factor_relative,
-                "risk_free_column": risk_free,
-                "schema_name": f"portfolio-{source_key}-returns",
-                "schema_version": "1",
-            },
-            "maximum_factor_staleness_days": maximum_factor_staleness_days,
-            "models": models,
-            "provenance_sources": generated_provenance,
-            "schema_version": 1,
-            "series_composition": series_composition,
-            "target_source": generated_target,
-        }
-        relative = f"specs/{source_key}.json"
-        content = _canonical_json(spec)
-        outputs[relative] = content
-        specs.append(
-            {
-                "analysis_lens": spec["analysis_lens"],
-                "as_of_date": spec["as_of_date"],
-                "data_boundary": calculation_age,
-                "model_count": len(models),
-                "model_calculation_boundaries": {
-                    model_id: model_calculation_boundaries[model_id]
-                    for model_id in sorted(model_calculation_boundaries)
+        for surface in required_surfaces:
+            surface_slug = surface.lower().replace("_", "-")
+            surface_models: list[dict[str, object]] = []
+            surface_boundaries: dict[str, dict[str, object]] = {}
+            for blueprint in model_blueprints:
+                base_model_id = cast(str, blueprint["model_id"])
+                model_id = f"{base_model_id}-{surface_slug}"
+                model = {**blueprint, "model_id": model_id}
+                if surface == "STATIC":
+                    model["estimator"] = "STATIC_RBSA"
+                else:
+                    model.update(
+                        {
+                            "constraint": dynamic_constraint,
+                            "estimator": "DYNAMIC_FLS",
+                            "ridge_candidates": [dynamic_state_ridge],
+                            "smoothness_candidates": list(dynamic_smoothness),
+                        }
+                    )
+                surface_models.append(model)
+                surface_boundaries[model_id] = model_calculation_boundaries[
+                    base_model_id
+                ]
+            spec = {
+                "analysis_lens": lens,
+                "as_of_date": analysis_as_of.isoformat(),
+                "evidence_mode": evidence_mode,
+                "factor_source": {
+                    "artifact_id": f"market/{source_key}.csv",
+                    "date_column": "date",
+                    "expected_sha256": _sha256(projected_factor_content),
+                    "expected_size_bytes": len(projected_factor_content),
+                    "factors": factor_definitions,
+                    "relative_path": factor_relative,
+                    "risk_free_column": risk_free,
+                    "schema_name": f"portfolio-{source_key}-returns",
+                    "schema_version": "1",
                 },
-                "path": relative,
-                "sha256": _sha256(content),
-                "size_bytes": len(content),
-                "source_key": source_key,
+                "maximum_factor_staleness_days": maximum_factor_staleness_days,
+                "models": surface_models,
+                "provenance_sources": generated_provenance,
+                "schema_version": 1,
+                "series_composition": series_composition,
+                "target_source": generated_target,
             }
-        )
+            relative = (
+                f"specs/{source_key}.json"
+                if surface == "STATIC"
+                else f"specs/{source_key}-{surface_slug}.json"
+            )
+            content = _canonical_json(spec)
+            outputs[relative] = content
+            spec_id = f"{source_key}:{surface}"
+            specs.append(
+                {
+                    "analysis_lens": spec["analysis_lens"],
+                    "as_of_date": spec["as_of_date"],
+                    "data_boundary": calculation_age,
+                    "model_count": len(surface_models),
+                    "model_calculation_boundaries": surface_boundaries,
+                    "path": relative,
+                    "sha256": _sha256(content),
+                    "size_bytes": len(content),
+                    "source_key": source_key,
+                    "spec_id": spec_id,
+                    "surface": surface,
+                }
+            )
 
     _validate_plan_authority(plan, plan_content, financial_mvp_contract)
     disposition_result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "candidate_dispositions": sorted(
             candidate_dispositions,
             key=lambda item: (
                 cast(str, item["strategy_id"]),
                 cast(str, item["source_key"]),
+                cast(str, item["surface"]),
                 cast(str, item["candidate_id"]),
             ),
         ),
@@ -2008,7 +2109,7 @@ def build_bundle(
     disposition_content = _canonical_json(disposition_result)
     outputs["candidate-dispositions.json"] = disposition_content
     manifest: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "builder": "portfolio-current-decomposition-plan",
         "builder_version": BUILDER_VERSION,
         "assurance_profile": assurance_profile,
@@ -2020,7 +2121,7 @@ def build_bundle(
             ],
             "public_factor_capture": public_factor_capture_age,
             "spec_calculation_boundaries": {
-                cast(str, row["source_key"]): row["data_boundary"] for row in specs
+                cast(str, row["spec_id"]): row["data_boundary"] for row in specs
             },
         },
         "inputs": [
@@ -2056,7 +2157,11 @@ def build_bundle(
             },
             "model_dimension": {
                 "absolute_minimum_training_observations": 3,
+                "dynamic_constraint": dynamic_constraint,
+                "dynamic_smoothness_candidates": list(dynamic_smoothness),
+                "dynamic_state_ridge": dynamic_state_ridge,
                 "minimum_training_observations_per_factor": minimum_per_factor,
+                "required_surfaces": list(required_surfaces),
             },
             "publication": "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE",
             "strategy_evidence_mode": evidence_mode,

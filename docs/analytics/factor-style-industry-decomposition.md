@@ -91,6 +91,13 @@ Keeping these estimands separate is standard returns-based-analysis practice;
 the panel states the question, return source, constraint, beta meaning, and
 holdings-inference boundary for each lens.
 
+The schema-v3 current-product plan emits separate `STATIC` and `DYNAMIC_FLS`
+specifications for every admitted strategy/source cell. Static ETF-style
+models retain the long-only simplex interpretation above. Dynamic ETF-style
+models use the separately declared unconstrained FLS state-path policy, so
+their time-varying betas are conditional sensitivities, not portfolio weights.
+Static and dynamic candidates never compete for one selection slot.
+
 ### Evidence modes
 
 Every factor, ETF-style, sector, industry, and dynamic-style result declares one

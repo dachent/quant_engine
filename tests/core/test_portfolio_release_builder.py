@@ -479,6 +479,95 @@ def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
     assert calls[2][0][0:2] == ("portfolio_decomposition.py", "publish")
 
 
+def _legacy_plan_manifest(specs: list[dict[str, object]]) -> dict[str, object]:
+    manifest: dict[str, object] = {
+        "builder": "portfolio-current-decomposition-plan",
+        "builder_version": "0.16.0",
+        "schema_version": 1,
+        "specs": specs,
+    }
+    manifest["bundle_id"] = hashlib.sha256(
+        builder.canonical_json_bytes(manifest)
+    ).hexdigest()
+    return manifest
+
+
+def test_legacy_release_composer_rejects_current_surface_plan() -> None:
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="requires #331 exact plan-bundle integration",
+    ):
+        builder._legacy_release_plan_specs(
+            {
+                "builder": "portfolio-current-decomposition-plan",
+                "builder_version": "0.17.0",
+                "schema_version": 2,
+                "specs": [
+                    {
+                        "path": "specs/us-economic.json",
+                        "source_key": "us-economic",
+                        "spec_id": "us-economic:STATIC",
+                        "surface": "STATIC",
+                    },
+                    {
+                        "path": "specs/us-economic-dynamic-fls.json",
+                        "source_key": "us-economic",
+                        "spec_id": "us-economic:DYNAMIC_FLS",
+                        "surface": "DYNAMIC_FLS",
+                    },
+                ],
+            }
+        )
+
+
+def test_legacy_release_composer_rejects_duplicate_source_key() -> None:
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="duplicates a source_key",
+    ):
+        builder._legacy_release_plan_specs(
+            _legacy_plan_manifest(
+                [
+                    {"path": "specs/a.json", "source_key": "us-economic"},
+                    {"path": "specs/b.json", "source_key": "us-economic"},
+                ]
+            )
+        )
+
+
+def test_legacy_release_composer_rejects_stripped_current_plan() -> None:
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="requires #331 exact plan-bundle integration",
+    ):
+        builder._legacy_release_plan_specs(
+            {
+                "builder": "portfolio-current-decomposition-plan",
+                "builder_version": "0.17.0",
+                "bundle_id": "a" * 64,
+                "schema_version": 2,
+                "specs": [
+                    {
+                        "path": "specs/us-economic.json",
+                        "source_key": "us-economic",
+                    }
+                ],
+            }
+        )
+
+
+def test_legacy_release_composer_rejects_bundle_identity_rewrite() -> None:
+    manifest = _legacy_plan_manifest(
+        [{"path": "specs/us-economic.json", "source_key": "us-economic"}]
+    )
+    manifest["specs"] = [{"path": "specs/forged.json", "source_key": "us-economic"}]
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="bundle identity differs",
+    ):
+        builder._legacy_release_plan_specs(manifest)
+
+
 def test_panel_invocations_carry_baseline_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

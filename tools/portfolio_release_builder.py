@@ -786,12 +786,58 @@ def _build_hybrid_decomposition(
     }
 
 
+def _legacy_release_plan_specs(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Admit only the pre-surface plan shape to the legacy release composer.
+
+    Current static and dynamic surfaces are emitted as separate, hash-bound
+    plan specifications.  The legacy release path keys outputs only by
+    ``source_key`` and composes history through the superseded correlation
+    adapter, so consuming a surface-qualified plan here would overwrite one
+    surface and falsely promote historical dynamic evidence.  #331 owns exact
+    plan-bundle composition into this existing release runtime.
+    """
+
+    if (
+        plan.get("builder") != "portfolio-current-decomposition-plan"
+        or plan.get("builder_version") not in {"0.15.0", "0.16.0"}
+        or plan.get("schema_version") != 1
+    ):
+        raise VerticalBuildError(
+            "current decomposition plan requires #331 exact plan-bundle integration"
+        )
+    bundle_id = _text(plan.get("bundle_id"), "attribution plan bundle_id")
+    identity = dict(plan)
+    identity.pop("bundle_id")
+    if hashlib.sha256(canonical_json_bytes(identity)).hexdigest() != bundle_id:
+        raise VerticalBuildError("attribution plan bundle identity differs")
+    specs = plan.get("specs")
+    if not isinstance(specs, list) or not specs:
+        raise VerticalBuildError("attribution plan has no lens specifications")
+    rows: list[dict[str, Any]] = []
+    source_keys: list[str] = []
+    for row in specs:
+        if not isinstance(row, dict):
+            raise VerticalBuildError("attribution lens definition is invalid")
+        if "surface" in row or "spec_id" in row:
+            raise VerticalBuildError(
+                "surface-qualified current decomposition requires #331 exact "
+                "plan-bundle integration"
+            )
+        source_keys.append(_text(row.get("source_key"), "lens source_key"))
+        rows.append(row)
+    if len(source_keys) != len(set(source_keys)):
+        raise VerticalBuildError("legacy attribution plan duplicates a source_key")
+    return rows
+
+
 def build_analytics(
     recipe_path: Path,
     attribution_bundle: Path,
     output_root: Path,
 ) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
+    plan = _load(attribution_bundle / "plan-manifest.json", "attribution plan")
+    specs = _legacy_release_plan_specs(plan)
     base_spec = (
         attribution_bundle / "inputs" / "governance" / "base-decomposition-spec.json"
     )
@@ -871,13 +917,7 @@ def build_analytics(
     hybrid_bundles["dynamic-style"] = _text(
         hybrid_dynamic.get("bundle_id"), "hybrid dynamic bundle_id"
     )
-    plan = _load(attribution_bundle / "plan-manifest.json", "attribution plan")
-    specs = plan.get("specs")
-    if not isinstance(specs, list) or not specs:
-        raise VerticalBuildError("attribution plan has no lens specifications")
     for row in specs:
-        if not isinstance(row, dict):
-            raise VerticalBuildError("attribution lens definition is invalid")
         source_key = _text(row.get("source_key"), "lens source_key")
         lens_root = lenses_root / source_key
         lens_spec = attribution_bundle / _text(row.get("path"), "lens spec path")

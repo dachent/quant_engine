@@ -14,6 +14,7 @@ import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+CONTRACT_PATH = REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_current_decomposition_plan.py"
 SPEC = importlib.util.spec_from_file_location(
     "portfolio_current_decomposition_plan", MODULE_PATH
@@ -294,7 +295,7 @@ def _fixture(
         },
     )
     plan_document = {
-        "schema_version": 2,
+        "schema_version": 3,
         "split_policy": {
             "holdout_fraction": "0.20",
             "minimum_holdout_observations": 1,
@@ -302,6 +303,11 @@ def _fixture(
             "cv_folds": 3,
             "parsimony_tolerance": "0.01",
             "ridge_candidates": ["0", "0.0001"],
+            "dynamic": {
+                "constraint": "UNCONSTRAINED",
+                "state_ridge": "0.0000000001",
+                "smoothness_candidates": ["0.00000001", "0.000001"],
+            },
         },
         "sources": {
             "economic": {
@@ -387,12 +393,16 @@ def _fixture(
         if source["source_id"] == "current-strategy-registry"
     )
     registry.update(
-        source_version="decomposition-plan-v2",
-        data_classes=["STRATEGY_VERSION", "DECOMPOSITION_APPLICABILITY"],
+        source_version="decomposition-plan-v3",
+        data_classes=[
+            "STRATEGY_VERSION",
+            "DECOMPOSITION_APPLICABILITY",
+            "DECOMPOSITION_SURFACE_POLICY",
+        ],
         endpoint_or_artifact_selector=(
             "docs/analytics/current-strategy-decomposition-plan.json"
         ),
-        schema={"name": "current-strategy-decomposition-plan", "version": "2"},
+        schema={"name": "current-strategy-decomposition-plan", "version": "3"},
         current_generation={
             "generation_id": plan_sha256,
             "sha256": plan_sha256,
@@ -401,12 +411,13 @@ def _fixture(
     )
     registry["admission"] = {
         "transform": "portfolio-current-product-strategy-census",
-        "version": "2",
+        "version": "3",
         "facts": [
             "STRATEGY_ID",
             "STRATEGY_ARCHETYPE",
             "STRATEGY_VERSION_REQUIREMENT",
             "DECOMPOSITION_APPLICABILITY",
+            "DECOMPOSITION_SURFACE_POLICY",
         ],
     }
     _write_json(history_fixture["contract_path"], contract_document)
@@ -479,7 +490,8 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
 
-    assert manifest["builder_version"] == "0.16.0"
+    assert manifest["builder_version"] == "0.17.0"
+    assert manifest["schema_version"] == 2
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
         "fraction": "0.20",
@@ -488,7 +500,11 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     }
     assert manifest["policies"]["model_dimension"] == {
         "absolute_minimum_training_observations": 3,
+        "dynamic_constraint": "UNCONSTRAINED",
+        "dynamic_smoothness_candidates": ["0.00000001", "0.000001"],
+        "dynamic_state_ridge": "0.0000000001",
         "minimum_training_observations_per_factor": 1,
+        "required_surfaces": ["STATIC", "DYNAMIC_FLS"],
     }
     assert manifest["evaluation_date"] == inputs["evaluation_date"]
     assert manifest["layered_history"]["mode"] == "LIVE_ONLY"
@@ -508,6 +524,11 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         "ETF_STYLE",
         "RETURN_SECTOR",
     }
+    assert {item["surface"] for item in manifest["specs"]} == {
+        "STATIC",
+        "DYNAMIC_FLS",
+    }
+    assert len(manifest["specs"]) == 6
     history_provenance = {
         item["artifact_id"]: item
         for item in json.loads(outputs["specs/economic.json"])["provenance_sources"]
@@ -521,8 +542,24 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         "portfolio-layered-history-segments"
     )
     assert history_provenance["history/segments.csv"]["schema_version"] == "1"
+    plan_provenance = {
+        item["artifact_id"]: item
+        for item in json.loads(outputs["specs/economic.json"])["provenance_sources"]
+        if item["artifact_id"].startswith("plan/")
+    }
+    assert (
+        plan_provenance["plan/current-strategy-decomposition-plan.json"][
+            "schema_version"
+        ]
+        == "3"
+    )
     dispositions = json.loads(outputs["candidate-dispositions.json"])
-    assert len(dispositions["candidate_dispositions"]) == 54
+    assert dispositions["schema_version"] == 2
+    assert len(dispositions["candidate_dispositions"]) == 108
+    assert {row["surface"] for row in dispositions["candidate_dispositions"]} == {
+        "STATIC",
+        "DYNAMIC_FLS",
+    }
     assert {row["requirement"] for row in dispositions["candidate_dispositions"]} == {
         "REQUIRED"
     }
@@ -532,6 +569,18 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         for token in ("DROPPED", "OUT_OF_SCOPE", "NOT_APPLICABLE")
     )
     economic = json.loads(outputs["specs/economic.json"])
+    dynamic_economic = json.loads(outputs["specs/economic-dynamic-fls.json"])
+    assert {model["estimator"] for model in economic["models"]} == {"STATIC_RBSA"}
+    assert {model["estimator"] for model in dynamic_economic["models"]} == {
+        "DYNAMIC_FLS"
+    }
+    assert {model["constraint"] for model in dynamic_economic["models"]} == {
+        "UNCONSTRAINED"
+    }
+    assert all(
+        model["smoothness_candidates"] == ["0.00000001", "0.000001"]
+        for model in dynamic_economic["models"]
+    )
     assert economic["models"][0]["test_start"] > economic["models"][0]["train_end"]
     assert {factor["factor_id"] for factor in economic["factor_source"]["factors"]} == {
         "MKT_RF",
@@ -561,6 +610,72 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         coverage_by_strategy["echotrade-growth-pivots"]["modes"]["LIVE_ONLY"]["status"]
         == "REQUIRED_NOT_READY"
     )
+
+
+def test_dynamic_surface_policy_and_grid_fail_closed(tmp_path: Path) -> None:
+    missing = _fixture(
+        tmp_path / "missing",
+        plan_mutator=lambda plan: plan["split_policy"].pop("dynamic"),
+    )
+    with pytest.raises(planner.CurrentPlanError, match="split.dynamic"):
+        planner.build_bundle(
+            **{key: value for key, value in missing.items() if key != "plan_document"}
+        )
+
+    duplicated = _fixture(
+        tmp_path / "duplicated",
+        plan_mutator=lambda plan: plan["split_policy"]["dynamic"].update(
+            smoothness_candidates=["0.000001", "0.000001"]
+        ),
+    )
+    with pytest.raises(planner.CurrentPlanError, match="duplicated"):
+        planner.build_bundle(
+            **{
+                key: value
+                for key, value in duplicated.items()
+                if key != "plan_document"
+            }
+        )
+
+    numerically_duplicated = _fixture(
+        tmp_path / "numerically-duplicated",
+        plan_mutator=lambda plan: plan["split_policy"]["dynamic"].update(
+            smoothness_candidates=["0.000001", "1e-6"]
+        ),
+    )
+    with pytest.raises(planner.CurrentPlanError, match="numerically duplicated"):
+        planner.build_bundle(
+            **{
+                key: value
+                for key, value in numerically_duplicated.items()
+                if key != "plan_document"
+            }
+        )
+
+    numerically_duplicated_ridge = _fixture(
+        tmp_path / "numerically-duplicated-ridge",
+        plan_mutator=lambda plan: plan["split_policy"].update(
+            ridge_candidates=["0.000001", "1e-6"]
+        ),
+    )
+    with pytest.raises(planner.CurrentPlanError, match="numerically duplicated"):
+        planner.build_bundle(
+            **{
+                key: value
+                for key, value in numerically_duplicated_ridge.items()
+                if key != "plan_document"
+            }
+        )
+
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    outcome = next(
+        row
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "DECOMPOSITION"
+    )
+    outcome["calculation_contract"]["surfaces"] = ["STATIC"]
+    with pytest.raises(planner.CurrentPlanError, match="surfaces differ"):
+        planner._required_decomposition_surfaces(contract)
 
 
 def test_required_decomposition_perimeter_cannot_be_dropped_or_omitted() -> None:
@@ -1027,12 +1142,14 @@ def test_models_use_independent_common_boundaries_without_global_target_truncati
         == tt_dates[-1].isoformat()
     )
     per_model = next(
-        row for row in manifest["specs"] if row["source_key"] == "economic"
+        row
+        for row in manifest["specs"]
+        if row["source_key"] == "economic" and row["surface"] == "STATIC"
     )["model_calculation_boundaries"]
-    assert per_model["qsi-economic-01"]["complete_through"] == (
+    assert per_model["qsi-economic-01-static"]["complete_through"] == (
         qsi_dates[-1].isoformat()
     )
-    assert per_model["tt-portfolio-economic-01"]["complete_through"] == (
+    assert per_model["tt-portfolio-economic-01-static"]["complete_through"] == (
         tt_dates[-1].isoformat()
     )
 
@@ -1429,8 +1546,11 @@ def test_generated_specs_execute_under_the_closed_engine_contract(
 
     for relative in (
         "specs/economic.json",
+        "specs/economic-dynamic-fls.json",
         "specs/sector.json",
+        "specs/sector-dynamic-fls.json",
         "specs/style.json",
+        "specs/style-dynamic-fls.json",
     ):
         result, manifest, _content = engine.build_decomposition(
             source_root / relative, source_root
@@ -1521,7 +1641,7 @@ def test_plan_preserves_target_end_beyond_publication_lag(
     assert target_rows[-1]["date"] == "2026-06-30"
     assert retained_history_rows[-1]["date"] == "2026-08-17"
     assert economic["maximum_factor_staleness_days"] == 0
-    assert manifest["data_age"]["spec_calculation_boundaries"]["economic"] == {
+    expected_boundary = {
         "age_days": 48,
         "complete_through": "2026-06-30",
         "evaluated_on": "2026-08-17",
@@ -1529,6 +1649,17 @@ def test_plan_preserves_target_end_beyond_publication_lag(
         "status": "WARN_COMPLETE_DATA_AGE",
         "warning_after_days": 0,
     }
+    boundaries = manifest["data_age"]["spec_calculation_boundaries"]
+    assert set(boundaries) == {
+        "economic:DYNAMIC_FLS",
+        "economic:STATIC",
+        "sector:DYNAMIC_FLS",
+        "sector:STATIC",
+        "style:DYNAMIC_FLS",
+        "style:STATIC",
+    }
+    assert boundaries["economic:STATIC"] == expected_boundary
+    assert boundaries["economic:DYNAMIC_FLS"] == expected_boundary
 
     source_root = tmp_path / "publication-lag-materialized"
     for relative, content in outputs.items():
