@@ -7,14 +7,16 @@ import csv
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import hashlib
+import importlib.util
 import io
 import json
 from pathlib import Path, PurePosixPath
 import shutil
+import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.4.0"
+BUILDER_VERSION = "0.6.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -57,6 +59,29 @@ TARGET_HEADERS = (
     "return_basis",
     "return_type",
     "cost",
+)
+LAYERED_PROJECTION_HEADERS = (
+    "series_id",
+    "date",
+    "return",
+    "evidence_layer",
+    "strategy_version",
+)
+LAYERED_SEGMENT_HEADERS = (
+    "strategy_id",
+    "series_id",
+    "date",
+    "return",
+    "evidence_layer",
+    "strategy_version",
+    "segment_id",
+    "source_id",
+    "source_generation_id",
+    "mode_admission",
+    "return_basis",
+    "return_type",
+    "calendar",
+    "frequency",
 )
 
 
@@ -214,6 +239,335 @@ def _csv_bytes(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> bytes:
     writer.writerow(headers)
     writer.writerows(rows)
     return buffer.getvalue().encode()
+
+
+def _layered_history_module() -> Any:
+    module_name = "portfolio_target_series_for_current_decomposition_plan"
+    module_path = Path(__file__).resolve().with_name("portfolio_target_series.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise CurrentPlanError("layered history verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise CurrentPlanError("layered history verifier cannot be loaded") from exc
+    return module
+
+
+def _layered_history_targets(
+    *,
+    generation_root: Path,
+    contract_path: Path,
+    strategies: Sequence[Mapping[str, Any]],
+    evidence_mode: str,
+    evaluated_on: date,
+) -> dict[str, Any]:
+    planned = [
+        (
+            _text(strategy.get("strategy_id"), "strategy_id"),
+            _text(strategy.get("series_id"), "series_id"),
+        )
+        for strategy in strategies
+        if _objects(strategy.get("assignments", []), "assignments")
+    ]
+    if not planned:
+        raise CurrentPlanError("current plan has no assigned strategies")
+    if len({item[0] for item in planned}) != len(planned) or len(
+        {item[1] for item in planned}
+    ) != len(planned):
+        raise CurrentPlanError("planned strategy or series identity is duplicated")
+
+    verifier = _layered_history_module()
+    try:
+        verification = verifier.verify_layered_history_generation(
+            generation_root, contract_path
+        )
+    except (OSError, ValueError) as exc:
+        raise CurrentPlanError(f"layered history verification failed: {exc}") from exc
+    if verification.get("verification") != "VALID":
+        raise CurrentPlanError("layered history verification is not valid")
+
+    manifest_path = generation_root / "generation.json"
+    coverage_path = generation_root / "coverage.json"
+    segments_path = generation_root / "segments.csv"
+    projection_name = (
+        "live-only.csv" if evidence_mode == "LIVE_ONLY" else "live-plus-backtest.csv"
+    )
+    projection_path = generation_root / projection_name
+    manifest, manifest_content = _load_json(manifest_path, "layered generation")
+    coverage, coverage_content = _load_json(coverage_path, "layered coverage")
+    contract, contract_content = _load_json(contract_path, "financial MVP contract")
+    contract_sources: dict[str, dict[str, Any]] = {}
+    for source in _objects(contract.get("source_segments"), "financial MVP sources"):
+        source_id = _text(source.get("source_id"), "financial MVP source_id")
+        if source_id in contract_sources:
+            raise CurrentPlanError("financial MVP source identity is duplicated")
+        contract_sources[source_id] = source
+    receipt_outputs = _object(manifest.get("outputs"), "layered generation outputs")
+    receipt_schemas: dict[str, dict[str, str]] = {}
+    for name in ("coverage.json", projection_name, "segments.csv"):
+        output = _object(receipt_outputs.get(name), f"layered output {name}")
+        receipt_schemas[name] = {
+            "schema_name": _text(output.get("schema_name"), f"{name} schema_name"),
+            "schema_version": _text(
+                output.get("schema_version"), f"{name} schema_version"
+            ),
+        }
+    projection_headers, projection_rows = _read_csv(
+        projection_path, "layered history projection"
+    )
+    segment_headers, segment_rows = _read_csv(segments_path, "layered history segments")
+    if projection_headers != LAYERED_PROJECTION_HEADERS:
+        raise CurrentPlanError("layered history projection headers differ")
+    if segment_headers != LAYERED_SEGMENT_HEADERS:
+        raise CurrentPlanError("layered history segment headers differ")
+    generation_id = _text(manifest.get("generation_id"), "layered generation_id")
+    if verification.get("generation_id") != generation_id:
+        raise CurrentPlanError("layered history generation identity differs")
+    history_as_of = _day(manifest.get("as_of_date"), "layered history as_of_date")
+    if history_as_of > evaluated_on:
+        raise CurrentPlanError("layered history exceeds the evaluation date")
+
+    coverage_rows = _objects(coverage.get("strategies"), "layered strategies")
+    coverage_by_strategy: dict[str, dict[str, Any]] = {}
+    for row in coverage_rows:
+        strategy_id = _text(row.get("strategy_id"), "layered strategy_id")
+        if strategy_id in coverage_by_strategy:
+            raise CurrentPlanError("layered strategy coverage is duplicated")
+        coverage_by_strategy[strategy_id] = row
+
+    planned_series: dict[str, str] = {}
+    composition: dict[str, dict[str, object]] = {}
+    selected_admissions = (
+        {"INCLUDE_SELECTED_LIVE"}
+        if evidence_mode == "LIVE_ONLY"
+        else {"INCLUDE_SELECTED_LIVE", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+    )
+    for strategy_id, series_id in planned:
+        coverage_row = coverage_by_strategy.get(strategy_id)
+        if coverage_row is None:
+            raise CurrentPlanError(
+                f"layered history lacks planned strategy: {strategy_id}"
+            )
+        if coverage_row.get("series_id") != series_id:
+            raise CurrentPlanError(
+                f"layered history series differs for planned strategy: {strategy_id}"
+            )
+        modes = _object(coverage_row.get("modes"), "layered strategy modes")
+        mode = _object(modes.get(evidence_mode), f"layered mode {evidence_mode}")
+        if mode.get("status") != "AVAILABLE":
+            reason = _text(mode.get("reason"), "layered history readiness reason")
+            raise CurrentPlanError(
+                f"layered history {evidence_mode} is not ready for "
+                f"{strategy_id}: {reason}"
+            )
+        planned_series[series_id] = strategy_id
+        summaries = _objects(coverage_row.get("segments"), "layered segment summaries")
+        selected_summaries = [
+            summary
+            for summary in summaries
+            if summary.get("mode_admission") in selected_admissions
+        ]
+        if not selected_summaries:
+            raise CurrentPlanError(
+                f"layered history has no selected segment for {strategy_id}"
+            )
+        expected_observations = sum(
+            _integer(summary.get("return_observations"), "segment observations", 1)
+            for summary in selected_summaries
+        )
+        live_summaries = [
+            summary
+            for summary in selected_summaries
+            if summary.get("evidence_layer") == "ACCOUNT_LIVE"
+        ]
+        if not live_summaries:
+            raise CurrentPlanError(
+                f"layered history has no selected account-live segment for {strategy_id}"
+            )
+        for summary in live_summaries:
+            source_id = _text(summary.get("source_id"), "live source_id")
+            live_source = contract_sources.get(source_id)
+            if live_source is None:
+                raise CurrentPlanError(
+                    f"layered history live source is absent from the contract: {source_id}"
+                )
+            freshness = _object(live_source.get("freshness"), f"{source_id} freshness")
+            max_age_days = _integer(
+                freshness.get("max_age_days"), f"{source_id} max_age_days"
+            )
+            observed_end = _day(summary.get("observed_end"), "live observed_end")
+            age_days = (evaluated_on - observed_end).days
+            if age_days < 0:
+                raise CurrentPlanError(
+                    f"layered history live source exceeds the evaluation date: {source_id}"
+                )
+            if age_days > max_age_days:
+                raise CurrentPlanError(
+                    "layered history live source is stale at the evaluation date for "
+                    f"{strategy_id}: {source_id} "
+                    f"(age_days={age_days}, max_age_days={max_age_days})"
+                )
+        backtest_observations = sum(
+            _integer(summary.get("return_observations"), "backtest observations", 1)
+            for summary in selected_summaries
+            if summary.get("evidence_layer") == "BACKTEST"
+        )
+        version = _object(
+            coverage_row.get("strategy_version"), "layered strategy_version"
+        )
+        composition[series_id] = {
+            "backtest_observations_used": backtest_observations,
+            "evidence_mode": evidence_mode,
+            "expected_observations": expected_observations,
+            "live_evidence_layer": "ACCOUNT_LIVE",
+            "live_inception": min(
+                _text(summary.get("observed_start"), "live observed_start")
+                for summary in live_summaries
+            ),
+            "live_observations": sum(
+                _integer(summary.get("return_observations"), "live observations", 1)
+                for summary in live_summaries
+            ),
+            "series_id": series_id,
+            "status": (
+                "AVAILABLE_LIVE_ONLY"
+                if evidence_mode == "LIVE_ONLY"
+                else "AVAILABLE_LIVE_PLUS_BACKTEST"
+            ),
+            "strategy_version": _text(
+                version.get("history_generation_ref"), "history strategy version"
+            ),
+        }
+
+    allowed_layers = (
+        {"ACCOUNT_LIVE"}
+        if evidence_mode == "LIVE_ONLY"
+        else {"ACCOUNT_LIVE", "BACKTEST"}
+    )
+    selected_projection = [
+        row for row in projection_rows if row["series_id"] in planned_series
+    ]
+    seen_dates: set[tuple[str, str]] = set()
+    selected_counts: dict[str, int] = {series_id: 0 for series_id in planned_series}
+    for row in selected_projection:
+        key = (row["series_id"], row["date"])
+        if key in seen_dates:
+            raise CurrentPlanError("layered history contains a duplicate series date")
+        seen_dates.add(key)
+        selected_counts[row["series_id"]] += 1
+        if row["evidence_layer"] not in allowed_layers:
+            raise CurrentPlanError("layered history evidence layer differs from mode")
+        if _day(row["date"], "layered target date") > evaluated_on:
+            raise CurrentPlanError(
+                "target observations extend beyond the evaluation date"
+            )
+        expected_version = composition[row["series_id"]]["strategy_version"]
+        if row["strategy_version"] != expected_version:
+            raise CurrentPlanError("layered target strategy version differs")
+    if any(
+        selected_counts[series_id] != composition[series_id]["expected_observations"]
+        for series_id in planned_series
+    ):
+        raise CurrentPlanError("layered projection and coverage observations differ")
+
+    segment_index: dict[tuple[str, str, str, str, str], list[dict[str, str]]] = {}
+    for row in segment_rows:
+        segment_key = (
+            row["series_id"],
+            row["date"],
+            row["return"],
+            row["evidence_layer"],
+            row["strategy_version"],
+        )
+        segment_index.setdefault(segment_key, []).append(row)
+    target_rows: list[dict[str, str]] = []
+    for row in selected_projection:
+        projection_key = (
+            row["series_id"],
+            row["date"],
+            row["return"],
+            row["evidence_layer"],
+            row["strategy_version"],
+        )
+        matches = segment_index.get(projection_key, [])
+        if (
+            len(matches) != 1
+            or matches[0]["strategy_id"] != planned_series[row["series_id"]]
+        ):
+            raise CurrentPlanError("layered projection does not match one segment")
+        segment = matches[0]
+        target_rows.append(
+            {
+                "series_id": row["series_id"],
+                "date": row["date"],
+                "return": row["return"],
+                "evidence_layer": row["evidence_layer"],
+                "return_basis": segment["return_basis"],
+                "return_type": segment["return_type"],
+                "cost": "",
+            }
+        )
+    target_rows.sort(key=lambda item: (item["series_id"], item["date"]))
+    for value in composition.values():
+        value.pop("expected_observations", None)
+    target_content = _csv_bytes(
+        TARGET_HEADERS,
+        [[row[header] for header in TARGET_HEADERS] for row in target_rows],
+    )
+    return {
+        "composition": composition,
+        "contents": {
+            "financial-mvp-contract.json": contract_content,
+            "generation.json": manifest_content,
+            "coverage.json": coverage_content,
+            projection_name: projection_path.read_bytes(),
+            "segments.csv": segments_path.read_bytes(),
+            "selected-targets.csv": target_content,
+        },
+        "identity": {
+            "as_of_date": history_as_of.isoformat(),
+            "contract_sha256": _sha256(contract_content),
+            "coverage_sha256": _sha256(coverage_content),
+            "generation_id": generation_id,
+            "generation_receipt_sha256": _sha256(manifest_content),
+            "mode": evidence_mode,
+            "projection": projection_name,
+            "projection_sha256": _sha256(projection_path.read_bytes()),
+            "segments_sha256": _sha256(segments_path.read_bytes()),
+            "selected_strategy_ids": sorted(strategy_id for strategy_id, _ in planned),
+            "selected_targets_sha256": _sha256(target_content),
+        },
+        "rows": target_rows,
+        "target_content": target_content,
+        "contract_schema_version": _integer(
+            contract.get("contract_schema_version"),
+            "financial MVP contract schema",
+            1,
+        ),
+        "schema_definitions": {
+            "financial-mvp-contract.json": {
+                "schema_name": "financial-mvp-source-contract",
+                "schema_version": str(contract["contract_schema_version"]),
+            },
+            "generation.json": {
+                "schema_name": "layered-history-generation",
+                "schema_version": str(
+                    _integer(
+                        manifest.get("schema_version"), "layered schema_version", 1
+                    )
+                ),
+            },
+            **receipt_schemas,
+            "selected-targets.csv": {
+                "schema_name": "portfolio-decomposition-target-series",
+                "schema_version": "1",
+            },
+        },
+    }
 
 
 def _catalog_universes(catalog: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -572,7 +926,11 @@ def _copy_definition(
 
 
 def _provenance_definition(
-    artifact_id: str, relative_path: str, content: bytes, schema_name: str
+    artifact_id: str,
+    relative_path: str,
+    content: bytes,
+    schema_name: str,
+    schema_version: str = "1",
 ) -> dict[str, object]:
     return {
         "artifact_id": artifact_id,
@@ -580,7 +938,7 @@ def _provenance_definition(
         "expected_size_bytes": len(content),
         "relative_path": relative_path,
         "schema_name": schema_name,
-        "schema_version": "1",
+        "schema_version": schema_version,
     }
 
 
@@ -588,6 +946,8 @@ def build_bundle(
     *,
     plan_path: Path,
     catalog_path: Path,
+    financial_mvp_contract_path: Path,
+    layered_history_generation_path: Path,
     base_spec_path: Path,
     base_source_root: Path,
     market_paths: Mapping[str, Path],
@@ -609,6 +969,8 @@ def build_bundle(
         raise CurrentPlanError("evidence_mode is unsupported")
     if set(market_paths) != set(INPUT_KEYS):
         raise CurrentPlanError("market input keys differ from the closed contract")
+    legacy_target = _object(base_spec.get("target_source"), "base.target_source")
+    _portable(legacy_target.get("relative_path"), "base.target_source.relative_path")
     for path in market_paths.values():
         if path.is_symlink() or not path.is_file():
             raise CurrentPlanError("market input must be a regular file")
@@ -622,24 +984,25 @@ def build_bundle(
     _verify_market_manifest(
         market_paths["sector_returns"], sector_manifest_path, catalog_sha256
     )
-
-    target_definition = _object(base_spec.get("target_source"), "base.target_source")
-    target_path = _verify_definition(base_source_root, target_definition, "base target")
-    target_headers, target_rows = _read_csv(target_path, "base targets")
-    if target_headers != TARGET_HEADERS:
-        raise CurrentPlanError(
-            "base target headers differ from the decomposition contract"
-        )
+    strategies = _resolved_strategies(plan)
+    layered_history = _layered_history_targets(
+        generation_root=layered_history_generation_path,
+        contract_path=financial_mvp_contract_path,
+        strategies=strategies,
+        evidence_mode=evidence_mode,
+        evaluated_on=evaluated_on,
+    )
+    target_rows = cast(list[dict[str, str]], layered_history["rows"])
     targets_by_series = _target_dates(target_rows)
-    if any(days[-1] > evaluated_on for days in targets_by_series.values()):
-        raise CurrentPlanError("target observations extend beyond the evaluation date")
 
     outputs: dict[str, bytes] = {
         "inputs/governance/current-strategy-decomposition-plan.json": plan_content,
         "inputs/governance/decomposition-source-catalog.json": catalog_content,
         "inputs/governance/base-decomposition-spec.json": base_spec_content,
-        "inputs/base/targets.csv": target_path.read_bytes(),
     }
+    history_contents = cast(dict[str, bytes], layered_history["contents"])
+    for name, content in history_contents.items():
+        outputs[f"inputs/history/{name}"] = content
     generated_provenance: list[dict[str, object]] = []
     for index, definition in enumerate(
         _objects(base_spec.get("provenance_sources", []), "base.provenance_sources")
@@ -693,6 +1056,19 @@ def build_bundle(
             ),
         )
     )
+    history_schema_definitions = cast(
+        dict[str, dict[str, str]], layered_history["schema_definitions"]
+    )
+    generated_provenance.extend(
+        _provenance_definition(
+            f"history/{name}",
+            f"inputs/history/{name}",
+            content,
+            history_schema_definitions[name]["schema_name"],
+            history_schema_definitions[name]["schema_version"],
+        )
+        for name, content in sorted(history_contents.items())
+    )
 
     market_rows: dict[str, list[dict[str, str]]] = {}
     market_headers: dict[str, tuple[str, ...]] = {}
@@ -709,7 +1085,6 @@ def build_bundle(
         key: _object(value, f"plan.sources.{key}")
         for key, value in _object(plan.get("sources"), "plan.sources").items()
     }
-    strategies = _resolved_strategies(plan)
     split = _object(plan.get("split_policy"), "plan.split_policy")
     holdout_fraction = _decimal(
         split.get("holdout_fraction"), "split.holdout_fraction", Decimal("0.01")
@@ -735,9 +1110,7 @@ def build_bundle(
     for strategy in strategies:
         strategy_id = _text(strategy.get("strategy_id"), "strategy_id")
         series_id = _text(strategy.get("series_id"), "series_id")
-        if series_id not in targets_by_series and strategy_id not in {
-            "composer-holy-grail"
-        }:
+        if strategy.get("assignments") and series_id not in targets_by_series:
             raise CurrentPlanError(
                 f"planned series is absent from targets: {series_id}"
             )
@@ -866,40 +1239,15 @@ def build_bundle(
         projected_target_content = _csv_bytes(TARGET_HEADERS, projected_target_rows)
         target_relative = f"inputs/lenses/{source_key}-targets.csv"
         outputs[target_relative] = projected_target_content
-        base_composition = base_spec.get("series_composition", {})
-        if not isinstance(base_composition, dict):
-            raise CurrentPlanError("base series_composition must be an object")
+        layered_composition = cast(
+            dict[str, dict[str, object]], layered_history["composition"]
+        )
         series_composition: dict[str, object] = {}
         for series_id in sorted(assigned_series):
-            accepted_rows = [
-                row
-                for row in target_rows
-                if row["series_id"] == series_id
-                and _day(row["date"], "target date") <= analysis_as_of
-            ]
-            if evidence_mode == "LIVE_PLUS_BACKTEST":
-                value = base_composition.get(series_id)
-                if not isinstance(value, dict):
-                    raise CurrentPlanError(
-                        f"hybrid composition is absent for {series_id}"
-                    )
-                series_composition[series_id] = dict(value)
-            else:
-                live_rows = [
-                    row for row in accepted_rows if row["evidence_layer"] != "BACKTEST"
-                ]
-                series_composition[series_id] = {
-                    "backtest_observations_used": 0,
-                    "evidence_mode": "LIVE_ONLY",
-                    "live_evidence_layer": (
-                        live_rows[0]["evidence_layer"] if live_rows else None
-                    ),
-                    "live_inception": live_rows[0]["date"] if live_rows else None,
-                    "live_observations": len(live_rows),
-                    "series_id": series_id,
-                    "status": "AVAILABLE_LIVE_ONLY" if live_rows else "UNAVAILABLE",
-                    "strategy_version": None,
-                }
+            value = layered_composition.get(series_id)
+            if value is None:
+                raise CurrentPlanError(f"layered composition is absent for {series_id}")
+            series_composition[series_id] = dict(value)
         generated_target = _provenance_definition(
             f"target/{source_key}.csv",
             target_relative,
@@ -1041,6 +1389,7 @@ def build_bundle(
         "builder": "portfolio-current-decomposition-plan",
         "builder_version": BUILDER_VERSION,
         "evaluation_date": evaluated_on.isoformat(),
+        "layered_history": layered_history["identity"],
         "inputs": [
             {
                 "path": path,
@@ -1062,8 +1411,15 @@ def build_bundle(
         "specs": specs,
         "policies": {
             "calendar": "EXACT_DATE_COMPLETE_CANDIDATE_UNIVERSE_NO_FILL",
-            "holdout": "LAST_20_PERCENT_MINIMUM_20_OBSERVATIONS",
-            "model_dimension": "MINIMUM_20_TRAINING_OBSERVATIONS_PER_FACTOR",
+            "holdout": {
+                "fraction": str(holdout_fraction),
+                "minimum_observations": minimum_holdout,
+                "selection": "TRAILING_SEALED_HOLDOUT",
+            },
+            "model_dimension": {
+                "absolute_minimum_training_observations": 3,
+                "minimum_training_observations_per_factor": minimum_per_factor,
+            },
             "publication": "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE",
             "strategy_evidence_mode": evidence_mode,
         },
@@ -1110,6 +1466,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--catalog", type=Path, required=True)
+    parser.add_argument("--financial-mvp-contract", type=Path, required=True)
+    parser.add_argument("--layered-history-generation", type=Path, required=True)
     parser.add_argument("--base-spec", type=Path, required=True)
     parser.add_argument("--base-source-root", type=Path, required=True)
     parser.add_argument("--us-factors", type=Path, required=True)
@@ -1136,6 +1494,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_root=args.output_root,
         plan_path=args.plan,
         catalog_path=args.catalog,
+        financial_mvp_contract_path=args.financial_mvp_contract,
+        layered_history_generation_path=args.layered_history_generation,
         base_spec_path=args.base_spec,
         base_source_root=args.base_source_root,
         market_paths={
