@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.7.0"
+BUILDER_VERSION = "0.8.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -52,6 +52,10 @@ INPUT_KEYS = (
     "sector_returns",
     "us_industries",
 )
+MARKET_CONTRACT_SOURCE_IDS = {
+    "style_returns": "public-etf-style-sector-and-market-prices",
+    "sector_returns": "public-etf-style-sector-and-market-prices",
+}
 TARGET_HEADERS = (
     "series_id",
     "date",
@@ -889,6 +893,7 @@ def _verify_public_factor_manifest(
     if len(outputs) != len(manifest.get("outputs", [])):
         raise CurrentPlanError("public factor output paths must be unique")
     admitted_boundaries: dict[str, date] = {}
+    output_calendars: dict[str, tuple[date, ...]] = {}
     for key in PUBLIC_FACTOR_INPUT_KEYS:
         path = market_paths[key]
         expected = outputs.get(path.name)
@@ -916,8 +921,45 @@ def _verify_public_factor_manifest(
             raise CurrentPlanError(
                 f"public factor {path.name} does not end at its admitted boundary"
             )
-        _headers, rows = _read_csv(path, f"public factor {path.name}")
-        observed_end = _day(rows[-1].get("date"), f"public factor {path.name} end")
+        headers, rows = _read_csv(path, f"public factor {path.name}")
+        dates = tuple(
+            _day(row.get("date"), f"public factor {path.name} date") for row in rows
+        )
+        if dates != tuple(sorted(set(dates))):
+            raise CurrentPlanError(
+                f"public factor {path.name} dates are not unique and increasing"
+            )
+        expected_coverage = (
+            "PARTIAL" if key == "us_industries" else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        )
+        missing_cells = sum(
+            not row.get(column, "").strip()
+            for row in rows
+            for column in headers
+            if column != "date"
+        )
+        if (
+            expected.get("coverage") != expected_coverage
+            or expected.get("declared_boundary") != "EXACT_DATE_INTERSECTION"
+            or expected.get("first_date") != dates[0].isoformat()
+            or _integer(
+                expected.get("row_count"), f"public factor {path.name} row_count", 1
+            )
+            != len(rows)
+            or _integer(
+                expected.get("missing_cells"),
+                f"public factor {path.name} missing_cells",
+            )
+            != missing_cells
+        ):
+            raise CurrentPlanError(
+                f"public factor {path.name} coverage identity differs"
+            )
+        if key != "us_industries" and missing_cells:
+            raise CurrentPlanError(
+                f"public factor {path.name} has a missing required cell"
+            )
+        observed_end = dates[-1]
         if observed_end != accepted_end:
             raise CurrentPlanError(
                 f"public factor {path.name} bytes exceed their admitted boundary"
@@ -948,6 +990,18 @@ def _verify_public_factor_manifest(
                 f"public factor {path.name} publication deadline has not elapsed"
             )
         admitted_boundaries[key] = accepted_end
+        output_calendars[key] = dates
+    if output_calendars["us_factors"] != output_calendars["us_industries"]:
+        raise CurrentPlanError("public US factor and industry calendars differ")
+    europe_dates = output_calendars["europe_factors"]
+    expected_europe_dates: list[date] = []
+    current = europe_dates[0]
+    while current <= europe_dates[-1]:
+        if current.weekday() < 5:
+            expected_europe_dates.append(current)
+        current += timedelta(days=1)
+    if europe_dates != tuple(expected_europe_dates):
+        raise CurrentPlanError("public Europe factor weekday calendar has a gap")
     capture_age = _age_disposition(
         complete_through=capture_evaluation_date,
         evaluated_on=planning_evaluation_date,
@@ -1030,8 +1084,13 @@ def _complete_dates(
         if observed in seen:
             raise CurrentPlanError(f"{source_name} has a duplicate date")
         seen.add(observed)
-        if all(row.get(column, "").strip() for column in required):
-            result.append(observed)
+        missing = [column for column in required if not row.get(column, "").strip()]
+        if missing:
+            raise CurrentPlanError(
+                f"{source_name} has an incomplete required observation: "
+                f"{observed.isoformat()}"
+            )
+        result.append(observed)
     if not result:
         raise CurrentPlanError(f"{source_name} has no complete observations")
     return tuple(result)
@@ -1150,6 +1209,23 @@ def build_bundle(
         "inputs/governance/base-decomposition-spec.json": base_spec_content,
     }
     history_contents = cast(dict[str, bytes], layered_history["contents"])
+    try:
+        financial_mvp_contract = json.loads(
+            history_contents["financial-mvp-contract.json"]
+        )
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CurrentPlanError(
+            "verified financial MVP contract is unavailable"
+        ) from exc
+    contract_sources = {
+        _text(source.get("source_id"), "financial MVP source_id"): source
+        for source in _objects(
+            financial_mvp_contract.get("source_segments"),
+            "financial MVP source segments",
+        )
+    }
+    if len(contract_sources) != len(financial_mvp_contract.get("source_segments", [])):
+        raise CurrentPlanError("financial MVP source IDs are duplicated")
     for name, content in history_contents.items():
         outputs[f"inputs/history/{name}"] = content
     generated_provenance: list[dict[str, object]] = []
@@ -1228,6 +1304,10 @@ def build_bundle(
         headers, rows = _read_csv(path, f"market input {key}")
         market_headers[key] = headers
         market_rows[key] = rows
+    style_dates = tuple(row["date"] for row in market_rows["style_returns"])
+    sector_dates = tuple(row["date"] for row in market_rows["sector_returns"])
+    if style_dates != sector_dates:
+        raise CurrentPlanError("style and sector market calendars differ")
 
     universes = _catalog_universes(catalog)
     source_plans = {
@@ -1307,6 +1387,7 @@ def build_bundle(
                 )
 
     specs: list[dict[str, object]] = []
+    market_source_ages: dict[str, dict[str, object]] = {}
     for source_key, source_assignments in sorted(assignments_by_source.items()):
         source_plan = source_plans[source_key]
         lens = _text(source_plan.get("lens"), "source.lens")
@@ -1328,6 +1409,54 @@ def build_bundle(
         complete_dates = _complete_dates(
             market_rows[input_key], required, f"market input {input_key}"
         )
+        contract_source_id = MARKET_CONTRACT_SOURCE_IDS.get(input_key)
+        if contract_source_id is not None:
+            contract_source = contract_sources.get(contract_source_id)
+            if contract_source is None:
+                raise CurrentPlanError(
+                    f"financial MVP source is absent: {contract_source_id}"
+                )
+            source_freshness = _object(
+                contract_source.get("freshness"),
+                f"financial MVP {contract_source_id} freshness",
+            )
+            source_max_age_days = _integer(
+                source_freshness.get("max_age_days"),
+                f"financial MVP {contract_source_id} max_age_days",
+            )
+            factor_source_age = {
+                **_age_disposition(
+                    complete_through=complete_dates[-1],
+                    evaluated_on=evaluated_on,
+                    warning_after_days=source_max_age_days,
+                    limiting_inputs=(f"factor:{input_key}",),
+                ),
+                "input_key": input_key,
+                "source_id": contract_source_id,
+            }
+            prior_age = market_source_ages.get(input_key)
+            if prior_age is not None and prior_age != factor_source_age:
+                raise CurrentPlanError(
+                    f"market source age differs across plans: {input_key}"
+                )
+            market_source_ages[input_key] = factor_source_age
+            if (
+                assurance_profile == "RELEASE_QC"
+                and factor_source_age["status"] == "WARN_COMPLETE_DATA_AGE"
+            ):
+                raise CurrentPlanError(
+                    "release QC requires a current market source for "
+                    f"{input_key}: {contract_source_id} "
+                    f"(age_days={factor_source_age['age_days']}, "
+                    f"max_age_days={source_max_age_days})"
+                )
+            if (
+                assurance_profile == "RELEASE_QC"
+                and contract_source.get("readiness") != "READY"
+            ):
+                raise CurrentPlanError(
+                    f"release QC market source is not READY: {contract_source_id}"
+                )
         assigned_series = {
             _text(strategy.get("series_id"), "series_id")
             for strategy, _assignment in source_assignments
@@ -1556,6 +1685,9 @@ def build_bundle(
         "evaluation_date": evaluated_on.isoformat(),
         "layered_history": layered_history["identity"],
         "data_age": {
+            "market_sources": [
+                market_source_ages[key] for key in sorted(market_source_ages)
+            ],
             "public_factor_capture": public_factor_capture_age,
             "spec_calculation_boundaries": {
                 cast(str, row["source_key"]): row["data_boundary"] for row in specs

@@ -140,12 +140,27 @@ def _public_factor_manifest(
         accepted_end = date.fromisoformat(rows[-1]["date"])
         eligible_month_end = _month_end(accepted_end)
         content = path.read_bytes()
+        missing_cells = sum(
+            not value.strip()
+            for row in rows
+            for column, value in row.items()
+            if column != "date"
+        )
         outputs.append(
             {
                 "path": path.name,
                 "sha256": hashlib.sha256(content).hexdigest(),
                 "bytes": len(content),
+                "coverage": (
+                    "PARTIAL"
+                    if key == "us_industries"
+                    else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+                ),
+                "declared_boundary": "EXACT_DATE_INTERSECTION",
+                "first_date": rows[0]["date"],
                 "last_date": accepted_end.isoformat(),
+                "row_count": len(rows),
+                "missing_cells": missing_cells,
                 "freshness": {
                     "state": "CURRENT",
                     "eligible_month": accepted_end.strftime("%Y-%m"),
@@ -1178,6 +1193,30 @@ def test_public_manifest_binds_receipts_sources_captures_and_bundle(
         )
 
 
+def test_public_factor_coherent_interior_gap_is_rejected(tmp_path: Path) -> None:
+    inputs = _fixture(tmp_path)
+    path = inputs["market_paths"]["us_factors"]
+    rows = list(csv.reader(path.read_text(encoding="utf-8").splitlines()))
+    rows.pop(2)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+
+    manifest_path = inputs["public_factor_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    output = next(row for row in manifest["outputs"] if row["path"] == path.name)
+    content = path.read_bytes()
+    output["sha256"] = hashlib.sha256(content).hexdigest()
+    output["bytes"] = len(content)
+    output["row_count"] -= 1
+    _reidentify_public_manifest(manifest)
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(planner.CurrentPlanError, match="US factor and industry"):
+        planner.build_bundle(
+            **{key: value for key, value in inputs.items() if key != "plan_document"}
+        )
+
+
 def test_public_manifest_reuse_warns_in_development_and_fails_release_qc(
     tmp_path: Path,
 ) -> None:
@@ -1200,6 +1239,32 @@ def test_public_manifest_reuse_warns_in_development_and_fails_release_qc(
     assert manifest["release_qc_eligibility"] == ("NOT_ELIGIBLE_NON_RELEASE_PROFILE")
 
     with pytest.raises(planner.CurrentPlanError, match="planning run"):
+        planner.build_bundle(
+            assurance_profile="RELEASE_QC",
+            **{key: value for key, value in inputs.items() if key != "plan_document"},
+        )
+
+
+def test_market_source_age_warns_in_development_and_fails_release_qc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _fixture(tmp_path)
+    original = planner._layered_history_targets
+
+    def _current_history(**kwargs: Any) -> dict[str, Any]:
+        kwargs["assurance_profile"] = "DEVELOPMENT"
+        return original(**kwargs)
+
+    monkeypatch.setattr(planner, "_layered_history_targets", _current_history)
+    _outputs, manifest = planner.build_bundle(
+        **{key: value for key, value in inputs.items() if key != "plan_document"}
+    )
+    ages = {row["input_key"]: row for row in manifest["data_age"]["market_sources"]}
+    assert set(ages) == {"sector_returns", "style_returns"}
+    assert all(row["warning_after_days"] == 10 for row in ages.values())
+    assert all(row["status"] == "WARN_COMPLETE_DATA_AGE" for row in ages.values())
+
+    with pytest.raises(planner.CurrentPlanError, match="current market source"):
         planner.build_bundle(
             assurance_profile="RELEASE_QC",
             **{key: value for key, value in inputs.items() if key != "plan_document"},
@@ -1256,7 +1321,7 @@ def test_public_factor_required_columns_must_be_complete_at_admitted_boundary(
             date.fromisoformat(inputs["evaluation_date"]),
         ),
     )
-    with pytest.raises(planner.CurrentPlanError, match="incomplete at the admitted"):
+    with pytest.raises(planner.CurrentPlanError, match="missing required cell"):
         planner.build_bundle(
             **{key: value for key, value in inputs.items() if key != "plan_document"}
         )
