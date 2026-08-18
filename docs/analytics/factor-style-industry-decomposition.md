@@ -201,9 +201,14 @@ becoming an indiscriminate mega-model. The first current-book assignments are:
   dimension-controlled 49-industry decomposition;
 - P123 EU: European economic factors only;
 - Robuxio: unavailable until an accepted crypto candidate source exists;
-- EchoTrade: unavailable because the current target history is insufficient;
-  and
-- Composer: dropped as immaterial from current scope.
+- EchoTrade: required but not ready because the captured event-only
+  reconstruction is not an admissible daily NAV target; and
+- Composer: required but not ready because connected account-live target
+  history is missing.
+
+The accepted de-minimis policy excludes EchoTrade and Composer only from the
+material HWM denominator. It does not remove their capital, decomposition, or
+dependence obligations from the current product.
 
 `tools/portfolio_current_decomposition_plan.py` verifies the plan, candidate
 catalog, target evidence, provider provenance, the operational evaluation date,

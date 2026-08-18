@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "as_of_policy": "MIN_TARGET_AND_SOURCE_LAST_OBSERVATION",
   "split_policy": {
     "holdout_fraction": "0.20",
@@ -70,7 +70,14 @@
       "strategy_id": "p123-ai-factor",
       "series_id": "AI Factor [P123]",
       "archetype": "US_SMALL_MICROCAP_EQUITY",
-      "default_disposition": "OUT_OF_SCOPE_UNDECLARED_LENS",
+      "source_dispositions": {
+        "us-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-equity-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-sector": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "us-industry": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"}
+      },
       "assignments": [
         {
           "source_key": "us-economic",
@@ -109,7 +116,14 @@
       "strategy_id": "p123-eu",
       "series_id": "EU [P123]",
       "archetype": "EUROPE_EQUITY",
-      "default_disposition": "OUT_OF_SCOPE_REGION_MISMATCH",
+      "source_dispositions": {
+        "us-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "europe-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "us-equity-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-sector": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-industry": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"}
+      },
       "assignments": [
         {
           "source_key": "europe-economic",
@@ -126,7 +140,14 @@
       "strategy_id": "qsi",
       "series_id": "QSI",
       "archetype": "TACTICAL_MULTI_ASSET",
-      "default_disposition": "OUT_OF_SCOPE_ARCHETYPE_MISMATCH",
+      "source_dispositions": {
+        "us-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-equity-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "us-sector": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "us-industry": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"}
+      },
       "assignments": [
         {
           "source_key": "us-economic",
@@ -178,40 +199,82 @@
       "strategy_id": "tt-portfolio",
       "series_id": "TT Portfolio",
       "archetype": "TACTICAL_MULTI_ASSET",
-      "default_disposition": "OUT_OF_SCOPE_ARCHETYPE_MISMATCH",
+      "source_dispositions": {
+        "us-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-equity-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "us-sector": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "us-industry": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"}
+      },
       "inherit_assignments_from": "qsi"
     },
     {
       "strategy_id": "volatis-strategy",
       "series_id": "Volatis Strategy",
       "archetype": "TACTICAL_VOLATILITY",
-      "default_disposition": "OUT_OF_SCOPE_ARCHETYPE_MISMATCH",
+      "source_dispositions": {
+        "us-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-equity-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "us-sector": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "us-industry": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"}
+      },
       "inherit_assignments_from": "qsi"
     },
     {
       "strategy_id": "grizzlybears-vtma",
       "series_id": "GrizzlyBears VTMA",
       "archetype": "TACTICAL_VOLATILITY",
-      "default_disposition": "OUT_OF_SCOPE_ARCHETYPE_MISMATCH",
+      "source_dispositions": {
+        "us-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-equity-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "us-sector": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
+        "us-industry": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"}
+      },
       "inherit_assignments_from": "qsi"
     },
     {
       "strategy_id": "robuxio-crypto",
       "series_id": "Robuxio Crypto (High Sharpe High Vol)",
       "archetype": "CRYPTO_TACTICAL",
-      "default_disposition": "UNAVAILABLE_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
+      "source_dispositions": {
+        "us-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-equity-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-sector": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-industry": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"}
+      }
     },
     {
       "strategy_id": "echotrade-growth-pivots",
       "series_id": "Growth at Market Pivot Points [EchoTrade]",
       "archetype": "UNVERIFIED_SIGNAL",
-      "default_disposition": "UNAVAILABLE_INSUFFICIENT_TARGET_HISTORY"
+      "source_dispositions": {
+        "us-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-equity-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-sector": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-industry": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"}
+      }
     },
     {
       "strategy_id": "composer-holy-grail",
       "series_id": "[Composer] - The Holy Grail (Buy Copy)",
-      "archetype": "DROPPED_IMMATERIAL",
-      "default_disposition": "DROPPED_IMMATERIAL_CURRENT_SCOPE"
+      "archetype": "UNRESOLVED_STRATEGY_DESIGN",
+      "source_dispositions": {
+        "us-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-equity-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-sector": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-industry": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"}
+      }
     }
   ]
 }

@@ -26,11 +26,12 @@
         "secondary": null
       },
       "no_identified_source": true,
-      "mechanism": "N/A — out of scope. Known exact-model HAR export defect; connected model omitted from HAR export.",
-      "persistence": "N/A — out of scope.",
-      "alternative_explanation": "N/A — decomposition unavailable without the connected model.",
+      "mechanism": "No admitted economic source of excess return is established. The exact connected Portfolio123 EU model and its provider-live curve are captured, but the provider-performance return transform is not admitted and authoritative design evidence remains incomplete. The strategy remains required in the current product; this evidence gap is not an out-of-scope disposition.",
+      "persistence": "Unresolved. Persistence cannot be attributed until the connected-model return transform and design evidence are admitted and the proposed economic-factor explanation survives exact-version out-of-sample testing.",
+      "alternative_explanation": "Any apparent return may reflect broad European factor exposure, sector or industry concentration, implementation effects, or model-specific selection rather than a persistent economic source.",
       "falsification": [
-        "N/A — not testable without the exact HAR export."
+        "Admit and decompose the exact connected-model return series against the accepted European economic factors.",
+        "Test the admitted mechanism on an exact-version pre-live history without post-live backtest fill."
       ],
       "confidence": "none"
     },
@@ -129,11 +130,12 @@
         "secondary": null
       },
       "no_identified_source": true,
-      "mechanism": "N/A — out of scope. Registry: UNAVAILABLE_INSUFFICIENT_TARGET_HISTORY, archetype UNVERIFIED_SIGNAL. Deprecated with no history; excluded de minimis from HWM perimeter.",
-      "persistence": "N/A — out of scope.",
-      "alternative_explanation": "N/A — insufficient history for any analysis.",
+      "mechanism": "No admitted economic source of excess return is established. The captured 2025 evidence is an event-to-event reconstruction on fill dates using last-trade marks, not an admissible daily NAV return series. Decomposition is therefore REQUIRED_NOT_READY; only the material HWM denominator is excluded by accepted policy, while capital and dependence remain required.",
+      "persistence": "Unresolved. There is no admissible daily target history or accepted design evidence from which to establish a persistent mechanism.",
+      "alternative_explanation": "Returns inferred from sparse fill-date marks can reflect observation timing, stale marks, and trade selection rather than a repeatable economic source.",
       "falsification": [
-        "N/A — not testable without target history."
+        "Capture and admit daily account NAV with exact funding, flow, and strategy-version evidence.",
+        "Test any proposed mechanism on the admitted daily history without substituting the rejected event-only reconstruction."
       ],
       "confidence": "none"
     },
@@ -144,11 +146,12 @@
         "secondary": null
       },
       "no_identified_source": true,
-      "mechanism": "N/A — dropped. Registry: DROPPED_IMMATERIAL_CURRENT_SCOPE, archetype DROPPED_IMMATERIAL. Immaterial, unconnected history; excluded de minimis from HWM perimeter.",
-      "persistence": "N/A — dropped.",
-      "alternative_explanation": "N/A — immaterial, dropped.",
+      "mechanism": "No admitted economic source of excess return is established. Connected account-live target history and authoritative design evidence are missing, so decomposition is REQUIRED_NOT_READY. The named sleeve remains required for capital and dependence; accepted policy excludes it only from the material HWM denominator.",
+      "persistence": "Unresolved. No admitted target history or design evidence exists from which to establish a persistent mechanism.",
+      "alternative_explanation": "Without connected history, any apparent result could reflect account aggregation, implementation timing, or an unrelated strategy rather than this sleeve's economic source.",
       "falsification": [
-        "N/A — not in scope."
+        "Bind the funded sleeve to an admissible account-live return series and exact strategy version.",
+        "Test any proposed mechanism against that admitted history and the required decomposition lenses."
       ],
       "confidence": "none"
     }
