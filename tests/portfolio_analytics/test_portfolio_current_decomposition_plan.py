@@ -406,7 +406,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
 
-    assert manifest["builder_version"] == "0.11.0"
+    assert manifest["builder_version"] == "0.12.0"
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
         "fraction": "0.20",
@@ -1384,13 +1384,27 @@ def test_declared_industry_provider_missing_cell_uses_exact_date_intersection() 
         rows,
         ("industry", "rf"),
         "declared industry",
-        allow_declared_provider_missing=True,
+        allowed_missing_after_start=frozenset(("industry",)),
+        always_required=frozenset(("rf",)),
     ) == (date(2026, 1, 5), date(2026, 1, 7))
     with pytest.raises(
         planner.CurrentPlanError,
         match="incomplete required observation after its completeness boundary",
     ):
         planner._complete_dates(rows, ("industry", "rf"), "undeclared market source")
+
+    rows[1] = {"date": "2026-01-06", "industry": "0.01", "rf": ""}
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match="missing unconditionally required observation",
+    ):
+        planner._complete_dates(
+            rows,
+            ("industry", "rf"),
+            "declared industry",
+            allowed_missing_after_start=frozenset(("industry",)),
+            always_required=frozenset(("rf",)),
+        )
 
 
 def test_public_factor_required_columns_must_be_complete_at_admitted_boundary(

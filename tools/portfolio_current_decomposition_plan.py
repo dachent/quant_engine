@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.11.0"
+BUILDER_VERSION = "0.12.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -1079,7 +1079,8 @@ def _complete_dates(
     required: Sequence[str],
     source_name: str,
     *,
-    allow_declared_provider_missing: bool = False,
+    allowed_missing_after_start: frozenset[str] = frozenset(),
+    always_required: frozenset[str] = frozenset(),
 ) -> tuple[date, ...]:
     seen: set[date] = set()
     result: list[date] = []
@@ -1095,7 +1096,15 @@ def _complete_dates(
         previous = observed
         missing = [column for column in required if not row.get(column, "").strip()]
         if missing:
-            if completeness_started and not allow_declared_provider_missing:
+            missing_columns = frozenset(missing)
+            if missing_columns & always_required:
+                raise CurrentPlanError(
+                    f"{source_name} has a missing unconditionally required observation: "
+                    f"{observed.isoformat()}"
+                )
+            if completeness_started and not missing_columns.issubset(
+                allowed_missing_after_start
+            ):
                 raise CurrentPlanError(
                     f"{source_name} has an incomplete required observation after "
                     f"its completeness boundary: {observed.isoformat()}"
@@ -1440,7 +1449,14 @@ def build_bundle(
             market_rows[input_key],
             required,
             f"market input {input_key}",
-            allow_declared_provider_missing=input_key == "us_industries",
+            allowed_missing_after_start=(
+                frozenset(columns.values())
+                if input_key == "us_industries"
+                else frozenset()
+            ),
+            always_required=(
+                frozenset((risk_free,)) if input_key == "us_industries" else frozenset()
+            ),
         )
         contract_source_id = MARKET_CONTRACT_SOURCE_IDS.get(input_key)
         if contract_source_id is not None:
