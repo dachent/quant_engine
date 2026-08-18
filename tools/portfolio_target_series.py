@@ -64,7 +64,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.11.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.12.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 LAYERED_HISTORY_MODE_POLICY: Final = {
     "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
@@ -1828,6 +1828,22 @@ def _matrixport_provider_returns(
     return rows
 
 
+def _validate_robuxio_provider_interval(
+    rows: Sequence[Mapping[str, str]], interval: Mapping[str, Any]
+) -> None:
+    if not rows:
+        raise TargetSeriesError("Matrixport provider-live history is unavailable")
+    try:
+        provider_observed_start = date.fromisoformat(str(interval["observed_start"]))
+        provider_observed_end = date.fromisoformat(str(interval["observed_end"]))
+        first_return = date.fromisoformat(rows[0]["date"])
+        last_return = date.fromisoformat(rows[-1]["date"])
+    except (KeyError, ValueError) as exc:
+        raise TargetSeriesError("Robuxio provider-live interval is invalid") from exc
+    if first_return <= provider_observed_start or last_return != provider_observed_end:
+        raise TargetSeriesError("Robuxio provider-live interval differs from contract")
+
+
 def _weekday_dates(start: date, end: date) -> list[date]:
     if end < start:
         raise TargetSeriesError("provider performance interval is reversed")
@@ -2672,6 +2688,14 @@ def build_layered_history_generation(
         robuxio_series,
         date.fromisoformat(str(robuxio_coverage["account_live_start"])),
     )
+    robuxio_provider_interval = corrections["robuxio-provider-live-before-funding"].get(
+        "interval"
+    )
+    if not isinstance(robuxio_provider_interval, dict):
+        raise TargetSeriesError(
+            "Robuxio provider-live interval is absent from contract"
+        )
+    _validate_robuxio_provider_interval(robuxio_provider, robuxio_provider_interval)
 
     quantbase_artifacts = _manifest_artifacts(quantbase_manifest.get("artifacts"))
     _verify_artifact(
@@ -4861,7 +4885,11 @@ def validate_layered_history_generation(
         key=lambda row: row["date"],
     )
     robuxio_interval = _correction_interval("robuxio-account-live-after-funding")
+    robuxio_provider_interval = _correction_interval(
+        "robuxio-provider-live-before-funding"
+    )
     funding_start = date.fromisoformat(str(robuxio_interval["effective_start"]))
+    _validate_robuxio_provider_interval(robuxio_provider, robuxio_provider_interval)
     if (
         not robuxio_live
         or robuxio_live[0]["date"] != robuxio_interval["observed_start"]
