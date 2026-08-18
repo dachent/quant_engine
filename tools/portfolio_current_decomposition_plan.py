@@ -1499,7 +1499,6 @@ def build_bundle(
         spec = {
             "analysis_lens": lens,
             "as_of_date": analysis_as_of.isoformat(),
-            "data_boundary": calculation_age,
             "evidence_mode": evidence_mode,
             "factor_source": {
                 "artifact_id": f"market/{source_key}.csv",

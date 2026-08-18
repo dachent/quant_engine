@@ -635,6 +635,17 @@ def test_layered_history_age_warns_in_development_and_fails_release_qc(
         )
 
 
+def test_latest_common_complete_date_uses_exact_intersection_not_minimum_tail() -> None:
+    first = {date(2026, 1, 1), date(2026, 1, 3)}
+    second = {date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 4)}
+
+    assert planner._latest_common_complete_date(
+        [first, second],
+        evaluated_on=date(2026, 1, 4),
+        name="disconfirm minimum tail",
+    ) == date(2026, 1, 1)
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (
@@ -1063,7 +1074,7 @@ def test_plan_preserves_target_end_beyond_publication_lag(
 
     monkeypatch.setattr(planner, "_layered_history_targets", _long_history)
 
-    outputs, _manifest = planner.build_bundle(
+    outputs, manifest = planner.build_bundle(
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
     economic = json.loads(outputs["specs/economic.json"])
@@ -1077,12 +1088,18 @@ def test_plan_preserves_target_end_beyond_publication_lag(
             outputs["inputs/lenses/economic-factors.csv"].decode("utf-8").splitlines()
         )
     )
+    retained_history_rows = list(
+        csv.DictReader(
+            outputs["inputs/history/selected-targets.csv"].decode("utf-8").splitlines()
+        )
+    )
 
     assert economic["as_of_date"] == target_rows[-1]["date"]
     assert factor_rows[-1]["date"] == "2026-06-30"
     assert target_rows[-1]["date"] == "2026-06-30"
+    assert retained_history_rows[-1]["date"] == "2026-08-17"
     assert economic["maximum_factor_staleness_days"] == 0
-    assert economic["data_boundary"] == {
+    assert manifest["data_age"]["spec_calculation_boundaries"]["economic"] == {
         "age_days": 48,
         "complete_through": "2026-06-30",
         "evaluated_on": "2026-08-17",
@@ -1161,16 +1178,31 @@ def test_public_manifest_binds_receipts_sources_captures_and_bundle(
         )
 
 
-def test_public_manifest_cannot_be_reused_by_a_later_planning_run(
+def test_public_manifest_reuse_warns_in_development_and_fails_release_qc(
     tmp_path: Path,
 ) -> None:
     inputs = _fixture(tmp_path)
+    original_evaluation_date = inputs["evaluation_date"]
     inputs["evaluation_date"] = (
         date.fromisoformat(inputs["evaluation_date"]) + timedelta(days=1)
     ).isoformat()
-    with pytest.raises(planner.CurrentPlanError, match="current planning run"):
+    _outputs, manifest = planner.build_bundle(
+        **{key: value for key, value in inputs.items() if key != "plan_document"}
+    )
+    assert manifest["data_age"]["public_factor_capture"] == {
+        "age_days": 1,
+        "complete_through": original_evaluation_date,
+        "evaluated_on": inputs["evaluation_date"],
+        "limiting_inputs": ["public-factor-acquisition-run"],
+        "status": "WARN_COMPLETE_DATA_AGE",
+        "warning_after_days": 0,
+    }
+    assert manifest["release_qc_eligibility"] == ("NOT_ELIGIBLE_NON_RELEASE_PROFILE")
+
+    with pytest.raises(planner.CurrentPlanError, match="planning run"):
         planner.build_bundle(
-            **{key: value for key, value in inputs.items() if key != "plan_document"}
+            assurance_profile="RELEASE_QC",
+            **{key: value for key, value in inputs.items() if key != "plan_document"},
         )
 
 
