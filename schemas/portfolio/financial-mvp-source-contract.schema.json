@@ -447,10 +447,10 @@
           "required": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
           "properties": {
             "LIVE_ONLY": {
-              "enum": ["EXCLUDE_COMPARISON_ONLY", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
+              "enum": ["EXCLUDE_COMPARISON_ONLY", "EXCLUDE_EVENT_ONLY_RECONSTRUCTION", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
             },
             "LIVE_PLUS_BACKTEST": {
-              "enum": ["EXCLUDE_COMPARISON_ONLY", "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
+              "enum": ["EXCLUDE_COMPARISON_ONLY", "EXCLUDE_EVENT_ONLY_RECONSTRUCTION", "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
             }
           }
         },
@@ -900,6 +900,64 @@
             "facts": {"$ref": "#/$defs/unique_strings"},
             "transform": {"$ref": "#/$defs/nonempty_string"},
             "version": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "declared_gap_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "authority_issue",
+            "calendar",
+            "coverage_status",
+            "cumulative_return_across_declared_gaps",
+            "declared_missing_source_dates",
+            "frequency",
+            "omitted_return_dates",
+            "policy_id",
+            "provenance",
+            "reason",
+            "return_transform",
+            "return_rule",
+            "unavailable_return_dates"
+          ],
+          "properties": {
+            "authority_issue": {"type": "integer", "minimum": 1},
+            "calendar": {"$ref": "#/$defs/nonempty_string"},
+            "coverage_status": {"$ref": "#/$defs/nonempty_string"},
+            "cumulative_return_across_declared_gaps": {"$ref": "#/$defs/nonempty_string"},
+            "declared_missing_source_dates": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "format": "date"}
+            },
+            "frequency": {"enum": ["DAILY"]},
+            "omitted_return_dates": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "format": "date"}
+            },
+            "policy_id": {"$ref": "#/$defs/nonempty_string"},
+            "provenance": {"$ref": "#/$defs/nonempty_string"},
+            "reason": {"$ref": "#/$defs/nonempty_string"},
+            "return_transform": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["facts", "transform", "version"],
+              "properties": {
+                "facts": {"$ref": "#/$defs/unique_strings"},
+                "transform": {"$ref": "#/$defs/nonempty_string"},
+                "version": {"$ref": "#/$defs/nonempty_string"}
+              }
+            },
+            "return_rule": {"$ref": "#/$defs/nonempty_string"},
+            "unavailable_return_dates": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "format": "date"}
+            }
           }
         },
         "product_requirement": {"$ref": "#/$defs/requirement"},

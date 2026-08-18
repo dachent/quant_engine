@@ -292,6 +292,7 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
                 "timestamp_utc": f"2025-12-{day:02d}T00:00:00Z",
             }
             for index, day in enumerate(range(1, 12))
+            if day != 9
         ],
     )
     matrix_holdings = matrix_root / "holdings.csv"
@@ -331,6 +332,13 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
             _artifact(matrix_subscriptions, "csv/subscription_details.csv"),
         ],
     )
+    matrix_manifest_value = json.loads(matrix_manifest.read_text(encoding="utf-8"))
+    matrix_manifest_value["coverage"] = {
+        "declared_exclusions": _matrixport_exclusions("2025-12-09"),
+        "known_gaps": [],
+        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+    }
+    _write_json(matrix_manifest, matrix_manifest_value)
     matrix_pointer = matrix_root / "CURRENT.json"
     _pointer(matrix_pointer, ids["matrixport"], matrix_manifest)
 
@@ -633,6 +641,14 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         effective_start="2024-10-15",
         effective_end=None,
     )
+    _update_correction_interval(
+        contract,
+        "echotrade-event-only-account-live-rejected",
+        observed_start="2026-01-05",
+        observed_end="2026-01-09",
+        effective_start=None,
+        effective_end=None,
+    )
     for source_id, manifest, authority_root in (
         ("owner-account-live-history", ledger_manifest, "PROVIDER_LEDGER"),
         ("matrixport-account-generation", matrix_manifest, "MATRIXPORT"),
@@ -643,6 +659,12 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         _update_correction_generations(
             contract, source_id, manifest, as_of, authority_root
         )
+    matrixport_source = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "matrixport-account-generation"
+    )
+    matrixport_source["declared_gap_policy"] = _matrixport_gap_policy("2025-12-09")
     _append_p123_performance_receipt(contract, p123_manifest, performance_path)
     contract_path = tmp_path / "contract.json"
     _write_json(contract_path, contract)
@@ -679,6 +701,90 @@ def _build(fixture: dict[str, Any]) -> tuple[dict[str, bytes], bytes]:
         repository_sha="a" * 40,
         **fixture,
     )
+
+
+def _matrixport_exclusions(*dates: str) -> list[dict[str, str]]:
+    return [
+        {
+            "item": f"{kind}:{observed}",
+            "provenance": "owner-accepted 2026-08-14, issue #287",
+            "reason": "provider NAV endpoint returned no data for this date",
+        }
+        for kind in (
+            "fx_missing_date",
+            "nav_missing_date",
+            "reconciliation_incomplete_date",
+        )
+        for observed in dates
+    ]
+
+
+def _matrixport_gap_policy(*dates: str) -> dict[str, object]:
+    missing = frozenset(target_series.date.fromisoformat(value) for value in dates)
+    omitted = target_series._matrixport_expected_gap_endpoints(missing)
+    contract = json.loads(
+        (ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    source = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "matrixport-account-generation"
+    )
+    policy = dict(source["declared_gap_policy"])
+    derived = target_series._matrixport_source_gap_policy(missing, omitted)
+    derived.pop("authority_bound")
+    policy.update(derived)
+    return policy
+
+
+def _inject_matrixport_gap(fixture: dict[str, Any], missing_date: str) -> None:
+    nav_path = fixture["matrixport_nav_path"]
+    nav_rows = list(csv.DictReader(io.StringIO(nav_path.read_text(encoding="utf-8"))))
+    retained = [
+        row
+        for row in nav_rows
+        if not row["timestamp_utc"].startswith(f"{missing_date}T")
+    ]
+    _write_csv(nav_path, list(nav_rows[0]), retained)
+
+    manifest_path = fixture["matrixport_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact = next(
+        row
+        for row in manifest["artifacts"]
+        if row["artifact_id"] == "csv/nav_daily.csv"
+    )
+    artifact.update(_artifact(nav_path, "csv/nav_daily.csv"))
+    manifest["coverage"]["declared_exclusions"] = _matrixport_exclusions(missing_date)
+    _write_json(manifest_path, manifest)
+    _pointer(
+        fixture["matrixport_pointer_path"], manifest["generation_id"], manifest_path
+    )
+
+    contract_path = fixture["contract_path"]
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    _update_source_generation(
+        contract,
+        "matrixport-account-generation",
+        manifest_path,
+        fixture["as_of_date"],
+    )
+    _update_correction_generations(
+        contract,
+        "matrixport-account-generation",
+        manifest_path,
+        fixture["as_of_date"],
+        "MATRIXPORT",
+    )
+    source = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "matrixport-account-generation"
+    )
+    source["declared_gap_policy"] = _matrixport_gap_policy(missing_date)
+    _write_json(contract_path, contract)
 
 
 def _reidentify_manifest(manifest: dict[str, Any]) -> bytes:
@@ -718,6 +824,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
+    assert json.loads(manifest_content)["builder_version"] == "1.3.0"
+    generation_schema = json.loads(
+        (
+            ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.3.0"}
 
     result = validate_layered_history_generation(
         artifacts=artifacts,
@@ -727,6 +840,17 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     assert result["verification"] == "VALID"
     assert result["strategy_count"] == 9
     coverage = json.loads(artifacts["coverage.json"])
+    coverage_by_strategy = {row["strategy_id"]: row for row in coverage["strategies"]}
+    assert coverage_by_strategy["echotrade-growth-pivots"]["segments"] == []
+    assert coverage_by_strategy["echotrade-growth-pivots"]["modes"]["LIVE_ONLY"] == {
+        "reason": "CAPTURED_EVENT_ONLY_RECONSTRUCTION_NOT_ADMISSIBLE_DAILY_NAV",
+        "status": "REQUIRED_NOT_READY",
+    }
+    assert coverage_by_strategy["composer-holy-grail"]["segments"] == []
+    assert coverage_by_strategy["composer-holy-grail"]["modes"]["LIVE_ONLY"] == {
+        "reason": "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT",
+        "status": "REQUIRED_NOT_READY",
+    }
     assert coverage["correction_resolutions"]["p123-eu-provider-live"] == {
         "calendar": "WEEKDAY_SOURCE_CALENDAR",
         "cash_added_treatment": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
@@ -738,6 +862,36 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
         "status": "DERIVED_NOT_ADMITTED_PENDING_303",
         "transform_id": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
     }
+    assert coverage["correction_resolutions"]["p123-ai-backtest"]["status"] == (
+        "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
+    )
+    echo_resolution = coverage["correction_resolutions"][
+        "echotrade-event-only-account-live-rejected"
+    ]
+    assert {
+        key: value for key, value in echo_resolution.items() if key != "sha256"
+    } == {
+        "observed_end": "2026-01-09",
+        "observed_start": "2026-01-05",
+        "return_observations": 5,
+        "source_generation_id": "1" * 64,
+        "status": "REJECTED_EVENT_ONLY_RECONSTRUCTION_NOT_DAILY_NAV",
+    }
+    assert len(echo_resolution["sha256"]) == 64
+    excluded = list(
+        csv.DictReader(io.StringIO(artifacts["excluded.csv"].decode("utf-8")))
+    )
+    assert len(excluded) == echo_resolution["return_observations"]
+    assert {row["series_id"] for row in excluded} == {
+        coverage_by_strategy["echotrade-growth-pivots"]["series_id"]
+    }
+    assert {row["evidence_layer"] for row in excluded} == {"ACCOUNT_LIVE"}
+    assert not any(
+        row["strategy_id"] == "p123-ai-factor" and row["evidence_layer"] == "BACKTEST"
+        for row in csv.DictReader(
+            io.StringIO(artifacts["segments.csv"].decode("utf-8"))
+        )
+    )
     live_only = artifacts["live-only.csv"].decode("utf-8")
     assert "PROVIDER_LIVE" not in live_only
     assert "BACKTEST" not in live_only
@@ -794,6 +948,27 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
         validate_layered_history_generation(
             artifacts=artifacts,
             manifest_content=_reidentify_manifest(extra_field),
+            contract_path=fixture["contract_path"],
+        )
+
+    rewritten_echo = dict(artifacts)
+    rewritten_echo_manifest = json.loads(manifest_content)
+    rewritten_echo_coverage = json.loads(artifacts["coverage.json"])
+    rewritten_echo_resolution = rewritten_echo_coverage["correction_resolutions"][
+        "echotrade-event-only-account-live-rejected"
+    ]
+    rewritten_echo_resolution["sha256"] = "0" * 64
+    rewritten_echo_resolution["return_observations"] += 1
+    _replace_output(
+        rewritten_echo,
+        rewritten_echo_manifest,
+        "coverage.json",
+        canonical_json_bytes(rewritten_echo_coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="event-only resolution differs"):
+        validate_layered_history_generation(
+            artifacts=rewritten_echo,
+            manifest_content=_reidentify_manifest(rewritten_echo_manifest),
             contract_path=fixture["contract_path"],
         )
 
@@ -855,6 +1030,221 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     assert changed_manifest != manifest_content
 
 
+def test_layered_history_accepts_only_manifest_declared_matrixport_gap(
+    tmp_path: Path,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+
+    artifacts, manifest_content = _build(fixture)
+    result = validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_content,
+        contract_path=fixture["contract_path"],
+    )
+    assert result["verification"] == "VALID"
+    segments = list(
+        csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8")))
+    )
+    live_dates = [
+        row["date"]
+        for row in segments
+        if row["strategy_id"] == "robuxio-crypto"
+        and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    ]
+    assert live_dates == ["2025-12-07", "2025-12-08", "2025-12-11"]
+    coverage = json.loads(artifacts["coverage.json"])
+    resolution = coverage["correction_resolutions"][
+        "robuxio-account-live-after-funding"
+    ]
+    fixture_contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
+    fixture_source = next(
+        row
+        for row in fixture_contract["source_segments"]
+        if row["source_id"] == "matrixport-account-generation"
+    )
+    assert resolution["source_gap_policy"] == fixture_source["declared_gap_policy"]
+    assert resolution["source_gap_policy"]["declared_missing_source_dates"] == [
+        "2025-12-09"
+    ]
+    assert resolution["source_gap_policy"]["omitted_return_dates"] == ["2025-12-10"]
+    robuxio_summary = next(
+        summary
+        for row in coverage["strategies"]
+        if row["strategy_id"] == "robuxio-crypto"
+        for summary in row["segments"]
+        if summary["segment_id"] == "robuxio-crypto:account-live"
+    )
+    assert robuxio_summary["gap_disposition"] == ("COMPLETE_WITHIN_DECLARED_BOUNDARY")
+
+    tampered_artifacts = dict(artifacts)
+    tampered_manifest = json.loads(manifest_content)
+    resolution["source_gap_policy"]["cumulative_return_across_declared_gaps"] = (
+        "MATERIALIZED"
+    )
+    _replace_output(
+        tampered_artifacts,
+        tampered_manifest,
+        "coverage.json",
+        canonical_json_bytes(coverage),
+    )
+    with pytest.raises(TargetSeriesError, match="source gap resolution differs"):
+        validate_layered_history_generation(
+            artifacts=tampered_artifacts,
+            manifest_content=_reidentify_manifest(tampered_manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+
+def test_layered_history_propagates_one_authoritative_gap_policy_edit(
+    tmp_path: Path,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    contract_path = fixture["contract_path"]
+    manifest_path = fixture["matrixport_manifest_path"]
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    source = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "matrixport-account-generation"
+    )
+    policy = source["declared_gap_policy"]
+    policy.update(
+        {
+            "authority_issue": 999,
+            "policy_id": "SYNTHETIC_OWNER_DECLARED_GAP_POLICY_V2",
+            "provenance": "synthetic owner evidence for propagation",
+            "reason": "synthetic provider omission",
+            "return_rule": "SYNTHETIC_ADJACENT_DAY_RESET_RULE",
+        }
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for exclusion in manifest["coverage"]["declared_exclusions"]:
+        exclusion["provenance"] = policy["provenance"]
+        exclusion["reason"] = policy["reason"]
+    _write_json(manifest_path, manifest)
+    _pointer(
+        fixture["matrixport_pointer_path"], manifest["generation_id"], manifest_path
+    )
+    _update_source_generation(
+        contract, "matrixport-account-generation", manifest_path, fixture["as_of_date"]
+    )
+    _update_correction_generations(
+        contract,
+        "matrixport-account-generation",
+        manifest_path,
+        fixture["as_of_date"],
+        "MATRIXPORT",
+    )
+    _write_json(contract_path, contract)
+
+    artifacts, manifest_content = _build(fixture)
+    result = validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_content,
+        contract_path=contract_path,
+    )
+    assert result["verification"] == "VALID"
+    coverage = json.loads(artifacts["coverage.json"])
+    propagated = coverage["correction_resolutions"][
+        "robuxio-account-live-after-funding"
+    ]["source_gap_policy"]
+    assert propagated == policy
+
+
+def test_layered_history_rejects_unproduced_matrixport_transform_fact(
+    tmp_path: Path,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
+    source = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "matrixport-account-generation"
+    )
+    source["declared_gap_policy"]["return_transform"]["facts"].append(
+        "FINANCING_LIABILITY"
+    )
+    _write_json(fixture["contract_path"], contract)
+
+    with pytest.raises(TargetSeriesError, match="return transform capability differs"):
+        _build(fixture)
+
+
+def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version(
+    tmp_path: Path,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    returns_path = fixture["portfolio123_returns_path"]
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "entity_id": "sim-ai",
+                    "model_return": float(100 + index),
+                    "period_date": observed,
+                    "source": "synthetic",
+                }
+                for index, observed in enumerate(
+                    ["2025-12-29", "2025-12-30", "2025-12-31", "2026-01-02"]
+                )
+            ]
+        ),
+        returns_path,
+    )
+    manifest_path = fixture["portfolio123_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact = next(
+        row
+        for row in manifest["artifacts"]
+        if row["artifact_id"] == "tables/returns_daily.parquet"
+    )
+    artifact.update(_artifact(returns_path, artifact["artifact_id"]))
+    _write_json(manifest_path, manifest)
+    _pointer(
+        fixture["portfolio123_pointer_path"], manifest["generation_id"], manifest_path
+    )
+    contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
+    _update_source_generation(
+        contract,
+        "portfolio123-model-generation",
+        manifest_path,
+        fixture["as_of_date"],
+    )
+    _update_correction_generations(
+        contract,
+        "portfolio123-model-generation",
+        manifest_path,
+        fixture["as_of_date"],
+        "PORTFOLIO123",
+    )
+    _append_p123_performance_receipt(
+        contract, manifest_path, fixture["portfolio123_performance_path"]
+    )
+    _write_json(fixture["contract_path"], contract)
+
+    artifacts, _manifest_content = _build(fixture)
+    segments = list(
+        csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8")))
+    )
+    assert not any(
+        row["strategy_id"] == "p123-ai-factor" and row["evidence_layer"] == "BACKTEST"
+        for row in segments
+    )
+    coverage = json.loads(artifacts["coverage.json"])
+    resolution = coverage["correction_resolutions"]["p123-ai-backtest"]
+    assert resolution["observed_end"] == "2026-01-02"
+    assert resolution["status"] == (
+        "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
+    )
+    p123 = next(
+        row for row in coverage["strategies"] if row["strategy_id"] == "p123-ai-factor"
+    )
+    assert p123["modes"]["LIVE_PLUS_BACKTEST"] == {
+        "reason": "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED",
+        "status": "REQUIRED_NOT_READY",
+    }
+
+
 def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
     tmp_path: Path,
 ) -> None:
@@ -872,6 +1262,28 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         validate_layered_history_generation(
             artifacts=artifacts,
             manifest_content=_reidentify_manifest(pointer_rewrite),
+            contract_path=fixture["contract_path"],
+        )
+
+    reordered_artifacts = dict(artifacts)
+    reordered_manifest = json.loads(manifest_content)
+    reordered_segments = list(
+        csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8")))
+    )
+    reordered_segments[0], reordered_segments[1] = (
+        reordered_segments[1],
+        reordered_segments[0],
+    )
+    _replace_output(
+        reordered_artifacts,
+        reordered_manifest,
+        "segments.csv",
+        _csv_bytes(target_series.LAYERED_HISTORY_SEGMENT_FIELDS, reordered_segments),
+    )
+    with pytest.raises(TargetSeriesError, match="segment ordering differs"):
+        validate_layered_history_generation(
+            artifacts=reordered_artifacts,
+            manifest_content=_reidentify_manifest(reordered_manifest),
             contract_path=fixture["contract_path"],
         )
 
@@ -1136,12 +1548,32 @@ def test_layered_history_rejects_relabel_and_admitted_overlap(tmp_path: Path) ->
     overlapping = list(
         csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8")))
     )
-    for row in overlapping:
-        if (
-            row["strategy_id"] == "p123-ai-factor"
-            and row["evidence_layer"] == "BACKTEST"
-        ):
-            row["mode_admission"] = "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+    p123_live = next(
+        row
+        for row in overlapping
+        if row["strategy_id"] == "p123-ai-factor"
+        and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    )
+    admitted_overlap = dict(p123_live)
+    admitted_overlap.update(
+        {
+            "evidence_layer": "BACKTEST",
+            "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+            "return_basis": "MODEL",
+            "segment_id": "p123-ai-factor:backtest",
+            "source_generation_id": "4" * 64,
+            "source_id": "strategy-backtests",
+        }
+    )
+    overlapping.append(admitted_overlap)
+    overlapping.sort(
+        key=lambda row: (
+            row["strategy_id"],
+            row["date"],
+            row["evidence_layer"],
+            row["segment_id"],
+        )
+    )
     overlap_artifacts = dict(artifacts)
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(
@@ -1151,15 +1583,10 @@ def test_layered_history_rejects_relabel_and_admitted_overlap(tmp_path: Path) ->
     )
     writer.writeheader()
     writer.writerows(overlapping)
-    overlap_artifacts["segments.csv"] = buffer.getvalue().encode("utf-8")
+    overlap_content = buffer.getvalue().encode("utf-8")
     # Even a coherent local rehash cannot make overlapping backtest/live rows admissible.
     manifest = json.loads(manifest_content)
-    manifest["outputs"]["segments.csv"]["sha256"] = hashlib.sha256(
-        overlap_artifacts["segments.csv"]
-    ).hexdigest()
-    manifest["outputs"]["segments.csv"]["size_bytes"] = len(
-        overlap_artifacts["segments.csv"]
-    )
+    _replace_output(overlap_artifacts, manifest, "segments.csv", overlap_content)
     with pytest.raises(TargetSeriesError):
         validate_layered_history_generation(
             artifacts=overlap_artifacts,

@@ -115,6 +115,7 @@ REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS: Final = frozenset(
     }
 )
 HISTORY_CORRECTION_LAYERS: Final = {
+    "echotrade-growth-pivots": frozenset({"ACCOUNT_LIVE"}),
     "p123-eu": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
     "robuxio-crypto": frozenset(
         {"ACCOUNT_LIVE", "PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"}
@@ -2351,6 +2352,106 @@ def _validate_outcomes(outcomes: list[dict[str, Any]]) -> None:
                 raise FinancialMvpContractError("dependence absence rule differs")
 
 
+def _validate_matrixport_gap_policy(row: Mapping[str, Any], source_id: str) -> None:
+    raw_policy = row.get("declared_gap_policy")
+    if source_id != "matrixport-account-generation":
+        if raw_policy is not None:
+            raise FinancialMvpContractError(
+                f"source {source_id} asserts an unauthorized declared-gap policy"
+            )
+        return
+    if not isinstance(raw_policy, dict):
+        raise FinancialMvpContractError(
+            "Matrixport source lacks the owner-declared gap policy"
+        )
+    policy = _object(raw_policy, "Matrixport declared_gap_policy")
+    _strict_keys(
+        policy,
+        {
+            "authority_issue",
+            "calendar",
+            "coverage_status",
+            "cumulative_return_across_declared_gaps",
+            "declared_missing_source_dates",
+            "frequency",
+            "omitted_return_dates",
+            "policy_id",
+            "provenance",
+            "reason",
+            "return_transform",
+            "return_rule",
+            "unavailable_return_dates",
+        },
+        "Matrixport declared_gap_policy",
+    )
+    authority_issue = policy["authority_issue"]
+    if not isinstance(authority_issue, int) or authority_issue < 1:
+        raise FinancialMvpContractError("Matrixport gap authority issue differs")
+    for key in (
+        "calendar",
+        "coverage_status",
+        "cumulative_return_across_declared_gaps",
+        "frequency",
+        "policy_id",
+        "provenance",
+        "reason",
+        "return_rule",
+    ):
+        _text(policy[key], f"Matrixport {key}")
+    return_transform = _object(
+        policy["return_transform"], "Matrixport declared-gap return transform"
+    )
+    _strict_keys(
+        return_transform,
+        {"facts", "transform", "version"},
+        "Matrixport declared-gap return transform",
+    )
+    _text(return_transform["transform"], "Matrixport return transform")
+    _text(return_transform["version"], "Matrixport return transform version")
+    _strings(return_transform["facts"], "Matrixport return transform facts")
+    rendered_dates: dict[str, list[str]] = {}
+    for key in (
+        "declared_missing_source_dates",
+        "omitted_return_dates",
+        "unavailable_return_dates",
+    ):
+        rendered = _strings(policy[key], f"Matrixport {key}")
+        for value in rendered:
+            _date(value, f"Matrixport {key}")
+        if rendered != sorted(rendered):
+            raise FinancialMvpContractError(f"Matrixport {key} is not ordered")
+        rendered_dates[key] = rendered
+    missing_dates = {
+        _date(value, "Matrixport missing date")
+        for value in rendered_dates["declared_missing_source_dates"]
+    }
+    expected_omitted = {
+        value + date.resolution
+        for value in missing_dates
+        if value + date.resolution not in missing_dates
+    }
+    omitted_dates = {
+        _date(value, "Matrixport omitted date")
+        for value in rendered_dates["omitted_return_dates"]
+    }
+    unavailable_dates = {
+        _date(value, "Matrixport unavailable date")
+        for value in rendered_dates["unavailable_return_dates"]
+    }
+    if omitted_dates != expected_omitted:
+        raise FinancialMvpContractError("Matrixport omitted return dates differ")
+    if unavailable_dates != missing_dates | omitted_dates:
+        raise FinancialMvpContractError("Matrixport unavailable return dates differ")
+    temporal = _object(row["temporal"], "Matrixport temporal")
+    if (policy["calendar"], policy["frequency"]) != (
+        temporal.get("calendar"),
+        temporal.get("cadence"),
+    ):
+        raise FinancialMvpContractError(
+            "Matrixport gap policy calendar/cadence differs from source authority"
+        )
+
+
 def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> None:
     source_ids: set[str] = set()
     data_classes: set[str] = set()
@@ -2363,35 +2464,38 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
         strategy_id: set() for strategy_id in registry_ids
     }
     for row in sources:
+        expected_source_keys = {
+            "absence_behavior",
+            "acquisition",
+            "admission",
+            "authority",
+            "blockers",
+            "capture_status",
+            "consumers",
+            "current_generation",
+            "data_classes",
+            "endpoint_or_artifact_selector",
+            "evidence_layer",
+            "existence_status",
+            "freshness",
+            "interval",
+            "invalidated_outputs",
+            "owner_policy_decision",
+            "product_requirement",
+            "readiness",
+            "schema",
+            "source_id",
+            "source_version",
+            "strategy_version",
+            "subjects",
+            "temporal",
+            "units",
+        }
+        if "declared_gap_policy" in row:
+            expected_source_keys.add("declared_gap_policy")
         _strict_keys(
             row,
-            {
-                "absence_behavior",
-                "acquisition",
-                "admission",
-                "authority",
-                "blockers",
-                "capture_status",
-                "consumers",
-                "current_generation",
-                "data_classes",
-                "endpoint_or_artifact_selector",
-                "evidence_layer",
-                "existence_status",
-                "freshness",
-                "interval",
-                "invalidated_outputs",
-                "owner_policy_decision",
-                "product_requirement",
-                "readiness",
-                "schema",
-                "source_id",
-                "source_version",
-                "strategy_version",
-                "subjects",
-                "temporal",
-                "units",
-            },
+            expected_source_keys,
             "source_segment",
         )
         source_id = _text(row["source_id"], "source_segment.source_id")
@@ -2685,6 +2789,7 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
                 f"required source has no invalidated outputs: {source_id}"
             )
         _text(row["owner_policy_decision"], "source_segment.owner_policy_decision")
+        _validate_matrixport_gap_policy(row, source_id)
     missing = REQUIRED_SOURCE_CLASSES - data_classes
     if missing:
         raise FinancialMvpContractError(
@@ -3609,6 +3714,38 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             + " | ".join(str(value).replace("|", "\\|") for value in timing_cells)
             + " |"
         )
+    declared_gap_sources = [
+        row for row in sources if isinstance(row.get("declared_gap_policy"), dict)
+    ]
+    lines.extend(
+        [
+            "",
+            "## Declared source-gap policies",
+            "",
+            "These are source omissions admitted by recorded authority, not filled values or inferred calendar closures. A first post-gap endpoint is retained as an observation but cannot produce a one-day return.",
+            "",
+            "| Source | Policy | Authority | Missing source dates | Omitted spanning-return dates | Return transform | Produced facts | Return rule |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+    )
+    for row in declared_gap_sources:
+        policy = row["declared_gap_policy"]
+        return_transform = policy["return_transform"]
+        gap_cells = (
+            row["source_id"],
+            policy["policy_id"],
+            f"#{policy['authority_issue']} — {policy['provenance']}",
+            ", ".join(policy["declared_missing_source_dates"]),
+            ", ".join(policy["omitted_return_dates"]),
+            f"{return_transform['transform']}@{return_transform['version']}",
+            ", ".join(return_transform["facts"]),
+            policy["return_rule"],
+        )
+        lines.append(
+            "| "
+            + " | ".join(str(value).replace("|", "\\|") for value in gap_cells)
+            + " |"
+        )
     lines.extend(
         [
             "",
@@ -3684,6 +3821,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                             "freshness_rule": source["freshness"]["rule"],
                             "admission_transform": source["admission"]["transform"],
                             "admission_facts": source["admission"]["facts"],
+                            "declared_gap_policy": source.get("declared_gap_policy"),
                             "consumer": consumer,
                             "generation_id": source["current_generation"][
                                 "generation_id"

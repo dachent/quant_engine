@@ -58,10 +58,24 @@ CORRELATION_FIELDS: Final = ("series_id", "date", "return", "evidence_layer")
 CORRELATION_FIELDS_V2: Final = (*CORRELATION_FIELDS, "strategy_version")
 STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
-MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-2"
+MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.0.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.3.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
+MATRIXPORT_GAP_KINDS: Final = (
+    "nav_missing_date",
+    "fx_missing_date",
+    "reconciliation_incomplete_date",
+)
+MATRIXPORT_RETURN_TRANSFORM_CAPABILITIES: Final = {
+    ("matrixport-declared-gap-one-day-returns", "1"): frozenset(
+        {
+            "ACCOUNT_LIVE_DAILY_RETURN",
+            "PROVIDER_LIVE_DAILY_RETURN",
+            "DECLARED_GAP_COVERAGE",
+        }
+    )
+}
 LAYERED_HISTORY_SEGMENT_FIELDS: Final = (
     "strategy_id",
     "series_id",
@@ -80,6 +94,7 @@ LAYERED_HISTORY_SEGMENT_FIELDS: Final = (
 )
 LAYERED_HISTORY_OUTPUT_NAMES: Final = (
     "segments.csv",
+    "excluded.csv",
     "returns.csv",
     "live-only.csv",
     "live-plus-backtest.csv",
@@ -210,6 +225,165 @@ def _utc_day(value: str) -> date:
     return parsed.date()
 
 
+def _matrixport_declared_missing_dates(
+    manifest: Mapping[str, Any],
+    expected_policy: Mapping[str, Any] | None = None,
+) -> frozenset[date]:
+    """Return manifest-declared omissions, optionally bound to product authority."""
+
+    coverage = manifest.get("coverage")
+    if not isinstance(coverage, dict) or (
+        coverage.get("status") != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        or coverage.get("known_gaps") != []
+    ):
+        raise TargetSeriesError("Matrixport declared-boundary coverage is invalid")
+    exclusions = coverage.get("declared_exclusions")
+    if not isinstance(exclusions, list):
+        raise TargetSeriesError("Matrixport declared exclusions are absent")
+    dates_by_kind: dict[str, set[date]] = {kind: set() for kind in MATRIXPORT_GAP_KINDS}
+    authorities: set[tuple[str, str]] = set()
+    for raw in exclusions:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("Matrixport declared exclusion is invalid")
+        item = raw.get("item")
+        if not isinstance(item, str) or ":" not in item:
+            continue
+        kind, rendered_date = item.split(":", 1)
+        if kind not in dates_by_kind:
+            continue
+        if set(raw) != {"item", "provenance", "reason"}:
+            raise TargetSeriesError("Matrixport declared exclusion authority differs")
+        provenance = raw.get("provenance")
+        reason = raw.get("reason")
+        if (
+            not isinstance(provenance, str)
+            or not provenance
+            or not isinstance(reason, str)
+            or not reason
+        ):
+            raise TargetSeriesError("Matrixport declared exclusion authority differs")
+        authorities.add((provenance, reason))
+        try:
+            missing_date = date.fromisoformat(rendered_date)
+        except ValueError as exc:
+            raise TargetSeriesError(
+                "Matrixport declared exclusion date is invalid"
+            ) from exc
+        if item != f"{kind}:{missing_date.isoformat()}":
+            raise TargetSeriesError("Matrixport declared exclusion item is invalid")
+        if missing_date in dates_by_kind[kind]:
+            raise TargetSeriesError("Matrixport declared exclusion is duplicated")
+        dates_by_kind[kind].add(missing_date)
+    accepted = dates_by_kind[MATRIXPORT_GAP_KINDS[0]]
+    if any(dates_by_kind[kind] != accepted for kind in MATRIXPORT_GAP_KINDS[1:]):
+        raise TargetSeriesError("Matrixport declared exclusion date sets differ")
+    if len(authorities) > 1:
+        raise TargetSeriesError("Matrixport declared exclusion authority differs")
+    if expected_policy is not None:
+        raw_expected_dates = expected_policy.get("declared_missing_source_dates")
+        if not isinstance(raw_expected_dates, list) or any(
+            not isinstance(value, str) for value in raw_expected_dates
+        ):
+            raise TargetSeriesError("Matrixport product gap dates are invalid")
+        try:
+            expected_dates = {date.fromisoformat(value) for value in raw_expected_dates}
+        except ValueError as exc:
+            raise TargetSeriesError("Matrixport product gap dates are invalid") from exc
+        expected_authority = (
+            expected_policy.get("provenance"),
+            expected_policy.get("reason"),
+        )
+        if accepted != expected_dates or authorities != {expected_authority}:
+            raise TargetSeriesError(
+                "Matrixport declared exclusions differ from product authority"
+            )
+    return frozenset(accepted)
+
+
+def _matrixport_gap_endpoints(
+    observed_dates: Sequence[date], declared_missing_dates: frozenset[date]
+) -> frozenset[date]:
+    """Validate all interior omissions and return non-comparable endpoints."""
+
+    ordered = sorted(set(observed_dates))
+    actual_missing: set[date] = set()
+    omitted_return_dates: set[date] = set()
+    for previous, current in zip(ordered, ordered[1:], strict=False):
+        candidate = previous + timedelta(days=1)
+        interval_missing: set[date] = set()
+        while candidate < current:
+            interval_missing.add(candidate)
+            candidate += timedelta(days=1)
+        if interval_missing:
+            actual_missing.update(interval_missing)
+            omitted_return_dates.add(current)
+    if actual_missing != set(declared_missing_dates):
+        raise TargetSeriesError("Matrixport NAV gaps differ from declared exclusions")
+    accepted_endpoints = _matrixport_expected_gap_endpoints(declared_missing_dates)
+    if omitted_return_dates != set(accepted_endpoints):
+        raise TargetSeriesError("Matrixport NAV gap endpoints differ")
+    return accepted_endpoints
+
+
+def _matrixport_expected_gap_endpoints(
+    declared_missing_dates: frozenset[date],
+) -> frozenset[date]:
+    """Return the first post-gap date whose multi-day return is unavailable."""
+
+    return frozenset(
+        item + timedelta(days=1)
+        for item in declared_missing_dates
+        if item + timedelta(days=1) not in declared_missing_dates
+    )
+
+
+def _matrixport_source_gap_policy(
+    declared_missing_dates: frozenset[date],
+    omitted_return_dates: frozenset[date],
+    authority_policy: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
+    unavailable = sorted(declared_missing_dates | omitted_return_dates)
+    derived: dict[str, object] = {
+        "declared_missing_source_dates": [
+            item.isoformat() for item in sorted(declared_missing_dates)
+        ],
+        "omitted_return_dates": [
+            item.isoformat() for item in sorted(omitted_return_dates)
+        ],
+        "unavailable_return_dates": [item.isoformat() for item in unavailable],
+    }
+    if authority_policy is None:
+        return {**derived, "authority_bound": False}
+    accepted = dict(authority_policy)
+    if any(accepted.get(key) != value for key, value in derived.items()):
+        raise TargetSeriesError(
+            "Matrixport source gap policy differs from observed omissions"
+        )
+    return accepted
+
+
+def _matrixport_return_transform(policy: Mapping[str, Any]) -> None:
+    """Prove that the contract-requested gap transform matches code capabilities."""
+
+    raw = policy.get("return_transform")
+    if not isinstance(raw, dict) or set(raw) != {"facts", "transform", "version"}:
+        raise TargetSeriesError("Matrixport return transform is invalid")
+    transform = raw.get("transform")
+    version = raw.get("version")
+    facts = raw.get("facts")
+    if (
+        not isinstance(transform, str)
+        or not isinstance(version, str)
+        or not isinstance(facts, list)
+        or any(not isinstance(item, str) or not item for item in facts)
+        or len(facts) != len(set(facts))
+    ):
+        raise TargetSeriesError("Matrixport return transform is invalid")
+    supported = MATRIXPORT_RETURN_TRANSFORM_CAPABILITIES.get((transform, version))
+    if supported is None or frozenset(facts) != supported:
+        raise TargetSeriesError("Matrixport return transform capability differs")
+
+
 def _base_rows(
     path: Path, series_id: str, *, replace_existing: bool = False
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -236,6 +410,8 @@ def _matrixport_returns(
     subscription_path: Path,
     product_id: str,
     series_id: str,
+    declared_missing_dates: frozenset[date],
+    declared_gap_policy: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, object]]:
     holdings = [
         row
@@ -304,13 +480,19 @@ def _matrixport_returns(
         raise TargetSeriesError(
             "Matrixport funding confirmation lacks an exact held NAV observation"
         )
+    account_nav_dates = [day for day, _nav in ordered if day >= account_live_start]
+    omitted_return_dates = _matrixport_gap_endpoints(
+        account_nav_dates, declared_missing_dates
+    )
     returns: list[dict[str, str]] = []
-    previous = ordered[0][1]
     provider_return_observations = 0
     boundary_return_excluded = False
-    for day, nav in ordered[1:]:
+    for (_previous_day, previous), (day, nav) in zip(
+        ordered, ordered[1:], strict=False
+    ):
+        if day in omitted_return_dates:
+            continue
         value = nav / previous - Decimal(1)
-        previous = nav
         if day < account_live_start:
             provider_return_observations += 1
             continue
@@ -328,7 +510,6 @@ def _matrixport_returns(
                 "cost": "",
             }
         )
-    account_nav_dates = [day for day, _nav in ordered if day >= account_live_start]
     provider_nav_dates = [day for day, _nav in ordered if day < account_live_start]
     if len(account_nav_dates) < 2 or not returns:
         raise TargetSeriesError(
@@ -353,6 +534,9 @@ def _matrixport_returns(
         ),
         "provider_live_return_observations": provider_return_observations,
         "return_observations": len(returns),
+        "source_gap_policy": _matrixport_source_gap_policy(
+            declared_missing_dates, omitted_return_dates, declared_gap_policy
+        ),
         "subscription_initiated_date": subscription_initiated_date.isoformat(),
     }
 
@@ -624,12 +808,18 @@ def build_matrixport_targets(
     subscription_artifact = _verify_artifact(
         subscription_path, artifacts, "csv/subscription_details.csv"
     )
+    declared_missing_dates = _matrixport_declared_missing_dates(manifest)
 
     base, existing = _base_rows(
         base_targets, series_id, replace_existing=replace_existing
     )
     provider_rows, coverage = _matrixport_returns(
-        nav_path, holdings_path, subscription_path, product_id, series_id
+        nav_path,
+        holdings_path,
+        subscription_path,
+        product_id,
+        series_id,
+        declared_missing_dates,
     )
     combined = sorted(
         [*base, *provider_rows], key=lambda row: (row["series_id"], row["date"])
@@ -1332,6 +1522,8 @@ def _matrixport_provider_returns(
     for (previous_day, previous), (day, nav) in zip(ordered, ordered[1:], strict=False):
         if previous_day >= account_live_start or day >= account_live_start:
             continue
+        if (day - previous_day).days != 1:
+            continue
         value = nav / previous - Decimal(1)
         if value <= -1:
             raise TargetSeriesError("Matrixport provider return is invalid")
@@ -1727,12 +1919,50 @@ def _row_identity(rows: Sequence[Mapping[str, str]]) -> dict[str, object]:
     }
 
 
-def _gap_disposition(rows: Sequence[Mapping[str, str]]) -> str:
+def _target_row_identity(rows: Sequence[Mapping[str, str]]) -> dict[str, object]:
+    """Hash rejected target rows without inventing a strategy-version identity."""
+
+    ordered = sorted(rows, key=lambda row: (row["series_id"], row["date"]))
+    return {
+        "observed_end": ordered[-1]["date"] if ordered else None,
+        "observed_start": ordered[0]["date"] if ordered else None,
+        "return_observations": len(ordered),
+        "sha256": hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "rows": [
+                        {field: row[field] for field in TARGET_FIELDS}
+                        for row in ordered
+                    ]
+                }
+            )
+        ).hexdigest(),
+    }
+
+
+def _gap_disposition(
+    rows: Sequence[Mapping[str, str]],
+    declared_unavailable_dates: frozenset[date] = frozenset(),
+) -> str:
     """Classify observable continuity without inventing a market calendar."""
 
     dates = sorted({date.fromisoformat(row["date"]) for row in rows})
     if len(dates) < 2:
         return "REQUIRED_NOT_READY_INSUFFICIENT_CONTINUITY_EVIDENCE"
+    if declared_unavailable_dates:
+        actual_missing: set[date] = set()
+        candidate = dates[0] + timedelta(days=1)
+        observed = set(dates)
+        while candidate < dates[-1]:
+            if candidate not in observed:
+                actual_missing.add(candidate)
+            candidate += timedelta(days=1)
+        expected_missing = {
+            item for item in declared_unavailable_dates if dates[0] < item < dates[-1]
+        }
+        if actual_missing == expected_missing:
+            return "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        return "REQUIRED_NOT_READY_UNEXPLAINED_INTERIOR_GAP"
     if all(
         (current - previous).days == 1 for previous, current in zip(dates, dates[1:])
     ):
@@ -1803,6 +2033,7 @@ def _history_output_identity(
 ) -> dict[str, object]:
     schema_name = {
         "segments.csv": "portfolio-layered-history-segments",
+        "excluded.csv": "portfolio-layered-history-excluded-targets",
         "returns.csv": "portfolio-layered-strategy-returns",
         "live-only.csv": "portfolio-layered-strategy-returns",
         "live-plus-backtest.csv": "portfolio-layered-strategy-returns",
@@ -1956,7 +2187,32 @@ def build_layered_history_generation(
         if date.fromisoformat(row["date"]) > accepted_as_of:
             raise TargetSeriesError("provider-ledger return exceeds accepted as-of")
         live_by_strategy[mapped_strategy_id].append(dict(row))
-
+    echo_correction = corrections.get("echotrade-event-only-account-live-rejected")
+    if not isinstance(echo_correction, dict):
+        raise TargetSeriesError("EchoTrade event-only disposition is absent")
+    echo_candidate = sorted(
+        live_by_strategy["echotrade-growth-pivots"], key=lambda row: row["date"]
+    )
+    echo_interval = echo_correction.get("interval")
+    echo_capture = echo_correction.get("capture")
+    echo_modes = echo_correction.get("mode_admission")
+    if (
+        not echo_candidate
+        or not isinstance(echo_interval, dict)
+        or not isinstance(echo_capture, dict)
+        or not isinstance(echo_modes, dict)
+        or echo_correction.get("source_id") != "owner-account-live-history"
+        or echo_correction.get("evidence_layer") != "ACCOUNT_LIVE"
+        or echo_correction.get("readiness") != "REQUIRED_NOT_READY"
+        or echo_modes.get("LIVE_ONLY") != "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
+        or echo_modes.get("LIVE_PLUS_BACKTEST") != "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
+        or echo_capture.get("generation_id") != ledger_generation
+        or (echo_candidate[0]["date"], echo_candidate[-1]["date"])
+        != (echo_interval.get("observed_start"), echo_interval.get("observed_end"))
+    ):
+        raise TargetSeriesError("EchoTrade event-only disposition differs")
+    echo_rejected_identity = _target_row_identity(echo_candidate)
+    live_by_strategy["echotrade-growth-pivots"] = []
     matrixport_artifacts = _manifest_artifacts(matrixport_manifest.get("artifacts"))
     _verify_artifact(matrixport_nav_path, matrixport_artifacts, "csv/nav_daily.csv")
     _verify_artifact(matrixport_holdings_path, matrixport_artifacts, "csv/holdings.csv")
@@ -1964,6 +2220,15 @@ def build_layered_history_generation(
         matrixport_subscription_path,
         matrixport_artifacts,
         "csv/subscription_details.csv",
+    )
+    matrixport_gap_policy = sources["matrixport-account-generation"].get(
+        "declared_gap_policy"
+    )
+    if not isinstance(matrixport_gap_policy, dict):
+        raise TargetSeriesError("Matrixport product gap policy is absent")
+    _matrixport_return_transform(matrixport_gap_policy)
+    matrixport_missing_dates = _matrixport_declared_missing_dates(
+        matrixport_manifest, matrixport_gap_policy
     )
     robuxio_series = series_by_strategy.get("robuxio-crypto")
     if robuxio_series is None:
@@ -1974,6 +2239,21 @@ def build_layered_history_generation(
         matrixport_subscription_path,
         matrixport_product_id,
         robuxio_series,
+        matrixport_missing_dates,
+        matrixport_gap_policy,
+    )
+    raw_gap_policy = robuxio_coverage.get("source_gap_policy")
+    if not isinstance(raw_gap_policy, dict):
+        raise TargetSeriesError("Matrixport source gap policy is absent")
+    if raw_gap_policy != sources["matrixport-account-generation"].get(
+        "declared_gap_policy"
+    ):
+        raise TargetSeriesError(
+            "Matrixport source gap policy differs from product authority"
+        )
+    matrixport_unavailable_return_dates = frozenset(
+        date.fromisoformat(str(item))
+        for item in raw_gap_policy.get("unavailable_return_dates", [])
     )
     robuxio_correction = corrections["robuxio-account-live-after-funding"]
     robuxio_interval = robuxio_correction.get("interval")
@@ -2136,14 +2416,24 @@ def build_layered_history_generation(
         status, version = _contract_version(strategy)
         version_status_by_strategy[strategy_id] = status
         version_by_strategy[strategy_id] = version
-    version_by_strategy["p123-ai-factor"] = p123_ai_version
 
     admitted_backtests: dict[str, list[dict[str, str]]] = {}
     unadmitted_backtests: dict[str, list[dict[str, str]]] = {}
-    if date.fromisoformat(p123_ai_backtest[-1]["date"]) >= first_live["p123-ai-factor"]:
+    p123_ai_exact_version = (
+        version_status_by_strategy["p123-ai-factor"] == "EVIDENCED"
+        and version_by_strategy["p123-ai-factor"] == p123_ai_version
+    )
+    p123_ai_overlaps_live = (
+        date.fromisoformat(p123_ai_backtest[-1]["date"]) >= first_live["p123-ai-factor"]
+    )
+    if not p123_ai_exact_version:
+        p123_ai_disposition = "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
+    elif p123_ai_overlaps_live:
         unadmitted_backtests["p123-ai-factor"] = p123_ai_backtest
+        p123_ai_disposition = "DERIVED_NOT_ADMITTED_OVERLAP"
     else:
         admitted_backtests["p123-ai-factor"] = p123_ai_backtest
+        p123_ai_disposition = "ADMITTED_EXACT_VERSION_PREHISTORY"
     for series_id, rows in history_rows.items():
         mapped_strategy_id = series_to_strategy.get(series_id)
         if mapped_strategy_id is None:
@@ -2332,22 +2622,38 @@ def build_layered_history_generation(
         max_age = (
             freshness_max_age if isinstance(freshness_max_age, int) else default_max_age
         )
+        tail_stale = (
+            bool(live_rows)
+            and (accepted_as_of - date.fromisoformat(live_rows[-1]["date"])).days
+            > max_age
+        )
         live_state = "AVAILABLE"
         live_reason: str | None = None
-        gap_disposition = _gap_disposition(live_rows) if live_rows else None
+        declared_unavailable_dates = (
+            matrixport_unavailable_return_dates
+            if strategy_id == "robuxio-crypto"
+            else frozenset()
+        )
+        gap_disposition = (
+            _gap_disposition(live_rows, declared_unavailable_dates)
+            if live_rows
+            else None
+        )
         if not live_rows:
             live_state = "REQUIRED_NOT_READY"
-            live_reason = "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
+            live_reason = (
+                "CAPTURED_EVENT_ONLY_RECONSTRUCTION_NOT_ADMISSIBLE_DAILY_NAV"
+                if strategy_id == "echotrade-growth-pivots"
+                else "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
+            )
         elif gap_disposition is not None and gap_disposition.startswith(
             "REQUIRED_NOT_READY"
         ):
             raise TargetSeriesError(f"unexplained account-live gap: {strategy_id}")
-        elif (
-            accepted_as_of - date.fromisoformat(live_rows[-1]["date"])
-        ).days > max_age:
+        elif tail_stale:
             live_state = "REQUIRED_NOT_READY"
             live_reason = "REQUIRED_ACCOUNT_LIVE_TAIL_STALE"
-        if live_state != "AVAILABLE":
+        if live_state == "REQUIRED_NOT_READY":
             live_not_ready.append(strategy_id)
         backtest_rows = admitted_backtests.get(strategy_id, [])
         hybrid_state = live_state
@@ -2362,7 +2668,7 @@ def build_layered_history_generation(
                 hybrid_reason = "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
             else:
                 hybrid_reason = "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED"
-        if hybrid_state != "AVAILABLE":
+        if hybrid_state == "REQUIRED_NOT_READY":
             hybrid_not_ready.append(strategy_id)
         strategy_segments = [
             row for row in segment_rows if row["strategy_id"] == strategy_id
@@ -2373,12 +2679,20 @@ def build_layered_history_generation(
                 row for row in strategy_segments if row["segment_id"] == segment_id
             ]
             identity = _row_identity(selected)
+            segment_unavailable_dates = (
+                matrixport_unavailable_return_dates
+                if strategy_id == "robuxio-crypto"
+                and selected[0]["source_id"] == "matrixport-account-generation"
+                else frozenset()
+            )
             segment_summaries.append(
                 {
                     "calendar": selected[0]["calendar"],
                     "evidence_layer": selected[0]["evidence_layer"],
                     "frequency": selected[0]["frequency"],
-                    "gap_disposition": _gap_disposition(selected),
+                    "gap_disposition": _gap_disposition(
+                        selected, segment_unavailable_dates
+                    ),
                     "mode_admission": selected[0]["mode_admission"],
                     "observed_end": identity["observed_end"],
                     "observed_start": identity["observed_start"],
@@ -2427,6 +2741,15 @@ def build_layered_history_generation(
         "builder": LAYERED_HISTORY_BUILDER,
         "builder_version": LAYERED_HISTORY_BUILDER_VERSION,
         "correction_resolutions": {
+            "echotrade-event-only-account-live-rejected": {
+                **echo_rejected_identity,
+                "source_generation_id": ledger_generation,
+                "status": "REJECTED_EVENT_ONLY_RECONSTRUCTION_NOT_DAILY_NAV",
+            },
+            "p123-ai-backtest": {
+                **p123_ai_proof,
+                "status": p123_ai_disposition,
+            },
             "p123-eu-provider-live": {
                 **p123_eu_proof,
                 "status": "DERIVED_NOT_ADMITTED_PENDING_303",
@@ -2435,6 +2758,7 @@ def build_layered_history_generation(
                 "account_live_start": robuxio_coverage["account_live_start"],
                 "observed_end": robuxio_live[-1]["date"],
                 "observed_start": robuxio_live[0]["date"],
+                "source_gap_policy": raw_gap_policy,
                 "status": "RESOLVED_BY_PIPE_HISTORY_001",
             },
             "volatis-account-live": {
@@ -2458,6 +2782,7 @@ def build_layered_history_generation(
     }
     artifacts = {
         "segments.csv": _segment_view_bytes(segment_rows),
+        "excluded.csv": _target_bytes(echo_candidate),
         "live-only.csv": _correlation_view_bytes(live_mode_rows),
         "live-plus-backtest.csv": _correlation_view_bytes(hybrid_rows),
     }
@@ -2648,6 +2973,8 @@ def build_layered_history_generation(
             artifacts[name],
             len(segment_rows)
             if name == "segments.csv"
+            else len(echo_candidate)
+            if name == "excluded.csv"
             else len(live_mode_rows)
             if name == "live-only.csv"
             else len(hybrid_rows)
@@ -2946,6 +3273,32 @@ def validate_layered_history_generation(
                 f"layered history source manifest identity differs: {source_name}"
             )
         source_manifests[source_name] = parsed
+    matrixport_gap_policy = sources["matrixport-account-generation"].get(
+        "declared_gap_policy"
+    )
+    if not isinstance(matrixport_gap_policy, dict):
+        raise TargetSeriesError("Matrixport product gap policy is absent")
+    _matrixport_return_transform(matrixport_gap_policy)
+    matrixport_missing_dates = _matrixport_declared_missing_dates(
+        source_manifests["matrixport"], matrixport_gap_policy
+    )
+    matrixport_omitted_return_dates = _matrixport_expected_gap_endpoints(
+        matrixport_missing_dates
+    )
+    matrixport_unavailable_return_dates = frozenset(
+        matrixport_missing_dates | matrixport_omitted_return_dates
+    )
+    expected_matrixport_gap_policy = _matrixport_source_gap_policy(
+        matrixport_missing_dates,
+        matrixport_omitted_return_dates,
+        matrixport_gap_policy,
+    )
+    if expected_matrixport_gap_policy != sources["matrixport-account-generation"].get(
+        "declared_gap_policy"
+    ):
+        raise TargetSeriesError(
+            "Matrixport source gap policy differs from product authority"
+        )
     source_pointer_input_ids = {
         "provider-ledger": "provider-ledger-current",
         "matrixport": "matrixport-current",
@@ -3111,6 +3464,25 @@ def validate_layered_history_generation(
         LAYERED_HISTORY_SEGMENT_FIELDS,
         "layered history segments",
     )
+    canonical_segments = sorted(
+        segments,
+        key=lambda row: (
+            row["strategy_id"],
+            row["date"],
+            row["evidence_layer"],
+            row["segment_id"],
+        ),
+    )
+    if segments != canonical_segments:
+        raise TargetSeriesError("layered history segment ordering differs")
+    excluded = _csv_content_rows(
+        artifacts["excluded.csv"], TARGET_FIELDS, "excluded history evidence"
+    )
+    canonical_excluded = sorted(
+        excluded, key=lambda row: (row["series_id"], row["date"])
+    )
+    if excluded != canonical_excluded:
+        raise TargetSeriesError("excluded history evidence ordering differs")
     live_only = _csv_content_rows(
         artifacts["live-only.csv"], CORRELATION_FIELDS_V2, "LIVE_ONLY history"
     )
@@ -3124,12 +3496,14 @@ def validate_layered_history_generation(
     )
     output_counts = {
         "segments.csv": len(segments),
+        "excluded.csv": len(excluded),
         "returns.csv": len(returns),
         "live-only.csv": len(live_only),
         "live-plus-backtest.csv": len(hybrid),
     }
     expected_schema = {
         "segments.csv": ("portfolio-layered-history-segments", "1"),
+        "excluded.csv": ("portfolio-layered-history-excluded-targets", "1"),
         "returns.csv": ("portfolio-layered-strategy-returns", "2"),
         "live-only.csv": ("portfolio-layered-strategy-returns", "2"),
         "live-plus-backtest.csv": ("portfolio-layered-strategy-returns", "2"),
@@ -3277,10 +3651,27 @@ def validate_layered_history_generation(
         strategy_version = raw.get("strategy_version")
         if not isinstance(strategy_version, dict):
             raise TargetSeriesError("layered history strategy version is absent")
+        product_version = strategies[strategy_id].get("strategy_version")
+        product_version_ref = (
+            product_version.get("version_ref")
+            if isinstance(product_version, dict)
+            else None
+        )
+        expected_version_status, expected_version_ref = _contract_version(
+            strategies[strategy_id]
+        )
+        if strategy_version != {
+            "history_generation_ref": expected_version_ref,
+            "product_status": expected_version_status,
+            "product_version_ref": product_version_ref,
+        }:
+            raise TargetSeriesError("layered history strategy version differs")
         summaries = raw.get("segments")
         if not isinstance(summaries, list):
             raise TargetSeriesError("layered history segment coverage is absent")
         actual_rows = rows_by_strategy[strategy_id]
+        if strategy_id == "echotrade-growth-pivots" and actual_rows:
+            raise TargetSeriesError("EchoTrade event-only history was admitted")
         actual_by_segment = {
             segment_id: [row for row in actual_rows if row["segment_id"] == segment_id]
             for segment_id in {row["segment_id"] for row in actual_rows}
@@ -3315,6 +3706,12 @@ def validate_layered_history_generation(
             )
             selected = actual_by_segment[str(summary["segment_id"])]
             identity = _row_identity(selected)
+            segment_unavailable_dates = (
+                matrixport_unavailable_return_dates
+                if strategy_id == "robuxio-crypto"
+                and selected[0]["source_id"] == "matrixport-account-generation"
+                else frozenset()
+            )
             if (
                 summary.get("sha256"),
                 summary.get("return_observations"),
@@ -3328,13 +3725,15 @@ def validate_layered_history_generation(
                 identity["observed_start"],
                 identity["observed_end"],
                 selected[0]["mode_admission"],
-                _gap_disposition(selected),
+                _gap_disposition(selected, segment_unavailable_dates),
             ):
                 raise TargetSeriesError("layered history segment summary differs")
             if selected[0]["mode_admission"] == "INCLUDE_SELECTED_LIVE" and str(
                 summary["gap_disposition"]
             ).startswith("REQUIRED_NOT_READY"):
-                raise TargetSeriesError("layered history has an unexplained live gap")
+                raise TargetSeriesError(
+                    f"layered history has an unexplained live gap: {strategy_id}"
+                )
 
             segment_id = str(summary["segment_id"])
             if segment_id == f"{strategy_id}:account-live":
@@ -3432,11 +3831,24 @@ def validate_layered_history_generation(
             ],
             key=lambda row: row["date"],
         )
+        live_unavailable_dates = (
+            matrixport_unavailable_return_dates
+            if strategy_id == "robuxio-crypto"
+            else frozenset()
+        )
         if not live_rows:
             live_status = "REQUIRED_NOT_READY"
-            live_reason = "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
-        elif _gap_disposition(live_rows).startswith("REQUIRED_NOT_READY"):
-            raise TargetSeriesError("layered history has an unexplained live gap")
+            live_reason = (
+                "CAPTURED_EVENT_ONLY_RECONSTRUCTION_NOT_ADMISSIBLE_DAILY_NAV"
+                if strategy_id == "echotrade-growth-pivots"
+                else "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
+            )
+        elif _gap_disposition(live_rows, live_unavailable_dates).startswith(
+            "REQUIRED_NOT_READY"
+        ):
+            raise TargetSeriesError(
+                f"layered history has an unexplained live gap: {strategy_id}"
+            )
         else:
             live_source = sources[live_rows[0]["source_id"]]
             freshness = live_source.get("freshness")
@@ -3459,6 +3871,8 @@ def validate_layered_history_generation(
             row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
             for row in actual_rows
         )
+        if admitted_backtest and expected_version_status != "EVIDENCED":
+            raise TargetSeriesError("unapproved backtest entered a selected mode")
         if hybrid_status == "AVAILABLE" and not admitted_backtest:
             hybrid_status = "REQUIRED_NOT_READY"
             if any(
@@ -3498,6 +3912,137 @@ def validate_layered_history_generation(
     resolutions = coverage.get("correction_resolutions")
     if not isinstance(resolutions, dict):
         raise TargetSeriesError("layered history correction resolutions are absent")
+    echo_resolution = resolutions.get("echotrade-event-only-account-live-rejected")
+    echo_correction = corrections.get("echotrade-event-only-account-live-rejected")
+    echo_interval = (
+        echo_correction.get("interval") if isinstance(echo_correction, dict) else None
+    )
+    echo_capture = (
+        echo_correction.get("capture") if isinstance(echo_correction, dict) else None
+    )
+    echo_series_id = coverage_by_strategy.get("echotrade-growth-pivots", {}).get(
+        "series_id"
+    )
+    if (
+        not excluded
+        or not isinstance(echo_series_id, str)
+        or not echo_series_id
+        or any(
+            row["series_id"] != echo_series_id
+            or row["evidence_layer"] != "ACCOUNT_LIVE"
+            or date.fromisoformat(row["date"]) > accepted_as_of
+            or _decimal(row["return"], "excluded return") <= -1
+            for row in excluded
+        )
+        or len({row["date"] for row in excluded}) != len(excluded)
+    ):
+        raise TargetSeriesError("EchoTrade excluded evidence differs")
+    expected_echo_identity = _target_row_identity(excluded)
+    if (
+        not isinstance(echo_resolution, dict)
+        or set(echo_resolution)
+        != {
+            "observed_end",
+            "observed_start",
+            "return_observations",
+            "sha256",
+            "source_generation_id",
+            "status",
+        }
+        or not isinstance(echo_interval, dict)
+        or not isinstance(echo_capture, dict)
+        or {
+            key: echo_resolution.get(key)
+            for key in (
+                "observed_end",
+                "observed_start",
+                "return_observations",
+                "sha256",
+            )
+        }
+        != expected_echo_identity
+        or (
+            echo_resolution.get("observed_start"),
+            echo_resolution.get("observed_end"),
+            echo_resolution.get("source_generation_id"),
+            echo_resolution.get("status"),
+        )
+        != (
+            echo_interval.get("observed_start"),
+            echo_interval.get("observed_end"),
+            echo_capture.get("generation_id"),
+            "REJECTED_EVENT_ONLY_RECONSTRUCTION_NOT_DAILY_NAV",
+        )
+        or not isinstance(echo_resolution.get("return_observations"), int)
+        or echo_resolution["return_observations"] < 1
+        or not isinstance(echo_resolution.get("sha256"), str)
+        or len(echo_resolution["sha256"]) != 64
+    ):
+        raise TargetSeriesError("EchoTrade event-only resolution differs")
+    p123_ai_resolution = resolutions.get("p123-ai-backtest")
+    if not isinstance(p123_ai_resolution, dict):
+        raise TargetSeriesError("Portfolio123 AI backtest disposition is absent")
+    _require_exact_keys(
+        p123_ai_resolution,
+        frozenset(
+            {
+                "index_observations",
+                "observed_end",
+                "observed_start",
+                "relationship_type",
+                "return_observations",
+                "source_labels",
+                "status",
+            }
+        ),
+        "Portfolio123 AI backtest disposition",
+    )
+    p123_ai_rows = [
+        row
+        for row in rows_by_strategy["p123-ai-factor"]
+        if row["evidence_layer"] == "BACKTEST"
+    ]
+    p123_ai_coverage_version = coverage_by_strategy["p123-ai-factor"].get(
+        "strategy_version"
+    )
+    if not isinstance(p123_ai_coverage_version, dict):
+        raise TargetSeriesError("Portfolio123 AI strategy version is absent")
+    p123_ai_product_status = p123_ai_coverage_version.get("product_status")
+    if p123_ai_product_status != "EVIDENCED":
+        expected_p123_ai_status = (
+            "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
+        )
+        if p123_ai_rows:
+            raise TargetSeriesError("unapproved Portfolio123 AI backtest was retained")
+    elif any(
+        row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+        for row in p123_ai_rows
+    ):
+        expected_p123_ai_status = "ADMITTED_EXACT_VERSION_PREHISTORY"
+    elif any(
+        row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP" for row in p123_ai_rows
+    ):
+        expected_p123_ai_status = "DERIVED_NOT_ADMITTED_OVERLAP"
+    else:
+        expected_p123_ai_status = (
+            "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
+        )
+    if (
+        p123_ai_resolution.get("status") != expected_p123_ai_status
+        or p123_ai_resolution.get("relationship_type") != "live_sim_twin"
+        or not isinstance(p123_ai_resolution.get("source_labels"), list)
+        or not isinstance(p123_ai_resolution.get("index_observations"), int)
+        or not isinstance(p123_ai_resolution.get("return_observations"), int)
+        or p123_ai_resolution["index_observations"] < 2
+        or p123_ai_resolution["return_observations"]
+        != p123_ai_resolution["index_observations"] - 1
+    ):
+        raise TargetSeriesError("Portfolio123 AI backtest disposition differs")
+    robuxio_resolution = resolutions.get("robuxio-account-live-after-funding")
+    if not isinstance(robuxio_resolution, dict) or (
+        robuxio_resolution.get("source_gap_policy") != expected_matrixport_gap_policy
+    ):
+        raise TargetSeriesError("Matrixport source gap resolution differs")
     p123_resolution = resolutions.get("p123-eu-provider-live")
     if not isinstance(p123_resolution, dict) or (
         p123_resolution.get("status"),
@@ -3549,6 +4094,14 @@ def validate_layered_history_generation(
         )
     ):
         raise TargetSeriesError("Robuxio funding correction differs")
+    if robuxio_resolution != {
+        "account_live_start": funding_start.isoformat(),
+        "observed_end": robuxio_live[-1]["date"],
+        "observed_start": robuxio_live[0]["date"],
+        "source_gap_policy": expected_matrixport_gap_policy,
+        "status": "RESOLVED_BY_PIPE_HISTORY_001",
+    }:
+        raise TargetSeriesError("Robuxio source gap coverage differs")
     for strategy_id, correction_id in (
         ("p123-eu", "p123-eu-account-live"),
         ("volatis-strategy", "volatis-account-live"),

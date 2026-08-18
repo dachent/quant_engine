@@ -66,6 +66,11 @@ def _sources(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
             {
                 "generation_id": "a" * 64,
                 "verification": "VERIFIED",
+                "coverage": {
+                    "declared_exclusions": [],
+                    "known_gaps": [],
+                    "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                },
                 "artifacts": [
                     {
                         "artifact_id": "csv/nav_daily.csv",
@@ -90,6 +95,39 @@ def _sources(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     return base, manifest, nav, holdings, subscriptions
 
 
+def _matrixport_exclusions(*dates: str) -> list[dict[str, str]]:
+    return [
+        {
+            "item": f"{kind}:{observed}",
+            "provenance": "owner-accepted 2026-08-14, issue #287",
+            "reason": "provider NAV endpoint returned no data for this date",
+        }
+        for kind in (
+            "fx_missing_date",
+            "nav_missing_date",
+            "reconciliation_incomplete_date",
+        )
+        for observed in dates
+    ]
+
+
+def _rebind_matrixport_nav(
+    manifest: Path, nav: Path, *, declared_dates: tuple[str, ...]
+) -> None:
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    nav_artifact = next(
+        row
+        for row in manifest_value["artifacts"]
+        if row["artifact_id"] == "csv/nav_daily.csv"
+    )
+    nav_artifact["sha256"] = hashlib.sha256(nav.read_bytes()).hexdigest()
+    nav_artifact["size_bytes"] = nav.stat().st_size
+    manifest_value["coverage"]["declared_exclusions"] = _matrixport_exclusions(
+        *declared_dates
+    )
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+
+
 def test_matrixport_target_starts_account_live_only_after_funding(
     tmp_path: Path,
 ) -> None:
@@ -104,7 +142,7 @@ def test_matrixport_target_starts_account_live_only_after_funding(
     assert [row["return"] for row in robuxio] == ["-0.1"]
     assert {row["evidence_layer"] for row in robuxio} == {"ACCOUNT_LIVE"}
     proof = json.loads(proof_bytes)
-    assert proof["builder"] == "portfolio-target-series/matrixport-2"
+    assert proof["builder"] == "portfolio-target-series/matrixport-3"
     assert proof["coverage"]["nav_observations"] == 3
     assert proof["coverage"]["provider_live_observed_end"] == "2026-01-01"
     assert proof["coverage"]["account_live_start"] == "2026-01-02"
@@ -112,6 +150,112 @@ def test_matrixport_target_starts_account_live_only_after_funding(
     assert proof["coverage"]["subscription_initiated_date"] == "2026-01-01"
     assert proof["coverage"]["boundary_return_excluded"] is True
     assert proof["coverage"]["return_observations"] == 1
+    assert proof["coverage"]["source_gap_policy"] == {
+        "authority_bound": False,
+        "declared_missing_source_dates": [],
+        "omitted_return_dates": [],
+        "unavailable_return_dates": [],
+    }
+
+
+def test_matrixport_target_omits_declared_gaps_and_spanning_returns(
+    tmp_path: Path,
+) -> None:
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
+    _write(
+        nav,
+        "product_id,timestamp_utc,nav\n"
+        "P1,2026-01-01T00:00:00Z,1\n"
+        "P1,2026-01-02T00:00:00Z,1.1\n"
+        "P1,2026-01-04T00:00:00Z,1.2\n"
+        "P1,2026-01-05T00:00:00Z,1.32\n"
+        "P1,2026-01-07T00:00:00Z,1.4\n"
+        "P1,2026-01-08T00:00:00Z,1.54\n",
+    )
+    _rebind_matrixport_nav(manifest, nav, declared_dates=("2026-01-03", "2026-01-06"))
+
+    targets, proof_bytes = build_matrixport_targets(
+        base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
+    )
+    rows = list(csv.DictReader(io.StringIO(targets.decode("utf-8"))))
+    robuxio = [row for row in rows if row["series_id"] == "Robuxio"]
+    assert [(row["date"], row["return"]) for row in robuxio] == [
+        ("2026-01-05", "0.1"),
+        ("2026-01-08", "0.1"),
+    ]
+    policy = json.loads(proof_bytes)["coverage"]["source_gap_policy"]
+    assert policy["declared_missing_source_dates"] == [
+        "2026-01-03",
+        "2026-01-06",
+    ]
+    assert policy["omitted_return_dates"] == ["2026-01-04", "2026-01-07"]
+    assert policy["unavailable_return_dates"] == [
+        "2026-01-03",
+        "2026-01-04",
+        "2026-01-06",
+        "2026-01-07",
+    ]
+    assert policy["authority_bound"] is False
+
+
+def test_matrixport_target_rejects_undeclared_or_stale_gap(
+    tmp_path: Path,
+) -> None:
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
+    _write(
+        nav,
+        "product_id,timestamp_utc,nav\n"
+        "P1,2026-01-01T00:00:00Z,1\n"
+        "P1,2026-01-02T00:00:00Z,1.1\n"
+        "P1,2026-01-04T00:00:00Z,1.2\n"
+        "P1,2026-01-05T00:00:00Z,1.3\n",
+    )
+    _rebind_matrixport_nav(manifest, nav, declared_dates=())
+    with pytest.raises(TargetSeriesError, match="NAV gaps differ"):
+        build_matrixport_targets(
+            base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
+        )
+
+    _rebind_matrixport_nav(manifest, nav, declared_dates=("2026-01-03", "2026-01-06"))
+    with pytest.raises(TargetSeriesError, match="NAV gaps differ"):
+        build_matrixport_targets(
+            base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
+        )
+
+
+def test_matrixport_target_rejects_mismatched_or_duplicate_gap_authority(
+    tmp_path: Path,
+) -> None:
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    exclusions = _matrixport_exclusions("2026-01-03")
+    exclusions.pop()
+    manifest_value["coverage"]["declared_exclusions"] = exclusions
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+    with pytest.raises(TargetSeriesError, match="date sets differ"):
+        build_matrixport_targets(
+            base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
+        )
+
+    manifest_value["coverage"]["declared_exclusions"] = [
+        *_matrixport_exclusions("2026-01-03"),
+        _matrixport_exclusions("2026-01-03")[0],
+    ]
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+    with pytest.raises(TargetSeriesError, match="duplicated"):
+        build_matrixport_targets(
+            base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
+        )
+
+    manifest_value["coverage"]["declared_exclusions"] = _matrixport_exclusions(
+        "2026-01-03"
+    )
+    manifest_value["coverage"]["declared_exclusions"][0]["provenance"] = "unapproved"
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+    with pytest.raises(TargetSeriesError, match="authority differs"):
+        build_matrixport_targets(
+            base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
+        )
 
 
 def test_matrixport_target_rejects_manifest_drift(tmp_path: Path) -> None:

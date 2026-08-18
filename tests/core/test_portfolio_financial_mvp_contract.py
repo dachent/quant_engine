@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import date
 import hashlib
 import importlib.util
 import json
@@ -120,7 +121,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "9ff108b2de52ba94442e6975a20e46bcfcda86ca79e0f271d4929dd783ae46ee"
+        "4aa3a7b9196d5dae80b325ae0e2b6d35389c140c409abc759a3ad1e321be0271"
     )
 
 
@@ -467,7 +468,103 @@ def test_source_matrix_covers_every_mandated_class_and_provider_family() -> None
         "temporal",
         "units",
     }
-    assert all(set(source) == required_fields for source in sources)
+    assert all(required_fields <= set(source) for source in sources)
+    assert all(
+        set(source) - required_fields <= {"declared_gap_policy"} for source in sources
+    )
+    assert {
+        source["source_id"] for source in sources if "declared_gap_policy" in source
+    } == {"matrixport-account-generation"}
+
+
+def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> None:
+    contract = _contract()
+    source = _source(contract, "matrixport-account-generation")
+    policy = source["declared_gap_policy"]
+    assert policy["authority_issue"] > 0
+    assert policy["policy_id"]
+    assert policy["provenance"]
+    assert policy["reason"]
+    assert policy["return_rule"]
+    missing = {
+        date.fromisoformat(value) for value in policy["declared_missing_source_dates"]
+    }
+    omitted = {date.fromisoformat(value) for value in policy["omitted_return_dates"]}
+    unavailable = {
+        date.fromisoformat(value) for value in policy["unavailable_return_dates"]
+    }
+    assert omitted == {
+        value + date.resolution
+        for value in missing
+        if value + date.resolution not in missing
+    }
+    assert unavailable == missing | omitted
+    assert source["readiness"] == "REQUIRED_NOT_READY"
+    assert source["blockers"] == [324, 318]
+    assert source["admission"] == {
+        "facts": [
+            "NAV_OBSERVATION",
+            "CAPITAL_ANCHOR",
+            "FINANCING_LIABILITY",
+            "LEVERAGE_EXPOSURE",
+            "FINANCING_COST",
+        ],
+        "transform": "provider-ledger",
+        "version": "1",
+    }
+    assert policy["return_transform"] == {
+        "facts": [
+            "ACCOUNT_LIVE_DAILY_RETURN",
+            "PROVIDER_LIVE_DAILY_RETURN",
+            "DECLARED_GAP_COVERAGE",
+        ],
+        "transform": "matrixport-declared-gap-one-day-returns",
+        "version": "1",
+    }
+    robuxio = next(
+        row for row in contract["strategies"] if row["strategy_id"] == "robuxio-crypto"
+    )
+    assert "unexplained" not in robuxio["readiness_reason"].lower()
+
+    views = contract_tool.render_views(contract)
+    matrix = json.loads(views.source_matrix_json)
+    rows = [
+        row
+        for row in matrix["rows"]
+        if row["source_id"] == "matrixport-account-generation"
+    ]
+    assert len(rows) == 30
+    assert all(row["declared_gap_policy"] == policy for row in rows)
+    assert all(
+        row["declared_gap_policy"] is None
+        for row in matrix["rows"]
+        if row["source_id"] != "matrixport-account-generation"
+    )
+    markdown = views.summary_markdown.decode("utf-8")
+    assert "## Declared source-gap policies" in markdown
+    assert ", ".join(policy["declared_missing_source_dates"]) in markdown
+    assert ", ".join(policy["omitted_return_dates"]) in markdown
+    assert "matrixport-declared-gap-one-day-returns@1" in markdown
+    assert ", ".join(policy["return_transform"]["facts"]) in markdown
+
+    changed_date = copy.deepcopy(contract)
+    changed_policy = _source(changed_date, "matrixport-account-generation")[
+        "declared_gap_policy"
+    ]
+    changed_policy["omitted_return_dates"] = ["2026-01-29", "2026-07-04"]
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="omitted return dates differ",
+    ):
+        _validate(changed_date)
+
+    missing_policy = copy.deepcopy(contract)
+    del _source(missing_policy, "matrixport-account-generation")["declared_gap_policy"]
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="lacks the owner-declared gap policy",
+    ):
+        _validate(missing_policy)
 
 
 def test_history_existence_capture_and_evidence_layers_are_separate() -> None:
@@ -493,7 +590,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     assert history["policy_id"] == "PORT-HISTORY-TRUTH-1"
     assert history["owner_issue"] == 319
     rows = history["corrections"]
-    assert len(rows) == 9
+    assert len(rows) == 10
     assert {(row["strategy_id"], row["evidence_layer"]) for row in rows} == {
         ("robuxio-crypto", "PROVIDER_TRACK_RECORD"),
         ("robuxio-crypto", "PROVIDER_LIVE"),
@@ -504,6 +601,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         ("volatis-strategy", "BACKTEST"),
         ("volatis-strategy", "PROVIDER_LIVE"),
         ("volatis-strategy", "ACCOUNT_LIVE"),
+        ("echotrade-growth-pivots", "ACCOUNT_LIVE"),
     }
 
     robux_live = _history_correction(contract, "robuxio-account-live-after-funding")
@@ -538,6 +636,14 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     volatis_live = _history_correction(contract, "volatis-account-live")
     assert volatis_live["funding_event"]["event_date"] == "2024-10-15"
     assert volatis_live["interval"]["observed_start"] == "2024-10-16"
+    echotrade = _history_correction(
+        contract, "echotrade-event-only-account-live-rejected"
+    )
+    assert echotrade["readiness"] == "REQUIRED_NOT_READY"
+    assert set(echotrade["mode_admission"].values()) == {
+        "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
+    }
+    assert echotrade["funding_event"]["status"] == "UNRESOLVED"
     assert (
         "EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE"
         in (volatis_live["funding_event"]["authority"])

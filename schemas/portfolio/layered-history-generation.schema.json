@@ -25,7 +25,7 @@
     "$schema": {"type": "string", "minLength": 1},
     "schema_version": {"const": 1},
     "builder": {"const": "portfolio-target-series/layered-history-1"},
-    "builder_version": {"const": "1.0.0"},
+    "builder_version": {"const": "1.3.0"},
     "generation_id": {"$ref": "#/$defs/sha256"},
     "as_of_date": {"type": "string", "format": "date"},
     "repository_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
@@ -80,6 +80,7 @@
       "additionalProperties": false,
       "required": [
         "segments.csv",
+        "excluded.csv",
         "returns.csv",
         "live-only.csv",
         "live-plus-backtest.csv",
@@ -87,6 +88,7 @@
       ],
       "properties": {
         "segments.csv": {"$ref": "#/$defs/outputArtifact"},
+        "excluded.csv": {"$ref": "#/$defs/outputArtifact"},
         "returns.csv": {"$ref": "#/$defs/outputArtifact"},
         "live-only.csv": {"$ref": "#/$defs/outputArtifact"},
         "live-plus-backtest.csv": {"$ref": "#/$defs/outputArtifact"},
