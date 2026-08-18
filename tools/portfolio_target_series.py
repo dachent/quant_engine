@@ -1757,26 +1757,24 @@ def _verified_current_generation(
         raise TargetSeriesError(f"{name} generation manifest differs from contract")
     pointer_schema_version = pointer.get("pointer_schema_version")
     expected_pointer_keys = {
+        "artifact_inventory_sha256",
         "generation_id",
         "manifest_sha256",
         "pointer_schema_version",
         "state",
     }
-    if pointer_schema_version == 2:
-        expected_pointer_keys.add("artifact_inventory_sha256")
-    if set(pointer) != expected_pointer_keys or pointer_schema_version not in {1, 2}:
+    if set(pointer) != expected_pointer_keys or pointer_schema_version != 2:
         raise TargetSeriesError(f"{name} current pointer contract differs")
-    if pointer_schema_version == 2:
-        inventory_sha256 = _source_generation_inventory_sha256(
-            inventory_profile, manifest_content, manifest
-        )
-        if pointer.get("artifact_inventory_sha256") != inventory_sha256:
-            raise TargetSeriesError(f"{name} current pointer inventory differs")
-        generation_dir = pointer_path.parent / "generations" / generation_id
-        if generation_dir.exists() and (
-            _generation_directory_inventory_sha256(generation_dir) != inventory_sha256
-        ):
-            raise TargetSeriesError(f"{name} published generation inventory differs")
+    inventory_sha256 = _source_generation_inventory_sha256(
+        inventory_profile, manifest_content, manifest
+    )
+    if pointer.get("artifact_inventory_sha256") != inventory_sha256:
+        raise TargetSeriesError(f"{name} current pointer inventory differs")
+    generation_dir = pointer_path.parent / "generations" / generation_id
+    if generation_dir.exists() and (
+        _generation_directory_inventory_sha256(generation_dir) != inventory_sha256
+    ):
+        raise TargetSeriesError(f"{name} published generation inventory differs")
     as_of = str(manifest.get("as_of_date", ""))
     try:
         date.fromisoformat(as_of)
@@ -3875,17 +3873,13 @@ def validate_layered_history_generation(
             raise TargetSeriesError("layered history source pointer is not canonical")
         pointer_schema_version = pointer.get("pointer_schema_version")
         expected_pointer_keys = {
+            "artifact_inventory_sha256",
             "generation_id",
             "manifest_sha256",
             "pointer_schema_version",
             "state",
         }
-        if pointer_schema_version == 2:
-            expected_pointer_keys.add("artifact_inventory_sha256")
-        if set(pointer) != expected_pointer_keys or pointer_schema_version not in {
-            1,
-            2,
-        }:
+        if set(pointer) != expected_pointer_keys or pointer_schema_version != 2:
             raise TargetSeriesError("layered history source pointer contract differs")
         pointer_input = inputs.get(pointer_input_id)
         manifest_input = inputs[source_manifest_input_ids[source_name]]
@@ -3910,7 +3904,7 @@ def validate_layered_history_generation(
                 f"layered history current pointer differs: {source_name}"
             )
         inventory_sha = pointer.get("artifact_inventory_sha256")
-        if pointer_schema_version == 2 and (
+        if (
             not isinstance(inventory_sha, str)
             or len(inventory_sha) != 64
             or any(ch not in "0123456789abcdef" for ch in inventory_sha)

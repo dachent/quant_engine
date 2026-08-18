@@ -1893,6 +1893,30 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
             contract_path=fixture["contract_path"],
         )
 
+    pointer_downgrade = json.loads(manifest_content)
+    downgraded_pointer = json.loads(
+        pointer_downgrade["source_pointers"]["provider-ledger"]
+    )
+    downgraded_pointer["pointer_schema_version"] = 1
+    downgraded_pointer.pop("artifact_inventory_sha256")
+    downgraded_pointer_content = canonical_json_bytes(downgraded_pointer)
+    pointer_downgrade["source_pointers"]["provider-ledger"] = (
+        downgraded_pointer_content.decode("utf-8")
+    )
+    downgraded_input = next(
+        row
+        for row in pointer_downgrade["inputs"]
+        if row["input_id"] == "provider-ledger-current"
+    )
+    downgraded_input["sha256"] = hashlib.sha256(downgraded_pointer_content).hexdigest()
+    downgraded_input["size_bytes"] = len(downgraded_pointer_content)
+    with pytest.raises(TargetSeriesError, match="source pointer contract differs"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(pointer_downgrade),
+            contract_path=fixture["contract_path"],
+        )
+
     input_order_rewrite = json.loads(manifest_content)
     input_order_rewrite["inputs"][0], input_order_rewrite["inputs"][1] = (
         input_order_rewrite["inputs"][1],
