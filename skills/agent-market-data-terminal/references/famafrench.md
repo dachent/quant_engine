@@ -46,6 +46,20 @@ Each section keeps:
 - `columns`
 - `rows`
 
+Every raw or parsed output receives a deterministic sibling
+`*.manifest.json`. Parsed mode also retains the native ZIP as
+`*.source.zip`. The receipt binds the exact request, retained raw ZIP name,
+hash and size, written artifact hash and size, coverage summary, and a
+content-derived source run ID. Output paths must resolve inside the current
+workspace, and an existing different artifact or receipt is never overwritten.
+
+Downstream normalization receives explicit `run_started_at_utc`,
+`run_ended_at_utc`, and `evaluation_date` values. Every source receipt must have
+been captured inside that run window. Daily observations are published in monthly batches:
+the latest required observation month is the latest month whose calendar
+month-end plus 45 days is on or before the evaluation date. This publication
+rule is independent of whether the pipeline is scheduled daily or weekly.
+
 ## Guidance
 
 - Raw mode should preserve the native zip payload unchanged.
@@ -53,3 +67,9 @@ Each section keeps:
 - Convert provider missing sentinels like `-99.99` and `-999` to `null`.
 - Reject `_TXT.zip` feeds and reject HTML page URLs.
 - Do not scrape `data_library.html` or any other Kenneth French HTML page during runtime.
+- Supply the parsed artifact and its sibling source-run manifest together to
+  downstream normalization; the parsed JSON alone is not acquisition evidence.
+- Never classify monthly-published daily observations as stale merely because
+  their last observation is more than a run interval old. Require a new capture
+  on every run and assess the observation month against the 45-day publication
+  deadline separately.

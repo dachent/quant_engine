@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import hashlib
 import io
@@ -14,7 +14,28 @@ import shutil
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.3.0"
+BUILDER_VERSION = "0.4.0"
+PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
+PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
+PUBLIC_FACTOR_FRESHNESS_POLICY = {
+    "policy_id": "KENNETH_FRENCH_MONTHLY_DAILY_45D_V1",
+    "observation_cadence": "DAILY",
+    "publication_cadence": "MONTHLY",
+    "deadline_anchor": "CALENDAR_MONTH_END",
+    "publication_lag_days": 45,
+    "calendar": "CALENDAR_DAY",
+    "deadline_inclusive": True,
+    "boundary_rule": "LATEST_PROVIDER_VALID_DAY_IN_ELIGIBLE_MONTH",
+    "receipt_rule": "CAPTURED_WITHIN_CURRENT_RUN",
+}
+PUBLIC_FACTOR_INPUT_KEYS = ("us_factors", "europe_factors", "us_industries")
+PUBLIC_FACTOR_RECEIPT_KEYS = {
+    "us_factors",
+    "us_momentum",
+    "europe_factors",
+    "europe_momentum",
+    "us_industries",
+}
 LENSES = (
     "ECONOMIC_FACTOR",
     "ETF_STYLE",
@@ -147,6 +168,31 @@ def _day(value: object, name: str) -> date:
     return parsed
 
 
+def _utc_datetime(value: object, name: str) -> datetime:
+    accepted = _text(value, name)
+    if not accepted.endswith("Z"):
+        raise CurrentPlanError(f"{name} must be RFC3339 UTC")
+    try:
+        parsed = datetime.fromisoformat(accepted.removesuffix("Z") + "+00:00")
+    except ValueError as exc:
+        raise CurrentPlanError(f"{name} must be RFC3339 UTC") from exc
+    if parsed.isoformat().replace("+00:00", "Z") != accepted:
+        raise CurrentPlanError(f"{name} must be canonical RFC3339 UTC")
+    return parsed
+
+
+def _month_end(value: date) -> date:
+    next_month = (value.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return next_month - timedelta(days=1)
+
+
+def _required_observation_month_end(evaluated_on: date) -> date:
+    candidate = _month_end(evaluated_on)
+    while candidate + timedelta(days=45) > evaluated_on:
+        candidate = _month_end(candidate.replace(day=1) - timedelta(days=1))
+    return candidate
+
+
 def _read_csv(path: Path, name: str) -> tuple[tuple[str, ...], list[dict[str, str]]]:
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
@@ -253,6 +299,169 @@ def _verify_market_manifest(
         expected.get(size_key), f"market manifest {path.name} size"
     ) != len(content):
         raise CurrentPlanError(f"market input {path.name} differs from its manifest")
+
+
+def _verify_public_factor_manifest(
+    manifest_path: Path,
+    market_paths: Mapping[str, Path],
+    catalog_sha256: str,
+    evaluation_date: date,
+) -> dict[str, date]:
+    manifest, _content = _load_json(manifest_path, "public factor source manifest")
+    if (
+        manifest.get("schema_version") != 2
+        or manifest.get("builder") != PUBLIC_FACTOR_BUILDER
+        or manifest.get("builder_version") != PUBLIC_FACTOR_BUILDER_VERSION
+    ):
+        raise CurrentPlanError("public factor manifest contract is unsupported")
+    catalog = _object(manifest.get("catalog"), "public factor manifest catalog")
+    if catalog.get("sha256") != catalog_sha256:
+        raise CurrentPlanError(
+            "public factor manifest catalog differs from the current catalog"
+        )
+    if manifest.get("freshness_policy") != PUBLIC_FACTOR_FRESHNESS_POLICY:
+        raise CurrentPlanError("public factor freshness policy differs")
+
+    run = _object(manifest.get("acquisition_run"), "public factor acquisition run")
+    if run.get("acquisition_requirement") != "EVERY_SOURCE_CAPTURED_WITHIN_CURRENT_RUN":
+        raise CurrentPlanError("public factor acquisition requirement differs")
+    evaluated_on = _day(run.get("evaluation_date"), "public factor evaluation date")
+    if evaluated_on != evaluation_date:
+        raise CurrentPlanError(
+            "public factor evaluation date differs from the current planning run"
+        )
+    run_started = _utc_datetime(
+        run.get("run_started_at_utc"), "public factor run start"
+    )
+    run_ended = _utc_datetime(run.get("run_ended_at_utc"), "public factor run end")
+    capture_first = _utc_datetime(
+        run.get("capture_window_first_utc"), "public factor first capture"
+    )
+    capture_last = _utc_datetime(
+        run.get("capture_window_last_utc"), "public factor last capture"
+    )
+    if not run_started <= capture_first <= capture_last <= run_ended:
+        raise CurrentPlanError("public factor captures fall outside the current run")
+    receipts = _object(
+        run.get("receipt_manifest_sha256s"), "public factor receipt hashes"
+    )
+    if set(receipts) != PUBLIC_FACTOR_RECEIPT_KEYS or any(
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        for value in receipts.values()
+    ):
+        raise CurrentPlanError("public factor receipt hash set differs")
+    run_payload = {
+        "evaluation_date": evaluated_on.isoformat(),
+        "run_started_at_utc": run.get("run_started_at_utc"),
+        "run_ended_at_utc": run.get("run_ended_at_utc"),
+        "receipt_manifest_sha256s": receipts,
+    }
+    if run.get("run_id") != _sha256(_canonical_json(run_payload)):
+        raise CurrentPlanError("public factor acquisition run identity differs")
+
+    source_rows = {
+        _text(item.get("source_key"), "public factor source key"): item
+        for item in _objects(manifest.get("sources"), "public factor sources")
+    }
+    if (
+        len(source_rows) != len(manifest.get("sources", []))
+        or set(source_rows) != PUBLIC_FACTOR_RECEIPT_KEYS
+    ):
+        raise CurrentPlanError("public factor source receipt set differs")
+    source_capture_times: dict[str, datetime] = {}
+    for key, source in source_rows.items():
+        if source.get("source_manifest_sha256") != receipts[key]:
+            raise CurrentPlanError(
+                f"public factor {key} source receipt identity differs"
+            )
+        response = _object(source.get("response"), f"public factor {key} response")
+        captured_at = _utc_datetime(
+            response.get("captured_at_utc"), f"public factor {key} capture"
+        )
+        if captured_at < run_started or captured_at > run_ended:
+            raise CurrentPlanError(
+                f"public factor {key} capture falls outside the current run"
+            )
+        source_capture_times[key] = captured_at
+    if capture_first != min(source_capture_times.values()) or capture_last != max(
+        source_capture_times.values()
+    ):
+        raise CurrentPlanError("public factor capture window differs from source rows")
+
+    declared_bundle_id = manifest.get("bundle_id")
+    manifest_without_id = dict(manifest)
+    manifest_without_id.pop("bundle_id", None)
+    if declared_bundle_id != _sha256(_canonical_json(manifest_without_id)):
+        raise CurrentPlanError("public factor bundle identity differs")
+
+    outputs = {
+        _text(item.get("path"), "public factor output path"): item
+        for item in _objects(manifest.get("outputs"), "public factor outputs")
+    }
+    if len(outputs) != len(manifest.get("outputs", [])):
+        raise CurrentPlanError("public factor output paths must be unique")
+    admitted_boundaries: dict[str, date] = {}
+    for key in PUBLIC_FACTOR_INPUT_KEYS:
+        path = market_paths[key]
+        expected = outputs.get(path.name)
+        if expected is None:
+            raise CurrentPlanError(
+                f"public factor manifest has no output for {path.name}"
+            )
+        content = path.read_bytes()
+        if expected.get("sha256") != _sha256(content) or _integer(
+            expected.get("bytes"), f"public factor manifest {path.name} size"
+        ) != len(content):
+            raise CurrentPlanError(
+                f"public factor input {path.name} differs from its manifest"
+            )
+        freshness = _object(
+            expected.get("freshness"), f"public factor {path.name} freshness"
+        )
+        if freshness.get("state") != "CURRENT":
+            raise CurrentPlanError(f"public factor {path.name} is not current")
+        accepted_end = _day(
+            freshness.get("accepted_observation_end"),
+            f"public factor {path.name} accepted observation end",
+        )
+        if expected.get("last_date") != accepted_end.isoformat():
+            raise CurrentPlanError(
+                f"public factor {path.name} does not end at its admitted boundary"
+            )
+        _headers, rows = _read_csv(path, f"public factor {path.name}")
+        observed_end = _day(rows[-1].get("date"), f"public factor {path.name} end")
+        if observed_end != accepted_end:
+            raise CurrentPlanError(
+                f"public factor {path.name} bytes exceed their admitted boundary"
+            )
+        eligible_month_end = _day(
+            freshness.get("eligible_month_end"),
+            f"public factor {path.name} eligible month end",
+        )
+        if (
+            eligible_month_end != _required_observation_month_end(evaluated_on)
+            or freshness.get("eligible_month") != eligible_month_end.strftime("%Y-%m")
+            or (accepted_end.year, accepted_end.month)
+            != (eligible_month_end.year, eligible_month_end.month)
+        ):
+            raise CurrentPlanError(
+                f"public factor {path.name} admitted publication month differs"
+            )
+        deadline = _day(
+            freshness.get("publication_deadline"),
+            f"public factor {path.name} publication deadline",
+        )
+        if (
+            deadline != eligible_month_end + timedelta(days=45)
+            or deadline > evaluated_on
+        ):
+            raise CurrentPlanError(
+                f"public factor {path.name} publication deadline has not elapsed"
+            )
+        admitted_boundaries[key] = accepted_end
+    return admitted_boundaries
 
 
 def _resolved_strategies(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -385,6 +594,7 @@ def build_bundle(
     public_factor_manifest_path: Path,
     style_manifest_path: Path,
     sector_manifest_path: Path,
+    evaluation_date: str,
     evidence_mode: str = "LIVE_ONLY",
 ) -> tuple[dict[str, bytes], dict[str, object]]:
     """Build a deterministic current-strategy planning bundle without writing."""
@@ -394,6 +604,7 @@ def build_bundle(
     base_spec, base_spec_content = _load_json(base_spec_path, "base specification")
     if plan.get("schema_version") != 1:
         raise CurrentPlanError("current strategy plan schema is unsupported")
+    evaluated_on = _day(evaluation_date, "evaluation_date")
     if evidence_mode not in {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}:
         raise CurrentPlanError("evidence_mode is unsupported")
     if set(market_paths) != set(INPUT_KEYS):
@@ -402,10 +613,9 @@ def build_bundle(
         if path.is_symlink() or not path.is_file():
             raise CurrentPlanError("market input must be a regular file")
     catalog_sha256 = _sha256(catalog_content)
-    for key in ("us_factors", "europe_factors", "us_industries"):
-        _verify_market_manifest(
-            market_paths[key], public_factor_manifest_path, catalog_sha256
-        )
+    public_factor_boundaries = _verify_public_factor_manifest(
+        public_factor_manifest_path, market_paths, catalog_sha256, evaluated_on
+    )
     _verify_market_manifest(
         market_paths["style_returns"], style_manifest_path, catalog_sha256
     )
@@ -421,6 +631,8 @@ def build_bundle(
             "base target headers differ from the decomposition contract"
         )
     targets_by_series = _target_dates(target_rows)
+    if any(days[-1] > evaluated_on for days in targets_by_series.values()):
+        raise CurrentPlanError("target observations extend beyond the evaluation date")
 
     outputs: dict[str, bytes] = {
         "inputs/governance/current-strategy-decomposition-plan.json": plan_content,
@@ -602,12 +814,37 @@ def build_bundle(
             targets_by_series[series_id][-1] for series_id in assigned_series
         )
         analysis_as_of = target_last
-        factor_as_of = min(complete_dates[-1], analysis_as_of)
-        maximum_factor_staleness_days = _integer(
-            source_plan.get("maximum_factor_staleness_days", 10),
-            f"source {source_key} maximum_factor_staleness_days",
-        )
         complete_date_set = set(complete_dates)
+        if input_key in public_factor_boundaries:
+            if (
+                source_plan.get("freshness_policy_id")
+                != PUBLIC_FACTOR_FRESHNESS_POLICY["policy_id"]
+            ):
+                raise CurrentPlanError(
+                    f"source {source_key} public factor freshness policy differs"
+                )
+            admitted_boundary = public_factor_boundaries[input_key]
+            if market_rows[input_key][-1].get("date") != admitted_boundary.isoformat():
+                raise CurrentPlanError(
+                    f"source {source_key} does not end at the admitted boundary"
+                )
+            if analysis_as_of >= admitted_boundary:
+                if admitted_boundary not in complete_date_set:
+                    raise CurrentPlanError(
+                        f"source {source_key} is incomplete at the admitted boundary"
+                    )
+                factor_as_of = admitted_boundary
+            else:
+                factor_as_of = min(complete_dates[-1], analysis_as_of)
+            maximum_factor_staleness_days = max(
+                0, (analysis_as_of - admitted_boundary).days
+            )
+        else:
+            factor_as_of = min(complete_dates[-1], analysis_as_of)
+            maximum_factor_staleness_days = _integer(
+                source_plan.get("maximum_factor_staleness_days", 10),
+                f"source {source_key} maximum_factor_staleness_days",
+            )
         projected_factor_rows = [
             [row["date"], *(row[column] for column in required)]
             for row in market_rows[input_key]
@@ -803,6 +1040,7 @@ def build_bundle(
         "schema_version": 1,
         "builder": "portfolio-current-decomposition-plan",
         "builder_version": BUILDER_VERSION,
+        "evaluation_date": evaluated_on.isoformat(),
         "inputs": [
             {
                 "path": path,
@@ -882,6 +1120,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--public-factor-manifest", type=Path, required=True)
     parser.add_argument("--style-manifest", type=Path, required=True)
     parser.add_argument("--sector-manifest", type=Path, required=True)
+    parser.add_argument("--evaluation-date", required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument(
         "--evidence-mode",
@@ -909,6 +1148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         public_factor_manifest_path=args.public_factor_manifest,
         style_manifest_path=args.style_manifest,
         sector_manifest_path=args.sector_manifest,
+        evaluation_date=args.evaluation_date,
         evidence_mode=args.evidence_mode,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

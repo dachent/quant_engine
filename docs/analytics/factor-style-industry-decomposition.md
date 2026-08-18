@@ -146,21 +146,32 @@ not overwrite prior evidence.
 `tools/portfolio_public_decomposition_sources.py` converts accepted Kenneth
 French parser outputs into three deterministic files: US factors, Europe
 factors, and US 49-industry value-weighted returns. It verifies every feed
-identity and URL, hashes every input and output, converts provider percentages
-to decimal returns, joins factor and momentum histories only on exact dates,
+identity and URL, requires each parsed input's hash-bound acquisition receipt,
+verifies the retained raw ZIP, binds its hash and the content-derived source-run
+identity, hashes every input and output, converts provider percentages to
+decimal returns, joins factor and momentum histories only on exact dates,
 joins US industries to the US risk-free series on exact dates, and preserves
 missing industry returns as empty observations. Its column order is directly
 compatible with the decomposition engine: date, risk-free return, then factor
 or industry returns. It never fills, interpolates, or treats missing values as
-zero.
+zero. Parsed JSON without the matching acquisition receipt fails before model
+planning. The normalizer also binds the declared run interval and evaluation
+date; every source receipt must fall inside that current run window.
 
 Coverage is reported as three separate intervals: the complete retained
 strategy target, the complete model-specific factor source, and their
 exact-common-date aligned regression sample. A model-source publication lag
 must never truncate or relabel the retained strategy interval. Kenneth French
 daily files are monthly-published public sources and use a declared 45-calendar-
-day lag allowance; the aligned end still stops at the last available provider
-observation and names the factor source as the limiting input.
+day publication allowance measured from calendar month-end. On each daily or
+weekly pipeline run, the source is captured anew. Observation currency is
+assessed separately: the output must contain the latest month whose month-end
+plus 45 days is on or before the evaluation date. For example, on 2026-08-17,
+June 2026 is required and July 2026 is not yet due. The planning run must use
+the same evaluation date, bind all five source-receipt hashes and the full
+source-bundle identity, and reject a required factor missing at the admitted
+boundary. The aligned end stops at the last admitted provider observation and
+names the factor source as the limiting input.
 
 `tools/portfolio_public_style_sources.py` independently verifies the governed
 Yahoo adjusted-history artifact and its sibling source manifest, derives the
@@ -190,8 +201,9 @@ becoming an indiscriminate mega-model. The first current-book assignments are:
 - Composer: dropped as immaterial from current scope.
 
 `tools/portfolio_current_decomposition_plan.py` verifies the plan, candidate
-catalog, target evidence, provider provenance, and market-source manifests. It
-then copies every input into a content-addressed local planning bundle and
+catalog, target evidence, provider provenance, the operational evaluation date,
+and every market-source receipt and bundle identity. It then copies every input
+into a content-addressed local planning bundle and
 emits separate `ECONOMIC_FACTOR`, `ETF_STYLE`, `RETURN_SECTOR`, and
 `RETURN_INDUSTRY`
 specifications. Every strategy/candidate pair receives an explicit disposition.

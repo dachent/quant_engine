@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
+import hashlib
 import io
 import json
 import re
@@ -16,6 +18,7 @@ from urllib.request import Request, urlopen
 
 BASE_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp"
 USER_AGENT = "Codex agent-market-data-terminal/1.0"
+ADAPTER_VERSION = "1.2.0"
 MISSING_SENTINELS = {"-99.99", "-999", "-999.0", "-999.00"}
 
 
@@ -97,10 +100,190 @@ def build_source_url(args: argparse.Namespace) -> tuple[str, str]:
     return source_url, Path(urlparse(source_url).path).stem
 
 
-def fetch_bytes(url: str) -> bytes:
+def canonical_json_bytes(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+
+def resolve_output_path(raw_value: str, workspace_root: Path) -> Path:
+    path = Path(raw_value).expanduser()
+    path = (
+        (workspace_root / path).resolve() if not path.is_absolute() else path.resolve()
+    )
+    try:
+        path.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ValueError(f"--output must resolve inside {workspace_root}.") from exc
+    return path
+
+
+def build_request_payload(
+    *, source_url: str, feed_id: str, output_format: str
+) -> dict[str, str]:
+    return {
+        "feed_id": feed_id,
+        "format": output_format,
+        "provider": "famafrench",
+        "source_url": source_url,
+    }
+
+
+def parsed_coverage(
+    csv_member: str, csv_bytes: bytes, sections: list[dict[str, object]]
+) -> dict[str, object]:
+    section_rows: list[dict[str, object]] = []
+    for index, section in enumerate(sections):
+        title = section.get("title")
+        columns = section.get("columns")
+        rows = section.get("rows")
+        if (
+            not isinstance(title, str)
+            or not isinstance(columns, list)
+            or not all(isinstance(column, str) for column in columns)
+            or not isinstance(rows, list)
+            or not rows
+            or not all(isinstance(row, dict) for row in rows)
+        ):
+            raise RuntimeError(f"Parsed section {index} has an invalid shape.")
+        periods = [str(row.get("period", "")).strip() for row in rows]
+        if not all(periods):
+            raise RuntimeError(f"Parsed section {index} has an empty period.")
+        section_rows.append(
+            {
+                "columns": columns,
+                "first_period": min(periods),
+                "last_period": max(periods),
+                "row_count": len(rows),
+                "title": title,
+            }
+        )
+    return {
+        "claim": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        "csv_member": csv_member,
+        "csv_member_sha256": hashlib.sha256(csv_bytes).hexdigest(),
+        "csv_member_size_bytes": len(csv_bytes),
+        "sections": section_rows,
+    }
+
+
+def build_run_manifest(
+    *,
+    output_path: Path,
+    raw_output_path: Path,
+    artifact_bytes: bytes,
+    raw_bytes: bytes,
+    request: dict[str, str],
+    response: dict[str, object],
+    coverage: dict[str, object],
+) -> dict[str, object]:
+    raw_content_identity = {
+        "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "size_bytes": len(raw_bytes),
+        "zip_members": zip_member_inventory(raw_bytes),
+    }
+    adapter = {
+        "id": "agent-market-data-terminal/famafrench",
+        "version": ADAPTER_VERSION,
+    }
+    response_identity = {
+        key: response.get(key)
+        for key in ("content_type", "etag", "final_url", "last_modified", "status")
+    }
+    source_run_id = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "adapter": adapter,
+                "raw_artifact": raw_content_identity,
+                "request": request,
+                "response": response_identity,
+            }
+        )
+    ).hexdigest()
+    return {
+        "schema_version": 1,
+        "source_run_id": source_run_id,
+        "adapter": adapter,
+        "request": request,
+        "response": response,
+        "coverage": coverage,
+        "raw_artifact": {
+            "name": raw_output_path.name,
+            **raw_content_identity,
+        },
+        "artifact": {
+            "name": output_path.name,
+            "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+            "size_bytes": len(artifact_bytes),
+        },
+    }
+
+
+def require_exact_or_absent(path: Path, content: bytes) -> None:
+    if path.exists():
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
+            raise RuntimeError(f"Existing output differs: {path}")
+
+
+def write_exact(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    require_exact_or_absent(path, content)
+    if path.exists():
+        return
+    with path.open("xb") as handle:
+        handle.write(content)
+
+
+def write_run_artifacts(
+    *,
+    output_path: Path,
+    artifact_bytes: bytes,
+    raw_bytes: bytes,
+    request: dict[str, str],
+    response: dict[str, object],
+    coverage: dict[str, object],
+) -> Path:
+    raw_output_path = (
+        output_path
+        if request.get("format") == "raw"
+        else output_path.with_suffix(output_path.suffix + ".source.zip")
+    )
+    manifest = build_run_manifest(
+        output_path=output_path,
+        raw_output_path=raw_output_path,
+        artifact_bytes=artifact_bytes,
+        raw_bytes=raw_bytes,
+        request=request,
+        response=response,
+        coverage=coverage,
+    )
+    manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
+    manifest_bytes = canonical_json_bytes(manifest)
+    require_exact_or_absent(output_path, artifact_bytes)
+    require_exact_or_absent(raw_output_path, raw_bytes)
+    require_exact_or_absent(manifest_path, manifest_bytes)
+    write_exact(output_path, artifact_bytes)
+    if raw_output_path != output_path:
+        write_exact(raw_output_path, raw_bytes)
+    write_exact(manifest_path, manifest_bytes)
+    return manifest_path
+
+
+def fetch_source(url: str) -> tuple[bytes, dict[str, object]]:
     request = Request(url, headers={"User-Agent": USER_AGENT})
     with urlopen(request, timeout=60) as response:
-        return response.read()
+        data = response.read()
+        return data, {
+            "captured_at_utc": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "content_type": response.headers.get("Content-Type"),
+            "etag": response.headers.get("ETag"),
+            "final_url": response.geturl(),
+            "last_modified": response.headers.get("Last-Modified"),
+            "status": response.status,
+        }
 
 
 def clean_text(value: str) -> str:
@@ -304,39 +487,72 @@ def parse_csv_member(
     return preamble, sections
 
 
-def load_zip_payload(raw_bytes: bytes) -> tuple[list[str], str, str]:
+def zip_member_inventory(raw_bytes: bytes) -> list[dict[str, object]]:
+    with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
+        return [
+            {
+                "name": member.filename,
+                "sha256": hashlib.sha256(archive.read(member)).hexdigest(),
+                "size_bytes": member.file_size,
+            }
+            for member in sorted(archive.infolist(), key=lambda item: item.filename)
+            if not member.is_dir()
+        ]
+
+
+def load_zip_payload(raw_bytes: bytes) -> tuple[list[str], str, bytes, str]:
     with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
         zip_members = archive.namelist()
         csv_members = [
             member for member in zip_members if member.lower().endswith(".csv")
         ]
-        if not csv_members:
+        if len(csv_members) != 1:
             raise RuntimeError(
-                "The Fama/French zip payload did not contain a CSV member."
+                "The Fama/French zip payload must contain exactly one CSV member."
             )
         csv_member = csv_members[0]
-        text = archive.read(csv_member).decode("utf-8-sig", errors="replace")
-    return zip_members, csv_member, text
+        csv_bytes = archive.read(csv_member)
+        text = csv_bytes.decode("utf-8-sig", errors="replace")
+    return zip_members, csv_member, csv_bytes, text
 
 
 def main() -> int:
     args = parse_args()
-    output_path = Path(args.output).expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    workspace_root = Path.cwd().resolve()
 
     try:
+        output_path = resolve_output_path(args.output, workspace_root)
         source_url, feed_id = build_source_url(args)
-        raw_bytes = fetch_bytes(source_url)
+        raw_bytes, response = fetch_source(source_url)
+        zip_members, csv_member, csv_bytes, text = load_zip_payload(raw_bytes)
+        request = build_request_payload(
+            source_url=source_url,
+            feed_id=feed_id,
+            output_format=args.format,
+        )
 
         if args.format == "raw":
-            output_path.write_bytes(raw_bytes)
+            manifest_path = write_run_artifacts(
+                output_path=output_path,
+                artifact_bytes=raw_bytes,
+                raw_bytes=raw_bytes,
+                request=request,
+                response=response,
+                coverage={
+                    "claim": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                    "csv_member": csv_member,
+                    "csv_member_sha256": hashlib.sha256(csv_bytes).hexdigest(),
+                    "csv_member_size_bytes": len(csv_bytes),
+                },
+            )
             print(f"Saved raw Fama/French payload to {output_path}")
+            print(f"Saved source-run manifest to {manifest_path}")
             print(f"URL: {source_url}")
             return 0
 
-        zip_members, csv_member, text = load_zip_payload(raw_bytes)
         preamble, sections = parse_csv_member(text, feed_id)
         artifact = {
+            "schema_version": 1,
             "provider": "famafrench",
             "source_url": source_url,
             "feed_id": feed_id,
@@ -345,10 +561,19 @@ def main() -> int:
             "preamble": preamble,
             "sections": sections,
         }
-        output_path.write_text(
-            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        artifact_bytes = (
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n"
+        ).encode("utf-8")
+        manifest_path = write_run_artifacts(
+            output_path=output_path,
+            artifact_bytes=artifact_bytes,
+            raw_bytes=raw_bytes,
+            request=request,
+            response=response,
+            coverage=parsed_coverage(csv_member, csv_bytes, sections),
         )
         print(f"Saved parsed Fama/French artifact to {output_path}")
+        print(f"Saved source-run manifest to {manifest_path}")
         print(f"sections={len(sections)}")
         return 0
     except (
