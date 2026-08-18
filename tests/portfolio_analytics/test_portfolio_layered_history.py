@@ -979,13 +979,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.6.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.7.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.6.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.7.0"}
     assert (
         "strategy-history"
         in generation_schema["properties"]["source_manifests"]["properties"]
@@ -1299,6 +1299,9 @@ def test_layered_history_propagates_one_authoritative_gap_policy_edit(
     tmp_path: Path,
 ) -> None:
     fixture = _history_fixture(tmp_path)
+    baseline_artifacts, baseline_manifest_content = _build(fixture)
+    baseline_manifest = json.loads(baseline_manifest_content)
+    baseline_coverage = json.loads(baseline_artifacts["coverage.json"])
     contract_path = fixture["contract_path"]
     manifest_path = fixture["matrixport_manifest_path"]
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
@@ -1339,6 +1342,7 @@ def test_layered_history_propagates_one_authoritative_gap_policy_edit(
     _refresh_materialized_segment_identities(fixture)
 
     artifacts, manifest_content = _build(fixture)
+    changed_manifest = json.loads(manifest_content)
     result = validate_layered_history_generation(
         artifacts=artifacts,
         manifest_content=manifest_content,
@@ -1350,6 +1354,60 @@ def test_layered_history_propagates_one_authoritative_gap_policy_edit(
         "robuxio-account-live-after-funding"
     ]["source_gap_policy"]
     assert propagated == policy
+    assert changed_manifest["generation_id"] != baseline_manifest["generation_id"]
+    assert (
+        changed_manifest["product"]["contract_sha256"]
+        != (baseline_manifest["product"]["contract_sha256"])
+    )
+
+    baseline_inputs = {row["input_id"]: row for row in baseline_manifest["inputs"]}
+    changed_inputs = {row["input_id"]: row for row in changed_manifest["inputs"]}
+    assert {
+        input_id
+        for input_id in baseline_inputs
+        if baseline_inputs[input_id] != changed_inputs[input_id]
+    } == {
+        "financial-mvp-contract",
+        "matrixport-current",
+        "matrixport-manifest",
+    }
+    assert {
+        name
+        for name in baseline_artifacts
+        if baseline_artifacts[name] != artifacts[name]
+    } == {"coverage.json"}
+    assert {
+        name
+        for name in baseline_manifest["source_manifests"]
+        if baseline_manifest["source_manifests"][name]
+        != changed_manifest["source_manifests"][name]
+    } == {"matrixport"}
+    assert {
+        name
+        for name in baseline_manifest["source_pointers"]
+        if baseline_manifest["source_pointers"][name]
+        != changed_manifest["source_pointers"][name]
+    } == {"matrixport"}
+
+    baseline_policy = baseline_coverage["correction_resolutions"][
+        "robuxio-account-live-after-funding"
+    ]["source_gap_policy"]
+    assert {
+        field
+        for field in baseline_policy
+        if baseline_policy[field] != propagated[field]
+    } == {
+        "authority_issue",
+        "policy_id",
+        "provenance",
+        "reason",
+        "return_rule",
+    }
+    coverage_with_baseline_policy = copy.deepcopy(coverage)
+    coverage_with_baseline_policy["correction_resolutions"][
+        "robuxio-account-live-after-funding"
+    ]["source_gap_policy"] = baseline_policy
+    assert coverage_with_baseline_policy == baseline_coverage
 
 
 def test_layered_history_rejects_unproduced_matrixport_transform_fact(
@@ -1481,7 +1539,23 @@ def test_layered_history_registers_optional_strategy_history_manifest(
         "as_of_date": fixture["as_of_date"],
         "builder": "portfolio-strategy-history",
         "builder_version": "1.4.0",
-        "history_dispositions": [],
+        "history_dispositions": [
+            {
+                "history_status": (
+                    "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_DERIVED_NOT_ADMITTED"
+                ),
+                "implementation_reconciliation_status": (
+                    "BLOCKED_ADMIT_OR_DECLARE; SEPARATE_FROM_ACCOUNT_LIVE"
+                ),
+                "reason": "Synthetic v1.4 provider-live transform remains unadmitted.",
+                "required_for_analysis": True,
+                "series_id": "EU [P123]",
+                "status": (
+                    "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_DERIVED_NOT_ADMITTED"
+                ),
+                "strategy_version": "synthetic-p123-eu:v1",
+            }
+        ],
         "returns_artifact": {
             "artifact_id": "strategy-history/returns.csv",
             "sha256": hashlib.sha256(returns_content).hexdigest(),
@@ -1591,6 +1665,41 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
         validate_layered_history_generation(
             artifacts=artifacts,
             manifest_content=_reidentify_manifest(pointer_rewrite),
+            contract_path=fixture["contract_path"],
+        )
+
+    input_order_rewrite = json.loads(manifest_content)
+    input_order_rewrite["inputs"][0], input_order_rewrite["inputs"][1] = (
+        input_order_rewrite["inputs"][1],
+        input_order_rewrite["inputs"][0],
+    )
+    with pytest.raises(TargetSeriesError, match="input ordering differs"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(input_order_rewrite),
+            contract_path=fixture["contract_path"],
+        )
+
+    input_contract_rewrite = json.loads(manifest_content)
+    matrixport_nav_input = next(
+        row
+        for row in input_contract_rewrite["inputs"]
+        if row["input_id"] == "matrixport-nav"
+    )
+    matrixport_nav_input.update(
+        {
+            "artifact_id": "fabricated/nav.csv",
+            "artifact_role": "UNCONTROLLED_ARTIFACT",
+            "sha256": "0" * 64,
+            "size_bytes": 1,
+        }
+    )
+    with pytest.raises(
+        TargetSeriesError, match="input contract differs: matrixport-nav"
+    ):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(input_contract_rewrite),
             contract_path=fixture["contract_path"],
         )
 

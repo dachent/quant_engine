@@ -60,7 +60,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.6.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.7.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 LAYERED_HISTORY_MODE_POLICY: Final = {
     "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
@@ -3316,6 +3316,79 @@ def validate_layered_history_generation(
         ):
             raise TargetSeriesError("layered history input identity differs")
         inputs[input_id] = dict(raw)
+    if input_rows != sorted(input_rows, key=lambda item: str(item["input_id"])):
+        raise TargetSeriesError("layered history input ordering differs")
+
+    expected_input_contracts: dict[str, tuple[str, str | None]] = {
+        "financial-mvp-contract": ("PRODUCT_CONTRACT", None),
+        "provider-ledger-current": ("CURRENT_POINTER", None),
+        "provider-ledger-manifest": ("GENERATION_MANIFEST", None),
+        "provider-ledger-catalog": (
+            "GENERATION_ARTIFACT",
+            "normalized/provider-ledger.json",
+        ),
+        "matrixport-current": ("CURRENT_POINTER", None),
+        "matrixport-manifest": ("GENERATION_MANIFEST", None),
+        "matrixport-nav": ("GENERATION_ARTIFACT", "csv/nav_daily.csv"),
+        "matrixport-holdings": ("GENERATION_ARTIFACT", "csv/holdings.csv"),
+        "matrixport-subscriptions": (
+            "GENERATION_ARTIFACT",
+            "csv/subscription_details.csv",
+        ),
+        "quantbase-current": ("CURRENT_POINTER", None),
+        "quantbase-manifest": ("GENERATION_MANIFEST", None),
+        "quantbase-history": (
+            "GENERATION_ARTIFACT",
+            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+        ),
+        "quantbase-activity": (
+            "GENERATION_ARTIFACT",
+            "source/csv/account_activity.csv",
+        ),
+        "portfolio123-current": ("CURRENT_POINTER", None),
+        "portfolio123-manifest": ("GENERATION_MANIFEST", None),
+        "portfolio123-metadata": (
+            "GENERATION_ARTIFACT",
+            "tables/har_managed_metadata.parquet",
+        ),
+        "portfolio123-performance": (
+            "GENERATION_ARTIFACT",
+            "tables/har_managed_performance.parquet",
+        ),
+        "portfolio123-equity": (
+            "GENERATION_ARTIFACT",
+            "tables/har_equity_curve.parquet",
+        ),
+        "portfolio123-returns": (
+            "GENERATION_ARTIFACT",
+            "tables/returns_daily.parquet",
+        ),
+        "portfolio123-relationships": (
+            "GENERATION_ARTIFACT",
+            "tables/strategy_relationships.parquet",
+        ),
+    }
+    optional_input_ids = {"strategy-history-manifest", "strategy-history-returns"}
+    if optional_input_ids & set(inputs):
+        expected_input_contracts.update(
+            {
+                "strategy-history-manifest": ("GENERATION_MANIFEST", None),
+                "strategy-history-returns": (
+                    "GENERATION_ARTIFACT",
+                    "strategy-history/returns.csv",
+                ),
+            }
+        )
+    if set(inputs) != set(expected_input_contracts):
+        raise TargetSeriesError("layered history input set differs")
+    for input_id, expected_contract in expected_input_contracts.items():
+        actual_input = inputs[input_id]
+        if (actual_input.get("artifact_role"), actual_input.get("artifact_id")) != (
+            expected_contract
+        ):
+            raise TargetSeriesError(
+                f"layered history input contract differs: {input_id}"
+            )
     expected_manifests = {
         "provider-ledger-manifest": sources["owner-account-live-history"],
         "matrixport-manifest": sources["matrixport-account-generation"],
@@ -3552,42 +3625,6 @@ def validate_layered_history_generation(
             raise TargetSeriesError(
                 f"layered history source artifact differs: {input_id}"
             )
-    p123_input_ids = {
-        "portfolio123-metadata": "tables/har_managed_metadata.parquet",
-        "portfolio123-performance": "tables/har_managed_performance.parquet",
-        "portfolio123-equity": "tables/har_equity_curve.parquet",
-        "portfolio123-returns": "tables/returns_daily.parquet",
-        "portfolio123-relationships": "tables/strategy_relationships.parquet",
-    }
-    for input_id, artifact_id in p123_input_ids.items():
-        p123_input = inputs.get(input_id)
-        if p123_input is None or p123_input.get("artifact_id") != artifact_id:
-            raise TargetSeriesError(f"Portfolio123 input identity differs: {input_id}")
-    expected_input_ids = {
-        "financial-mvp-contract",
-        "provider-ledger-current",
-        "provider-ledger-manifest",
-        "provider-ledger-catalog",
-        "matrixport-current",
-        "matrixport-manifest",
-        "matrixport-nav",
-        "matrixport-holdings",
-        "matrixport-subscriptions",
-        "quantbase-current",
-        "quantbase-manifest",
-        "quantbase-history",
-        "quantbase-activity",
-        "portfolio123-current",
-        "portfolio123-manifest",
-        *p123_input_ids,
-    }
-    if "strategy-history-manifest" in inputs or "strategy-history-returns" in inputs:
-        expected_input_ids.update(
-            {"strategy-history-manifest", "strategy-history-returns"}
-        )
-    if set(inputs) != expected_input_ids:
-        raise TargetSeriesError("layered history input set differs")
-
     output_rows = manifest.get("outputs")
     if not isinstance(output_rows, dict) or set(output_rows) != set(
         LAYERED_HISTORY_OUTPUT_NAMES
@@ -4796,7 +4833,10 @@ def _strategy_history_returns(
             or not (
                 history_status.startswith("UNAVAILABLE_")
                 or history_status
-                == "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED"
+                in {
+                    "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED",
+                    "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_DERIVED_NOT_ADMITTED",
+                }
             )
             or not version
             or not implementation

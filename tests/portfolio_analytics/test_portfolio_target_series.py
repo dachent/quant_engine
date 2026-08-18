@@ -800,9 +800,10 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
             {
                 "as_of_date": "2026-01-06",
                 "builder": "portfolio-strategy-history",
-                "builder_version": "1.2.0",
+                "builder_version": "1.4.0",
                 "bundle_id": "b" * 64,
                 "returns_artifact": {
+                    "artifact_id": "strategy-history/returns.csv",
                     "sha256": hashlib.sha256(history_returns.read_bytes()).hexdigest(),
                     "size_bytes": history_returns.stat().st_size,
                 },
@@ -810,7 +811,7 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
                 "history_dispositions": [
                     {
                         "history_status": (
-                            "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED"
+                            "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_DERIVED_NOT_ADMITTED"
                         ),
                         "implementation_reconciliation_status": (
                             "BLOCKED_RETURN_TRANSFORM; SEPARATE_FROM_ACCOUNT_LIVE"
@@ -822,7 +823,7 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
                         "required_for_analysis": True,
                         "series_id": "Missing",
                         "status": (
-                            "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_REQUIRED"
+                            "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_DERIVED_NOT_ADMITTED"
                         ),
                         "strategy_version": "missing-current:v1",
                     }
@@ -918,7 +919,7 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
     )
     assert missing["live_observations"] == 0
     assert missing["status"] == (
-        "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_REQUIRED"
+        "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_DERIVED_NOT_ADMITTED"
     )
     assert missing["history_disposition_reason"] == (
         "Exact provider-live history is not an exact-version backtest and remains "
