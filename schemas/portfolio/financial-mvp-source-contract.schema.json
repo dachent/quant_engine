@@ -18,7 +18,7 @@
     "$schema": {
       "const": "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     },
-    "contract_schema_version": {"const": 4},
+    "contract_schema_version": {"const": 5},
     "product": {"$ref": "#/$defs/product"},
     "strategies": {
       "type": "array",
@@ -177,10 +177,79 @@
         "as_of_policy": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["calendar_cutoff", "policy_id", "publication_lag_rule"],
+          "required": [
+            "calculation_boundary",
+            "decision_evidence",
+            "execution_profiles",
+            "policy_id",
+            "publication_lag_rule"
+          ],
           "properties": {
-            "calendar_cutoff": {"$ref": "#/$defs/nonempty_string"},
-            "policy_id": {"$ref": "#/$defs/nonempty_string"},
+            "calculation_boundary": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "age_disposition",
+                "calendar_rule",
+                "completeness_failure_disposition",
+                "post_boundary_rows",
+                "required_evidence",
+                "rule",
+                "scope"
+              ],
+              "properties": {
+                "age_disposition": {
+                  "const": "WARN_WITH_COMPLETE_THROUGH_DATE_AGE_DAYS_THRESHOLD_AND_LIMITING_INPUTS"
+                },
+                "calendar_rule": {"$ref": "#/$defs/nonempty_string"},
+                "completeness_failure_disposition": {"const": "FAIL_CLOSED"},
+                "post_boundary_rows": {
+                  "const": "RETAIN_IN_SOURCE_EVIDENCE_EXCLUDE_FROM_CALCULATION"
+                },
+                "required_evidence": {
+                  "const": [
+                    "EVALUATED_ON_DATE",
+                    "COMPLETE_THROUGH_DATE",
+                    "AGE_DAYS",
+                    "WARNING_AFTER_DAYS",
+                    "LIMITING_INPUTS"
+                  ]
+                },
+                "rule": {
+                  "const": "LATEST_COMMON_COMPLETE_ACCEPTED_DATE_ACROSS_REQUIRED_CALCULATION_INPUTS"
+                },
+                "scope": {"const": "REQUIRED_INPUTS_OF_EACH_CALCULATION"}
+              }
+            },
+            "decision_evidence": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["authority_issue", "evidence_url", "recorded_on"],
+              "properties": {
+                "authority_issue": {"const": 320},
+                "evidence_url": {"$ref": "#/$defs/nonempty_string"},
+                "recorded_on": {"type": "string", "format": "date"}
+              }
+            },
+            "execution_profiles": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["DEVELOPMENT", "WORKSTATION_QC", "RELEASE_QC"],
+              "properties": {
+                "DEVELOPMENT": {
+                  "const": "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING"
+                },
+                "WORKSTATION_QC": {
+                  "const": "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING"
+                },
+                "RELEASE_QC": {
+                  "const": "CURRENT_RELEASE_RECEIPTS_REQUIRED_WITH_CALCULATION_AGE_DISCLOSED"
+                }
+              }
+            },
+            "policy_id": {
+              "const": "LATEST_COMMON_COMPLETE_ACCEPTED_BOUNDARY_WARN_ON_AGE_V2"
+            },
             "publication_lag_rule": {"$ref": "#/$defs/nonempty_string"}
           }
         },

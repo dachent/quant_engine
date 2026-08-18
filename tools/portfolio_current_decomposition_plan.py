@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.6.0"
+BUILDER_VERSION = "0.13.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -38,6 +38,7 @@ PUBLIC_FACTOR_RECEIPT_KEYS = {
     "europe_momentum",
     "us_industries",
 }
+ASSURANCE_PROFILES = ("DEVELOPMENT", "WORKSTATION_QC", "RELEASE_QC")
 LENSES = (
     "ECONOMIC_FACTOR",
     "ETF_STYLE",
@@ -51,6 +52,10 @@ INPUT_KEYS = (
     "sector_returns",
     "us_industries",
 )
+MARKET_CONTRACT_SOURCE_IDS = {
+    "style_returns": "public-etf-style-sector-and-market-prices",
+    "sector_returns": "public-etf-style-sector-and-market-prices",
+}
 TARGET_HEADERS = (
     "series_id",
     "date",
@@ -193,6 +198,49 @@ def _day(value: object, name: str) -> date:
     return parsed
 
 
+def _age_disposition(
+    *,
+    complete_through: date,
+    evaluated_on: date,
+    warning_after_days: int,
+    limiting_inputs: Sequence[str],
+) -> dict[str, object]:
+    """Describe data age without converting complete history into unavailability."""
+
+    if complete_through > evaluated_on:
+        raise CurrentPlanError("complete data boundary exceeds the evaluation date")
+    inputs = sorted(set(limiting_inputs))
+    if not inputs:
+        raise CurrentPlanError("data age disposition has no limiting input")
+    age_days = (evaluated_on - complete_through).days
+    return {
+        "age_days": age_days,
+        "complete_through": complete_through.isoformat(),
+        "evaluated_on": evaluated_on.isoformat(),
+        "limiting_inputs": inputs,
+        "status": (
+            "WARN_COMPLETE_DATA_AGE"
+            if age_days > warning_after_days
+            else "CURRENT_WITHIN_AGE_THRESHOLD"
+        ),
+        "warning_after_days": warning_after_days,
+    }
+
+
+def _latest_common_complete_date(
+    date_sets: Sequence[set[date]], *, evaluated_on: date, name: str
+) -> date:
+    """Return the latest date present in every required input without filling."""
+
+    if not date_sets or any(not values for values in date_sets):
+        raise CurrentPlanError(f"{name} has no complete accepted observations")
+    common = set.intersection(*date_sets)
+    eligible = [observed for observed in common if observed <= evaluated_on]
+    if not eligible:
+        raise CurrentPlanError(f"{name} has no common complete accepted date")
+    return max(eligible)
+
+
 def _utc_datetime(value: object, name: str) -> datetime:
     accepted = _text(value, name)
     if not accepted.endswith("Z"):
@@ -264,7 +312,10 @@ def _layered_history_targets(
     strategies: Sequence[Mapping[str, Any]],
     evidence_mode: str,
     evaluated_on: date,
+    assurance_profile: str = "DEVELOPMENT",
 ) -> dict[str, Any]:
+    if assurance_profile not in ASSURANCE_PROFILES:
+        raise CurrentPlanError("assurance_profile is unsupported")
     planned = [
         (
             _text(strategy.get("strategy_id"), "strategy_id"),
@@ -300,6 +351,15 @@ def _layered_history_targets(
     manifest, manifest_content = _load_json(manifest_path, "layered generation")
     coverage, coverage_content = _load_json(coverage_path, "layered coverage")
     contract, contract_content = _load_json(contract_path, "financial MVP contract")
+    product = _object(contract.get("product"), "financial MVP product")
+    as_of_policy = _object(product.get("as_of_policy"), "financial MVP as_of_policy")
+    profiles = _object(
+        as_of_policy.get("execution_profiles"), "financial MVP execution profiles"
+    )
+    profile_policy = _text(
+        profiles.get(assurance_profile),
+        f"financial MVP {assurance_profile} execution profile",
+    )
     contract_sources: dict[str, dict[str, Any]] = {}
     for source in _objects(contract.get("source_segments"), "financial MVP sources"):
         source_id = _text(source.get("source_id"), "financial MVP source_id")
@@ -330,6 +390,10 @@ def _layered_history_targets(
     history_as_of = _day(manifest.get("as_of_date"), "layered history as_of_date")
     if history_as_of > evaluated_on:
         raise CurrentPlanError("layered history exceeds the evaluation date")
+    if assurance_profile == "RELEASE_QC" and history_as_of != evaluated_on:
+        raise CurrentPlanError(
+            "release QC requires a layered history receipt for the evaluation date"
+        )
 
     coverage_rows = _objects(coverage.get("strategies"), "layered strategies")
     coverage_by_strategy: dict[str, dict[str, Any]] = {}
@@ -341,6 +405,7 @@ def _layered_history_targets(
 
     planned_series: dict[str, str] = {}
     composition: dict[str, dict[str, object]] = {}
+    source_age_dispositions: list[dict[str, object]] = []
     selected_admissions = (
         {"INCLUDE_SELECTED_LIVE"}
         if evidence_mode == "LIVE_ONLY"
@@ -400,16 +465,28 @@ def _layered_history_targets(
                 freshness.get("max_age_days"), f"{source_id} max_age_days"
             )
             observed_end = _day(summary.get("observed_end"), "live observed_end")
-            age_days = (evaluated_on - observed_end).days
-            if age_days < 0:
+            age = _age_disposition(
+                complete_through=observed_end,
+                evaluated_on=evaluated_on,
+                warning_after_days=max_age_days,
+                limiting_inputs=(f"{strategy_id}:{source_id}",),
+            )
+            source_age_dispositions.append(
+                {
+                    **age,
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "source_id": source_id,
+                    "strategy_id": strategy_id,
+                }
+            )
+            if (
+                assurance_profile == "RELEASE_QC"
+                and age["status"] == "WARN_COMPLETE_DATA_AGE"
+            ):
                 raise CurrentPlanError(
-                    f"layered history live source exceeds the evaluation date: {source_id}"
-                )
-            if age_days > max_age_days:
-                raise CurrentPlanError(
-                    "layered history live source is stale at the evaluation date for "
+                    "release QC requires a current layered history live source for "
                     f"{strategy_id}: {source_id} "
-                    f"(age_days={age_days}, max_age_days={max_age_days})"
+                    f"(age_days={age['age_days']}, max_age_days={max_age_days})"
                 )
         backtest_observations = sum(
             _integer(summary.get("return_observations"), "backtest observations", 1)
@@ -474,6 +551,39 @@ def _layered_history_targets(
     ):
         raise CurrentPlanError("layered projection and coverage observations differ")
 
+    projection_dates_by_series = {
+        series_id: {
+            _day(row["date"], "layered target date")
+            for row in selected_projection
+            if row["series_id"] == series_id
+        }
+        for series_id in planned_series
+    }
+    common_complete_through = _latest_common_complete_date(
+        list(projection_dates_by_series.values()),
+        evaluated_on=evaluated_on,
+        name="layered history",
+    )
+    limiting_series = [
+        f"{planned_series[series_id]}:{series_id}"
+        for series_id, observed in projection_dates_by_series.items()
+        if max(observed) == common_complete_through
+    ]
+    if not limiting_series:
+        limiting_series = [
+            f"{planned_series[series_id]}:{series_id}"
+            for series_id in sorted(planned_series)
+        ]
+    warning_after_days = min(
+        cast(int, row["warning_after_days"]) for row in source_age_dispositions
+    )
+    calculation_age = _age_disposition(
+        complete_through=common_complete_through,
+        evaluated_on=evaluated_on,
+        warning_after_days=warning_after_days,
+        limiting_inputs=limiting_series,
+    )
+
     segment_index: dict[tuple[str, str, str, str, str], list[dict[str, str]]] = {}
     for row in segment_rows:
         segment_key = (
@@ -512,8 +622,14 @@ def _layered_history_targets(
             }
         )
     target_rows.sort(key=lambda item: (item["series_id"], item["date"]))
-    for value in composition.values():
+    for series_id, value in composition.items():
         value.pop("expected_observations", None)
+        value["accepted_history_complete_through"] = max(
+            projection_dates_by_series[series_id]
+        ).isoformat()
+        value["calculation_observations_used"] = sum(
+            row["series_id"] == series_id for row in target_rows
+        )
     target_content = _csv_bytes(
         TARGET_HEADERS,
         [[row[header] for header in TARGET_HEADERS] for row in target_rows],
@@ -529,9 +645,15 @@ def _layered_history_targets(
             "selected-targets.csv": target_content,
         },
         "identity": {
-            "as_of_date": history_as_of.isoformat(),
+            "as_of_date": max(
+                max(observed) for observed in projection_dates_by_series.values()
+            ).isoformat(),
+            "assurance_profile": assurance_profile,
+            "assurance_profile_policy": profile_policy,
+            "calculation_boundary": calculation_age,
             "contract_sha256": _sha256(contract_content),
             "coverage_sha256": _sha256(coverage_content),
+            "generation_as_of_date": history_as_of.isoformat(),
             "generation_id": generation_id,
             "generation_receipt_sha256": _sha256(manifest_content),
             "mode": evidence_mode,
@@ -540,6 +662,13 @@ def _layered_history_targets(
             "segments_sha256": _sha256(segments_path.read_bytes()),
             "selected_strategy_ids": sorted(strategy_id for strategy_id, _ in planned),
             "selected_targets_sha256": _sha256(target_content),
+            "source_age_dispositions": sorted(
+                source_age_dispositions,
+                key=lambda row: (
+                    cast(str, row["strategy_id"]),
+                    cast(str, row["source_id"]),
+                ),
+            ),
         },
         "rows": target_rows,
         "target_content": target_content,
@@ -659,8 +788,9 @@ def _verify_public_factor_manifest(
     manifest_path: Path,
     market_paths: Mapping[str, Path],
     catalog_sha256: str,
-    evaluation_date: date,
-) -> dict[str, date]:
+    planning_evaluation_date: date,
+    assurance_profile: str,
+) -> tuple[dict[str, date], dict[str, object]]:
     manifest, _content = _load_json(manifest_path, "public factor source manifest")
     if (
         manifest.get("schema_version") != 2
@@ -679,10 +809,19 @@ def _verify_public_factor_manifest(
     run = _object(manifest.get("acquisition_run"), "public factor acquisition run")
     if run.get("acquisition_requirement") != "EVERY_SOURCE_CAPTURED_WITHIN_CURRENT_RUN":
         raise CurrentPlanError("public factor acquisition requirement differs")
-    evaluated_on = _day(run.get("evaluation_date"), "public factor evaluation date")
-    if evaluated_on != evaluation_date:
+    capture_evaluation_date = _day(
+        run.get("evaluation_date"), "public factor evaluation date"
+    )
+    if capture_evaluation_date > planning_evaluation_date:
         raise CurrentPlanError(
-            "public factor evaluation date differs from the current planning run"
+            "public factor evaluation date exceeds the current planning run"
+        )
+    if (
+        assurance_profile == "RELEASE_QC"
+        and capture_evaluation_date != planning_evaluation_date
+    ):
+        raise CurrentPlanError(
+            "release QC requires public factors captured for the planning run"
         )
     run_started = _utc_datetime(
         run.get("run_started_at_utc"), "public factor run start"
@@ -707,7 +846,7 @@ def _verify_public_factor_manifest(
     ):
         raise CurrentPlanError("public factor receipt hash set differs")
     run_payload = {
-        "evaluation_date": evaluated_on.isoformat(),
+        "evaluation_date": capture_evaluation_date.isoformat(),
         "run_started_at_utc": run.get("run_started_at_utc"),
         "run_ended_at_utc": run.get("run_ended_at_utc"),
         "receipt_manifest_sha256s": receipts,
@@ -757,6 +896,7 @@ def _verify_public_factor_manifest(
     if len(outputs) != len(manifest.get("outputs", [])):
         raise CurrentPlanError("public factor output paths must be unique")
     admitted_boundaries: dict[str, date] = {}
+    output_calendars: dict[str, tuple[date, ...]] = {}
     for key in PUBLIC_FACTOR_INPUT_KEYS:
         path = market_paths[key]
         expected = outputs.get(path.name)
@@ -784,8 +924,45 @@ def _verify_public_factor_manifest(
             raise CurrentPlanError(
                 f"public factor {path.name} does not end at its admitted boundary"
             )
-        _headers, rows = _read_csv(path, f"public factor {path.name}")
-        observed_end = _day(rows[-1].get("date"), f"public factor {path.name} end")
+        headers, rows = _read_csv(path, f"public factor {path.name}")
+        dates = tuple(
+            _day(row.get("date"), f"public factor {path.name} date") for row in rows
+        )
+        if dates != tuple(sorted(set(dates))):
+            raise CurrentPlanError(
+                f"public factor {path.name} dates are not unique and increasing"
+            )
+        expected_coverage = (
+            "PARTIAL" if key == "us_industries" else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        )
+        missing_cells = sum(
+            not row.get(column, "").strip()
+            for row in rows
+            for column in headers
+            if column != "date"
+        )
+        if (
+            expected.get("coverage") != expected_coverage
+            or expected.get("declared_boundary") != "EXACT_DATE_INTERSECTION"
+            or expected.get("first_date") != dates[0].isoformat()
+            or _integer(
+                expected.get("row_count"), f"public factor {path.name} row_count", 1
+            )
+            != len(rows)
+            or _integer(
+                expected.get("missing_cells"),
+                f"public factor {path.name} missing_cells",
+            )
+            != missing_cells
+        ):
+            raise CurrentPlanError(
+                f"public factor {path.name} coverage identity differs"
+            )
+        if key != "us_industries" and missing_cells:
+            raise CurrentPlanError(
+                f"public factor {path.name} has a missing required cell"
+            )
+        observed_end = dates[-1]
         if observed_end != accepted_end:
             raise CurrentPlanError(
                 f"public factor {path.name} bytes exceed their admitted boundary"
@@ -795,7 +972,8 @@ def _verify_public_factor_manifest(
             f"public factor {path.name} eligible month end",
         )
         if (
-            eligible_month_end != _required_observation_month_end(evaluated_on)
+            eligible_month_end
+            != _required_observation_month_end(capture_evaluation_date)
             or freshness.get("eligible_month") != eligible_month_end.strftime("%Y-%m")
             or (accepted_end.year, accepted_end.month)
             != (eligible_month_end.year, eligible_month_end.month)
@@ -809,13 +987,31 @@ def _verify_public_factor_manifest(
         )
         if (
             deadline != eligible_month_end + timedelta(days=45)
-            or deadline > evaluated_on
+            or deadline > capture_evaluation_date
         ):
             raise CurrentPlanError(
                 f"public factor {path.name} publication deadline has not elapsed"
             )
         admitted_boundaries[key] = accepted_end
-    return admitted_boundaries
+        output_calendars[key] = dates
+    if output_calendars["us_factors"] != output_calendars["us_industries"]:
+        raise CurrentPlanError("public US factor and industry calendars differ")
+    europe_dates = output_calendars["europe_factors"]
+    expected_europe_dates: list[date] = []
+    current = europe_dates[0]
+    while current <= europe_dates[-1]:
+        if current.weekday() < 5:
+            expected_europe_dates.append(current)
+        current += timedelta(days=1)
+    if europe_dates != tuple(expected_europe_dates):
+        raise CurrentPlanError("public Europe factor weekday calendar has a gap")
+    capture_age = _age_disposition(
+        complete_through=capture_evaluation_date,
+        evaluated_on=planning_evaluation_date,
+        warning_after_days=0,
+        limiting_inputs=("public-factor-acquisition-run",),
+    )
+    return admitted_boundaries, capture_age
 
 
 def _resolved_strategies(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -882,17 +1078,43 @@ def _factor_sets(
 
 
 def _complete_dates(
-    rows: Sequence[Mapping[str, str]], required: Sequence[str], source_name: str
+    rows: Sequence[Mapping[str, str]],
+    required: Sequence[str],
+    source_name: str,
+    *,
+    allowed_missing_after_start: frozenset[str] = frozenset(),
+    always_required: frozenset[str] = frozenset(),
 ) -> tuple[date, ...]:
     seen: set[date] = set()
     result: list[date] = []
+    previous: date | None = None
+    completeness_started = False
     for index, row in enumerate(rows, 2):
         observed = _day(row.get("date"), f"{source_name} line {index} date")
         if observed in seen:
             raise CurrentPlanError(f"{source_name} has a duplicate date")
+        if previous is not None and observed <= previous:
+            raise CurrentPlanError(f"{source_name} dates are not increasing")
         seen.add(observed)
-        if all(row.get(column, "").strip() for column in required):
-            result.append(observed)
+        previous = observed
+        missing = [column for column in required if not row.get(column, "").strip()]
+        if missing:
+            missing_columns = frozenset(missing)
+            if missing_columns & always_required:
+                raise CurrentPlanError(
+                    f"{source_name} has a missing unconditionally required observation: "
+                    f"{observed.isoformat()}"
+                )
+            if completeness_started and not missing_columns.issubset(
+                allowed_missing_after_start
+            ):
+                raise CurrentPlanError(
+                    f"{source_name} has an incomplete required observation after "
+                    f"its completeness boundary: {observed.isoformat()}"
+                )
+            continue
+        completeness_started = True
+        result.append(observed)
     if not result:
         raise CurrentPlanError(f"{source_name} has no complete observations")
     return tuple(result)
@@ -956,6 +1178,7 @@ def build_bundle(
     sector_manifest_path: Path,
     evaluation_date: str,
     evidence_mode: str = "LIVE_ONLY",
+    assurance_profile: str = "DEVELOPMENT",
 ) -> tuple[dict[str, bytes], dict[str, object]]:
     """Build a deterministic current-strategy planning bundle without writing."""
 
@@ -965,6 +1188,8 @@ def build_bundle(
     if plan.get("schema_version") != 1:
         raise CurrentPlanError("current strategy plan schema is unsupported")
     evaluated_on = _day(evaluation_date, "evaluation_date")
+    if assurance_profile not in ASSURANCE_PROFILES:
+        raise CurrentPlanError("assurance_profile is unsupported")
     if evidence_mode not in {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}:
         raise CurrentPlanError("evidence_mode is unsupported")
     if set(market_paths) != set(INPUT_KEYS):
@@ -975,8 +1200,14 @@ def build_bundle(
         if path.is_symlink() or not path.is_file():
             raise CurrentPlanError("market input must be a regular file")
     catalog_sha256 = _sha256(catalog_content)
-    public_factor_boundaries = _verify_public_factor_manifest(
-        public_factor_manifest_path, market_paths, catalog_sha256, evaluated_on
+    public_factor_boundaries, public_factor_capture_age = (
+        _verify_public_factor_manifest(
+            public_factor_manifest_path,
+            market_paths,
+            catalog_sha256,
+            evaluated_on,
+            assurance_profile,
+        )
     )
     _verify_market_manifest(
         market_paths["style_returns"], style_manifest_path, catalog_sha256
@@ -991,6 +1222,7 @@ def build_bundle(
         strategies=strategies,
         evidence_mode=evidence_mode,
         evaluated_on=evaluated_on,
+        assurance_profile=assurance_profile,
     )
     target_rows = cast(list[dict[str, str]], layered_history["rows"])
     targets_by_series = _target_dates(target_rows)
@@ -1001,6 +1233,23 @@ def build_bundle(
         "inputs/governance/base-decomposition-spec.json": base_spec_content,
     }
     history_contents = cast(dict[str, bytes], layered_history["contents"])
+    try:
+        financial_mvp_contract = json.loads(
+            history_contents["financial-mvp-contract.json"]
+        )
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CurrentPlanError(
+            "verified financial MVP contract is unavailable"
+        ) from exc
+    contract_sources = {
+        _text(source.get("source_id"), "financial MVP source_id"): source
+        for source in _objects(
+            financial_mvp_contract.get("source_segments"),
+            "financial MVP source segments",
+        )
+    }
+    if len(contract_sources) != len(financial_mvp_contract.get("source_segments", [])):
+        raise CurrentPlanError("financial MVP source IDs are duplicated")
     for name, content in history_contents.items():
         outputs[f"inputs/history/{name}"] = content
     generated_provenance: list[dict[str, object]] = []
@@ -1079,6 +1328,28 @@ def build_bundle(
         headers, rows = _read_csv(path, f"market input {key}")
         market_headers[key] = headers
         market_rows[key] = rows
+    style_dates = tuple(
+        _day(row.get("date"), f"style_returns line {index} date")
+        for index, row in enumerate(market_rows["style_returns"], 2)
+    )
+    sector_dates = tuple(
+        _day(row.get("date"), f"sector_returns line {index} date")
+        for index, row in enumerate(market_rows["sector_returns"], 2)
+    )
+    if not style_dates or not sector_dates:
+        raise CurrentPlanError("style and sector market calendars must be non-empty")
+    shared_start = max(style_dates[0], sector_dates[0])
+    shared_end = min(style_dates[-1], sector_dates[-1])
+    if shared_start > shared_end:
+        raise CurrentPlanError("style and sector market calendars do not overlap")
+    shared_style_dates = tuple(
+        observed for observed in style_dates if shared_start <= observed <= shared_end
+    )
+    shared_sector_dates = tuple(
+        observed for observed in sector_dates if shared_start <= observed <= shared_end
+    )
+    if shared_style_dates != shared_sector_dates:
+        raise CurrentPlanError("style and sector shared market calendars differ")
 
     universes = _catalog_universes(catalog)
     source_plans = {
@@ -1158,6 +1429,7 @@ def build_bundle(
                 )
 
     specs: list[dict[str, object]] = []
+    market_source_ages: dict[str, dict[str, object]] = {}
     for source_key, source_assignments in sorted(assignments_by_source.items()):
         source_plan = source_plans[source_key]
         lens = _text(source_plan.get("lens"), "source.lens")
@@ -1177,16 +1449,70 @@ def build_bundle(
         if not set(("date", *required)).issubset(market_headers[input_key]):
             raise CurrentPlanError(f"market input {input_key} lacks planned columns")
         complete_dates = _complete_dates(
-            market_rows[input_key], required, f"market input {input_key}"
+            market_rows[input_key],
+            required,
+            f"market input {input_key}",
+            allowed_missing_after_start=(
+                frozenset(columns.values())
+                if input_key == "us_industries"
+                else frozenset()
+            ),
+            always_required=(
+                frozenset((risk_free,)) if input_key == "us_industries" else frozenset()
+            ),
         )
+        contract_source_id = MARKET_CONTRACT_SOURCE_IDS.get(input_key)
+        if contract_source_id is not None:
+            contract_source = contract_sources.get(contract_source_id)
+            if contract_source is None:
+                raise CurrentPlanError(
+                    f"financial MVP source is absent: {contract_source_id}"
+                )
+            source_freshness = _object(
+                contract_source.get("freshness"),
+                f"financial MVP {contract_source_id} freshness",
+            )
+            source_max_age_days = _integer(
+                source_freshness.get("max_age_days"),
+                f"financial MVP {contract_source_id} max_age_days",
+            )
+            factor_source_age = {
+                **_age_disposition(
+                    complete_through=complete_dates[-1],
+                    evaluated_on=evaluated_on,
+                    warning_after_days=source_max_age_days,
+                    limiting_inputs=(f"factor:{input_key}",),
+                ),
+                "input_key": input_key,
+                "source_id": contract_source_id,
+            }
+            prior_age = market_source_ages.get(input_key)
+            if prior_age is not None and prior_age != factor_source_age:
+                raise CurrentPlanError(
+                    f"market source age differs across plans: {input_key}"
+                )
+            market_source_ages[input_key] = factor_source_age
+            if (
+                assurance_profile == "RELEASE_QC"
+                and factor_source_age["status"] == "WARN_COMPLETE_DATA_AGE"
+            ):
+                raise CurrentPlanError(
+                    "release QC requires a current market source for "
+                    f"{input_key}: {contract_source_id} "
+                    f"(age_days={factor_source_age['age_days']}, "
+                    f"max_age_days={source_max_age_days})"
+                )
+            if (
+                assurance_profile == "RELEASE_QC"
+                and contract_source.get("readiness") != "READY"
+            ):
+                raise CurrentPlanError(
+                    f"release QC market source is not READY: {contract_source_id}"
+                )
         assigned_series = {
             _text(strategy.get("series_id"), "series_id")
             for strategy, _assignment in source_assignments
         }
-        target_last = max(
-            targets_by_series[series_id][-1] for series_id in assigned_series
-        )
-        analysis_as_of = target_last
         complete_date_set = set(complete_dates)
         if input_key in public_factor_boundaries:
             if (
@@ -1201,29 +1527,129 @@ def build_bundle(
                 raise CurrentPlanError(
                     f"source {source_key} does not end at the admitted boundary"
                 )
-            if analysis_as_of >= admitted_boundary:
-                if admitted_boundary not in complete_date_set:
-                    raise CurrentPlanError(
-                        f"source {source_key} is incomplete at the admitted boundary"
+            if admitted_boundary not in complete_date_set:
+                raise CurrentPlanError(
+                    f"source {source_key} is incomplete at the admitted boundary"
+                )
+        maximum_factor_staleness_days = 0
+
+        model_date_cache: dict[tuple[str, ...], tuple[date, ...]] = {}
+        model_boundaries: dict[str, date] = {}
+        model_calculation_boundaries: dict[str, dict[str, object]] = {}
+        models: list[dict[str, object]] = []
+        for strategy, assignment in source_assignments:
+            strategy_id = _text(strategy.get("strategy_id"), "strategy_id")
+            series_id = _text(strategy.get("series_id"), "series_id")
+            factor_sets = cast(
+                tuple[tuple[str, ...], ...], assignment["resolved_factor_sets"]
+            )
+            constraint = _text(assignment.get("constraint"), "assignment.constraint")
+            for index, factors in enumerate(factor_sets, 1):
+                model_id = f"{strategy_id}-{source_key}-{index:02d}"
+                factor_columns = tuple(columns[factor] for factor in factors)
+                model_required = (risk_free, *factor_columns)
+                model_dates = model_date_cache.get(model_required)
+                if model_dates is None:
+                    model_dates = _complete_dates(
+                        market_rows[input_key],
+                        model_required,
+                        f"market input {input_key} model {model_id}",
+                        allowed_missing_after_start=(
+                            frozenset(factor_columns)
+                            if input_key == "us_industries"
+                            else frozenset()
+                        ),
+                        always_required=(
+                            frozenset((risk_free,))
+                            if input_key == "us_industries"
+                            else frozenset()
+                        ),
                     )
-                factor_as_of = admitted_boundary
-            else:
-                factor_as_of = min(complete_dates[-1], analysis_as_of)
-            maximum_factor_staleness_days = max(
-                0, (analysis_as_of - admitted_boundary).days
-            )
-        else:
-            factor_as_of = min(complete_dates[-1], analysis_as_of)
-            maximum_factor_staleness_days = _integer(
-                source_plan.get("maximum_factor_staleness_days", 10),
-                f"source {source_key} maximum_factor_staleness_days",
-            )
+                    model_date_cache[model_required] = model_dates
+                model_as_of = _latest_common_complete_date(
+                    [set(targets_by_series[series_id]), set(model_dates)],
+                    evaluated_on=evaluated_on,
+                    name=f"model {model_id}",
+                )
+                aligned = sorted(
+                    set(targets_by_series[series_id]).intersection(model_dates)
+                )
+                aligned = [observed for observed in aligned if observed <= model_as_of]
+                proposed_test = int(
+                    (Decimal(len(aligned)) * holdout_fraction).to_integral_value(
+                        rounding=ROUND_CEILING
+                    )
+                )
+                test_count = max(minimum_holdout, proposed_test)
+                if len(aligned) - test_count < 3:
+                    raise CurrentPlanError(
+                        f"{series_id} has insufficient aligned history for {model_id}"
+                    )
+                train_end = aligned[-test_count - 1]
+                test_start = aligned[-test_count]
+                limiting_inputs = []
+                if targets_by_series[series_id][-1] == model_as_of:
+                    limiting_inputs.append(f"target:{series_id}")
+                if model_dates[-1] == model_as_of:
+                    limiting_inputs.append(
+                        f"factor:{input_key}:{','.join(factors)}:{risk_free}"
+                    )
+                if not limiting_inputs:
+                    limiting_inputs = [
+                        f"target:{series_id}",
+                        f"factor:{input_key}:{','.join(factors)}:{risk_free}",
+                    ]
+                model_boundaries[model_id] = model_as_of
+                model_calculation_boundaries[model_id] = _age_disposition(
+                    complete_through=model_as_of,
+                    evaluated_on=evaluated_on,
+                    warning_after_days=0,
+                    limiting_inputs=limiting_inputs,
+                )
+                models.append(
+                    {
+                        "as_of_date": model_as_of.isoformat(),
+                        "constraint": constraint,
+                        "cost_coverage": "INCOMPLETE",
+                        "cv_folds": cv_folds,
+                        "factor_ids": list(factors),
+                        "minimum_test_observations": minimum_holdout,
+                        "minimum_train_observations": max(
+                            3, minimum_per_factor * len(factors)
+                        ),
+                        "model_id": model_id,
+                        "parsimony_tolerance": tolerance,
+                        "periods_per_year": 252,
+                        "ridge_candidates": list(ridge),
+                        "series_id": series_id,
+                        "test_start": test_start.isoformat(),
+                        "train_end": train_end.isoformat(),
+                    }
+                )
+        if not models:
+            raise CurrentPlanError(f"source {source_key} has no planned models")
+        analysis_as_of = max(model_boundaries.values())
+        oldest_model_boundary = min(model_boundaries.values())
+        calculation_age = _age_disposition(
+            complete_through=oldest_model_boundary,
+            evaluated_on=evaluated_on,
+            warning_after_days=0,
+            limiting_inputs=sorted(
+                f"model:{model_id}"
+                for model_id, boundary in model_boundaries.items()
+                if boundary == oldest_model_boundary
+            ),
+        )
+        factor_input_start = min(
+            min(observed) for observed in model_date_cache.values()
+        )
         projected_factor_rows = [
             [row["date"], *(row[column] for column in required)]
             for row in market_rows[input_key]
             if (observed := _day(row["date"], f"market input {input_key} date"))
-            in complete_date_set
-            and observed <= factor_as_of
+            >= factor_input_start
+            and observed <= analysis_as_of
+            and row[risk_free].strip()
         ]
         projected_factor_content = _csv_bytes(
             ("date", *required), projected_factor_rows
@@ -1254,52 +1680,24 @@ def build_bundle(
             projected_target_content,
             "portfolio-decomposition-target-series",
         )
-        models: list[dict[str, object]] = []
-        for strategy, assignment in source_assignments:
-            series_id = _text(strategy.get("series_id"), "series_id")
-            aligned = sorted(
-                set(targets_by_series[series_id]).intersection(complete_dates)
-            )
-            aligned = [observed for observed in aligned if observed <= analysis_as_of]
-            proposed_test = int(
-                (Decimal(len(aligned)) * holdout_fraction).to_integral_value(
-                    rounding=ROUND_CEILING
-                )
-            )
-            test_count = max(minimum_holdout, proposed_test)
-            if len(aligned) - test_count < 3:
-                raise CurrentPlanError(f"{series_id} has insufficient aligned history")
-            train_end = aligned[-test_count - 1]
-            test_start = aligned[-test_count]
-            factor_sets = cast(
-                tuple[tuple[str, ...], ...], assignment["resolved_factor_sets"]
-            )
-            constraint = _text(assignment.get("constraint"), "assignment.constraint")
-            for index, factors in enumerate(factor_sets, 1):
-                models.append(
-                    {
-                        "constraint": constraint,
-                        "cost_coverage": "INCOMPLETE",
-                        "cv_folds": cv_folds,
-                        "factor_ids": list(factors),
-                        "minimum_test_observations": minimum_holdout,
-                        "minimum_train_observations": max(
-                            3, minimum_per_factor * len(factors)
-                        ),
-                        "model_id": (
-                            f"{strategy['strategy_id']}-{source_key}-{index:02d}"
-                        ),
-                        "parsimony_tolerance": tolerance,
-                        "periods_per_year": 252,
-                        "ridge_candidates": list(ridge),
-                        "series_id": series_id,
-                        "test_start": test_start.isoformat(),
-                        "train_end": train_end.isoformat(),
-                    }
-                )
         factor_definitions: list[dict[str, object]] = []
         for candidate_id in candidates:
             candidate_record = candidate_records[candidate_id]
+            candidate_column = columns[candidate_id]
+            candidate_effective_dates = [
+                _day(row["date"], f"market input {input_key} date")
+                for row in market_rows[input_key]
+                if row[candidate_column].strip()
+                and row[risk_free].strip()
+                and factor_input_start
+                <= _day(row["date"], f"market input {input_key} date")
+                <= analysis_as_of
+            ]
+            if not candidate_effective_dates:
+                raise CurrentPlanError(
+                    f"source {source_key} candidate has no effective observations: "
+                    f"{candidate_id}"
+                )
             source_id = str(
                 candidate_record.get("source_id") or "UNAVAILABLE_NOT_DECLARED"
             ).strip()
@@ -1313,12 +1711,12 @@ def build_bundle(
                 )
             factor_definitions.append(
                 {
-                    "column": columns[candidate_id],
+                    "column": candidate_column,
                     "economic_family": str(
                         candidate_record.get("economic_family") or "UNCLASSIFIED"
                     ).strip(),
-                    "effective_end": str(projected_factor_rows[-1][0]),
-                    "effective_start": str(projected_factor_rows[0][0]),
+                    "effective_end": candidate_effective_dates[-1].isoformat(),
+                    "effective_start": candidate_effective_dates[0].isoformat(),
                     "factor_id": candidate_id,
                     "raw_orthogonal": raw_orthogonal,
                     "redundancy_policy": (
@@ -1362,7 +1760,12 @@ def build_bundle(
             {
                 "analysis_lens": spec["analysis_lens"],
                 "as_of_date": spec["as_of_date"],
+                "data_boundary": calculation_age,
                 "model_count": len(models),
+                "model_calculation_boundaries": {
+                    model_id: model_calculation_boundaries[model_id]
+                    for model_id in sorted(model_calculation_boundaries)
+                },
                 "path": relative,
                 "sha256": _sha256(content),
                 "size_bytes": len(content),
@@ -1388,8 +1791,18 @@ def build_bundle(
         "schema_version": 1,
         "builder": "portfolio-current-decomposition-plan",
         "builder_version": BUILDER_VERSION,
+        "assurance_profile": assurance_profile,
         "evaluation_date": evaluated_on.isoformat(),
         "layered_history": layered_history["identity"],
+        "data_age": {
+            "market_sources": [
+                market_source_ages[key] for key in sorted(market_source_ages)
+            ],
+            "public_factor_capture": public_factor_capture_age,
+            "spec_calculation_boundaries": {
+                cast(str, row["source_key"]): row["data_boundary"] for row in specs
+            },
+        },
         "inputs": [
             {
                 "path": path,
@@ -1409,6 +1822,11 @@ def build_bundle(
             if not path.startswith("inputs/")
         ],
         "specs": specs,
+        "release_qc_eligibility": (
+            "REQUIRES_DOWNSTREAM_RELEASE_QC"
+            if assurance_profile == "RELEASE_QC"
+            else "NOT_ELIGIBLE_NON_RELEASE_PROFILE"
+        ),
         "policies": {
             "calendar": "EXACT_DATE_COMPLETE_CANDIDATE_UNIVERSE_NO_FILL",
             "holdout": {
@@ -1422,6 +1840,7 @@ def build_bundle(
             },
             "publication": "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE",
             "strategy_evidence_mode": evidence_mode,
+            "data_age": "WARN_IN_DEVELOPMENT_AND_WORKSTATION; FAIL_REQUIRED_STALE_SOURCE_IN_RELEASE_QC",
         },
     }
     manifest["bundle_id"] = _sha256(_canonical_json(manifest))
@@ -1485,6 +1904,11 @@ def _parser() -> argparse.ArgumentParser:
         choices=("LIVE_ONLY", "LIVE_PLUS_BACKTEST"),
         default="LIVE_ONLY",
     )
+    parser.add_argument(
+        "--assurance-profile",
+        choices=ASSURANCE_PROFILES,
+        default="DEVELOPMENT",
+    )
     return parser
 
 
@@ -1510,6 +1934,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sector_manifest_path=args.sector_manifest,
         evaluation_date=args.evaluation_date,
         evidence_mode=args.evidence_mode,
+        assurance_profile=args.assurance_profile,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

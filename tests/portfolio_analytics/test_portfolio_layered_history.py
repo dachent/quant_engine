@@ -1044,13 +1044,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.10.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.11.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.10.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.11.0"}
     assert (
         "strategy-history"
         in generation_schema["properties"]["source_manifests"]["properties"]
@@ -1413,6 +1413,41 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     }
     assert changed_artifacts["returns.csv"] != artifacts["returns.csv"]
     assert changed_manifest != manifest_content
+
+
+def test_complete_account_history_age_is_warning_not_unavailability(
+    tmp_path: Path,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
+    owner_history = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "owner-account-live-history"
+    )
+    owner_history["freshness"]["max_age_days"] = 0
+    _write_json(fixture["contract_path"], contract)
+
+    artifacts, manifest_content = _build(fixture)
+    coverage = json.loads(artifacts["coverage.json"])
+    qsi = next(row for row in coverage["strategies"] if row["strategy_id"] == "qsi")
+    assert qsi["data_age"] == {
+        "age_days": 1,
+        "complete_through": "2026-01-09",
+        "evaluated_on": "2026-01-10",
+        "status": "WARN_COMPLETE_DATA_AGE",
+        "warning_after_days": 0,
+    }
+    assert qsi["modes"]["LIVE_ONLY"] == {
+        "reason": "WARN_ACCOUNT_LIVE_COMPLETE_DATA_AGE",
+        "status": "AVAILABLE",
+    }
+    result = validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_content,
+        contract_path=fixture["contract_path"],
+    )
+    assert result["verification"] == "VALID"
 
 
 def test_layered_history_accepts_only_manifest_declared_matrixport_gap(

@@ -35,7 +35,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 ANALYTICS_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.10.0"
+BUILDER_VERSION: Final = "1.11.0"
 METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-3"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
 ANALYSIS_LENSES: Final = {
@@ -133,6 +133,7 @@ class FactorRow:
 class ModelDefinition:
     model_id: str
     series_id: str
+    as_of_date: date | None
     factor_ids: tuple[str, ...]
     constraint: str
     cost_coverage: str
@@ -378,6 +379,8 @@ def _model_definition(value: Mapping[str, Any], index: int) -> ModelDefinition:
     expected_keys = set(base_keys)
     if "estimator" in value:
         expected_keys.add("estimator")
+    if "as_of_date" in value:
+        expected_keys.add("as_of_date")
     if estimator == "DYNAMIC_FLS":
         expected_keys.add("smoothness_candidates")
     _strict_keys(
@@ -444,6 +447,11 @@ def _model_definition(value: Mapping[str, Any], index: int) -> ModelDefinition:
     return ModelDefinition(
         model_id=_text(value["model_id"], f"{name}.model_id"),
         series_id=_text(value["series_id"], f"{name}.series_id"),
+        as_of_date=(
+            None
+            if value.get("as_of_date") is None
+            else _day(value["as_of_date"], f"{name}.as_of_date")
+        ),
         factor_ids=factor_ids,
         constraint=constraint,
         cost_coverage=cost_coverage,
@@ -547,6 +555,7 @@ def _load_spec(path: Path) -> Specification:
         raise DecompositionError("factor IDs must be unique and non-empty")
     if len({item.column for item in factors}) != len(factors):
         raise DecompositionError("factor columns must be unique")
+    spec_as_of_date = _day(root["as_of_date"], "as_of_date")
     models = tuple(
         _model_definition(item, index)
         for index, item in enumerate(_objects(root["models"], "models"))
@@ -555,6 +564,10 @@ def _load_spec(path: Path) -> Specification:
         raise DecompositionError("model IDs must be unique and non-empty")
     known_factors = {item.factor_id for item in factors}
     for model in models:
+        if model.as_of_date is not None and model.as_of_date > spec_as_of_date:
+            raise DecompositionError(
+                f"model {model.model_id} as_of_date follows specification as_of_date"
+            )
         unknown = set(model.factor_ids) - known_factors
         if unknown:
             raise DecompositionError(
@@ -568,7 +581,7 @@ def _load_spec(path: Path) -> Specification:
         raise DecompositionError("specification.series_composition must be an object")
     return Specification(
         analysis_lens=analysis_lens,
-        as_of_date=_day(root["as_of_date"], "as_of_date"),
+        as_of_date=spec_as_of_date,
         evidence_mode=evidence_mode,
         maximum_factor_staleness_days=_integer(
             root["maximum_factor_staleness_days"],
@@ -1833,6 +1846,9 @@ def _dynamic_model_result(
         "factor_ids": list(model.factor_ids),
         "method_label": METHOD_LABEL,
         "model_id": model.model_id,
+        "model_as_of_date": (
+            model.as_of_date.isoformat() if model.as_of_date is not None else None
+        ),
         "parsimony_tolerance": _number(model.parsimony_tolerance),
         "ridge_sensitivity": [
             {
@@ -1879,6 +1895,9 @@ def _unavailable_result(
         "factor_ids": list(model.factor_ids),
         "method_label": METHOD_LABEL,
         "model_id": model.model_id,
+        "model_as_of_date": (
+            model.as_of_date.isoformat() if model.as_of_date is not None else None
+        ),
         "model_quality": {
             "decision_rule": "SEALED_HOLDOUT_PREDICTED_R2_GT_ZERO",
             "decision_status": "UNAVAILABLE",
@@ -1900,6 +1919,15 @@ def _model_result(
     factor_definitions: Mapping[str, FactorDefinition],
     maximum_staleness_days: int,
 ) -> dict[str, object]:
+    if model.as_of_date is not None:
+        target_rows = tuple(
+            row for row in (target_rows or ()) if row.day <= model.as_of_date
+        )
+        factor_rows = {
+            observed: row
+            for observed, row in factor_rows.items()
+            if observed <= model.as_of_date
+        }
     live_target_rows = [
         row for row in (target_rows or ()) if row.evidence_layer != "BACKTEST"
     ]
@@ -2307,6 +2335,9 @@ def _model_result(
         "factor_ids": list(model.factor_ids),
         "method_label": METHOD_LABEL,
         "model_id": model.model_id,
+        "model_as_of_date": (
+            model.as_of_date.isoformat() if model.as_of_date is not None else None
+        ),
         "parsimony_tolerance": _number(model.parsimony_tolerance),
         "ridge_sensitivity": sensitivity,
         "selected_for_series": False,
