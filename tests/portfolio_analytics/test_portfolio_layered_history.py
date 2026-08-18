@@ -31,6 +31,7 @@ TargetSeriesError = target_series.TargetSeriesError
 build_layered_history_generation = target_series.build_layered_history_generation
 validate_layered_history_generation = target_series.validate_layered_history_generation
 write_layered_history_generation = target_series.write_layered_history_generation
+verify_layered_history_generation = target_series.verify_layered_history_generation
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -827,7 +828,7 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
 
 def _build(fixture: dict[str, Any]) -> tuple[dict[str, bytes], bytes]:
     return build_layered_history_generation(
-        repository_sha="a" * 40,
+        repository_sha=target_series._trusted_layered_history_code_identity()[0],
         **fixture,
     )
 
@@ -971,6 +972,17 @@ def _replace_output(
         )
 
 
+def test_layered_history_code_identity_ignores_inherited_git_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted_identity = target_series._trusted_layered_history_code_identity()
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "foreign.git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "foreign-worktree"))
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(tmp_path / "foreign-objects"))
+    target_series._trusted_layered_history_code_identity.cache_clear()
+    assert target_series._trusted_layered_history_code_identity() == trusted_identity
+
+
 def test_layered_history_generation_is_deterministic_and_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -979,13 +991,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.7.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.8.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.7.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.8.0"}
     assert (
         "strategy-history"
         in generation_schema["properties"]["source_manifests"]["properties"]
@@ -1067,6 +1079,88 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
         )
         == destination
     )
+    verified = verify_layered_history_generation(destination, fixture["contract_path"])
+    assert verified["verification"] == "VALID"
+
+    extra_file_destination = write_layered_history_generation(
+        tmp_path / "candidate-extra-file", artifacts, manifest_content
+    )
+    (extra_file_destination / "untracked.txt").write_text(
+        "not receipt-bound", encoding="utf-8"
+    )
+    with pytest.raises(TargetSeriesError, match="generation inventory differs"):
+        verify_layered_history_generation(
+            extra_file_destination, fixture["contract_path"]
+        )
+
+    extra_directory_destination = write_layered_history_generation(
+        tmp_path / "candidate-extra-directory", artifacts, manifest_content
+    )
+    (extra_directory_destination / "untracked").mkdir()
+    with pytest.raises(TargetSeriesError, match="generation inventory differs"):
+        verify_layered_history_generation(
+            extra_directory_destination, fixture["contract_path"]
+        )
+
+    missing_file_destination = write_layered_history_generation(
+        tmp_path / "candidate-missing-file", artifacts, manifest_content
+    )
+    (missing_file_destination / "coverage.json").unlink()
+    with pytest.raises(TargetSeriesError, match="generation inventory differs"):
+        verify_layered_history_generation(
+            missing_file_destination, fixture["contract_path"]
+        )
+
+    replaced_file_destination = write_layered_history_generation(
+        tmp_path / "candidate-replaced-file", artifacts, manifest_content
+    )
+    (replaced_file_destination / "coverage.json").unlink()
+    (replaced_file_destination / "coverage.json").mkdir()
+    with pytest.raises(TargetSeriesError, match="generation inventory differs"):
+        verify_layered_history_generation(
+            replaced_file_destination, fixture["contract_path"]
+        )
+
+    symlink_destination = write_layered_history_generation(
+        tmp_path / "candidate-symlink", artifacts, manifest_content
+    )
+    symlink_path = symlink_destination / "coverage.json"
+    symlink_target = tmp_path / "external-coverage.json"
+    symlink_target.write_bytes(artifacts["coverage.json"])
+    symlink_path.unlink()
+    try:
+        symlink_path.symlink_to(symlink_target)
+    except OSError:
+        pass
+    else:
+        with pytest.raises(TargetSeriesError, match="generation inventory differs"):
+            verify_layered_history_generation(
+                symlink_destination, fixture["contract_path"]
+            )
+
+    rewritten_repository = json.loads(manifest_content)
+    rewritten_repository["repository_sha"] = "0" * 40
+    with pytest.raises(TargetSeriesError, match="code identity is not trusted"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(rewritten_repository),
+            contract_path=fixture["contract_path"],
+        )
+
+    rewritten_tool = json.loads(manifest_content)
+    rewritten_tool["tool_sha256"] = "0" * 64
+    with pytest.raises(TargetSeriesError, match="code identity is not trusted"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(rewritten_tool),
+            contract_path=fixture["contract_path"],
+        )
+
+    with pytest.raises(
+        TargetSeriesError, match="repository SHA differs from the executing checkout"
+    ):
+        build_layered_history_generation(repository_sha="0" * 40, **fixture)
+
     with pytest.raises(TargetSeriesError, match="required history mode is not ready"):
         validate_layered_history_generation(
             artifacts=artifacts,
@@ -2451,7 +2545,7 @@ def test_layered_history_cli_builds_verifies_and_requires_modes(
         "portfolio_target_series.py",
         "--layered-history-generation",
         "--repository-sha",
-        "a" * 40,
+        target_series._trusted_layered_history_code_identity()[0],
         "--as-of-date",
         fixture["as_of_date"],
         "--product-id",

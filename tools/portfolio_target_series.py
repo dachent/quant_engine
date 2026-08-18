@@ -15,13 +15,16 @@ import csv
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 import hashlib
 import importlib.util
 import io
 import json
 import math
+import os
 from pathlib import Path
 import statistics
+import subprocess
 import sys
 from typing import Any, Final, Mapping, Sequence
 
@@ -60,7 +63,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.7.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.8.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 LAYERED_HISTORY_MODE_POLICY: Final = {
     "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
@@ -91,6 +94,64 @@ MATRIXPORT_RETURN_TRANSFORM_CAPABILITIES: Final = {
         }
     )
 }
+
+
+@lru_cache(maxsize=1)
+def _trusted_layered_history_code_identity() -> tuple[str, str]:
+    repository_root = Path(__file__).resolve().parents[1]
+    repository_selection_variables = frozenset(
+        {
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_DIR",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+            "GIT_INDEX_FILE",
+            "GIT_NAMESPACE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_PREFIX",
+            "GIT_WORK_TREE",
+        }
+    )
+    clean_environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() not in repository_selection_variables
+    }
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository_root),
+                "rev-parse",
+                "--show-toplevel",
+                "HEAD^{commit}",
+            ],
+            capture_output=True,
+            check=False,
+            env=clean_environment,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise TargetSeriesError(
+            "layered history repository identity is unavailable"
+        ) from exc
+    identity_lines = completed.stdout.splitlines()
+    repository_sha = identity_lines[1].strip() if len(identity_lines) == 2 else ""
+    if (
+        completed.returncode != 0
+        or len(identity_lines) != 2
+        or Path(identity_lines[0].strip()).resolve() != repository_root
+        or len(repository_sha) != 40
+        or any(ch not in "0123456789abcdef" for ch in repository_sha)
+    ):
+        raise TargetSeriesError("layered history repository identity is unavailable")
+    tool_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    return repository_sha, tool_sha256
+
+
 LAYERED_HISTORY_SEGMENT_FIELDS: Final = (
     "strategy_id",
     "series_id",
@@ -2172,6 +2233,11 @@ def build_layered_history_generation(
         ch not in "0123456789abcdef" for ch in repository_sha
     ):
         raise TargetSeriesError("repository SHA must be lowercase hexadecimal")
+    trusted_repository_sha, _trusted_tool_sha256 = (
+        _trusted_layered_history_code_identity()
+    )
+    if repository_sha != trusted_repository_sha:
+        raise TargetSeriesError("repository SHA differs from the executing checkout")
     try:
         accepted_as_of = date.fromisoformat(as_of_date)
     except ValueError as exc:
@@ -3246,6 +3312,11 @@ def validate_layered_history_generation(
         or any(ch not in "0123456789abcdef" for ch in tool_sha256)
     ):
         raise TargetSeriesError("layered history code identity differs")
+    trusted_repository_sha, trusted_tool_sha256 = (
+        _trusted_layered_history_code_identity()
+    )
+    if repository_sha != trusted_repository_sha or tool_sha256 != trusted_tool_sha256:
+        raise TargetSeriesError("layered history code identity is not trusted")
 
     contract, strategies, sources, corrections = _history_contract(contract_path)
     product = manifest.get("product")
@@ -4645,6 +4716,20 @@ def verify_layered_history_generation(
 ) -> dict[str, object]:
     if generation_root.is_symlink() or not generation_root.is_dir():
         raise TargetSeriesError("layered history generation root must be a directory")
+
+    expected_names = frozenset((*LAYERED_HISTORY_OUTPUT_NAMES, "generation.json"))
+    try:
+        entries = tuple(generation_root.iterdir())
+    except OSError as exc:
+        raise TargetSeriesError(
+            "layered history generation inventory is unreadable"
+        ) from exc
+    if (
+        len(entries) != len(expected_names)
+        or {entry.name for entry in entries} != expected_names
+        or any(entry.is_symlink() or not entry.is_file() for entry in entries)
+    ):
+        raise TargetSeriesError("layered history generation inventory differs")
 
     def _read_generation_file(name: str) -> bytes:
         path = generation_root / name
