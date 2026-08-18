@@ -2847,6 +2847,29 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
     lines.extend(
         [
             "",
+            "## Source timing",
+            "",
+            "| Source | Cadence | Calendar | Max age days | Publication lag days | Freshness rule |",
+            "|---|---|---|---:|---:|---|",
+        ]
+    )
+    for row in sources:
+        timing_cells = (
+            row["source_id"],
+            row["temporal"]["cadence"],
+            row["temporal"]["calendar"],
+            row["freshness"]["max_age_days"],
+            row["freshness"]["publication_lag_days"],
+            row["freshness"]["rule"],
+        )
+        lines.append(
+            "| "
+            + " | ".join(str(value).replace("|", "\\|") for value in timing_cells)
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
             "## Source readiness",
             "",
             f"- Source segments: `{len(sources)}`",
@@ -2909,6 +2932,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                             "publication_lag_days": source["freshness"][
                                 "publication_lag_days"
                             ],
+                            "freshness_rule": source["freshness"]["rule"],
                             "admission_transform": source["admission"]["transform"],
                             "admission_facts": source["admission"]["facts"],
                             "consumer": consumer,

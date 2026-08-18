@@ -821,8 +821,8 @@
       "interval": {"observed_start": null, "observed_end": null, "effective_start": null, "effective_end": null, "splice_policy": "EXACT_DATE_INTERSECTION_WITH_DECLARED_TARGET_CALENDAR"},
       "schema": {"name": "portfolio-public-decomposition-sources", "version": "1"},
       "units": {"measurement": "DAILY_PERCENT_OR_DECIMAL_RETURN_NORMALIZED_TO_DECLARED_DECIMAL", "currency": "NOT_APPLICABLE_OR_USD_RISK_FREE"},
-      "temporal": {"timezone": "PROVIDER_DECLARED", "calendar": "WEEKDAY_SOURCE_CALENDAR", "cadence": "DAILY_WITH_PROVIDER_LAG"},
-      "freshness": {"max_age_days": 45, "publication_lag_days": 10, "rule": "SOURCE_SPECIFIC_MAX_AGE_AND_PROVIDER_LAG"},
+      "temporal": {"timezone": "PROVIDER_DECLARED", "calendar": "WEEKDAY_SOURCE_CALENDAR", "cadence": "DAILY_TO_WEEKLY_FULL_PIPELINE; CAPTURE_EVERY_SCHEDULED_RUN"},
+      "freshness": {"max_age_days": 0, "publication_lag_days": 45, "rule": "CURRENT_RUN_CAPTURE_REQUIRED; MONTHLY_PROVIDER_PUBLICATION; REQUIRE_DAILY_OBSERVATIONS_THROUGH_LATEST_MONTH_END_WHOSE_45_CALENDAR_DAY_ALLOWANCE_HAS_ELAPSED"},
       "admission": {"transform": "portfolio-public-decomposition-sources", "version": "1", "facts": ["ECONOMIC_FACTOR_RETURN", "INDUSTRY_RETURN", "RISK_FREE_RETURN"]},
       "product_requirement": "REQUIRED",
       "consumers": ["DECOMPOSITION", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
@@ -833,7 +833,7 @@
       "readiness": "REQUIRED_NOT_READY",
       "blockers": [328],
       "invalidated_outputs": ["DECOMPOSITION", "REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
-      "owner_policy_decision": "The existing candidate catalog is a selector, not this product authority; #328 must refresh and bind exact immutable generations."
+      "owner_policy_decision": "Every daily-to-weekly scheduled full-pipeline run captures a new receipt. Kenneth French daily observations publish monthly and are required through the latest calendar month-end whose 45-calendar-day allowance has elapsed; #328 owns the exact selector, immutable generation, and executable boundary gate."
     },
     {
       "source_id": "public-etf-style-sector-and-market-prices",

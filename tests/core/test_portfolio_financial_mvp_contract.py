@@ -110,7 +110,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "3b3320147671098bb803df92aafcbe7eb6b095a8207f29ef52149adf27ccaf85"
+        "223566d79a949c1729d5b6e110152e6db42716ba186b5d4bb14e601b06056192"
     )
 
 
@@ -558,6 +558,52 @@ def test_proposed_market_candidates_are_not_promoted_to_authority() -> None:
         assert row["acquisition"]["mode"] == (
             "NO_ACQUISITION_BEFORE_OWNER_SOURCE_APPROVAL"
         )
+
+
+def test_public_factor_run_and_publication_timing_propagate_to_every_view() -> None:
+    contract = _contract()
+    source = _source(contract, "public-economic-and-industry-factors")
+    expected_cadence = (
+        "DAILY_TO_WEEKLY_FULL_PIPELINE; CAPTURE_EVERY_SCHEDULED_RUN"
+    )
+    expected_rule = (
+        "CURRENT_RUN_CAPTURE_REQUIRED; MONTHLY_PROVIDER_PUBLICATION; "
+        "REQUIRE_DAILY_OBSERVATIONS_THROUGH_LATEST_MONTH_END_WHOSE_45_"
+        "CALENDAR_DAY_ALLOWANCE_HAS_ELAPSED"
+    )
+    assert source["temporal"] == {
+        "timezone": "PROVIDER_DECLARED",
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "cadence": expected_cadence,
+    }
+    assert source["freshness"] == {
+        "max_age_days": 0,
+        "publication_lag_days": 45,
+        "rule": expected_rule,
+    }
+
+    views = contract_tool.render_views(contract)
+    matrix = json.loads(views.source_matrix_json)
+    rows = [
+        row
+        for row in matrix["rows"]
+        if row["source_id"] == "public-economic-and-industry-factors"
+    ]
+    assert len(rows) == 135
+    assert all(
+        row["cadence"] == expected_cadence
+        and row["max_age_days"] == 0
+        and row["publication_lag_days"] == 45
+        and row["freshness_rule"] == expected_rule
+        and row["owner_policy_decision"] == source["owner_policy_decision"]
+        for row in rows
+    )
+    assert b"## Source timing" in views.summary_markdown
+    assert expected_cadence.encode() in views.summary_markdown
+    assert expected_rule.encode() in views.summary_markdown
+    source_bytes = json.dumps(source, sort_keys=True).encode()
+    assert b"DAILY_WITH_PROVIDER_LAG" not in source_bytes
+    assert b"SOURCE_SPECIFIC_MAX_AGE_AND_PROVIDER_LAG" not in source_bytes
 
 
 def test_delete_or_rename_any_required_outcome_fails() -> None:
