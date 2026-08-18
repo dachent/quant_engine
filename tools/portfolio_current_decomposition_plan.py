@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.5.0"
+BUILDER_VERSION = "0.6.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -300,6 +300,22 @@ def _layered_history_targets(
     manifest, manifest_content = _load_json(manifest_path, "layered generation")
     coverage, coverage_content = _load_json(coverage_path, "layered coverage")
     contract, contract_content = _load_json(contract_path, "financial MVP contract")
+    contract_sources: dict[str, dict[str, Any]] = {}
+    for source in _objects(contract.get("source_segments"), "financial MVP sources"):
+        source_id = _text(source.get("source_id"), "financial MVP source_id")
+        if source_id in contract_sources:
+            raise CurrentPlanError("financial MVP source identity is duplicated")
+        contract_sources[source_id] = source
+    receipt_outputs = _object(manifest.get("outputs"), "layered generation outputs")
+    receipt_schemas: dict[str, dict[str, str]] = {}
+    for name in ("coverage.json", projection_name, "segments.csv"):
+        output = _object(receipt_outputs.get(name), f"layered output {name}")
+        receipt_schemas[name] = {
+            "schema_name": _text(output.get("schema_name"), f"{name} schema_name"),
+            "schema_version": _text(
+                output.get("schema_version"), f"{name} schema_version"
+            ),
+        }
     projection_headers, projection_rows = _read_csv(
         projection_path, "layered history projection"
     )
@@ -372,6 +388,29 @@ def _layered_history_targets(
             raise CurrentPlanError(
                 f"layered history has no selected account-live segment for {strategy_id}"
             )
+        for summary in live_summaries:
+            source_id = _text(summary.get("source_id"), "live source_id")
+            live_source = contract_sources.get(source_id)
+            if live_source is None:
+                raise CurrentPlanError(
+                    f"layered history live source is absent from the contract: {source_id}"
+                )
+            freshness = _object(live_source.get("freshness"), f"{source_id} freshness")
+            max_age_days = _integer(
+                freshness.get("max_age_days"), f"{source_id} max_age_days"
+            )
+            observed_end = _day(summary.get("observed_end"), "live observed_end")
+            age_days = (evaluated_on - observed_end).days
+            if age_days < 0:
+                raise CurrentPlanError(
+                    f"layered history live source exceeds the evaluation date: {source_id}"
+                )
+            if age_days > max_age_days:
+                raise CurrentPlanError(
+                    "layered history live source is stale at the evaluation date for "
+                    f"{strategy_id}: {source_id} "
+                    f"(age_days={age_days}, max_age_days={max_age_days})"
+                )
         backtest_observations = sum(
             _integer(summary.get("return_observations"), "backtest observations", 1)
             for summary in selected_summaries
@@ -509,6 +548,25 @@ def _layered_history_targets(
             "financial MVP contract schema",
             1,
         ),
+        "schema_definitions": {
+            "financial-mvp-contract.json": {
+                "schema_name": "financial-mvp-source-contract",
+                "schema_version": str(contract["contract_schema_version"]),
+            },
+            "generation.json": {
+                "schema_name": "layered-history-generation",
+                "schema_version": str(
+                    _integer(
+                        manifest.get("schema_version"), "layered schema_version", 1
+                    )
+                ),
+            },
+            **receipt_schemas,
+            "selected-targets.csv": {
+                "schema_name": "portfolio-decomposition-target-series",
+                "schema_version": "1",
+            },
+        },
     }
 
 
@@ -998,31 +1056,16 @@ def build_bundle(
             ),
         )
     )
-    history_schema_versions = {
-        "financial-mvp-contract.json": str(layered_history["contract_schema_version"]),
-        "generation.json": "1",
-        "coverage.json": "1",
-        "live-only.csv": "2",
-        "live-plus-backtest.csv": "2",
-        "segments.csv": "2",
-        "selected-targets.csv": "1",
-    }
-    history_schema_names = {
-        "financial-mvp-contract.json": "financial-mvp-source-contract",
-        "generation.json": "layered-history-generation",
-        "coverage.json": "layered-history-coverage",
-        "live-only.csv": "portfolio-layered-history-projection",
-        "live-plus-backtest.csv": "portfolio-layered-history-projection",
-        "segments.csv": "portfolio-layered-history-segments",
-        "selected-targets.csv": "portfolio-decomposition-target-series",
-    }
+    history_schema_definitions = cast(
+        dict[str, dict[str, str]], layered_history["schema_definitions"]
+    )
     generated_provenance.extend(
         _provenance_definition(
             f"history/{name}",
             f"inputs/history/{name}",
             content,
-            history_schema_names[name],
-            history_schema_versions[name],
+            history_schema_definitions[name]["schema_name"],
+            history_schema_definitions[name]["schema_version"],
         )
         for name, content in sorted(history_contents.items())
     )

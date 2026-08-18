@@ -197,6 +197,16 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     days = _weekdays(80)
     history_fixture = history_tests._history_fixture(tmp_path / "layered-source")
+    history_contract = json.loads(
+        history_fixture["contract_path"].read_text(encoding="utf-8")
+    )
+    owner_history = next(
+        source
+        for source in history_contract["source_segments"]
+        if source["source_id"] == "owner-account-live-history"
+    )
+    owner_history["freshness"]["max_age_days"] = 730
+    _write_json(history_fixture["contract_path"], history_contract)
     history_artifacts, history_manifest = history_tests._build(history_fixture)
     history_generation = history_tests.write_layered_history_generation(
         tmp_path / "layered-generations", history_artifacts, history_manifest
@@ -419,6 +429,19 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         "ETF_STYLE",
         "RETURN_SECTOR",
     }
+    history_provenance = {
+        item["artifact_id"]: item
+        for item in json.loads(outputs["specs/economic.json"])["provenance_sources"]
+        if item["artifact_id"].startswith("history/")
+    }
+    assert history_provenance["history/live-only.csv"]["schema_name"] == (
+        "portfolio-layered-strategy-returns"
+    )
+    assert history_provenance["history/live-only.csv"]["schema_version"] == "2"
+    assert history_provenance["history/segments.csv"]["schema_name"] == (
+        "portfolio-layered-history-segments"
+    )
+    assert history_provenance["history/segments.csv"]["schema_version"] == "1"
     dispositions = json.loads(outputs["candidate-dispositions.json"])
     assert len(dispositions["candidate_dispositions"]) == 12
     economic = json.loads(outputs["specs/economic.json"])
@@ -553,6 +576,49 @@ def test_live_plus_backtest_requires_exact_available_mode(tmp_path: Path) -> Non
         )
 
 
+def test_layered_history_freshness_is_revalidated_at_planning_date(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixture(tmp_path)
+    contract = json.loads(
+        inputs["financial_mvp_contract_path"].read_text(encoding="utf-8")
+    )
+    owner_history = next(
+        source
+        for source in contract["source_segments"]
+        if source["source_id"] == "owner-account-live-history"
+    )
+    max_age_days = owner_history["freshness"]["max_age_days"]
+    coverage = json.loads(
+        (inputs["layered_history_generation_path"] / "coverage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    qsi = next(row for row in coverage["strategies"] if row["strategy_id"] == "qsi")
+    live = next(
+        row
+        for row in qsi["segments"]
+        if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    )
+    stale_date = date.fromisoformat(live["observed_end"]) + timedelta(
+        days=max_age_days + 1
+    )
+    with pytest.raises(
+        planner.CurrentPlanError,
+        match=(
+            "live source is stale at the evaluation date for qsi: "
+            "owner-account-live-history"
+        ),
+    ):
+        planner._layered_history_targets(
+            generation_root=inputs["layered_history_generation_path"],
+            contract_path=inputs["financial_mvp_contract_path"],
+            strategies=planner._resolved_strategies(inputs["plan_document"]),
+            evidence_mode="LIVE_ONLY",
+            evaluated_on=stale_date,
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (
@@ -572,7 +638,25 @@ def test_planner_independently_rejects_invalid_selected_projection(
     generation_root.mkdir()
     _write_json(
         generation_root / "generation.json",
-        {"as_of_date": "2026-01-10", "generation_id": generation_id},
+        {
+            "schema_version": 1,
+            "as_of_date": "2026-01-10",
+            "generation_id": generation_id,
+            "outputs": {
+                "coverage.json": {
+                    "schema_name": "portfolio-layered-history-coverage",
+                    "schema_version": "1",
+                },
+                "live-only.csv": {
+                    "schema_name": "portfolio-layered-strategy-returns",
+                    "schema_version": "2",
+                },
+                "segments.csv": {
+                    "schema_name": "portfolio-layered-history-segments",
+                    "schema_version": "1",
+                },
+            },
+        },
     )
     _write_json(
         generation_root / "coverage.json",
@@ -589,7 +673,9 @@ def test_planner_independently_rejects_invalid_selected_projection(
                         {
                             "evidence_layer": "ACCOUNT_LIVE",
                             "mode_admission": "INCLUDE_SELECTED_LIVE",
+                            "source_id": "provider-ledger-account-live",
                             "observed_start": "2026-01-09",
+                            "observed_end": "2026-01-09",
                             "return_observations": 1,
                         }
                     ],
@@ -597,7 +683,18 @@ def test_planner_independently_rejects_invalid_selected_projection(
             ]
         },
     )
-    _write_json(tmp_path / "contract.json", {"contract_schema_version": 4})
+    _write_json(
+        tmp_path / "contract.json",
+        {
+            "contract_schema_version": 4,
+            "source_segments": [
+                {
+                    "source_id": "provider-ledger-account-live",
+                    "freshness": {"max_age_days": 10},
+                }
+            ],
+        },
+    )
     selected_date = "2026-01-11" if mutation == "future" else "2026-01-09"
     selected_layer = "BACKTEST" if mutation == "wrong_layer" else "ACCOUNT_LIVE"
     projection_rows = [["QSI", selected_date, "0.001", selected_layer, "qsi:v1"]]
@@ -746,6 +843,7 @@ def test_available_hybrid_projection_is_selected_without_legacy_override(
         for row in contract["source_segments"]
         if row["source_id"] == "owner-account-live-history"
     )
+    live_source["freshness"]["max_age_days"] = 730
     live_source["strategy_version"]["version_refs"]["qsi"] = version
     for identity in contract["history_corrections"]["materialized_segment_identities"]:
         if identity["strategy_id"] == "qsi":
