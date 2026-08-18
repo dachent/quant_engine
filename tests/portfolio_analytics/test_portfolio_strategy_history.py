@@ -284,7 +284,7 @@ def _p123_generation(path: Path) -> None:
                 },
                 {
                     "_entity_id": exact_id,
-                    "Date": "2025-11-15",
+                    "Date": "2025-11-17",
                     "Total Equity": "99",
                     "Cash Added": "99",
                     "# Positions": "13",
@@ -296,6 +296,29 @@ def _p123_generation(path: Path) -> None:
                     "Total Equity": "100",
                     "Cash Added": "0",
                 },
+            ]
+        ),
+        "har_managed_performance.parquet": pa.Table.from_pylist(
+            [
+                {"_entity_id": exact_id, "field": field, "value": value}
+                for field, value in (
+                    ("data", json.dumps([[0, 100, 100], [1, 101, 101], [-1, 99, 99]])),
+                    ("date", "2025-11-13"),
+                    ("dateLast", "2025-11-17"),
+                    (
+                        "panels",
+                        json.dumps(
+                            [
+                                {
+                                    "graphs": [
+                                        {"idx": 0, "s": "Strategy"},
+                                        {"idx": 1, "s": "Total Value"},
+                                    ]
+                                }
+                            ]
+                        ),
+                    ),
+                )
             ]
         ),
         "returns_daily.parquet": pa.table(
@@ -376,7 +399,7 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
 
     assert manifest["verification"] == "VERIFIED"
     assert manifest["builder"] == "portfolio-strategy-history"
-    assert manifest["builder_version"] == "1.3.0"
+    assert manifest["builder_version"] == "1.4.0"
     assert {item["series_id"] for item in manifest["series"]} == {
         "GrizzlyBears VTMA",
         "QSI",
@@ -401,16 +424,18 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
         item["series_id"]: item for item in manifest["history_dispositions"]
     }
     assert dispositions["EU [P123]"]["status"] == (
-        "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_REQUIRED"
+        "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_DERIVED_NOT_ADMITTED"
     )
     assert dispositions["EU [P123]"]["required_for_analysis"] is True
     assert dispositions["EU [P123]"]["exact_equity_curve_rows"] == 3
     assert dispositions["EU [P123]"]["provider_live"] == {
-        "cash_added_semantics": "UNRESOLVED_RETURN_TRANSFORM",
-        "observed_end": "2025-11-15",
-        "observed_start": "2025-11-13",
+        "cash_added_semantics": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
+        "equity_overlap_observations": 3,
+        "observed_end": "2025-11-17",
+        "observed_start": "2025-11-14",
         "raw_observations": 3,
-        "return_observations": 0,
+        "return_observations": 2,
+        "transform_id": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
     }
     assert (
         dispositions["EU [P123]"]["retained_but_not_admitted"][0]["return_observations"]

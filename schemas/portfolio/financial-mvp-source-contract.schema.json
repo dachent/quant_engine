@@ -18,7 +18,7 @@
     "$schema": {
       "const": "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     },
-    "contract_schema_version": {"const": 2},
+    "contract_schema_version": {"const": 4},
     "product": {"$ref": "#/$defs/product"},
     "strategies": {
       "type": "array",
@@ -238,6 +238,7 @@
         "blockers",
         "effective_product_interval",
         "funded_membership",
+        "history_series_id",
         "outcome_dispositions",
         "product_requirement",
         "readiness",
@@ -247,6 +248,10 @@
       ],
       "properties": {
         "strategy_id": {"$ref": "#/$defs/nonempty_string"},
+        "history_series_id": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
         "product_requirement": {"$ref": "#/$defs/requirement"},
         "readiness": {"$ref": "#/$defs/readiness"},
         "readiness_reason": {"$ref": "#/$defs/nonempty_string"},
@@ -324,6 +329,7 @@
       "additionalProperties": false,
       "required": [
         "corrections",
+        "materialized_segment_identities",
         "owner_issue",
         "policy_id",
         "policy_version",
@@ -340,7 +346,63 @@
           "type": "array",
           "minItems": 1,
           "items": {"$ref": "#/$defs/history_correction"}
+        },
+        "materialized_segment_identities": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/materialized_segment_identity"}
         }
+      }
+    },
+    "materialized_segment_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calendar",
+        "canonicalization",
+        "evidence_layer",
+        "frequency",
+        "mode_admission",
+        "observed_end",
+        "observed_start",
+        "return_basis",
+        "return_observations",
+        "return_type",
+        "segment_id",
+        "sha256",
+        "source_generation_id",
+        "source_generation_sha256",
+        "source_id",
+        "strategy_id",
+        "strategy_version"
+      ],
+      "properties": {
+        "calendar": {"$ref": "#/$defs/nonempty_string"},
+        "canonicalization": {"const": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1"},
+        "evidence_layer": {
+          "enum": ["ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"]
+        },
+        "frequency": {"$ref": "#/$defs/nonempty_string"},
+        "mode_admission": {
+          "enum": [
+            "EXCLUDE_COMPARISON_ONLY",
+            "INCLUDE_SELECTED_LIVE",
+            "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+            "REQUIRED_NOT_READY_OVERLAP"
+          ]
+        },
+        "observed_end": {"type": "string", "format": "date"},
+        "observed_start": {"type": "string", "format": "date"},
+        "return_basis": {"$ref": "#/$defs/nonempty_string"},
+        "return_observations": {"type": "integer", "minimum": 1},
+        "return_type": {"$ref": "#/$defs/nonempty_string"},
+        "segment_id": {"$ref": "#/$defs/nonempty_string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_generation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_generation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_id": {"$ref": "#/$defs/nonempty_string"},
+        "strategy_id": {"$ref": "#/$defs/nonempty_string"},
+        "strategy_version": {"$ref": "#/$defs/nonempty_string"}
       }
     },
     "history_correction": {
@@ -447,10 +509,10 @@
           "required": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
           "properties": {
             "LIVE_ONLY": {
-              "enum": ["EXCLUDE_COMPARISON_ONLY", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
+              "enum": ["EXCLUDE_COMPARISON_ONLY", "EXCLUDE_EVENT_ONLY_RECONSTRUCTION", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
             },
             "LIVE_PLUS_BACKTEST": {
-              "enum": ["EXCLUDE_COMPARISON_ONLY", "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
+              "enum": ["EXCLUDE_COMPARISON_ONLY", "EXCLUDE_EVENT_ONLY_RECONSTRUCTION", "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
             }
           }
         },
@@ -490,6 +552,71 @@
                 "else": {"properties": {"manifest_artifact_id": {"type": "null"}}}
               }
             ]
+          }
+        },
+        "rejected_evidence_identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "canonicalization",
+            "return_observations",
+            "sha256",
+            "source_receipt_sha256"
+          ],
+          "properties": {
+            "canonicalization": {"const": "TARGET_FIELDS_CANONICAL_JSON_V1"},
+            "return_observations": {"type": "integer", "minimum": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "source_receipt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "derived_evidence_identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "calendar",
+            "cash_added_treatment",
+            "equity_overlap_observations",
+            "observed_end",
+            "observed_start",
+            "raw_level_observations",
+            "return_observations",
+            "transform_id"
+          ],
+          "properties": {
+            "calendar": {"$ref": "#/$defs/nonempty_string"},
+            "cash_added_treatment": {"$ref": "#/$defs/nonempty_string"},
+            "equity_overlap_observations": {"type": "integer", "minimum": 2},
+            "observed_end": {"type": "string", "format": "date"},
+            "observed_start": {"type": "string", "format": "date"},
+            "raw_level_observations": {"type": "integer", "minimum": 2},
+            "return_observations": {"type": "integer", "minimum": 1},
+            "transform_id": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "derived_backtest_identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "index_observations",
+            "observed_end",
+            "observed_start",
+            "relationship_type",
+            "return_observations",
+            "source_labels"
+          ],
+          "properties": {
+            "index_observations": {"type": "integer", "minimum": 2},
+            "observed_end": {"type": "string", "format": "date"},
+            "observed_start": {"type": "string", "format": "date"},
+            "relationship_type": {"$ref": "#/$defs/nonempty_string"},
+            "return_observations": {"type": "integer", "minimum": 1},
+            "source_labels": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/nonempty_string"}
+            }
           }
         },
         "disposition_reason": {"$ref": "#/$defs/nonempty_string"},
@@ -900,6 +1027,64 @@
             "facts": {"$ref": "#/$defs/unique_strings"},
             "transform": {"$ref": "#/$defs/nonempty_string"},
             "version": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "declared_gap_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "authority_issue",
+            "calendar",
+            "coverage_status",
+            "cumulative_return_across_declared_gaps",
+            "declared_missing_source_dates",
+            "frequency",
+            "omitted_return_dates",
+            "policy_id",
+            "provenance",
+            "reason",
+            "return_transform",
+            "return_rule",
+            "unavailable_return_dates"
+          ],
+          "properties": {
+            "authority_issue": {"type": "integer", "minimum": 1},
+            "calendar": {"$ref": "#/$defs/nonempty_string"},
+            "coverage_status": {"$ref": "#/$defs/nonempty_string"},
+            "cumulative_return_across_declared_gaps": {"$ref": "#/$defs/nonempty_string"},
+            "declared_missing_source_dates": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "format": "date"}
+            },
+            "frequency": {"enum": ["DAILY"]},
+            "omitted_return_dates": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "format": "date"}
+            },
+            "policy_id": {"$ref": "#/$defs/nonempty_string"},
+            "provenance": {"$ref": "#/$defs/nonempty_string"},
+            "reason": {"$ref": "#/$defs/nonempty_string"},
+            "return_transform": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["facts", "transform", "version"],
+              "properties": {
+                "facts": {"$ref": "#/$defs/unique_strings"},
+                "transform": {"$ref": "#/$defs/nonempty_string"},
+                "version": {"$ref": "#/$defs/nonempty_string"}
+              }
+            },
+            "return_rule": {"$ref": "#/$defs/nonempty_string"},
+            "unavailable_return_dates": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "format": "date"}
+            }
           }
         },
         "product_requirement": {"$ref": "#/$defs/requirement"},

@@ -36,7 +36,7 @@ RETURN_FIELDS: Final = (
     "strategy_version",
 )
 SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.3.0"
+BUILDER_VERSION: Final = "1.4.0"
 _SHEET_NS: Final = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS: Final = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PKG_REL_NS: Final = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -475,6 +475,11 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
     equity_path, equity_artifact, equity_manifest = _verified_generation_artifact(
         generation_root, "tables/har_equity_curve.parquet"
     )
+    performance_path, performance_artifact, performance_manifest = (
+        _verified_generation_artifact(
+            generation_root, "tables/har_managed_performance.parquet"
+        )
+    )
     daily_path, daily_artifact, daily_manifest = _verified_generation_artifact(
         generation_root, "tables/returns_daily.parquet"
     )
@@ -485,6 +490,7 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
     if (
         len(generation_id) != 64
         or equity_manifest.get("generation_id") != generation_id
+        or performance_manifest.get("generation_id") != generation_id
         or daily_manifest.get("generation_id") != generation_id
         or registry_manifest.get("generation_id") != generation_id
     ):
@@ -570,12 +576,121 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
             raise StrategyHistoryError(
                 "Portfolio123 exact EU provider history is insufficient"
             )
+        performance_rows = [
+            row
+            for row in parquet.read_table(performance_path).to_pylist()
+            if str(row.get("_entity_id") or "") in exact_ids
+        ]
+        captures: dict[str, dict[str, str]] = {}
+        by_entity: dict[str, dict[str, str]] = {}
+        for row in performance_rows:
+            entity_id = str(row.get("_entity_id") or "")
+            field = str(row.get("field") or "")
+            performance_value = str(row.get("value") or "")
+            prior_field = by_entity.setdefault(entity_id, {}).get(field)
+            if prior_field is not None and prior_field != performance_value:
+                raise StrategyHistoryError(
+                    "Portfolio123 exact EU performance has conflicting captures"
+                )
+            by_entity[entity_id][field] = performance_value
+        for fields in by_entity.values():
+            if not {"data", "date", "dateLast", "panels"} <= set(fields):
+                continue
+            capture_signature = hashlib.sha256(
+                canonical_json_bytes(
+                    {key: fields[key] for key in ("data", "date", "dateLast", "panels")}
+                )
+            ).hexdigest()
+            captures[capture_signature] = fields
+        if len(captures) != 1:
+            raise StrategyHistoryError(
+                "Portfolio123 exact EU performance is not unique"
+            )
+        fields = next(iter(captures.values()))
+        try:
+            performance_start = date.fromisoformat(fields["date"])
+            performance_end = date.fromisoformat(fields["dateLast"])
+            data = json.loads(fields["data"])
+            panels = json.loads(fields["panels"])
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise StrategyHistoryError(
+                "Portfolio123 exact EU performance is invalid"
+            ) from exc
+        if not isinstance(data, list) or not isinstance(panels, list):
+            raise StrategyHistoryError(
+                "Portfolio123 exact EU performance shape differs"
+            )
+        graphs = [
+            graph
+            for panel in panels
+            if isinstance(panel, dict)
+            for graph in panel.get("graphs", [])
+            if isinstance(graph, dict)
+        ]
+        if not any(
+            graph.get("idx") == 0 and graph.get("s") == "Strategy" for graph in graphs
+        ) or not any(
+            graph.get("idx") == 1 and graph.get("s") == "Total Value"
+            for graph in graphs
+        ):
+            raise StrategyHistoryError(
+                "Portfolio123 exact EU performance selector differs"
+            )
+        calendar: list[date] = []
+        observed = performance_start
+        while observed <= performance_end:
+            if observed.weekday() < 5:
+                calendar.append(observed)
+            observed += timedelta(days=1)
+        if len(calendar) != len(data):
+            raise StrategyHistoryError(
+                "Portfolio123 exact EU performance calendar differs"
+            )
+        parsed: list[tuple[date, Decimal, Decimal, Decimal]] = []
+        for observed, raw in zip(calendar, data, strict=True):
+            if not isinstance(raw, list) or len(raw) != 3:
+                raise StrategyHistoryError(
+                    "Portfolio123 exact EU performance observation differs"
+                )
+            wealth = Decimal(1) + _decimal(
+                raw[0], "Portfolio123 exact EU strategy performance"
+            ) / Decimal(100)
+            total_equity = _decimal(raw[1], "Portfolio123 exact EU total value")
+            cash_added = _decimal(raw[2], "Portfolio123 exact EU cash added")
+            if wealth <= 0 or total_equity <= 0:
+                raise StrategyHistoryError(
+                    "Portfolio123 exact EU performance contains invalid values"
+                )
+            parsed.append((observed, wealth, total_equity, cash_added))
+        overlap = 0
+        for observed, _wealth, total_equity, cash_added in parsed:
+            if observed not in observations:
+                continue
+            overlap += 1
+            if observations[observed] != (total_equity, cash_added):
+                raise StrategyHistoryError(
+                    "Portfolio123 exact EU performance and equity differ"
+                )
+        if overlap < 2:
+            raise StrategyHistoryError(
+                "Portfolio123 exact EU performance/equity overlap is insufficient"
+            )
+        provider_returns = [
+            current[1] / previous[1] - Decimal(1)
+            for previous, current in zip(parsed, parsed[1:], strict=False)
+        ]
+        if not provider_returns or any(value <= -1 for value in provider_returns):
+            raise StrategyHistoryError(
+                "Portfolio123 exact EU provider return is invalid"
+            )
         provider_summary = {
-            "cash_added_semantics": "UNRESOLVED_RETURN_TRANSFORM",
-            "observed_end": ordered[-1][0].isoformat(),
-            "observed_start": ordered[0][0].isoformat(),
-            "raw_observations": len(ordered),
-            "return_observations": 0,
+            "cash_added_semantics": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
+            "equity_overlap_observations": overlap,
+            "observed_end": parsed[-1][0].isoformat(),
+            "observed_start": parsed[1][0].isoformat(),
+            "raw_observations": len(parsed),
+            "return_observations": len(provider_returns),
+            "transform_id": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
         }
 
     registry = {
@@ -626,6 +741,7 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
         }
         for artifact_id, artifact in (
             ("tables/har_managed_metadata.parquet", metadata_artifact),
+            ("tables/har_managed_performance.parquet", performance_artifact),
             ("tables/har_equity_curve.parquet", equity_artifact),
             ("tables/returns_daily.parquet", daily_artifact),
             ("tables/strategy_registry.parquet", registry_artifact),
@@ -655,24 +771,25 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
         }
     else:
         exact_disposition = {
-            "action": "DEFINE_AND_ACCEPT_PROVIDER_RETURN_TRANSFORM_IN_320",
+            "action": "ROUTE_CANDIDATE_PROVIDER_PERFORMANCE_TRANSFORM_TO_303",
             "exact_equity_curve_rows": len(exact_equity),
             "exact_normalized_daily_rows": len(exact_daily),
             "history_status": (
-                "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED"
+                "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_DERIVED_NOT_ADMITTED"
             ),
             "implementation_reconciliation_status": (
-                "BLOCKED_RETURN_TRANSFORM; SEPARATE_FROM_ACCOUNT_LIVE"
+                "BLOCKED_ADMIT_OR_DECLARE; SEPARATE_FROM_ACCOUNT_LIVE"
             ),
             "provider_live": provider_summary,
             "reason": (
-                "The exact connected-model equity curve is captured, but the HAR Cash "
-                "Added field is not accepted as a per-period external flow. The curve "
-                "remains PROVIDER_LIVE and cannot be return-materialized until #320 "
-                "accepts its transform; it never overwrites the IBKR ACCOUNT_LIVE path."
+                "The exact connected-model provider-managed Strategy performance level "
+                "supports a deterministic candidate daily-return derivation. Cash Added "
+                "reconciles to the equity curve but its financial interpretation is not "
+                "approved and is not used in the candidate formula. No provider-live "
+                "return is admitted before #303; the IBKR ACCOUNT_LIVE path is unchanged."
             ),
             "status": (
-                "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_REQUIRED"
+                "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_DERIVED_NOT_ADMITTED"
             ),
         }
     return [

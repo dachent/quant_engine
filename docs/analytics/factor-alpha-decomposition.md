@@ -197,11 +197,13 @@ artifact.
   The 2024-10-13 purchase has no accepted event-time value; funded membership
   therefore begins with positive reconciled NAV and cost basis on 2024-10-15,
   and measurable account returns begin on 2024-10-16.
-- Portfolio123 provider-live equity remains separate from the IBKR account-live
-  path. The exact connected-model curve is captured, but its `Cash Added` field
-  is not accepted as a per-period external flow. #320 must accept the return
-  transform before exact-date comparison is materialized; no provider return is
-  appended to account TWR.
+- Portfolio123 provider evidence remains separate from the IBKR account-live
+  path. The exact connected-model provider-managed Strategy level supports a
+  deterministic candidate
+  `P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1`; `Cash Added`
+  reconciles to the equity curve but its financial interpretation is not
+  approved and it is not used in the candidate formula. No provider-live return
+  is admitted pending #303, and nothing is appended to account TWR.
 
 The normalized targets, source proofs, strategy-evidence overlay, and upstream
 generation manifests are hash-bound inputs to the decomposition generation.
@@ -221,9 +223,9 @@ The roll-forward CLI takes explicit paths and provider identities from local
 configuration; none is hard-coded or committed. A separately verified
 strategy-history bundle supplies version-bound GrizzlyBears, QSI, and
 TuringTrader backtests. The captured Volatis path is provider/account live and
-is not admitted as a backtest. The exact Portfolio123 EU connected-model curve
-is retained as `PROVIDER_LIVE`, but its return transform is not yet accepted;
-its exact-version backtest is also not captured.
+is not admitted as a backtest. The exact Portfolio123 EU connected-model
+provider-managed Strategy level has a reproducible but unadmitted candidate
+return transform; its exact-version backtest is not captured.
 The Portfolio123 live-simulation twin supplies AI Factor. History compatibility
 never asserts that the brokerage account executed the model correctly; trade
 reconciliation remains separate.
@@ -266,8 +268,9 @@ dependence builder uses all admitted history only before the first account-live
 observation. The current contract admits exact-version backtest history for AI
 Factor, GrizzlyBears, QSI, and TuringTrader. Volatis remains live-only because
 its current provider/account path is not a backtest. The exact Portfolio123 EU
-provider-live curve is captured, but its return transform and exact-version
-backtest are not accepted; other long EU curves are not interchangeable.
+candidate return transform is not admitted and therefore remains outside both
+analysis modes; its exact-version backtest is not captured, and other long EU
+curves are not interchangeable.
 EchoTrade is deprecated with no history and Composer is immaterial with
 unconnected history. Omitting all three arguments preserves the replay-
 compatible schema-v1 output. Supplying a partial set fails closed.

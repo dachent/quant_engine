@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-engine.local/schemas/portfolio/layered-history-generation.schema.json",
+  "title": "Layered history immutable generation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "builder",
+    "builder_version",
+    "generation_id",
+    "as_of_date",
+    "repository_sha",
+    "tool_sha256",
+    "product",
+    "source_pointers",
+    "source_manifests",
+    "inputs",
+    "outputs",
+    "mode_status",
+    "verification"
+  ],
+  "properties": {
+    "$schema": {"type": "string", "minLength": 1},
+    "schema_version": {"const": 1},
+    "builder": {"const": "portfolio-target-series/layered-history-1"},
+    "builder_version": {"const": "1.10.0"},
+    "generation_id": {"$ref": "#/$defs/sha256"},
+    "as_of_date": {"type": "string", "format": "date"},
+    "repository_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "tool_sha256": {"$ref": "#/$defs/sha256"},
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_sha256",
+        "product_id",
+        "product_version",
+        "history_policy_id",
+        "history_policy_version"
+      ],
+      "properties": {
+        "contract_sha256": {"$ref": "#/$defs/sha256"},
+        "product_id": {"const": "FINANCIAL_MVP"},
+        "product_version": {"type": "string", "minLength": 1},
+        "history_policy_id": {"const": "PORT-HISTORY-TRUTH-1"},
+        "history_policy_version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "source_manifests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider-ledger", "matrixport", "quantbase", "portfolio123"],
+      "properties": {
+        "provider-ledger": {"type": "string", "minLength": 2},
+        "matrixport": {"type": "string", "minLength": 2},
+        "quantbase": {"type": "string", "minLength": 2},
+        "portfolio123": {"type": "string", "minLength": 2},
+        "strategy-history": {"type": "string", "minLength": 2}
+      }
+    },
+    "source_pointers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider-ledger", "matrixport", "quantbase", "portfolio123"],
+      "properties": {
+        "provider-ledger": {"type": "string", "minLength": 2},
+        "matrixport": {"type": "string", "minLength": 2},
+        "quantbase": {"type": "string", "minLength": 2},
+        "portfolio123": {"type": "string", "minLength": 2}
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segments.csv",
+        "excluded.csv",
+        "returns.csv",
+        "live-only.csv",
+        "live-plus-backtest.csv",
+        "coverage.json"
+      ],
+      "properties": {
+        "segments.csv": {"$ref": "#/$defs/outputArtifact"},
+        "excluded.csv": {"$ref": "#/$defs/outputArtifact"},
+        "returns.csv": {"$ref": "#/$defs/outputArtifact"},
+        "live-only.csv": {"$ref": "#/$defs/outputArtifact"},
+        "live-plus-backtest.csv": {"$ref": "#/$defs/outputArtifact"},
+        "coverage.json": {"$ref": "#/$defs/outputArtifact"}
+      }
+    },
+    "mode_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+      "properties": {
+        "LIVE_ONLY": {"$ref": "#/$defs/modeStatus"},
+        "LIVE_PLUS_BACKTEST": {"$ref": "#/$defs/modeStatus"}
+      }
+    },
+    "verification": {"const": "VERIFIED"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "artifact_role",
+        "artifact_id",
+        "generation_id",
+        "as_of_date",
+        "sha256",
+        "size_bytes"
+      ],
+      "properties": {
+        "input_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
+        "artifact_role": {"type": "string", "minLength": 1},
+        "artifact_id": {"type": ["string", "null"]},
+        "generation_id": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "as_of_date": {"type": ["string", "null"], "format": "date"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "outputArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "schema_name", "schema_version", "sha256", "size_bytes", "row_count"],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 1},
+        "schema_name": {"type": "string", "minLength": 1},
+        "schema_version": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "row_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "modeStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "required_not_ready_strategy_ids"],
+      "properties": {
+        "status": {"enum": ["AVAILABLE", "REQUIRED_NOT_READY"]},
+        "required_not_ready_strategy_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

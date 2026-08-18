@@ -115,6 +115,8 @@ REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS: Final = frozenset(
     }
 )
 HISTORY_CORRECTION_LAYERS: Final = {
+    "echotrade-growth-pivots": frozenset({"ACCOUNT_LIVE"}),
+    "p123-ai-factor": frozenset({"BACKTEST"}),
     "p123-eu": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
     "robuxio-crypto": frozenset(
         {"ACCOUNT_LIVE", "PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"}
@@ -1353,6 +1355,7 @@ def _validate_strategies(
                 "blockers",
                 "effective_product_interval",
                 "funded_membership",
+                "history_series_id",
                 "outcome_dispositions",
                 "product_requirement",
                 "readiness",
@@ -1363,6 +1366,7 @@ def _validate_strategies(
             "strategy",
         )
         strategy_id = _text(row["strategy_id"], "strategy.strategy_id")
+        _optional_text(row["history_series_id"], "strategy.history_series_id")
         requirement = _text(row["product_requirement"], "strategy.product_requirement")
         if requirement not in {"REQUIRED", "OPTIONAL", "EXCLUDED"}:
             raise FinancialMvpContractError(
@@ -1467,7 +1471,14 @@ def _validate_history_corrections(
 ) -> None:
     _strict_keys(
         policy,
-        {"corrections", "owner_issue", "policy_id", "policy_version", "splice_policy"},
+        {
+            "corrections",
+            "materialized_segment_identities",
+            "owner_issue",
+            "policy_id",
+            "policy_version",
+            "splice_policy",
+        },
         "history_corrections",
     )
     if policy["policy_id"] != "PORT-HISTORY-TRUTH-1":
@@ -1481,6 +1492,145 @@ def _validate_history_corrections(
 
     source_by_id = {str(row.get("source_id")): row for row in sources}
     strategy_by_id = {str(row.get("strategy_id")): row for row in strategies}
+    segment_rows = _objects(
+        policy["materialized_segment_identities"],
+        "history_corrections.materialized_segment_identities",
+    )
+    segment_ids: list[str] = []
+    for row in segment_rows:
+        _strict_keys(
+            row,
+            {
+                "calendar",
+                "canonicalization",
+                "evidence_layer",
+                "frequency",
+                "mode_admission",
+                "observed_end",
+                "observed_start",
+                "return_basis",
+                "return_observations",
+                "return_type",
+                "segment_id",
+                "sha256",
+                "source_generation_id",
+                "source_generation_sha256",
+                "source_id",
+                "strategy_id",
+                "strategy_version",
+            },
+            "materialized history segment identity",
+        )
+        segment_id = _text(row["segment_id"], "history segment_id")
+        strategy_id = _text(row["strategy_id"], "history segment strategy_id")
+        source_id = _text(row["source_id"], "history segment source_id")
+        source = source_by_id.get(source_id)
+        if strategy_id not in strategy_by_id or source is None:
+            raise FinancialMvpContractError(
+                f"materialized history segment has unknown authority: {segment_id}"
+            )
+        if not segment_id.startswith(f"{strategy_id}:"):
+            raise FinancialMvpContractError(
+                f"materialized history segment identity differs: {segment_id}"
+            )
+        subjects = _object(source["subjects"], "history segment source subjects")
+        subject_ids = _strings(
+            subjects["strategy_ids"], "history segment source strategy_ids"
+        )
+        if strategy_id not in subject_ids:
+            raise FinancialMvpContractError(
+                f"materialized history segment is outside source subjects: {segment_id}"
+            )
+        if row["canonicalization"] != "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1":
+            raise FinancialMvpContractError(
+                f"materialized history segment canonicalization differs: {segment_id}"
+            )
+        segment_observed_start = _date(
+            row["observed_start"], "history segment observed_start"
+        )
+        segment_observed_end = _date(
+            row["observed_end"], "history segment observed_end"
+        )
+        if segment_observed_end < segment_observed_start:
+            raise FinancialMvpContractError(
+                f"materialized history segment interval is reversed: {segment_id}"
+            )
+        observations = row["return_observations"]
+        if (
+            not isinstance(observations, int)
+            or isinstance(observations, bool)
+            or observations < 1
+        ):
+            raise FinancialMvpContractError(
+                f"materialized history segment observation count differs: {segment_id}"
+            )
+        _hash(row["sha256"], "history segment sha256")
+        source_generation_id = _hash(
+            row["source_generation_id"], "history segment source_generation_id"
+        )
+        source_generation_sha = _hash(
+            row["source_generation_sha256"],
+            "history segment source_generation_sha256",
+        )
+        current_generation = _object(
+            source["current_generation"], "history segment source current_generation"
+        )
+        if (
+            current_generation.get("generation_id"),
+            current_generation.get("sha256"),
+        ) != (source_generation_id, source_generation_sha):
+            raise FinancialMvpContractError(
+                f"materialized history segment source receipt differs: {segment_id}"
+            )
+        temporal = _object(source["temporal"], "history segment source temporal")
+        if (row["calendar"], row["frequency"]) != (
+            temporal["calendar"],
+            temporal["cadence"],
+        ):
+            raise FinancialMvpContractError(
+                f"materialized history segment temporal authority differs: {segment_id}"
+            )
+        version = _object(
+            source["strategy_version"], "history segment source strategy_version"
+        )
+        version_refs = _object(
+            version["version_refs"], "history segment source version_refs"
+        )
+        expected_version = version_refs.get(strategy_id) or "UNRESOLVED"
+        if row["strategy_version"] != expected_version:
+            raise FinancialMvpContractError(
+                f"materialized history segment version differs: {segment_id}"
+            )
+        layer = _text(row["evidence_layer"], "history segment evidence_layer")
+        admission = _text(row["mode_admission"], "history segment mode_admission")
+        if layer not in {
+            "ACCOUNT_LIVE",
+            "BACKTEST",
+            "PROVIDER_LIVE",
+        } or admission not in {
+            "EXCLUDE_COMPARISON_ONLY",
+            "INCLUDE_SELECTED_LIVE",
+            "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+            "REQUIRED_NOT_READY_OVERLAP",
+        }:
+            raise FinancialMvpContractError(
+                f"materialized history segment admission differs: {segment_id}"
+            )
+        if (layer == "ACCOUNT_LIVE") != (admission == "INCLUDE_SELECTED_LIVE"):
+            raise FinancialMvpContractError(
+                f"materialized history segment selected-live authority differs: {segment_id}"
+            )
+        if layer == "PROVIDER_LIVE" and admission != "EXCLUDE_COMPARISON_ONLY":
+            raise FinancialMvpContractError(
+                f"materialized provider history entered an admitted mode: {segment_id}"
+            )
+        _text(row["return_basis"], "history segment return_basis")
+        _text(row["return_type"], "history segment return_type")
+        segment_ids.append(segment_id)
+    if segment_ids != sorted(segment_ids) or len(segment_ids) != len(set(segment_ids)):
+        raise FinancialMvpContractError(
+            "materialized history segment identities are not canonical"
+        )
     correction_ids: set[str] = set()
     observed_layers: dict[str, set[str]] = {
         strategy_id: set() for strategy_id in HISTORY_CORRECTION_LAYERS
@@ -1489,24 +1639,31 @@ def _validate_history_corrections(
     funding_dates: dict[str, date] = {}
     rows = _objects(policy["corrections"], "history_corrections.corrections")
     for row in rows:
+        expected_correction_keys = {
+            "blockers",
+            "capture",
+            "correction_id",
+            "disposition_reason",
+            "evidence_layer",
+            "funding_event",
+            "history_existence",
+            "interval",
+            "mode_admission",
+            "readiness",
+            "source_id",
+            "source_receipts",
+            "strategy_id",
+            "strategy_version",
+        }
+        if row.get("correction_id") == "echotrade-event-only-account-live-rejected":
+            expected_correction_keys.add("rejected_evidence_identity")
+        if row.get("correction_id") == "p123-eu-provider-live":
+            expected_correction_keys.add("derived_evidence_identity")
+        if row.get("correction_id") == "p123-ai-backtest-candidate":
+            expected_correction_keys.add("derived_backtest_identity")
         _strict_keys(
             row,
-            {
-                "blockers",
-                "capture",
-                "correction_id",
-                "disposition_reason",
-                "evidence_layer",
-                "funding_event",
-                "history_existence",
-                "interval",
-                "mode_admission",
-                "readiness",
-                "source_id",
-                "source_receipts",
-                "strategy_id",
-                "strategy_version",
-            },
+            expected_correction_keys,
             "history correction",
         )
         correction_id = _text(row["correction_id"], "history correction id")
@@ -1823,6 +1980,43 @@ def _validate_history_corrections(
             raise FinancialMvpContractError(
                 f"history generation is not receipt-bound: {correction_id}"
             )
+        if correction_id == "echotrade-event-only-account-live-rejected":
+            rejected_identity = _object(
+                row["rejected_evidence_identity"],
+                "EchoTrade rejected evidence identity",
+            )
+            _strict_keys(
+                rejected_identity,
+                {
+                    "canonicalization",
+                    "return_observations",
+                    "sha256",
+                    "source_receipt_sha256",
+                },
+                "EchoTrade rejected evidence identity",
+            )
+            if (
+                rejected_identity["canonicalization"]
+                != "TARGET_FIELDS_CANONICAL_JSON_V1"
+                or not isinstance(rejected_identity["return_observations"], int)
+                or rejected_identity["return_observations"] < 1
+            ):
+                raise FinancialMvpContractError(
+                    "EchoTrade rejected evidence identity differs"
+                )
+            _hash(rejected_identity["sha256"], "EchoTrade rejected evidence sha256")
+            receipt_sha = _hash(
+                rejected_identity["source_receipt_sha256"],
+                "EchoTrade rejected evidence source receipt",
+            )
+            if receipt_sha not in receipt_hashes or not any(
+                receipt.get("artifact_role") == "provider-ledger-catalog"
+                and receipt.get("sha256") == receipt_sha
+                for receipt in receipts
+            ):
+                raise FinancialMvpContractError(
+                    "EchoTrade rejected evidence is not bound to the provider ledger"
+                )
         _text(row["disposition_reason"], "history disposition_reason")
         readiness = _text(row["readiness"], "history readiness")
         blockers = _blockers(row["blockers"], "history blockers")
@@ -1879,12 +2073,139 @@ def _validate_history_corrections(
             )
 
     correction_by_id = {str(row["correction_id"]): row for row in rows}
-    p123_provider = correction_by_id["p123-eu-provider-live"]
-    if p123_provider["readiness"] != "REQUIRED_NOT_READY" or p123_provider[
-        "blockers"
-    ] != [320]:
+    p123_ai_backtest = correction_by_id["p123-ai-backtest-candidate"]
+    p123_ai_identity = _object(
+        p123_ai_backtest["derived_backtest_identity"],
+        "P123 AI derived backtest identity",
+    )
+    _strict_keys(
+        p123_ai_identity,
+        {
+            "index_observations",
+            "observed_end",
+            "observed_start",
+            "relationship_type",
+            "return_observations",
+            "source_labels",
+        },
+        "P123 AI derived backtest identity",
+    )
+    index_observations = p123_ai_identity.get("index_observations")
+    return_observations = p123_ai_identity.get("return_observations")
+    p123_ai_interval = _object(
+        p123_ai_backtest["interval"], "P123 AI backtest interval"
+    )
+    source_labels = p123_ai_identity.get("source_labels")
+    if (
+        not isinstance(index_observations, int)
+        or isinstance(index_observations, bool)
+        or index_observations < 2
+        or not isinstance(return_observations, int)
+        or isinstance(return_observations, bool)
+        or return_observations != index_observations - 1
+        or (
+            p123_ai_identity.get("observed_start"),
+            p123_ai_identity.get("observed_end"),
+        )
+        != (
+            p123_ai_interval.get("observed_start"),
+            p123_ai_interval.get("observed_end"),
+        )
+        or p123_ai_identity.get("relationship_type") != "live_sim_twin"
+        or not isinstance(source_labels, list)
+        or not source_labels
+        or source_labels != sorted(set(source_labels))
+        or not all(isinstance(item, str) and item.strip() for item in source_labels)
+    ):
+        raise FinancialMvpContractError("P123 AI derived backtest identity differs")
+    p123_ai_receipts = {
+        str(receipt["manifest_artifact_id"]): receipt
+        for receipt in p123_ai_backtest["source_receipts"]
+        if isinstance(receipt, dict) and receipt.get("manifest_artifact_id")
+    }
+    if (
+        p123_ai_backtest["readiness"] != "REQUIRED_NOT_READY"
+        or p123_ai_backtest["blockers"] != [302, 303]
+        or p123_ai_backtest["strategy_version"]["status"] != "UNRESOLVED"
+        or p123_ai_backtest["strategy_version"]["compatibility"] != "UNRESOLVED"
+        or p123_ai_backtest["mode_admission"]
+        != {"LIVE_ONLY": "NOT_APPLICABLE", "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"}
+        or {
+            "tables/returns_daily.parquet",
+            "tables/strategy_relationships.parquet",
+        }
+        - set(p123_ai_receipts)
+    ):
         raise FinancialMvpContractError(
-            "P123 EU provider history bypasses its unaccepted return transform"
+            "P123 AI backtest bypasses its unresolved version disposition"
+        )
+    p123_provider = correction_by_id["p123-eu-provider-live"]
+    p123_identity = _object(
+        p123_provider["derived_evidence_identity"],
+        "P123 EU derived evidence identity",
+    )
+    _strict_keys(
+        p123_identity,
+        {
+            "calendar",
+            "cash_added_treatment",
+            "equity_overlap_observations",
+            "observed_end",
+            "observed_start",
+            "raw_level_observations",
+            "return_observations",
+            "transform_id",
+        },
+        "P123 EU derived evidence identity",
+    )
+    raw_levels = p123_identity.get("raw_level_observations")
+    derived_returns = p123_identity.get("return_observations")
+    equity_overlap = p123_identity.get("equity_overlap_observations")
+    p123_interval = _object(p123_provider["interval"], "P123 EU provider interval")
+    if (
+        not isinstance(raw_levels, int)
+        or isinstance(raw_levels, bool)
+        or raw_levels < 2
+        or not isinstance(derived_returns, int)
+        or isinstance(derived_returns, bool)
+        or derived_returns != raw_levels - 1
+        or not isinstance(equity_overlap, int)
+        or isinstance(equity_overlap, bool)
+        or equity_overlap < 2
+        or equity_overlap > raw_levels
+        or (
+            p123_identity.get("observed_start"),
+            p123_identity.get("observed_end"),
+        )
+        != (p123_interval.get("observed_start"), p123_interval.get("observed_end"))
+    ):
+        raise FinancialMvpContractError("P123 EU derived evidence identity differs")
+    _text(p123_identity["calendar"], "P123 EU derived calendar")
+    _text(
+        p123_identity["cash_added_treatment"],
+        "P123 EU derived Cash Added treatment",
+    )
+    p123_transform_id = _text(
+        p123_identity["transform_id"], "P123 EU derived transform"
+    )
+    p123_receipts = {
+        str(receipt["manifest_artifact_id"]): receipt
+        for receipt in p123_provider["source_receipts"]
+        if isinstance(receipt, dict) and receipt.get("manifest_artifact_id")
+    }
+    p123_disposition = _text(
+        p123_provider["disposition_reason"], "P123 EU provider disposition"
+    )
+    if (
+        p123_provider["readiness"] != "REQUIRED_NOT_READY"
+        or p123_provider["blockers"] != [303]
+        or "tables/har_managed_performance.parquet" not in p123_receipts
+        or p123_transform_id not in p123_disposition
+        or "financial interpretation is not approved" not in p123_disposition
+        or "No provider-live return is admitted" not in p123_disposition
+    ):
+        raise FinancialMvpContractError(
+            "P123 EU provider history bypasses its unadmitted transform disposition"
         )
     p123_account = correction_by_id["p123-eu-account-live"]
     p123_funding_authority = _text(
@@ -2337,6 +2658,106 @@ def _validate_outcomes(outcomes: list[dict[str, Any]]) -> None:
                 raise FinancialMvpContractError("dependence absence rule differs")
 
 
+def _validate_matrixport_gap_policy(row: Mapping[str, Any], source_id: str) -> None:
+    raw_policy = row.get("declared_gap_policy")
+    if source_id != "matrixport-account-generation":
+        if raw_policy is not None:
+            raise FinancialMvpContractError(
+                f"source {source_id} asserts an unauthorized declared-gap policy"
+            )
+        return
+    if not isinstance(raw_policy, dict):
+        raise FinancialMvpContractError(
+            "Matrixport source lacks the owner-declared gap policy"
+        )
+    policy = _object(raw_policy, "Matrixport declared_gap_policy")
+    _strict_keys(
+        policy,
+        {
+            "authority_issue",
+            "calendar",
+            "coverage_status",
+            "cumulative_return_across_declared_gaps",
+            "declared_missing_source_dates",
+            "frequency",
+            "omitted_return_dates",
+            "policy_id",
+            "provenance",
+            "reason",
+            "return_transform",
+            "return_rule",
+            "unavailable_return_dates",
+        },
+        "Matrixport declared_gap_policy",
+    )
+    authority_issue = policy["authority_issue"]
+    if not isinstance(authority_issue, int) or authority_issue < 1:
+        raise FinancialMvpContractError("Matrixport gap authority issue differs")
+    for key in (
+        "calendar",
+        "coverage_status",
+        "cumulative_return_across_declared_gaps",
+        "frequency",
+        "policy_id",
+        "provenance",
+        "reason",
+        "return_rule",
+    ):
+        _text(policy[key], f"Matrixport {key}")
+    return_transform = _object(
+        policy["return_transform"], "Matrixport declared-gap return transform"
+    )
+    _strict_keys(
+        return_transform,
+        {"facts", "transform", "version"},
+        "Matrixport declared-gap return transform",
+    )
+    _text(return_transform["transform"], "Matrixport return transform")
+    _text(return_transform["version"], "Matrixport return transform version")
+    _strings(return_transform["facts"], "Matrixport return transform facts")
+    rendered_dates: dict[str, list[str]] = {}
+    for key in (
+        "declared_missing_source_dates",
+        "omitted_return_dates",
+        "unavailable_return_dates",
+    ):
+        rendered = _strings(policy[key], f"Matrixport {key}")
+        for value in rendered:
+            _date(value, f"Matrixport {key}")
+        if rendered != sorted(rendered):
+            raise FinancialMvpContractError(f"Matrixport {key} is not ordered")
+        rendered_dates[key] = rendered
+    missing_dates = {
+        _date(value, "Matrixport missing date")
+        for value in rendered_dates["declared_missing_source_dates"]
+    }
+    expected_omitted = {
+        value + date.resolution
+        for value in missing_dates
+        if value + date.resolution not in missing_dates
+    }
+    omitted_dates = {
+        _date(value, "Matrixport omitted date")
+        for value in rendered_dates["omitted_return_dates"]
+    }
+    unavailable_dates = {
+        _date(value, "Matrixport unavailable date")
+        for value in rendered_dates["unavailable_return_dates"]
+    }
+    if omitted_dates != expected_omitted:
+        raise FinancialMvpContractError("Matrixport omitted return dates differ")
+    if unavailable_dates != missing_dates | omitted_dates:
+        raise FinancialMvpContractError("Matrixport unavailable return dates differ")
+    temporal = _object(row["temporal"], "Matrixport temporal")
+    if (policy["calendar"], policy["frequency"]) != (
+        temporal.get("calendar"),
+        temporal.get("cadence"),
+    ):
+        raise FinancialMvpContractError(
+            "Matrixport gap policy calendar/cadence differs from source authority"
+        )
+
+
 def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> None:
     source_ids: set[str] = set()
     data_classes: set[str] = set()
@@ -2349,35 +2770,38 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
         strategy_id: set() for strategy_id in registry_ids
     }
     for row in sources:
+        expected_source_keys = {
+            "absence_behavior",
+            "acquisition",
+            "admission",
+            "authority",
+            "blockers",
+            "capture_status",
+            "consumers",
+            "current_generation",
+            "data_classes",
+            "endpoint_or_artifact_selector",
+            "evidence_layer",
+            "existence_status",
+            "freshness",
+            "interval",
+            "invalidated_outputs",
+            "owner_policy_decision",
+            "product_requirement",
+            "readiness",
+            "schema",
+            "source_id",
+            "source_version",
+            "strategy_version",
+            "subjects",
+            "temporal",
+            "units",
+        }
+        if "declared_gap_policy" in row:
+            expected_source_keys.add("declared_gap_policy")
         _strict_keys(
             row,
-            {
-                "absence_behavior",
-                "acquisition",
-                "admission",
-                "authority",
-                "blockers",
-                "capture_status",
-                "consumers",
-                "current_generation",
-                "data_classes",
-                "endpoint_or_artifact_selector",
-                "evidence_layer",
-                "existence_status",
-                "freshness",
-                "interval",
-                "invalidated_outputs",
-                "owner_policy_decision",
-                "product_requirement",
-                "readiness",
-                "schema",
-                "source_id",
-                "source_version",
-                "strategy_version",
-                "subjects",
-                "temporal",
-                "units",
-            },
+            expected_source_keys,
             "source_segment",
         )
         source_id = _text(row["source_id"], "source_segment.source_id")
@@ -2671,6 +3095,7 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
                 f"required source has no invalidated outputs: {source_id}"
             )
         _text(row["owner_policy_decision"], "source_segment.owner_policy_decision")
+        _validate_matrixport_gap_policy(row, source_id)
     missing = REQUIRED_SOURCE_CLASSES - data_classes
     if missing:
         raise FinancialMvpContractError(
@@ -3302,8 +3727,8 @@ def validate_contract(
         },
         "financial MVP contract",
     )
-    if contract["contract_schema_version"] != 2:
-        raise FinancialMvpContractError("contract_schema_version must be 2")
+    if contract["contract_schema_version"] != 4:
+        raise FinancialMvpContractError("contract_schema_version must be 4")
     if contract["$schema"] != (
         "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     ):
@@ -3356,6 +3781,10 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
     sources = _objects(contract["source_segments"], "source_segments")
     history = _object(contract["history_corrections"], "history_corrections")
     history_rows = _objects(history["corrections"], "history corrections")
+    materialized_segments = _objects(
+        history["materialized_segment_identities"],
+        "materialized history segment identities",
+    )
     lines = [
         "# Current financial MVP",
         "",
@@ -3506,8 +3935,8 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             "",
             "## Current perimeter",
             "",
-            "| Strategy | Requirement | Readiness | Version | Funded membership | Blockers |",
-            "|---|---|---|---|---|---|",
+            "| Strategy | History series | Requirement | Readiness | Version | Funded membership | Blockers |",
+            "|---|---|---|---|---|---|---|",
         ]
     )
     for row in strategies:
@@ -3515,8 +3944,10 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
         membership = row["funded_membership"]
         blockers = ", ".join(f"#{value}" for value in row["blockers"]) or "None"
         version_text = version["version_ref"] or version["status"]
+        history_series = row["history_series_id"] or "NOT_CAPTURED"
         lines.append(
-            f"| {row['strategy_id']} | {row['product_requirement']} | "
+            f"| {row['strategy_id']} | {history_series} | "
+            f"{row['product_requirement']} | "
             f"{row['readiness']} | {version_text} | {membership['status']} | "
             f"{blockers} |"
         )
@@ -3528,8 +3959,8 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             f"- Policy: `{history['policy_id']}` version `{history['policy_version']}`",
             f"- Splice: `{history['splice_policy']}`",
             "",
-            "| Correction | Strategy | Layer | Existence | Capture | Observed interval | Funding / live start | Version compatibility | LIVE_ONLY | LIVE_PLUS_BACKTEST | Readiness | Source | Evidence receipts |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "| Correction | Strategy | Layer | Existence | Capture | Observed interval | Funding / live start | Version compatibility | LIVE_ONLY | LIVE_PLUS_BACKTEST | Readiness | Source | Evidence receipts | Derived / rejected evidence identity |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
     )
     for row in history_rows:
@@ -3550,6 +3981,35 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             f"{receipt['sha256'][:12]}"
             for receipt in row["source_receipts"]
         )
+        rejected_identity = row.get("rejected_evidence_identity")
+        rejected_identity_text = (
+            f"{rejected_identity['return_observations']} rows@"
+            f"{rejected_identity['sha256'][:12]} from "
+            f"{rejected_identity['source_receipt_sha256'][:12]}"
+            if isinstance(rejected_identity, dict)
+            else "—"
+        )
+        derived_identity = row.get("derived_evidence_identity")
+        derived_backtest_identity = row.get("derived_backtest_identity")
+        evidence_identity_text = (
+            f"{derived_identity['raw_level_observations']} levels / "
+            f"{derived_identity['return_observations']} returns / "
+            f"{derived_identity['equity_overlap_observations']} equity overlaps / "
+            f"{derived_identity['calendar']} / Cash Added: "
+            f"{derived_identity['cash_added_treatment']} / "
+            f"{derived_identity['transform_id']}"
+            if isinstance(derived_identity, dict)
+            else (
+                f"{derived_backtest_identity['index_observations']} index levels / "
+                f"{derived_backtest_identity['return_observations']} returns / "
+                f"{derived_backtest_identity['observed_start']}.."
+                f"{derived_backtest_identity['observed_end']} / "
+                f"{derived_backtest_identity['relationship_type']} / "
+                f"sources: {','.join(derived_backtest_identity['source_labels'])}"
+                if isinstance(derived_backtest_identity, dict)
+                else rejected_identity_text
+            )
+        )
         lines.append(
             "| "
             + " | ".join(
@@ -3568,8 +4028,38 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                     row["readiness"],
                     row["source_id"],
                     receipt_text,
+                    evidence_identity_text,
                 )
             )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "### Materialized segment value authority",
+            "",
+            "Each segment hash is calculated from canonical return rows and bound to the current governed source-generation manifest. A coherent output rewrite cannot replace these independently controlled contract bytes.",
+            "",
+            "| Segment | Strategy | Layer / admission | Observed interval | Returns | Value SHA-256 | Source receipt |",
+            "|---|---|---|---|---:|---|---|",
+        ]
+    )
+    for row in materialized_segments:
+        materialized_cells = (
+            row["segment_id"],
+            row["strategy_id"],
+            f"{row['evidence_layer']} / {row['mode_admission']}",
+            f"{row['observed_start']}..{row['observed_end']}",
+            row["return_observations"],
+            row["sha256"],
+            (
+                f"{row['source_id']}@{row['source_generation_id'][:12]} / "
+                f"{row['source_generation_sha256'][:12]}"
+            ),
+        )
+        lines.append(
+            "| "
+            + " | ".join(str(value).replace("|", "\\|") for value in materialized_cells)
             + " |"
         )
     lines.extend(
@@ -3593,6 +4083,38 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
         lines.append(
             "| "
             + " | ".join(str(value).replace("|", "\\|") for value in timing_cells)
+            + " |"
+        )
+    declared_gap_sources = [
+        row for row in sources if isinstance(row.get("declared_gap_policy"), dict)
+    ]
+    lines.extend(
+        [
+            "",
+            "## Declared source-gap policies",
+            "",
+            "These are source omissions admitted by recorded authority, not filled values or inferred calendar closures. A first post-gap endpoint is retained as an observation but cannot produce a one-day return.",
+            "",
+            "| Source | Policy | Authority | Missing source dates | Omitted spanning-return dates | Return transform | Produced facts | Return rule |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+    )
+    for row in declared_gap_sources:
+        policy = row["declared_gap_policy"]
+        return_transform = policy["return_transform"]
+        gap_cells = (
+            row["source_id"],
+            policy["policy_id"],
+            f"#{policy['authority_issue']} — {policy['provenance']}",
+            ", ".join(policy["declared_missing_source_dates"]),
+            ", ".join(policy["omitted_return_dates"]),
+            f"{return_transform['transform']}@{return_transform['version']}",
+            ", ".join(return_transform["facts"]),
+            policy["return_rule"],
+        )
+        lines.append(
+            "| "
+            + " | ".join(str(value).replace("|", "\\|") for value in gap_cells)
             + " |"
         )
     lines.extend(
@@ -3670,6 +4192,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                             "freshness_rule": source["freshness"]["rule"],
                             "admission_transform": source["admission"]["transform"],
                             "admission_facts": source["admission"]["facts"],
+                            "declared_gap_policy": source.get("declared_gap_policy"),
                             "consumer": consumer,
                             "generation_id": source["current_generation"][
                                 "generation_id"

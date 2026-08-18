@@ -13,14 +13,20 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 import hashlib
+import importlib.util
+import inspect
 import io
 import json
 import math
+import os
 from pathlib import Path
 import statistics
+import subprocess
+import sys
 from typing import Any, Final, Mapping, Sequence
 
 from quant_engine.core.contracts import canonical_json_bytes
@@ -55,8 +61,186 @@ QUANTBASE_ACTIVITY_FIELDS: Final = frozenset(
 CORRELATION_FIELDS: Final = ("series_id", "date", "return", "evidence_layer")
 CORRELATION_FIELDS_V2: Final = (*CORRELATION_FIELDS, "strategy_version")
 STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
-STRATEGY_HISTORY_BUILDER_VERSION: Final = "1.2.0"
-MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-2"
+STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
+MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
+LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.10.0"
+LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
+LAYERED_HISTORY_MODE_POLICY: Final = {
+    "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
+    "LIVE_PLUS_BACKTEST": "EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE_THEN_ACCOUNT_LIVE",
+    "comparison_layers_in_modes": False,
+    "post_inception_backtest_fill": False,
+}
+LAYERED_HISTORY_CORRECTION_RESOLUTION_IDS: Final = frozenset(
+    {
+        "echotrade-event-only-account-live-rejected",
+        "p123-ai-backtest",
+        "p123-eu-provider-live",
+        "robuxio-account-live-after-funding",
+        "volatis-account-live",
+    }
+)
+MATRIXPORT_GAP_KINDS: Final = (
+    "nav_missing_date",
+    "fx_missing_date",
+    "reconciliation_incomplete_date",
+)
+MATRIXPORT_RETURN_TRANSFORM_CAPABILITIES: Final = {
+    ("matrixport-declared-gap-one-day-returns", "1"): frozenset(
+        {
+            "ACCOUNT_LIVE_DAILY_RETURN",
+            "PROVIDER_LIVE_DAILY_RETURN",
+            "DECLARED_GAP_COVERAGE",
+        }
+    )
+}
+LAYERED_HISTORY_REPOSITORY_DEPENDENCIES: Final = (
+    "docs/analytics/current-strategy-decomposition-plan.json",
+    "packages/core/src/quant_engine/core/contracts.py",
+    "schemas/portfolio/financial-mvp-source-contract.schema.json",
+    "tools/portfolio_financial_mvp_contract.py",
+)
+
+
+def _clean_git_environment() -> dict[str, str]:
+    repository_selection_variables = frozenset(
+        {
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_DIR",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+            "GIT_INDEX_FILE",
+            "GIT_NAMESPACE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_PREFIX",
+            "GIT_WORK_TREE",
+        }
+    )
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() not in repository_selection_variables
+    }
+
+
+@lru_cache(maxsize=1)
+def _trusted_layered_history_code_identity() -> tuple[str, str]:
+    repository_root = Path(__file__).resolve().parents[1]
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository_root),
+                "rev-parse",
+                "--show-toplevel",
+                "HEAD^{commit}",
+            ],
+            capture_output=True,
+            check=False,
+            env=_clean_git_environment(),
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise TargetSeriesError(
+            "layered history repository identity is unavailable"
+        ) from exc
+    identity_lines = completed.stdout.splitlines()
+    repository_sha = identity_lines[1].strip() if len(identity_lines) == 2 else ""
+    if (
+        completed.returncode != 0
+        or len(identity_lines) != 2
+        or Path(identity_lines[0].strip()).resolve() != repository_root
+        or len(repository_sha) != 40
+        or any(ch not in "0123456789abcdef" for ch in repository_sha)
+    ):
+        raise TargetSeriesError("layered history repository identity is unavailable")
+    tool_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    return repository_sha, tool_sha256
+
+
+@lru_cache(maxsize=1)
+def _committed_layered_history_dependency_sha256s() -> dict[str, str]:
+    repository_root = Path(__file__).resolve().parents[1]
+    repository_sha, _tool_sha256 = _trusted_layered_history_code_identity()
+    identities: dict[str, str] = {}
+    for relative_path in LAYERED_HISTORY_REPOSITORY_DEPENDENCIES:
+        try:
+            completed = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository_root),
+                    "show",
+                    f"{repository_sha}:{relative_path}",
+                ],
+                capture_output=True,
+                check=False,
+                env=_clean_git_environment(),
+                timeout=10,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            raise TargetSeriesError(
+                "layered history committed dependency is unavailable"
+            ) from exc
+        if completed.returncode != 0:
+            raise TargetSeriesError(
+                "layered history committed dependency is unavailable"
+            )
+        identities[relative_path] = hashlib.sha256(completed.stdout).hexdigest()
+    return identities
+
+
+def _require_trusted_layered_history_dependencies() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    expected = _committed_layered_history_dependency_sha256s()
+    for relative_path, expected_sha256 in expected.items():
+        path = repository_root.joinpath(*relative_path.split("/"))
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256
+        ):
+            raise TargetSeriesError(
+                f"layered history repository dependency differs: {relative_path}"
+            )
+    imported_core_path = inspect.getsourcefile(canonical_json_bytes)
+    core_dependency = "packages/core/src/quant_engine/core/contracts.py"
+    if (
+        imported_core_path is None
+        or hashlib.sha256(Path(imported_core_path).read_bytes()).hexdigest()
+        != expected[core_dependency]
+    ):
+        raise TargetSeriesError("layered history imported core dependency differs")
+
+
+LAYERED_HISTORY_SEGMENT_FIELDS: Final = (
+    "strategy_id",
+    "series_id",
+    "date",
+    "return",
+    "evidence_layer",
+    "strategy_version",
+    "segment_id",
+    "source_id",
+    "source_generation_id",
+    "mode_admission",
+    "return_basis",
+    "return_type",
+    "calendar",
+    "frequency",
+)
+LAYERED_HISTORY_OUTPUT_NAMES: Final = (
+    "segments.csv",
+    "excluded.csv",
+    "returns.csv",
+    "live-only.csv",
+    "live-plus-backtest.csv",
+    "coverage.json",
+)
 STRATEGY_HISTORY_STATUSES: Final = frozenset(
     {
         "ACCEPTED_EXACT_VERSION_HISTORY",
@@ -121,6 +305,101 @@ def _manifest_artifacts(value: object) -> dict[str, VerifiedArtifact]:
     return result
 
 
+def _inventory_sha256(files: list[dict[str, object]]) -> str:
+    files.sort(key=lambda item: str(item["relative_path"]))
+    return hashlib.sha256(
+        canonical_json_bytes({"files": files, "inventory_schema_version": 1})
+    ).hexdigest()
+
+
+def _source_generation_inventory_sha256(
+    source_name: str,
+    manifest_content: bytes,
+    manifest: Mapping[str, Any],
+) -> str:
+    """Derive the published generation inventory from governed manifest bytes."""
+
+    artifacts = _manifest_artifacts(manifest.get("artifacts"))
+    production_inventory_artifacts: dict[str, dict[str, str]] = {
+        "provider-ledger": {"normalized/provider-ledger.json": "provider-ledger.json"},
+        "matrixport": {"normalized/generation-catalog.json": "catalog.json"},
+        "quantbase": {
+            "normalized/quantbase-generation.json": "quantbase-generation.json"
+        },
+        "portfolio123": {
+            "normalized/portfolio123-generation.json": "portfolio123-generation.json"
+        },
+    }
+    if source_name not in production_inventory_artifacts:
+        raise TargetSeriesError("source generation inventory profile differs")
+    selected: dict[str, str] = {}
+    configured = production_inventory_artifacts[source_name]
+    if set(configured) <= set(artifacts):
+        selected.update(configured)
+        if source_name == "portfolio123":
+            selected.update(
+                {
+                    artifact_id: artifact_id
+                    for artifact_id in artifacts
+                    if artifact_id.startswith("tables/")
+                }
+            )
+    else:
+        # Portable synthetic fixtures do not stage provider envelope catalogs.
+        # Their declared artifacts are the complete generation inventory.
+        selected.update({artifact_id: artifact_id for artifact_id in artifacts})
+    if not selected:
+        raise TargetSeriesError("source generation inventory is empty")
+    files: list[dict[str, object]] = [
+        {
+            "relative_path": "generation.json",
+            "sha256": hashlib.sha256(manifest_content).hexdigest(),
+            "size_bytes": len(manifest_content),
+        }
+    ]
+    for artifact_id, relative_path in selected.items():
+        artifact = artifacts[artifact_id]
+        files.append(
+            {
+                "relative_path": relative_path,
+                "sha256": artifact.sha256,
+                "size_bytes": artifact.size_bytes,
+            }
+        )
+    if len({str(item["relative_path"]) for item in files}) != len(files):
+        raise TargetSeriesError("source generation inventory paths differ")
+    return _inventory_sha256(files)
+
+
+def _generation_directory_inventory_sha256(generation_dir: Path) -> str:
+    if generation_dir.is_symlink() or not generation_dir.is_dir():
+        raise TargetSeriesError("source generation directory is missing or linked")
+    files: list[dict[str, object]] = []
+    for directory_name, directory_names, file_names in os.walk(
+        generation_dir, followlinks=False
+    ):
+        directory = Path(directory_name)
+        if any((directory / name).is_symlink() for name in directory_names):
+            raise TargetSeriesError("source generation inventory contains a link")
+        for name in file_names:
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                raise TargetSeriesError(
+                    "source generation inventory contains an irregular file"
+                )
+            digest, size = _sha256(path)
+            files.append(
+                {
+                    "relative_path": path.relative_to(generation_dir).as_posix(),
+                    "sha256": digest,
+                    "size_bytes": size,
+                }
+            )
+    if "generation.json" not in {str(item["relative_path"]) for item in files}:
+        raise TargetSeriesError("source generation inventory lacks generation.json")
+    return _inventory_sha256(files)
+
+
 def _verify_artifact(
     path: Path, artifacts: Mapping[str, VerifiedArtifact], artifact_id: str
 ) -> VerifiedArtifact:
@@ -182,6 +461,165 @@ def _utc_day(value: str) -> date:
     return parsed.date()
 
 
+def _matrixport_declared_missing_dates(
+    manifest: Mapping[str, Any],
+    expected_policy: Mapping[str, Any] | None = None,
+) -> frozenset[date]:
+    """Return manifest-declared omissions, optionally bound to product authority."""
+
+    coverage = manifest.get("coverage")
+    if not isinstance(coverage, dict) or (
+        coverage.get("status") != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        or coverage.get("known_gaps") != []
+    ):
+        raise TargetSeriesError("Matrixport declared-boundary coverage is invalid")
+    exclusions = coverage.get("declared_exclusions")
+    if not isinstance(exclusions, list):
+        raise TargetSeriesError("Matrixport declared exclusions are absent")
+    dates_by_kind: dict[str, set[date]] = {kind: set() for kind in MATRIXPORT_GAP_KINDS}
+    authorities: set[tuple[str, str]] = set()
+    for raw in exclusions:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("Matrixport declared exclusion is invalid")
+        item = raw.get("item")
+        if not isinstance(item, str) or ":" not in item:
+            continue
+        kind, rendered_date = item.split(":", 1)
+        if kind not in dates_by_kind:
+            continue
+        if set(raw) != {"item", "provenance", "reason"}:
+            raise TargetSeriesError("Matrixport declared exclusion authority differs")
+        provenance = raw.get("provenance")
+        reason = raw.get("reason")
+        if (
+            not isinstance(provenance, str)
+            or not provenance
+            or not isinstance(reason, str)
+            or not reason
+        ):
+            raise TargetSeriesError("Matrixport declared exclusion authority differs")
+        authorities.add((provenance, reason))
+        try:
+            missing_date = date.fromisoformat(rendered_date)
+        except ValueError as exc:
+            raise TargetSeriesError(
+                "Matrixport declared exclusion date is invalid"
+            ) from exc
+        if item != f"{kind}:{missing_date.isoformat()}":
+            raise TargetSeriesError("Matrixport declared exclusion item is invalid")
+        if missing_date in dates_by_kind[kind]:
+            raise TargetSeriesError("Matrixport declared exclusion is duplicated")
+        dates_by_kind[kind].add(missing_date)
+    accepted = dates_by_kind[MATRIXPORT_GAP_KINDS[0]]
+    if any(dates_by_kind[kind] != accepted for kind in MATRIXPORT_GAP_KINDS[1:]):
+        raise TargetSeriesError("Matrixport declared exclusion date sets differ")
+    if len(authorities) > 1:
+        raise TargetSeriesError("Matrixport declared exclusion authority differs")
+    if expected_policy is not None:
+        raw_expected_dates = expected_policy.get("declared_missing_source_dates")
+        if not isinstance(raw_expected_dates, list) or any(
+            not isinstance(value, str) for value in raw_expected_dates
+        ):
+            raise TargetSeriesError("Matrixport product gap dates are invalid")
+        try:
+            expected_dates = {date.fromisoformat(value) for value in raw_expected_dates}
+        except ValueError as exc:
+            raise TargetSeriesError("Matrixport product gap dates are invalid") from exc
+        expected_authority = (
+            expected_policy.get("provenance"),
+            expected_policy.get("reason"),
+        )
+        if accepted != expected_dates or authorities != {expected_authority}:
+            raise TargetSeriesError(
+                "Matrixport declared exclusions differ from product authority"
+            )
+    return frozenset(accepted)
+
+
+def _matrixport_gap_endpoints(
+    observed_dates: Sequence[date], declared_missing_dates: frozenset[date]
+) -> frozenset[date]:
+    """Validate all interior omissions and return non-comparable endpoints."""
+
+    ordered = sorted(set(observed_dates))
+    actual_missing: set[date] = set()
+    omitted_return_dates: set[date] = set()
+    for previous, current in zip(ordered, ordered[1:], strict=False):
+        candidate = previous + timedelta(days=1)
+        interval_missing: set[date] = set()
+        while candidate < current:
+            interval_missing.add(candidate)
+            candidate += timedelta(days=1)
+        if interval_missing:
+            actual_missing.update(interval_missing)
+            omitted_return_dates.add(current)
+    if actual_missing != set(declared_missing_dates):
+        raise TargetSeriesError("Matrixport NAV gaps differ from declared exclusions")
+    accepted_endpoints = _matrixport_expected_gap_endpoints(declared_missing_dates)
+    if omitted_return_dates != set(accepted_endpoints):
+        raise TargetSeriesError("Matrixport NAV gap endpoints differ")
+    return accepted_endpoints
+
+
+def _matrixport_expected_gap_endpoints(
+    declared_missing_dates: frozenset[date],
+) -> frozenset[date]:
+    """Return the first post-gap date whose multi-day return is unavailable."""
+
+    return frozenset(
+        item + timedelta(days=1)
+        for item in declared_missing_dates
+        if item + timedelta(days=1) not in declared_missing_dates
+    )
+
+
+def _matrixport_source_gap_policy(
+    declared_missing_dates: frozenset[date],
+    omitted_return_dates: frozenset[date],
+    authority_policy: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
+    unavailable = sorted(declared_missing_dates | omitted_return_dates)
+    derived: dict[str, object] = {
+        "declared_missing_source_dates": [
+            item.isoformat() for item in sorted(declared_missing_dates)
+        ],
+        "omitted_return_dates": [
+            item.isoformat() for item in sorted(omitted_return_dates)
+        ],
+        "unavailable_return_dates": [item.isoformat() for item in unavailable],
+    }
+    if authority_policy is None:
+        return {**derived, "authority_bound": False}
+    accepted = dict(authority_policy)
+    if any(accepted.get(key) != value for key, value in derived.items()):
+        raise TargetSeriesError(
+            "Matrixport source gap policy differs from observed omissions"
+        )
+    return accepted
+
+
+def _matrixport_return_transform(policy: Mapping[str, Any]) -> None:
+    """Prove that the contract-requested gap transform matches code capabilities."""
+
+    raw = policy.get("return_transform")
+    if not isinstance(raw, dict) or set(raw) != {"facts", "transform", "version"}:
+        raise TargetSeriesError("Matrixport return transform is invalid")
+    transform = raw.get("transform")
+    version = raw.get("version")
+    facts = raw.get("facts")
+    if (
+        not isinstance(transform, str)
+        or not isinstance(version, str)
+        or not isinstance(facts, list)
+        or any(not isinstance(item, str) or not item for item in facts)
+        or len(facts) != len(set(facts))
+    ):
+        raise TargetSeriesError("Matrixport return transform is invalid")
+    supported = MATRIXPORT_RETURN_TRANSFORM_CAPABILITIES.get((transform, version))
+    if supported is None or frozenset(facts) != supported:
+        raise TargetSeriesError("Matrixport return transform capability differs")
+
+
 def _base_rows(
     path: Path, series_id: str, *, replace_existing: bool = False
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -208,6 +646,8 @@ def _matrixport_returns(
     subscription_path: Path,
     product_id: str,
     series_id: str,
+    declared_missing_dates: frozenset[date],
+    declared_gap_policy: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, object]]:
     holdings = [
         row
@@ -276,13 +716,19 @@ def _matrixport_returns(
         raise TargetSeriesError(
             "Matrixport funding confirmation lacks an exact held NAV observation"
         )
+    account_nav_dates = [day for day, _nav in ordered if day >= account_live_start]
+    omitted_return_dates = _matrixport_gap_endpoints(
+        account_nav_dates, declared_missing_dates
+    )
     returns: list[dict[str, str]] = []
-    previous = ordered[0][1]
     provider_return_observations = 0
     boundary_return_excluded = False
-    for day, nav in ordered[1:]:
+    for (_previous_day, previous), (day, nav) in zip(
+        ordered, ordered[1:], strict=False
+    ):
+        if day in omitted_return_dates:
+            continue
         value = nav / previous - Decimal(1)
-        previous = nav
         if day < account_live_start:
             provider_return_observations += 1
             continue
@@ -300,7 +746,6 @@ def _matrixport_returns(
                 "cost": "",
             }
         )
-    account_nav_dates = [day for day, _nav in ordered if day >= account_live_start]
     provider_nav_dates = [day for day, _nav in ordered if day < account_live_start]
     if len(account_nav_dates) < 2 or not returns:
         raise TargetSeriesError(
@@ -325,6 +770,9 @@ def _matrixport_returns(
         ),
         "provider_live_return_observations": provider_return_observations,
         "return_observations": len(returns),
+        "source_gap_policy": _matrixport_source_gap_policy(
+            declared_missing_dates, omitted_return_dates, declared_gap_policy
+        ),
         "subscription_initiated_date": subscription_initiated_date.isoformat(),
     }
 
@@ -596,12 +1044,18 @@ def build_matrixport_targets(
     subscription_artifact = _verify_artifact(
         subscription_path, artifacts, "csv/subscription_details.csv"
     )
+    declared_missing_dates = _matrixport_declared_missing_dates(manifest)
 
     base, existing = _base_rows(
         base_targets, series_id, replace_existing=replace_existing
     )
     provider_rows, coverage = _matrixport_returns(
-        nav_path, holdings_path, subscription_path, product_id, series_id
+        nav_path,
+        holdings_path,
+        subscription_path,
+        product_id,
+        series_id,
+        declared_missing_dates,
     )
     combined = sorted(
         [*base, *provider_rows], key=lambda row: (row["series_id"], row["date"])
@@ -1134,6 +1588,3396 @@ def _strategy_version(namespace: str, value: Mapping[str, object]) -> str:
     return f"{namespace}:{digest}"
 
 
+def _artifact_identity(
+    *,
+    input_id: str,
+    artifact_role: str,
+    path: Path,
+    artifact_id: str | None = None,
+    generation_id: str | None = None,
+    as_of_date: str | None = None,
+) -> dict[str, object]:
+    digest, size = _sha256(path)
+    return {
+        "artifact_id": artifact_id,
+        "artifact_role": artifact_role,
+        "as_of_date": as_of_date,
+        "generation_id": generation_id,
+        "input_id": input_id,
+        "sha256": digest,
+        "size_bytes": size,
+    }
+
+
+def _history_contract(
+    path: Path,
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
+    _require_trusted_layered_history_dependencies()
+    validator_path = Path(__file__).with_name("portfolio_financial_mvp_contract.py")
+    spec = importlib.util.spec_from_file_location(
+        "_portfolio_financial_mvp_contract_for_history", validator_path
+    )
+    if spec is None or spec.loader is None:
+        raise TargetSeriesError("financial MVP contract validator is unavailable")
+    validator = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = validator
+    try:
+        spec.loader.exec_module(validator)
+        validator_canonical_json_bytes = getattr(
+            validator, "canonical_json_bytes", None
+        )
+        validator_core_path = (
+            inspect.getsourcefile(validator_canonical_json_bytes)
+            if callable(validator_canonical_json_bytes)
+            else None
+        )
+        committed_core_sha256 = _committed_layered_history_dependency_sha256s()[
+            "packages/core/src/quant_engine/core/contracts.py"
+        ]
+        if (
+            validator_core_path is None
+            or hashlib.sha256(Path(validator_core_path).read_bytes()).hexdigest()
+            != committed_core_sha256
+        ):
+            raise TargetSeriesError(
+                "financial MVP validator imported core dependency differs"
+            )
+        contract = _load_json(path, "financial MVP source contract")
+        schema = _load_json(
+            validator_path.parents[1]
+            / "schemas"
+            / "portfolio"
+            / "financial-mvp-source-contract.schema.json",
+            "financial MVP source contract schema",
+        )
+        schema_failures = validator.schema_errors(schema, contract, schema)
+        if schema_failures:
+            raise TargetSeriesError("financial MVP contract schema differs")
+        registry = _load_json(validator.DEFAULT_REGISTRY, "current strategy registry")
+        contract = validator.validate_contract(contract, registry=registry)
+    except (OSError, ValueError) as exc:
+        raise TargetSeriesError("financial MVP contract is invalid") from exc
+    product = contract.get("product")
+    history = contract.get("history_corrections")
+    raw_strategies = contract.get("strategies")
+    raw_sources = contract.get("source_segments")
+    if (
+        not isinstance(product, dict)
+        or product.get("product_id") != "FINANCIAL_MVP"
+        or not isinstance(history, dict)
+        or history.get("policy_id") != "PORT-HISTORY-TRUTH-1"
+        or not isinstance(raw_strategies, list)
+        or not isinstance(raw_sources, list)
+    ):
+        raise TargetSeriesError("financial MVP history contract differs")
+    strategies: dict[str, dict[str, Any]] = {}
+    for raw in raw_strategies:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("financial MVP strategy row is invalid")
+        strategy_id = str(raw.get("strategy_id", "")).strip()
+        if (
+            not strategy_id
+            or raw.get("product_requirement") != "REQUIRED"
+            or strategy_id in strategies
+        ):
+            raise TargetSeriesError("financial MVP strategy identity differs")
+        strategies[strategy_id] = dict(raw)
+    if not strategies:
+        raise TargetSeriesError("financial MVP strategy set is empty")
+    sources: dict[str, dict[str, Any]] = {}
+    for raw in raw_sources:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("financial MVP source row is invalid")
+        source_id = str(raw.get("source_id", "")).strip()
+        if not source_id or source_id in sources:
+            raise TargetSeriesError("financial MVP source identity differs")
+        sources[source_id] = dict(raw)
+    corrections: dict[str, dict[str, Any]] = {}
+    raw_corrections = history.get("corrections")
+    if not isinstance(raw_corrections, list):
+        raise TargetSeriesError("financial MVP history corrections are invalid")
+    for raw in raw_corrections:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("financial MVP history correction is invalid")
+        correction_id = str(raw.get("correction_id", "")).strip()
+        if not correction_id or correction_id in corrections:
+            raise TargetSeriesError("financial MVP correction identity differs")
+        corrections[correction_id] = dict(raw)
+    required_corrections = {
+        "robuxio-provider-live-before-funding",
+        "robuxio-account-live-after-funding",
+        "p123-ai-backtest-candidate",
+        "p123-eu-backtest-not-captured",
+        "p123-eu-provider-live",
+        "p123-eu-account-live",
+        "volatis-backtest-not-proved",
+        "volatis-provider-live",
+        "volatis-account-live",
+    }
+    if not required_corrections <= set(corrections):
+        raise TargetSeriesError("financial MVP history correction set is incomplete")
+    return contract, strategies, sources, corrections
+
+
+def _verified_current_generation(
+    *,
+    pointer_path: Path,
+    manifest_path: Path,
+    source: Mapping[str, Any],
+    name: str,
+    inventory_profile: str,
+) -> tuple[dict[str, Any], str, str]:
+    pointer_content = pointer_path.read_bytes()
+    pointer = _load_json(pointer_path, f"{name} current pointer")
+    manifest_content = manifest_path.read_bytes()
+    manifest = _load_json(manifest_path, f"{name} generation manifest")
+    current = source.get("current_generation")
+    if not isinstance(current, dict):
+        raise TargetSeriesError(f"{name} current generation is absent from contract")
+    generation_id = str(manifest.get("generation_id", ""))
+    if (
+        manifest.get("verification") != "VERIFIED"
+        or len(generation_id) != 64
+        or pointer.get("generation_id") != generation_id
+        or current.get("generation_id") != generation_id
+    ):
+        raise TargetSeriesError(f"{name} current generation identity differs")
+    manifest_hash, _manifest_size = _sha256(manifest_path)
+    if (
+        current.get("sha256") != manifest_hash
+        or pointer.get("manifest_sha256") != manifest_hash
+        or pointer.get("state") != "PUBLISHED"
+        or canonical_json_bytes(pointer) != pointer_content
+    ):
+        raise TargetSeriesError(f"{name} generation manifest differs from contract")
+    pointer_schema_version = pointer.get("pointer_schema_version")
+    expected_pointer_keys = {
+        "artifact_inventory_sha256",
+        "generation_id",
+        "manifest_sha256",
+        "pointer_schema_version",
+        "state",
+    }
+    if set(pointer) != expected_pointer_keys or pointer_schema_version != 2:
+        raise TargetSeriesError(f"{name} current pointer contract differs")
+    inventory_sha256 = _source_generation_inventory_sha256(
+        inventory_profile, manifest_content, manifest
+    )
+    if pointer.get("artifact_inventory_sha256") != inventory_sha256:
+        raise TargetSeriesError(f"{name} current pointer inventory differs")
+    generation_dir = pointer_path.parent / "generations" / generation_id
+    if generation_dir.exists() and (
+        _generation_directory_inventory_sha256(generation_dir) != inventory_sha256
+    ):
+        raise TargetSeriesError(f"{name} published generation inventory differs")
+    as_of = str(manifest.get("as_of_date", ""))
+    try:
+        date.fromisoformat(as_of)
+    except ValueError as exc:
+        raise TargetSeriesError(f"{name} generation as-of date is invalid") from exc
+    if current.get("as_of") != as_of:
+        raise TargetSeriesError(f"{name} generation as-of differs from contract")
+    return manifest, generation_id, as_of
+
+
+def _matrixport_provider_returns(
+    nav_path: Path,
+    product_id: str,
+    series_id: str,
+    account_live_start: date,
+) -> list[dict[str, str]]:
+    observations: dict[date, Decimal] = {}
+    for row in _csv_rows(nav_path, MATRIXPORT_NAV_FIELDS, "Matrixport daily NAV"):
+        if row["product_id"] != product_id:
+            continue
+        day = _utc_day(row["timestamp_utc"])
+        nav = _positive_decimal(row["nav"], "Matrixport NAV")
+        if day in observations and observations[day] != nav:
+            raise TargetSeriesError(
+                "Matrixport NAV contains conflicting duplicate dates"
+            )
+        observations[day] = nav
+    ordered = sorted(observations.items())
+    rows: list[dict[str, str]] = []
+    for (previous_day, previous), (day, nav) in zip(ordered, ordered[1:], strict=False):
+        if previous_day >= account_live_start or day >= account_live_start:
+            continue
+        if (day - previous_day).days != 1:
+            continue
+        value = nav / previous - Decimal(1)
+        if value <= -1:
+            raise TargetSeriesError("Matrixport provider return is invalid")
+        rows.append(
+            {
+                "series_id": series_id,
+                "date": day.isoformat(),
+                "return": format(value.normalize(), "f"),
+                "evidence_layer": "PROVIDER_LIVE",
+                "return_basis": "NET",
+                "return_type": "TOTAL",
+                "cost": "",
+            }
+        )
+    if not rows:
+        raise TargetSeriesError("Matrixport provider-live history is unavailable")
+    return rows
+
+
+def _weekday_dates(start: date, end: date) -> list[date]:
+    if end < start:
+        raise TargetSeriesError("provider performance interval is reversed")
+    result: list[date] = []
+    observed = start
+    while observed <= end:
+        if observed.weekday() < 5:
+            result.append(observed)
+        observed += timedelta(days=1)
+    return result
+
+
+def _portfolio123_exact_model(
+    metadata_path: Path,
+) -> tuple[set[str], str]:
+    rows = _parquet_rows(
+        metadata_path,
+        (
+            "assetName",
+            "assetUid",
+            "currency",
+            "inceptionDt",
+            "isAccountLive",
+            "name",
+            "portfolioUid",
+            "posCnt",
+            "strategyTotalHoldCount",
+        ),
+        "Portfolio123 managed metadata",
+    )
+    matched = [
+        row
+        for row in rows
+        if "eu multifactor microcap" in str(row.get("name") or "").casefold()
+        and str(row.get("isAccountLive") or "").casefold() == "true"
+    ]
+    signatures: dict[str, dict[str, object]] = {}
+    for row in matched:
+        signature = {
+            field: row.get(field)
+            for field in (
+                "assetName",
+                "assetUid",
+                "currency",
+                "inceptionDt",
+                "isAccountLive",
+                "name",
+                "portfolioUid",
+                "posCnt",
+                "strategyTotalHoldCount",
+            )
+        }
+        signatures[hashlib.sha256(canonical_json_bytes(signature)).hexdigest()] = row
+    if len(signatures) != 1:
+        raise TargetSeriesError("Portfolio123 exact EU model is not unique")
+    exact = next(iter(signatures.values()))
+    entity_ids = {
+        str(exact.get(field) or "").strip()
+        for field in ("assetUid", "portfolioUid")
+        if str(exact.get(field) or "").strip()
+    }
+    if not entity_ids:
+        raise TargetSeriesError("Portfolio123 exact EU model lacks identity")
+    version = _strategy_version(
+        "p123-eu-connected-model",
+        {
+            "generation_id": "__GENERATION_BOUND_BY_CALLER__",
+            "provider_entity_ids": sorted(entity_ids),
+            "strategy_name": str(exact.get("assetName") or ""),
+        },
+    )
+    return entity_ids, version
+
+
+def _portfolio123_provider_performance_returns(
+    *,
+    metadata_path: Path,
+    performance_path: Path,
+    equity_path: Path,
+    generation_id: str,
+    series_id: str,
+    accepted_version: str,
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    entity_ids, placeholder_version = _portfolio123_exact_model(metadata_path)
+    # Recompute the exact accepted version with the current generation.  The
+    # private provider identifiers participate only in this in-memory digest.
+    metadata_rows = _parquet_rows(
+        metadata_path,
+        (
+            "assetName",
+            "assetUid",
+            "currency",
+            "inceptionDt",
+            "isAccountLive",
+            "name",
+            "portfolioUid",
+            "posCnt",
+            "strategyTotalHoldCount",
+        ),
+        "Portfolio123 managed metadata",
+    )
+    exact = next(
+        row
+        for row in metadata_rows
+        if "eu multifactor microcap" in str(row.get("name") or "").casefold()
+        and str(row.get("isAccountLive") or "").casefold() == "true"
+    )
+    computed_version = _strategy_version(
+        "p123-eu-connected-model",
+        {
+            "generation_id": generation_id,
+            "provider_entity_ids": sorted(entity_ids),
+            "strategy_name": str(exact.get("assetName") or ""),
+        },
+    )
+    if placeholder_version == computed_version or computed_version != accepted_version:
+        raise TargetSeriesError("Portfolio123 exact EU strategy version differs")
+
+    performance_rows = [
+        row
+        for row in _parquet_rows(
+            performance_path,
+            ("_entity_id", "field", "value"),
+            "Portfolio123 managed performance",
+        )
+        if str(row.get("_entity_id") or "") in entity_ids
+    ]
+    captures: dict[str, dict[str, str]] = {}
+    by_entity: dict[str, dict[str, str]] = {}
+    for row in performance_rows:
+        entity_id = str(row.get("_entity_id") or "")
+        field = str(row.get("field") or "")
+        value = str(row.get("value") or "")
+        fields = by_entity.setdefault(entity_id, {})
+        prior = fields.get(field)
+        if prior is not None and prior != value:
+            raise TargetSeriesError(
+                "Portfolio123 managed performance has conflicting captures"
+            )
+        fields[field] = value
+    for fields in by_entity.values():
+        if not {"data", "date", "dateLast", "panels"} <= set(fields):
+            continue
+        signature = hashlib.sha256(
+            canonical_json_bytes(
+                {key: fields[key] for key in ("data", "date", "dateLast", "panels")}
+            )
+        ).hexdigest()
+        captures[signature] = fields
+    if len(captures) != 1:
+        raise TargetSeriesError("Portfolio123 exact EU performance is not unique")
+    fields = next(iter(captures.values()))
+    try:
+        observed_start = date.fromisoformat(fields["date"])
+        observed_end = date.fromisoformat(fields["dateLast"])
+        data = json.loads(fields["data"])
+        panels = json.loads(fields["panels"])
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError("Portfolio123 exact EU performance is invalid") from exc
+    if not isinstance(data, list) or not isinstance(panels, list):
+        raise TargetSeriesError("Portfolio123 exact EU performance shape differs")
+    graphs = [
+        graph
+        for panel in panels
+        if isinstance(panel, dict)
+        for graph in panel.get("graphs", [])
+        if isinstance(graph, dict)
+    ]
+    if not any(
+        graph.get("idx") == 0 and graph.get("s") == "Strategy" for graph in graphs
+    ):
+        raise TargetSeriesError("Portfolio123 strategy performance selector differs")
+    if not any(
+        graph.get("idx") == 1 and graph.get("s") == "Total Value" for graph in graphs
+    ):
+        raise TargetSeriesError("Portfolio123 total-value selector differs")
+    calendar = _weekday_dates(observed_start, observed_end)
+    if len(calendar) != len(data):
+        raise TargetSeriesError("Portfolio123 performance calendar differs")
+    parsed: list[tuple[date, Decimal, Decimal, Decimal]] = []
+    for day, raw in zip(calendar, data, strict=True):
+        if not isinstance(raw, list) or len(raw) != 3:
+            raise TargetSeriesError("Portfolio123 performance observation differs")
+        strategy_level = _decimal(raw[0], "Portfolio123 strategy performance")
+        total_equity = _positive_decimal(raw[1], "Portfolio123 total value")
+        cash_added = _decimal(raw[2], "Portfolio123 cash added")
+        wealth = Decimal(1) + strategy_level / Decimal(100)
+        if wealth <= 0:
+            raise TargetSeriesError("Portfolio123 strategy performance is invalid")
+        parsed.append((day, wealth, total_equity, cash_added))
+
+    equity_rows = [
+        row
+        for row in _parquet_rows(
+            equity_path,
+            ("_entity_id", "Date", "Total Equity", "Cash Added"),
+            "Portfolio123 equity curve",
+        )
+        if str(row.get("_entity_id") or "") in entity_ids
+        and row.get("Total Equity") not in (None, "")
+    ]
+    equity_by_day: dict[date, tuple[Decimal, Decimal]] = {}
+    for row in equity_rows:
+        try:
+            day = date.fromisoformat(str(row.get("Date") or ""))
+        except ValueError as exc:
+            raise TargetSeriesError("Portfolio123 equity date is invalid") from exc
+        equity_identity = (
+            _positive_decimal(row.get("Total Equity"), "Portfolio123 total equity"),
+            _decimal(row.get("Cash Added") or 0, "Portfolio123 cash added"),
+        )
+        if day in equity_by_day and equity_by_day[day] != equity_identity:
+            raise TargetSeriesError("Portfolio123 equity curve conflicts")
+        equity_by_day[day] = equity_identity
+    overlap = 0
+    for day, _wealth, total_equity, cash_added in parsed:
+        if day not in equity_by_day:
+            continue
+        overlap += 1
+        if equity_by_day[day] != (total_equity, cash_added):
+            raise TargetSeriesError("Portfolio123 performance and equity paths differ")
+    if overlap < 2:
+        raise TargetSeriesError(
+            "Portfolio123 performance/equity overlap is insufficient"
+        )
+
+    returns: list[dict[str, str]] = []
+    for previous, current in zip(parsed, parsed[1:], strict=False):
+        period_return = current[1] / previous[1] - Decimal(1)
+        if period_return <= -1:
+            raise TargetSeriesError("Portfolio123 provider return is invalid")
+        returns.append(
+            {
+                "series_id": series_id,
+                "date": current[0].isoformat(),
+                "return": format(period_return.normalize(), "f"),
+                "evidence_layer": "PROVIDER_LIVE",
+                "return_basis": "PROVIDER_COMPUTED_STRATEGY_PERFORMANCE",
+                "return_type": "TOTAL",
+                "cost": "",
+            }
+        )
+    return returns, {
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "cash_added_treatment": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
+        "equity_overlap_observations": overlap,
+        "observed_end": returns[-1]["date"],
+        "observed_start": returns[0]["date"],
+        "raw_level_observations": len(parsed),
+        "return_observations": len(returns),
+        "transform_id": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
+    }
+
+
+def _correlation_view_bytes(rows: Sequence[Mapping[str, str]]) -> bytes:
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        buffer, fieldnames=CORRELATION_FIELDS_V2, lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(
+        {field: row[field] for field in CORRELATION_FIELDS_V2} for row in rows
+    )
+    return buffer.getvalue().encode("utf-8")
+
+
+def _segment_view_bytes(rows: Sequence[Mapping[str, str]]) -> bytes:
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        buffer, fieldnames=LAYERED_HISTORY_SEGMENT_FIELDS, lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(
+        {field: row[field] for field in LAYERED_HISTORY_SEGMENT_FIELDS} for row in rows
+    )
+    return buffer.getvalue().encode("utf-8")
+
+
+def _source_temporal(source: Mapping[str, Any]) -> tuple[str, str]:
+    temporal = source.get("temporal")
+    if not isinstance(temporal, dict):
+        raise TargetSeriesError("history source temporal contract is absent")
+    calendar = str(temporal.get("calendar", "")).strip()
+    frequency = str(temporal.get("cadence", "")).strip()
+    if not calendar or not frequency:
+        raise TargetSeriesError("history source temporal contract is incomplete")
+    return calendar, frequency
+
+
+def _source_generation(
+    source: Mapping[str, Any], name: str
+) -> tuple[str | None, str | None]:
+    current = source.get("current_generation")
+    if not isinstance(current, dict):
+        raise TargetSeriesError(f"{name} generation contract is absent")
+    generation_id = current.get("generation_id")
+    as_of = current.get("as_of")
+    if generation_id is not None and (
+        not isinstance(generation_id, str) or len(generation_id) != 64
+    ):
+        raise TargetSeriesError(f"{name} generation identity is invalid")
+    if as_of is not None:
+        try:
+            date.fromisoformat(str(as_of))
+        except ValueError as exc:
+            raise TargetSeriesError(f"{name} generation as-of is invalid") from exc
+    return generation_id, None if as_of is None else str(as_of)
+
+
+def _contract_version(strategy: Mapping[str, Any]) -> tuple[str, str]:
+    value = strategy.get("strategy_version")
+    if not isinstance(value, dict):
+        raise TargetSeriesError("strategy version contract is absent")
+    status = str(value.get("status", "")).strip()
+    version = value.get("version_ref")
+    if status == "EVIDENCED":
+        if not isinstance(version, str) or ":" not in version:
+            raise TargetSeriesError("evidenced strategy version is invalid")
+        return status, version
+    if status != "UNRESOLVED" or version is not None:
+        raise TargetSeriesError("strategy version status differs")
+    return status, "UNRESOLVED"
+
+
+def _segment_rows(
+    rows: Sequence[Mapping[str, str]],
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    segment_id: str,
+    source_id: str,
+    source_generation_id: str | None,
+    mode_admission: str,
+    calendar: str,
+    frequency: str,
+) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for row in rows:
+        result.append(
+            {
+                "calendar": calendar,
+                "date": row["date"],
+                "evidence_layer": row["evidence_layer"],
+                "frequency": frequency,
+                "mode_admission": mode_admission,
+                "return": row["return"],
+                "return_basis": row.get("return_basis", "OBSERVED"),
+                "return_type": row.get("return_type", "TOTAL"),
+                "segment_id": segment_id,
+                "series_id": row["series_id"],
+                "source_generation_id": source_generation_id or "NOT_CAPTURED",
+                "source_id": source_id,
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+            }
+        )
+    return result
+
+
+def _row_identity(rows: Sequence[Mapping[str, str]]) -> dict[str, object]:
+    if not rows:
+        return {
+            "observed_end": None,
+            "observed_start": None,
+            "return_observations": 0,
+            "sha256": hashlib.sha256(_correlation_view_bytes([])).hexdigest(),
+        }
+    ordered = sorted(rows, key=lambda row: (row["series_id"], row["date"]))
+    return {
+        "observed_end": ordered[-1]["date"],
+        "observed_start": ordered[0]["date"],
+        "return_observations": len(ordered),
+        "sha256": hashlib.sha256(_correlation_view_bytes(ordered)).hexdigest(),
+    }
+
+
+def _materialized_segment_identities(
+    rows: Sequence[Mapping[str, str]],
+    sources: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, object]]:
+    """Bind each value-bearing segment to its current governed source receipt."""
+
+    result: list[dict[str, object]] = []
+    for segment_id in sorted({row["segment_id"] for row in rows}):
+        selected = [row for row in rows if row["segment_id"] == segment_id]
+        first = selected[0]
+        static_fields = (
+            "calendar",
+            "evidence_layer",
+            "frequency",
+            "mode_admission",
+            "return_basis",
+            "return_type",
+            "segment_id",
+            "source_generation_id",
+            "source_id",
+            "strategy_id",
+            "strategy_version",
+        )
+        if any(
+            tuple(row[field] for field in static_fields)
+            != tuple(first[field] for field in static_fields)
+            for row in selected
+        ):
+            raise TargetSeriesError(
+                f"layered history segment has mixed authority: {segment_id}"
+            )
+        source = sources.get(first["source_id"])
+        generation = source.get("current_generation") if source is not None else None
+        if not isinstance(generation, dict) or (
+            generation.get("generation_id") != first["source_generation_id"]
+            or not isinstance(generation.get("sha256"), str)
+        ):
+            raise TargetSeriesError(
+                f"layered history segment source receipt differs: {segment_id}"
+            )
+        identity = _row_identity(selected)
+        result.append(
+            {
+                "calendar": first["calendar"],
+                "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+                "evidence_layer": first["evidence_layer"],
+                "frequency": first["frequency"],
+                "mode_admission": first["mode_admission"],
+                "observed_end": identity["observed_end"],
+                "observed_start": identity["observed_start"],
+                "return_basis": first["return_basis"],
+                "return_observations": identity["return_observations"],
+                "return_type": first["return_type"],
+                "segment_id": segment_id,
+                "sha256": identity["sha256"],
+                "source_generation_id": first["source_generation_id"],
+                "source_generation_sha256": generation["sha256"],
+                "source_id": first["source_id"],
+                "strategy_id": first["strategy_id"],
+                "strategy_version": first["strategy_version"],
+            }
+        )
+    return result
+
+
+def _target_row_identity(rows: Sequence[Mapping[str, str]]) -> dict[str, object]:
+    """Hash rejected target rows without inventing a strategy-version identity."""
+
+    ordered = sorted(rows, key=lambda row: (row["series_id"], row["date"]))
+    return {
+        "observed_end": ordered[-1]["date"] if ordered else None,
+        "observed_start": ordered[0]["date"] if ordered else None,
+        "return_observations": len(ordered),
+        "sha256": hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "rows": [
+                        {field: row[field] for field in TARGET_FIELDS}
+                        for row in ordered
+                    ]
+                }
+            )
+        ).hexdigest(),
+    }
+
+
+def _gap_disposition(
+    rows: Sequence[Mapping[str, str]],
+    declared_unavailable_dates: frozenset[date] = frozenset(),
+) -> str:
+    """Classify observable continuity without inventing a market calendar."""
+
+    dates = sorted({date.fromisoformat(row["date"]) for row in rows})
+    if len(dates) < 2:
+        return "REQUIRED_NOT_READY_INSUFFICIENT_CONTINUITY_EVIDENCE"
+    if declared_unavailable_dates:
+        actual_missing: set[date] = set()
+        candidate = dates[0] + timedelta(days=1)
+        observed = set(dates)
+        while candidate < dates[-1]:
+            if candidate not in observed:
+                actual_missing.add(candidate)
+            candidate += timedelta(days=1)
+        expected_missing = {
+            item for item in declared_unavailable_dates if dates[0] < item < dates[-1]
+        }
+        if actual_missing == expected_missing:
+            return "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        return "REQUIRED_NOT_READY_UNEXPLAINED_INTERIOR_GAP"
+    if all(
+        (current - previous).days == 1 for previous, current in zip(dates, dates[1:])
+    ):
+        return "COMPLETE_CONSECUTIVE_CALENDAR_DAYS"
+    if all(day.weekday() < 5 for day in dates) and dates == _weekday_dates(
+        dates[0], dates[-1]
+    ):
+        return "COMPLETE_CONSECUTIVE_WEEKDAYS"
+    return "REQUIRED_NOT_READY_UNEXPLAINED_INTERIOR_GAP"
+
+
+def _p123_ai_backtest(
+    *,
+    evidence: Mapping[str, Any],
+    returns_path: Path,
+    relationships_path: Path,
+    generation_id: str,
+    relationships_sha256: str,
+    strategy_evidence_sha256: str,
+    series_id: str,
+) -> tuple[list[dict[str, str]], str, dict[str, object]]:
+    provider = evidence.get("provider")
+    if not isinstance(provider, dict) or provider.get("provider_id") != "portfolio123":
+        raise TargetSeriesError("Portfolio123 AI provider evidence is absent")
+    provider_entity_id = str(provider.get("entity_id", "")).strip()
+    if not provider_entity_id:
+        raise TargetSeriesError("Portfolio123 AI provider identity is absent")
+    twins: set[str] = set()
+    for row in _parquet_rows(
+        relationships_path,
+        ("entity_ref_a", "entity_ref_b", "relationship_type", "notes"),
+        "Portfolio123 strategy relationships",
+    ):
+        if row.get("relationship_type") != "live_sim_twin":
+            continue
+        left = str(row.get("entity_ref_a") or "")
+        right = str(row.get("entity_ref_b") or "")
+        if provider_entity_id == left and right:
+            twins.add(right)
+        if provider_entity_id == right and left:
+            twins.add(left)
+    if len(twins) != 1:
+        raise TargetSeriesError("Portfolio123 AI live/simulation twin is not unique")
+    simulation_entity_id = next(iter(twins))
+    rows, coverage = _portfolio123_simulation_returns(
+        returns_path,
+        relationships_path,
+        provider_entity_id,
+        simulation_entity_id,
+        series_id,
+    )
+    version = _strategy_version(
+        "p123-live-sim-twin",
+        {
+            "generation_id": generation_id,
+            "provider_entity_id": provider_entity_id,
+            "relationship_sha256": relationships_sha256,
+            "relationship_type": "live_sim_twin",
+            "simulation_entity_id": simulation_entity_id,
+            "strategy_evidence_sha256": strategy_evidence_sha256,
+        },
+    )
+    return rows, version, coverage
+
+
+def _history_output_identity(
+    name: str, content: bytes, row_count: int
+) -> dict[str, object]:
+    schema_name = {
+        "segments.csv": "portfolio-layered-history-segments",
+        "excluded.csv": "portfolio-layered-history-excluded-targets",
+        "returns.csv": "portfolio-layered-strategy-returns",
+        "live-only.csv": "portfolio-layered-strategy-returns",
+        "live-plus-backtest.csv": "portfolio-layered-strategy-returns",
+        "coverage.json": "portfolio-layered-history-coverage",
+    }[name]
+    return {
+        "artifact_id": f"layered-history/{name}",
+        "row_count": row_count,
+        "schema_name": schema_name,
+        "schema_version": "2"
+        if name in {"returns.csv", "live-only.csv", "live-plus-backtest.csv"}
+        else "1",
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": len(content),
+    }
+
+
+def build_layered_history_generation(
+    *,
+    contract_path: Path,
+    repository_sha: str,
+    as_of_date: str,
+    provider_ledger_pointer_path: Path,
+    provider_ledger_manifest_path: Path,
+    provider_ledger_catalog_path: Path,
+    matrixport_pointer_path: Path,
+    matrixport_manifest_path: Path,
+    matrixport_nav_path: Path,
+    matrixport_holdings_path: Path,
+    matrixport_subscription_path: Path,
+    matrixport_product_id: str,
+    quantbase_pointer_path: Path,
+    quantbase_manifest_path: Path,
+    quantbase_history_path: Path,
+    quantbase_activity_path: Path,
+    quantbase_fund_id: str,
+    portfolio123_pointer_path: Path,
+    portfolio123_manifest_path: Path,
+    portfolio123_metadata_path: Path,
+    portfolio123_performance_path: Path,
+    portfolio123_equity_path: Path,
+    portfolio123_returns_path: Path,
+    portfolio123_relationships_path: Path,
+    strategy_history_manifest_path: Path | None = None,
+    strategy_history_returns_path: Path | None = None,
+) -> tuple[dict[str, bytes], bytes]:
+    """Build one deterministic, content-addressed current history generation.
+
+    Private provider identifiers are used only in memory.  The emitted receipt
+    contains hashes, redacted strategy identities, coverage states, and source
+    generation identities; it never contains roots or provider/account IDs.
+    """
+
+    if len(repository_sha) != 40 or any(
+        ch not in "0123456789abcdef" for ch in repository_sha
+    ):
+        raise TargetSeriesError("repository SHA must be lowercase hexadecimal")
+    trusted_repository_sha, _trusted_tool_sha256 = (
+        _trusted_layered_history_code_identity()
+    )
+    if repository_sha != trusted_repository_sha:
+        raise TargetSeriesError("repository SHA differs from the executing checkout")
+    try:
+        accepted_as_of = date.fromisoformat(as_of_date)
+    except ValueError as exc:
+        raise TargetSeriesError("layered history as-of date is invalid") from exc
+    contract, strategies, sources, corrections = _history_contract(contract_path)
+    product = contract["product"]
+    history_policy = contract["history_corrections"]
+
+    ledger_manifest, ledger_generation, ledger_as_of = _verified_current_generation(
+        pointer_path=provider_ledger_pointer_path,
+        manifest_path=provider_ledger_manifest_path,
+        source=sources["owner-account-live-history"],
+        name="provider ledger",
+        inventory_profile="provider-ledger",
+    )
+    matrixport_manifest, matrixport_generation, matrixport_as_of = (
+        _verified_current_generation(
+            pointer_path=matrixport_pointer_path,
+            manifest_path=matrixport_manifest_path,
+            source=sources["matrixport-account-generation"],
+            name="Matrixport",
+            inventory_profile="matrixport",
+        )
+    )
+    quantbase_manifest, quantbase_generation, quantbase_as_of = (
+        _verified_current_generation(
+            pointer_path=quantbase_pointer_path,
+            manifest_path=quantbase_manifest_path,
+            source=sources["quantbase-account-generation"],
+            name="Quantbase",
+            inventory_profile="quantbase",
+        )
+    )
+    p123_manifest, p123_generation, p123_as_of = _verified_current_generation(
+        pointer_path=portfolio123_pointer_path,
+        manifest_path=portfolio123_manifest_path,
+        source=sources["portfolio123-model-generation"],
+        name="Portfolio123",
+        inventory_profile="portfolio123",
+    )
+    if (
+        max(
+            map(
+                date.fromisoformat,
+                (ledger_as_of, matrixport_as_of, quantbase_as_of, p123_as_of),
+            )
+        )
+        > accepted_as_of
+    ):
+        raise TargetSeriesError("source generation exceeds layered history as-of")
+
+    targets, strategy_evidence_content, ledger_proof_content, _manifest_content = (
+        build_provider_ledger_targets(
+            provider_ledger_manifest_path, provider_ledger_catalog_path
+        )
+    )
+    ledger_proof = json.loads(ledger_proof_content)
+    contracts = ledger_proof.get("series_contracts")
+    if not isinstance(contracts, list):
+        raise TargetSeriesError("provider-ledger series contracts are absent")
+    series_by_strategy: dict[str, str] = {}
+    for item in contracts:
+        if not isinstance(item, dict):
+            raise TargetSeriesError("provider-ledger series contract is invalid")
+        strategy_id = str(item.get("strategy_id", ""))
+        series_id = str(item.get("series_id", ""))
+        if not strategy_id or not series_id or strategy_id in series_by_strategy:
+            raise TargetSeriesError("provider-ledger strategy mapping differs")
+        series_by_strategy[strategy_id] = series_id
+    unknown_ledger = set(series_by_strategy) - set(strategies)
+    if unknown_ledger:
+        raise TargetSeriesError("provider ledger contains non-product strategy")
+    product_series_by_strategy: dict[str, str] = {}
+    for strategy_id, strategy in strategies.items():
+        history_series_id = strategy.get("history_series_id")
+        if history_series_id is None:
+            continue
+        if not isinstance(history_series_id, str) or not history_series_id.strip():
+            raise TargetSeriesError("product history series identity is invalid")
+        product_series_by_strategy[strategy_id] = history_series_id
+    if series_by_strategy != product_series_by_strategy:
+        raise TargetSeriesError(
+            "provider-ledger series mapping differs from product authority"
+        )
+
+    evidence_value = json.loads(strategy_evidence_content)
+    evidence_rows = evidence_value.get("strategies")
+    if not isinstance(evidence_rows, list):
+        raise TargetSeriesError("provider-ledger strategy evidence is absent")
+    evidence_by_strategy = {
+        str(item.get("strategy_id")): item
+        for item in evidence_rows
+        if isinstance(item, dict) and item.get("strategy_id")
+    }
+
+    live_by_strategy: dict[str, list[dict[str, str]]] = {
+        strategy_id: [] for strategy_id in strategies
+    }
+    series_to_strategy = {
+        series_id: strategy_id for strategy_id, series_id in series_by_strategy.items()
+    }
+    for row in _target_rows(targets):
+        mapped_strategy_id = series_to_strategy.get(row["series_id"])
+        if mapped_strategy_id is None:
+            raise TargetSeriesError("provider-ledger target lacks strategy mapping")
+        if row["evidence_layer"] != "ACCOUNT_LIVE":
+            raise TargetSeriesError(
+                "provider-ledger selected target is not account-live"
+            )
+        if date.fromisoformat(row["date"]) > accepted_as_of:
+            raise TargetSeriesError("provider-ledger return exceeds accepted as-of")
+        live_by_strategy[mapped_strategy_id].append(dict(row))
+    echo_correction = corrections.get("echotrade-event-only-account-live-rejected")
+    if not isinstance(echo_correction, dict):
+        raise TargetSeriesError("EchoTrade event-only disposition is absent")
+    echo_candidate = sorted(
+        live_by_strategy["echotrade-growth-pivots"], key=lambda row: row["date"]
+    )
+    echo_interval = echo_correction.get("interval")
+    echo_capture = echo_correction.get("capture")
+    echo_modes = echo_correction.get("mode_admission")
+    if (
+        not echo_candidate
+        or not isinstance(echo_interval, dict)
+        or not isinstance(echo_capture, dict)
+        or not isinstance(echo_modes, dict)
+        or echo_correction.get("source_id") != "owner-account-live-history"
+        or echo_correction.get("evidence_layer") != "ACCOUNT_LIVE"
+        or echo_correction.get("readiness") != "REQUIRED_NOT_READY"
+        or echo_modes.get("LIVE_ONLY") != "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
+        or echo_modes.get("LIVE_PLUS_BACKTEST") != "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
+        or echo_capture.get("generation_id") != ledger_generation
+        or (echo_candidate[0]["date"], echo_candidate[-1]["date"])
+        != (echo_interval.get("observed_start"), echo_interval.get("observed_end"))
+    ):
+        raise TargetSeriesError("EchoTrade event-only disposition differs")
+    echo_rejected_identity = _target_row_identity(echo_candidate)
+    echo_expected_identity = echo_correction.get("rejected_evidence_identity")
+    provider_ledger_catalog_sha = hashlib.sha256(
+        provider_ledger_catalog_path.read_bytes()
+    ).hexdigest()
+    if (
+        not isinstance(echo_expected_identity, dict)
+        or set(echo_expected_identity)
+        != {
+            "canonicalization",
+            "return_observations",
+            "sha256",
+            "source_receipt_sha256",
+        }
+        or echo_expected_identity.get("canonicalization")
+        != "TARGET_FIELDS_CANONICAL_JSON_V1"
+        or {
+            "return_observations": echo_expected_identity.get("return_observations"),
+            "sha256": echo_expected_identity.get("sha256"),
+        }
+        != {
+            key: echo_rejected_identity[key]
+            for key in ("return_observations", "sha256")
+        }
+        or echo_expected_identity.get("source_receipt_sha256")
+        != provider_ledger_catalog_sha
+    ):
+        raise TargetSeriesError(
+            "EchoTrade rejected evidence differs from product authority"
+        )
+    live_by_strategy["echotrade-growth-pivots"] = []
+    matrixport_artifacts = _manifest_artifacts(matrixport_manifest.get("artifacts"))
+    _verify_artifact(matrixport_nav_path, matrixport_artifacts, "csv/nav_daily.csv")
+    _verify_artifact(matrixport_holdings_path, matrixport_artifacts, "csv/holdings.csv")
+    _verify_artifact(
+        matrixport_subscription_path,
+        matrixport_artifacts,
+        "csv/subscription_details.csv",
+    )
+    matrixport_gap_policy = sources["matrixport-account-generation"].get(
+        "declared_gap_policy"
+    )
+    if not isinstance(matrixport_gap_policy, dict):
+        raise TargetSeriesError("Matrixport product gap policy is absent")
+    _matrixport_return_transform(matrixport_gap_policy)
+    matrixport_missing_dates = _matrixport_declared_missing_dates(
+        matrixport_manifest, matrixport_gap_policy
+    )
+    robuxio_series = series_by_strategy.get("robuxio-crypto")
+    if robuxio_series is None:
+        raise TargetSeriesError("provider ledger lacks Robuxio mapping")
+    robuxio_live, robuxio_coverage = _matrixport_returns(
+        matrixport_nav_path,
+        matrixport_holdings_path,
+        matrixport_subscription_path,
+        matrixport_product_id,
+        robuxio_series,
+        matrixport_missing_dates,
+        matrixport_gap_policy,
+    )
+    raw_gap_policy = robuxio_coverage.get("source_gap_policy")
+    if not isinstance(raw_gap_policy, dict):
+        raise TargetSeriesError("Matrixport source gap policy is absent")
+    if raw_gap_policy != sources["matrixport-account-generation"].get(
+        "declared_gap_policy"
+    ):
+        raise TargetSeriesError(
+            "Matrixport source gap policy differs from product authority"
+        )
+    matrixport_unavailable_return_dates = frozenset(
+        date.fromisoformat(str(item))
+        for item in raw_gap_policy.get("unavailable_return_dates", [])
+    )
+    robuxio_correction = corrections["robuxio-account-live-after-funding"]
+    robuxio_interval = robuxio_correction.get("interval")
+    if not isinstance(robuxio_interval, dict) or (
+        robuxio_live[0]["date"],
+        robuxio_live[-1]["date"],
+    ) != (
+        robuxio_interval.get("observed_start"),
+        robuxio_interval.get("observed_end"),
+    ):
+        raise TargetSeriesError("Robuxio account-live interval differs from contract")
+    live_by_strategy["robuxio-crypto"] = robuxio_live
+    robuxio_provider = _matrixport_provider_returns(
+        matrixport_nav_path,
+        matrixport_product_id,
+        robuxio_series,
+        date.fromisoformat(str(robuxio_coverage["account_live_start"])),
+    )
+
+    quantbase_artifacts = _manifest_artifacts(quantbase_manifest.get("artifacts"))
+    _verify_artifact(
+        quantbase_history_path,
+        quantbase_artifacts,
+        "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+    )
+    _verify_artifact(
+        quantbase_activity_path,
+        quantbase_artifacts,
+        "source/csv/account_activity.csv",
+    )
+    volatis_series = series_by_strategy.get("volatis-strategy")
+    if volatis_series is None:
+        raise TargetSeriesError("provider ledger lacks Volatis mapping")
+    volatis_live, volatis_proof = _quantbase_returns(
+        quantbase_history_path,
+        quantbase_activity_path,
+        quantbase_fund_id,
+        volatis_series,
+    )
+    volatis_coverage = volatis_proof.get("coverage")
+    if not isinstance(volatis_coverage, dict):
+        raise TargetSeriesError("Volatis coverage proof is invalid")
+    volatis_interval = corrections["volatis-account-live"].get("interval")
+    if not isinstance(volatis_interval, dict) or (
+        volatis_live[0]["date"],
+        volatis_live[-1]["date"],
+    ) != (
+        volatis_interval.get("observed_start"),
+        volatis_interval.get("observed_end"),
+    ):
+        raise TargetSeriesError("Volatis account-live interval differs from contract")
+    live_by_strategy["volatis-strategy"] = volatis_live
+
+    p123_artifacts = _manifest_artifacts(p123_manifest.get("artifacts"))
+    metadata_artifact = _verify_artifact(
+        portfolio123_metadata_path,
+        p123_artifacts,
+        "tables/har_managed_metadata.parquet",
+    )
+    performance_artifact = _verify_artifact(
+        portfolio123_performance_path,
+        p123_artifacts,
+        "tables/har_managed_performance.parquet",
+    )
+    equity_artifact = _verify_artifact(
+        portfolio123_equity_path,
+        p123_artifacts,
+        "tables/har_equity_curve.parquet",
+    )
+    p123_returns_artifact = _verify_artifact(
+        portfolio123_returns_path, p123_artifacts, "tables/returns_daily.parquet"
+    )
+    relationships_artifact = _verify_artifact(
+        portfolio123_relationships_path,
+        p123_artifacts,
+        "tables/strategy_relationships.parquet",
+    )
+    p123_eu_series = series_by_strategy.get("p123-eu")
+    if p123_eu_series is None:
+        raise TargetSeriesError("provider ledger lacks Portfolio123 EU mapping")
+    _eu_version_status, p123_eu_version = _contract_version(strategies["p123-eu"])
+    p123_eu_candidate, p123_eu_proof = _portfolio123_provider_performance_returns(
+        metadata_path=portfolio123_metadata_path,
+        performance_path=portfolio123_performance_path,
+        equity_path=portfolio123_equity_path,
+        generation_id=p123_generation,
+        series_id=p123_eu_series,
+        accepted_version=p123_eu_version,
+    )
+    p123_eu_interval = corrections["p123-eu-provider-live"].get("interval")
+    if not isinstance(p123_eu_interval, dict) or (
+        p123_eu_candidate[0]["date"],
+        p123_eu_candidate[-1]["date"],
+    ) != (
+        p123_eu_interval.get("observed_start"),
+        p123_eu_interval.get("observed_end"),
+    ):
+        raise TargetSeriesError("Portfolio123 EU provider interval differs")
+    p123_eu_live_interval = corrections["p123-eu-account-live"].get("interval")
+    p123_eu_live = live_by_strategy["p123-eu"]
+    if (
+        not isinstance(p123_eu_live_interval, dict)
+        or not p123_eu_live
+        or (p123_eu_live[0]["date"], p123_eu_live[-1]["date"])
+        != (
+            p123_eu_live_interval.get("observed_start"),
+            p123_eu_live_interval.get("observed_end"),
+        )
+    ):
+        raise TargetSeriesError("Portfolio123 EU account-live interval differs")
+
+    p123_ai_series = series_by_strategy.get("p123-ai-factor")
+    p123_ai_evidence = evidence_by_strategy.get("p123-ai-factor")
+    if p123_ai_series is None or not isinstance(p123_ai_evidence, dict):
+        raise TargetSeriesError("Portfolio123 AI evidence is absent")
+    p123_ai_backtest, p123_ai_version, p123_ai_proof = _p123_ai_backtest(
+        evidence=p123_ai_evidence,
+        returns_path=portfolio123_returns_path,
+        relationships_path=portfolio123_relationships_path,
+        generation_id=p123_generation,
+        relationships_sha256=relationships_artifact.sha256,
+        strategy_evidence_sha256=hashlib.sha256(strategy_evidence_content).hexdigest(),
+        series_id=p123_ai_series,
+    )
+
+    history_rows: dict[str, list[dict[str, str]]] = {}
+    history_definitions: dict[str, dict[str, object]] = {}
+    history_dispositions: dict[str, dict[str, object]] = {}
+    history_proof: dict[str, object] | None = None
+    if (strategy_history_manifest_path is None) != (
+        strategy_history_returns_path is None
+    ):
+        raise TargetSeriesError("strategy history inputs must be supplied together")
+    if (
+        strategy_history_manifest_path is not None
+        and strategy_history_returns_path is not None
+    ):
+        (
+            history_rows,
+            history_definitions,
+            history_dispositions,
+            history_proof,
+        ) = _strategy_history_returns(
+            strategy_history_manifest_path, strategy_history_returns_path
+        )
+
+    first_live: dict[str, date] = {}
+    for strategy_id, rows in live_by_strategy.items():
+        rows.sort(key=lambda item: item["date"])
+        seen_dates: set[str] = set()
+        for row in rows:
+            if row["date"] in seen_dates:
+                raise TargetSeriesError(f"duplicate live return: {strategy_id}")
+            seen_dates.add(row["date"])
+        if rows:
+            first_live[strategy_id] = date.fromisoformat(rows[0]["date"])
+    version_by_strategy: dict[str, str] = {}
+    version_status_by_strategy: dict[str, str] = {}
+    for strategy_id, strategy in strategies.items():
+        status, version = _contract_version(strategy)
+        version_status_by_strategy[strategy_id] = status
+        version_by_strategy[strategy_id] = version
+
+    admitted_backtests: dict[str, list[dict[str, str]]] = {}
+    unadmitted_backtests: dict[str, list[dict[str, str]]] = {}
+    p123_ai_exact_version = (
+        version_status_by_strategy["p123-ai-factor"] == "EVIDENCED"
+        and version_by_strategy["p123-ai-factor"] == p123_ai_version
+    )
+    p123_ai_overlaps_live = (
+        date.fromisoformat(p123_ai_backtest[-1]["date"]) >= first_live["p123-ai-factor"]
+    )
+    if not p123_ai_exact_version:
+        p123_ai_disposition = "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
+    elif p123_ai_overlaps_live:
+        unadmitted_backtests["p123-ai-factor"] = p123_ai_backtest
+        p123_ai_disposition = "DERIVED_NOT_ADMITTED_OVERLAP"
+    else:
+        admitted_backtests["p123-ai-factor"] = p123_ai_backtest
+        p123_ai_disposition = "ADMITTED_EXACT_VERSION_PREHISTORY"
+    for series_id, rows in history_rows.items():
+        mapped_strategy_id = series_to_strategy.get(series_id)
+        if mapped_strategy_id is None:
+            raise TargetSeriesError("strategy history series lacks product mapping")
+        definition = history_definitions[series_id]
+        definition_version = str(definition["strategy_version"])
+        if (
+            version_status_by_strategy[mapped_strategy_id] != "EVIDENCED"
+            or version_by_strategy[mapped_strategy_id] != definition_version
+        ):
+            continue
+        if (
+            rows
+            and date.fromisoformat(rows[-1]["date"]) >= first_live[mapped_strategy_id]
+        ):
+            raise TargetSeriesError(
+                f"strategy history overlaps account-live: {mapped_strategy_id}"
+            )
+        admitted_backtests[mapped_strategy_id] = rows
+
+    account_source = sources["owner-account-live-history"]
+    account_calendar, account_frequency = _source_temporal(account_source)
+    matrixport_calendar, matrixport_frequency = _source_temporal(
+        sources["matrixport-account-generation"]
+    )
+    quantbase_calendar, quantbase_frequency = _source_temporal(
+        sources["quantbase-account-generation"]
+    )
+    backtest_calendar, backtest_frequency = _source_temporal(
+        sources["strategy-backtests"]
+    )
+    segment_rows: list[dict[str, str]] = []
+    for strategy_id, rows in live_by_strategy.items():
+        if strategy_id == "robuxio-crypto":
+            source_id = "matrixport-account-generation"
+            source_generation_id = matrixport_generation
+            calendar, frequency = matrixport_calendar, matrixport_frequency
+        elif strategy_id == "volatis-strategy":
+            source_id = "quantbase-account-generation"
+            source_generation_id = quantbase_generation
+            calendar, frequency = quantbase_calendar, quantbase_frequency
+        else:
+            source_id = "owner-account-live-history"
+            source_generation_id = ledger_generation
+            calendar, frequency = account_calendar, account_frequency
+        segment_rows.extend(
+            _segment_rows(
+                rows,
+                strategy_id=strategy_id,
+                strategy_version=version_by_strategy[strategy_id],
+                segment_id=f"{strategy_id}:account-live",
+                source_id=source_id,
+                source_generation_id=source_generation_id,
+                mode_admission="INCLUDE_SELECTED_LIVE",
+                calendar=calendar,
+                frequency=frequency,
+            )
+        )
+    segment_rows.extend(
+        _segment_rows(
+            robuxio_provider,
+            strategy_id="robuxio-crypto",
+            strategy_version=version_by_strategy["robuxio-crypto"],
+            segment_id="robuxio-crypto:provider-live-before-funding",
+            source_id="matrixport-account-generation",
+            source_generation_id=matrixport_generation,
+            mode_admission="EXCLUDE_COMPARISON_ONLY",
+            calendar=matrixport_calendar,
+            frequency=matrixport_frequency,
+        )
+    )
+    for strategy_id, rows in admitted_backtests.items():
+        series_id = series_by_strategy[strategy_id]
+        normalized = [
+            {
+                "series_id": series_id,
+                "date": row["date"],
+                "return": row["return"],
+                "evidence_layer": "BACKTEST",
+                "return_basis": "MODEL",
+                "return_type": "TOTAL",
+            }
+            for row in rows
+        ]
+        source_generation_id = (
+            p123_generation
+            if strategy_id == "p123-ai-factor"
+            else str((history_proof or {}).get("bundle_id") or "NOT_CAPTURED")
+        )
+        segment_rows.extend(
+            _segment_rows(
+                normalized,
+                strategy_id=strategy_id,
+                strategy_version=version_by_strategy[strategy_id],
+                segment_id=f"{strategy_id}:backtest",
+                source_id="strategy-backtests",
+                source_generation_id=source_generation_id,
+                mode_admission="INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+                calendar=backtest_calendar,
+                frequency=backtest_frequency,
+            )
+        )
+    for strategy_id, rows in unadmitted_backtests.items():
+        normalized = [
+            {
+                "series_id": series_by_strategy[strategy_id],
+                "date": row["date"],
+                "return": row["return"],
+                "evidence_layer": "BACKTEST",
+                "return_basis": "MODEL",
+                "return_type": "TOTAL",
+            }
+            for row in rows
+        ]
+        segment_rows.extend(
+            _segment_rows(
+                normalized,
+                strategy_id=strategy_id,
+                strategy_version=version_by_strategy[strategy_id],
+                segment_id=f"{strategy_id}:backtest-not-admitted",
+                source_id="strategy-backtests",
+                source_generation_id=p123_generation,
+                mode_admission="REQUIRED_NOT_READY_OVERLAP",
+                calendar=backtest_calendar,
+                frequency=backtest_frequency,
+            )
+        )
+    segment_rows.sort(
+        key=lambda row: (
+            row["strategy_id"],
+            row["date"],
+            row["evidence_layer"],
+            row["segment_id"],
+        )
+    )
+    segment_keys: set[tuple[str, str, str]] = set()
+    for row in segment_rows:
+        key = (row["strategy_id"], row["segment_id"], row["date"])
+        if key in segment_keys:
+            raise TargetSeriesError("layered history contains duplicate segment date")
+        segment_keys.add(key)
+
+    live_mode_rows = sorted(
+        [
+            row
+            for row in segment_rows
+            if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+        ],
+        key=lambda row: (row["series_id"], row["date"]),
+    )
+    hybrid_rows = sorted(
+        [
+            row
+            for row in segment_rows
+            if row["mode_admission"]
+            in {"INCLUDE_SELECTED_LIVE", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+        ],
+        key=lambda row: (
+            row["series_id"],
+            row["date"],
+            0 if row["evidence_layer"] == "BACKTEST" else 1,
+        ),
+    )
+
+    coverage_rows: list[dict[str, object]] = []
+    live_not_ready: list[str] = []
+    hybrid_not_ready: list[str] = []
+    account_freshness = account_source.get("freshness")
+    if not isinstance(account_freshness, dict) or not isinstance(
+        account_freshness.get("max_age_days"), int
+    ):
+        raise TargetSeriesError("account-live freshness contract is invalid")
+    default_max_age = int(account_freshness["max_age_days"])
+    for strategy_id, strategy in strategies.items():
+        mapped_series_id = series_by_strategy.get(strategy_id)
+        live_rows = live_by_strategy[strategy_id]
+        if strategy_id == "robuxio-crypto":
+            freshness = sources["matrixport-account-generation"].get("freshness")
+        elif strategy_id == "volatis-strategy":
+            freshness = sources["quantbase-account-generation"].get("freshness")
+        else:
+            freshness = account_freshness
+        freshness_max_age = (
+            freshness.get("max_age_days") if isinstance(freshness, dict) else None
+        )
+        max_age = (
+            freshness_max_age if isinstance(freshness_max_age, int) else default_max_age
+        )
+        tail_stale = (
+            bool(live_rows)
+            and (accepted_as_of - date.fromisoformat(live_rows[-1]["date"])).days
+            > max_age
+        )
+        live_state = "AVAILABLE"
+        live_reason: str | None = None
+        declared_unavailable_dates = (
+            matrixport_unavailable_return_dates
+            if strategy_id == "robuxio-crypto"
+            else frozenset()
+        )
+        gap_disposition = (
+            _gap_disposition(live_rows, declared_unavailable_dates)
+            if live_rows
+            else None
+        )
+        if not live_rows:
+            live_state = "REQUIRED_NOT_READY"
+            live_reason = (
+                "CAPTURED_EVENT_ONLY_RECONSTRUCTION_NOT_ADMISSIBLE_DAILY_NAV"
+                if strategy_id == "echotrade-growth-pivots"
+                else "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
+            )
+        elif gap_disposition is not None and gap_disposition.startswith(
+            "REQUIRED_NOT_READY"
+        ):
+            raise TargetSeriesError(f"unexplained account-live gap: {strategy_id}")
+        elif tail_stale:
+            live_state = "REQUIRED_NOT_READY"
+            live_reason = "REQUIRED_ACCOUNT_LIVE_TAIL_STALE"
+        if live_state == "REQUIRED_NOT_READY":
+            live_not_ready.append(strategy_id)
+        backtest_rows = admitted_backtests.get(strategy_id, [])
+        hybrid_state = live_state
+        hybrid_reason = live_reason
+        if hybrid_state == "AVAILABLE" and not backtest_rows:
+            hybrid_state = "REQUIRED_NOT_READY"
+            if strategy_id in unadmitted_backtests:
+                hybrid_reason = (
+                    "REQUIRED_NOT_READY_BACKTEST_SOURCE_OVERLAPS_ACCOUNT_LIVE"
+                )
+            elif version_status_by_strategy[strategy_id] != "EVIDENCED":
+                hybrid_reason = "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
+            else:
+                hybrid_reason = "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED"
+        if hybrid_state == "REQUIRED_NOT_READY":
+            hybrid_not_ready.append(strategy_id)
+        strategy_segments = [
+            row for row in segment_rows if row["strategy_id"] == strategy_id
+        ]
+        segment_summaries: list[dict[str, object]] = []
+        for segment_id in sorted({row["segment_id"] for row in strategy_segments}):
+            selected = [
+                row for row in strategy_segments if row["segment_id"] == segment_id
+            ]
+            identity = _row_identity(selected)
+            segment_unavailable_dates = (
+                matrixport_unavailable_return_dates
+                if strategy_id == "robuxio-crypto"
+                and selected[0]["source_id"] == "matrixport-account-generation"
+                else frozenset()
+            )
+            segment_summaries.append(
+                {
+                    "calendar": selected[0]["calendar"],
+                    "evidence_layer": selected[0]["evidence_layer"],
+                    "frequency": selected[0]["frequency"],
+                    "gap_disposition": _gap_disposition(
+                        selected, segment_unavailable_dates
+                    ),
+                    "mode_admission": selected[0]["mode_admission"],
+                    "observed_end": identity["observed_end"],
+                    "observed_start": identity["observed_start"],
+                    "return_observations": identity["return_observations"],
+                    "segment_id": segment_id,
+                    "sha256": identity["sha256"],
+                    "source_generation_id": selected[0]["source_generation_id"],
+                    "source_id": selected[0]["source_id"],
+                    "strategy_version": selected[0]["strategy_version"],
+                }
+            )
+        coverage_rows.append(
+            {
+                "blockers": sorted(
+                    {
+                        int(item)
+                        for item in strategy.get("blockers", [])
+                        if isinstance(item, int)
+                    }
+                ),
+                "funded_membership": strategy.get("funded_membership"),
+                "modes": {
+                    "LIVE_ONLY": {"reason": live_reason, "status": live_state},
+                    "LIVE_PLUS_BACKTEST": {
+                        "reason": hybrid_reason,
+                        "status": hybrid_state,
+                    },
+                },
+                "product_readiness": strategy.get("readiness"),
+                "segments": segment_summaries,
+                "series_id": mapped_series_id,
+                "strategy_id": strategy_id,
+                "strategy_version": {
+                    "history_generation_ref": version_by_strategy[strategy_id],
+                    "product_status": version_status_by_strategy[strategy_id],
+                    "product_version_ref": strategy.get("strategy_version", {}).get(
+                        "version_ref"
+                    )
+                    if isinstance(strategy.get("strategy_version"), dict)
+                    else None,
+                },
+            }
+        )
+    coverage = {
+        "as_of_date": accepted_as_of.isoformat(),
+        "builder": LAYERED_HISTORY_BUILDER,
+        "builder_version": LAYERED_HISTORY_BUILDER_VERSION,
+        "correction_resolutions": {
+            "echotrade-event-only-account-live-rejected": {
+                **echo_rejected_identity,
+                "source_generation_id": ledger_generation,
+                "status": "REJECTED_EVENT_ONLY_RECONSTRUCTION_NOT_DAILY_NAV",
+            },
+            "p123-ai-backtest": {
+                **p123_ai_proof,
+                "status": p123_ai_disposition,
+            },
+            "p123-eu-provider-live": {
+                **p123_eu_proof,
+                "status": "DERIVED_NOT_ADMITTED_PENDING_303",
+            },
+            "robuxio-account-live-after-funding": {
+                "account_live_start": robuxio_coverage["account_live_start"],
+                "observed_end": robuxio_live[-1]["date"],
+                "observed_start": robuxio_live[0]["date"],
+                "source_gap_policy": raw_gap_policy,
+                "status": "RESOLVED_BY_PIPE_HISTORY_001",
+            },
+            "volatis-account-live": {
+                "observed_end": volatis_live[-1]["date"],
+                "observed_start": volatis_live[0]["date"],
+                "source_first_positive_value_date": volatis_coverage[
+                    "source_first_positive_value_date"
+                ],
+                "status": "RESOLVED_BY_PIPE_HISTORY_001",
+            },
+        },
+        "mode_policy": dict(LAYERED_HISTORY_MODE_POLICY),
+        "schema_version": LAYERED_HISTORY_SCHEMA_VERSION,
+        "strategies": sorted(coverage_rows, key=lambda item: str(item["strategy_id"])),
+        "verification": "VERIFIED_WITH_REQUIRED_NOT_READY_DISPOSITIONS",
+    }
+    artifacts = {
+        "segments.csv": _segment_view_bytes(segment_rows),
+        "excluded.csv": _target_bytes(echo_candidate),
+        "live-only.csv": _correlation_view_bytes(live_mode_rows),
+        "live-plus-backtest.csv": _correlation_view_bytes(hybrid_rows),
+    }
+    artifacts["returns.csv"] = artifacts["live-plus-backtest.csv"]
+    artifacts["coverage.json"] = canonical_json_bytes(coverage)
+
+    inputs = [
+        _artifact_identity(
+            input_id="financial-mvp-contract",
+            artifact_role="PRODUCT_CONTRACT",
+            path=contract_path,
+        ),
+        _artifact_identity(
+            input_id="provider-ledger-current",
+            artifact_role="CURRENT_POINTER",
+            path=provider_ledger_pointer_path,
+            generation_id=ledger_generation,
+            as_of_date=ledger_as_of,
+        ),
+        _artifact_identity(
+            input_id="provider-ledger-manifest",
+            artifact_role="GENERATION_MANIFEST",
+            path=provider_ledger_manifest_path,
+            generation_id=ledger_generation,
+            as_of_date=ledger_as_of,
+        ),
+        _artifact_identity(
+            input_id="provider-ledger-catalog",
+            artifact_role="GENERATION_ARTIFACT",
+            path=provider_ledger_catalog_path,
+            artifact_id="normalized/provider-ledger.json",
+            generation_id=ledger_generation,
+            as_of_date=ledger_as_of,
+        ),
+        _artifact_identity(
+            input_id="matrixport-current",
+            artifact_role="CURRENT_POINTER",
+            path=matrixport_pointer_path,
+            generation_id=matrixport_generation,
+            as_of_date=matrixport_as_of,
+        ),
+        _artifact_identity(
+            input_id="matrixport-manifest",
+            artifact_role="GENERATION_MANIFEST",
+            path=matrixport_manifest_path,
+            generation_id=matrixport_generation,
+            as_of_date=matrixport_as_of,
+        ),
+        _artifact_identity(
+            input_id="matrixport-nav",
+            artifact_role="GENERATION_ARTIFACT",
+            path=matrixport_nav_path,
+            artifact_id="csv/nav_daily.csv",
+            generation_id=matrixport_generation,
+            as_of_date=matrixport_as_of,
+        ),
+        _artifact_identity(
+            input_id="matrixport-holdings",
+            artifact_role="GENERATION_ARTIFACT",
+            path=matrixport_holdings_path,
+            artifact_id="csv/holdings.csv",
+            generation_id=matrixport_generation,
+            as_of_date=matrixport_as_of,
+        ),
+        _artifact_identity(
+            input_id="matrixport-subscriptions",
+            artifact_role="GENERATION_ARTIFACT",
+            path=matrixport_subscription_path,
+            artifact_id="csv/subscription_details.csv",
+            generation_id=matrixport_generation,
+            as_of_date=matrixport_as_of,
+        ),
+        _artifact_identity(
+            input_id="quantbase-current",
+            artifact_role="CURRENT_POINTER",
+            path=quantbase_pointer_path,
+            generation_id=quantbase_generation,
+            as_of_date=quantbase_as_of,
+        ),
+        _artifact_identity(
+            input_id="quantbase-manifest",
+            artifact_role="GENERATION_MANIFEST",
+            path=quantbase_manifest_path,
+            generation_id=quantbase_generation,
+            as_of_date=quantbase_as_of,
+        ),
+        _artifact_identity(
+            input_id="quantbase-history",
+            artifact_role="GENERATION_ARTIFACT",
+            path=quantbase_history_path,
+            artifact_id="source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+            generation_id=quantbase_generation,
+            as_of_date=quantbase_as_of,
+        ),
+        _artifact_identity(
+            input_id="quantbase-activity",
+            artifact_role="GENERATION_ARTIFACT",
+            path=quantbase_activity_path,
+            artifact_id="source/csv/account_activity.csv",
+            generation_id=quantbase_generation,
+            as_of_date=quantbase_as_of,
+        ),
+        _artifact_identity(
+            input_id="portfolio123-current",
+            artifact_role="CURRENT_POINTER",
+            path=portfolio123_pointer_path,
+            generation_id=p123_generation,
+            as_of_date=p123_as_of,
+        ),
+        _artifact_identity(
+            input_id="portfolio123-manifest",
+            artifact_role="GENERATION_MANIFEST",
+            path=portfolio123_manifest_path,
+            generation_id=p123_generation,
+            as_of_date=p123_as_of,
+        ),
+        _artifact_identity(
+            input_id="portfolio123-metadata",
+            artifact_role="GENERATION_ARTIFACT",
+            path=portfolio123_metadata_path,
+            artifact_id=metadata_artifact.artifact_id,
+            generation_id=p123_generation,
+            as_of_date=p123_as_of,
+        ),
+        _artifact_identity(
+            input_id="portfolio123-performance",
+            artifact_role="GENERATION_ARTIFACT",
+            path=portfolio123_performance_path,
+            artifact_id=performance_artifact.artifact_id,
+            generation_id=p123_generation,
+            as_of_date=p123_as_of,
+        ),
+        _artifact_identity(
+            input_id="portfolio123-equity",
+            artifact_role="GENERATION_ARTIFACT",
+            path=portfolio123_equity_path,
+            artifact_id=equity_artifact.artifact_id,
+            generation_id=p123_generation,
+            as_of_date=p123_as_of,
+        ),
+        _artifact_identity(
+            input_id="portfolio123-returns",
+            artifact_role="GENERATION_ARTIFACT",
+            path=portfolio123_returns_path,
+            artifact_id=p123_returns_artifact.artifact_id,
+            generation_id=p123_generation,
+            as_of_date=p123_as_of,
+        ),
+        _artifact_identity(
+            input_id="portfolio123-relationships",
+            artifact_role="GENERATION_ARTIFACT",
+            path=portfolio123_relationships_path,
+            artifact_id=relationships_artifact.artifact_id,
+            generation_id=p123_generation,
+            as_of_date=p123_as_of,
+        ),
+    ]
+    if (
+        strategy_history_manifest_path is not None
+        and strategy_history_returns_path is not None
+    ):
+        bundle_id = str((history_proof or {}).get("bundle_id") or "")
+        inputs.extend(
+            [
+                _artifact_identity(
+                    input_id="strategy-history-manifest",
+                    artifact_role="GENERATION_MANIFEST",
+                    path=strategy_history_manifest_path,
+                    generation_id=bundle_id or None,
+                    as_of_date=str((history_proof or {}).get("as_of_date") or "")
+                    or None,
+                ),
+                _artifact_identity(
+                    input_id="strategy-history-returns",
+                    artifact_role="GENERATION_ARTIFACT",
+                    path=strategy_history_returns_path,
+                    artifact_id="strategy-history/returns.csv",
+                    generation_id=bundle_id or None,
+                    as_of_date=str((history_proof or {}).get("as_of_date") or "")
+                    or None,
+                ),
+            ]
+        )
+    inputs.sort(key=lambda item: str(item["input_id"]))
+    output_identities = {
+        name: _history_output_identity(
+            name,
+            artifacts[name],
+            len(segment_rows)
+            if name == "segments.csv"
+            else len(echo_candidate)
+            if name == "excluded.csv"
+            else len(live_mode_rows)
+            if name == "live-only.csv"
+            else len(hybrid_rows)
+            if name in {"returns.csv", "live-plus-backtest.csv"}
+            else len(coverage_rows),
+        )
+        for name in LAYERED_HISTORY_OUTPUT_NAMES
+    }
+    source_manifest_contents = {
+        "matrixport": matrixport_manifest_path.read_text(encoding="utf-8"),
+        "portfolio123": portfolio123_manifest_path.read_text(encoding="utf-8"),
+        "provider-ledger": provider_ledger_manifest_path.read_text(encoding="utf-8"),
+        "quantbase": quantbase_manifest_path.read_text(encoding="utf-8"),
+    }
+    if strategy_history_manifest_path is not None:
+        source_manifest_contents["strategy-history"] = (
+            strategy_history_manifest_path.read_text(encoding="utf-8")
+        )
+    contract_sha = hashlib.sha256(canonical_json_bytes(contract)).hexdigest()
+    manifest_without_id: dict[str, object] = {
+        "$schema": "https://quant-engine.local/schemas/portfolio/layered-history-generation.schema.json",
+        "as_of_date": accepted_as_of.isoformat(),
+        "builder": LAYERED_HISTORY_BUILDER,
+        "builder_version": LAYERED_HISTORY_BUILDER_VERSION,
+        "inputs": inputs,
+        "mode_status": {
+            "LIVE_ONLY": {
+                "required_not_ready_strategy_ids": sorted(live_not_ready),
+                "status": "AVAILABLE" if not live_not_ready else "REQUIRED_NOT_READY",
+            },
+            "LIVE_PLUS_BACKTEST": {
+                "required_not_ready_strategy_ids": sorted(hybrid_not_ready),
+                "status": "AVAILABLE" if not hybrid_not_ready else "REQUIRED_NOT_READY",
+            },
+        },
+        "outputs": output_identities,
+        "product": {
+            "contract_sha256": contract_sha,
+            "history_policy_id": history_policy["policy_id"],
+            "history_policy_version": history_policy["policy_version"],
+            "product_id": product["product_id"],
+            "product_version": product["product_version"],
+        },
+        "repository_sha": repository_sha,
+        "schema_version": LAYERED_HISTORY_SCHEMA_VERSION,
+        "source_manifests": source_manifest_contents,
+        "source_pointers": {
+            "matrixport": matrixport_pointer_path.read_text(encoding="utf-8"),
+            "portfolio123": portfolio123_pointer_path.read_text(encoding="utf-8"),
+            "provider-ledger": provider_ledger_pointer_path.read_text(encoding="utf-8"),
+            "quantbase": quantbase_pointer_path.read_text(encoding="utf-8"),
+        },
+        "tool_sha256": _sha256(Path(__file__))[0],
+        "verification": "VERIFIED",
+    }
+    generation_id = hashlib.sha256(
+        canonical_json_bytes(manifest_without_id)
+    ).hexdigest()
+    manifest = {**manifest_without_id, "generation_id": generation_id}
+    return artifacts, canonical_json_bytes(manifest)
+
+
+def _csv_content_rows(
+    content: bytes, fields: Sequence[str], name: str
+) -> list[dict[str, str]]:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TargetSeriesError(f"{name} is not UTF-8") from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if tuple(reader.fieldnames or ()) != tuple(fields):
+        raise TargetSeriesError(f"{name} header differs")
+    rows: list[dict[str, str]] = []
+    for row in reader:
+        if None in row or any(value is None for value in row.values()):
+            raise TargetSeriesError(f"{name} contains malformed row")
+        rows.append({field: str(row[field]) for field in fields})
+    return rows
+
+
+def _require_exact_keys(
+    value: Mapping[str, object], expected: frozenset[str], name: str
+) -> None:
+    if set(value) != expected:
+        raise TargetSeriesError(f"{name} keys differ")
+
+
+def validate_layered_history_generation(
+    *,
+    artifacts: Mapping[str, bytes],
+    manifest_content: bytes,
+    contract_path: Path,
+    require_mode: str | None = None,
+) -> dict[str, object]:
+    try:
+        manifest = json.loads(manifest_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError(
+            "layered history generation manifest is invalid"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise TargetSeriesError("layered history generation manifest must be an object")
+    if manifest_content != canonical_json_bytes(manifest):
+        raise TargetSeriesError("layered history generation manifest is not canonical")
+    _require_exact_keys(
+        manifest,
+        frozenset(
+            {
+                "$schema",
+                "as_of_date",
+                "builder",
+                "builder_version",
+                "generation_id",
+                "inputs",
+                "mode_status",
+                "outputs",
+                "product",
+                "repository_sha",
+                "schema_version",
+                "source_manifests",
+                "source_pointers",
+                "tool_sha256",
+                "verification",
+            }
+        ),
+        "layered history generation",
+    )
+    if (
+        manifest.get("$schema")
+        != "https://quant-engine.local/schemas/portfolio/layered-history-generation.schema.json"
+        or manifest.get("schema_version") != LAYERED_HISTORY_SCHEMA_VERSION
+        or manifest.get("builder") != LAYERED_HISTORY_BUILDER
+        or manifest.get("builder_version") != LAYERED_HISTORY_BUILDER_VERSION
+        or manifest.get("verification") != "VERIFIED"
+    ):
+        raise TargetSeriesError("layered history generation contract differs")
+    generation_id = str(manifest.get("generation_id", ""))
+    without_id = dict(manifest)
+    without_id.pop("generation_id", None)
+    if generation_id != hashlib.sha256(canonical_json_bytes(without_id)).hexdigest():
+        raise TargetSeriesError("layered history generation identity differs")
+    try:
+        accepted_as_of = date.fromisoformat(str(manifest.get("as_of_date", "")))
+    except ValueError as exc:
+        raise TargetSeriesError("layered history generation as-of is invalid") from exc
+    repository_sha = str(manifest.get("repository_sha", ""))
+    tool_sha256 = str(manifest.get("tool_sha256", ""))
+    if (
+        len(repository_sha) != 40
+        or any(ch not in "0123456789abcdef" for ch in repository_sha)
+        or len(tool_sha256) != 64
+        or any(ch not in "0123456789abcdef" for ch in tool_sha256)
+    ):
+        raise TargetSeriesError("layered history code identity differs")
+    trusted_repository_sha, trusted_tool_sha256 = (
+        _trusted_layered_history_code_identity()
+    )
+    if repository_sha != trusted_repository_sha or tool_sha256 != trusted_tool_sha256:
+        raise TargetSeriesError("layered history code identity is not trusted")
+
+    contract, strategies, sources, corrections = _history_contract(contract_path)
+    product = manifest.get("product")
+    if (
+        not isinstance(product, dict)
+        or product.get("contract_sha256")
+        != hashlib.sha256(canonical_json_bytes(contract)).hexdigest()
+    ):
+        raise TargetSeriesError("layered history product contract identity differs")
+    _require_exact_keys(
+        product,
+        frozenset(
+            {
+                "contract_sha256",
+                "history_policy_id",
+                "history_policy_version",
+                "product_id",
+                "product_version",
+            }
+        ),
+        "layered history product",
+    )
+    if (
+        product.get("product_id") != contract["product"]["product_id"]
+        or product.get("product_version") != contract["product"]["product_version"]
+        or product.get("history_policy_id")
+        != contract["history_corrections"]["policy_id"]
+        or product.get("history_policy_version")
+        != contract["history_corrections"]["policy_version"]
+    ):
+        raise TargetSeriesError("layered history product authority differs")
+
+    input_rows = manifest.get("inputs")
+    if not isinstance(input_rows, list):
+        raise TargetSeriesError("layered history input identities are absent")
+    inputs: dict[str, dict[str, object]] = {}
+    for raw in input_rows:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("layered history input identity is invalid")
+        _require_exact_keys(
+            raw,
+            frozenset(
+                {
+                    "artifact_id",
+                    "artifact_role",
+                    "as_of_date",
+                    "generation_id",
+                    "input_id",
+                    "sha256",
+                    "size_bytes",
+                }
+            ),
+            "layered history input identity",
+        )
+        input_id = str(raw.get("input_id", ""))
+        sha256 = str(raw.get("sha256", ""))
+        size = raw.get("size_bytes")
+        if (
+            not input_id
+            or input_id in inputs
+            or len(sha256) != 64
+            or not isinstance(size, int)
+            or size < 0
+            or any(
+                key in raw
+                for key in ("path", "root", "provider_entity_id", "account_id")
+            )
+        ):
+            raise TargetSeriesError("layered history input identity differs")
+        inputs[input_id] = dict(raw)
+    if input_rows != sorted(input_rows, key=lambda item: str(item["input_id"])):
+        raise TargetSeriesError("layered history input ordering differs")
+
+    expected_input_contracts: dict[str, tuple[str, str | None]] = {
+        "financial-mvp-contract": ("PRODUCT_CONTRACT", None),
+        "provider-ledger-current": ("CURRENT_POINTER", None),
+        "provider-ledger-manifest": ("GENERATION_MANIFEST", None),
+        "provider-ledger-catalog": (
+            "GENERATION_ARTIFACT",
+            "normalized/provider-ledger.json",
+        ),
+        "matrixport-current": ("CURRENT_POINTER", None),
+        "matrixport-manifest": ("GENERATION_MANIFEST", None),
+        "matrixport-nav": ("GENERATION_ARTIFACT", "csv/nav_daily.csv"),
+        "matrixport-holdings": ("GENERATION_ARTIFACT", "csv/holdings.csv"),
+        "matrixport-subscriptions": (
+            "GENERATION_ARTIFACT",
+            "csv/subscription_details.csv",
+        ),
+        "quantbase-current": ("CURRENT_POINTER", None),
+        "quantbase-manifest": ("GENERATION_MANIFEST", None),
+        "quantbase-history": (
+            "GENERATION_ARTIFACT",
+            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+        ),
+        "quantbase-activity": (
+            "GENERATION_ARTIFACT",
+            "source/csv/account_activity.csv",
+        ),
+        "portfolio123-current": ("CURRENT_POINTER", None),
+        "portfolio123-manifest": ("GENERATION_MANIFEST", None),
+        "portfolio123-metadata": (
+            "GENERATION_ARTIFACT",
+            "tables/har_managed_metadata.parquet",
+        ),
+        "portfolio123-performance": (
+            "GENERATION_ARTIFACT",
+            "tables/har_managed_performance.parquet",
+        ),
+        "portfolio123-equity": (
+            "GENERATION_ARTIFACT",
+            "tables/har_equity_curve.parquet",
+        ),
+        "portfolio123-returns": (
+            "GENERATION_ARTIFACT",
+            "tables/returns_daily.parquet",
+        ),
+        "portfolio123-relationships": (
+            "GENERATION_ARTIFACT",
+            "tables/strategy_relationships.parquet",
+        ),
+    }
+    optional_input_ids = {"strategy-history-manifest", "strategy-history-returns"}
+    if optional_input_ids & set(inputs):
+        expected_input_contracts.update(
+            {
+                "strategy-history-manifest": ("GENERATION_MANIFEST", None),
+                "strategy-history-returns": (
+                    "GENERATION_ARTIFACT",
+                    "strategy-history/returns.csv",
+                ),
+            }
+        )
+    if set(inputs) != set(expected_input_contracts):
+        raise TargetSeriesError("layered history input set differs")
+    for input_id, expected_contract in expected_input_contracts.items():
+        actual_input = inputs[input_id]
+        if (actual_input.get("artifact_role"), actual_input.get("artifact_id")) != (
+            expected_contract
+        ):
+            raise TargetSeriesError(
+                f"layered history input contract differs: {input_id}"
+            )
+    contract_input = inputs["financial-mvp-contract"]
+    if (
+        contract_input.get("as_of_date") is not None
+        or contract_input.get("generation_id") is not None
+    ):
+        raise TargetSeriesError("layered history product input provenance differs")
+    expected_manifests = {
+        "provider-ledger-manifest": sources["owner-account-live-history"],
+        "matrixport-manifest": sources["matrixport-account-generation"],
+        "quantbase-manifest": sources["quantbase-account-generation"],
+        "portfolio123-manifest": sources["portfolio123-model-generation"],
+    }
+    for input_id, source in expected_manifests.items():
+        current = source.get("current_generation")
+        actual = inputs.get(input_id)
+        if (
+            not isinstance(current, dict)
+            or actual is None
+            or (
+                actual.get("artifact_role"),
+                actual.get("generation_id"),
+                actual.get("sha256"),
+                actual.get("as_of_date"),
+            )
+            != (
+                "GENERATION_MANIFEST",
+                current.get("generation_id"),
+                current.get("sha256"),
+                current.get("as_of"),
+            )
+        ):
+            raise TargetSeriesError(
+                f"layered history current input differs: {input_id}"
+            )
+    if (
+        contract_input.get("artifact_role"),
+        contract_input.get("sha256"),
+        contract_input.get("size_bytes"),
+    ) != ("PRODUCT_CONTRACT", *_sha256(contract_path)):
+        raise TargetSeriesError("layered history product input differs")
+    raw_source_manifests = manifest.get("source_manifests")
+    source_manifest_input_ids = {
+        "provider-ledger": "provider-ledger-manifest",
+        "matrixport": "matrixport-manifest",
+        "quantbase": "quantbase-manifest",
+        "portfolio123": "portfolio123-manifest",
+    }
+    if "strategy-history-manifest" in inputs:
+        source_manifest_input_ids["strategy-history"] = "strategy-history-manifest"
+    if not isinstance(raw_source_manifests, dict) or set(raw_source_manifests) != set(
+        source_manifest_input_ids
+    ):
+        raise TargetSeriesError("layered history source manifests differ")
+    source_manifests: dict[str, dict[str, Any]] = {}
+    for source_name, input_id in source_manifest_input_ids.items():
+        raw = raw_source_manifests.get(source_name)
+        if not isinstance(raw, str):
+            raise TargetSeriesError("layered history source manifest is invalid")
+        if any(
+            token in raw
+            for token in ("C:\\\\", "/Users/", "provider_entity_id", "account_id")
+        ):
+            raise TargetSeriesError(
+                "layered history source manifest exposes a private locator"
+            )
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise TargetSeriesError(
+                "layered history source manifest is invalid"
+            ) from exc
+        if not isinstance(parsed, dict) or canonical_json_bytes(parsed) != raw.encode(
+            "utf-8"
+        ):
+            raise TargetSeriesError("layered history source manifest is not canonical")
+        source_input = inputs[input_id]
+        source_generation_id = (
+            parsed.get("bundle_id")
+            if source_name == "strategy-history"
+            else parsed.get("generation_id")
+        )
+        if source_name == "strategy-history":
+            payload = dict(parsed)
+            declared_bundle_id = payload.pop("bundle_id", None)
+            if (
+                not isinstance(declared_bundle_id, str)
+                or len(declared_bundle_id) != 64
+                or hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+                != declared_bundle_id
+            ):
+                raise TargetSeriesError(
+                    "layered history strategy-history bundle identity differs"
+                )
+        if (
+            source_input.get("artifact_role") != "GENERATION_MANIFEST"
+            or hashlib.sha256(raw.encode("utf-8")).hexdigest() != source_input["sha256"]
+            or len(raw.encode("utf-8")) != source_input.get("size_bytes")
+            or source_generation_id != source_input.get("generation_id")
+        ):
+            raise TargetSeriesError(
+                f"layered history source manifest identity differs: {source_name}"
+            )
+        source_manifests[source_name] = parsed
+    input_source_names = {
+        "provider-ledger-current": "provider-ledger",
+        "provider-ledger-manifest": "provider-ledger",
+        "provider-ledger-catalog": "provider-ledger",
+        "matrixport-current": "matrixport",
+        "matrixport-manifest": "matrixport",
+        "matrixport-nav": "matrixport",
+        "matrixport-holdings": "matrixport",
+        "matrixport-subscriptions": "matrixport",
+        "quantbase-current": "quantbase",
+        "quantbase-manifest": "quantbase",
+        "quantbase-history": "quantbase",
+        "quantbase-activity": "quantbase",
+        "portfolio123-current": "portfolio123",
+        "portfolio123-manifest": "portfolio123",
+        "portfolio123-metadata": "portfolio123",
+        "portfolio123-performance": "portfolio123",
+        "portfolio123-equity": "portfolio123",
+        "portfolio123-returns": "portfolio123",
+        "portfolio123-relationships": "portfolio123",
+    }
+    if "strategy-history" in source_manifests:
+        input_source_names.update(
+            {
+                "strategy-history-manifest": "strategy-history",
+                "strategy-history-returns": "strategy-history",
+            }
+        )
+    if set(input_source_names) != set(inputs) - {"financial-mvp-contract"}:
+        raise TargetSeriesError("layered history input source mapping differs")
+    for input_id, source_name in input_source_names.items():
+        authority_manifest = source_manifests[source_name]
+        generation_key = (
+            "bundle_id" if source_name == "strategy-history" else "generation_id"
+        )
+        if (
+            inputs[input_id].get("generation_id"),
+            inputs[input_id].get("as_of_date"),
+        ) != (
+            authority_manifest.get(generation_key),
+            authority_manifest.get("as_of_date"),
+        ):
+            raise TargetSeriesError(
+                f"layered history input source authority differs: {input_id}"
+            )
+    matrixport_gap_policy = sources["matrixport-account-generation"].get(
+        "declared_gap_policy"
+    )
+    if not isinstance(matrixport_gap_policy, dict):
+        raise TargetSeriesError("Matrixport product gap policy is absent")
+    _matrixport_return_transform(matrixport_gap_policy)
+    matrixport_missing_dates = _matrixport_declared_missing_dates(
+        source_manifests["matrixport"], matrixport_gap_policy
+    )
+    matrixport_omitted_return_dates = _matrixport_expected_gap_endpoints(
+        matrixport_missing_dates
+    )
+    matrixport_unavailable_return_dates = frozenset(
+        matrixport_missing_dates | matrixport_omitted_return_dates
+    )
+    expected_matrixport_gap_policy = _matrixport_source_gap_policy(
+        matrixport_missing_dates,
+        matrixport_omitted_return_dates,
+        matrixport_gap_policy,
+    )
+    if expected_matrixport_gap_policy != sources["matrixport-account-generation"].get(
+        "declared_gap_policy"
+    ):
+        raise TargetSeriesError(
+            "Matrixport source gap policy differs from product authority"
+        )
+    source_pointer_input_ids = {
+        "provider-ledger": "provider-ledger-current",
+        "matrixport": "matrixport-current",
+        "quantbase": "quantbase-current",
+        "portfolio123": "portfolio123-current",
+    }
+    raw_source_pointers = manifest.get("source_pointers")
+    if not isinstance(raw_source_pointers, dict) or set(raw_source_pointers) != set(
+        source_pointer_input_ids
+    ):
+        raise TargetSeriesError("layered history source pointers differ")
+    for source_name, pointer_input_id in source_pointer_input_ids.items():
+        raw_pointer = raw_source_pointers.get(source_name)
+        if not isinstance(raw_pointer, str):
+            raise TargetSeriesError("layered history source pointer is invalid")
+        try:
+            pointer = json.loads(raw_pointer)
+        except json.JSONDecodeError as exc:
+            raise TargetSeriesError(
+                "layered history source pointer is invalid"
+            ) from exc
+        if not isinstance(pointer, dict) or canonical_json_bytes(
+            pointer
+        ) != raw_pointer.encode("utf-8"):
+            raise TargetSeriesError("layered history source pointer is not canonical")
+        pointer_schema_version = pointer.get("pointer_schema_version")
+        expected_pointer_keys = {
+            "artifact_inventory_sha256",
+            "generation_id",
+            "manifest_sha256",
+            "pointer_schema_version",
+            "state",
+        }
+        if set(pointer) != expected_pointer_keys or pointer_schema_version != 2:
+            raise TargetSeriesError("layered history source pointer contract differs")
+        pointer_input = inputs.get(pointer_input_id)
+        manifest_input = inputs[source_manifest_input_ids[source_name]]
+        if pointer_input is None or (
+            pointer_input.get("artifact_role"),
+            pointer_input.get("generation_id"),
+            pointer_input.get("sha256"),
+            pointer_input.get("size_bytes"),
+            pointer.get("generation_id"),
+            pointer.get("manifest_sha256"),
+            pointer.get("state"),
+        ) != (
+            "CURRENT_POINTER",
+            manifest_input.get("generation_id"),
+            hashlib.sha256(raw_pointer.encode("utf-8")).hexdigest(),
+            len(raw_pointer.encode("utf-8")),
+            manifest_input.get("generation_id"),
+            manifest_input.get("sha256"),
+            "PUBLISHED",
+        ):
+            raise TargetSeriesError(
+                f"layered history current pointer differs: {source_name}"
+            )
+        inventory_sha = pointer.get("artifact_inventory_sha256")
+        if (
+            not isinstance(inventory_sha, str)
+            or len(inventory_sha) != 64
+            or any(ch not in "0123456789abcdef" for ch in inventory_sha)
+            or inventory_sha
+            != _source_generation_inventory_sha256(
+                source_name,
+                raw_source_manifests[source_name].encode("utf-8"),
+                source_manifests[source_name],
+            )
+        ):
+            raise TargetSeriesError(
+                f"layered history current pointer inventory differs: {source_name}"
+            )
+    manifests_by_generation = {
+        str(value.get("generation_id") or value.get("bundle_id")): value
+        for value in source_manifests.values()
+    }
+    for input_id, artifact_input in inputs.items():
+        if artifact_input.get("artifact_role") != "GENERATION_ARTIFACT":
+            continue
+        source_generation_id = str(artifact_input.get("generation_id") or "")
+        source_manifest = manifests_by_generation.get(source_generation_id)
+        if source_manifest is None:
+            raise TargetSeriesError(
+                f"layered history source generation is absent: {input_id}"
+            )
+        artifact_id = str(artifact_input.get("artifact_id") or "")
+        if input_id == "strategy-history-returns":
+            raw_artifact = source_manifest.get("returns_artifact")
+            artifact_identity = (
+                (
+                    raw_artifact.get("artifact_id"),
+                    raw_artifact.get("sha256"),
+                    raw_artifact.get("size_bytes"),
+                )
+                if isinstance(raw_artifact, dict)
+                else None
+            )
+        else:
+            artifact = _manifest_artifacts(source_manifest.get("artifacts")).get(
+                artifact_id
+            )
+            artifact_identity = (
+                (artifact.artifact_id, artifact.sha256, artifact.size_bytes)
+                if artifact is not None
+                else None
+            )
+        if artifact_identity != (
+            artifact_id,
+            artifact_input.get("sha256"),
+            artifact_input.get("size_bytes"),
+        ):
+            raise TargetSeriesError(
+                f"layered history source artifact differs: {input_id}"
+            )
+    output_rows = manifest.get("outputs")
+    if not isinstance(output_rows, dict) or set(output_rows) != set(
+        LAYERED_HISTORY_OUTPUT_NAMES
+    ):
+        raise TargetSeriesError("layered history output identities differ")
+    if set(artifacts) != set(LAYERED_HISTORY_OUTPUT_NAMES):
+        raise TargetSeriesError("layered history output set differs")
+    for name in LAYERED_HISTORY_OUTPUT_NAMES:
+        expected = output_rows.get(name)
+        content = artifacts[name]
+        if isinstance(expected, dict):
+            _require_exact_keys(
+                expected,
+                frozenset(
+                    {
+                        "artifact_id",
+                        "row_count",
+                        "schema_name",
+                        "schema_version",
+                        "sha256",
+                        "size_bytes",
+                    }
+                ),
+                f"layered history output identity {name}",
+            )
+        if not isinstance(expected, dict) or (
+            expected.get("sha256"),
+            expected.get("size_bytes"),
+        ) != (hashlib.sha256(content).hexdigest(), len(content)):
+            raise TargetSeriesError(f"layered history output differs: {name}")
+
+    segments = _csv_content_rows(
+        artifacts["segments.csv"],
+        LAYERED_HISTORY_SEGMENT_FIELDS,
+        "layered history segments",
+    )
+    if artifacts["segments.csv"] != _segment_view_bytes(segments):
+        raise TargetSeriesError("layered history segments serialization differs")
+    canonical_segments = sorted(
+        segments,
+        key=lambda row: (
+            row["strategy_id"],
+            row["date"],
+            row["evidence_layer"],
+            row["segment_id"],
+        ),
+    )
+    if segments != canonical_segments:
+        raise TargetSeriesError("layered history segment ordering differs")
+    actual_segment_identities = _materialized_segment_identities(segments, sources)
+    if actual_segment_identities != contract["history_corrections"].get(
+        "materialized_segment_identities"
+    ):
+        raise TargetSeriesError(
+            "layered history segment values differ from product authority"
+        )
+    excluded = _csv_content_rows(
+        artifacts["excluded.csv"], TARGET_FIELDS, "excluded history evidence"
+    )
+    if artifacts["excluded.csv"] != _target_bytes(excluded):
+        raise TargetSeriesError("excluded history evidence serialization differs")
+    canonical_excluded = sorted(
+        excluded, key=lambda row: (row["series_id"], row["date"])
+    )
+    if excluded != canonical_excluded:
+        raise TargetSeriesError("excluded history evidence ordering differs")
+    live_only = _csv_content_rows(
+        artifacts["live-only.csv"], CORRELATION_FIELDS_V2, "LIVE_ONLY history"
+    )
+    if artifacts["live-only.csv"] != _correlation_view_bytes(live_only):
+        raise TargetSeriesError("LIVE_ONLY history serialization differs")
+    hybrid = _csv_content_rows(
+        artifacts["live-plus-backtest.csv"],
+        CORRELATION_FIELDS_V2,
+        "LIVE_PLUS_BACKTEST history",
+    )
+    if artifacts["live-plus-backtest.csv"] != _correlation_view_bytes(hybrid):
+        raise TargetSeriesError("LIVE_PLUS_BACKTEST history serialization differs")
+    returns = _csv_content_rows(
+        artifacts["returns.csv"], CORRELATION_FIELDS_V2, "correlation history"
+    )
+    if artifacts["returns.csv"] != _correlation_view_bytes(returns):
+        raise TargetSeriesError("correlation history serialization differs")
+    output_counts = {
+        "segments.csv": len(segments),
+        "excluded.csv": len(excluded),
+        "returns.csv": len(returns),
+        "live-only.csv": len(live_only),
+        "live-plus-backtest.csv": len(hybrid),
+    }
+    expected_schema = {
+        "segments.csv": ("portfolio-layered-history-segments", "1"),
+        "excluded.csv": ("portfolio-layered-history-excluded-targets", "1"),
+        "returns.csv": ("portfolio-layered-strategy-returns", "2"),
+        "live-only.csv": ("portfolio-layered-strategy-returns", "2"),
+        "live-plus-backtest.csv": ("portfolio-layered-strategy-returns", "2"),
+        "coverage.json": ("portfolio-layered-history-coverage", "1"),
+    }
+    for name, count in output_counts.items():
+        identity = output_rows[name]
+        if (
+            identity.get("artifact_id") != f"layered-history/{name}"
+            or (identity.get("schema_name"), identity.get("schema_version"))
+            != expected_schema[name]
+            or identity.get("row_count") != count
+        ):
+            raise TargetSeriesError(f"layered history output metadata differs: {name}")
+    if returns != hybrid:
+        raise TargetSeriesError("correlation history differs from hybrid view")
+    expected_live = [
+        {field: row[field] for field in CORRELATION_FIELDS_V2}
+        for row in segments
+        if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    ]
+    expected_live.sort(key=lambda row: (row["series_id"], row["date"]))
+    expected_hybrid = [
+        {field: row[field] for field in CORRELATION_FIELDS_V2}
+        for row in segments
+        if row["mode_admission"]
+        in {"INCLUDE_SELECTED_LIVE", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"}
+    ]
+    expected_hybrid.sort(
+        key=lambda row: (
+            row["series_id"],
+            row["date"],
+            0 if row["evidence_layer"] == "BACKTEST" else 1,
+        )
+    )
+    if live_only != expected_live or hybrid != expected_hybrid:
+        raise TargetSeriesError("layered history mode projection differs")
+    segment_keys: set[tuple[str, str, str]] = set()
+    rows_by_strategy: dict[str, list[dict[str, str]]] = {
+        strategy_id: [] for strategy_id in strategies
+    }
+    for segment_row in segments:
+        strategy_id = segment_row["strategy_id"]
+        if strategy_id not in strategies:
+            raise TargetSeriesError("layered history contains non-product strategy")
+        key = (
+            strategy_id,
+            segment_row["segment_id"],
+            segment_row["date"],
+        )
+        if key in segment_keys:
+            raise TargetSeriesError("layered history contains duplicate segment date")
+        segment_keys.add(key)
+        try:
+            observed = date.fromisoformat(segment_row["date"])
+        except ValueError as exc:
+            raise TargetSeriesError("layered history date is invalid") from exc
+        if observed > accepted_as_of:
+            raise TargetSeriesError("layered history exceeds accepted as-of")
+        if _decimal(segment_row["return"], "layered history return") <= -1:
+            raise TargetSeriesError("layered history return is invalid")
+        if segment_row["evidence_layer"] in {
+            "PROVIDER_LIVE",
+            "PROVIDER_TRACK_RECORD",
+        } and segment_row["mode_admission"] not in {
+            "EXCLUDE_COMPARISON_ONLY",
+            "REQUIRED_NOT_READY_OVERLAP",
+        }:
+            raise TargetSeriesError("comparison history entered a selected mode")
+        rows_by_strategy[strategy_id].append(segment_row)
+
+    for strategy_id, rows in rows_by_strategy.items():
+        live = sorted(
+            [row for row in rows if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"],
+            key=lambda row: row["date"],
+        )
+        if len({row["date"] for row in live}) != len(live):
+            raise TargetSeriesError("selected live history contains duplicate date")
+        backtest = sorted(
+            [
+                row
+                for row in rows
+                if row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+            ],
+            key=lambda row: row["date"],
+        )
+        if backtest:
+            if not live:
+                raise TargetSeriesError("admitted backtest lacks selected live path")
+            if backtest[0]["strategy_version"] != live[0]["strategy_version"]:
+                raise TargetSeriesError("admitted backtest version differs from live")
+            if date.fromisoformat(backtest[-1]["date"]) >= date.fromisoformat(
+                live[0]["date"]
+            ):
+                raise TargetSeriesError("admitted backtest overlaps account-live")
+
+    try:
+        coverage = json.loads(artifacts["coverage.json"])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError("layered history coverage is invalid") from exc
+    if not isinstance(coverage, dict):
+        raise TargetSeriesError("layered history coverage contract differs")
+    _require_exact_keys(
+        coverage,
+        frozenset(
+            {
+                "as_of_date",
+                "builder",
+                "builder_version",
+                "correction_resolutions",
+                "mode_policy",
+                "schema_version",
+                "strategies",
+                "verification",
+            }
+        ),
+        "layered history coverage",
+    )
+    if canonical_json_bytes(coverage) != artifacts["coverage.json"]:
+        raise TargetSeriesError("layered history coverage is not canonical")
+    if coverage.get("verification") != (
+        "VERIFIED_WITH_REQUIRED_NOT_READY_DISPOSITIONS"
+    ):
+        raise TargetSeriesError("layered history coverage contract differs")
+    if (
+        coverage.get("as_of_date"),
+        coverage.get("builder"),
+        coverage.get("builder_version"),
+        coverage.get("schema_version"),
+    ) != (
+        accepted_as_of.isoformat(),
+        LAYERED_HISTORY_BUILDER,
+        LAYERED_HISTORY_BUILDER_VERSION,
+        LAYERED_HISTORY_SCHEMA_VERSION,
+    ):
+        raise TargetSeriesError("layered history coverage metadata differs")
+    mode_policy = coverage.get("mode_policy")
+    if not isinstance(mode_policy, dict):
+        raise TargetSeriesError("layered history mode policy differs")
+    _require_exact_keys(
+        mode_policy,
+        frozenset(LAYERED_HISTORY_MODE_POLICY),
+        "layered history mode policy",
+    )
+    if mode_policy != LAYERED_HISTORY_MODE_POLICY:
+        raise TargetSeriesError("layered history mode policy differs")
+    serialized_coverage = artifacts["coverage.json"].decode("utf-8")
+    if any(
+        token in serialized_coverage
+        for token in ("C:\\\\", "/Users/", "provider_entity_id", "account_id")
+    ):
+        raise TargetSeriesError("layered history coverage exposes a private locator")
+    coverage_rows = coverage.get("strategies")
+    if not isinstance(coverage_rows, list):
+        raise TargetSeriesError("layered history strategy coverage is absent")
+    if any(not isinstance(raw, dict) for raw in coverage_rows) or [
+        str(raw.get("strategy_id", "")) for raw in coverage_rows
+    ] != sorted(str(raw.get("strategy_id", "")) for raw in coverage_rows):
+        raise TargetSeriesError("layered history strategy coverage ordering differs")
+    coverage_by_strategy: dict[str, dict[str, object]] = {}
+    for raw in coverage_rows:
+        if not isinstance(raw, dict):
+            raise TargetSeriesError("layered history strategy coverage is invalid")
+        strategy_id = str(raw.get("strategy_id", ""))
+        if not strategy_id or strategy_id in coverage_by_strategy:
+            raise TargetSeriesError("layered history strategy coverage is duplicated")
+        coverage_by_strategy[strategy_id] = dict(raw)
+    if set(coverage_by_strategy) != set(strategies):
+        raise TargetSeriesError("layered history strategy coverage set differs")
+    coverage_identity = output_rows["coverage.json"]
+    if (
+        coverage_identity.get("artifact_id") != "layered-history/coverage.json"
+        or (
+            coverage_identity.get("schema_name"),
+            coverage_identity.get("schema_version"),
+        )
+        != expected_schema["coverage.json"]
+        or coverage_identity.get("row_count") != len(coverage_by_strategy)
+    ):
+        raise TargetSeriesError(
+            "layered history output metadata differs: coverage.json"
+        )
+    expected_modes_by_strategy: dict[str, dict[str, dict[str, str | None]]] = {}
+    source_generation_inputs = {
+        "owner-account-live-history": "provider-ledger-manifest",
+        "matrixport-account-generation": "matrixport-manifest",
+        "quantbase-account-generation": "quantbase-manifest",
+        "portfolio123-model-generation": "portfolio123-manifest",
+    }
+    for strategy_id, raw in coverage_by_strategy.items():
+        _require_exact_keys(
+            raw,
+            frozenset(
+                {
+                    "blockers",
+                    "funded_membership",
+                    "modes",
+                    "product_readiness",
+                    "segments",
+                    "series_id",
+                    "strategy_id",
+                    "strategy_version",
+                }
+            ),
+            "layered history strategy coverage",
+        )
+        strategy = strategies[strategy_id]
+        if raw.get("series_id") != strategy.get("history_series_id"):
+            raise TargetSeriesError(
+                "layered history series identity differs from product authority"
+            )
+        expected_blockers = sorted(
+            int(item) for item in strategy.get("blockers", []) if isinstance(item, int)
+        )
+        if (
+            raw.get("blockers"),
+            raw.get("funded_membership"),
+            raw.get("product_readiness"),
+        ) != (
+            expected_blockers,
+            strategy.get("funded_membership"),
+            strategy.get("readiness"),
+        ):
+            raise TargetSeriesError("layered history strategy coverage differs")
+        strategy_version = raw.get("strategy_version")
+        if not isinstance(strategy_version, dict):
+            raise TargetSeriesError("layered history strategy version is absent")
+        product_version = strategies[strategy_id].get("strategy_version")
+        product_version_ref = (
+            product_version.get("version_ref")
+            if isinstance(product_version, dict)
+            else None
+        )
+        expected_version_status, expected_version_ref = _contract_version(
+            strategies[strategy_id]
+        )
+        if strategy_version != {
+            "history_generation_ref": expected_version_ref,
+            "product_status": expected_version_status,
+            "product_version_ref": product_version_ref,
+        }:
+            raise TargetSeriesError("layered history strategy version differs")
+        summaries = raw.get("segments")
+        if not isinstance(summaries, list):
+            raise TargetSeriesError("layered history segment coverage is absent")
+        summary_ids = [
+            str(item.get("segment_id", ""))
+            for item in summaries
+            if isinstance(item, dict)
+        ]
+        if (
+            len(summary_ids) != len(summaries)
+            or len(set(summary_ids)) != len(summary_ids)
+            or summary_ids != sorted(summary_ids)
+        ):
+            raise TargetSeriesError("layered history segment coverage ordering differs")
+        actual_rows = rows_by_strategy[strategy_id]
+        if strategy_id == "echotrade-growth-pivots" and actual_rows:
+            raise TargetSeriesError("EchoTrade event-only history was admitted")
+        actual_by_segment = {
+            segment_id: [row for row in actual_rows if row["segment_id"] == segment_id]
+            for segment_id in {row["segment_id"] for row in actual_rows}
+        }
+        if {
+            str(item.get("segment_id")) for item in summaries if isinstance(item, dict)
+        } != set(actual_by_segment):
+            raise TargetSeriesError("layered history segment coverage set differs")
+        for summary in summaries:
+            if not isinstance(summary, dict):
+                raise TargetSeriesError("layered history segment summary is invalid")
+            _require_exact_keys(
+                summary,
+                frozenset(
+                    {
+                        "calendar",
+                        "evidence_layer",
+                        "frequency",
+                        "gap_disposition",
+                        "mode_admission",
+                        "observed_end",
+                        "observed_start",
+                        "return_observations",
+                        "segment_id",
+                        "sha256",
+                        "source_generation_id",
+                        "source_id",
+                        "strategy_version",
+                    }
+                ),
+                "layered history segment summary",
+            )
+            selected = actual_by_segment[str(summary["segment_id"])]
+            identity = _row_identity(selected)
+            segment_unavailable_dates = (
+                matrixport_unavailable_return_dates
+                if strategy_id == "robuxio-crypto"
+                and selected[0]["source_id"] == "matrixport-account-generation"
+                else frozenset()
+            )
+            if (
+                summary.get("sha256"),
+                summary.get("return_observations"),
+                summary.get("observed_start"),
+                summary.get("observed_end"),
+                summary.get("mode_admission"),
+                summary.get("gap_disposition"),
+            ) != (
+                identity["sha256"],
+                identity["return_observations"],
+                identity["observed_start"],
+                identity["observed_end"],
+                selected[0]["mode_admission"],
+                _gap_disposition(selected, segment_unavailable_dates),
+            ):
+                raise TargetSeriesError("layered history segment summary differs")
+            if selected[0]["mode_admission"] == "INCLUDE_SELECTED_LIVE" and str(
+                summary["gap_disposition"]
+            ).startswith("REQUIRED_NOT_READY"):
+                raise TargetSeriesError(
+                    f"layered history has an unexplained live gap: {strategy_id}"
+                )
+
+            segment_id = str(summary["segment_id"])
+            if segment_id == f"{strategy_id}:account-live":
+                source_id = (
+                    "matrixport-account-generation"
+                    if strategy_id == "robuxio-crypto"
+                    else "quantbase-account-generation"
+                    if strategy_id == "volatis-strategy"
+                    else "owner-account-live-history"
+                )
+                expected_layer = "ACCOUNT_LIVE"
+                expected_admission = "INCLUDE_SELECTED_LIVE"
+                expected_basis = "NET"
+            elif (
+                strategy_id == "robuxio-crypto"
+                and segment_id == "robuxio-crypto:provider-live-before-funding"
+            ):
+                source_id = "matrixport-account-generation"
+                expected_layer = "PROVIDER_LIVE"
+                expected_admission = "EXCLUDE_COMPARISON_ONLY"
+                expected_basis = "NET"
+            elif segment_id in {
+                f"{strategy_id}:backtest",
+                f"{strategy_id}:backtest-not-admitted",
+            }:
+                source_id = "strategy-backtests"
+                expected_layer = "BACKTEST"
+                expected_admission = (
+                    "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+                    if segment_id.endswith(":backtest")
+                    else "REQUIRED_NOT_READY_OVERLAP"
+                )
+                expected_basis = "MODEL"
+            else:
+                raise TargetSeriesError("layered history segment is not authorized")
+            calendar, frequency = _source_temporal(sources[source_id])
+            if source_id == "strategy-backtests":
+                generation_input_id = (
+                    "portfolio123-manifest"
+                    if strategy_id == "p123-ai-factor"
+                    else "strategy-history-manifest"
+                )
+            else:
+                generation_input_id = source_generation_inputs[source_id]
+            generation_input = inputs.get(generation_input_id)
+            expected_identity = (
+                source_id,
+                str((generation_input or {}).get("generation_id") or "NOT_CAPTURED"),
+                expected_layer,
+                expected_admission,
+                expected_basis,
+                "TOTAL",
+                calendar,
+                frequency,
+                raw.get("series_id"),
+                strategy_version.get("history_generation_ref"),
+            )
+            if any(
+                (
+                    row["source_id"],
+                    row["source_generation_id"],
+                    row["evidence_layer"],
+                    row["mode_admission"],
+                    row["return_basis"],
+                    row["return_type"],
+                    row["calendar"],
+                    row["frequency"],
+                    row["series_id"],
+                    row["strategy_version"],
+                )
+                != expected_identity
+                for row in selected
+            ) or (
+                summary.get("source_id"),
+                summary.get("source_generation_id"),
+                summary.get("evidence_layer"),
+                summary.get("calendar"),
+                summary.get("frequency"),
+                summary.get("strategy_version"),
+            ) != (
+                source_id,
+                expected_identity[1],
+                expected_layer,
+                calendar,
+                frequency,
+                expected_identity[9],
+            ):
+                raise TargetSeriesError("layered history segment authority differs")
+
+        live_rows = sorted(
+            [
+                row
+                for row in actual_rows
+                if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+            ],
+            key=lambda row: row["date"],
+        )
+        live_unavailable_dates = (
+            matrixport_unavailable_return_dates
+            if strategy_id == "robuxio-crypto"
+            else frozenset()
+        )
+        if not live_rows:
+            live_status = "REQUIRED_NOT_READY"
+            live_reason = (
+                "CAPTURED_EVENT_ONLY_RECONSTRUCTION_NOT_ADMISSIBLE_DAILY_NAV"
+                if strategy_id == "echotrade-growth-pivots"
+                else "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
+            )
+        elif _gap_disposition(live_rows, live_unavailable_dates).startswith(
+            "REQUIRED_NOT_READY"
+        ):
+            raise TargetSeriesError(
+                f"layered history has an unexplained live gap: {strategy_id}"
+            )
+        else:
+            live_source = sources[live_rows[0]["source_id"]]
+            freshness = live_source.get("freshness")
+            max_age = (
+                freshness.get("max_age_days") if isinstance(freshness, dict) else None
+            )
+            if not isinstance(max_age, int):
+                raise TargetSeriesError("layered history source freshness differs")
+            if (
+                accepted_as_of - date.fromisoformat(live_rows[-1]["date"])
+            ).days > max_age:
+                live_status = "REQUIRED_NOT_READY"
+                live_reason = "REQUIRED_ACCOUNT_LIVE_TAIL_STALE"
+            else:
+                live_status = "AVAILABLE"
+                live_reason = None
+        hybrid_status = live_status
+        hybrid_reason = live_reason
+        admitted_backtest = any(
+            row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+            for row in actual_rows
+        )
+        if admitted_backtest and expected_version_status != "EVIDENCED":
+            raise TargetSeriesError("unapproved backtest entered a selected mode")
+        if hybrid_status == "AVAILABLE" and not admitted_backtest:
+            hybrid_status = "REQUIRED_NOT_READY"
+            if any(
+                row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP"
+                for row in actual_rows
+            ):
+                hybrid_reason = (
+                    "REQUIRED_NOT_READY_BACKTEST_SOURCE_OVERLAPS_ACCOUNT_LIVE"
+                )
+            elif strategy_version.get("product_status") != "EVIDENCED":
+                hybrid_reason = "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
+            else:
+                hybrid_reason = "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED"
+        expected_modes = {
+            "LIVE_ONLY": {"reason": live_reason, "status": live_status},
+            "LIVE_PLUS_BACKTEST": {
+                "reason": hybrid_reason,
+                "status": hybrid_status,
+            },
+        }
+        raw_modes = raw.get("modes")
+        if not isinstance(raw_modes, dict) or set(raw_modes) != set(expected_modes):
+            raise TargetSeriesError("layered history strategy modes differ")
+        for mode_name, expected_mode in expected_modes.items():
+            actual_mode = raw_modes.get(mode_name)
+            if not isinstance(actual_mode, dict):
+                raise TargetSeriesError("layered history strategy mode is invalid")
+            _require_exact_keys(
+                actual_mode,
+                frozenset({"reason", "status"}),
+                "layered history strategy mode",
+            )
+            if actual_mode != expected_mode:
+                raise TargetSeriesError("layered history strategy mode reason differs")
+        expected_modes_by_strategy[strategy_id] = expected_modes
+
+    resolutions = coverage.get("correction_resolutions")
+    if (
+        not isinstance(resolutions, dict)
+        or set(resolutions) != LAYERED_HISTORY_CORRECTION_RESOLUTION_IDS
+    ):
+        raise TargetSeriesError("layered history correction resolutions are absent")
+    echo_resolution = resolutions.get("echotrade-event-only-account-live-rejected")
+    echo_correction = corrections.get("echotrade-event-only-account-live-rejected")
+    echo_interval = (
+        echo_correction.get("interval") if isinstance(echo_correction, dict) else None
+    )
+    echo_capture = (
+        echo_correction.get("capture") if isinstance(echo_correction, dict) else None
+    )
+    echo_contract_identity = (
+        echo_correction.get("rejected_evidence_identity")
+        if isinstance(echo_correction, dict)
+        else None
+    )
+    provider_ledger_catalog_input = inputs.get("provider-ledger-catalog")
+    echo_series_id = coverage_by_strategy.get("echotrade-growth-pivots", {}).get(
+        "series_id"
+    )
+    if (
+        not excluded
+        or not isinstance(echo_series_id, str)
+        or not echo_series_id
+        or any(
+            row["series_id"] != echo_series_id
+            or row["evidence_layer"] != "ACCOUNT_LIVE"
+            or date.fromisoformat(row["date"]) > accepted_as_of
+            or _decimal(row["return"], "excluded return") <= -1
+            for row in excluded
+        )
+        or len({row["date"] for row in excluded}) != len(excluded)
+    ):
+        raise TargetSeriesError("EchoTrade excluded evidence differs")
+    expected_echo_identity = _target_row_identity(excluded)
+    if (
+        not isinstance(echo_contract_identity, dict)
+        or echo_contract_identity.get("canonicalization")
+        != "TARGET_FIELDS_CANONICAL_JSON_V1"
+        or not isinstance(provider_ledger_catalog_input, dict)
+        or echo_contract_identity.get("source_receipt_sha256")
+        != provider_ledger_catalog_input.get("sha256")
+        or {
+            "return_observations": echo_contract_identity.get("return_observations"),
+            "sha256": echo_contract_identity.get("sha256"),
+        }
+        != {
+            key: expected_echo_identity[key]
+            for key in ("return_observations", "sha256")
+        }
+    ):
+        raise TargetSeriesError(
+            "EchoTrade excluded evidence differs from product authority"
+        )
+    if (
+        not isinstance(echo_resolution, dict)
+        or set(echo_resolution)
+        != {
+            "observed_end",
+            "observed_start",
+            "return_observations",
+            "sha256",
+            "source_generation_id",
+            "status",
+        }
+        or not isinstance(echo_interval, dict)
+        or not isinstance(echo_capture, dict)
+        or {
+            key: echo_resolution.get(key)
+            for key in (
+                "observed_end",
+                "observed_start",
+                "return_observations",
+                "sha256",
+            )
+        }
+        != expected_echo_identity
+        or (
+            echo_resolution.get("observed_start"),
+            echo_resolution.get("observed_end"),
+            echo_resolution.get("source_generation_id"),
+            echo_resolution.get("status"),
+        )
+        != (
+            echo_interval.get("observed_start"),
+            echo_interval.get("observed_end"),
+            echo_capture.get("generation_id"),
+            "REJECTED_EVENT_ONLY_RECONSTRUCTION_NOT_DAILY_NAV",
+        )
+        or not isinstance(echo_resolution.get("return_observations"), int)
+        or echo_resolution["return_observations"] < 1
+        or not isinstance(echo_resolution.get("sha256"), str)
+        or len(echo_resolution["sha256"]) != 64
+    ):
+        raise TargetSeriesError("EchoTrade event-only resolution differs")
+    p123_ai_resolution = resolutions.get("p123-ai-backtest")
+    if not isinstance(p123_ai_resolution, dict):
+        raise TargetSeriesError("Portfolio123 AI backtest disposition is absent")
+    _require_exact_keys(
+        p123_ai_resolution,
+        frozenset(
+            {
+                "index_observations",
+                "observed_end",
+                "observed_start",
+                "relationship_type",
+                "return_observations",
+                "source_labels",
+                "status",
+            }
+        ),
+        "Portfolio123 AI backtest disposition",
+    )
+    p123_ai_rows = [
+        row
+        for row in rows_by_strategy["p123-ai-factor"]
+        if row["evidence_layer"] == "BACKTEST"
+    ]
+    p123_ai_coverage_version = coverage_by_strategy["p123-ai-factor"].get(
+        "strategy_version"
+    )
+    if not isinstance(p123_ai_coverage_version, dict):
+        raise TargetSeriesError("Portfolio123 AI strategy version is absent")
+    p123_ai_product_status = p123_ai_coverage_version.get("product_status")
+    if p123_ai_product_status != "EVIDENCED":
+        expected_p123_ai_status = (
+            "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
+        )
+        if p123_ai_rows:
+            raise TargetSeriesError("unapproved Portfolio123 AI backtest was retained")
+    elif any(
+        row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+        for row in p123_ai_rows
+    ):
+        expected_p123_ai_status = "ADMITTED_EXACT_VERSION_PREHISTORY"
+    elif any(
+        row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP" for row in p123_ai_rows
+    ):
+        expected_p123_ai_status = "DERIVED_NOT_ADMITTED_OVERLAP"
+    else:
+        expected_p123_ai_status = (
+            "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
+        )
+    p123_ai_correction = corrections.get("p123-ai-backtest-candidate")
+    p123_ai_identity = (
+        p123_ai_correction.get("derived_backtest_identity")
+        if isinstance(p123_ai_correction, dict)
+        else None
+    )
+    if not isinstance(p123_ai_identity, dict) or p123_ai_resolution != {
+        **p123_ai_identity,
+        "status": expected_p123_ai_status,
+    }:
+        raise TargetSeriesError("Portfolio123 AI backtest disposition differs")
+    robuxio_resolution = resolutions.get("robuxio-account-live-after-funding")
+    if not isinstance(robuxio_resolution, dict):
+        raise TargetSeriesError("Matrixport source gap resolution differs")
+    _require_exact_keys(
+        robuxio_resolution,
+        frozenset(
+            {
+                "account_live_start",
+                "observed_end",
+                "observed_start",
+                "source_gap_policy",
+                "status",
+            }
+        ),
+        "Matrixport source gap resolution",
+    )
+    if robuxio_resolution.get("source_gap_policy") != expected_matrixport_gap_policy:
+        raise TargetSeriesError("Matrixport source gap resolution differs")
+    p123_resolution = resolutions.get("p123-eu-provider-live")
+    if not isinstance(p123_resolution, dict):
+        raise TargetSeriesError("Portfolio123 EU return transform disposition differs")
+    _require_exact_keys(
+        p123_resolution,
+        frozenset(
+            {
+                "calendar",
+                "cash_added_treatment",
+                "equity_overlap_observations",
+                "observed_end",
+                "observed_start",
+                "raw_level_observations",
+                "return_observations",
+                "status",
+                "transform_id",
+            }
+        ),
+        "Portfolio123 EU return transform disposition",
+    )
+    p123_correction = corrections.get("p123-eu-provider-live")
+    p123_evidence_identity = (
+        p123_correction.get("derived_evidence_identity")
+        if isinstance(p123_correction, dict)
+        else None
+    )
+    if not isinstance(p123_evidence_identity, dict) or p123_resolution != {
+        **p123_evidence_identity,
+        "status": "DERIVED_NOT_ADMITTED_PENDING_303",
+    }:
+        raise TargetSeriesError("Portfolio123 EU return transform disposition differs")
+    if any(
+        row["strategy_id"] == "p123-eu" and row["evidence_layer"] == "PROVIDER_LIVE"
+        for row in segments
+    ):
+        raise TargetSeriesError("Portfolio123 EU candidate transform was admitted")
+    volatis_resolution = resolutions.get("volatis-account-live")
+    if not isinstance(volatis_resolution, dict):
+        raise TargetSeriesError("Volatis account-live resolution differs")
+    _require_exact_keys(
+        volatis_resolution,
+        frozenset(
+            {
+                "observed_end",
+                "observed_start",
+                "source_first_positive_value_date",
+                "status",
+            }
+        ),
+        "Volatis account-live resolution",
+    )
+    volatis_correction = corrections.get("volatis-account-live")
+    volatis_interval = (
+        volatis_correction.get("interval")
+        if isinstance(volatis_correction, dict)
+        else None
+    )
+    volatis_funding = (
+        volatis_correction.get("funding_event")
+        if isinstance(volatis_correction, dict)
+        else None
+    )
+    if (
+        not isinstance(volatis_interval, dict)
+        or not isinstance(volatis_funding, dict)
+        or volatis_resolution
+        != {
+            "observed_end": volatis_interval.get("observed_end"),
+            "observed_start": volatis_interval.get("observed_start"),
+            "source_first_positive_value_date": volatis_funding.get("event_date"),
+            "status": "RESOLVED_BY_PIPE_HISTORY_001",
+        }
+    ):
+        raise TargetSeriesError("Volatis account-live resolution differs")
+
+    def _correction_interval(correction_id: str) -> Mapping[str, Any]:
+        value = corrections[correction_id].get("interval")
+        if not isinstance(value, dict):
+            raise TargetSeriesError(
+                f"history correction interval is absent: {correction_id}"
+            )
+        return value
+
+    robuxio_live = sorted(
+        [
+            row
+            for row in rows_by_strategy["robuxio-crypto"]
+            if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+        ],
+        key=lambda row: row["date"],
+    )
+    robuxio_provider = sorted(
+        [
+            row
+            for row in rows_by_strategy["robuxio-crypto"]
+            if row["evidence_layer"] == "PROVIDER_LIVE"
+        ],
+        key=lambda row: row["date"],
+    )
+    robuxio_interval = _correction_interval("robuxio-account-live-after-funding")
+    funding_start = date.fromisoformat(str(robuxio_interval["effective_start"]))
+    if (
+        not robuxio_live
+        or robuxio_live[0]["date"] != robuxio_interval["observed_start"]
+        or robuxio_live[-1]["date"] != robuxio_interval["observed_end"]
+        or any(date.fromisoformat(row["date"]) <= funding_start for row in robuxio_live)
+        or any(
+            date.fromisoformat(row["date"]) >= funding_start for row in robuxio_provider
+        )
+    ):
+        raise TargetSeriesError("Robuxio funding correction differs")
+    if robuxio_resolution != {
+        "account_live_start": funding_start.isoformat(),
+        "observed_end": robuxio_live[-1]["date"],
+        "observed_start": robuxio_live[0]["date"],
+        "source_gap_policy": expected_matrixport_gap_policy,
+        "status": "RESOLVED_BY_PIPE_HISTORY_001",
+    }:
+        raise TargetSeriesError("Robuxio source gap coverage differs")
+    for strategy_id, correction_id in (
+        ("p123-eu", "p123-eu-account-live"),
+        ("volatis-strategy", "volatis-account-live"),
+    ):
+        live = sorted(
+            [
+                row
+                for row in rows_by_strategy[strategy_id]
+                if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+            ],
+            key=lambda row: row["date"],
+        )
+        interval = _correction_interval(correction_id)
+        if not live or (live[0]["date"], live[-1]["date"]) != (
+            interval["observed_start"],
+            interval["observed_end"],
+        ):
+            raise TargetSeriesError(f"history correction differs: {strategy_id}")
+    if any(
+        row["evidence_layer"] == "BACKTEST"
+        and row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+        for row in rows_by_strategy["volatis-strategy"]
+    ):
+        raise TargetSeriesError("Volatis provider path was relabeled as backtest")
+
+    mode_status = manifest.get("mode_status")
+    if not isinstance(mode_status, dict):
+        raise TargetSeriesError("layered history mode status is absent")
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        status = mode_status.get(mode)
+        if not isinstance(status, dict):
+            raise TargetSeriesError(f"layered history mode status differs: {mode}")
+        _require_exact_keys(
+            status,
+            frozenset({"required_not_ready_strategy_ids", "status"}),
+            f"layered history mode status {mode}",
+        )
+        not_ready: list[str] = []
+        for strategy_id, expected_modes in expected_modes_by_strategy.items():
+            if expected_modes[mode]["status"] == "REQUIRED_NOT_READY":
+                not_ready.append(strategy_id)
+        not_ready.sort()
+        if status.get("required_not_ready_strategy_ids") != not_ready or status.get(
+            "status"
+        ) != ("AVAILABLE" if not not_ready else "REQUIRED_NOT_READY"):
+            raise TargetSeriesError(f"layered history mode readiness differs: {mode}")
+    if require_mode is not None:
+        if require_mode not in {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}:
+            raise TargetSeriesError("required history mode is invalid")
+        required = mode_status[require_mode]
+        if not isinstance(required, dict) or required.get("status") != "AVAILABLE":
+            raise TargetSeriesError(
+                f"required history mode is not ready: {require_mode}"
+            )
+    return {
+        "generation_id": generation_id,
+        "mode_status": mode_status,
+        "output_sha256": {
+            name: hashlib.sha256(artifacts[name]).hexdigest()
+            for name in LAYERED_HISTORY_OUTPUT_NAMES
+        },
+        "strategy_count": len(coverage_by_strategy),
+        "verification": "VALID",
+    }
+
+
+def write_layered_history_generation(
+    output_root: Path,
+    artifacts: Mapping[str, bytes],
+    manifest_content: bytes,
+) -> Path:
+    try:
+        manifest = json.loads(manifest_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError(
+            "layered history generation manifest is invalid"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise TargetSeriesError("layered history generation manifest must be an object")
+    generation_id = str(manifest.get("generation_id", ""))
+    if len(generation_id) != 64:
+        raise TargetSeriesError("layered history generation identity is invalid")
+    destination = output_root / generation_id
+    for name in LAYERED_HISTORY_OUTPUT_NAMES:
+        _write_exact(destination / name, artifacts[name])
+    _write_exact(destination / "generation.json", manifest_content)
+    return destination
+
+
+def verify_layered_history_generation(
+    generation_root: Path,
+    contract_path: Path,
+    *,
+    require_mode: str | None = None,
+) -> dict[str, object]:
+    if generation_root.is_symlink() or not generation_root.is_dir():
+        raise TargetSeriesError("layered history generation root must be a directory")
+
+    expected_names = frozenset((*LAYERED_HISTORY_OUTPUT_NAMES, "generation.json"))
+    try:
+        entries = tuple(generation_root.iterdir())
+    except OSError as exc:
+        raise TargetSeriesError(
+            "layered history generation inventory is unreadable"
+        ) from exc
+    if (
+        len(entries) != len(expected_names)
+        or {entry.name for entry in entries} != expected_names
+        or any(entry.is_symlink() or not entry.is_file() for entry in entries)
+    ):
+        raise TargetSeriesError("layered history generation inventory differs")
+
+    def _read_generation_file(name: str) -> bytes:
+        path = generation_root / name
+        if path.is_symlink() or not path.is_file():
+            raise TargetSeriesError(
+                f"layered history generation file must be regular: {name}"
+            )
+        return path.read_bytes()
+
+    artifacts = {
+        name: _read_generation_file(name) for name in LAYERED_HISTORY_OUTPUT_NAMES
+    }
+    manifest_content = _read_generation_file("generation.json")
+    result = validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_content,
+        contract_path=contract_path,
+        require_mode=require_mode,
+    )
+    if generation_root.name != result["generation_id"]:
+        raise TargetSeriesError("layered history generation directory differs")
+    return result
+
+
 def _portfolio123_simulation_returns(
     returns_path: Path,
     relationships_path: Path,
@@ -1235,7 +5079,7 @@ def _strategy_history_returns(
         raise TargetSeriesError("strategy history manifest schema is unsupported")
     if (
         manifest.get("builder") != "portfolio-strategy-history"
-        or manifest.get("builder_version") != STRATEGY_HISTORY_BUILDER_VERSION
+        or manifest.get("builder_version") not in STRATEGY_HISTORY_BUILDER_VERSIONS
     ):
         raise TargetSeriesError("strategy history builder version is unsupported")
     if manifest.get("verification") != "VERIFIED":
@@ -1247,6 +5091,23 @@ def _strategy_history_returns(
     artifact = manifest.get("returns_artifact")
     if not isinstance(artifact, dict):
         raise TargetSeriesError("strategy history returns artifact is invalid")
+    artifact_keys = frozenset(artifact)
+    builder_version = str(manifest.get("builder_version"))
+    if builder_version == "1.4.0":
+        _require_exact_keys(
+            artifact,
+            frozenset({"artifact_id", "sha256", "size_bytes"}),
+            "strategy history returns artifact",
+        )
+    elif artifact_keys not in {
+        frozenset({"sha256", "size_bytes"}),
+        frozenset({"artifact_id", "sha256", "size_bytes"}),
+    }:
+        raise TargetSeriesError("strategy history returns artifact keys differ")
+    if "artifact_id" in artifact and artifact.get("artifact_id") != (
+        "strategy-history/returns.csv"
+    ):
+        raise TargetSeriesError("strategy history returns artifact ID differs")
     expected_hash = str(artifact.get("sha256", ""))
     expected_size = artifact.get("size_bytes")
     actual_hash, actual_size = _sha256(returns_path)
@@ -1331,7 +5192,10 @@ def _strategy_history_returns(
             or not (
                 history_status.startswith("UNAVAILABLE_")
                 or history_status
-                == "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED"
+                in {
+                    "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED",
+                    "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_DERIVED_NOT_ADMITTED",
+                }
             )
             or not version
             or not implementation
@@ -2071,7 +5935,7 @@ def _write_exact(path: Path, content: bytes) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-targets", type=Path, required=True)
+    parser.add_argument("--base-targets", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--nav", type=Path)
     parser.add_argument("--holdings", type=Path)
@@ -2093,6 +5957,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-manifest", type=Path)
     parser.add_argument("--portfolio123-equity", type=Path)
     parser.add_argument("--portfolio123-metadata", type=Path)
+    parser.add_argument("--portfolio123-performance", type=Path)
     parser.add_argument("--portfolio123-returns", type=Path)
     parser.add_argument("--portfolio123-relationships", type=Path)
     parser.add_argument("--portfolio123-provider-entity-id")
@@ -2105,8 +5970,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--strategy-history-returns", type=Path)
     parser.add_argument("--provider-ledger-manifest", type=Path)
     parser.add_argument("--provider-ledger-catalog", type=Path)
+    parser.add_argument("--financial-mvp-contract", type=Path)
+    parser.add_argument("--repository-sha")
+    parser.add_argument("--as-of-date")
+    parser.add_argument("--provider-ledger-current", type=Path)
+    parser.add_argument("--matrixport-current", type=Path)
+    parser.add_argument("--quantbase-current", type=Path)
+    parser.add_argument("--portfolio123-current", type=Path)
+    parser.add_argument("--layered-history-generation", action="store_true")
+    parser.add_argument("--verify-layered-history", type=Path)
+    parser.add_argument("--require-mode", choices=("LIVE_ONLY", "LIVE_PLUS_BACKTEST"))
     parser.add_argument("--layered-correlation-only", action="store_true")
-    parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path)
     return parser
 
 
@@ -2120,6 +5995,91 @@ def _required(args: argparse.Namespace, names: Sequence[str], mode: str) -> None
 def main() -> int:
     args = _parser().parse_args()
     try:
+        if args.layered_history_generation and args.verify_layered_history is not None:
+            raise TargetSeriesError(
+                "layered history build and verification modes are mutually exclusive"
+            )
+        if args.verify_layered_history is not None:
+            _required(args, ("financial_mvp_contract",), "layered history verification")
+            result = verify_layered_history_generation(
+                args.verify_layered_history,
+                args.financial_mvp_contract,
+                require_mode=args.require_mode,
+            )
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+            return 0
+        if args.layered_history_generation:
+            _required(
+                args,
+                (
+                    "financial_mvp_contract",
+                    "repository_sha",
+                    "as_of_date",
+                    "provider_ledger_current",
+                    "provider_ledger_manifest",
+                    "provider_ledger_catalog",
+                    "matrixport_current",
+                    "manifest",
+                    "nav",
+                    "holdings",
+                    "subscriptions",
+                    "product_id",
+                    "quantbase_current",
+                    "quantbase_manifest",
+                    "quantbase_history",
+                    "quantbase_activity",
+                    "quantbase_fund_id",
+                    "portfolio123_current",
+                    "portfolio123_manifest",
+                    "portfolio123_metadata",
+                    "portfolio123_performance",
+                    "portfolio123_equity",
+                    "portfolio123_returns",
+                    "portfolio123_relationships",
+                    "output_root",
+                ),
+                "layered history generation",
+            )
+            artifacts, manifest_content = build_layered_history_generation(
+                contract_path=args.financial_mvp_contract,
+                repository_sha=args.repository_sha,
+                as_of_date=args.as_of_date,
+                provider_ledger_pointer_path=args.provider_ledger_current,
+                provider_ledger_manifest_path=args.provider_ledger_manifest,
+                provider_ledger_catalog_path=args.provider_ledger_catalog,
+                matrixport_pointer_path=args.matrixport_current,
+                matrixport_manifest_path=args.manifest,
+                matrixport_nav_path=args.nav,
+                matrixport_holdings_path=args.holdings,
+                matrixport_subscription_path=args.subscriptions,
+                matrixport_product_id=args.product_id,
+                quantbase_pointer_path=args.quantbase_current,
+                quantbase_manifest_path=args.quantbase_manifest,
+                quantbase_history_path=args.quantbase_history,
+                quantbase_activity_path=args.quantbase_activity,
+                quantbase_fund_id=args.quantbase_fund_id,
+                portfolio123_pointer_path=args.portfolio123_current,
+                portfolio123_manifest_path=args.portfolio123_manifest,
+                portfolio123_metadata_path=args.portfolio123_metadata,
+                portfolio123_performance_path=args.portfolio123_performance,
+                portfolio123_equity_path=args.portfolio123_equity,
+                portfolio123_returns_path=args.portfolio123_returns,
+                portfolio123_relationships_path=args.portfolio123_relationships,
+                strategy_history_manifest_path=args.strategy_history_manifest,
+                strategy_history_returns_path=args.strategy_history_returns,
+            )
+            result = validate_layered_history_generation(
+                artifacts=artifacts,
+                manifest_content=manifest_content,
+                contract_path=args.financial_mvp_contract,
+                require_mode=args.require_mode,
+            )
+            write_layered_history_generation(
+                args.output_root, artifacts, manifest_content
+            )
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+            return 0
+        _required(args, ("base_targets", "output_root"), "target-series")
         if args.provider_ledger_manifest is not None:
             _required(
                 args,
