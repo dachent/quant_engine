@@ -784,9 +784,7 @@ def test_layered_correlation_uses_generation_bound_live_sim_twin(
     assert proof["strategy_history_bundle"]["verification"] == "VERIFIED"
     assert manifest_bytes == manifest.read_bytes()
 
-    stale_history_manifest = json.loads(
-        history_manifest.read_text(encoding="utf-8")
-    )
+    stale_history_manifest = json.loads(history_manifest.read_text(encoding="utf-8"))
     stale_history_manifest["builder_version"] = "1.1.0"
     history_manifest.write_text(json.dumps(stale_history_manifest), encoding="utf-8")
     with pytest.raises(

@@ -494,10 +494,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     assert history["owner_issue"] == 319
     rows = history["corrections"]
     assert len(rows) == 9
-    assert {
-        (row["strategy_id"], row["evidence_layer"])
-        for row in rows
-    } == {
+    assert {(row["strategy_id"], row["evidence_layer"]) for row in rows} == {
         ("robuxio-crypto", "PROVIDER_TRACK_RECORD"),
         ("robuxio-crypto", "PROVIDER_LIVE"),
         ("robuxio-crypto", "ACCOUNT_LIVE"),
@@ -509,9 +506,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         ("volatis-strategy", "ACCOUNT_LIVE"),
     }
 
-    robux_live = _history_correction(
-        contract, "robuxio-account-live-after-funding"
-    )
+    robux_live = _history_correction(contract, "robuxio-account-live-after-funding")
     assert robux_live["funding_event"]["event_date"] == "2025-12-06"
     assert robux_live["interval"]["observed_start"] == "2025-12-07"
     assert robux_live["interval"]["assignment_date"] == "2025-08-26"
@@ -523,17 +518,18 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         contract, "robuxio-provider-live-before-funding"
     )
     assert robux_provider["interval"]["observed_end"] == "2025-12-05"
-    assert set(robux_provider["mode_admission"].values()) == {
-        "EXCLUDE_COMPARISON_ONLY"
-    }
+    assert set(robux_provider["mode_admission"].values()) == {"EXCLUDE_COMPARISON_ONLY"}
 
     p123_provider = _history_correction(contract, "p123-eu-provider-live")
     assert p123_provider["capture"]["status"] == "CAPTURED_GOVERNED"
     assert p123_provider["strategy_version"]["compatibility"] == "EXACT_MATCH"
     assert p123_provider["interval"]["observed_start"] == "2025-11-13"
-    assert _source(contract, "portfolio123-model-generation")["strategy_version"][
-        "version_refs"
-    ]["p123-eu"] == p123_provider["strategy_version"]["version_ref"]
+    assert (
+        _source(contract, "portfolio123-model-generation")["strategy_version"][
+            "version_refs"
+        ]["p123-eu"]
+        == p123_provider["strategy_version"]["version_ref"]
+    )
     p123_backtest = _history_correction(contract, "p123-eu-backtest-not-captured")
     assert p123_backtest["history_existence"]["status"] == "EXISTS"
     assert p123_backtest["capture"]["status"] == "NOT_CAPTURED"
@@ -542,8 +538,9 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     volatis_live = _history_correction(contract, "volatis-account-live")
     assert volatis_live["funding_event"]["event_date"] == "2024-10-15"
     assert volatis_live["interval"]["observed_start"] == "2024-10-16"
-    assert "EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE" in (
-        volatis_live["funding_event"]["authority"]
+    assert (
+        "EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE"
+        in (volatis_live["funding_event"]["authority"])
     )
     volatis_backtest = _history_correction(contract, "volatis-backtest-not-proved")
     assert volatis_backtest["history_existence"]["status"] == "UNRESOLVED"
@@ -558,8 +555,9 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     }
     p123_live = _history_correction(contract, "p123-eu-account-live")
     assert "INTERNAL_TRANSFER_IN" in p123_live["funding_event"]["authority"]
-    assert "ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT" in (
-        p123_live["funding_event"]["authority"]
+    assert (
+        "ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT"
+        in (p123_live["funding_event"]["authority"])
     )
     assert "EXTERNAL_FLOW" not in p123_live["funding_event"]["authority"]
     assert p123_provider["readiness"] == "REQUIRED_NOT_READY"
@@ -570,7 +568,8 @@ def test_history_correction_omission_and_capture_conflation_fail() -> None:
     missing = copy.deepcopy(_contract())
     missing["history_corrections"]["corrections"].pop()
     with pytest.raises(
-        contract_tool.FinancialMvpContractError, match="history correction layers differ"
+        contract_tool.FinancialMvpContractError,
+        match="history correction layers differ",
     ):
         _validate(missing)
 
@@ -743,17 +742,18 @@ def test_history_receipts_resolve_to_governed_bytes_and_reject_coherent_rewrite(
             "sha256": artifact_sha,
         },
     ]
-    minimal = {
-        "history_corrections": {"corrections": [{"source_receipts": receipts}]}
-    }
-    assert contract_tool.verify_history_evidence(
-        minimal, {"MATRIXPORT": authority}
-    )["verified_receipts"] == 3
+    minimal = {"history_corrections": {"corrections": [{"source_receipts": receipts}]}}
+    assert (
+        contract_tool.verify_history_evidence(minimal, {"MATRIXPORT": authority})[
+            "verified_receipts"
+        ]
+        == 3
+    )
 
     invented_artifact = copy.deepcopy(minimal)
-    invented_artifact["history_corrections"]["corrections"][0][
-        "source_receipts"
-    ][2]["sha256"] = "a" * 64
+    invented_artifact["history_corrections"]["corrections"][0]["source_receipts"][2][
+        "sha256"
+    ] = "a" * 64
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="differs from governed evidence bytes",
@@ -849,7 +849,8 @@ def test_source_strategy_version_and_cost_are_explicit() -> None:
     p123 = _source(mutated, "portfolio123-model-generation")
     p123["subjects"]["strategy_ids"].remove("p123-eu")
     with pytest.raises(
-        contract_tool.FinancialMvpContractError, match="version refs outside its subjects"
+        contract_tool.FinancialMvpContractError,
+        match="version refs outside its subjects",
     ):
         _validate(mutated)
 

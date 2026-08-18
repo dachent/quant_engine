@@ -295,7 +295,7 @@ def _p123_generation(path: Path) -> None:
                     "# Positions": "100",
                     "Total Equity": "100",
                     "Cash Added": "0",
-                }
+                },
             ]
         ),
         "returns_daily.parquet": pa.table(

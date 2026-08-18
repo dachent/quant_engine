@@ -171,8 +171,10 @@ def _evidence_file(root: Path, selector: str, name: str) -> Path:
     if root.is_symlink() or not root.is_dir():
         raise FinancialMvpContractError(f"history authority root is invalid: {name}")
     relative = PurePosixPath(selector)
-    if relative.is_absolute() or not relative.parts or any(
-        part in {"", ".", ".."} for part in relative.parts
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
     ):
         raise FinancialMvpContractError(f"history evidence selector is invalid: {name}")
     candidate = root.joinpath(*relative.parts)
@@ -208,9 +210,7 @@ def _verify_history_receipt(
     receipt: Mapping[str, Any], authority_roots: Mapping[str, Path]
 ) -> None:
     role = _text(receipt["artifact_role"], "history receipt artifact_role")
-    authority_root = _text(
-        receipt["authority_root"], "history receipt authority_root"
-    )
+    authority_root = _text(receipt["authority_root"], "history receipt authority_root")
     if authority_root not in HISTORY_EVIDENCE_ROOTS:
         raise FinancialMvpContractError(f"history receipt root differs: {role}")
     root = authority_roots.get(authority_root)
@@ -230,7 +230,10 @@ def _verify_history_receipt(
 
     pointer_path = _evidence_file(root, "CURRENT.json", f"{authority_root}/CURRENT")
     pointer = _load_json(pointer_path, f"{authority_root} current pointer")
-    if pointer.get("state") != "PUBLISHED" or pointer.get("generation_id") != generation_id:
+    if (
+        pointer.get("state") != "PUBLISHED"
+        or pointer.get("generation_id") != generation_id
+    ):
         raise FinancialMvpContractError(
             f"history receipt generation is not the published current authority: {role}"
         )
@@ -291,7 +294,10 @@ def _verify_history_receipt(
         )
         actual_hash, actual_size = _file_identity(artifact_path)
         artifact = matches[0]
-        if artifact.get("sha256") != actual_hash or artifact.get("size_bytes") != actual_size:
+        if (
+            artifact.get("sha256") != actual_hash
+            or artifact.get("size_bytes") != actual_size
+        ):
             raise FinancialMvpContractError(
                 f"history artifact differs from its generation manifest: {role}"
             )
@@ -1467,7 +1473,9 @@ def _validate_history_corrections(
     if policy["policy_id"] != "PORT-HISTORY-TRUTH-1":
         raise FinancialMvpContractError("history correction policy identity differs")
     if policy["policy_version"] != 1 or policy["owner_issue"] != 319:
-        raise FinancialMvpContractError("history correction policy owner/version differs")
+        raise FinancialMvpContractError(
+            "history correction policy owner/version differs"
+        )
     if policy["splice_policy"] != HISTORY_SPLICE_POLICY:
         raise FinancialMvpContractError("history splice policy is unapproved")
 
@@ -1552,7 +1560,8 @@ def _validate_history_corrections(
         )
         generation_as_of = _optional_date(capture["as_of"], "history generation as_of")
         has_generation = all(
-            value is not None for value in (generation_id, generation_sha, generation_as_of)
+            value is not None
+            for value in (generation_id, generation_sha, generation_as_of)
         )
         if capture_status == "CAPTURED_GOVERNED":
             if existence_status != "EXISTS" or not has_generation:
@@ -1575,7 +1584,8 @@ def _validate_history_corrections(
                     f"history correction generation differs from source: {correction_id}"
                 )
         elif has_generation or any(
-            value is not None for value in (generation_id, generation_sha, generation_as_of)
+            value is not None
+            for value in (generation_id, generation_sha, generation_as_of)
         ):
             raise FinancialMvpContractError(
                 f"uncaptured history asserts a generation: {correction_id}"
@@ -1612,7 +1622,10 @@ def _validate_history_corrections(
             raise FinancialMvpContractError(
                 f"unresolved history version asserts identity: {correction_id}"
             )
-        if compatibility in {"ACCOUNT_OWNED", "EXACT_MATCH"} and version_status != "EVIDENCED":
+        if (
+            compatibility in {"ACCOUNT_OWNED", "EXACT_MATCH"}
+            and version_status != "EVIDENCED"
+        ):
             raise FinancialMvpContractError(
                 f"compatible history lacks evidenced version: {correction_id}"
             )
@@ -1620,18 +1633,42 @@ def _validate_history_corrections(
         interval = _object(row["interval"], "history interval")
         _strict_keys(
             interval,
-            {"assignment_date", "effective_end", "effective_start", "observed_end", "observed_start"},
+            {
+                "assignment_date",
+                "effective_end",
+                "effective_start",
+                "observed_end",
+                "observed_start",
+            },
             "history interval",
         )
         assignment_date = _optional_date(interval["assignment_date"], "assignment date")
-        observed_start = _optional_date(interval["observed_start"], "history observed_start")
+        observed_start = _optional_date(
+            interval["observed_start"], "history observed_start"
+        )
         observed_end = _optional_date(interval["observed_end"], "history observed_end")
-        effective_start = _optional_date(interval["effective_start"], "history effective_start")
-        effective_end = _optional_date(interval["effective_end"], "history effective_end")
-        if observed_start is not None and observed_end is not None and observed_end < observed_start:
-            raise FinancialMvpContractError(f"history observed interval is reversed: {correction_id}")
-        if effective_start is not None and effective_end is not None and effective_end < effective_start:
-            raise FinancialMvpContractError(f"history effective interval is reversed: {correction_id}")
+        effective_start = _optional_date(
+            interval["effective_start"], "history effective_start"
+        )
+        effective_end = _optional_date(
+            interval["effective_end"], "history effective_end"
+        )
+        if (
+            observed_start is not None
+            and observed_end is not None
+            and observed_end < observed_start
+        ):
+            raise FinancialMvpContractError(
+                f"history observed interval is reversed: {correction_id}"
+            )
+        if (
+            effective_start is not None
+            and effective_end is not None
+            and effective_end < effective_start
+        ):
+            raise FinancialMvpContractError(
+                f"history effective interval is reversed: {correction_id}"
+            )
 
         funding = _object(row["funding_event"], "history funding_event")
         _strict_keys(
@@ -1640,7 +1677,9 @@ def _validate_history_corrections(
             "history funding_event",
         )
         funding_status = _text(funding["status"], "history funding status")
-        funding_date = _optional_date(funding["event_date"], "history funding event_date")
+        funding_date = _optional_date(
+            funding["event_date"], "history funding event_date"
+        )
         account_live_start = _optional_date(
             funding["account_live_start"], "history account_live_start"
         )
@@ -1675,23 +1714,37 @@ def _validate_history_corrections(
             raise FinancialMvpContractError(
                 f"non-account history asserts funding: {correction_id}"
             )
-        if assignment_date is not None and funding_status == "EVIDENCED" and funding_date is None:
+        if (
+            assignment_date is not None
+            and funding_status == "EVIDENCED"
+            and funding_date is None
+        ):
             raise FinancialMvpContractError(
                 f"assignment date substituted for funding: {correction_id}"
             )
 
         modes = _object(row["mode_admission"], "history mode_admission")
-        _strict_keys(modes, {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}, "history mode_admission")
+        _strict_keys(
+            modes, {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}, "history mode_admission"
+        )
         live_only = _text(modes["LIVE_ONLY"], "history LIVE_ONLY admission")
-        hybrid = _text(modes["LIVE_PLUS_BACKTEST"], "history LIVE_PLUS_BACKTEST admission")
+        hybrid = _text(
+            modes["LIVE_PLUS_BACKTEST"], "history LIVE_PLUS_BACKTEST admission"
+        )
         if layer in {"PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"} and (
-            live_only != "EXCLUDE_COMPARISON_ONLY" or hybrid != "EXCLUDE_COMPARISON_ONLY"
+            live_only != "EXCLUDE_COMPARISON_ONLY"
+            or hybrid != "EXCLUDE_COMPARISON_ONLY"
         ):
             raise FinancialMvpContractError(
                 f"provider history was relabeled into an accepted mode: {correction_id}"
             )
-        if layer == "ACCOUNT_LIVE" and funding_status == "EVIDENCED" and (
-            live_only != "INCLUDE_SELECTED_LIVE" or hybrid != "INCLUDE_SELECTED_LIVE"
+        if (
+            layer == "ACCOUNT_LIVE"
+            and funding_status == "EVIDENCED"
+            and (
+                live_only != "INCLUDE_SELECTED_LIVE"
+                or hybrid != "INCLUDE_SELECTED_LIVE"
+            )
         ):
             raise FinancialMvpContractError(
                 f"evidenced account-live history is not selected live: {correction_id}"
@@ -1712,7 +1765,9 @@ def _validate_history_corrections(
 
         receipts = _objects(row["source_receipts"], "history source_receipts")
         if not receipts:
-            raise FinancialMvpContractError(f"history correction lacks receipts: {correction_id}")
+            raise FinancialMvpContractError(
+                f"history correction lacks receipts: {correction_id}"
+            )
         receipt_keys: set[tuple[str, str]] = set()
         receipt_hashes: set[str] = set()
         for receipt in receipts:
@@ -1754,14 +1809,14 @@ def _validate_history_corrections(
                 _no_private_locator(
                     manifest_artifact_id, "history manifest artifact id"
                 )
-            if (locator == "GENERATION_ARTIFACT") != (
-                manifest_artifact_id is not None
-            ):
+            if (locator == "GENERATION_ARTIFACT") != (manifest_artifact_id is not None):
                 raise FinancialMvpContractError(
                     f"history receipt manifest selector differs: {correction_id}"
                 )
             if (role, digest) in receipt_keys:
-                raise FinancialMvpContractError(f"duplicate history receipt: {correction_id}")
+                raise FinancialMvpContractError(
+                    f"duplicate history receipt: {correction_id}"
+                )
             receipt_keys.add((role, digest))
             receipt_hashes.add(digest)
         if generation_sha is not None and generation_sha not in receipt_hashes:
@@ -1772,11 +1827,17 @@ def _validate_history_corrections(
         readiness = _text(row["readiness"], "history readiness")
         blockers = _blockers(row["blockers"], "history blockers")
         if readiness == "READY" and blockers:
-            raise FinancialMvpContractError(f"ready history correction retains blockers: {correction_id}")
+            raise FinancialMvpContractError(
+                f"ready history correction retains blockers: {correction_id}"
+            )
         if readiness == "REQUIRED_NOT_READY" and not blockers:
-            raise FinancialMvpContractError(f"history correction lacks blocker: {correction_id}")
+            raise FinancialMvpContractError(
+                f"history correction lacks blocker: {correction_id}"
+            )
         if readiness == "READY" and capture_status != "CAPTURED_GOVERNED":
-            raise FinancialMvpContractError(f"ready history correction is uncaptured: {correction_id}")
+            raise FinancialMvpContractError(
+                f"ready history correction is uncaptured: {correction_id}"
+            )
 
     for strategy_id, expected_layers in HISTORY_CORRECTION_LAYERS.items():
         if observed_layers[strategy_id] != set(expected_layers):
@@ -1792,16 +1853,27 @@ def _validate_history_corrections(
         ):
             continue
         account_start = account_live_starts.get(str(row["strategy_id"]))
-        backtest_end = _optional_date(row["interval"]["observed_end"], "backtest observed_end")
-        if account_start is None or backtest_end is None or backtest_end >= account_start:
+        backtest_end = _optional_date(
+            row["interval"]["observed_end"], "backtest observed_end"
+        )
+        if (
+            account_start is None
+            or backtest_end is None
+            or backtest_end >= account_start
+        ):
             raise FinancialMvpContractError(
                 f"backtest is not strictly before live inception: {row['correction_id']}"
             )
 
     for strategy_id, funding_date in funding_dates.items():
         strategy = strategy_by_id[strategy_id]
-        membership = _object(strategy["funded_membership"], "strategy funded_membership")
-        if membership["status"] != "EVIDENCED" or membership["effective_start"] != funding_date.isoformat():
+        membership = _object(
+            strategy["funded_membership"], "strategy funded_membership"
+        )
+        if (
+            membership["status"] != "EVIDENCED"
+            or membership["effective_start"] != funding_date.isoformat()
+        ):
             raise FinancialMvpContractError(
                 f"history funding does not propagate to strategy membership: {strategy_id}"
             )
@@ -3443,7 +3515,9 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
     )
     for row in history_rows:
         interval = row["interval"]
-        observed = f"{interval['observed_start'] or '—'}..{interval['observed_end'] or '—'}"
+        observed = (
+            f"{interval['observed_start'] or '—'}..{interval['observed_end'] or '—'}"
+        )
         funding = row["funding_event"]
         funding_text = (
             f"{funding['event_date'] or '—'} / {funding['account_live_start'] or '—'}"
