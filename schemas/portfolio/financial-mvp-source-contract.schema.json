@@ -9,6 +9,7 @@
     "contract_schema_version",
     "financial_outcomes",
     "golden_case",
+    "history_corrections",
     "product",
     "source_segments",
     "strategies"
@@ -17,7 +18,7 @@
     "$schema": {
       "const": "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     },
-    "contract_schema_version": {"const": 1},
+    "contract_schema_version": {"const": 2},
     "product": {"$ref": "#/$defs/product"},
     "strategies": {
       "type": "array",
@@ -35,6 +36,7 @@
       "minItems": 1,
       "items": {"$ref": "#/$defs/source_segment"}
     },
+    "history_corrections": {"$ref": "#/$defs/history_corrections"},
     "golden_case": {"$ref": "#/$defs/golden_case"}
   },
   "$defs": {
@@ -316,6 +318,184 @@
           }
         }
       ]
+    },
+    "history_corrections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "corrections",
+        "owner_issue",
+        "policy_id",
+        "policy_version",
+        "splice_policy"
+      ],
+      "properties": {
+        "policy_id": {"const": "PORT-HISTORY-TRUTH-1"},
+        "policy_version": {"const": 1},
+        "owner_issue": {"const": 319},
+        "splice_policy": {
+          "const": "SELECT_ONE_ACCEPTED_LIVE_LAYER; BACKTEST_ONLY_WHEN_EXACT_VERSION_MATCHED_AND_STRICTLY_BEFORE_LIVE_INCEPTION; NEVER_RELABEL_PROVIDER_EVIDENCE_AS_ACCOUNT_LIVE"
+        },
+        "corrections": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/history_correction"}
+        }
+      }
+    },
+    "history_correction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blockers",
+        "capture",
+        "correction_id",
+        "disposition_reason",
+        "evidence_layer",
+        "funding_event",
+        "history_existence",
+        "interval",
+        "mode_admission",
+        "readiness",
+        "source_id",
+        "source_receipts",
+        "strategy_id",
+        "strategy_version"
+      ],
+      "properties": {
+        "correction_id": {"$ref": "#/$defs/nonempty_string"},
+        "strategy_id": {"$ref": "#/$defs/nonempty_string"},
+        "source_id": {"$ref": "#/$defs/nonempty_string"},
+        "evidence_layer": {
+          "enum": [
+            "ACCOUNT_LIVE",
+            "BACKTEST",
+            "PROVIDER_LIVE",
+            "PROVIDER_TRACK_RECORD"
+          ]
+        },
+        "history_existence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["authority", "status"],
+          "properties": {
+            "authority": {"$ref": "#/$defs/nonempty_string"},
+            "status": {"enum": ["EXISTS", "DOES_NOT_EXIST", "UNRESOLVED"]}
+          }
+        },
+        "capture": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "as_of",
+            "capture_defect",
+            "generation_id",
+            "generation_sha256",
+            "status"
+          ],
+          "properties": {
+            "status": {"enum": ["CAPTURED_GOVERNED", "NOT_CAPTURED", "UNRESOLVED"]},
+            "capture_defect": {"type": ["string", "null"], "minLength": 1},
+            "generation_id": {"$ref": "#/$defs/hash_or_null"},
+            "generation_sha256": {"$ref": "#/$defs/hash_or_null"},
+            "as_of": {"$ref": "#/$defs/date_or_null"}
+          }
+        },
+        "strategy_version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["authority", "compatibility", "status", "version_ref"],
+          "properties": {
+            "status": {"enum": ["EVIDENCED", "NOT_APPLICABLE", "UNRESOLVED"]},
+            "version_ref": {"type": ["string", "null"], "minLength": 1},
+            "compatibility": {"enum": ["ACCOUNT_OWNED", "EXACT_MATCH", "NOT_APPLICABLE", "UNRESOLVED"]},
+            "authority": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "interval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "assignment_date",
+            "effective_end",
+            "effective_start",
+            "observed_end",
+            "observed_start"
+          ],
+          "properties": {
+            "assignment_date": {"$ref": "#/$defs/date_or_null"},
+            "effective_start": {"$ref": "#/$defs/date_or_null"},
+            "effective_end": {"$ref": "#/$defs/date_or_null"},
+            "observed_start": {"$ref": "#/$defs/date_or_null"},
+            "observed_end": {"$ref": "#/$defs/date_or_null"}
+          }
+        },
+        "funding_event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account_live_start", "authority", "event_date", "status"],
+          "properties": {
+            "status": {"enum": ["EVIDENCED", "NOT_APPLICABLE", "UNRESOLVED"]},
+            "event_date": {"$ref": "#/$defs/date_or_null"},
+            "account_live_start": {"$ref": "#/$defs/date_or_null"},
+            "authority": {"$ref": "#/$defs/nonempty_string"}
+          }
+        },
+        "mode_admission": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+          "properties": {
+            "LIVE_ONLY": {
+              "enum": ["EXCLUDE_COMPARISON_ONLY", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
+            },
+            "LIVE_PLUS_BACKTEST": {
+              "enum": ["EXCLUDE_COMPARISON_ONLY", "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY", "INCLUDE_SELECTED_LIVE", "NOT_APPLICABLE", "REQUIRED_NOT_READY"]
+            }
+          }
+        },
+        "source_receipts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "artifact_role",
+              "artifact_selector",
+              "authority_root",
+              "generation_id",
+              "locator_kind",
+              "manifest_artifact_id",
+              "sha256"
+            ],
+            "properties": {
+              "artifact_role": {"$ref": "#/$defs/nonempty_string"},
+              "artifact_selector": {"$ref": "#/$defs/nonempty_string"},
+              "authority_root": {
+                "enum": ["MATRIXPORT", "PORTFOLIO123", "PROVIDER_LEDGER", "QUANTBASE"]
+              },
+              "generation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "locator_kind": {
+                "enum": ["CURRENT_POINTER", "GENERATION_ARTIFACT", "GENERATION_MANIFEST"]
+              },
+              "manifest_artifact_id": {"type": ["string", "null"], "minLength": 1},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            },
+            "allOf": [
+              {
+                "if": {"properties": {"locator_kind": {"const": "GENERATION_ARTIFACT"}}},
+                "then": {"properties": {"manifest_artifact_id": {"type": "string", "minLength": 1}}},
+                "else": {"properties": {"manifest_artifact_id": {"type": "null"}}}
+              }
+            ]
+          }
+        },
+        "disposition_reason": {"$ref": "#/$defs/nonempty_string"},
+        "readiness": {"$ref": "#/$defs/readiness"},
+        "blockers": {"$ref": "#/$defs/blockers"}
+      }
     },
     "outcome": {
       "type": "object",

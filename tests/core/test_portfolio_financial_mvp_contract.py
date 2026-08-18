@@ -52,6 +52,16 @@ def _outcome(contract: dict[str, object], outcome_id: str) -> dict[str, object]:
     return next(row for row in rows if row["outcome_id"] == outcome_id)
 
 
+def _history_correction(
+    contract: dict[str, object], correction_id: str
+) -> dict[str, object]:
+    history = contract["history_corrections"]
+    assert isinstance(history, dict)
+    rows = history["corrections"]
+    assert isinstance(rows, list)
+    return next(row for row in rows if row["correction_id"] == correction_id)
+
+
 def _github_comment(comment_id: int, body: str = "") -> dict[str, object]:
     return {
         "id": comment_id,
@@ -110,7 +120,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "223566d79a949c1729d5b6e110152e6db42716ba186b5d4bb14e601b06056192"
+        "fb61e533d83f3987c7dd7345f58c93cb07c2c3ffee902dd9ed548a057dc97a4a"
     )
 
 
@@ -464,7 +474,7 @@ def test_history_existence_capture_and_evidence_layers_are_separate() -> None:
     contract = _contract()
     p123 = _source(contract, "portfolio123-model-generation")
     assert p123["existence_status"] == "EXISTS"
-    assert p123["capture_status"] == "NOT_CAPTURED"
+    assert p123["capture_status"] == "CAPTURED_GOVERNED"
     assert p123["evidence_layer"] == "PROVIDER_LIVE"
     owner_live = _source(contract, "owner-account-live-history")
     assert owner_live["evidence_layer"] == "ACCOUNT_LIVE"
@@ -475,6 +485,295 @@ def test_history_existence_capture_and_evidence_layers_are_separate() -> None:
     assert {"PROVIDER_TRACK_RECORD", "PROVIDER_LIVE", "ACCOUNT_LIVE"} <= {
         row["evidence_layer"] for row in contract["source_segments"]
     }
+
+
+def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None:
+    contract = _contract()
+    history = contract["history_corrections"]
+    assert history["policy_id"] == "PORT-HISTORY-TRUTH-1"
+    assert history["owner_issue"] == 319
+    rows = history["corrections"]
+    assert len(rows) == 9
+    assert {
+        (row["strategy_id"], row["evidence_layer"])
+        for row in rows
+    } == {
+        ("robuxio-crypto", "PROVIDER_TRACK_RECORD"),
+        ("robuxio-crypto", "PROVIDER_LIVE"),
+        ("robuxio-crypto", "ACCOUNT_LIVE"),
+        ("p123-eu", "BACKTEST"),
+        ("p123-eu", "PROVIDER_LIVE"),
+        ("p123-eu", "ACCOUNT_LIVE"),
+        ("volatis-strategy", "BACKTEST"),
+        ("volatis-strategy", "PROVIDER_LIVE"),
+        ("volatis-strategy", "ACCOUNT_LIVE"),
+    }
+
+    robux_live = _history_correction(
+        contract, "robuxio-account-live-after-funding"
+    )
+    assert robux_live["funding_event"]["event_date"] == "2025-12-06"
+    assert robux_live["interval"]["observed_start"] == "2025-12-07"
+    assert robux_live["interval"]["assignment_date"] == "2025-08-26"
+    assert robux_live["mode_admission"] == {
+        "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
+        "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE",
+    }
+    robux_provider = _history_correction(
+        contract, "robuxio-provider-live-before-funding"
+    )
+    assert robux_provider["interval"]["observed_end"] == "2025-12-05"
+    assert set(robux_provider["mode_admission"].values()) == {
+        "EXCLUDE_COMPARISON_ONLY"
+    }
+
+    p123_provider = _history_correction(contract, "p123-eu-provider-live")
+    assert p123_provider["capture"]["status"] == "CAPTURED_GOVERNED"
+    assert p123_provider["strategy_version"]["compatibility"] == "EXACT_MATCH"
+    assert p123_provider["interval"]["observed_start"] == "2025-11-13"
+    assert _source(contract, "portfolio123-model-generation")["strategy_version"][
+        "version_refs"
+    ]["p123-eu"] == p123_provider["strategy_version"]["version_ref"]
+    p123_backtest = _history_correction(contract, "p123-eu-backtest-not-captured")
+    assert p123_backtest["history_existence"]["status"] == "EXISTS"
+    assert p123_backtest["capture"]["status"] == "NOT_CAPTURED"
+    assert p123_backtest["strategy_version"]["compatibility"] == "UNRESOLVED"
+
+    volatis_live = _history_correction(contract, "volatis-account-live")
+    assert volatis_live["funding_event"]["event_date"] == "2024-10-15"
+    assert volatis_live["interval"]["observed_start"] == "2024-10-16"
+    assert "EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE" in (
+        volatis_live["funding_event"]["authority"]
+    )
+    volatis_backtest = _history_correction(contract, "volatis-backtest-not-proved")
+    assert volatis_backtest["history_existence"]["status"] == "UNRESOLVED"
+    assert volatis_backtest["capture"]["status"] == "NOT_CAPTURED"
+    owner_versions = _source(contract, "owner-account-live-history")[
+        "strategy_version"
+    ]["version_refs"]
+    assert owner_versions == {
+        "p123-eu": p123_provider["strategy_version"]["version_ref"],
+        "robuxio-crypto": robux_live["strategy_version"]["version_ref"],
+        "volatis-strategy": volatis_live["strategy_version"]["version_ref"],
+    }
+    p123_live = _history_correction(contract, "p123-eu-account-live")
+    assert "INTERNAL_TRANSFER_IN" in p123_live["funding_event"]["authority"]
+    assert "ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT" in (
+        p123_live["funding_event"]["authority"]
+    )
+    assert "EXTERNAL_FLOW" not in p123_live["funding_event"]["authority"]
+    assert p123_provider["readiness"] == "REQUIRED_NOT_READY"
+    assert p123_provider["blockers"] == [320]
+
+
+def test_history_correction_omission_and_capture_conflation_fail() -> None:
+    missing = copy.deepcopy(_contract())
+    missing["history_corrections"]["corrections"].pop()
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="history correction layers differ"
+    ):
+        _validate(missing)
+
+    uncaptured_with_generation = copy.deepcopy(_contract())
+    row = _history_correction(
+        uncaptured_with_generation, "robuxio-provider-live-before-funding"
+    )
+    row["capture"]["status"] = "NOT_CAPTURED"
+    row["capture"]["capture_defect"] = "SYNTHETIC_MISSING_CAPTURE"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="uncaptured history asserts a generation",
+    ):
+        _validate(uncaptured_with_generation)
+
+
+def test_provider_history_cannot_be_relabelled_or_assignment_funded() -> None:
+    relabelled = copy.deepcopy(_contract())
+    provider = _history_correction(relabelled, "p123-eu-provider-live")
+    provider["mode_admission"]["LIVE_ONLY"] = "INCLUDE_SELECTED_LIVE"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="provider history was relabeled",
+    ):
+        _validate(relabelled)
+
+    assignment_funded = copy.deepcopy(_contract())
+    account = _history_correction(
+        assignment_funded, "robuxio-account-live-after-funding"
+    )
+    account["funding_event"]["authority"] = "ASSIGNMENT_DATE"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="assignment date cannot be funding authority",
+    ):
+        _validate(assignment_funded)
+
+
+def test_history_truth_recurrence_mutations_fail_closed() -> None:
+    p123_materialized = copy.deepcopy(_contract())
+    provider = _history_correction(p123_materialized, "p123-eu-provider-live")
+    provider["readiness"] = "READY"
+    provider["blockers"] = []
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="unaccepted return transform",
+    ):
+        _validate(p123_materialized)
+
+    p123_external = copy.deepcopy(_contract())
+    account = _history_correction(p123_external, "p123-eu-account-live")
+    account["funding_event"]["authority"] = "FIRST_HASH_BOUND_IBKR_EXTERNAL_FLOW"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="misclassified as external capital",
+    ):
+        _validate(p123_external)
+
+    early_volatis = copy.deepcopy(_contract())
+    account = _history_correction(early_volatis, "volatis-account-live")
+    account["funding_event"]["event_date"] = "2024-10-13"
+    account["funding_event"]["account_live_start"] = "2024-10-13"
+    account["interval"]["effective_start"] = "2024-10-13"
+    account["interval"]["observed_start"] = "2024-10-14"
+    strategy = next(
+        row
+        for row in early_volatis["strategies"]
+        if row["strategy_id"] == "volatis-strategy"
+    )
+    strategy["funded_membership"]["effective_start"] = "2024-10-13"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="valued governed evidence",
+    ):
+        _validate(early_volatis)
+
+
+def test_incompatible_backtest_splice_and_unbound_generation_fail() -> None:
+    spliced = copy.deepcopy(_contract())
+    backtest = _history_correction(spliced, "p123-eu-backtest-not-captured")
+    backtest["mode_admission"]["LIVE_PLUS_BACKTEST"] = (
+        "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="incompatible backtest entered hybrid mode",
+    ):
+        _validate(spliced)
+
+    unbound = copy.deepcopy(_contract())
+    provider = _history_correction(unbound, "p123-eu-provider-live")
+    provider["source_receipts"][0]["sha256"] = "0" * 64
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="history generation is not receipt-bound",
+    ):
+        _validate(unbound)
+
+
+def test_history_receipts_resolve_to_governed_bytes_and_reject_coherent_rewrite(
+    tmp_path: Path,
+) -> None:
+    authority = tmp_path / "matrixport-authority"
+    generation_id = "1" * 64
+    generation_root = authority / "generations" / generation_id
+    artifact_path = generation_root / "csv" / "subscription_details.csv"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_bytes(b"synthetic governed receipt bytes\n")
+    artifact_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    manifest_path = generation_root / "generation.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "artifacts": [
+                    {
+                        "artifact_id": "csv/subscription_details.csv",
+                        "sha256": artifact_sha,
+                        "size_bytes": artifact_path.stat().st_size,
+                    }
+                ],
+                "generation_id": generation_id,
+                "verification": "VERIFIED",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    pointer_path = authority / "CURRENT.json"
+    pointer_path.write_text(
+        json.dumps(
+            {
+                "generation_id": generation_id,
+                "manifest_sha256": manifest_sha,
+                "state": "PUBLISHED",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    pointer_sha = hashlib.sha256(pointer_path.read_bytes()).hexdigest()
+    receipts = [
+        {
+            "artifact_role": "synthetic-current-pointer",
+            "artifact_selector": "CURRENT.json",
+            "authority_root": "MATRIXPORT",
+            "generation_id": generation_id,
+            "locator_kind": "CURRENT_POINTER",
+            "manifest_artifact_id": None,
+            "sha256": pointer_sha,
+        },
+        {
+            "artifact_role": "synthetic-generation-manifest",
+            "artifact_selector": f"generations/{generation_id}/generation.json",
+            "authority_root": "MATRIXPORT",
+            "generation_id": generation_id,
+            "locator_kind": "GENERATION_MANIFEST",
+            "manifest_artifact_id": None,
+            "sha256": manifest_sha,
+        },
+        {
+            "artifact_role": "synthetic-secondary-artifact",
+            "artifact_selector": (
+                f"generations/{generation_id}/csv/subscription_details.csv"
+            ),
+            "authority_root": "MATRIXPORT",
+            "generation_id": generation_id,
+            "locator_kind": "GENERATION_ARTIFACT",
+            "manifest_artifact_id": "csv/subscription_details.csv",
+            "sha256": artifact_sha,
+        },
+    ]
+    minimal = {
+        "history_corrections": {"corrections": [{"source_receipts": receipts}]}
+    }
+    assert contract_tool.verify_history_evidence(
+        minimal, {"MATRIXPORT": authority}
+    )["verified_receipts"] == 3
+
+    invented_artifact = copy.deepcopy(minimal)
+    invented_artifact["history_corrections"]["corrections"][0][
+        "source_receipts"
+    ][2]["sha256"] = "a" * 64
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="differs from governed evidence bytes",
+    ):
+        contract_tool.verify_history_evidence(
+            invented_artifact, {"MATRIXPORT": authority}
+        )
+
+    coherent_rewrite = copy.deepcopy(minimal)
+    for receipt in coherent_rewrite["history_corrections"]["corrections"][0][
+        "source_receipts"
+    ]:
+        receipt["generation_id"] = "b" * 64
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="not the published current authority",
+    ):
+        contract_tool.verify_history_evidence(
+            coherent_rewrite, {"MATRIXPORT": authority}
+        )
 
 
 def test_outcome_semantics_and_provider_layers_are_runtime_gates() -> None:
@@ -543,6 +842,24 @@ def test_source_strategy_version_and_cost_are_explicit() -> None:
     }
     with pytest.raises(
         contract_tool.FinancialMvpContractError, match="asserts unresolved"
+    ):
+        _validate(mutated)
+
+    mutated = copy.deepcopy(contract)
+    p123 = _source(mutated, "portfolio123-model-generation")
+    p123["subjects"]["strategy_ids"].remove("p123-eu")
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="version refs outside its subjects"
+    ):
+        _validate(mutated)
+
+    mutated = copy.deepcopy(contract)
+    _source(mutated, "portfolio123-model-generation")["strategy_version"][
+        "version_refs"
+    ] = {}
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="claims evidenced versions without identities",
     ):
         _validate(mutated)
 
@@ -693,7 +1010,7 @@ def test_required_not_ready_needs_blocker_and_ready_needs_generation() -> None:
         _validate(contract)
 
     contract = copy.deepcopy(_contract())
-    source = _source(contract, "portfolio123-model-generation")
+    source = _source(contract, "provider-live-history")
     source["readiness"] = "READY"
     with pytest.raises(
         contract_tool.FinancialMvpContractError, match="lacks a current generation"
@@ -712,15 +1029,16 @@ def test_required_not_ready_needs_blocker_and_ready_needs_generation() -> None:
 
 def test_capture_generation_invariants_fail_closed() -> None:
     contract = copy.deepcopy(_contract())
-    source = _source(contract, "portfolio123-model-generation")
+    source = _source(contract, "provider-live-history")
     source["capture_status"] = "CAPTURED_GOVERNED"
+    source["existence_status"] = "EXISTS"
     with pytest.raises(
         contract_tool.FinancialMvpContractError, match="immutable generation"
     ):
         _validate(contract)
 
     contract = copy.deepcopy(_contract())
-    source = _source(contract, "portfolio123-model-generation")
+    source = _source(contract, "provider-live-history")
     source["current_generation"] = {
         "generation_id": "a" * 64,
         "sha256": "b" * 64,
@@ -845,6 +1163,16 @@ def test_generated_views_are_deterministic_and_match_authoritative_bytes(
 
     matrix = json.loads(first.source_matrix_json)
     rows = matrix["rows"]
+    assert matrix["history_corrections"] == contract["history_corrections"]
+    assert b"## Truthful strategy-history corrections \xe2\x80\x94 #319" in (
+        first.summary_markdown
+    )
+    assert b"robuxio-account-live-after-funding" in first.summary_markdown
+    assert b"MATRIXPORT:output/20260816T141010.494Z/csv/subscription_details.csv" in (
+        first.summary_markdown
+    )
+    assert b"p123-eu-provider-live" in first.summary_markdown
+    assert b"volatis-backtest-not-proved" in first.summary_markdown
     receipts = _outcome(contract, "INVESTED_CAPITAL")["calculation_contract"][
         "owner_decision_receipts"
     ]

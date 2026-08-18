@@ -241,17 +241,60 @@ def _p123_generation(path: Path) -> None:
                     "inceptionDt": "2025-11-12",
                     "strategyTotalHoldCount": "13",
                     "posCnt": "13",
-                }
+                },
+                {
+                    "name": "Based on EU multifactor microcap model",
+                    "assetName": "EU multifactor microcap model",
+                    "assetUid": exact_id,
+                    "portfolioUid": "exact-eu-live-book",
+                    "isAccountLive": "True",
+                    "currency": "USD",
+                    "inceptionDt": "2025-11-12",
+                    "strategyTotalHoldCount": "13",
+                    "posCnt": "13",
+                },
+                {
+                    "name": "Based on EU multifactor microcap model",
+                    "assetName": "EU multifactor microcap model",
+                    "assetUid": exact_id,
+                    "portfolioUid": "exact-eu-live-book",
+                    "isAccountLive": "True",
+                    "currency": "USD",
+                    "inceptionDt": "2025-11-12",
+                    "strategyTotalHoldCount": "13",
+                    "posCnt": "13",
+                },
             ]
         ),
         "har_equity_curve.parquet": pa.Table.from_pylist(
             [
                 {
+                    "_entity_id": exact_id,
+                    "Date": "2025-11-13",
+                    "Total Equity": "100",
+                    "Cash Added": "100",
+                    "# Positions": "13",
+                },
+                {
+                    "_entity_id": exact_id,
+                    "Date": "2025-11-14",
+                    "Total Equity": "101",
+                    "Cash Added": "101",
+                    "# Positions": "13",
+                },
+                {
+                    "_entity_id": exact_id,
+                    "Date": "2025-11-15",
+                    "Total Equity": "99",
+                    "Cash Added": "99",
+                    "# Positions": "13",
+                },
+                {
                     "_entity_id": "different-eu-book",
                     "Date": "1999-01-01",
-                    "100 EUR Ret": "100",
-                    "100 USD Ret": "100",
                     "# Positions": "100",
+                    "Total Equity": "100",
+                    "Cash Added": "0",
                 }
             ]
         ),
@@ -331,11 +374,12 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
     rows = list(history.csv.DictReader(io.StringIO(returns_content.decode("utf-8"))))
 
     assert manifest["verification"] == "VERIFIED"
+    assert manifest["builder"] == "portfolio-strategy-history"
+    assert manifest["builder_version"] == "1.2.0"
     assert {item["series_id"] for item in manifest["series"]} == {
         "GrizzlyBears VTMA",
         "QSI",
         "TT Portfolio",
-        "Volatis Strategy",
     }
     assert {row["evidence_layer"] for row in rows} == {"BACKTEST"}
     assert (
@@ -352,17 +396,30 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
         qsi_manifest["daily_reconstruction_validation"]["price_shape_correlation"]
         > 0.999
     )
-    assert len([row for row in rows if row["series_id"] == "Volatis Strategy"]) == 3
     dispositions = {
         item["series_id"]: item for item in manifest["history_dispositions"]
     }
     assert dispositions["EU [P123]"]["status"] == (
-        "EXPORT_DEFECT_EXACT_CONNECTED_MODEL_NOT_CAPTURED"
+        "CAPTURED_EXACT_CONNECTED_MODEL_PROVIDER_LIVE_TRANSFORM_REQUIRED"
     )
     assert dispositions["EU [P123]"]["required_for_analysis"] is True
+    assert dispositions["EU [P123]"]["exact_equity_curve_rows"] == 3
+    assert dispositions["EU [P123]"]["provider_live"] == {
+        "cash_added_semantics": "UNRESOLVED_RETURN_TRANSFORM",
+        "observed_end": "2025-11-15",
+        "observed_start": "2025-11-13",
+        "raw_observations": 3,
+        "return_observations": 0,
+    }
     assert (
         dispositions["EU [P123]"]["retained_but_not_admitted"][0]["return_observations"]
         == 1
+    )
+    assert dispositions["Volatis Strategy"]["status"] == (
+        "CAPTURED_PROVIDER_LIVE_NOT_BACKTEST"
+    )
+    assert dispositions["Volatis Strategy"]["history_status"] == (
+        "UNAVAILABLE_BACKTEST_NOT_PROVED"
     )
     assert (
         dispositions["Growth at Market Pivot Points [EchoTrade]"][
@@ -374,6 +431,36 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
         dispositions["[Composer] - The Holy Grail (Buy Copy)"]["required_for_analysis"]
         is False
     )
+
+
+def test_p123_conflicting_connected_model_metadata_fails_closed(
+    tmp_path: Path,
+) -> None:
+    generation = tmp_path / "p123-generation"
+    _p123_generation(generation)
+    metadata_path = generation / "tables" / "har_managed_metadata.parquet"
+    metadata = pq.read_table(metadata_path).to_pylist()
+    conflicting = dict(metadata[0])
+    conflicting["portfolioUid"] = "conflicting-live-book"
+    pq.write_table(pa.Table.from_pylist([*metadata, conflicting]), metadata_path)
+
+    digest, size = history._sha256(metadata_path)
+    manifest_path = generation / "generation.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact = next(
+        row
+        for row in manifest["artifacts"]
+        if row["artifact_id"] == "tables/har_managed_metadata.parquet"
+    )
+    artifact["sha256"] = digest
+    artifact["size_bytes"] = size
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(
+        history.StrategyHistoryError,
+        match="connected EU model metadata is not unique",
+    ):
+        history._p123_history_dispositions(generation)
 
 
 def test_grizzly_lineage_separates_futures_design_from_live_spxl(
