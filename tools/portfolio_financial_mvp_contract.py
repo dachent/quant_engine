@@ -2102,7 +2102,8 @@ def _validate_history_corrections(
         or derived_returns != raw_levels - 1
         or not isinstance(equity_overlap, int)
         or isinstance(equity_overlap, bool)
-        or equity_overlap != raw_levels
+        or equity_overlap < 2
+        or equity_overlap > raw_levels
         or (
             p123_identity.get("observed_start"),
             p123_identity.get("observed_end"),
@@ -3923,6 +3924,9 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
         evidence_identity_text = (
             f"{derived_identity['raw_level_observations']} levels / "
             f"{derived_identity['return_observations']} returns / "
+            f"{derived_identity['equity_overlap_observations']} equity overlaps / "
+            f"{derived_identity['calendar']} / Cash Added: "
+            f"{derived_identity['cash_added_treatment']} / "
             f"{derived_identity['transform_id']}"
             if isinstance(derived_identity, dict)
             else rejected_identity_text

@@ -121,7 +121,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "540291e750eda7e2428d7e9fbbf80eac8a7155064c1d04089705c90aa5a51ef2"
+        "7f870c630b2cb570a6a51df2257f6be47a60f170ae92c063e2fc9fddca59ccb0"
     )
 
 
@@ -668,10 +668,17 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "equity_overlap_observations": 157,
         "observed_end": "2026-08-13",
         "observed_start": "2025-11-13",
-        "raw_level_observations": 157,
-        "return_observations": 156,
+        "raw_level_observations": 197,
+        "return_observations": 196,
         "transform_id": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
     }
+    rendered_history = contract_tool.render_views(contract).summary_markdown
+    assert (
+        b"197 levels / 196 returns / 157 equity overlaps / "
+        b"WEEKDAY_SOURCE_CALENDAR / Cash Added: "
+        b"UNRESOLVED_NOT_USED_IN_RETURN_FORMULA / "
+        b"P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1" in rendered_history
+    )
     assert (
         _source(contract, "portfolio123-model-generation")["strategy_version"][
             "version_refs"
@@ -847,6 +854,15 @@ def test_history_truth_recurrence_mutations_fail_closed() -> None:
         match="derived evidence identity differs",
     ):
         _validate(p123_rewritten_identity)
+
+    p123_impossible_overlap = copy.deepcopy(_contract())
+    provider = _history_correction(p123_impossible_overlap, "p123-eu-provider-live")
+    provider["derived_evidence_identity"]["equity_overlap_observations"] = 198
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="derived evidence identity differs",
+    ):
+        _validate(p123_impossible_overlap)
 
     p123_external = copy.deepcopy(_contract())
     account = _history_correction(p123_external, "p123-eu-account-live")
