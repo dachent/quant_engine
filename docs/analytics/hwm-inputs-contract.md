@@ -81,7 +81,7 @@ than trusted as caller labels. Every event binds its classification authority,
 canonical UTC effective time, source timezone, original amount/currency,
 event-time FX authority/rate, exact USD amount, and correction/reversal
 lineage. All PORT-HWM-4 arithmetic, including FX conversion, runs under the
-policy's explicit 34-digit half-even decimal context and cannot inherit a
+kernel's explicit existing 34-digit half-even decimal context and cannot inherit a
 caller's ambient context. Opening contributed basis is admitted at most once
 and only at the exact funded-membership opening boundary. Internal transfers
 carry reciprocal group/counterparty identities; ordinary pairs share one

@@ -1406,6 +1406,7 @@ def _compute_as_held_composite_hwm(
             first["counterparty_strategy_id"] != second["strategy_id"]
             or second["counterparty_strategy_id"] != first["strategy_id"]
             or first["usd_amount_decimal"] + second["usd_amount_decimal"] != 0
+            or first["event_type"] != second["event_type"]
         ):
             raise HwmCoverageError("HWM internal transfer pairing differs")
         if first["interval_id"] == second["interval_id"]:
@@ -2382,6 +2383,17 @@ def as_held_hwm_receipt(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _validate_as_held_hwm_receipt_semantics(receipt: Mapping[str, Any]) -> None:
+    """Validate receipt arithmetic under the same fixed context as calculation."""
+
+    with localcontext() as ctx:
+        ctx.prec = 34
+        ctx.rounding = ROUND_HALF_EVEN
+        _validate_as_held_hwm_receipt_semantics_in_context(receipt)
+
+
+def _validate_as_held_hwm_receipt_semantics_in_context(
+    receipt: Mapping[str, Any],
+) -> None:
     """Reject internally contradictory receipts even after a coherent rehash."""
 
     if (

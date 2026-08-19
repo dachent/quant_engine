@@ -149,7 +149,29 @@
         },
         "classification_authority_sha256": {"$ref": "#/$defs/sha256"},
         "event_evidence_sha256": {"$ref": "#/$defs/sha256"}
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "capital_treatment": {"const": "INTERNAL_TRANSFER"}
+            },
+            "required": ["capital_treatment"]
+          },
+          "then": {
+            "properties": {
+              "transfer_group_id": {"type": "string", "minLength": 1},
+              "counterparty_strategy_id": {"type": "string", "minLength": 1}
+            }
+          },
+          "else": {
+            "properties": {
+              "transfer_group_id": {"type": "null"},
+              "counterparty_strategy_id": {"type": "null"}
+            }
+          }
+        }
+      ]
     }
   }
 }

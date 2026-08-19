@@ -1216,6 +1216,29 @@ def test_as_held_hwm_receipt_is_deterministic_and_tamper_evident() -> None:
     assert set(generation_schema["$defs"]["flow_event"]["required"]) == set(
         flow_generation["flow_events"][0]
     )
+    assert generation_schema["$defs"]["flow_event"]["allOf"] == [
+        {
+            "if": {
+                "properties": {"capital_treatment": {"const": "INTERNAL_TRANSFER"}},
+                "required": ["capital_treatment"],
+            },
+            "then": {
+                "properties": {
+                    "transfer_group_id": {"type": "string", "minLength": 1},
+                    "counterparty_strategy_id": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                }
+            },
+            "else": {
+                "properties": {
+                    "transfer_group_id": {"type": "null"},
+                    "counterparty_strategy_id": {"type": "null"},
+                }
+            },
+        }
+    ]
     assert receipt["current_index"] == "93.6"
     assert receipt["current_hwm"] == "104"
     assert receipt["maximum_drawdown"] == "-0.1"
@@ -1322,7 +1345,7 @@ def test_as_held_hwm_rejects_wrong_non_usd_fx_conversion() -> None:
 
 
 def test_as_held_hwm_fx_validation_uses_fixed_decimal_context() -> None:
-    from decimal import ROUND_DOWN, getcontext
+    from decimal import ROUND_DOWN, getcontext, localcontext
 
     fixture = _single_strategy_flow_fixture()
     product_sha256 = hashlib.sha256(fixture["product_contract_bytes"]).hexdigest()
@@ -1352,17 +1375,57 @@ def test_as_held_hwm_fx_validation_uses_fixed_decimal_context() -> None:
     fixture["_flow_events_override"] = [event]
     _refresh_fixture_authorities(fixture)
 
+    precise = _as_held_hwm_fixture()
+    precise["accepted_intervals"] = precise["accepted_intervals"][:1]
+    precise["component_periods"] = []
+    with localcontext() as context:
+        context.prec = 34
+        precise["component_periods"] = [
+            _as_held_component(
+                "strategy-a",
+                "d1",
+                "2026-08-10",
+                "2026-08-11",
+                "1.0000000000000000000000000001",
+                "0",
+            ),
+            _as_held_component(
+                "strategy-b",
+                "d1",
+                "2026-08-10",
+                "2026-08-11",
+                "1.0000000000000000000000000002",
+                "0",
+            ),
+        ]
+    precise["complete_through"] = "2026-08-11"
+    precise["evaluated_on"] = "2026-08-11"
+    _refresh_fixture_authorities(precise)
+    precise_result = _compute_as_held(precise)
+
     saved_prec = getcontext().prec
     saved_rounding = getcontext().rounding
     try:
         getcontext().prec = 5
         getcontext().rounding = ROUND_DOWN
         result = _compute_as_held(fixture)
+        precise_receipt = as_held_hwm_receipt(precise_result)
+        as_held_hwm_receipt_bytes(precise_result)
+        verify_as_held_hwm_receipt(
+            precise_receipt,
+            policy_bytes=precise["policy_bytes"],
+            product_contract_bytes=precise["product_contract_bytes"],
+            performance_policy_bytes=precise["performance_policy_bytes"],
+            legacy_policy_bytes=precise["legacy_policy_bytes"],
+            calendar_bytes=precise["calendar_bytes"],
+            input_generation_bytes=precise["input_generation_bytes"],
+        )
     finally:
         getcontext().prec = saved_prec
         getcontext().rounding = saved_rounding
 
     assert result["current_index"] == Decimal("100")
+    assert precise_receipt["current_index"] == "100"
 
 
 def test_as_held_hwm_rejects_opening_basis_after_membership_start() -> None:
@@ -1642,6 +1705,14 @@ def test_as_held_hwm_internal_transfer_does_not_change_composite() -> None:
         row["index"] for row in baseline["index_path"]
     ]
     assert transferred["periods"][1]["total_beginning_capital_usd"] == Decimal("1040")
+
+    mixed_pair = deepcopy(fixture)
+    mixed_events = json.loads(mixed_pair["input_generation_bytes"])["flow_events"]
+    mixed_events[0]["event_type"] = "PREDECESSOR_TRANSITION"
+    mixed_pair["_flow_events_override"] = mixed_events
+    _refresh_fixture_authorities(mixed_pair)
+    with pytest.raises(HwmCoverageError, match="internal transfer pairing differs"):
+        _compute_as_held(mixed_pair)
 
 
 def test_as_held_hwm_rejects_unpaired_internal_transfer() -> None:
