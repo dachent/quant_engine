@@ -232,12 +232,15 @@ Verification evaluates the receipt separately from calculation data age.
 immutable receipt and emit `WARN_VERIFIED_IMMUTABLE_RECEIPT_REUSE` with the
 receipt date and age. `RELEASE_QC` requires a receipt whose `as_of_date` equals
 `--evaluated-on`. This operational receipt warning never advances a financial
-as-of date: each calculation still uses its exact latest common complete date
-and reports `WARN_COMPLETE_DATA_AGE` when that boundary exceeds its threshold.
-Missing evidence, gaps, and version incompatibility remain fail-closed in every
-profile. An unavailable mode fails acceptance when selected with
-`--require-mode`; otherwise its exact `REQUIRED_NOT_READY` disposition remains
-visible for scheduling and remediation.
+as-of date. Development and workstation calculations still use their exact
+latest common complete date and report `WARN_COMPLETE_DATA_AGE` when that
+boundary exceeds its threshold. The current decomposition `RELEASE_QC`
+consumer additionally rejects a source beyond its age threshold; receipt
+verification does not weaken or bypass that downstream gate. Missing evidence,
+gaps, and version incompatibility remain fail-closed in every profile. An
+unavailable mode fails acceptance when selected with `--require-mode`;
+otherwise its exact `REQUIRED_NOT_READY` disposition remains visible for
+scheduling and remediation.
 
 Recompute the separate trade/implementation evidence for AI Factor,
 GrizzlyBears, and TuringTrader. Portfolio123 remains HAR-first; this command
