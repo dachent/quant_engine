@@ -49,9 +49,7 @@
     "return_basis": {
       "const": "LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL"
     },
-    "assurance_profile": {
-      "enum": ["DEVELOPMENT", "WORKSTATION_QC", "RELEASE_QC"]
-    },
+    "assurance_profile": {"const": "DEVELOPMENT"},
     "evaluated_on": {"type": "string", "format": "date"},
     "complete_through": {"type": "string", "format": "date"},
     "calculation_age_days": {"type": "integer", "minimum": 0},

@@ -84,6 +84,8 @@
         "usd_amount",
         "correction_kind",
         "related_event_id",
+        "transfer_group_id",
+        "counterparty_strategy_id",
         "classification_authority_sha256",
         "event_evidence_sha256"
       ],
@@ -137,6 +139,12 @@
           "enum": ["ORIGINAL", "SOURCE_CORRECTION", "ECONOMIC_REVERSAL"]
         },
         "related_event_id": {
+          "oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]
+        },
+        "transfer_group_id": {
+          "oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]
+        },
+        "counterparty_strategy_id": {
           "oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]
         },
         "classification_authority_sha256": {"$ref": "#/$defs/sha256"},

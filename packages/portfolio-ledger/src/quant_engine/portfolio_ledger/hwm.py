@@ -766,6 +766,44 @@ def compute_as_held_composite_hwm(
     maximum_age_days: int,
     assurance_profile: str,
 ) -> dict[str, Any]:
+    """Calculate PORT-HWM-4 under one explicit decimal arithmetic context."""
+
+    with localcontext() as ctx:
+        ctx.prec = 34
+        ctx.rounding = ROUND_HALF_EVEN
+        return _compute_as_held_composite_hwm(
+            accepted_intervals,
+            memberships,
+            component_periods,
+            policy_bytes=policy_bytes,
+            product_contract_bytes=product_contract_bytes,
+            performance_policy_bytes=performance_policy_bytes,
+            legacy_policy_bytes=legacy_policy_bytes,
+            calendar_bytes=calendar_bytes,
+            input_generation_bytes=input_generation_bytes,
+            evaluated_on=evaluated_on,
+            complete_through=complete_through,
+            maximum_age_days=maximum_age_days,
+            assurance_profile=assurance_profile,
+        )
+
+
+def _compute_as_held_composite_hwm(
+    accepted_intervals: Sequence[Mapping[str, Any]],
+    memberships: Sequence[Mapping[str, Any]],
+    component_periods: Sequence[Mapping[str, Any]],
+    *,
+    policy_bytes: bytes,
+    product_contract_bytes: bytes,
+    performance_policy_bytes: bytes,
+    legacy_policy_bytes: bytes,
+    calendar_bytes: bytes,
+    input_generation_bytes: bytes,
+    evaluated_on: str,
+    complete_through: str,
+    maximum_age_days: int,
+    assurance_profile: str,
+) -> dict[str, Any]:
     """Calculate the governed as-held composite HWM under ``PORT-HWM-4``.
 
     The caller supplies the accepted common interval sequence.  This kernel
@@ -1010,6 +1048,8 @@ def compute_as_held_composite_hwm(
         "usd_amount",
         "correction_kind",
         "related_event_id",
+        "transfer_group_id",
+        "counterparty_strategy_id",
         "classification_authority_sha256",
         "event_evidence_sha256",
     }
@@ -1026,6 +1066,31 @@ def compute_as_held_composite_hwm(
             or event["capital_treatment"] != expected_treatment
         ):
             raise HwmCoverageError("HWM input flow event classification differs")
+        strategy_id = _text(event["strategy_id"], "flow_event.strategy_id")
+        interval_id = _text(event["interval_id"], "flow_event.interval_id")
+        subperiod_id = _text(event["subperiod_id"], "flow_event.subperiod_id")
+        transfer_group_id = (
+            None
+            if event["transfer_group_id"] is None
+            else _text(event["transfer_group_id"], "flow_event.transfer_group_id")
+        )
+        counterparty_strategy_id = (
+            None
+            if event["counterparty_strategy_id"] is None
+            else _text(
+                event["counterparty_strategy_id"],
+                "flow_event.counterparty_strategy_id",
+            )
+        )
+        if expected_treatment == "INTERNAL_TRANSFER":
+            if (
+                transfer_group_id is None
+                or counterparty_strategy_id is None
+                or counterparty_strategy_id == strategy_id
+            ):
+                raise HwmCoverageError("HWM internal transfer pairing differs")
+        elif transfer_group_id is not None or counterparty_strategy_id is not None:
+            raise HwmCoverageError("non-transfer HWM event has transfer pairing")
         effective_at = _canonical_utc_timestamp(
             event["effective_at_utc"], "flow_event.effective_at_utc"
         )
@@ -1042,7 +1107,9 @@ def compute_as_held_composite_hwm(
             raise HwmCoverageError("HWM input flow event currency differs")
         fx_rate = _decimal(event["fx_rate_to_usd"], "flow_event.fx_rate_to_usd")
         usd_amount = _decimal(event["usd_amount"], "flow_event.usd_amount")
-        if fx_rate <= 0 or original_amount * fx_rate != usd_amount:
+        if fx_rate <= 0 or Fraction(original_amount) * Fraction(fx_rate) != Fraction(
+            usd_amount
+        ):
             raise HwmCoverageError("HWM input flow event FX conversion differs")
         fx_authority_id = _text(event["fx_authority_id"], "flow_event.fx_authority_id")
         fx_generation_sha256 = _sha256(
@@ -1077,9 +1144,9 @@ def compute_as_held_composite_hwm(
             raise HwmCoverageError("HWM corrected flow event lacks lineage")
         normalized_without_evidence = {
             "event_id": event_id,
-            "strategy_id": _text(event["strategy_id"], "flow_event.strategy_id"),
-            "interval_id": _text(event["interval_id"], "flow_event.interval_id"),
-            "subperiod_id": _text(event["subperiod_id"], "flow_event.subperiod_id"),
+            "strategy_id": strategy_id,
+            "interval_id": interval_id,
+            "subperiod_id": subperiod_id,
             "event_type": event_type,
             "capital_treatment": expected_treatment,
             "effective_at_utc": _text(
@@ -1097,6 +1164,8 @@ def compute_as_held_composite_hwm(
             "usd_amount": _decimal_text(usd_amount),
             "correction_kind": correction_kind,
             "related_event_id": related_event_id,
+            "transfer_group_id": transfer_group_id,
+            "counterparty_strategy_id": counterparty_strategy_id,
             "classification_authority_sha256": classification_authority_sha256,
         }
         evidence_sha256 = _sha256(
@@ -1286,6 +1355,91 @@ def compute_as_held_composite_hwm(
         raise HwmCoverageError("membership has no effective accepted interval")
     if any(not members for members in active_members_by_interval.values()):
         raise HwmCoverageError("accepted interval has no effective members")
+
+    interval_order = {
+        item["interval_id"]: index for index, item in enumerate(normalized_intervals)
+    }
+    effective_flow_events = [
+        event
+        for event in normalized_flow_events
+        if event["event_id"] not in source_correction_target_ids
+    ]
+    opening_event_ids: set[str] = set()
+    opening_basis_strategies: set[str] = set()
+    transfer_events_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for event in effective_flow_events:
+        interval = interval_by_id.get(event["interval_id"])
+        membership = membership_by_strategy.get(event["strategy_id"])
+        if interval is None or membership is None:
+            raise HwmCoverageError("HWM flow event authority reference differs")
+        if event["event_type"] == "OPENING_BASIS" and event["correction_kind"] in {
+            "ORIGINAL",
+            "SOURCE_CORRECTION",
+        }:
+            opening_boundary = datetime(
+                interval["start_date"].year,
+                interval["start_date"].month,
+                interval["start_date"].day,
+                tzinfo=timezone.utc,
+            )
+            if (
+                event["strategy_id"] in opening_basis_strategies
+                or membership["start_date"] != interval["start_date"]
+                or event["effective_at"] != opening_boundary
+                or event["timing_basis"] != "EXACT_TIMESTAMP"
+            ):
+                raise HwmCoverageError(
+                    "opening basis differs from funded membership start"
+                )
+            opening_basis_strategies.add(event["strategy_id"])
+            opening_event_ids.add(event["event_id"])
+        if event["capital_treatment"] == "INTERNAL_TRANSFER":
+            if event["usd_amount_decimal"] == 0:
+                raise HwmCoverageError("HWM internal transfer amount differs")
+            transfer_events_by_group[event["transfer_group_id"]].append(event)
+
+    for transfer_group_id, events in transfer_events_by_group.items():
+        if len(events) != 2:
+            raise HwmCoverageError("HWM internal transfer pairing differs")
+        first, second = events
+        if (
+            first["counterparty_strategy_id"] != second["strategy_id"]
+            or second["counterparty_strategy_id"] != first["strategy_id"]
+            or first["usd_amount_decimal"] + second["usd_amount_decimal"] != 0
+        ):
+            raise HwmCoverageError("HWM internal transfer pairing differs")
+        if first["interval_id"] == second["interval_id"]:
+            if first["effective_at"] != second["effective_at"]:
+                raise HwmCoverageError("HWM internal transfer timing differs")
+            continue
+        negative = first if first["usd_amount_decimal"] < 0 else second
+        positive = second if negative is first else first
+        negative_interval = interval_by_id[negative["interval_id"]]
+        positive_interval = interval_by_id[positive["interval_id"]]
+        boundary = datetime(
+            negative_interval["end_date"].year,
+            negative_interval["end_date"].month,
+            negative_interval["end_date"].day,
+            tzinfo=timezone.utc,
+        )
+        if (
+            {negative["event_type"], positive["event_type"]}
+            != {"PREDECESSOR_TRANSITION"}
+            or interval_order[positive["interval_id"]]
+            != interval_order[negative["interval_id"]] + 1
+            or negative_interval["end_date"] != positive_interval["start_date"]
+            or membership_by_strategy[negative["strategy_id"]]["end_date"]
+            != negative_interval["end_date"]
+            or membership_by_strategy[positive["strategy_id"]]["start_date"]
+            != positive_interval["start_date"]
+            or negative["effective_at"] != boundary
+            or positive["effective_at"] != boundary
+            or positive["timing_basis"] != "EXACT_TIMESTAMP"
+        ):
+            raise HwmCoverageError(
+                f"predecessor transfer group {transfer_group_id} boundary differs"
+            )
+        opening_event_ids.add(positive["event_id"])
 
     component_keys = {
         "strategy_id",
@@ -1546,7 +1700,13 @@ def compute_as_held_composite_hwm(
                 (strategy_id, interval_id, subperiod_id), []
             )
             if any(
-                event["effective_at"] != subperiod_end for event in effective_events
+                event["effective_at"]
+                != (
+                    subperiod_start
+                    if event["event_id"] in opening_event_ids
+                    else subperiod_end
+                )
+                for event in effective_events
             ):
                 raise HwmCoverageError("HWM flow event effective time differs")
             derived_external_flow = sum(
@@ -1554,6 +1714,7 @@ def compute_as_held_composite_hwm(
                     event["usd_amount_decimal"]
                     for event in effective_events
                     if event["capital_treatment"] == "EXTERNAL_FLOW"
+                    and event["event_id"] not in opening_event_ids
                 ),
                 Decimal("0"),
             )
@@ -1562,6 +1723,7 @@ def compute_as_held_composite_hwm(
                     event["usd_amount_decimal"]
                     for event in effective_events
                     if event["capital_treatment"] == "INTERNAL_TRANSFER"
+                    and event["event_id"] not in opening_event_ids
                 ),
                 Decimal("0"),
             )
@@ -2009,25 +2171,6 @@ def compute_as_held_composite_hwm(
     if evidence_registry != used_evidence_sha256s:
         raise HwmCoverageError("HWM input evidence registry coverage differs")
 
-    for interval_id, members in active_members_by_interval.items():
-        transfer_total = sum(
-            (
-                _decimal(
-                    component_by_key[(interval_id, strategy_id)][
-                        "internal_transfer_usd"
-                    ],
-                    "component.internal_transfer_usd",
-                )
-                for strategy_id in members
-            ),
-            Decimal("0"),
-        )
-        if transfer_total != 0:
-            raise HwmCoverageError("internal transfers do not net to zero")
-
-    interval_order = {
-        item["interval_id"]: index for index, item in enumerate(normalized_intervals)
-    }
     for strategy_id, components in components_by_strategy.items():
         ordered = sorted(
             components, key=lambda item: interval_order[item["interval_id"]]

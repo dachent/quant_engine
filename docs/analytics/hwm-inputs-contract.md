@@ -80,8 +80,16 @@ margin principal and financing cost are rederived from typed events rather
 than trusted as caller labels. Every event binds its classification authority,
 canonical UTC effective time, source timezone, original amount/currency,
 event-time FX authority/rate, exact USD amount, and correction/reversal
-lineage. Dividends, interest, reinvestment, fees, taxes, expenses and rebates
-remain investment results; they cannot become owner flows. Exact-timestamp
+lineage. All PORT-HWM-4 arithmetic, including FX conversion, runs under the
+policy's explicit 34-digit half-even decimal context and cannot inherit a
+caller's ambient context. Opening contributed basis is admitted at most once
+and only at the exact funded-membership opening boundary. Internal transfers
+carry reciprocal group/counterparty identities; ordinary pairs share one
+interval, while an admitted predecessor exit and successor entry may pair
+across exactly one adjacent membership boundary without adding the successor
+to the predecessor's as-held weights. Dividends, interest, reinvestment, fees,
+taxes, expenses and rebates remain investment results; they cannot become
+owner flows. Exact-timestamp
 events are represented as contiguous timestamped subperiods; date-only events
 enter after the single daily subperiod. The kernel proves
 `net NAV = gross assets - financing liability` at

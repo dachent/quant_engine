@@ -740,6 +740,8 @@ def _fixture_flow_events(
                     "usd_amount": _fixture_decimal_text(amount),
                     "correction_kind": "ORIGINAL",
                     "related_event_id": None,
+                    "transfer_group_id": None,
+                    "counterparty_strategy_id": None,
                     "classification_authority_sha256": product_sha256,
                 }
                 events.append(
@@ -750,6 +752,52 @@ def _fixture_flow_events(
                         ),
                     }
                 )
+    transfer_events_by_interval: dict[str, list[dict[str, object]]] = {}
+    for event in events:
+        if event["capital_treatment"] == "INTERNAL_TRANSFER":
+            transfer_events_by_interval.setdefault(
+                str(event["interval_id"]), []
+            ).append(event)
+    for interval_id, transfer_events in transfer_events_by_interval.items():
+        negatives = sorted(
+            (
+                event
+                for event in transfer_events
+                if Decimal(str(event["usd_amount"])) < 0
+            ),
+            key=lambda event: str(event["event_id"]),
+        )
+        positives = sorted(
+            (
+                event
+                for event in transfer_events
+                if Decimal(str(event["usd_amount"])) > 0
+            ),
+            key=lambda event: str(event["event_id"]),
+        )
+        for pair_index, negative in enumerate(negatives):
+            positive = next(
+                (
+                    candidate
+                    for candidate in positives
+                    if Decimal(str(candidate["usd_amount"]))
+                    == -Decimal(str(negative["usd_amount"]))
+                    and candidate["transfer_group_id"] is None
+                ),
+                None,
+            )
+            if positive is None:
+                continue
+            transfer_group_id = f"fixture-transfer:{interval_id}:{pair_index}"
+            negative["transfer_group_id"] = transfer_group_id
+            negative["counterparty_strategy_id"] = positive["strategy_id"]
+            positive["transfer_group_id"] = transfer_group_id
+            positive["counterparty_strategy_id"] = negative["strategy_id"]
+    for event in events:
+        unsigned_event = {
+            key: value for key, value in event.items() if key != "event_evidence_sha256"
+        }
+        event["event_evidence_sha256"] = _fixture_sha256(unsigned_event)
     return sorted(events, key=lambda event: str(event["event_id"]))
 
 
@@ -1080,6 +1128,12 @@ def test_as_held_hwm_policy_is_valid_and_binds_current_authorities() -> None:
     assert set(schema["required"]) == set(_PORT_HWM4_POLICY)
     assert schema["properties"]["schema_version"]["const"] == 5
     assert schema["properties"]["policy_id"]["const"] == "PORT-HWM-4"
+    receipt_schema = json.loads(
+        (
+            _REPO_ROOT / "schemas" / "portfolio" / "hwm-calculation-receipt.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert receipt_schema["properties"]["assurance_profile"] == {"const": "DEVELOPMENT"}
 
     authorities = {
         "product_authority": ("path", "raw_sha256"),
@@ -1265,6 +1319,142 @@ def test_as_held_hwm_rejects_wrong_non_usd_fx_conversion() -> None:
 
     with pytest.raises(HwmCoverageError, match="FX conversion differs"):
         _compute_as_held(fixture)
+
+
+def test_as_held_hwm_fx_validation_uses_fixed_decimal_context() -> None:
+    from decimal import ROUND_DOWN, getcontext
+
+    fixture = _single_strategy_flow_fixture()
+    product_sha256 = hashlib.sha256(fixture["product_contract_bytes"]).hexdigest()
+    event = {
+        "event_id": "strategy-a:d1:d1-close:DIVIDEND",
+        "strategy_id": "strategy-a",
+        "interval_id": "d1",
+        "subperiod_id": "d1-close",
+        "event_type": "DIVIDEND",
+        "capital_treatment": "INVESTMENT_RESULT",
+        "effective_at_utc": "2026-08-11T00:00:00Z",
+        "effective_timezone": "UTC",
+        "timing_basis": "DATE_ONLY_END_OF_DAY",
+        "original_amount": "1234567890123456789012345678901234567891",
+        "original_currency": "EUR",
+        "fx_rate_to_usd": "0.0000000000000000000000000000000000000001",
+        "fx_authority_id": "SYNTHETIC_EURUSD_EVENT_TIME",
+        "fx_generation_sha256": "e" * 64,
+        "usd_amount": "0.1234567890123456789012345678901234567891",
+        "correction_kind": "ORIGINAL",
+        "related_event_id": None,
+        "transfer_group_id": None,
+        "counterparty_strategy_id": None,
+        "classification_authority_sha256": product_sha256,
+        "event_evidence_sha256": "0" * 64,
+    }
+    fixture["_flow_events_override"] = [event]
+    _refresh_fixture_authorities(fixture)
+
+    saved_prec = getcontext().prec
+    saved_rounding = getcontext().rounding
+    try:
+        getcontext().prec = 5
+        getcontext().rounding = ROUND_DOWN
+        result = _compute_as_held(fixture)
+    finally:
+        getcontext().prec = saved_prec
+        getcontext().rounding = saved_rounding
+
+    assert result["current_index"] == Decimal("100")
+
+
+def test_as_held_hwm_rejects_opening_basis_after_membership_start() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"] = fixture["accepted_intervals"][:2]
+    fixture["memberships"] = fixture["memberships"][:1]
+    fixture["component_periods"] = [
+        fixture["component_periods"][0],
+        _as_held_component(
+            "strategy-a",
+            "d2",
+            "2026-08-11",
+            "2026-08-12",
+            "660",
+            "0",
+            external_flow="10",
+            capital_basis="ROLLFORWARD_FROM_PRIOR_INTERVAL",
+        ),
+    ]
+    fixture["complete_through"] = "2026-08-12"
+    fixture["evaluated_on"] = "2026-08-12"
+    _refresh_fixture_authorities(fixture)
+    events = json.loads(fixture["input_generation_bytes"])["flow_events"]
+    events[0].update(
+        event_type="OPENING_BASIS",
+        effective_at_utc="2026-08-11T00:00:00Z",
+        timing_basis="EXACT_TIMESTAMP",
+    )
+    fixture["_flow_events_override"] = events
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(HwmCoverageError, match="funded membership start"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_binds_opening_basis_once_and_preserves_later_reversal() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"] = fixture["accepted_intervals"][:2]
+    fixture["memberships"] = fixture["memberships"][:1]
+    fixture["component_periods"] = [
+        _as_held_component("strategy-a", "d1", "2026-08-10", "2026-08-11", "100", "0"),
+        _as_held_component(
+            "strategy-a",
+            "d2",
+            "2026-08-11",
+            "2026-08-12",
+            "100",
+            "0",
+            external_flow="-10",
+            capital_basis="ROLLFORWARD_FROM_PRIOR_INTERVAL",
+        ),
+    ]
+    fixture["complete_through"] = "2026-08-12"
+    fixture["evaluated_on"] = "2026-08-12"
+    _refresh_fixture_authorities(fixture)
+    events = json.loads(fixture["input_generation_bytes"])["flow_events"]
+    reversal = events[0]
+    original = deepcopy(reversal)
+    original.update(
+        event_id="strategy-a:d1:d1-close:OPENING_BASIS",
+        interval_id="d1",
+        subperiod_id="d1-close",
+        event_type="OPENING_BASIS",
+        effective_at_utc="2026-08-10T00:00:00Z",
+        timing_basis="EXACT_TIMESTAMP",
+        original_amount="10",
+        usd_amount="10",
+        correction_kind="ORIGINAL",
+        related_event_id=None,
+    )
+    reversal.update(
+        event_type="OPENING_BASIS",
+        correction_kind="ECONOMIC_REVERSAL",
+        related_event_id=original["event_id"],
+    )
+    fixture["_flow_events_override"] = [original, reversal]
+    _refresh_fixture_authorities(fixture)
+
+    result = _compute_as_held(fixture)
+
+    assert result["current_index"] == Decimal("100")
+    assert result["periods"][1]["components"][0]["period_return"] == Decimal("0")
+
+    duplicate = deepcopy(fixture)
+    duplicate_events = deepcopy(duplicate["_flow_events_override"])
+    duplicate_opening = deepcopy(original)
+    duplicate_opening["event_id"] = f"{original['event_id']}:duplicate"
+    duplicate_events.append(duplicate_opening)
+    duplicate["_flow_events_override"] = duplicate_events
+    _refresh_fixture_authorities(duplicate)
+    with pytest.raises(HwmCoverageError, match="funded membership start"):
+        _compute_as_held(duplicate)
 
 
 def test_as_held_hwm_rejects_dividend_misclassified_as_external_flow() -> None:
@@ -1464,8 +1654,87 @@ def test_as_held_hwm_rejects_unpaired_internal_transfer() -> None:
     row["subperiods"][0]["internal_transfer_after_subperiod_usd"] = "1"
     _refresh_fixture_authorities(fixture)
 
-    with pytest.raises(HwmCoverageError, match="internal transfers do not net to zero"):
+    with pytest.raises(HwmCoverageError, match="internal transfer pairing differs"):
         _compute_as_held(fixture)
+
+
+def test_as_held_hwm_pairs_predecessor_transfer_across_membership_boundary() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"] = fixture["accepted_intervals"][:2]
+    fixture["memberships"] = [
+        {
+            "strategy_id": "predecessor",
+            "effective_start": "2026-08-10",
+            "effective_end": "2026-08-11",
+            "membership_evidence_sha256": "1" * 64,
+        },
+        {
+            "strategy_id": "successor",
+            "effective_start": "2026-08-11",
+            "effective_end": None,
+            "membership_evidence_sha256": "2" * 64,
+        },
+    ]
+    fixture["component_periods"] = [
+        _as_held_component(
+            "predecessor",
+            "d1",
+            "2026-08-10",
+            "2026-08-11",
+            "100",
+            "0",
+            internal_transfer="-100",
+        ),
+        _as_held_component("successor", "d2", "2026-08-11", "2026-08-12", "100", "0"),
+    ]
+    fixture["complete_through"] = "2026-08-12"
+    fixture["evaluated_on"] = "2026-08-12"
+    _refresh_fixture_authorities(fixture)
+    events = json.loads(fixture["input_generation_bytes"])["flow_events"]
+    predecessor = events[0]
+    predecessor.update(
+        event_type="PREDECESSOR_TRANSITION",
+        transfer_group_id="predecessor-to-successor",
+        counterparty_strategy_id="successor",
+    )
+    successor = deepcopy(predecessor)
+    successor.update(
+        event_id="successor:d2:d2-close:PREDECESSOR_TRANSITION",
+        strategy_id="successor",
+        interval_id="d2",
+        subperiod_id="d2-close",
+        effective_at_utc="2026-08-11T00:00:00Z",
+        timing_basis="EXACT_TIMESTAMP",
+        original_amount="100",
+        usd_amount="100",
+        counterparty_strategy_id="predecessor",
+    )
+    fixture["_flow_events_override"] = [predecessor, successor]
+    _refresh_fixture_authorities(fixture)
+
+    result = _compute_as_held(fixture)
+
+    assert result["current_index"] == Decimal("100")
+    assert [
+        [component["strategy_id"] for component in period["components"]]
+        for period in result["periods"]
+    ] == [["predecessor"], ["successor"]]
+
+    invalid = deepcopy(fixture)
+    invalid_events = deepcopy(invalid["_flow_events_override"])
+    invalid_events[1]["counterparty_strategy_id"] = "not-the-predecessor"
+    invalid["_flow_events_override"] = invalid_events
+    _refresh_fixture_authorities(invalid)
+    with pytest.raises(HwmCoverageError, match="internal transfer pairing differs"):
+        _compute_as_held(invalid)
+
+    wrong_boundary = deepcopy(fixture)
+    wrong_boundary_events = deepcopy(wrong_boundary["_flow_events_override"])
+    wrong_boundary_events[1]["effective_at_utc"] = "2026-08-12T00:00:00Z"
+    wrong_boundary["_flow_events_override"] = wrong_boundary_events
+    _refresh_fixture_authorities(wrong_boundary)
+    with pytest.raises(HwmCoverageError, match="boundary differs"):
+        _compute_as_held(wrong_boundary)
 
 
 def test_as_held_hwm_rejects_calendar_interval_gap() -> None:
