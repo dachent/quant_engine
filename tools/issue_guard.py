@@ -1296,14 +1296,19 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
         )
 
     mutations: list[Mutation] = []
-    if current.structural_diagnostics:
+    unsafe_structural_diagnostics = tuple(
+        diagnostic
+        for diagnostic in current.structural_diagnostics
+        if diagnostic.code not in _NATIVE_COMPARISON_SAFE_GRAPH_DIAGNOSTICS
+    )
+    if unsafe_structural_diagnostics:
         # A malformed dependency graph must still block all native-edge writes,
         # but it must not shield independently illegal final handoffs from the
         # fail-safe reopen control. Reopening is reversible and depends only on
         # the affected closed issue's own body and state.
         if any(
             diagnostic.code == "ISSUE_NUMBER_DUPLICATE"
-            for diagnostic in current.structural_diagnostics
+            for diagnostic in unsafe_structural_diagnostics
         ):
             illegal_closed: tuple[int, ...] = ()
         else:

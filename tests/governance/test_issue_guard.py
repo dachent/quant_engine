@@ -700,6 +700,36 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(client.calls, [("reopen", 1)])
         self.assertEqual(report.issues[0].status, "GRAPH_READY")
 
+    def test_safe_global_diagnostics_do_not_suppress_illegal_reopen(self) -> None:
+        cases = {
+            "priority": [
+                _issue(1, "A-001", "#2 (A-002)", state="closed"),
+                _issue(
+                    2,
+                    "A-002",
+                    labels=["backlog:active", "priority:critical"],
+                ),
+            ],
+            "active_cap": [
+                _issue(
+                    1,
+                    "A-001",
+                    "#2 (A-002)",
+                    state="closed",
+                    labels=["backlog:next"],
+                ),
+                *[_issue(number, f"A-00{number}") for number in range(2, 6)],
+            ],
+        }
+        for name, issues in cases.items():
+            with self.subTest(name=name):
+                client = FakeClient(issues, {1: [_native(2)]})
+                report = guard.reconcile(client, OWNER, REPO)
+                self.assertFalse(report.ok)
+                self.assertEqual(client.calls, [("reopen", 1)])
+                self.assertEqual(report.mutations, (guard.Mutation("reopen", 1),))
+                self.assertIn("POSTCONDITION_FAILED", _diagnostic_codes(report))
+
     def test_structural_diagnostic_does_not_shield_pending_final_handoff(self) -> None:
         pending = _body("None").replace("Synthetic accepted evidence.", "Pending.")
         client = FakeClient(
