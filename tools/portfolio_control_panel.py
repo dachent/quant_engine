@@ -37,6 +37,7 @@ from quant_engine.portfolio_ledger import (
     HWM_STATUS_SEMANTICS,
     HwmCoverageError,
     HwmInputsContractError,
+    as_held_hwm_receipt,
     compute_full_systematic_hwm_index,
     decimal_text,
     governed_hwm_coverage,
@@ -46,7 +47,7 @@ from quant_engine.portfolio_ledger import (
 
 
 PANEL_SCHEMA_VERSION: Final = 18
-BUILDER_VERSION: Final = "2.9.1"
+BUILDER_VERSION: Final = "2.10.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -1422,6 +1423,43 @@ def _compute_panel_numerical_hwm(catalog: Mapping[str, Any]) -> dict[str, Any]:
         "hwm_current_drawdown": decimal_text(result["current_drawdown"]),
         "hwm_maximum_drawdown": decimal_text(result["maximum_drawdown"]),
         "hwm_numerical_status": "AVAILABLE",
+    }
+
+
+def _panel_portable_hwm_proof(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Independently project a verified portable proof for panel reconciliation."""
+
+    try:
+        accepted = as_held_hwm_receipt(receipt)
+    except HwmCoverageError as exc:
+        raise ControlPanelValidationError(
+            f"portable HWM proof is invalid: {exc}"
+        ) from exc
+    return {
+        "schema_version": 1,
+        "status": accepted["status"],
+        "financial_acceptance": "NOT_FINANCIAL_ACCEPTANCE",
+        "assurance_profile": accepted["assurance_profile"],
+        "policy_id": accepted["policy_id"],
+        "policy_sha256": accepted["policy_sha256"],
+        "policy_semantic_digest": accepted["policy_semantic_digest"],
+        "receipt_sha256": accepted["receipt_sha256"],
+        "input_authority_class": accepted["input_authority_class"],
+        "calendar_authority_status": accepted["calendar_authority_status"],
+        "input_generation_sha256": accepted["input_generation_sha256"],
+        "input_sha256": accepted["input_sha256"],
+        "return_basis": accepted["return_basis"],
+        "evaluated_on": accepted["evaluated_on"],
+        "complete_through": accepted["complete_through"],
+        "calculation_age_days": accepted["calculation_age_days"],
+        "maximum_age_days": accepted["maximum_age_days"],
+        "age_status": accepted["age_status"],
+        "warnings": accepted["warnings"],
+        "current_index": accepted["current_index"],
+        "current_hwm": accepted["current_hwm"],
+        "current_drawdown": accepted["current_drawdown"],
+        "maximum_drawdown": accepted["maximum_drawdown"],
+        "index_path": accepted["index_path"],
     }
 
 
@@ -4052,6 +4090,7 @@ def _panel_data(
     candidate_driver_map: Mapping[str, Any] | None = None,
     candidate_driver_map_identity: Mapping[str, str] | None = None,
     baseline_catalog: Mapping[str, Any] | None = None,
+    hwm_portable_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -4474,7 +4513,35 @@ def _panel_data(
     # Independently recompute the numerical composite from the governed
     # catalog (never the report's copies); the full-summary equality check
     # below then reconciles the numerical HWM fields against the report.
-    hwm_summary = {**hwm_summary, **_compute_panel_numerical_hwm(baseline_catalog)}
+    portable_hwm_proof = (
+        _panel_portable_hwm_proof(hwm_portable_receipt)
+        if hwm_portable_receipt is not None
+        else None
+    )
+    report_portable_hwm_proof = report.get("hwm_portable_proof")
+    if report_portable_hwm_proof is not None and portable_hwm_proof is None:
+        raise ControlPanelValidationError(
+            "portable HWM authority is not supplied independently"
+        )
+    if portable_hwm_proof is not None:
+        if report_portable_hwm_proof is None:
+            raise ControlPanelValidationError(
+                "accepted portfolio report lacks the portable HWM proof"
+            )
+        if (
+            _object(report_portable_hwm_proof, "report.hwm_portable_proof")
+            != portable_hwm_proof
+        ):
+            raise ControlPanelValidationError(
+                "portable HWM proof differs from the accepted portfolio report"
+            )
+        hwm_numerical = {
+            "hwm_numerical_status": "UNAVAILABLE",
+            "hwm_numerical_reason": "GOVERNED_HWM_AUTHORITY_ABSENT",
+        }
+    else:
+        hwm_numerical = _compute_panel_numerical_hwm(baseline_catalog)
+    hwm_summary = {**hwm_summary, **hwm_numerical}
     report_hwm = report.get("hwm_summary")
     if report_hwm is None:
         raise ControlPanelValidationError(
@@ -4801,7 +4868,7 @@ def _panel_data(
             *(str(row.get("known_gap")) for row in coverage if row.get("known_gap")),
         }
     )
-    return {
+    panel_data = {
         "account_summary": accounts,
         "advisory": {
             "central_case_loss": dependence_analysis["central_case"].get("loss"),
@@ -4960,6 +5027,9 @@ def _panel_data(
         "hybrid_mode_gate": hybrid_mode_gate,
         "weekly_returns": accepted_weekly_returns,
     }
+    if portable_hwm_proof is not None:
+        panel_data["hwm_portable_proof"] = portable_hwm_proof
+    return panel_data
 
 
 def _rendered_files(
@@ -4976,6 +5046,7 @@ def _rendered_files(
     replication_root: Path | None = None,
     candidate_driver_map_path: Path | None = None,
     baseline_root: Path | None = None,
+    hwm_portable_receipt: Mapping[str, Any] | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -5079,6 +5150,7 @@ def _rendered_files(
         candidate_driver_map,
         candidate_driver_map_identity,
         baseline_catalog,
+        hwm_portable_receipt,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -5159,6 +5231,7 @@ def build_candidate(
     replication_root: Path | None = None,
     candidate_driver_map_path: Path | None = None,
     baseline_root: Path | None = None,
+    hwm_portable_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -5174,6 +5247,7 @@ def build_candidate(
         replication_root,
         candidate_driver_map_path,
         baseline_root,
+        hwm_portable_receipt,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -5250,6 +5324,7 @@ def verify_candidate(
     replication_root: Path | None = None,
     candidate_driver_map_path: Path | None = None,
     baseline_root: Path | None = None,
+    hwm_portable_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -5265,6 +5340,7 @@ def verify_candidate(
         replication_root,
         candidate_driver_map_path,
         baseline_root,
+        hwm_portable_receipt,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []

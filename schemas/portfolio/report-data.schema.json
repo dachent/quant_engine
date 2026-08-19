@@ -117,6 +117,7 @@
         }
       ]
     },
+    "hwm_portable_proof": {"$ref": "#/$defs/portable_hwm_proof"},
     "hwm_inputs": {"$ref": "baseline-catalog.schema.json#/properties/hwm_inputs"},
     "corrections": {"type": "array", "items": {"type": "object"}},
     "methodology": {"type": "array", "minItems": 7, "items": {"type": "object"}},
@@ -138,6 +139,60 @@
   "$defs": {
     "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "portable_hwm_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "status", "financial_acceptance", "assurance_profile",
+        "policy_id", "policy_sha256", "policy_semantic_digest", "receipt_sha256",
+        "input_authority_class", "calendar_authority_status",
+        "input_generation_sha256", "input_sha256", "return_basis", "evaluated_on",
+        "complete_through", "calculation_age_days", "maximum_age_days", "age_status",
+        "warnings", "current_index", "current_hwm", "current_drawdown",
+        "maximum_drawdown", "index_path"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "status": {"const": "PORTABLE_SYNTHETIC_PROOF"},
+        "financial_acceptance": {"const": "NOT_FINANCIAL_ACCEPTANCE"},
+        "assurance_profile": {"const": "DEVELOPMENT"},
+        "policy_id": {"const": "PORT-HWM-4"},
+        "policy_sha256": {"$ref": "#/$defs/sha256"},
+        "policy_semantic_digest": {"$ref": "#/$defs/sha256"},
+        "receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "input_authority_class": {"const": "PORTABLE_SYNTHETIC"},
+        "calendar_authority_status": {"const": "PORTABLE_SYNTHETIC"},
+        "input_generation_sha256": {"$ref": "#/$defs/sha256"},
+        "input_sha256": {"$ref": "#/$defs/sha256"},
+        "return_basis": {"const": "LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL"},
+        "evaluated_on": {"type": "string", "format": "date"},
+        "complete_through": {"type": "string", "format": "date"},
+        "calculation_age_days": {"type": "integer", "minimum": 0},
+        "maximum_age_days": {"type": "integer", "minimum": 0},
+        "age_status": {"enum": ["CURRENT", "COMPLETE_DATA_AGE_WARNING"]},
+        "warnings": {
+          "type": "array", "uniqueItems": true,
+          "items": {"const": "HWM_COMPLETE_DATA_AGE"}
+        },
+        "current_index": {"$ref": "#/$defs/decimal"},
+        "current_hwm": {"$ref": "#/$defs/decimal"},
+        "current_drawdown": {"$ref": "#/$defs/decimal"},
+        "maximum_drawdown": {"$ref": "#/$defs/decimal"},
+        "index_path": {
+          "type": "array", "minItems": 2,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["as_of", "index", "hwm", "drawdown"],
+            "properties": {
+              "as_of": {"type": "string", "format": "date"},
+              "index": {"$ref": "#/$defs/decimal"},
+              "hwm": {"$ref": "#/$defs/decimal"},
+              "drawdown": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        }
+      }
+    },
     "performance": {
       "type": "object",
       "additionalProperties": true,
