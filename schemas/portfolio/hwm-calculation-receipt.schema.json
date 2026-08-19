@@ -1,0 +1,346 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/hwm-calculation-receipt.schema.json",
+  "title": "PORT-HWM-4 calculation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "policy_id",
+    "policy_sha256",
+    "policy_semantic_digest",
+    "calendar_sha256",
+    "input_generation_sha256",
+    "input_authority_class",
+    "calendar_authority_status",
+    "input_sha256",
+    "return_basis",
+    "assurance_profile",
+    "evaluated_on",
+    "complete_through",
+    "calculation_age_days",
+    "maximum_age_days",
+    "age_status",
+    "warnings",
+    "complete_through_limiting_inputs",
+    "index_base",
+    "current_index",
+    "current_hwm",
+    "current_drawdown",
+    "maximum_drawdown",
+    "governor_drawdown_loss",
+    "index_path",
+    "periods",
+    "input_evidence",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "status": {"const": "PORTABLE_SYNTHETIC_PROOF"},
+    "policy_id": {"const": "PORT-HWM-4"},
+    "policy_sha256": {"$ref": "#/$defs/sha256"},
+    "policy_semantic_digest": {"$ref": "#/$defs/sha256"},
+    "calendar_sha256": {"$ref": "#/$defs/sha256"},
+    "input_generation_sha256": {"$ref": "#/$defs/sha256"},
+    "input_authority_class": {"const": "PORTABLE_SYNTHETIC"},
+    "calendar_authority_status": {"const": "PORTABLE_SYNTHETIC"},
+    "input_sha256": {"$ref": "#/$defs/sha256"},
+    "return_basis": {
+      "const": "LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL"
+    },
+    "assurance_profile": {"const": "DEVELOPMENT"},
+    "evaluated_on": {"type": "string", "format": "date"},
+    "complete_through": {"type": "string", "format": "date"},
+    "calculation_age_days": {"type": "integer", "minimum": 0},
+    "maximum_age_days": {"type": "integer", "minimum": 0},
+    "age_status": {"enum": ["CURRENT", "COMPLETE_DATA_AGE_WARNING"]},
+    "warnings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"const": "HWM_COMPLETE_DATA_AGE"}
+    },
+    "complete_through_limiting_inputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/limiting_input"}
+    },
+    "index_base": {"const": "100"},
+    "current_index": {"$ref": "#/$defs/decimal"},
+    "current_hwm": {"$ref": "#/$defs/decimal"},
+    "current_drawdown": {"$ref": "#/$defs/decimal"},
+    "maximum_drawdown": {"$ref": "#/$defs/decimal"},
+    "governor_drawdown_loss": {"$ref": "#/$defs/decimal"},
+    "index_path": {
+      "type": "array",
+      "minItems": 2,
+      "items": {"$ref": "#/$defs/index_point"}
+    },
+    "periods": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/calculated_period"}
+    },
+    "input_evidence": {"$ref": "#/$defs/input_evidence"},
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+    },
+    "index_point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of", "index", "hwm", "drawdown"],
+      "properties": {
+        "as_of": {"type": "string", "format": "date"},
+        "index": {"$ref": "#/$defs/decimal"},
+        "hwm": {"$ref": "#/$defs/decimal"},
+        "drawdown": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "calculated_component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy_id",
+        "beginning_capital_usd",
+        "weight",
+        "period_return"
+      ],
+      "properties": {
+        "strategy_id": {"type": "string", "minLength": 1},
+        "beginning_capital_usd": {"$ref": "#/$defs/decimal"},
+        "weight": {"$ref": "#/$defs/decimal"},
+        "period_return": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "calculated_period": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "interval_id",
+        "interval_start",
+        "interval_end",
+        "total_beginning_capital_usd",
+        "composite_return",
+        "components"
+      ],
+      "properties": {
+        "interval_id": {"type": "string", "minLength": 1},
+        "interval_start": {"type": "string", "format": "date"},
+        "interval_end": {"type": "string", "format": "date"},
+        "total_beginning_capital_usd": {"$ref": "#/$defs/decimal"},
+        "composite_return": {"$ref": "#/$defs/decimal"},
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/calculated_component"}
+        }
+      }
+    },
+    "input_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accepted_intervals", "memberships", "component_periods"],
+      "properties": {
+        "accepted_intervals": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/input_interval"}
+        },
+        "memberships": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/input_membership"}
+        },
+        "component_periods": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/input_component"}
+        }
+      }
+    },
+    "input_interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "interval_id",
+        "interval_start",
+        "interval_end",
+        "interval_evidence_sha256"
+      ],
+      "properties": {
+        "interval_id": {"type": "string", "minLength": 1},
+        "interval_start": {"type": "string", "format": "date"},
+        "interval_end": {"type": "string", "format": "date"},
+        "interval_evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "input_membership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy_id",
+        "effective_start",
+        "effective_end",
+        "membership_evidence_sha256"
+      ],
+      "properties": {
+        "strategy_id": {"type": "string", "minLength": 1},
+        "effective_start": {"type": "string", "format": "date"},
+        "effective_end": {
+          "oneOf": [
+            {"type": "string", "format": "date"},
+            {"type": "null"}
+          ]
+        },
+        "membership_evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "input_component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy_id",
+        "interval_id",
+        "interval_start",
+        "interval_end",
+        "beginning_capital_usd",
+        "beginning_gross_assets_usd",
+        "beginning_financing_liability_usd",
+        "ending_gross_assets_usd",
+        "ending_financing_liability_usd",
+        "margin_principal_flow_usd",
+        "financing_cost_usd",
+        "gross_asset_return",
+        "ending_nav_usd",
+        "external_flow_usd",
+        "internal_transfer_usd",
+        "flow_adjusted_ending_nav_usd",
+        "period_return",
+        "flow_timing",
+        "subperiods",
+        "capital_basis",
+        "capital_evidence_sha256",
+        "flow_reconciliation_sha256",
+        "return_evidence_sha256",
+        "leverage_evidence_sha256",
+        "source_generation_sha256",
+        "policy_sha256",
+        "calendar_sha256",
+        "return_basis"
+      ],
+      "properties": {
+        "strategy_id": {"type": "string", "minLength": 1},
+        "interval_id": {"type": "string", "minLength": 1},
+        "interval_start": {"type": "string", "format": "date"},
+        "interval_end": {"type": "string", "format": "date"},
+        "beginning_capital_usd": {"$ref": "#/$defs/decimal"},
+        "beginning_gross_assets_usd": {"$ref": "#/$defs/decimal"},
+        "beginning_financing_liability_usd": {"$ref": "#/$defs/decimal"},
+        "ending_gross_assets_usd": {"$ref": "#/$defs/decimal"},
+        "ending_financing_liability_usd": {"$ref": "#/$defs/decimal"},
+        "margin_principal_flow_usd": {"$ref": "#/$defs/decimal"},
+        "financing_cost_usd": {"$ref": "#/$defs/decimal"},
+        "gross_asset_return": {"$ref": "#/$defs/decimal"},
+        "ending_nav_usd": {"$ref": "#/$defs/decimal"},
+        "external_flow_usd": {"$ref": "#/$defs/decimal"},
+        "internal_transfer_usd": {"$ref": "#/$defs/decimal"},
+        "flow_adjusted_ending_nav_usd": {"$ref": "#/$defs/decimal"},
+        "period_return": {"$ref": "#/$defs/decimal"},
+        "flow_timing": {
+          "enum": [
+            "NO_EXTERNAL_OR_INTERNAL_FLOW",
+            "DATE_ONLY_END_OF_DAY",
+            "EXACT_TIMESTAMP_SEGMENTED"
+          ]
+        },
+        "subperiods": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/input_subperiod"}
+        },
+        "capital_basis": {
+          "enum": ["OBSERVED_INDEPENDENT", "ROLLFORWARD_FROM_PRIOR_INTERVAL"]
+        },
+        "capital_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "flow_reconciliation_sha256": {"$ref": "#/$defs/sha256"},
+        "return_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "leverage_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "source_generation_sha256": {"$ref": "#/$defs/sha256"},
+        "policy_sha256": {"$ref": "#/$defs/sha256"},
+        "calendar_sha256": {"$ref": "#/$defs/sha256"},
+        "return_basis": {
+          "const": "LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL"
+        }
+      }
+    },
+    "input_subperiod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subperiod_id",
+        "subperiod_start_utc",
+        "subperiod_end_utc",
+        "beginning_nav_usd",
+        "ending_nav_before_flow_usd",
+        "beginning_gross_assets_usd",
+        "beginning_financing_liability_usd",
+        "ending_gross_assets_before_flow_usd",
+        "ending_financing_liability_before_flow_usd",
+        "margin_principal_flow_after_subperiod_usd",
+        "financing_cost_usd",
+        "external_flow_after_subperiod_usd",
+        "internal_transfer_after_subperiod_usd",
+        "flow_event_evidence_sha256"
+      ],
+      "properties": {
+        "subperiod_id": {"type": "string", "minLength": 1},
+        "subperiod_start_utc": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+        },
+        "subperiod_end_utc": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+        },
+        "beginning_nav_usd": {"$ref": "#/$defs/decimal"},
+        "ending_nav_before_flow_usd": {"$ref": "#/$defs/decimal"},
+        "beginning_gross_assets_usd": {"$ref": "#/$defs/decimal"},
+        "beginning_financing_liability_usd": {"$ref": "#/$defs/decimal"},
+        "ending_gross_assets_before_flow_usd": {"$ref": "#/$defs/decimal"},
+        "ending_financing_liability_before_flow_usd": {"$ref": "#/$defs/decimal"},
+        "margin_principal_flow_after_subperiod_usd": {"$ref": "#/$defs/decimal"},
+        "financing_cost_usd": {"$ref": "#/$defs/decimal"},
+        "external_flow_after_subperiod_usd": {"$ref": "#/$defs/decimal"},
+        "internal_transfer_after_subperiod_usd": {"$ref": "#/$defs/decimal"},
+        "flow_event_evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "limiting_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy_id",
+        "interval_id",
+        "source_generation_sha256",
+        "capital_evidence_sha256",
+        "flow_reconciliation_sha256",
+        "return_evidence_sha256",
+        "leverage_evidence_sha256"
+      ],
+      "properties": {
+        "strategy_id": {"type": "string", "minLength": 1},
+        "interval_id": {"type": "string", "minLength": 1},
+        "source_generation_sha256": {"$ref": "#/$defs/sha256"},
+        "capital_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "flow_reconciliation_sha256": {"$ref": "#/$defs/sha256"},
+        "return_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "leverage_evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
