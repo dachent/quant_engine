@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import runpy
 import sys
 from typing import Any
 
@@ -33,6 +34,16 @@ if SPEC is None or SPEC.loader is None:
 panel = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = panel
 SPEC.loader.exec_module(panel)
+
+HWM_TEST_NAMESPACE = runpy.run_path(
+    str(REPOSITORY_ROOT / "tests" / "portfolio_ledger" / "test_hwm.py")
+)
+
+
+def _portable_hwm_receipt() -> dict[str, Any]:
+    fixture = HWM_TEST_NAMESPACE["_as_held_hwm_fixture"]()
+    return HWM_TEST_NAMESPACE["_compute_as_held"](fixture)
+
 
 STRATEGY_NAMES = (
     "CAOS current strategy",
@@ -3533,6 +3544,149 @@ def test_advisory_carries_numerical_hwm_when_envelope_present(
         data["hwm_summary"]["hwm_maximum_drawdown"]
         == (expected["hwm_maximum_drawdown"])
     )
+
+
+def test_panel_reconciles_portable_proof_without_replacing_governed_hwm(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    _republish_report(inputs["report"], tmp_path, report)
+    governed_candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        tmp_path / "governed-panel-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    governed_data = _candidate_data(governed_candidate)
+    receipt = _portable_hwm_receipt()
+    proof = panel._panel_portable_hwm_proof(receipt)
+    report["hwm_portable_proof"] = proof
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        hwm_portable_receipt=receipt,
+    )
+    data = _candidate_data(candidate)
+
+    assert data["hwm_portable_proof"] == proof
+    assert data["hwm_summary"] == governed_data["hwm_summary"]
+    assert data["advisory"] == governed_data["advisory"]
+    assert data["advisory"]["hwm_index"] != proof["current_index"]
+    assert data["hwm_portable_proof"]["current_index"] == "93.6"
+    assert data["hwm_portable_proof"]["current_hwm"] == "104"
+    assert data["hwm_portable_proof"]["current_drawdown"] == "-0.1"
+    assert data["hwm_portable_proof"]["maximum_drawdown"] == "-0.1"
+    assert data["hwm_portable_proof"]["age_status"] == ("COMPLETE_DATA_AGE_WARNING")
+    assert (
+        panel.verify_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            Path(candidate["candidate_dir"]),
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            hwm_portable_receipt=receipt,
+        )["all_passed"]
+        is True
+    )
+    renderer = (REPOSITORY_ROOT / "apps/portfolio-control-panel/app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "DEVELOPMENT — NOT FINANCIAL ACCEPTANCE" in renderer
+    assert 'join(" → ")' in renderer
+    assert "governed financial HWM remains unavailable" in renderer
+    assert "governed financial HWM remains independently available" in renderer
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    portable_schema = schema["$defs"]["portable_hwm_proof"]
+    assert portable_schema["properties"]["financial_acceptance"] == {
+        "const": "NOT_FINANCIAL_ACCEPTANCE"
+    }
+    assert portable_schema["properties"]["assurance_profile"] == {
+        "const": "DEVELOPMENT"
+    }
+
+
+def test_panel_portable_proof_does_not_upgrade_missing_governed_hwm(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    governed_candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        tmp_path / "governed-panel-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    governed_data = _candidate_data(governed_candidate)
+    report = _report_with_baseline(inputs)
+    _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog())
+    receipt = _portable_hwm_receipt()
+    report["hwm_portable_proof"] = panel._panel_portable_hwm_proof(receipt)
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        hwm_portable_receipt=receipt,
+    )
+    data = _candidate_data(candidate)
+
+    assert data["hwm_summary"] == governed_data["hwm_summary"]
+    assert data["advisory"] == governed_data["advisory"]
+    assert data["hwm_portable_proof"]["financial_acceptance"] == (
+        "NOT_FINANCIAL_ACCEPTANCE"
+    )
+
+
+def test_panel_rejects_missing_or_tampered_portable_hwm_authority(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    receipt = _portable_hwm_receipt()
+    report["hwm_portable_proof"] = panel._panel_portable_hwm_proof(receipt)
+    _republish_report(inputs["report"], tmp_path, report)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="portable HWM authority is not supplied independently",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+        )
+
+    tampered = panel.as_held_hwm_receipt(receipt)
+    tampered["status"] = "AVAILABLE"
+    unsigned = {
+        key: value for key, value in tampered.items() if key != "receipt_sha256"
+    }
+    tampered["receipt_sha256"] = HWM_TEST_NAMESPACE["_fixture_sha256"](unsigned)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="receipt identity is invalid",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            tmp_path / "tampered-output",
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            hwm_portable_receipt=tampered,
+        )
 
 
 def test_advisory_omits_drawdown_fields_when_envelope_absent(

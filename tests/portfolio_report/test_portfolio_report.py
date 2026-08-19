@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import runpy
 import shutil
 import sys
 from typing import Any
@@ -14,6 +15,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 import pytest
+from openpyxl import load_workbook
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -38,6 +40,15 @@ if SPEC is None or SPEC.loader is None:
 reporter = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = reporter
 SPEC.loader.exec_module(reporter)
+
+HWM_TEST_NAMESPACE = runpy.run_path(
+    str(REPOSITORY_ROOT / "tests" / "portfolio_ledger" / "test_hwm.py")
+)
+
+
+def _portable_hwm_receipt() -> dict[str, Any]:
+    fixture = HWM_TEST_NAMESPACE["_as_held_hwm_fixture"]()
+    return HWM_TEST_NAMESPACE["_compute_as_held"](fixture)
 
 
 def test_public_report_value_redacts_portfolio123_entity_identifiers() -> None:
@@ -1993,6 +2004,154 @@ def test_hwm_numerical_composite_matches_hand_computation(tmp_path: Path) -> Non
     assert _summary_row(report, "Advisory readiness") == "ELIGIBLE_FOR_REVIEW"
     # The report carries the governed envelope for downstream reconciliation.
     assert report["hwm_inputs"]["contract_version"] == 1
+
+
+def test_portable_hwm_proof_coexists_with_governed_report_and_workbook_hwm(
+    tmp_path: Path,
+) -> None:
+    catalog = _baseline_catalog()
+    crosswalk = _hwm_return_crosswalk()
+    _attach_hwm_envelope(catalog, crosswalk)
+    catalog["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+    receipt = _portable_hwm_receipt()
+    governed_report, _governed_bytes, _governed_baseline = reporter.build_report_data(
+        baseline_root,
+        freshness_health_path=_hwm_freshness_file(tmp_path),
+    )
+
+    candidate = reporter.build_candidate(
+        baseline_root,
+        tmp_path / "report-output",
+        freshness_health_path=_hwm_freshness_file(tmp_path),
+        hwm_portable_receipt=receipt,
+    )
+    candidate_dir = Path(candidate["candidate_dir"])
+    report = json.loads(
+        (candidate_dir / reporter.REPORT_DATA_NAME).read_text(encoding="utf-8")
+    )
+    proof = report["hwm_portable_proof"]
+
+    assert report["hwm_summary"] == governed_report["hwm_summary"]
+    assert report["hwm_summary"]["hwm_index"] != proof["current_index"]
+    assert _summary_row(report, "Advisory readiness") == _summary_row(
+        governed_report, "Advisory readiness"
+    )
+    assert proof["financial_acceptance"] == "NOT_FINANCIAL_ACCEPTANCE"
+    assert proof["assurance_profile"] == "DEVELOPMENT"
+    assert proof["input_authority_class"] == "PORTABLE_SYNTHETIC"
+    assert proof["receipt_sha256"] == receipt["receipt_sha256"]
+    assert [row["index"] for row in proof["index_path"]] == [
+        "100",
+        "104",
+        "93.6",
+        "93.6",
+    ]
+    assert proof["current_index"] == "93.6"
+    assert proof["current_hwm"] == "104"
+    assert proof["current_drawdown"] == "-0.1"
+    assert proof["maximum_drawdown"] == "-0.1"
+    assert proof["age_status"] == "COMPLETE_DATA_AGE_WARNING"
+    assert proof["warnings"] == ["HWM_COMPLETE_DATA_AGE"]
+    assert _summary_row(report, "PORT-HWM-4 proof status") == (
+        "DEVELOPMENT_NOT_FINANCIAL_ACCEPTANCE"
+    )
+    assert _summary_row(report, "PORT-HWM-4 proof index") == "93.6"
+    assert _summary_row(report, "PORT-HWM-4 proof HWM") == "104"
+    assert _summary_row(report, "PORT-HWM-4 proof current drawdown") == "-0.1"
+    assert _summary_row(report, "PORT-HWM-4 proof maximum drawdown") == "-0.1"
+    assert reporter.verify_workbook(candidate_dir / reporter.WORKBOOK_NAME)[
+        "sheet_count"
+    ] == len(reporter.SHEET_NAMES)
+    workbook = load_workbook(
+        candidate_dir / reporter.WORKBOOK_NAME, read_only=True, data_only=True
+    )
+    summary_sheet = workbook["Portfolio Summary"]
+    workbook_summary = {
+        str(summary_sheet.cell(row=row_index, column=1).value): summary_sheet.cell(
+            row=row_index, column=4
+        ).value
+        for row_index in range(7, 7 + len(report["portfolio_summary"]))
+    }
+    assert workbook_summary["PORT-HWM-4 proof status"] == (
+        "DEVELOPMENT_NOT_FINANCIAL_ACCEPTANCE"
+    )
+    assert Decimal(str(workbook_summary["PORT-HWM-4 proof index"])) == Decimal("93.6")
+    assert Decimal(str(workbook_summary["PORT-HWM-4 proof HWM"])) == Decimal("104")
+    assert Decimal(
+        str(workbook_summary["PORT-HWM-4 proof current drawdown"])
+    ) == Decimal("-0.1")
+    assert Decimal(
+        str(workbook_summary["PORT-HWM-4 proof maximum drawdown"])
+    ) == Decimal("-0.1")
+    assert [
+        Decimal(str(workbook_summary[f"PORT-HWM-4 proof path {point['as_of']}"]))
+        for point in proof["index_path"]
+    ] == [Decimal("100"), Decimal("104"), Decimal("93.6"), Decimal("93.6")]
+    workbook_contract = json.loads(
+        (candidate_dir / "workbook-contract.json").read_text(encoding="utf-8")
+    )
+    assert workbook_contract["sentinel_cells"][0] == {
+        "cell": "B4",
+        "expected": "ELIGIBLE_FOR_REVIEW",
+        "sheet": "Portfolio Summary",
+    }
+    workbook.close()
+
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    portable_schema = schema["$defs"]["portable_hwm_proof"]
+    assert portable_schema["properties"]["financial_acceptance"] == {
+        "const": "NOT_FINANCIAL_ACCEPTANCE"
+    }
+    assert portable_schema["properties"]["assurance_profile"] == {
+        "const": "DEVELOPMENT"
+    }
+
+
+def test_portable_hwm_proof_does_not_upgrade_missing_governed_authority(
+    tmp_path: Path,
+) -> None:
+    catalog = _baseline_catalog()
+    catalog["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+    governed_report, _governed_bytes, _governed_path = reporter.build_report_data(
+        baseline_root,
+        freshness_health_path=_hwm_freshness_file(tmp_path),
+    )
+
+    report, _report_bytes, _baseline_path = reporter.build_report_data(
+        baseline_root,
+        freshness_health_path=_hwm_freshness_file(tmp_path),
+        hwm_portable_receipt=_portable_hwm_receipt(),
+    )
+
+    assert report["hwm_summary"] == governed_report["hwm_summary"]
+    assert _summary_row(report, "Advisory readiness") == _summary_row(
+        governed_report, "Advisory readiness"
+    )
+    assert report["hwm_portable_proof"]["financial_acceptance"] == (
+        "NOT_FINANCIAL_ACCEPTANCE"
+    )
+
+
+def test_report_rejects_tampered_portable_hwm_receipt(tmp_path: Path) -> None:
+    catalog = _baseline_catalog()
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+    receipt = _portable_hwm_receipt()
+    receipt["current_hwm"] = Decimal("999")
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="receipt identity differs"
+    ):
+        reporter.build_report_data(
+            baseline_root,
+            freshness_health_path=_hwm_freshness_file(tmp_path),
+            hwm_portable_receipt=receipt,
+        )
 
 
 def test_hwm_numerical_unavailable_without_envelope(tmp_path: Path) -> None:

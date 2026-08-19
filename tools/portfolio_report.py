@@ -41,6 +41,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     HwmInputsContractError,
+    as_held_hwm_receipt,
     compute_full_systematic_hwm_index,
     decimal_text,
     governed_hwm_coverage,
@@ -51,7 +52,7 @@ from quant_engine.portfolio_ledger import (
 
 REPORT_SCHEMA_VERSION: Final = 1
 _CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
-BUILDER_VERSION: Final = "1.3.0"
+BUILDER_VERSION: Final = "1.4.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
@@ -2331,6 +2332,91 @@ def _hwm_numerical_from_envelope(
     }
 
 
+def _report_portable_hwm_proof(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a verified PORT-HWM-4 portable proof without upgrading authority."""
+
+    try:
+        accepted = as_held_hwm_receipt(receipt)
+    except HwmCoverageError as exc:
+        raise ReportValidationError(f"portable HWM proof is invalid: {exc}") from exc
+    return {
+        "schema_version": 1,
+        "status": accepted["status"],
+        "financial_acceptance": "NOT_FINANCIAL_ACCEPTANCE",
+        "assurance_profile": accepted["assurance_profile"],
+        "policy_id": accepted["policy_id"],
+        "policy_sha256": accepted["policy_sha256"],
+        "policy_semantic_digest": accepted["policy_semantic_digest"],
+        "receipt_sha256": accepted["receipt_sha256"],
+        "input_authority_class": accepted["input_authority_class"],
+        "calendar_authority_status": accepted["calendar_authority_status"],
+        "input_generation_sha256": accepted["input_generation_sha256"],
+        "input_sha256": accepted["input_sha256"],
+        "return_basis": accepted["return_basis"],
+        "evaluated_on": accepted["evaluated_on"],
+        "complete_through": accepted["complete_through"],
+        "calculation_age_days": accepted["calculation_age_days"],
+        "maximum_age_days": accepted["maximum_age_days"],
+        "age_status": accepted["age_status"],
+        "warnings": accepted["warnings"],
+        "current_index": accepted["current_index"],
+        "current_hwm": accepted["current_hwm"],
+        "current_drawdown": accepted["current_drawdown"],
+        "maximum_drawdown": accepted["maximum_drawdown"],
+        "index_path": accepted["index_path"],
+    }
+
+
+def _portable_hwm_summary_rows(proof: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "metric": "PORT-HWM-4 proof status",
+            "status": "DEVELOPMENT_NOT_FINANCIAL_ACCEPTANCE",
+            "unit": "status",
+            "value": "DEVELOPMENT_NOT_FINANCIAL_ACCEPTANCE",
+        },
+        {
+            "metric": "PORT-HWM-4 proof index",
+            "status": "PORTABLE_SYNTHETIC_PROOF",
+            "unit": "index",
+            "value": proof["current_index"],
+        },
+        {
+            "metric": "PORT-HWM-4 proof HWM",
+            "status": "PORTABLE_SYNTHETIC_PROOF",
+            "unit": "index",
+            "value": proof["current_hwm"],
+        },
+        {
+            "metric": "PORT-HWM-4 proof current drawdown",
+            "status": "PORTABLE_SYNTHETIC_PROOF",
+            "unit": "ratio",
+            "value": proof["current_drawdown"],
+        },
+        {
+            "metric": "PORT-HWM-4 proof maximum drawdown",
+            "status": "PORTABLE_SYNTHETIC_PROOF",
+            "unit": "ratio",
+            "value": proof["maximum_drawdown"],
+        },
+        *[
+            {
+                "metric": f"PORT-HWM-4 proof path {point['as_of']}",
+                "status": "PORTABLE_SYNTHETIC_PROOF",
+                "unit": "index",
+                "value": point["index"],
+            }
+            for point in proof["index_path"]
+        ],
+        {
+            "metric": "PORT-HWM-4 proof complete through",
+            "status": proof["age_status"],
+            "unit": "date",
+            "value": proof["complete_through"],
+        },
+    ]
+
+
 def _reconcile_hwm_coverage(
     coverage: Sequence[Mapping[str, Any]], hwm_summary: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
@@ -2434,6 +2520,7 @@ def build_report_data(
     history_contract_path: Path | None = None,
     implementation_reconciliation_path: Path | None = None,
     implementation_return_attribution_path: Path | None = None,
+    hwm_portable_receipt: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -2494,6 +2581,11 @@ def build_report_data(
     # is supplied, so the NO_HWM_INPUTS/envelope-derived status always
     # publishes.  Absence or any internal defect yields UNAVAILABLE with a
     # structured reason, never an error or a fallback.
+    portable_hwm_proof = (
+        _report_portable_hwm_proof(hwm_portable_receipt)
+        if hwm_portable_receipt is not None
+        else None
+    )
     hwm_numerical = _hwm_numerical_from_envelope(catalog)
     hwm_summary: dict[str, Any]
     hwm_provenance: list[dict[str, Any]] = []
@@ -2579,7 +2671,14 @@ def build_report_data(
                 "value": "Provider/model comparisons use exact common dates only. Version-unresolved results remain descriptive; benchmark, cash-drag, fee, or after-tax gaps stay unavailable rather than becoming zero.",
             },
         ],
-        "portfolio_summary": _portfolio_summary(catalog, hwm_summary),
+        "portfolio_summary": [
+            *_portfolio_summary(catalog, hwm_summary),
+            *(
+                _portable_hwm_summary_rows(portable_hwm_proof)
+                if portable_hwm_proof is not None
+                else []
+            ),
+        ],
         "observation_windows": catalog.get("observation_windows", []),
         "positions": _positions(catalog),
         "provider_admissions": catalog.get("provider_admissions", []),
@@ -2610,6 +2709,18 @@ def build_report_data(
                 )
             ],
             *hwm_provenance,
+            *(
+                [
+                    {
+                        "artifact": "portfolio-hwm-4-portable-proof",
+                        "as_of_date": portable_hwm_proof["complete_through"],
+                        "schema": "portfolio-hwm-calculation-receipt/2",
+                        "sha256": portable_hwm_proof["receipt_sha256"],
+                    }
+                ]
+                if portable_hwm_proof is not None
+                else []
+            ),
             *(
                 [
                     {
@@ -2681,6 +2792,8 @@ def build_report_data(
             implementation_return_attribution_ref
         )
     report["hwm_summary"] = hwm_summary
+    if portable_hwm_proof is not None:
+        report["hwm_portable_proof"] = portable_hwm_proof
     if catalog.get("hwm_inputs") is not None:
         report["hwm_inputs"] = catalog["hwm_inputs"]
     if attribution_catalog is not None and attribution_ref is not None:
@@ -2990,7 +3103,11 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
             summary.write_number(
                 row_index, 3, float(Decimal(str(row["value"]))), formats["percent"]
             )
-    for index, sheet_name in enumerate(SHEET_NAMES[1:], start=16):
+    # Keep navigation links below the summary table.  PORT-HWM-4 adds
+    # development-proof rows, so a fixed row would overwrite accepted table
+    # values in the workbook even though the canonical JSON remained intact.
+    navigation_start_row = max(16, 8 + len(summary_rows))
+    for index, sheet_name in enumerate(SHEET_NAMES[1:], start=navigation_start_row):
         summary.write_url(index, 0, f"internal:'{sheet_name}'!A1", string=sheet_name)
 
     for sheet_name, key, table_name, fallback in table_specs:
@@ -3070,6 +3187,7 @@ def build_candidate(
     history_contract_path: Path | None = None,
     implementation_reconciliation_path: Path | None = None,
     implementation_return_attribution_path: Path | None = None,
+    hwm_portable_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -3079,6 +3197,7 @@ def build_candidate(
         history_contract_path,
         implementation_reconciliation_path,
         implementation_return_attribution_path,
+        hwm_portable_receipt,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -3105,7 +3224,11 @@ def build_candidate(
         "sentinel_cells": [
             {
                 "cell": "B4",
-                "expected": report["portfolio_summary"][-1]["value"],
+                "expected": next(
+                    row["value"]
+                    for row in report["portfolio_summary"]
+                    if row["metric"] == "Advisory readiness"
+                ),
                 "sheet": "Portfolio Summary",
             },
             {"cell": "E4", "expected": "PASS", "sheet": "Portfolio Summary"},
@@ -3449,6 +3572,7 @@ def verify_candidate(
     history_contract_path: Path | None = None,
     implementation_reconciliation_path: Path | None = None,
     implementation_return_attribution_path: Path | None = None,
+    hwm_portable_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -3458,6 +3582,7 @@ def verify_candidate(
         history_contract_path,
         implementation_reconciliation_path,
         implementation_return_attribution_path,
+        hwm_portable_receipt,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:
