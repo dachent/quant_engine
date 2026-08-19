@@ -65,6 +65,14 @@ process maps `GITHUB_TOKEN` into its environment. The hourly schedule catches
 native relationship changes because those changes do not have a dedicated
 Issues workflow event.
 
+A failed live reconciliation also upserts one sanitized marker comment on the
+existing `GOV-EXEC-001` issue. The comment contains only the Actions run link,
+repository SHA, snapshot fingerprint, diagnostic/mutation counts, fixed
+diagnostic codes, issue/blocker numbers, and HTTP status codes. Repeating the
+same failed run updates that comment instead of
+creating a new notification surface; the failed Actions run remains the durable
+execution record. Pull-request validation never receives this write authority.
+
 ## Local proof
 
 Use a repository-local uv cache on this synced Windows worktree:

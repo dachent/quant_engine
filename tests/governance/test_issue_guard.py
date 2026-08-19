@@ -101,6 +101,7 @@ class FakeClient:
         self.issues = deepcopy(issues)
         self.native = deepcopy(native or {})
         self.calls: list[tuple[object, ...]] = []
+        self.native_reads: list[int] = []
         self.list_issue_count = 0
         self.change_on_second_read: tuple[int, str, object] | None = None
         self.fail_add = False
@@ -119,6 +120,7 @@ class FakeClient:
         return deepcopy(self.issues)
 
     def list_blocked_by(self, issue_number: int) -> list[dict[str, object]]:
+        self.native_reads.append(issue_number)
         return deepcopy(self.native.get(issue_number, []))
 
     def reopen_issue(self, issue_number: int) -> None:
@@ -450,6 +452,44 @@ class ParserAndGraphTests(unittest.TestCase):
             {1: "active", 2: "next", 3: "deferred", 4: "folded"},
         )
 
+    def test_fourth_open_active_issue_fails_with_complete_identity_set(self) -> None:
+        issues = [_issue(number, f"A-00{number}") for number in range(1, 5)]
+        report = guard.audit(FakeClient(issues), OWNER, REPO)
+        finding = next(
+            item for item in report.diagnostics if item.code == "ACTIVE_LIMIT_EXCEEDED"
+        )
+        self.assertFalse(report.ok)
+        self.assertEqual(finding.related_numbers, (1, 2, 3, 4))
+
+    def test_every_open_priority_namespace_label_is_forbidden(self) -> None:
+        for label in ("priority:now", "priority:next", "priority:critical"):
+            with self.subTest(label=label):
+                report = guard.audit(
+                    FakeClient([_issue(1, "A-001", labels=["backlog:active", label])]),
+                    OWNER,
+                    REPO,
+                )
+                self.assertFalse(report.ok)
+                self.assertIn(
+                    "OPEN_PRIORITY_LABEL_FORBIDDEN", _diagnostic_codes(report)
+                )
+
+        closed = guard.audit(
+            FakeClient(
+                [
+                    _issue(
+                        1,
+                        "A-001",
+                        state="closed",
+                        labels=["priority:historical"],
+                    )
+                ]
+            ),
+            OWNER,
+            REPO,
+        )
+        self.assertTrue(closed.ok)
+
     def test_open_issue_requires_exactly_one_backlog_state(self) -> None:
         cases = {
             "missing": ([], "BACKLOG_STATE_MISSING"),
@@ -488,6 +528,85 @@ class ParserAndGraphTests(unittest.TestCase):
         cases = {
             "pending": (pending, "FINAL_HANDOFF_PENDING"),
             "pending_detail": (pending_detail, "FINAL_HANDOFF_PENDING"),
+            "parenthesized": (
+                accepted.replace("Synthetic accepted evidence.", "(pending)"),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "markdown": (
+                accepted.replace("Synthetic accepted evidence.", "**`Pending.`**"),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "template": (
+                accepted.replace(
+                    "Synthetic accepted evidence.",
+                    "Complete before closing the issue.",
+                ),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "none_at_creation": (
+                accepted.replace("Synthetic accepted evidence.", "None at creation."),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "evidence_pending": (
+                accepted.replace("Synthetic accepted evidence.", "Evidence pending."),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "awaiting_evidence": (
+                accepted.replace(
+                    "Synthetic accepted evidence.", "Awaiting final evidence."
+                ),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "evidence_remains_pending": (
+                accepted.replace(
+                    "Synthetic accepted evidence.", "Evidence remains pending."
+                ),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "to_be_completed": (
+                accepted.replace("Synthetic accepted evidence.", "To be completed."),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "not_completed": (
+                accepted.replace("Synthetic accepted evidence.", "Not completed."),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "not_applicable_placeholder": (
+                accepted.replace("Synthetic accepted evidence.", "N/A"),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "pending_awaiting_run": (
+                accepted.replace(
+                    "Synthetic accepted evidence.",
+                    "Pending evidence; awaiting hosted run.",
+                ),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "pending_with_run_reference": (
+                accepted.replace(
+                    "Synthetic accepted evidence.",
+                    "Evidence remains pending; see Actions run 12345.",
+                ),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "awaiting_ci": (
+                accepted.replace(
+                    "Synthetic accepted evidence.", "Awaiting final evidence from CI."
+                ),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "complete_after_review": (
+                accepted.replace(
+                    "Synthetic accepted evidence.", "To be completed after review."
+                ),
+                "FINAL_HANDOFF_PENDING",
+            ),
+            "not_applicable_until_validation": (
+                accepted.replace(
+                    "Synthetic accepted evidence.", "N/A until validation finishes."
+                ),
+                "FINAL_HANDOFF_PENDING",
+            ),
             "missing": (missing, "FINAL_HANDOFF_SECTION_MISSING"),
             "empty": (empty, "FINAL_HANDOFF_PENDING"),
             "duplicate": (duplicate, "FINAL_HANDOFF_SECTION_DUPLICATE"),
@@ -502,6 +621,32 @@ class ParserAndGraphTests(unittest.TestCase):
                 self.assertFalse(report.ok)
                 self.assertIn(expected, _diagnostic_codes(report))
                 self.assertEqual(report.issues[0].status, "ILLEGAL_CLOSED")
+
+        for evidence in (
+            "Pending risk was resolved; exact checks passed at accepted SHA.",
+            "TODO marker removed; exact checks passed at accepted SHA.",
+            "`N/A` placeholder was removed; validation now passes.",
+            "Awaiting final evidence was the prior state; exact checks now pass.",
+            "To be completed was obsolete template text; hosted validation passed.",
+        ):
+            with self.subTest(evidence=evidence):
+                report = guard.audit(
+                    FakeClient(
+                        [
+                            _issue(
+                                1,
+                                "A-001",
+                                state="closed",
+                                body=accepted.replace(
+                                    "Synthetic accepted evidence.", evidence
+                                ),
+                            )
+                        ]
+                    ),
+                    OWNER,
+                    REPO,
+                )
+                self.assertTrue(report.ok)
 
     def test_closed_folded_issue_is_exempt_from_independent_handoff(self) -> None:
         body = _body("None").replace("Synthetic accepted evidence.", "Pending.")
@@ -565,7 +710,10 @@ class ReconciliationTests(unittest.TestCase):
         )
         report = guard.reconcile(client, OWNER, REPO)
         self.assertFalse(report.ok)
-        self.assertEqual(_diagnostic_codes(report), {"BLOCKED_BY_LINE_INVALID"})
+        self.assertEqual(
+            _diagnostic_codes(report),
+            {"BLOCKED_BY_LINE_INVALID", "POSTCONDITION_FAILED"},
+        )
         self.assertEqual(client.calls, [("reopen", 2)])
         self.assertEqual(
             report.mutations,
@@ -598,11 +746,16 @@ class ReconciliationTests(unittest.TestCase):
         )
         report = guard.reconcile(client, OWNER, REPO)
         self.assertFalse(report.ok)
-        self.assertEqual(_diagnostic_codes(report), {"BLOCKED_BY_LINE_INVALID"})
-        self.assertEqual(client.calls, [("reopen", 2)])
+        self.assertEqual(
+            _diagnostic_codes(report),
+            {"BLOCKED_BY_LINE_INVALID", "POSTCONDITION_FAILED"},
+        )
+        self.assertEqual(client.calls, [("reopen", 2), ("add", 3, 10_004)])
         self.assertEqual(client.issues[2]["state"], "closed")
 
-    def test_reopen_created_structural_error_blocks_native_mutation(self) -> None:
+    def test_reopen_created_structural_error_quarantines_only_affected_issue(
+        self,
+    ) -> None:
         pending = _body("None").replace("Synthetic accepted evidence.", "Pending.")
         client = FakeClient(
             [
@@ -613,9 +766,12 @@ class ReconciliationTests(unittest.TestCase):
         )
         report = guard.reconcile(client, OWNER, REPO)
         self.assertFalse(report.ok)
-        self.assertEqual(_diagnostic_codes(report), {"BACKLOG_STATE_MISSING"})
-        self.assertEqual(client.calls, [("reopen", 1)])
-        self.assertEqual(client.native, {})
+        self.assertEqual(
+            _diagnostic_codes(report),
+            {"BACKLOG_STATE_MISSING", "POSTCONDITION_FAILED"},
+        )
+        self.assertEqual(client.calls, [("reopen", 1), ("add", 2, 10_003)])
+        self.assertEqual(client.native, {2: [_native(3)]})
 
     def test_native_diagnostic_allows_only_independent_handoff_reopen(self) -> None:
         pending = _body("None").replace("Synthetic accepted evidence.", "Pending.")
@@ -625,7 +781,10 @@ class ReconciliationTests(unittest.TestCase):
         )
         report = guard.reconcile(client, OWNER, REPO)
         self.assertFalse(report.ok)
-        self.assertEqual(_diagnostic_codes(report), {"NATIVE_RECORD_INVALID"})
+        self.assertEqual(
+            _diagnostic_codes(report),
+            {"NATIVE_RECORD_INVALID", "POSTCONDITION_FAILED"},
+        )
         self.assertEqual(client.calls, [("reopen", 1)])
 
     def test_unobserved_reopen_blocks_native_mutation(self) -> None:
@@ -729,7 +888,10 @@ class ReconciliationTests(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertEqual(client.calls, [("add", 1, 10_002)])
         self.assertNotIn("remove", {str(call[0]) for call in client.calls})
-        self.assertEqual(_diagnostic_codes(report), {"MUTATION_FAILED"})
+        self.assertEqual(
+            _diagnostic_codes(report),
+            {"MUTATION_FAILED", "NATIVE_MIRROR_MISMATCH"},
+        )
 
     def test_unobserved_add_prevents_every_removal(self) -> None:
         issues = [
@@ -800,18 +962,50 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(_diagnostic_codes(report), {"NATIVE_MIRROR_MISMATCH"})
         self.assertEqual(client.calls, [])
 
-    def test_invalid_graph_causes_zero_writes_and_zero_native_reads(self) -> None:
-        issues = [_issue(1, "A-001", "not a governed reference")]
+    def test_malformed_issue_does_not_hide_later_native_diagnostics(self) -> None:
+        issues = [
+            _issue(1, "A-001", "not a governed reference"),
+            _issue(2, "A-002", "#3 (A-003)"),
+            _issue(3, "A-003"),
+        ]
         client = FakeClient(issues)
-        with mock.patch.object(
-            client,
-            "list_blocked_by",
-            side_effect=AssertionError("native mirror must not be read"),
-        ):
-            report = guard.reconcile(client, OWNER, REPO)
+        report = guard.reconcile(client, OWNER, REPO)
         self.assertFalse(report.ok)
-        self.assertIn("BLOCKED_BY_LINE_INVALID", _diagnostic_codes(report))
+        self.assertEqual(
+            _diagnostic_codes(report),
+            {"BLOCKED_BY_LINE_INVALID", "POSTCONDITION_FAILED"},
+        )
+        self.assertEqual(client.native_reads, [1, 2, 3] * 3)
+        self.assertEqual(client.calls, [("add", 2, 10_003)])
+
+        client.calls.clear()
+        client.native_reads.clear()
+        replay = guard.reconcile(client, OWNER, REPO)
+        self.assertFalse(replay.ok)
+        self.assertEqual(
+            _diagnostic_codes(replay),
+            {"BLOCKED_BY_LINE_INVALID", "POSTCONDITION_FAILED"},
+        )
+        self.assertEqual(client.native_reads, [1, 2, 3] * 3)
         self.assertEqual(client.calls, [])
+        self.assertEqual(replay.mutations, ())
+
+    def test_unscoped_invalid_record_quarantines_every_native_write(self) -> None:
+        client = FakeClient(
+            [
+                {"number": None},
+                _issue(1, "A-001", "#2 (A-002)"),
+                _issue(2, "A-002"),
+            ]
+        )
+        report = guard.reconcile(client, OWNER, REPO)
+        self.assertFalse(report.ok)
+        self.assertEqual(
+            _diagnostic_codes(report),
+            {"ISSUE_RECORD_INVALID", "POSTCONDITION_FAILED"},
+        )
+        self.assertEqual(client.calls, [])
+        self.assertEqual(report.mutations, ())
 
     def test_concurrent_body_title_state_or_label_change_aborts_before_writes(
         self,
@@ -890,6 +1084,124 @@ def _auth_value() -> str:
 
 
 class HttpClientTests(unittest.TestCase):
+    def test_failure_consumer_comment_is_marker_upserted_not_duplicated(self) -> None:
+        marker_body = f"{guard.FAILURE_CONSUMER_MARKER}\nold"
+        opener = QueueOpener(
+            [
+                FakeResponse([]),
+                FakeResponse(None),
+                FakeResponse(
+                    [
+                        {
+                            "id": 42,
+                            "body": marker_body,
+                            "user": {"login": "github-actions[bot]", "type": "Bot"},
+                        }
+                    ]
+                ),
+                FakeResponse(None),
+            ]
+        )
+        client = guard.GitHubClient(
+            auth_value=_auth_value(), owner=OWNER, repo=REPO, opener=opener
+        )
+        new_body = f"{guard.FAILURE_CONSUMER_MARKER}\nnew"
+        client.upsert_failure_comment(333, new_body)
+        client.upsert_failure_comment(333, new_body)
+
+        requests = opener.requests
+        self.assertEqual(
+            [item.get_method() for item in requests],
+            ["GET", "POST", "GET", "PATCH"],
+        )
+        self.assertTrue(requests[1].full_url.endswith("/issues/333/comments"))
+        self.assertTrue(requests[3].full_url.endswith("/issues/comments/42"))
+        self.assertEqual(
+            json.loads(requests[1].data.decode("utf-8")), {"body": new_body}
+        )
+        self.assertEqual(
+            json.loads(requests[3].data.decode("utf-8")), {"body": new_body}
+        )
+
+    def test_failure_consumer_body_is_sanitized_and_actions_linked(self) -> None:
+        report = guard.GuardReport(
+            mode="reconcile",
+            ok=False,
+            fingerprint="a" * 64,
+            issues=(),
+            diagnostics=(
+                guard.Diagnostic(
+                    "NATIVE_MIRROR_MISMATCH", issue_number=7, blocker_number=8
+                ),
+            ),
+        )
+        environment = {
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_REPOSITORY": f"{OWNER}/{REPO}",
+            "GITHUB_RUN_ID": "12345",
+            "GITHUB_SHA": "b" * 40,
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            body = guard._failure_consumer_body(report)
+        self.assertIn(guard.FAILURE_CONSUMER_MARKER, body)
+        self.assertIn("actions/runs/12345", body)
+        self.assertIn(f"Repository SHA: `{'b' * 40}`", body)
+        self.assertIn("Diagnostic count: 1", body)
+        self.assertIn("Mutation count: 0", body)
+        self.assertIn("`NATIVE_MIRROR_MISMATCH`; issue #7; blocker #8", body)
+        self.assertNotIn("private", body.casefold())
+
+    def test_duplicate_failure_consumer_markers_fail_closed(self) -> None:
+        opener = QueueOpener(
+            [
+                FakeResponse(
+                    [
+                        {
+                            "id": 41,
+                            "body": f"{guard.FAILURE_CONSUMER_MARKER}\nfirst",
+                            "user": {"login": "github-actions[bot]", "type": "Bot"},
+                        },
+                        {
+                            "id": 42,
+                            "body": f"{guard.FAILURE_CONSUMER_MARKER}\nsecond",
+                            "user": {"login": "github-actions[bot]", "type": "Bot"},
+                        },
+                    ]
+                )
+            ]
+        )
+        client = guard.GitHubClient(
+            auth_value=_auth_value(), owner=OWNER, repo=REPO, opener=opener
+        )
+        with self.assertRaises(guard.GitHubApiError) as caught:
+            client.upsert_failure_comment(333, guard.FAILURE_CONSUMER_MARKER)
+        self.assertEqual(caught.exception.code, "FAILURE_CONSUMER_DUPLICATE")
+
+    def test_human_marker_quote_is_never_overwritten(self) -> None:
+        opener = QueueOpener(
+            [
+                FakeResponse(
+                    [
+                        {
+                            "id": 41,
+                            "body": f"quoted {guard.FAILURE_CONSUMER_MARKER}",
+                            "user": {"login": "human-owner", "type": "User"},
+                        }
+                    ]
+                ),
+                FakeResponse(None),
+            ]
+        )
+        client = guard.GitHubClient(
+            auth_value=_auth_value(), owner=OWNER, repo=REPO, opener=opener
+        )
+        body = f"{guard.FAILURE_CONSUMER_MARKER}\nnew"
+        client.upsert_failure_comment(333, body)
+        self.assertEqual(
+            [item.get_method() for item in opener.requests], ["GET", "POST"]
+        )
+        self.assertTrue(opener.requests[1].full_url.endswith("/issues/333/comments"))
+
     def test_pagination_is_bounded_and_aggregated(self) -> None:
         second = (
             "https://api.github.com/repos/example-owner/example-repo/issues"
@@ -1054,6 +1366,44 @@ class HttpClientTests(unittest.TestCase):
         self.assertTrue(requests[2].full_url.endswith("/88008"))
         for item in requests:
             self.assertEqual(item.get_header("X-github-api-version"), guard.API_VERSION)
+
+
+class CliTests(unittest.TestCase):
+    def test_failed_reconcile_upserts_named_consumer_before_nonzero_exit(self) -> None:
+        client = mock.Mock()
+        report = guard.GuardReport(
+            mode="reconcile",
+            ok=False,
+            fingerprint="a" * 64,
+            issues=(),
+            diagnostics=(guard.Diagnostic("POSTCONDITION_FAILED"),),
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                guard.GitHubClient, "from_environment", return_value=client
+            ),
+            mock.patch.object(guard, "reconcile", return_value=report),
+            mock.patch("sys.stdout", new=output),
+        ):
+            exit_code = guard.main(
+                [
+                    "reconcile",
+                    "--repository",
+                    f"{OWNER}/{REPO}",
+                    "--format",
+                    "json",
+                    "--failure-consumer-issue",
+                    "333",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        client.upsert_failure_comment.assert_called_once()
+        issue_number, body = client.upsert_failure_comment.call_args.args
+        self.assertEqual(issue_number, 333)
+        self.assertTrue(body.startswith(f"{guard.FAILURE_CONSUMER_MARKER}\n"))
+        self.assertFalse(json.loads(output.getvalue())["ok"])
 
 
 if __name__ == "__main__":

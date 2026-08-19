@@ -66,4 +66,4 @@ jobs:
       - name: Reconcile body authority to native dependencies
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python tools/issue_guard.py reconcile --repository "${{ github.repository }}" --format json --max-pages 20 --timeout-seconds 20
+        run: python tools/issue_guard.py reconcile --repository "${{ github.repository }}" --format json --max-pages 20 --timeout-seconds 20 --failure-consumer-issue 333
