@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import csv
+from datetime import date, timedelta
 import hashlib
 import importlib.util
 import io
@@ -1134,6 +1135,7 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     )
     verified = verify_layered_history_generation(destination, fixture["contract_path"])
     assert verified["verification"] == "VALID"
+    assert "assurance" not in verified
 
     extra_file_destination = write_layered_history_generation(
         tmp_path / "candidate-extra-file", artifacts, manifest_content
@@ -1755,6 +1757,154 @@ def test_complete_account_history_age_is_warning_not_unavailability(
         contract_path=fixture["contract_path"],
     )
     assert result["verification"] == "VALID"
+
+
+def test_layered_history_verification_applies_assurance_profile_after_validation(
+    tmp_path: Path,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    artifacts, manifest_content = _build(fixture)
+    destination = write_layered_history_generation(
+        tmp_path / "assurance-candidate", artifacts, manifest_content
+    )
+    receipt_as_of = date.fromisoformat(fixture["as_of_date"])
+
+    for profile in ("DEVELOPMENT", "WORKSTATION_QC"):
+        current = verify_layered_history_generation(
+            destination,
+            fixture["contract_path"],
+            assurance_profile=profile,
+            evaluated_on=receipt_as_of,
+        )
+        assert current["assurance"] == {
+            "evaluated_on": receipt_as_of.isoformat(),
+            "profile": profile,
+            "profile_policy": (
+                "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING"
+            ),
+            "receipt_age_days": 0,
+            "receipt_as_of": receipt_as_of.isoformat(),
+            "status": "CURRENT_IMMUTABLE_RECEIPT",
+        }
+
+        reused_on = receipt_as_of + timedelta(days=4)
+        reused = verify_layered_history_generation(
+            destination,
+            fixture["contract_path"],
+            assurance_profile=profile,
+            evaluated_on=reused_on,
+        )
+        assert reused["assurance"] == {
+            "evaluated_on": reused_on.isoformat(),
+            "profile": profile,
+            "profile_policy": (
+                "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING"
+            ),
+            "receipt_age_days": 4,
+            "receipt_as_of": receipt_as_of.isoformat(),
+            "status": "WARN_VERIFIED_IMMUTABLE_RECEIPT_REUSE",
+        }
+
+    release = verify_layered_history_generation(
+        destination,
+        fixture["contract_path"],
+        assurance_profile="RELEASE_QC",
+        evaluated_on=receipt_as_of,
+    )
+    assert release["assurance"] == {
+        "evaluated_on": receipt_as_of.isoformat(),
+        "profile": "RELEASE_QC",
+        "profile_policy": (
+            "CURRENT_RELEASE_RECEIPTS_REQUIRED_WITH_CALCULATION_AGE_DISCLOSED"
+        ),
+        "receipt_age_days": 0,
+        "receipt_as_of": receipt_as_of.isoformat(),
+        "status": "CURRENT_RELEASE_RECEIPT",
+    }
+
+    with pytest.raises(
+        TargetSeriesError,
+        match="release QC requires a layered history receipt for the evaluation date",
+    ):
+        verify_layered_history_generation(
+            destination,
+            fixture["contract_path"],
+            assurance_profile="RELEASE_QC",
+            evaluated_on=receipt_as_of + timedelta(days=1),
+        )
+    with pytest.raises(
+        TargetSeriesError,
+        match="receipt exceeds the assurance evaluation date",
+    ):
+        verify_layered_history_generation(
+            destination,
+            fixture["contract_path"],
+            assurance_profile="DEVELOPMENT",
+            evaluated_on=receipt_as_of - timedelta(days=1),
+        )
+    with pytest.raises(
+        TargetSeriesError,
+        match="assurance profile and evaluation date must be supplied together",
+    ):
+        verify_layered_history_generation(
+            destination,
+            fixture["contract_path"],
+            assurance_profile="DEVELOPMENT",
+        )
+    with pytest.raises(
+        TargetSeriesError,
+        match="assurance profile and evaluation date must be supplied together",
+    ):
+        verify_layered_history_generation(
+            destination,
+            fixture["contract_path"],
+            evaluated_on=receipt_as_of,
+        )
+    with pytest.raises(
+        TargetSeriesError,
+        match="required history mode is not ready: LIVE_PLUS_BACKTEST",
+    ):
+        verify_layered_history_generation(
+            destination,
+            fixture["contract_path"],
+            require_mode="LIVE_PLUS_BACKTEST",
+            assurance_profile="DEVELOPMENT",
+            evaluated_on=receipt_as_of + timedelta(days=1),
+        )
+
+    for rewritten_as_of in ("20260110", "2026-W02-6"):
+        noncanonical_manifest = json.loads(manifest_content)
+        noncanonical_manifest["as_of_date"] = rewritten_as_of
+        noncanonical_destination = write_layered_history_generation(
+            tmp_path / f"noncanonical-{rewritten_as_of}",
+            artifacts,
+            _reidentify_manifest(noncanonical_manifest),
+        )
+        with pytest.raises(
+            TargetSeriesError,
+            match="layered history generation as-of is invalid",
+        ):
+            verify_layered_history_generation(
+                noncanonical_destination,
+                fixture["contract_path"],
+                assurance_profile="RELEASE_QC",
+                evaluated_on=receipt_as_of,
+            )
+
+    rewritten_contract = json.loads(
+        fixture["contract_path"].read_text(encoding="utf-8")
+    )
+    rewritten_contract["product"]["as_of_policy"]["execution_profiles"][
+        "DEVELOPMENT"
+    ] = "REUSE_WITHOUT_WARNING"
+    _write_json(fixture["contract_path"], rewritten_contract)
+    with pytest.raises(TargetSeriesError, match="financial MVP contract is invalid"):
+        verify_layered_history_generation(
+            destination,
+            fixture["contract_path"],
+            assurance_profile="DEVELOPMENT",
+            evaluated_on=receipt_as_of,
+        )
 
 
 def test_layered_history_accepts_only_manifest_declared_matrixport_gap(
@@ -3057,6 +3207,55 @@ def test_layered_history_cli_builds_verifies_and_requires_modes(
     assert target_series.main() == 0
     verify_result = json.loads(capsys.readouterr().out)
     assert verify_result["verification"] == "VALID"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "portfolio_target_series.py",
+            "--verify-layered-history",
+            str(generation_root),
+            "--financial-mvp-contract",
+            str(fixture["contract_path"]),
+            "--assurance-profile",
+            "DEVELOPMENT",
+            "--evaluated-on",
+            "2026-01-14",
+        ],
+    )
+    assert target_series.main() == 0
+    assurance_result = json.loads(capsys.readouterr().out)
+    assert assurance_result["assurance"] == {
+        "evaluated_on": "2026-01-14",
+        "profile": "DEVELOPMENT",
+        "profile_policy": (
+            "VERIFIED_IMMUTABLE_INPUT_REUSE_ALLOWED_WITH_STRUCTURED_AGE_WARNING"
+        ),
+        "receipt_age_days": 4,
+        "receipt_as_of": "2026-01-10",
+        "status": "WARN_VERIFIED_IMMUTABLE_RECEIPT_REUSE",
+    }
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "portfolio_target_series.py",
+            "--verify-layered-history",
+            str(generation_root),
+            "--financial-mvp-contract",
+            str(fixture["contract_path"]),
+            "--assurance-profile",
+            "RELEASE_QC",
+            "--evaluated-on",
+            "2026-01-11",
+        ],
+    )
+    assert target_series.main() == 2
+    assert (
+        "release QC requires a layered history receipt for the evaluation date"
+        in capsys.readouterr().err
+    )
 
     monkeypatch.setattr(
         sys,

@@ -66,6 +66,9 @@ MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
 LAYERED_HISTORY_BUILDER_VERSION: Final = "1.12.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
+LAYERED_HISTORY_ASSURANCE_PROFILES: Final = frozenset(
+    {"DEVELOPMENT", "WORKSTATION_QC", "RELEASE_QC"}
+)
 LAYERED_HISTORY_MODE_POLICY: Final = {
     "LIVE_ONLY": "SELECTED_ACCOUNT_LIVE_ONLY",
     "LIVE_PLUS_BACKTEST": "EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE_THEN_ACCOUNT_LIVE",
@@ -3497,12 +3500,63 @@ def _require_exact_keys(
         raise TargetSeriesError(f"{name} keys differ")
 
 
+def _layered_history_assurance_disposition(
+    *,
+    contract: Mapping[str, Any],
+    receipt_as_of: date,
+    assurance_profile: str,
+    evaluated_on: date,
+) -> dict[str, object]:
+    if (
+        not isinstance(assurance_profile, str)
+        or assurance_profile not in LAYERED_HISTORY_ASSURANCE_PROFILES
+    ):
+        raise TargetSeriesError("layered history assurance profile is invalid")
+    product = contract.get("product")
+    as_of_policy = product.get("as_of_policy") if isinstance(product, dict) else None
+    profiles = (
+        as_of_policy.get("execution_profiles")
+        if isinstance(as_of_policy, dict)
+        else None
+    )
+    profile_policy = (
+        profiles.get(assurance_profile) if isinstance(profiles, dict) else None
+    )
+    if not isinstance(profile_policy, str) or not profile_policy:
+        raise TargetSeriesError("layered history assurance authority is absent")
+    if receipt_as_of > evaluated_on:
+        raise TargetSeriesError(
+            "layered history receipt exceeds the assurance evaluation date"
+        )
+    receipt_age_days = (evaluated_on - receipt_as_of).days
+    if assurance_profile == "RELEASE_QC" and receipt_age_days != 0:
+        raise TargetSeriesError(
+            "release QC requires a layered history receipt for the evaluation date"
+        )
+    if assurance_profile == "RELEASE_QC":
+        status = "CURRENT_RELEASE_RECEIPT"
+    elif receipt_age_days == 0:
+        status = "CURRENT_IMMUTABLE_RECEIPT"
+    else:
+        status = "WARN_VERIFIED_IMMUTABLE_RECEIPT_REUSE"
+    return {
+        "evaluated_on": evaluated_on.isoformat(),
+        "profile": assurance_profile,
+        "profile_policy": profile_policy,
+        "receipt_age_days": receipt_age_days,
+        "receipt_as_of": receipt_as_of.isoformat(),
+        "status": status,
+    }
+
+
 def validate_layered_history_generation(
     *,
     artifacts: Mapping[str, bytes],
     manifest_content: bytes,
     contract_path: Path,
     require_mode: str | None = None,
+    assurance_profile: str | None = None,
+    evaluated_on: date | None = None,
 ) -> dict[str, object]:
     try:
         manifest = json.loads(manifest_content)
@@ -3551,10 +3605,13 @@ def validate_layered_history_generation(
     without_id.pop("generation_id", None)
     if generation_id != hashlib.sha256(canonical_json_bytes(without_id)).hexdigest():
         raise TargetSeriesError("layered history generation identity differs")
+    raw_as_of = str(manifest.get("as_of_date", ""))
     try:
-        accepted_as_of = date.fromisoformat(str(manifest.get("as_of_date", "")))
+        accepted_as_of = date.fromisoformat(raw_as_of)
     except ValueError as exc:
         raise TargetSeriesError("layered history generation as-of is invalid") from exc
+    if accepted_as_of.isoformat() != raw_as_of:
+        raise TargetSeriesError("layered history generation as-of is invalid")
     repository_sha = str(manifest.get("repository_sha", ""))
     tool_sha256 = str(manifest.get("tool_sha256", ""))
     if (
@@ -4962,7 +5019,15 @@ def validate_layered_history_generation(
             raise TargetSeriesError(
                 f"required history mode is not ready: {require_mode}"
             )
-    return {
+    if (assurance_profile is None) != (evaluated_on is None):
+        raise TargetSeriesError(
+            "assurance profile and evaluation date must be supplied together"
+        )
+    if evaluated_on is not None and (
+        not isinstance(evaluated_on, date) or isinstance(evaluated_on, datetime)
+    ):
+        raise TargetSeriesError("assurance evaluation date is invalid")
+    result: dict[str, object] = {
         "generation_id": generation_id,
         "mode_status": mode_status,
         "output_sha256": {
@@ -4972,6 +5037,14 @@ def validate_layered_history_generation(
         "strategy_count": len(coverage_by_strategy),
         "verification": "VALID",
     }
+    if assurance_profile is not None and evaluated_on is not None:
+        result["assurance"] = _layered_history_assurance_disposition(
+            contract=contract,
+            receipt_as_of=accepted_as_of,
+            assurance_profile=assurance_profile,
+            evaluated_on=evaluated_on,
+        )
+    return result
 
 
 def write_layered_history_generation(
@@ -5002,6 +5075,8 @@ def verify_layered_history_generation(
     contract_path: Path,
     *,
     require_mode: str | None = None,
+    assurance_profile: str | None = None,
+    evaluated_on: date | None = None,
 ) -> dict[str, object]:
     if generation_root.is_symlink() or not generation_root.is_dir():
         raise TargetSeriesError("layered history generation root must be a directory")
@@ -5037,6 +5112,8 @@ def verify_layered_history_generation(
         manifest_content=manifest_content,
         contract_path=contract_path,
         require_mode=require_mode,
+        assurance_profile=assurance_profile,
+        evaluated_on=evaluated_on,
     )
     if generation_root.name != result["generation_id"]:
         raise TargetSeriesError("layered history generation directory differs")
@@ -6045,6 +6122,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--layered-history-generation", action="store_true")
     parser.add_argument("--verify-layered-history", type=Path)
     parser.add_argument("--require-mode", choices=("LIVE_ONLY", "LIVE_PLUS_BACKTEST"))
+    parser.add_argument(
+        "--assurance-profile", choices=tuple(sorted(LAYERED_HISTORY_ASSURANCE_PROFILES))
+    )
+    parser.add_argument("--evaluated-on")
     parser.add_argument("--layered-correlation-only", action="store_true")
     parser.add_argument("--output-root", type=Path)
     return parser
@@ -6064,12 +6145,30 @@ def main() -> int:
             raise TargetSeriesError(
                 "layered history build and verification modes are mutually exclusive"
             )
+        if (args.assurance_profile is None) != (args.evaluated_on is None):
+            raise TargetSeriesError(
+                "assurance profile and evaluation date must be supplied together"
+            )
+        assurance_evaluated_on: date | None = None
+        if args.evaluated_on is not None:
+            try:
+                assurance_evaluated_on = date.fromisoformat(args.evaluated_on)
+            except ValueError as exc:
+                raise TargetSeriesError("assurance evaluation date is invalid") from exc
+            if assurance_evaluated_on.isoformat() != args.evaluated_on:
+                raise TargetSeriesError("assurance evaluation date is invalid")
+        if args.assurance_profile is not None and args.verify_layered_history is None:
+            raise TargetSeriesError(
+                "assurance profile evaluation requires layered history verification"
+            )
         if args.verify_layered_history is not None:
             _required(args, ("financial_mvp_contract",), "layered history verification")
             result = verify_layered_history_generation(
                 args.verify_layered_history,
                 args.financial_mvp_contract,
                 require_mode=args.require_mode,
+                assurance_profile=args.assurance_profile,
+                evaluated_on=assurance_evaluated_on,
             )
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
             return 0
