@@ -27,6 +27,11 @@ ACTION_REFERENCE = re.compile(r"^(?P<target>[^@]+)@(?P<sha>[0-9a-f]{40})$")
 LOCKED_AUDIT_COMMAND = (
     "uv audit --locked --python-version 3.11 --preview-features audit-command"
 )
+ISSUE_GUARD_RECONCILE_COMMAND = (
+    'python tools/issue_guard.py reconcile --repository "${{ github.repository }}" '
+    "--format json --max-pages 20 --timeout-seconds 20 "
+    "--failure-consumer-issue 333"
+)
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -497,14 +502,14 @@ def validate_workflow_document(
                     or set(step_env) != {"GITHUB_TOKEN"}
                     or re.fullmatch(r"\$\{\{\s*github\.token\s*\}\}", token_value)
                     is None
-                    or "uv " in run_text
-                    or not run_text.startswith("python tools/issue_guard.py reconcile ")
+                    or run_text != ISSUE_GUARD_RECONCILE_COMMAND
                 ):
                     findings.append(
                         Finding(
                             locator,
                             "ISSUE_TOKEN_ENV_INVALID",
-                            "explicit token environment is limited to the reconciler",
+                            "explicit token environment is limited to the reconciler "
+                            "and named failure consumer",
                         )
                     )
     if workflow_name == "issue-guard.yml" and (

@@ -32,6 +32,8 @@ DEFAULT_TIMEOUT_SECONDS = 20.0
 MAX_PAGES_LIMIT = 100
 MAX_TIMEOUT_SECONDS = 60.0
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_ACTIVE_ISSUES = 3
+FAILURE_CONSUMER_MARKER = "<!-- quant-engine-issue-guard-failure -->"
 
 _TITLE_KEY = re.compile(r"^\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\](?:\s|$)")
 _KEY = r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+"
@@ -123,6 +125,42 @@ BACKLOG_LABELS: dict[str, BacklogState] = {
     "backlog:deferred": "deferred",
     "backlog:folded": "folded",
 }
+
+_FINAL_HANDOFF_PLACEHOLDERS = frozenset(
+    {
+        "awaitingfinalevidence",
+        "completebeforeclosing",
+        "completebeforeclosingtheissue",
+        "evidencepending",
+        "evidenceremainspending",
+        "finalevidencepending",
+        "handoffpending",
+        "na",
+        "none",
+        "noneatcreation",
+        "notcomplete",
+        "notcompleted",
+        "notyetcomplete",
+        "pending",
+        "pendingevidence",
+        "pendinghostedvalidation",
+        "placeholder",
+        "tbd",
+        "tobecompleted",
+        "todo",
+    }
+)
+_FINAL_HANDOFF_PENDING_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"pending(?:\s+(?:final\s+)?(?:evidence|validation|review|handoff|hosted\s+validation))?(?:\s*[;,:.-]\s*(?:awaiting|after|until|for|from|on)\s+(?:hosted\s+)?(?:evidence|validation|review|run|ci))?",
+        r"(?:final\s+)?evidence\s+(?:remains|is)\s+pending(?:\s*[;,:.-]\s*see\s+actions\s+run\s+[0-9]+)?",
+        r"awaiting\s+(?:final\s+)?(?:evidence|validation|review|handoff|hosted\s+run)(?:\s+from\s+(?:ci|review|hosted\s+run))?",
+        r"to\s+be\s+completed(?:\s+after\s+(?:review|validation|ci|hosted\s+run))?",
+        r"not(?:\s+yet)?\s+completed?(?:\s+(?:after|until)\s+(?:review|validation|ci|hosted\s+run))?",
+        r"n\s*/\s*a(?:\s+until\s+(?:validation|review|ci|hosted\s+run)(?:\s+(?:finishes|completes))?)?",
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -473,6 +511,21 @@ def parse_blocked_by(
     return tuple(references), _sorted_diagnostics(diagnostics)
 
 
+def _final_handoff_is_placeholder(content: Sequence[str]) -> bool:
+    """Return whether visible handoff content is only a completion placeholder."""
+
+    raw = "\n".join(content).casefold()
+    compact = re.sub(r"[^a-z0-9]+", "", raw)
+    if not compact or compact in _FINAL_HANDOFF_PLACEHOLDERS:
+        return True
+    without_markdown = re.sub(r"[`*_~]+", "", raw)
+    normalized = re.sub(r"\s+", " ", without_markdown).strip(" .,;:()[]{}")
+    return any(
+        pattern.fullmatch(normalized) is not None
+        for pattern in _FINAL_HANDOFF_PENDING_PATTERNS
+    )
+
+
 def _final_handoff_diagnostics(
     issues: Mapping[int, IssueRecord],
 ) -> tuple[Diagnostic, ...]:
@@ -511,8 +564,7 @@ def _final_handoff_diagnostics(
                 break
             if line.strip():
                 content.append(line.strip())
-        normalized = re.sub(r"[\s.*_`~\-]+", "", "\n".join(content).casefold())
-        if not normalized or normalized.startswith(("pending", "tbd", "todo")):
+        if _final_handoff_is_placeholder(content):
             diagnostics.append(Diagnostic("FINAL_HANDOFF_PENDING", issue_number=number))
     return _sorted_diagnostics(diagnostics)
 
@@ -679,6 +731,21 @@ def _parse_issue_graph(
             backlog_state=backlog_state,
         )
 
+        if state == "open" and any(label.startswith("priority:") for label in labels):
+            diagnostics.append(
+                Diagnostic("OPEN_PRIORITY_LABEL_FORBIDDEN", issue_number=number)
+            )
+
+    active_numbers = tuple(
+        number
+        for number, issue in sorted(issues.items())
+        if issue.state == "open" and issue.backlog_state == "active"
+    )
+    if len(active_numbers) > MAX_ACTIVE_ISSUES:
+        diagnostics.append(
+            Diagnostic("ACTIVE_LIMIT_EXCEEDED", related_numbers=active_numbers)
+        )
+
     adjacency: dict[int, tuple[int, ...]] = {}
     for number in sorted(issues):
         record = issues[number]
@@ -800,6 +867,59 @@ def _snapshot_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+_NATIVE_COMPARISON_SAFE_GRAPH_DIAGNOSTICS = frozenset(
+    {
+        "ACTIVE_LIMIT_EXCEEDED",
+        "BACKLOG_STATE_MISSING",
+        "BACKLOG_STATE_MULTIPLE",
+        "OPEN_PRIORITY_LABEL_FORBIDDEN",
+    }
+)
+
+
+def _unsafe_native_comparison_numbers(
+    diagnostics: Sequence[Diagnostic],
+) -> frozenset[int]:
+    """Identify issue rows whose authority is too ambiguous to compare natively."""
+
+    unsafe: set[int] = set()
+    for diagnostic in diagnostics:
+        if diagnostic.code in _NATIVE_COMPARISON_SAFE_GRAPH_DIAGNOSTICS:
+            continue
+        if diagnostic.issue_number is not None:
+            unsafe.add(diagnostic.issue_number)
+        if diagnostic.blocker_number is not None:
+            unsafe.add(diagnostic.blocker_number)
+        unsafe.update(diagnostic.related_numbers)
+    return frozenset(unsafe)
+
+
+def _unsafe_native_component_numbers(
+    issues: Mapping[int, IssueRecord], diagnostics: Sequence[Diagnostic]
+) -> frozenset[int]:
+    """Expand unsafe authority through dependents that consume it."""
+
+    if any(
+        diagnostic.code not in _NATIVE_COMPARISON_SAFE_GRAPH_DIAGNOSTICS
+        and diagnostic.issue_number is None
+        and diagnostic.blocker_number is None
+        and not diagnostic.related_numbers
+        for diagnostic in diagnostics
+    ):
+        return frozenset(issues)
+    unsafe = set(_unsafe_native_comparison_numbers(diagnostics))
+    changed = True
+    while changed:
+        changed = False
+        for number, issue in issues.items():
+            if number in unsafe:
+                continue
+            if any(reference.number in unsafe for reference in issue.blockers):
+                unsafe.add(number)
+                changed = True
+    return frozenset(unsafe)
+
+
 def load_snapshot(client: IssueClient, owner: str, repo: str) -> Snapshot:
     """Read and validate the complete body graph and native mirror."""
 
@@ -810,55 +930,61 @@ def load_snapshot(client: IssueClient, owner: str, repo: str) -> Snapshot:
     mirror_diagnostics: list[Diagnostic] = []
     expected_repository_url = f"https://api.github.com/repos/{owner}/{repo}".casefold()
 
-    if not graph_diagnostics:
-        for number in sorted(issues):
-            parsed, findings = _parse_native_dependencies(
-                client.list_blocked_by(number), number
-            )
-            native[number] = parsed
-            native_diagnostics.extend(findings)
-        database_id_to_number = {
-            issue.database_id: number for number, issue in issues.items()
+    # Read every parsed issue even when an unrelated body is malformed.  The
+    # affected row remains fail-closed, but it cannot hide later native/API
+    # diagnostics or body/native mismatches on independently valid rows.
+    for number in sorted(issues):
+        parsed, findings = _parse_native_dependencies(
+            client.list_blocked_by(number), number
+        )
+        native[number] = parsed
+        native_diagnostics.extend(findings)
+    database_id_to_number = {
+        issue.database_id: number for number, issue in issues.items()
+    }
+    for number in sorted(issues):
+        for dependency in native.get(number, ()):
+            if dependency.repository_url.casefold() != expected_repository_url:
+                continue
+            expected_number = database_id_to_number.get(dependency.database_id)
+            known_number = issues.get(dependency.number)
+            if (
+                expected_number is not None and expected_number != dependency.number
+            ) or (
+                known_number is not None
+                and known_number.database_id != dependency.database_id
+            ):
+                native_diagnostics.append(
+                    Diagnostic(
+                        "NATIVE_RECORD_IDENTITY_MISMATCH",
+                        issue_number=number,
+                        blocker_number=dependency.number,
+                    )
+                )
+    unsafe_numbers = _unsafe_native_component_numbers(
+        issues, graph_diagnostics + tuple(native_diagnostics)
+    )
+    for number in sorted(issues):
+        if number in unsafe_numbers:
+            continue
+        desired_ids = {
+            issues[reference.number].database_id
+            for reference in issues[number].blockers
         }
-        for number in sorted(issues):
-            for dependency in native.get(number, ()):
-                if dependency.repository_url.casefold() != expected_repository_url:
-                    continue
-                expected_number = database_id_to_number.get(dependency.database_id)
-                known_number = issues.get(dependency.number)
-                if (
-                    expected_number is not None and expected_number != dependency.number
-                ) or (
-                    known_number is not None
-                    and known_number.database_id != dependency.database_id
-                ):
-                    native_diagnostics.append(
-                        Diagnostic(
-                            "NATIVE_RECORD_IDENTITY_MISMATCH",
-                            issue_number=number,
-                            blocker_number=dependency.number,
-                        )
-                    )
-        if not native_diagnostics:
-            for number in sorted(issues):
-                desired_ids = {
-                    issues[reference.number].database_id
-                    for reference in issues[number].blockers
-                }
-                current_ids = {
-                    dependency.database_id
-                    for dependency in native.get(number, ())
-                    if dependency.repository_url.casefold() == expected_repository_url
-                }
-                cross_repository_ids = {
-                    dependency.database_id
-                    for dependency in native.get(number, ())
-                    if dependency.repository_url.casefold() != expected_repository_url
-                }
-                if desired_ids != current_ids or cross_repository_ids:
-                    mirror_diagnostics.append(
-                        Diagnostic("NATIVE_MIRROR_MISMATCH", issue_number=number)
-                    )
+        current_ids = {
+            dependency.database_id
+            for dependency in native.get(number, ())
+            if dependency.repository_url.casefold() == expected_repository_url
+        }
+        cross_repository_ids = {
+            dependency.database_id
+            for dependency in native.get(number, ())
+            if dependency.repository_url.casefold() != expected_repository_url
+        }
+        if desired_ids != current_ids or cross_repository_ids:
+            mirror_diagnostics.append(
+                Diagnostic("NATIVE_MIRROR_MISMATCH", issue_number=number)
+            )
 
     fingerprint = _snapshot_fingerprint(issues, pull_requests, native)
     return Snapshot(
@@ -1064,7 +1190,7 @@ def _mutation_failure(
         ok=False,
         fingerprint=snapshot.fingerprint,
         issues=_issue_results(snapshot),
-        diagnostics=(diagnostic,),
+        diagnostics=_sorted_diagnostics(snapshot.all_diagnostics + (diagnostic,)),
         mutations=tuple(mutations),
     )
 
@@ -1075,9 +1201,14 @@ def _native_delta(
     """Return missing and stale links as issue, blocker number, database ID."""
 
     expected_repository_url = f"https://api.github.com/repos/{owner}/{repo}".casefold()
+    unsafe_numbers = _unsafe_native_component_numbers(
+        snapshot.issues, snapshot.structural_diagnostics
+    )
     missing: list[tuple[int, int, int]] = []
     stale: list[tuple[int, int, int]] = []
     for number in sorted(snapshot.issues):
+        if number in unsafe_numbers:
+            continue
         desired_by_id = {
             snapshot.issues[reference.number].database_id: reference.number
             for reference in snapshot.issues[number].blockers
@@ -1165,14 +1296,19 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
         )
 
     mutations: list[Mutation] = []
-    if current.structural_diagnostics:
+    unsafe_structural_diagnostics = tuple(
+        diagnostic
+        for diagnostic in current.structural_diagnostics
+        if diagnostic.code not in _NATIVE_COMPARISON_SAFE_GRAPH_DIAGNOSTICS
+    )
+    if unsafe_structural_diagnostics:
         # A malformed dependency graph must still block all native-edge writes,
         # but it must not shield independently illegal final handoffs from the
         # fail-safe reopen control. Reopening is reversible and depends only on
         # the affected closed issue's own body and state.
         if any(
             diagnostic.code == "ISSUE_NUMBER_DUPLICATE"
-            for diagnostic in current.structural_diagnostics
+            for diagnostic in unsafe_structural_diagnostics
         ):
             illegal_closed: tuple[int, ...] = ()
         else:
@@ -1287,16 +1423,9 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
                 )
             current = verification
 
-    if current.structural_diagnostics:
-        return GuardReport(
-            mode="reconcile",
-            ok=False,
-            fingerprint=current.fingerprint,
-            issues=_issue_results(current, invalid_all=True),
-            diagnostics=current.structural_diagnostics,
-            mutations=tuple(mutations),
-        )
-
+    # Structural ambiguity quarantines only the affected issue/component from
+    # native writes. Independently valid rows still reconcile, while the final
+    # report remains failed until every structural diagnostic is corrected.
     missing, stale = _native_delta(current, owner, repo)
     cycle_breaking = _cycle_breaking_stale(current, stale, owner, repo)
     for issue_number, blocker_number, database_id in cycle_breaking:
@@ -1314,10 +1443,10 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
 
     if cycle_breaking:
         verification = load_snapshot(client, owner, repo)
-        if verification.structural_diagnostics:
+        if verification.structural_diagnostics != current.structural_diagnostics:
             diagnostics = _sorted_diagnostics(
                 verification.structural_diagnostics
-                + (Diagnostic("REMOVAL_VERIFICATION_FAILED"),)
+                + (Diagnostic("CONCURRENT_STATE_CHANGE"),)
             )
             return GuardReport(
                 mode="reconcile",
@@ -1369,10 +1498,10 @@ def reconcile(client: IssueClient, owner: str, repo: str) -> GuardReport:
     # relationship is an uncertain outcome, so non-cycle stale links remain.
     if stale:
         verification = load_snapshot(client, owner, repo)
-        if verification.structural_diagnostics:
+        if verification.structural_diagnostics != current.structural_diagnostics:
             diagnostics = _sorted_diagnostics(
                 verification.structural_diagnostics
-                + (Diagnostic("ADD_VERIFICATION_FAILED"),)
+                + (Diagnostic("CONCURRENT_STATE_CHANGE"),)
             )
             return GuardReport(
                 mode="reconcile",
@@ -1651,6 +1780,46 @@ class GitHubClient:
             "/dependencies/blocked_by?per_page=100&page=1"
         )
 
+    def list_issue_comments(self, issue_number: int) -> Sequence[Mapping[str, object]]:
+        return self._get_paginated(
+            f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
+            "/comments?per_page=100&page=1"
+        )
+
+    def upsert_failure_comment(self, issue_number: int, body: str) -> None:
+        """Create or replace the one named Issue Guard failure comment."""
+
+        matches: list[int] = []
+        for item in self.list_issue_comments(issue_number):
+            comment_body = item.get("body")
+            raw_user = item.get("user")
+            comment_user = raw_user if isinstance(raw_user, Mapping) else {}
+            if (
+                not isinstance(comment_body, str)
+                or not comment_body.startswith(f"{FAILURE_CONSUMER_MARKER}\n")
+                or comment_user.get("login") != "github-actions[bot]"
+                or comment_user.get("type") != "Bot"
+            ):
+                continue
+            comment_id = _positive_integer(item.get("id"))
+            if comment_id is None:
+                raise GitHubApiError("FAILURE_CONSUMER_RESPONSE_INVALID")
+            matches.append(comment_id)
+        if len(matches) > 1:
+            raise GitHubApiError("FAILURE_CONSUMER_DUPLICATE")
+        if matches:
+            self._request(
+                "PATCH",
+                f"/repos/{self.owner}/{self.repo}/issues/comments/{matches[0]}",
+                {"body": body},
+            )
+            return
+        self._request(
+            "POST",
+            f"/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments",
+            {"body": body},
+        )
+
     def reopen_issue(self, issue_number: int) -> None:
         self._request(
             "PATCH",
@@ -1701,6 +1870,66 @@ def _render_text(report: GuardReport) -> str:
     return "\n".join(lines)
 
 
+def _actions_run_url() -> str | None:
+    server = os.environ.get("GITHUB_SERVER_URL", "")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if server != "https://github.com" or not run_id.isdigit():
+        return None
+    pieces = repository.split("/")
+    if len(pieces) != 2 or not all(pieces):
+        return None
+    return f"{server}/{repository}/actions/runs/{run_id}"
+
+
+def _failure_consumer_body(report: GuardReport) -> str:
+    lines = [
+        FAILURE_CONSUMER_MARKER,
+        "## Automated Issue Guard failure",
+        "",
+        "The existing event/scheduled reconciliation failed closed.",
+        "",
+        f"- Fingerprint: `{report.fingerprint or 'UNAVAILABLE'}`",
+        f"- Diagnostic count: {len(report.diagnostics)}",
+        f"- Mutation count: {len(report.mutations)}",
+    ]
+    github_sha = os.environ.get("GITHUB_SHA", "").casefold()
+    if re.fullmatch(r"[0-9a-f]{40}", github_sha) is not None:
+        lines.append(f"- Repository SHA: `{github_sha}`")
+    run_url = _actions_run_url()
+    if run_url is not None:
+        lines.append(f"- Actions evidence: {run_url}")
+    lines.extend(("", "Diagnostics:"))
+    for diagnostic in report.diagnostics:
+        fields = [f"`{diagnostic.code}`"]
+        if diagnostic.issue_number is not None:
+            fields.append(f"issue #{diagnostic.issue_number}")
+        if diagnostic.blocker_number is not None:
+            fields.append(f"blocker #{diagnostic.blocker_number}")
+        if diagnostic.status is not None:
+            fields.append(f"HTTP {diagnostic.status}")
+        lines.append(f"- {'; '.join(fields)}")
+    lines.extend(
+        (
+            "",
+            "This sanitized comment is the named #333 consumer; the failed "
+            "Actions run remains the durable execution evidence.",
+        )
+    )
+    return "\n".join(lines)
+
+
+def _with_diagnostic(report: GuardReport, diagnostic: Diagnostic) -> GuardReport:
+    return GuardReport(
+        mode=report.mode,
+        ok=False,
+        fingerprint=report.fingerprint,
+        issues=report.issues,
+        diagnostics=_sorted_diagnostics(report.diagnostics + (diagnostic,)),
+        mutations=report.mutations,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Audit or reconcile governed GitHub Issue dependencies."
@@ -1715,13 +1944,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS
     )
+    parser.add_argument(
+        "--failure-consumer-issue",
+        type=int,
+        help="existing issue that receives one sanitized live-failure comment",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     mode: Literal["audit", "reconcile"] = arguments.mode
+    client: GitHubClient | None = None
     try:
+        if arguments.failure_consumer_issue is not None and (
+            mode != "reconcile" or arguments.failure_consumer_issue <= 0
+        ):
+            raise GuardConfigurationError("FAILURE_CONSUMER_ARGUMENT_INVALID")
         client = GitHubClient.from_environment(
             repository=arguments.repository,
             max_pages=arguments.max_pages,
@@ -1739,6 +1978,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         # A malformed remote response or unexpected runtime failure must not
         # print raw exception material that could contain issue or API data.
         report = _error_report(mode, "INTERNAL_ERROR", None)
+    if (
+        not report.ok
+        and arguments.failure_consumer_issue is not None
+        and client is not None
+    ):
+        try:
+            client.upsert_failure_comment(
+                arguments.failure_consumer_issue,
+                _failure_consumer_body(report),
+            )
+        except (GitHubApiError, GuardConfigurationError):
+            report = _with_diagnostic(
+                report,
+                Diagnostic(
+                    "FAILURE_CONSUMER_FAILED",
+                    issue_number=arguments.failure_consumer_issue,
+                ),
+            )
+        except Exception:
+            report = _with_diagnostic(
+                report,
+                Diagnostic(
+                    "FAILURE_CONSUMER_FAILED",
+                    issue_number=arguments.failure_consumer_issue,
+                ),
+            )
     if arguments.format == "json":
         print(json.dumps(report.to_dict(), sort_keys=True, indent=2))
     else:

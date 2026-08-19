@@ -183,6 +183,30 @@ def test_issue_guard_requires_unfiltered_pr_and_limited_token_environment() -> N
     }.issubset(_codes(findings))
 
     mutated = copy.deepcopy(document)
+    reconcile_steps = mutated["jobs"]["reconcile"]["steps"]  # type: ignore[index]
+    token_step = next(step for step in reconcile_steps if "env" in step)
+    token_step["run"] = str(token_step["run"]).replace(
+        " --failure-consumer-issue 333", ""
+    )
+    findings = workflow_policy.validate_workflow_document(
+        "issue-guard.yml", mutated, text, ci_lock
+    )
+    assert "ISSUE_TOKEN_ENV_INVALID" in _codes(findings)
+
+    for suffix in (
+        " --failure-consumer-issue 334",
+        "\npython tools/issue_guard.py audit --repository example/example",
+    ):
+        mutated = copy.deepcopy(document)
+        reconcile_steps = mutated["jobs"]["reconcile"]["steps"]  # type: ignore[index]
+        token_step = next(step for step in reconcile_steps if "env" in step)
+        token_step["run"] = f"{token_step['run']}{suffix}"
+        findings = workflow_policy.validate_workflow_document(
+            "issue-guard.yml", mutated, text, ci_lock
+        )
+        assert "ISSUE_TOKEN_ENV_INVALID" in _codes(findings)
+
+    mutated = copy.deepcopy(document)
     mutated["on"]["push"] = {"branches": ["feature"]}  # type: ignore[index]
     mutated["jobs"]["reconcile"]["if"] = "always()"  # type: ignore[index]
     findings = workflow_policy.validate_workflow_document(
