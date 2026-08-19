@@ -29,11 +29,18 @@ from quant_engine.portfolio_ledger.models import (
     decimal_text,
 )
 from quant_engine.portfolio_ledger.hwm import (
+    AS_HELD_HWM_POLICY_ID,
+    AS_HELD_HWM_RETURN_BASIS,
     HWM_STATUS_CODE_VERSION,
     HWM_STATUS_SEMANTICS,
     HwmCoverageError,
+    as_held_hwm_receipt,
+    as_held_hwm_receipt_bytes,
+    compute_as_held_composite_hwm,
     compute_full_systematic_hwm_index,
     governed_hwm_coverage,
+    validate_as_held_hwm_policy,
+    verify_as_held_hwm_receipt,
 )
 from quant_engine.portfolio_ledger.hwm_inputs import (
     HwmInputsContractError,
@@ -78,6 +85,8 @@ __all__ = [
     "AccountStrategyAssignment",
     "AdmissionDisposition",
     "AnalyticalModelStatus",
+    "AS_HELD_HWM_POLICY_ID",
+    "AS_HELD_HWM_RETURN_BASIS",
     "AllocationBridgeReconciliation",
     "AllocationDecision",
     "CashFlow",
@@ -114,7 +123,10 @@ __all__ = [
     "Transaction",
     "ValueStatus",
     "VersionMatchStatus",
+    "as_held_hwm_receipt",
+    "as_held_hwm_receipt_bytes",
     "compare_strategy_evidence",
+    "compute_as_held_composite_hwm",
     "compute_full_systematic_hwm_index",
     "decimal_text",
     "governed_hwm_coverage",
@@ -122,5 +134,7 @@ __all__ = [
     "reconcile_position_values",
     "reconcile_allocation_bridge",
     "validate_hwm_inputs_envelope",
+    "validate_as_held_hwm_policy",
+    "verify_as_held_hwm_receipt",
     "validate_provider_authority",
 ]

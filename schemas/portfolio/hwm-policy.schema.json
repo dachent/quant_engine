@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/hwm-policy.schema.json",
+  "title": "Governed as-held composite high-water-mark policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_id",
+    "product_authority",
+    "performance_authority",
+    "owner_decision_receipts",
+    "material_perimeter_authority",
+    "calculation",
+    "as_of_policy",
+    "membership_policy",
+    "capital_policy",
+    "calendar_policy",
+    "input_authority_policy",
+    "absence_behavior"
+  ],
+  "properties": {
+    "schema_version": {"const": 5},
+    "policy_id": {"const": "PORT-HWM-4"},
+    "product_authority": {"$ref": "#/$defs/contract_authority"},
+    "performance_authority": {
+      "allOf": [
+        {"$ref": "#/$defs/file_authority"},
+        {
+          "type": "object",
+          "properties": {"policy_version": {"const": "PORT-PERF-1"}}
+        }
+      ]
+    },
+    "owner_decision_receipts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "CORRECTION_REVERSAL",
+        "FX_BASE_CURRENCY",
+        "MARGIN_AND_LEVERAGE",
+        "NEGATIVE_NET_CONTRIBUTIONS",
+        "PREDECESSOR_TRANSITION"
+      ],
+      "properties": {
+        "CORRECTION_REVERSAL": {"$ref": "#/$defs/sha256"},
+        "FX_BASE_CURRENCY": {"$ref": "#/$defs/sha256"},
+        "MARGIN_AND_LEVERAGE": {"$ref": "#/$defs/sha256"},
+        "NEGATIVE_NET_CONTRIBUTIONS": {"$ref": "#/$defs/sha256"},
+        "PREDECESSOR_TRANSITION": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "material_perimeter_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "legacy_policy_path", "legacy_policy_sha256"],
+      "properties": {
+        "source": {
+          "const": "PRODUCT_AUTHORITY_HWM_REQUIREMENT_AND_ACCEPTED_HWM_EXCLUSIONS"
+        },
+        "legacy_policy_path": {"const": "contracts/portfolio-hwm-policy-v3.json"},
+        "legacy_policy_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "calculation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "index_base",
+        "return_basis",
+        "weight_basis",
+        "hwm_rule",
+        "drawdown_sign",
+        "governor_loss_sign",
+        "numeric_type"
+      ],
+      "properties": {
+        "method": {"const": "GEOMETRIC_BEGINNING_CAPITAL_WEIGHTED_AS_HELD"},
+        "index_base": {"const": "100"},
+        "return_basis": {
+          "const": "LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL"
+        },
+        "weight_basis": {"const": "BEGINNING_NET_NAV"},
+        "hwm_rule": {"const": "RUNNING_MAXIMUM_OF_COMPOSITE_INDEX"},
+        "drawdown_sign": {"const": "SIGNED_NON_POSITIVE"},
+        "governor_loss_sign": {"const": "POSITIVE_MAGNITUDE"},
+        "numeric_type": {"const": "DECIMAL_CONTEXT_INDEPENDENT_HALF_EVEN"}
+      }
+    },
+    "as_of_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boundary",
+        "development",
+        "workstation_qc",
+        "release_qc",
+        "required_evidence"
+      ],
+      "properties": {
+        "boundary": {"const": "LATEST_COMMON_COMPLETE_ACCEPTED_BOUNDARY"},
+        "development": {"const": "WARN_AND_CALCULATE"},
+        "workstation_qc": {"const": "WARN_AND_CALCULATE"},
+        "release_qc": {"const": "WARN_AND_CALCULATE"},
+        "required_evidence": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "EVALUATED_ON",
+              "COMPLETE_THROUGH",
+              "CALCULATION_AGE_DAYS",
+              "LIMITING_INPUT_IDENTITIES"
+            ]
+          }
+        }
+      }
+    },
+    "membership_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "entry_exit", "missing_member"],
+      "properties": {
+        "basis": {"const": "EFFECTIVE_FUNDED_MEMBERSHIP"},
+        "entry_exit": {"const": "ACCEPTED_INTERVAL_BOUNDARIES_ONLY"},
+        "missing_member": {"const": "FAIL_NO_SURVIVOR_RENORMALIZATION"}
+      }
+    },
+    "capital_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first_period", "later_periods", "terminal_anchor"],
+      "properties": {
+        "first_period": {"const": "INDEPENDENT_OBSERVED_BEGINNING_NET_NAV"},
+        "later_periods": {
+          "const": "INDEPENDENT_OBSERVED_OR_EXACT_PRIOR_ENDING_NET_NAV_ROLLFORWARD"
+        },
+        "terminal_anchor": {"const": "NO_BACKCAST"}
+      }
+    },
+    "calendar_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "interval_rule",
+        "missing_interval",
+        "release_authority_status",
+        "accepted_governed_calendar_policy_ids",
+        "portable_synthetic_policy_id"
+      ],
+      "properties": {
+        "authority": {"const": "HASH_BOUND_ACCEPTED_INTERVAL_SEQUENCE"},
+        "interval_rule": {"const": "EXACT_CONTIGUOUS_ONE_DAY_ACCEPTED_INTERVALS"},
+        "missing_interval": {"const": "FAIL_NO_ZERO_FILL_OR_HOLIDAY_INFERENCE"},
+        "release_authority_status": {"enum": ["REQUIRED_NOT_READY", "READY"]},
+        "accepted_governed_calendar_policy_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "portable_synthetic_policy_id": {
+          "const": "SYNTHETIC_DAILY_COMMON_CALENDAR"
+        }
+      }
+    },
+    "input_authority_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["portable_synthetic", "available_status", "workstation_and_release"],
+      "properties": {
+        "portable_synthetic": {
+          "const": "DEVELOPMENT_PROOF_ONLY_NOT_FINANCIAL_ACCEPTANCE"
+        },
+        "available_status": {
+          "const": "REQUIRES_EXISTING_PIPELINE_GOVERNED_RECEIPT"
+        },
+        "workstation_and_release": {
+          "const": "REJECT_PORTABLE_SYNTHETIC_INPUTS"
+        }
+      }
+    },
+    "absence_behavior": {
+      "const": "REQUIRED_INFRASTRUCTURE_OR_EVIDENCE_ABSENCE_FAILS_NUMERICAL_ACCEPTANCE"
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "relative_json_path": {
+      "type": "string",
+      "pattern": "^(contracts|schemas)/[a-z0-9./-]+\\.json$"
+    },
+    "file_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "policy_version"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relative_json_path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "policy_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "contract_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "raw_sha256", "semantic_digest"],
+      "properties": {
+        "path": {"const": "contracts/portfolio-financial-mvp-source-v1.json"},
+        "raw_sha256": {"$ref": "#/$defs/sha256"},
+        "semantic_digest": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

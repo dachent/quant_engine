@@ -45,6 +45,83 @@ The #277 consumers are implemented (branch `feat/hwm-001-composite`):
   divergence, a missing baseline root, or an unresolvable generation fails
   the panel build closed.
 
+## PORT-HWM-4 successor calculation boundary
+
+Issue #324 adds a separate, versioned as-held calculation without changing
+the historical PORT-HWM-3 behavior described below.  The authority is
+`contracts/portfolio-hwm-policy-v4.json`, validated against
+`schemas/portfolio/hwm-policy.schema.json`.  It references the financial-MVP
+contract, PORT-PERF-1, the accepted #318 decision receipts, and the immutable
+PORT-HWM-3 perimeter authority; it does not copy those policies into another
+editable manifest.
+
+`compute_as_held_composite_hwm` in the existing portfolio-ledger package
+accepts three explicit tables plus exact calendar and input-authority receipt
+bytes:
+
+- the hash-bound common interval sequence selected by the accepted calendar
+  authority;
+- effective funded membership intervals with evidence identities; and
+- exactly one component period for every member effective in every accepted
+  interval.
+
+The input receipt is schema v2 (`hwm-input-generation.schema.json`). In this
+first slice it is deliberately limited to `PORTABLE_SYNTHETIC`: it binds the
+policy, product, performance, perimeter and calendar bytes, the complete
+evidence registry, and typed flow events, but it cannot claim workstation or
+release assurance. `ACCEPTED_GOVERNED` remains reserved for the existing
+pipeline/materializer receipt added by #331; a self-rehashed local bundle can
+never upgrade itself to that class.
+
+Each component period carries beginning and ending gross assets and financing
+liabilities, ending net NAV, flow-adjusted ending net NAV, gross-asset return,
+and the accepted levered period return. External flow, internal transfer,
+margin principal and financing cost are rederived from typed events rather
+than trusted as caller labels. Every event binds its classification authority,
+canonical UTC effective time, source timezone, original amount/currency,
+event-time FX authority/rate, exact USD amount, and correction/reversal
+lineage. Dividends, interest, reinvestment, fees, taxes, expenses and rebates
+remain investment results; they cannot become owner flows. Exact-timestamp
+events are represented as contiguous timestamped subperiods; date-only events
+enter after the single daily subperiod. The kernel proves
+`net NAV = gross assets - financing liability` at
+every subperiod boundary, proves margin principal changes gross assets and debt
+without becoming owner flow, includes financing cost in the levered net-NAV
+return, and rejects any return basis other than
+`LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL`.  First membership periods
+require independent beginning-capital anchors. Later exact rollforwards must
+equal the preceding ending net NAV; a terminal value cannot be backcast. An
+effective membership exit must reconcile to zero gross assets, debt and net
+NAV through an admitted terminal withdrawal or transfer; positive residual NAV
+cannot silently disappear.
+
+The composite return is beginning-net-NAV weighted over the complete as-held
+membership set and geometrically linked from 100.  Current and maximum
+drawdowns are signed non-positive values; `governor_drawdown_loss` is the
+corresponding positive magnitude.  Missing members, extra members, interval
+gaps, policy/calendar identity drift, inferred holiday zeros, and survivor
+renormalization fail before a numerical receipt exists.
+
+The portable proof records `evaluated_on`, `complete_through`, age, assurance
+profile, warnings, the exact source/capital/flow/return/leverage identities that
+limit the complete-through boundary, component weights/returns, the dated
+index/HWM path, and input/policy/output hashes. Its status is
+`PORTABLE_SYNTHETIC_PROOF`, never `AVAILABLE`, and it is DEVELOPMENT-only.
+The policy still requires older complete accepted data to calculate with
+`HWM_COMPLETE_DATA_AGE`; age alone is not a financial failure. Workstation and
+release execution currently fail because the governed source/calendar receipt
+is not yet admitted, not because the complete data is older than a threshold.
+The deterministic JSON view is governed by
+`schemas/portfolio/hwm-calculation-receipt.schema.json`.
+
+This first boundary does not promote a PORT-HWM-4 baseline source, emit an
+`AVAILABLE` financial receipt, or replace
+the current report/panel calculation.  That happens only after the funded
+membership, capital-anchor, flow/FX, and mixed-calendar inputs are admitted
+and the existing baseline/report/panel consumers are migrated together.  A
+PORT-HWM-3 `AVAILABLE_GOVERNED_HWM_PERIMETER` label remains coverage evidence,
+not PORT-HWM-4 numerical acceptance.
+
 ## Envelope structure
 
 ### `contract_version`

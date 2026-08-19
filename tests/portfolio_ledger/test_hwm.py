@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date as date_type
+import hashlib
+import json
+from pathlib import Path
 
 import pytest
 
@@ -8,9 +12,30 @@ from decimal import Decimal
 
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
+    as_held_hwm_receipt,
+    as_held_hwm_receipt_bytes,
+    compute_as_held_composite_hwm,
     compute_full_systematic_hwm_index,
     governed_hwm_coverage,
+    validate_as_held_hwm_policy,
+    verify_as_held_hwm_receipt,
 )
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PORT_HWM4_POLICY_PATH = _REPO_ROOT / "contracts" / "portfolio-hwm-policy-v4.json"
+_PORT_HWM4_POLICY_BYTES = _PORT_HWM4_POLICY_PATH.read_bytes()
+_PORT_HWM4_POLICY = json.loads(_PORT_HWM4_POLICY_BYTES)
+_PORT_HWM4_POLICY_SHA256 = hashlib.sha256(_PORT_HWM4_POLICY_BYTES).hexdigest()
+_PRODUCT_CONTRACT_BYTES = (
+    _REPO_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+).read_bytes()
+_PERFORMANCE_POLICY_BYTES = (
+    _REPO_ROOT / "contracts" / "portfolio-performance-policy-v1.json"
+).read_bytes()
+_LEGACY_HWM_POLICY_BYTES = (
+    _REPO_ROOT / "contracts" / "portfolio-hwm-policy-v3.json"
+).read_bytes()
 
 
 def _policy() -> dict[str, object]:
@@ -372,6 +397,1483 @@ def test_hwm_index_is_context_independent() -> None:
         getcontext().rounding = saved_rounding
 
     assert ref == up_result
+
+
+# ---------------------------------------------------------------------------
+# compute_as_held_composite_hwm / PORT-HWM-4
+# ---------------------------------------------------------------------------
+
+
+def _fixture_decimal_text(value: object) -> str:
+    text = format(Decimal(str(value)), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in {"", "-0"} else text
+
+
+def _fixture_sha256(value: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _refresh_membership_evidence(row: dict[str, object]) -> None:
+    row["membership_evidence_sha256"] = _fixture_sha256(
+        {
+            "schema_version": 1,
+            "evidence_type": "FUNDED_MEMBERSHIP",
+            "strategy_id": str(row["strategy_id"]),
+            "effective_start": str(row["effective_start"]),
+            "effective_end": row["effective_end"],
+        }
+    )
+
+
+_IDENTITY_USD_SHA256 = hashlib.sha256(b"IDENTITY_USD").hexdigest()
+
+
+def _refresh_component_evidence(
+    row: dict[str, object],
+    flow_events_by_subperiod: dict[tuple[str, str, str], list[dict[str, object]]]
+    | None = None,
+) -> None:
+    normalized_subperiods: list[dict[str, object]] = []
+    for subperiod in row["subperiods"]:  # type: ignore[union-attr]
+        normalized_without_evidence = {
+            "subperiod_id": str(subperiod["subperiod_id"]),
+            "subperiod_start_utc": str(subperiod["subperiod_start_utc"]),
+            "subperiod_end_utc": str(subperiod["subperiod_end_utc"]),
+            "beginning_nav_usd": _fixture_decimal_text(subperiod["beginning_nav_usd"]),
+            "ending_nav_before_flow_usd": _fixture_decimal_text(
+                subperiod["ending_nav_before_flow_usd"]
+            ),
+            "beginning_gross_assets_usd": _fixture_decimal_text(
+                subperiod["beginning_gross_assets_usd"]
+            ),
+            "beginning_financing_liability_usd": _fixture_decimal_text(
+                subperiod["beginning_financing_liability_usd"]
+            ),
+            "ending_gross_assets_before_flow_usd": _fixture_decimal_text(
+                subperiod["ending_gross_assets_before_flow_usd"]
+            ),
+            "ending_financing_liability_before_flow_usd": _fixture_decimal_text(
+                subperiod["ending_financing_liability_before_flow_usd"]
+            ),
+            "margin_principal_flow_after_subperiod_usd": _fixture_decimal_text(
+                subperiod["margin_principal_flow_after_subperiod_usd"]
+            ),
+            "financing_cost_usd": _fixture_decimal_text(
+                subperiod["financing_cost_usd"]
+            ),
+            "external_flow_after_subperiod_usd": _fixture_decimal_text(
+                subperiod["external_flow_after_subperiod_usd"]
+            ),
+            "internal_transfer_after_subperiod_usd": _fixture_decimal_text(
+                subperiod["internal_transfer_after_subperiod_usd"]
+            ),
+        }
+        if flow_events_by_subperiod is not None:
+            events = flow_events_by_subperiod.get(
+                (
+                    str(row["strategy_id"]),
+                    str(row["interval_id"]),
+                    str(subperiod["subperiod_id"]),
+                ),
+                [],
+            )
+        else:
+            events = []
+        flow_sha256 = _fixture_sha256(
+            {
+                "schema_version": 2,
+                "evidence_type": "FLOW_EVENT",
+                "strategy_id": str(row["strategy_id"]),
+                "interval_id": str(row["interval_id"]),
+                "subperiod": {
+                    **normalized_without_evidence,
+                    "flow_event_ids": [str(event["event_id"]) for event in events],
+                    "flow_event_sha256s": [
+                        str(event["event_evidence_sha256"]) for event in events
+                    ],
+                },
+            }
+        )
+        subperiod["flow_event_evidence_sha256"] = flow_sha256
+        normalized_subperiods.append(
+            {**normalized_without_evidence, "flow_event_evidence_sha256": flow_sha256}
+        )
+
+    common = {
+        "schema_version": 1,
+        "strategy_id": str(row["strategy_id"]),
+        "interval_id": str(row["interval_id"]),
+    }
+    row["capital_evidence_sha256"] = _fixture_sha256(
+        {
+            **common,
+            "evidence_type": "BEGINNING_CAPITAL",
+            "beginning_capital_usd": _fixture_decimal_text(
+                row["beginning_capital_usd"]
+            ),
+            "capital_basis": str(row["capital_basis"]),
+        }
+    )
+    row["flow_reconciliation_sha256"] = _fixture_sha256(
+        {
+            **common,
+            "evidence_type": "FLOW_RECONCILIATION",
+            "flow_timing": str(row["flow_timing"]),
+            "external_flow_usd": _fixture_decimal_text(row["external_flow_usd"]),
+            "internal_transfer_usd": _fixture_decimal_text(
+                row["internal_transfer_usd"]
+            ),
+            "margin_principal_flow_usd": _fixture_decimal_text(
+                row["margin_principal_flow_usd"]
+            ),
+            "subperiod_flow_evidence_sha256s": [
+                item["flow_event_evidence_sha256"] for item in normalized_subperiods
+            ],
+        }
+    )
+    row["return_evidence_sha256"] = _fixture_sha256(
+        {
+            **common,
+            "evidence_type": "LEVERED_NET_RETURN",
+            "beginning_capital_usd": _fixture_decimal_text(
+                row["beginning_capital_usd"]
+            ),
+            "ending_nav_usd": _fixture_decimal_text(row["ending_nav_usd"]),
+            "flow_adjusted_ending_nav_usd": _fixture_decimal_text(
+                row["flow_adjusted_ending_nav_usd"]
+            ),
+            "period_return": _fixture_decimal_text(row["period_return"]),
+            "subperiods": normalized_subperiods,
+        }
+    )
+    row["leverage_evidence_sha256"] = _fixture_sha256(
+        {
+            **common,
+            "evidence_type": "LEVERAGE_RECONCILIATION",
+            "beginning_gross_assets_usd": _fixture_decimal_text(
+                row["beginning_gross_assets_usd"]
+            ),
+            "beginning_financing_liability_usd": _fixture_decimal_text(
+                row["beginning_financing_liability_usd"]
+            ),
+            "ending_gross_assets_usd": _fixture_decimal_text(
+                row["ending_gross_assets_usd"]
+            ),
+            "ending_financing_liability_usd": _fixture_decimal_text(
+                row["ending_financing_liability_usd"]
+            ),
+            "margin_principal_flow_usd": _fixture_decimal_text(
+                row["margin_principal_flow_usd"]
+            ),
+            "financing_cost_usd": _fixture_decimal_text(row["financing_cost_usd"]),
+            "gross_asset_return": _fixture_decimal_text(row["gross_asset_return"]),
+            "subperiods": normalized_subperiods,
+        }
+    )
+
+
+def _as_held_component(
+    strategy_id: str,
+    interval_id: str,
+    interval_start: str,
+    interval_end: str,
+    beginning_capital: str,
+    period_return: str,
+    *,
+    financing_liability: str = "0",
+    beginning_financing_liability: str | None = None,
+    margin_principal_flow: str = "0",
+    financing_cost: str = "0",
+    external_flow: str = "0",
+    internal_transfer: str = "0",
+    capital_basis: str = "OBSERVED_INDEPENDENT",
+) -> dict[str, object]:
+    beginning = Decimal(beginning_capital)
+    accepted_return = Decimal(period_return)
+    flow = Decimal(external_flow)
+    transfer = Decimal(internal_transfer)
+    adjusted_ending_nav = beginning * (Decimal("1") + accepted_return)
+    ending_nav = adjusted_ending_nav + flow + transfer
+    liability = Decimal(financing_liability)
+    beginning_liability = Decimal(
+        financing_liability
+        if beginning_financing_liability is None
+        else beginning_financing_liability
+    )
+    principal_flow = Decimal(margin_principal_flow)
+    gross_assets = ending_nav + liability
+    ending_gross_before_flow = gross_assets - flow - transfer - principal_flow
+    gross_asset_return = (ending_gross_before_flow + Decimal(financing_cost)) / (
+        beginning + beginning_liability
+    ) - Decimal("1")
+    hash_character = str((sum(ord(character) for character in strategy_id) % 6) + 1)
+    row: dict[str, object] = {
+        "strategy_id": strategy_id,
+        "interval_id": interval_id,
+        "interval_start": interval_start,
+        "interval_end": interval_end,
+        "beginning_capital_usd": format(beginning, "f"),
+        "beginning_gross_assets_usd": format(beginning + beginning_liability, "f"),
+        "beginning_financing_liability_usd": format(beginning_liability, "f"),
+        "ending_gross_assets_usd": format(gross_assets, "f"),
+        "ending_financing_liability_usd": format(liability, "f"),
+        "margin_principal_flow_usd": format(principal_flow, "f"),
+        "financing_cost_usd": financing_cost,
+        "gross_asset_return": format(gross_asset_return, "f"),
+        "ending_nav_usd": format(ending_nav, "f"),
+        "external_flow_usd": format(flow, "f"),
+        "internal_transfer_usd": format(transfer, "f"),
+        "flow_adjusted_ending_nav_usd": format(adjusted_ending_nav, "f"),
+        "period_return": format(accepted_return, "f"),
+        "flow_timing": (
+            "NO_EXTERNAL_OR_INTERNAL_FLOW"
+            if flow == 0 and transfer == 0
+            else "DATE_ONLY_END_OF_DAY"
+        ),
+        "subperiods": [
+            {
+                "subperiod_id": f"{interval_id}-close",
+                "subperiod_start_utc": f"{interval_start}T00:00:00Z",
+                "subperiod_end_utc": f"{interval_end}T00:00:00Z",
+                "beginning_nav_usd": format(beginning, "f"),
+                "ending_nav_before_flow_usd": format(adjusted_ending_nav, "f"),
+                "beginning_gross_assets_usd": format(
+                    beginning + beginning_liability, "f"
+                ),
+                "beginning_financing_liability_usd": format(beginning_liability, "f"),
+                "ending_gross_assets_before_flow_usd": format(
+                    ending_gross_before_flow, "f"
+                ),
+                "ending_financing_liability_before_flow_usd": format(
+                    beginning_liability, "f"
+                ),
+                "margin_principal_flow_after_subperiod_usd": format(
+                    principal_flow, "f"
+                ),
+                "financing_cost_usd": financing_cost,
+                "external_flow_after_subperiod_usd": format(flow, "f"),
+                "internal_transfer_after_subperiod_usd": format(transfer, "f"),
+                "flow_event_evidence_sha256": "7" * 64,
+            }
+        ],
+        "capital_basis": capital_basis,
+        "capital_evidence_sha256": hash_character * 64,
+        "flow_reconciliation_sha256": "7" * 64,
+        "return_evidence_sha256": "8" * 64,
+        "leverage_evidence_sha256": "6" * 64,
+        "source_generation_sha256": "0" * 64,
+        "policy_sha256": _PORT_HWM4_POLICY_SHA256,
+        "calendar_sha256": "0" * 64,
+        "return_basis": "LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL",
+    }
+    _refresh_component_evidence(row)
+    return row
+
+
+def _fixture_flow_events(
+    periods: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    product_sha256 = hashlib.sha256(_PRODUCT_CONTRACT_BYTES).hexdigest()
+    for period in periods:
+        for subperiod in period["subperiods"]:  # type: ignore[union-attr]
+            definitions = [
+                (
+                    "external_flow_after_subperiod_usd",
+                    "OWNER_CONTRIBUTION"
+                    if Decimal(str(subperiod["external_flow_after_subperiod_usd"])) > 0
+                    else "OWNER_WITHDRAWAL",
+                    "EXTERNAL_FLOW",
+                ),
+                (
+                    "internal_transfer_after_subperiod_usd",
+                    "INTERNAL_TRANSFER",
+                    "INTERNAL_TRANSFER",
+                ),
+                (
+                    "margin_principal_flow_after_subperiod_usd",
+                    "MARGIN_BORROW"
+                    if Decimal(
+                        str(subperiod["margin_principal_flow_after_subperiod_usd"])
+                    )
+                    > 0
+                    else "MARGIN_REPAYMENT",
+                    "MARGIN_PRINCIPAL",
+                ),
+                ("financing_cost_usd", "FINANCING_COST", "FINANCING_COST"),
+            ]
+            for field_name, event_type, treatment in definitions:
+                amount = Decimal(str(subperiod[field_name]))
+                if amount == 0:
+                    continue
+                event_without_evidence: dict[str, object] = {
+                    "event_id": (
+                        f"{period['strategy_id']}:{period['interval_id']}:"
+                        f"{subperiod['subperiod_id']}:{event_type}"
+                    ),
+                    "strategy_id": str(period["strategy_id"]),
+                    "interval_id": str(period["interval_id"]),
+                    "subperiod_id": str(subperiod["subperiod_id"]),
+                    "event_type": event_type,
+                    "capital_treatment": treatment,
+                    "effective_at_utc": str(subperiod["subperiod_end_utc"]),
+                    "effective_timezone": "UTC",
+                    "timing_basis": (
+                        "EXACT_TIMESTAMP"
+                        if period["flow_timing"] == "EXACT_TIMESTAMP_SEGMENTED"
+                        else "DATE_ONLY_END_OF_DAY"
+                    ),
+                    "original_amount": _fixture_decimal_text(amount),
+                    "original_currency": "USD",
+                    "fx_rate_to_usd": "1",
+                    "fx_authority_id": "IDENTITY_USD",
+                    "fx_generation_sha256": _IDENTITY_USD_SHA256,
+                    "usd_amount": _fixture_decimal_text(amount),
+                    "correction_kind": "ORIGINAL",
+                    "related_event_id": None,
+                    "classification_authority_sha256": product_sha256,
+                }
+                events.append(
+                    {
+                        **event_without_evidence,
+                        "event_evidence_sha256": _fixture_sha256(
+                            event_without_evidence
+                        ),
+                    }
+                )
+    return sorted(events, key=lambda event: str(event["event_id"]))
+
+
+def _as_held_hwm_fixture() -> dict[str, object]:
+    interval_definitions = [
+        {
+            "interval_id": "d1",
+            "interval_start": "2026-08-10",
+            "interval_end": "2026-08-11",
+        },
+        {
+            "interval_id": "d2",
+            "interval_start": "2026-08-11",
+            "interval_end": "2026-08-12",
+        },
+        {
+            "interval_id": "d3",
+            "interval_start": "2026-08-12",
+            "interval_end": "2026-08-13",
+        },
+    ]
+    calendar_bytes = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "calendar_policy_id": "SYNTHETIC_DAILY_COMMON_CALENDAR",
+                "accepted_intervals": interval_definitions,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    calendar_sha256 = hashlib.sha256(calendar_bytes).hexdigest()
+    intervals = [
+        {**row, "interval_evidence_sha256": calendar_sha256}
+        for row in interval_definitions
+    ]
+    memberships = [
+        {
+            "strategy_id": "strategy-a",
+            "effective_start": "2026-08-10",
+            "effective_end": None,
+            "membership_evidence_sha256": "1" * 64,
+        },
+        {
+            "strategy_id": "strategy-b",
+            "effective_start": "2026-08-10",
+            "effective_end": None,
+            "membership_evidence_sha256": "2" * 64,
+        },
+    ]
+    periods = [
+        _as_held_component(
+            "strategy-a", "d1", "2026-08-10", "2026-08-11", "600", "0.10"
+        ),
+        _as_held_component(
+            "strategy-b", "d1", "2026-08-10", "2026-08-11", "400", "-0.05"
+        ),
+        _as_held_component(
+            "strategy-a", "d2", "2026-08-11", "2026-08-12", "660", "-0.10"
+        ),
+        _as_held_component(
+            "strategy-b", "d2", "2026-08-11", "2026-08-12", "380", "-0.10"
+        ),
+        _as_held_component("strategy-a", "d3", "2026-08-12", "2026-08-13", "594", "0"),
+        _as_held_component("strategy-b", "d3", "2026-08-12", "2026-08-13", "342", "0"),
+    ]
+    evidence_sha256s = sorted(
+        {
+            *(str(row["membership_evidence_sha256"]) for row in memberships),
+            *(
+                str(row[field])
+                for row in periods
+                for field in (
+                    "capital_evidence_sha256",
+                    "flow_reconciliation_sha256",
+                    "return_evidence_sha256",
+                    "leverage_evidence_sha256",
+                )
+            ),
+            *(
+                str(subperiod["flow_event_evidence_sha256"])
+                for row in periods
+                for subperiod in row["subperiods"]  # type: ignore[union-attr]
+            ),
+        }
+    )
+    input_generation_bytes = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "builder": "portfolio-hwm-inputs",
+                "evidence_sha256s": evidence_sha256s,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    input_generation_sha256 = hashlib.sha256(input_generation_bytes).hexdigest()
+    for row in periods:
+        row["source_generation_sha256"] = input_generation_sha256
+        row["calendar_sha256"] = calendar_sha256
+    fixture: dict[str, object] = {
+        "accepted_intervals": intervals,
+        "memberships": memberships,
+        "component_periods": periods,
+        "policy_bytes": _PORT_HWM4_POLICY_BYTES,
+        "product_contract_bytes": _PRODUCT_CONTRACT_BYTES,
+        "performance_policy_bytes": _PERFORMANCE_POLICY_BYTES,
+        "legacy_policy_bytes": _LEGACY_HWM_POLICY_BYTES,
+        "calendar_bytes": calendar_bytes,
+        "input_generation_bytes": input_generation_bytes,
+        "evaluated_on": "2026-08-17",
+        "complete_through": "2026-08-13",
+        "maximum_age_days": 3,
+        "assurance_profile": "DEVELOPMENT",
+    }
+    _refresh_fixture_authorities(fixture)
+    return fixture
+
+
+def _refresh_fixture_authorities(fixture: dict[str, object]) -> None:
+    """Rebuild synthetic authority bytes after an intentional fixture edit."""
+
+    intervals: list[dict[str, object]] = fixture["accepted_intervals"]  # type: ignore[assignment]
+    memberships: list[dict[str, object]] = fixture["memberships"]  # type: ignore[assignment]
+    periods: list[dict[str, object]] = fixture["component_periods"]  # type: ignore[assignment]
+    for row in memberships:
+        _refresh_membership_evidence(row)
+    interval_definitions = [
+        {
+            "interval_id": str(row["interval_id"]),
+            "interval_start": str(row["interval_start"]),
+            "interval_end": str(row["interval_end"]),
+        }
+        for row in intervals
+    ]
+    calendar_without_evidence: dict[str, object] = {
+        "schema_version": 2,
+        "calendar_policy_id": fixture.get(
+            "_calendar_policy_id_override", "SYNTHETIC_DAILY_COMMON_CALENDAR"
+        ),
+        "authority_status": fixture.get(
+            "_calendar_authority_status_override", "PORTABLE_SYNTHETIC"
+        ),
+        "accepted_intervals": interval_definitions,
+    }
+    calendar = {
+        **calendar_without_evidence,
+        "authority_evidence_sha256": _fixture_sha256(calendar_without_evidence),
+    }
+    calendar_bytes = (
+        json.dumps(
+            calendar,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    calendar_sha256 = hashlib.sha256(calendar_bytes).hexdigest()
+    for row in intervals:
+        row["interval_evidence_sha256"] = calendar_sha256
+
+    override_events = fixture.get("_flow_events_override")
+    flow_events = (
+        deepcopy(override_events)
+        if isinstance(override_events, list)
+        else _fixture_flow_events(periods)
+    )
+    for event in flow_events:
+        unsigned_event = {
+            key: value for key, value in event.items() if key != "event_evidence_sha256"
+        }
+        event["event_evidence_sha256"] = _fixture_sha256(unsigned_event)
+    flow_events_by_subperiod: dict[tuple[str, str, str], list[dict[str, object]]] = {}
+    corrected_event_ids = {
+        str(event["related_event_id"])
+        for event in flow_events
+        if event.get("correction_kind") == "SOURCE_CORRECTION"
+    }
+    for event in flow_events:
+        if str(event["event_id"]) in corrected_event_ids:
+            continue
+        flow_events_by_subperiod.setdefault(
+            (
+                str(event["strategy_id"]),
+                str(event["interval_id"]),
+                str(event["subperiod_id"]),
+            ),
+            [],
+        ).append(event)
+    for row in periods:
+        _refresh_component_evidence(row, flow_events_by_subperiod)
+
+    evidence_sha256s = sorted(
+        {
+            str(calendar["authority_evidence_sha256"]),
+            *(str(row["membership_evidence_sha256"]) for row in memberships),
+            *(
+                str(row[field])
+                for row in periods
+                for field in (
+                    "capital_evidence_sha256",
+                    "flow_reconciliation_sha256",
+                    "return_evidence_sha256",
+                    "leverage_evidence_sha256",
+                )
+            ),
+            *(
+                str(subperiod["flow_event_evidence_sha256"])
+                for row in periods
+                for subperiod in row["subperiods"]
+            ),
+            *(str(event["event_evidence_sha256"]) for event in flow_events),
+            *(str(event["fx_generation_sha256"]) for event in flow_events),
+        }
+    )
+    authority_bindings = {
+        "policy_sha256": hashlib.sha256(fixture["policy_bytes"]).hexdigest(),  # type: ignore[arg-type]
+        "policy_semantic_digest": hashlib.sha256(
+            json.dumps(
+                json.loads(fixture["policy_bytes"]),  # type: ignore[arg-type]
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest(),
+        "product_contract_sha256": hashlib.sha256(
+            fixture["product_contract_bytes"]  # type: ignore[arg-type]
+        ).hexdigest(),
+        "performance_policy_sha256": hashlib.sha256(
+            fixture["performance_policy_bytes"]  # type: ignore[arg-type]
+        ).hexdigest(),
+        "legacy_policy_sha256": hashlib.sha256(
+            fixture["legacy_policy_bytes"]  # type: ignore[arg-type]
+        ).hexdigest(),
+        "calendar_sha256": calendar_sha256,
+    }
+    input_generation_bytes = (
+        json.dumps(
+            {
+                "schema_version": 2,
+                "builder": "portfolio-hwm-inputs",
+                "builder_version": "0.2.0",
+                "authority_profile": "PORTABLE_SYNTHETIC",
+                "authority_bindings": authority_bindings,
+                "upstream_receipt_sha256": None,
+                "maximum_age_days": int(fixture["maximum_age_days"]),
+                "evidence_sha256s": evidence_sha256s,
+                "flow_events": flow_events,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    generation_sha256 = hashlib.sha256(input_generation_bytes).hexdigest()
+    for row in periods:
+        row["calendar_sha256"] = calendar_sha256
+        row["source_generation_sha256"] = generation_sha256
+    fixture["calendar_bytes"] = calendar_bytes
+    fixture["input_generation_bytes"] = input_generation_bytes
+
+
+def _compute_as_held(fixture: dict[str, object]) -> dict[str, object]:
+    return compute_as_held_composite_hwm(
+        fixture["accepted_intervals"],  # type: ignore[arg-type]
+        fixture["memberships"],  # type: ignore[arg-type]
+        fixture["component_periods"],  # type: ignore[arg-type]
+        policy_bytes=fixture["policy_bytes"],  # type: ignore[arg-type]
+        product_contract_bytes=fixture["product_contract_bytes"],  # type: ignore[arg-type]
+        performance_policy_bytes=fixture["performance_policy_bytes"],  # type: ignore[arg-type]
+        legacy_policy_bytes=fixture["legacy_policy_bytes"],  # type: ignore[arg-type]
+        calendar_bytes=fixture["calendar_bytes"],  # type: ignore[arg-type]
+        input_generation_bytes=fixture["input_generation_bytes"],  # type: ignore[arg-type]
+        evaluated_on=str(fixture["evaluated_on"]),
+        complete_through=str(fixture["complete_through"]),
+        maximum_age_days=int(fixture["maximum_age_days"]),
+        assurance_profile=str(fixture["assurance_profile"]),
+    )
+
+
+def _single_strategy_flow_fixture(
+    *,
+    external_flow: str = "0",
+    margin_principal_flow: str = "0",
+    financing_liability: str = "0",
+    financing_cost: str = "0",
+) -> dict[str, object]:
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"] = fixture["accepted_intervals"][:1]
+    fixture["memberships"] = fixture["memberships"][:1]
+    fixture["component_periods"] = [
+        _as_held_component(
+            "strategy-a",
+            "d1",
+            "2026-08-10",
+            "2026-08-11",
+            "100",
+            "0",
+            external_flow=external_flow,
+            margin_principal_flow=margin_principal_flow,
+            financing_liability=financing_liability,
+            beginning_financing_liability="0",
+            financing_cost=financing_cost,
+        )
+    ]
+    fixture["complete_through"] = "2026-08-11"
+    fixture["evaluated_on"] = "2026-08-11"
+    _refresh_fixture_authorities(fixture)
+    return fixture
+
+
+def test_as_held_hwm_policy_is_valid_and_binds_current_authorities() -> None:
+    validate_as_held_hwm_policy(_PORT_HWM4_POLICY)
+
+    schema = json.loads(
+        (_REPO_ROOT / "schemas" / "portfolio" / "hwm-policy.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(schema["required"]) == set(_PORT_HWM4_POLICY)
+    assert schema["properties"]["schema_version"]["const"] == 5
+    assert schema["properties"]["policy_id"]["const"] == "PORT-HWM-4"
+
+    authorities = {
+        "product_authority": ("path", "raw_sha256"),
+        "performance_authority": ("path", "sha256"),
+        "material_perimeter_authority": (
+            "legacy_policy_path",
+            "legacy_policy_sha256",
+        ),
+    }
+    for authority_name, (path_field, hash_field) in authorities.items():
+        authority = _PORT_HWM4_POLICY[authority_name]
+        assert (
+            hashlib.sha256(
+                (_REPO_ROOT / authority[path_field]).read_bytes()
+            ).hexdigest()
+            == authority[hash_field]
+        )
+
+
+def test_as_held_hwm_policy_semantic_mutation_fails_closed() -> None:
+    policy = deepcopy(_PORT_HWM4_POLICY)
+    policy["calculation"]["return_basis"] = "UNLEVERED_GROSS_ASSETS"
+
+    with pytest.raises(HwmCoverageError, match="calculation differs"):
+        validate_as_held_hwm_policy(policy)
+
+
+def test_as_held_hwm_reproduces_authoritative_base_100_vector() -> None:
+    result = _compute_as_held(_as_held_hwm_fixture())
+
+    assert result["status"] == "PORTABLE_SYNTHETIC_PROOF"
+    assert [row["index"] for row in result["index_path"]] == [
+        Decimal("100"),
+        Decimal("104"),
+        Decimal("93.6"),
+        Decimal("93.6"),
+    ]
+    assert result["current_hwm"] == Decimal("104")
+    assert result["current_drawdown"] == Decimal("-0.1")
+    assert result["maximum_drawdown"] == Decimal("-0.1")
+    assert result["governor_drawdown_loss"] == Decimal("0.1")
+    assert result["calculation_age_days"] == 4
+    assert result["age_status"] == "COMPLETE_DATA_AGE_WARNING"
+    assert result["warnings"] == ["HWM_COMPLETE_DATA_AGE"]
+    assert len(result["receipt_sha256"]) == 64
+
+
+def test_as_held_hwm_receipt_is_deterministic_and_tamper_evident() -> None:
+    fixture = _as_held_hwm_fixture()
+    result = _compute_as_held(fixture)
+    receipt = as_held_hwm_receipt(result)
+    receipt_bytes = as_held_hwm_receipt_bytes(result)
+
+    assert json.loads(receipt_bytes) == receipt
+    assert receipt_bytes == as_held_hwm_receipt_bytes(result)
+    schema = json.loads(
+        (
+            _REPO_ROOT / "schemas" / "portfolio" / "hwm-calculation-receipt.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert set(schema["required"]) == set(receipt)
+    assert set(schema["$defs"]["input_component"]["required"]) == set(
+        receipt["input_evidence"]["component_periods"][0]
+    )
+    assert set(schema["$defs"]["input_subperiod"]["required"]) == set(
+        receipt["input_evidence"]["component_periods"][0]["subperiods"][0]
+    )
+    generation = json.loads(fixture["input_generation_bytes"])
+    generation_schema = json.loads(
+        (
+            _REPO_ROOT / "schemas" / "portfolio" / "hwm-input-generation.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert set(generation_schema["required"]) == set(generation)
+    assert generation_schema["properties"]["authority_profile"]["const"] == (
+        "PORTABLE_SYNTHETIC"
+    )
+    flow_fixture = _single_strategy_flow_fixture(external_flow="10")
+    flow_generation = json.loads(flow_fixture["input_generation_bytes"])
+    assert set(generation_schema["$defs"]["flow_event"]["required"]) == set(
+        flow_generation["flow_events"][0]
+    )
+    assert receipt["current_index"] == "93.6"
+    assert receipt["current_hwm"] == "104"
+    assert receipt["maximum_drawdown"] == "-0.1"
+    assert [
+        row["strategy_id"] for row in receipt["complete_through_limiting_inputs"]
+    ] == ["strategy-a", "strategy-b"]
+    verification_args = {
+        "policy_bytes": _PORT_HWM4_POLICY_BYTES,
+        "product_contract_bytes": _PRODUCT_CONTRACT_BYTES,
+        "performance_policy_bytes": _PERFORMANCE_POLICY_BYTES,
+        "legacy_policy_bytes": _LEGACY_HWM_POLICY_BYTES,
+        "calendar_bytes": fixture["calendar_bytes"],
+        "input_generation_bytes": fixture["input_generation_bytes"],
+    }
+    verify_as_held_hwm_receipt(receipt, **verification_args)  # type: ignore[arg-type]
+
+    tampered = deepcopy(result)
+    tampered["current_index"] = Decimal("104")
+    with pytest.raises(HwmCoverageError, match="receipt identity differs"):
+        as_held_hwm_receipt(tampered)
+
+    coherently_tampered = deepcopy(receipt)
+    coherently_tampered["current_index"] = "104"
+    unsigned = {
+        key: value
+        for key, value in coherently_tampered.items()
+        if key != "receipt_sha256"
+    }
+    coherently_tampered["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    with pytest.raises(HwmCoverageError, match="summary differs"):
+        as_held_hwm_receipt(coherently_tampered)
+    with pytest.raises(HwmCoverageError, match="summary differs"):
+        verify_as_held_hwm_receipt(
+            coherently_tampered,
+            **verification_args,  # type: ignore[arg-type]
+        )
+
+
+def test_as_held_hwm_development_proof_warns_on_complete_data_age() -> None:
+    fixture = _as_held_hwm_fixture()
+    result = _compute_as_held(fixture)
+    assert result["status"] == "PORTABLE_SYNTHETIC_PROOF"
+    assert result["warnings"] == ["HWM_COMPLETE_DATA_AGE"]
+
+
+@pytest.mark.parametrize("profile", ["WORKSTATION_QC", "RELEASE_QC"])
+def test_as_held_hwm_portable_inputs_cannot_claim_assurance(profile: str) -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["assurance_profile"] = profile
+    with pytest.raises(HwmCoverageError, match="development proof only"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_coherent_calendar_rewrite_cannot_gain_authority() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["_calendar_policy_id_override"] = "FORGED_UNAPPROVED_CALENDAR"
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(HwmCoverageError, match="calendar authority integration"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_portable_receipt_cannot_be_relabelled_available() -> None:
+    receipt = as_held_hwm_receipt(_compute_as_held(_as_held_hwm_fixture()))
+    forged = deepcopy(receipt)
+    forged["status"] = "AVAILABLE"
+    unsigned = {key: value for key, value in forged.items() if key != "receipt_sha256"}
+    forged["receipt_sha256"] = _fixture_sha256(unsigned)
+
+    with pytest.raises(HwmCoverageError, match="receipt identity is invalid"):
+        as_held_hwm_receipt(forged)
+
+
+def test_as_held_hwm_freshness_threshold_is_bound_to_input_receipt() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["maximum_age_days"] = 4
+
+    with pytest.raises(HwmCoverageError, match="freshness threshold differs"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_rejects_wrong_non_usd_fx_conversion() -> None:
+    fixture = _single_strategy_flow_fixture(external_flow="120")
+    events = json.loads(fixture["input_generation_bytes"])["flow_events"]
+    events[0].update(
+        original_amount="100",
+        original_currency="EUR",
+        fx_rate_to_usd="1.2",
+        fx_authority_id="SYNTHETIC_EURUSD_EVENT_TIME",
+        usd_amount="100",
+    )
+    fixture["_flow_events_override"] = events
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(HwmCoverageError, match="FX conversion differs"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_rejects_dividend_misclassified_as_external_flow() -> None:
+    fixture = _single_strategy_flow_fixture(external_flow="10")
+    events = json.loads(fixture["input_generation_bytes"])["flow_events"]
+    events[0].update(event_type="DIVIDEND", capital_treatment="INVESTMENT_RESULT")
+    fixture["_flow_events_override"] = events
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(
+        HwmCoverageError, match="flow facts differ from admitted events"
+    ):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_rejects_margin_principal_as_owner_flow() -> None:
+    fixture = _single_strategy_flow_fixture(
+        margin_principal_flow="50", financing_liability="50"
+    )
+    events = json.loads(fixture["input_generation_bytes"])["flow_events"]
+    events[0]["capital_treatment"] = "EXTERNAL_FLOW"
+    fixture["_flow_events_override"] = events
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(HwmCoverageError, match="classification differs"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_rejects_survivor_recalculation() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["component_periods"] = [
+        row
+        for row in fixture["component_periods"]
+        if not (row["strategy_id"] == "strategy-b" and row["interval_id"] == "d2")
+    ]
+
+    with pytest.raises(HwmCoverageError, match="membership coverage differs"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_applies_effective_entry_and_exit_boundaries() -> None:
+    fixture = _as_held_hwm_fixture()
+    memberships = fixture["memberships"]
+    memberships[1]["effective_start"] = "2026-08-11"
+    memberships[1]["effective_end"] = "2026-08-12"
+    fixture["component_periods"] = [
+        row
+        for row in fixture["component_periods"]
+        if row["strategy_id"] != "strategy-b" or row["interval_id"] == "d2"
+    ]
+    fixture["component_periods"] = [
+        _as_held_component(
+            "strategy-b",
+            "d2",
+            "2026-08-11",
+            "2026-08-12",
+            "380",
+            "-0.10",
+            external_flow="-342",
+        )
+        if row["strategy_id"] == "strategy-b"
+        else row
+        for row in fixture["component_periods"]
+    ]
+    _refresh_fixture_authorities(fixture)
+
+    result = _compute_as_held(fixture)
+
+    assert [row["index"] for row in result["index_path"]] == [
+        Decimal("100"),
+        Decimal("110"),
+        Decimal("99"),
+        Decimal("99"),
+    ]
+    assert [
+        [component["strategy_id"] for component in period["components"]]
+        for period in result["periods"]
+    ] == [["strategy-a"], ["strategy-a", "strategy-b"], ["strategy-a"]]
+
+
+def test_as_held_hwm_rejects_membership_exit_with_residual_nav() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["memberships"][1]["effective_start"] = "2026-08-11"
+    fixture["memberships"][1]["effective_end"] = "2026-08-12"
+    fixture["component_periods"] = [
+        row
+        for row in fixture["component_periods"]
+        if row["strategy_id"] != "strategy-b" or row["interval_id"] == "d2"
+    ]
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(HwmCoverageError, match="residual net NAV"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_rejects_zero_nav_for_continuing_membership() -> None:
+    fixture = _single_strategy_flow_fixture(external_flow="-100")
+
+    with pytest.raises(HwmCoverageError, match="ending net NAV is invalid"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_rejects_component_outside_membership() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["memberships"][1]["effective_start"] = "2026-08-11"
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(HwmCoverageError, match="outside effective membership"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_rejects_terminal_anchor_backcast() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["component_periods"][0]["capital_basis"] = "ROLLFORWARD_FROM_PRIOR_INTERVAL"
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(HwmCoverageError, match="independent capital anchor"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_rejects_unreconciled_rollforward() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["component_periods"][2]["capital_basis"] = "ROLLFORWARD_FROM_PRIOR_INTERVAL"
+    fixture["component_periods"][2]["beginning_capital_usd"] = "659"
+    fixture["component_periods"][2]["beginning_gross_assets_usd"] = "659"
+    fixture["component_periods"][2]["ending_gross_assets_usd"] = "593.1"
+    fixture["component_periods"][2]["ending_nav_usd"] = "593.1"
+    fixture["component_periods"][2]["flow_adjusted_ending_nav_usd"] = "593.1"
+    fixture["component_periods"][2]["subperiods"][0]["beginning_nav_usd"] = "659"
+    fixture["component_periods"][2]["subperiods"][0]["ending_nav_before_flow_usd"] = (
+        "593.1"
+    )
+    fixture["component_periods"][2]["subperiods"][0]["beginning_gross_assets_usd"] = (
+        "659"
+    )
+    fixture["component_periods"][2]["subperiods"][0][
+        "ending_gross_assets_before_flow_usd"
+    ] = "593.1"
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(
+        HwmCoverageError, match="beginning capital differs from prior ending net NAV"
+    ):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_internal_transfer_does_not_change_composite() -> None:
+    baseline = _compute_as_held(_as_held_hwm_fixture())
+    fixture = _as_held_hwm_fixture()
+    fixture["component_periods"][0:4] = [
+        _as_held_component(
+            "strategy-a",
+            "d1",
+            "2026-08-10",
+            "2026-08-11",
+            "600",
+            "0.10",
+            internal_transfer="-100",
+        ),
+        _as_held_component(
+            "strategy-b",
+            "d1",
+            "2026-08-10",
+            "2026-08-11",
+            "400",
+            "-0.05",
+            internal_transfer="100",
+        ),
+        _as_held_component(
+            "strategy-a", "d2", "2026-08-11", "2026-08-12", "560", "-0.10"
+        ),
+        _as_held_component(
+            "strategy-b", "d2", "2026-08-11", "2026-08-12", "480", "-0.10"
+        ),
+    ]
+    fixture["component_periods"][4:6] = [
+        _as_held_component("strategy-a", "d3", "2026-08-12", "2026-08-13", "504", "0"),
+        _as_held_component("strategy-b", "d3", "2026-08-12", "2026-08-13", "432", "0"),
+    ]
+    _refresh_fixture_authorities(fixture)
+
+    transferred = _compute_as_held(fixture)
+
+    assert [row["index"] for row in transferred["index_path"]] == [
+        row["index"] for row in baseline["index_path"]
+    ]
+    assert transferred["periods"][1]["total_beginning_capital_usd"] == Decimal("1040")
+
+
+def test_as_held_hwm_rejects_unpaired_internal_transfer() -> None:
+    fixture = _as_held_hwm_fixture()
+    row = fixture["component_periods"][0]
+    row["internal_transfer_usd"] = "1"
+    row["ending_gross_assets_usd"] = "661"
+    row["ending_nav_usd"] = "661"
+    row["flow_timing"] = "DATE_ONLY_END_OF_DAY"
+    row["subperiods"][0]["internal_transfer_after_subperiod_usd"] = "1"
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(HwmCoverageError, match="internal transfers do not net to zero"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_rejects_calendar_interval_gap() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"][2]["interval_start"] = "2026-08-13"
+    fixture["accepted_intervals"][2]["interval_end"] = "2026-08-14"
+
+    with pytest.raises(HwmCoverageError, match="not contiguous"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_uses_net_nav_for_leveraged_total_return() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"] = fixture["accepted_intervals"][:1]
+    fixture["memberships"] = fixture["memberships"][:1]
+    fixture["component_periods"] = [
+        _as_held_component(
+            "strategy-a",
+            "d1",
+            "2026-08-10",
+            "2026-08-11",
+            "100",
+            "0.14",
+            financing_liability="50",
+            financing_cost="1",
+        )
+    ]
+    fixture["complete_through"] = "2026-08-11"
+    fixture["evaluated_on"] = "2026-08-11"
+    _refresh_fixture_authorities(fixture)
+
+    result = _compute_as_held(fixture)
+
+    assert result["current_index"] == Decimal("114")
+    assert result["periods"][0]["components"][0]["period_return"] == Decimal("0.14")
+    assert fixture["component_periods"][0]["ending_gross_assets_usd"] == "164.00"
+    assert fixture["component_periods"][0]["ending_nav_usd"] == "114.00"
+    assert fixture["component_periods"][0]["gross_asset_return"] == "0.10"
+    assert fixture["component_periods"][0]["financing_cost_usd"] == "1"
+
+    forged = deepcopy(fixture)
+    forged_period = forged["component_periods"][0]
+    forged_period["period_return"] = "0.64"
+    forged_period["flow_adjusted_ending_nav_usd"] = "164"
+    with pytest.raises(HwmCoverageError, match="subperiod TWR"):
+        _compute_as_held(forged)
+
+    missing_leverage = deepcopy(fixture)
+    missing_leverage["component_periods"][0].pop("leverage_evidence_sha256")
+    with pytest.raises(HwmCoverageError, match=r"component_periods\[0\] keys differ"):
+        _compute_as_held(missing_leverage)
+
+    altered_financing = deepcopy(fixture)
+    altered_financing["component_periods"][0]["financing_cost_usd"] = "0"
+    altered_financing["component_periods"][0]["subperiods"][0]["financing_cost_usd"] = (
+        "0"
+    )
+    _refresh_fixture_authorities(altered_financing)
+    with pytest.raises(HwmCoverageError, match="gross asset return differs"):
+        _compute_as_held(altered_financing)
+
+
+def test_as_held_hwm_margin_principal_changes_leverage_not_return() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"] = fixture["accepted_intervals"][:1]
+    fixture["memberships"] = fixture["memberships"][:1]
+    fixture["component_periods"] = [
+        _as_held_component(
+            "strategy-a",
+            "d1",
+            "2026-08-10",
+            "2026-08-11",
+            "100",
+            "0",
+            financing_liability="50",
+            beginning_financing_liability="0",
+            margin_principal_flow="50",
+        )
+    ]
+    fixture["complete_through"] = "2026-08-11"
+    fixture["evaluated_on"] = "2026-08-11"
+    _refresh_fixture_authorities(fixture)
+
+    result = _compute_as_held(fixture)
+
+    assert result["current_index"] == Decimal("100")
+    component = fixture["component_periods"][0]
+    assert component["ending_gross_assets_usd"] == "150"
+    assert component["ending_financing_liability_usd"] == "50"
+    assert component["ending_nav_usd"] == "100"
+    assert component["external_flow_usd"] == "0"
+
+
+def test_as_held_hwm_rejects_self_asserted_evidence_rewrite() -> None:
+    fixture = _as_held_hwm_fixture()
+    row = fixture["component_periods"][0]
+    old_evidence = row["capital_evidence_sha256"]
+    row["capital_evidence_sha256"] = "a" * 64
+    generation = json.loads(fixture["input_generation_bytes"])
+    generation["evidence_sha256s"] = sorted(
+        "a" * 64 if value == old_evidence else value
+        for value in generation["evidence_sha256s"]
+    )
+    fixture["input_generation_bytes"] = (
+        json.dumps(
+            generation,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    rewritten_generation_sha256 = hashlib.sha256(
+        fixture["input_generation_bytes"]
+    ).hexdigest()
+    for component in fixture["component_periods"]:
+        component["source_generation_sha256"] = rewritten_generation_sha256
+
+    with pytest.raises(
+        HwmCoverageError, match="capital_evidence_sha256 identity differs"
+    ):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_exact_timestamp_flow_uses_segmented_twr() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"] = fixture["accepted_intervals"][:1]
+    fixture["memberships"] = fixture["memberships"][:1]
+    row = _as_held_component(
+        "strategy-a",
+        "d1",
+        "2026-08-10",
+        "2026-08-11",
+        "100",
+        "0.10",
+        external_flow="100",
+    )
+    row.update(
+        ending_gross_assets_usd="220",
+        ending_nav_usd="220",
+        flow_adjusted_ending_nav_usd="110",
+        flow_timing="EXACT_TIMESTAMP_SEGMENTED",
+        subperiods=[
+            {
+                "subperiod_id": "d1-before-flow",
+                "subperiod_start_utc": "2026-08-10T00:00:00Z",
+                "subperiod_end_utc": "2026-08-10T12:00:00Z",
+                "beginning_nav_usd": "100",
+                "ending_nav_before_flow_usd": "100",
+                "beginning_gross_assets_usd": "100",
+                "beginning_financing_liability_usd": "0",
+                "ending_gross_assets_before_flow_usd": "100",
+                "ending_financing_liability_before_flow_usd": "0",
+                "margin_principal_flow_after_subperiod_usd": "0",
+                "financing_cost_usd": "0",
+                "external_flow_after_subperiod_usd": "100",
+                "internal_transfer_after_subperiod_usd": "0",
+                "flow_event_evidence_sha256": "7" * 64,
+            },
+            {
+                "subperiod_id": "d1-after-flow",
+                "subperiod_start_utc": "2026-08-10T12:00:00Z",
+                "subperiod_end_utc": "2026-08-11T00:00:00Z",
+                "beginning_nav_usd": "200",
+                "ending_nav_before_flow_usd": "220",
+                "beginning_gross_assets_usd": "200",
+                "beginning_financing_liability_usd": "0",
+                "ending_gross_assets_before_flow_usd": "220",
+                "ending_financing_liability_before_flow_usd": "0",
+                "margin_principal_flow_after_subperiod_usd": "0",
+                "financing_cost_usd": "0",
+                "external_flow_after_subperiod_usd": "0",
+                "internal_transfer_after_subperiod_usd": "0",
+                "flow_event_evidence_sha256": "7" * 64,
+            },
+        ],
+    )
+    fixture["component_periods"] = [row]
+    fixture["complete_through"] = "2026-08-11"
+    fixture["evaluated_on"] = "2026-08-11"
+    _refresh_fixture_authorities(fixture)
+
+    result = _compute_as_held(fixture)
+
+    assert result["current_index"] == Decimal("110")
+    assert result["periods"][0]["composite_return"] == Decimal("0.10")
+
+    reordered = deepcopy(fixture)
+    events = json.loads(reordered["input_generation_bytes"])["flow_events"]
+    events[0]["effective_at_utc"] = "2026-08-10T13:00:00Z"
+    reordered["_flow_events_override"] = events
+    _refresh_fixture_authorities(reordered)
+    with pytest.raises(HwmCoverageError, match="effective time differs"):
+        _compute_as_held(reordered)
+
+
+def test_as_held_hwm_rejects_duplicate_flow_event_identity() -> None:
+    fixture = _single_strategy_flow_fixture(external_flow="10")
+    events = json.loads(fixture["input_generation_bytes"])["flow_events"]
+    events.append(deepcopy(events[0]))
+    fixture["_flow_events_override"] = events
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(HwmCoverageError, match="identity is duplicated"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_binds_economic_reversal_lineage_and_amount() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"] = fixture["accepted_intervals"][:2]
+    fixture["memberships"] = fixture["memberships"][:1]
+    fixture["component_periods"] = [
+        _as_held_component(
+            "strategy-a",
+            "d1",
+            "2026-08-10",
+            "2026-08-11",
+            "100",
+            "0",
+            external_flow="10",
+        ),
+        _as_held_component(
+            "strategy-a",
+            "d2",
+            "2026-08-11",
+            "2026-08-12",
+            "110",
+            "0",
+            external_flow="-10",
+            capital_basis="ROLLFORWARD_FROM_PRIOR_INTERVAL",
+        ),
+    ]
+    fixture["complete_through"] = "2026-08-12"
+    fixture["evaluated_on"] = "2026-08-12"
+    _refresh_fixture_authorities(fixture)
+    events = json.loads(fixture["input_generation_bytes"])["flow_events"]
+    original = next(event for event in events if event["interval_id"] == "d1")
+    reversal = next(event for event in events if event["interval_id"] == "d2")
+    reversal.update(
+        event_type="OWNER_CONTRIBUTION",
+        capital_treatment="EXTERNAL_FLOW",
+        correction_kind="ECONOMIC_REVERSAL",
+        related_event_id=original["event_id"],
+    )
+    fixture["_flow_events_override"] = events
+    _refresh_fixture_authorities(fixture)
+
+    assert _compute_as_held(fixture)["current_index"] == Decimal("100")
+
+    invalid = deepcopy(fixture)
+    invalid_events = deepcopy(events)
+    reversal = next(
+        event
+        for event in invalid_events
+        if event["correction_kind"] == "ECONOMIC_REVERSAL"
+    )
+    reversal.update(original_amount="-9", usd_amount="-9")
+    invalid["_flow_events_override"] = invalid_events
+    _refresh_fixture_authorities(invalid)
+    with pytest.raises(HwmCoverageError, match="economic reversal differs"):
+        _compute_as_held(invalid)
+
+
+def test_as_held_hwm_source_correction_replaces_original_once() -> None:
+    fixture = _single_strategy_flow_fixture(external_flow="20")
+    correction = json.loads(fixture["input_generation_bytes"])["flow_events"][0]
+    original = deepcopy(correction)
+    original.update(
+        event_id=f"{correction['event_id']}:original",
+        original_amount="10",
+        usd_amount="10",
+        correction_kind="ORIGINAL",
+        related_event_id=None,
+    )
+    correction.update(
+        correction_kind="SOURCE_CORRECTION",
+        related_event_id=original["event_id"],
+    )
+    fixture["_flow_events_override"] = [original, correction]
+    _refresh_fixture_authorities(fixture)
+
+    assert _compute_as_held(fixture)["current_index"] == Decimal("100")
+
+    duplicate = deepcopy(fixture)
+    duplicate_events = deepcopy(fixture["_flow_events_override"])
+    second_correction = deepcopy(correction)
+    second_correction["event_id"] = f"{correction['event_id']}:duplicate"
+    duplicate_events.append(second_correction)
+    duplicate["_flow_events_override"] = duplicate_events
+    _refresh_fixture_authorities(duplicate)
+    with pytest.raises(
+        HwmCoverageError, match="source correction effective time differs"
+    ):
+        _compute_as_held(duplicate)
+
+
+def test_as_held_hwm_coherent_synthetic_return_rewrite_stays_proof_only() -> None:
+    fixture = _single_strategy_flow_fixture()
+    fixture["component_periods"] = [
+        _as_held_component(
+            "strategy-a",
+            "d1",
+            "2026-08-10",
+            "2026-08-11",
+            "100",
+            "0.25",
+        )
+    ]
+    _refresh_fixture_authorities(fixture)
+
+    result = _compute_as_held(fixture)
+
+    assert result["current_index"] == Decimal("125")
+    assert result["status"] == "PORTABLE_SYNTHETIC_PROOF"
+    assert result["input_authority_class"] == "PORTABLE_SYNTHETIC"
+
+
+def test_as_held_hwm_rejects_multi_day_aggregate_interval() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"] = fixture["accepted_intervals"][:1]
+    fixture["memberships"] = fixture["memberships"][:1]
+    fixture["component_periods"] = fixture["component_periods"][:1]
+    fixture["accepted_intervals"][0]["interval_end"] = "2026-08-13"
+    fixture["component_periods"][0]["interval_end"] = "2026-08-13"
+    fixture["complete_through"] = "2026-08-13"
+    _refresh_fixture_authorities(fixture)
+
+    with pytest.raises(HwmCoverageError, match="must be exactly one day"):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_rejects_corrupted_authority_bytes() -> None:
+    fixture = _as_held_hwm_fixture()
+    fixture["product_contract_bytes"] = fixture["product_contract_bytes"] + b" "
+
+    with pytest.raises(HwmCoverageError, match="product authority bytes differ"):
+        _compute_as_held(fixture)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda row: row.update(policy_sha256="0" * 64), "policy identity differs"),
+        (lambda row: row.update(calendar_sha256="0" * 64), "calendar identity differs"),
+        (lambda row: row.update(period_return="-1"), "greater than negative one"),
+        (lambda row: row.update(beginning_capital_usd="0"), "must be positive"),
+        (
+            lambda row: row.update(
+                return_basis="UNLEVERED_GROSS_ASSETS_BEFORE_FINANCING_COST"
+            ),
+            "return basis is invalid",
+        ),
+    ],
+)
+def test_as_held_hwm_rejects_authority_and_financial_semantic_drift(
+    mutation: object, message: str
+) -> None:
+    fixture = _as_held_hwm_fixture()
+    mutation(fixture["component_periods"][0])
+
+    with pytest.raises(HwmCoverageError, match=message):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_is_decimal_context_independent() -> None:
+    from decimal import ROUND_DOWN, getcontext
+
+    fixture = _as_held_hwm_fixture()
+    fixture["accepted_intervals"] = fixture["accepted_intervals"][:1]
+    fixture["memberships"] = fixture["memberships"][:1]
+    fixture["component_periods"] = [
+        {
+            **fixture["component_periods"][0],
+            "beginning_capital_usd": "3",
+            "beginning_gross_assets_usd": "3",
+            "ending_gross_assets_usd": "4",
+            "ending_financing_liability_usd": "0",
+            "ending_nav_usd": "4",
+            "external_flow_usd": "0",
+            "flow_adjusted_ending_nav_usd": "4",
+            "period_return": "0.3333333333333333333333333333333333",
+            "gross_asset_return": "0.3333333333333333333333333333333333",
+            "subperiods": [
+                {
+                    **fixture["component_periods"][0]["subperiods"][0],
+                    "beginning_nav_usd": "3",
+                    "ending_nav_before_flow_usd": "4",
+                    "beginning_gross_assets_usd": "3",
+                    "ending_gross_assets_before_flow_usd": "4",
+                }
+            ],
+        }
+    ]
+    fixture["complete_through"] = "2026-08-11"
+    fixture["evaluated_on"] = "2026-08-11"
+    _refresh_fixture_authorities(fixture)
+    reference = _compute_as_held(fixture)
+    saved_precision = getcontext().prec
+    saved_rounding = getcontext().rounding
+    try:
+        getcontext().prec = 7
+        getcontext().rounding = ROUND_DOWN
+        polluted = _compute_as_held(fixture)
+    finally:
+        getcontext().prec = saved_precision
+        getcontext().rounding = saved_rounding
+
+    assert polluted == reference
 
 
 # ── hwm_inputs consumer-contract conformance ─────────────────────────────
