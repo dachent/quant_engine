@@ -3546,30 +3546,22 @@ def test_advisory_carries_numerical_hwm_when_envelope_present(
     )
 
 
-def test_panel_reconciles_portable_hwm_proof_without_financial_acceptance(
+def test_panel_reconciles_portable_proof_without_replacing_governed_hwm(
     inputs: dict[str, Any], tmp_path: Path
 ) -> None:
     report, _catalog = _envelope_report(inputs, tmp_path)
+    _republish_report(inputs["report"], tmp_path, report)
+    governed_candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        tmp_path / "governed-panel-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    governed_data = _candidate_data(governed_candidate)
     receipt = _portable_hwm_receipt()
     proof = panel._panel_portable_hwm_proof(receipt)
     report["hwm_portable_proof"] = proof
-    report["hwm_summary"] = {
-        **{
-            key: value
-            for key, value in report["hwm_summary"].items()
-            if key not in _NUMERICAL_KEYS
-        },
-        "hwm_numerical_status": "UNAVAILABLE",
-        "hwm_numerical_reason": "GOVERNED_HWM_AUTHORITY_ABSENT",
-    }
-    report["portfolio_summary"] = [
-        (
-            {**row, "value": "DO_NOT_EXPAND_SYSTEMATIC_RISK"}
-            if row["metric"] == "Advisory readiness"
-            else row
-        )
-        for row in report["portfolio_summary"]
-    ]
     _republish_report(inputs["report"], tmp_path, report)
 
     candidate = panel.build_candidate(
@@ -3583,9 +3575,9 @@ def test_panel_reconciles_portable_hwm_proof_without_financial_acceptance(
     data = _candidate_data(candidate)
 
     assert data["hwm_portable_proof"] == proof
-    assert data["advisory"]["hwm_numerical_status"] == "UNAVAILABLE"
-    assert data["advisory"]["hwm_numerical_reason"] == ("GOVERNED_HWM_AUTHORITY_ABSENT")
-    assert "hwm_index" not in data["advisory"]
+    assert data["hwm_summary"] == governed_data["hwm_summary"]
+    assert data["advisory"] == governed_data["advisory"]
+    assert data["advisory"]["hwm_index"] != proof["current_index"]
     assert data["hwm_portable_proof"]["current_index"] == "93.6"
     assert data["hwm_portable_proof"]["current_hwm"] == "104"
     assert data["hwm_portable_proof"]["current_drawdown"] == "-0.1"
@@ -3607,7 +3599,8 @@ def test_panel_reconciles_portable_hwm_proof_without_financial_acceptance(
     )
     assert "DEVELOPMENT — NOT FINANCIAL ACCEPTANCE" in renderer
     assert 'join(" → ")' in renderer
-    assert "Governed HWM authority remains absent" in renderer
+    assert "governed financial HWM remains unavailable" in renderer
+    assert "governed financial HWM remains independently available" in renderer
     schema = json.loads(
         (
             REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
@@ -3622,29 +3615,46 @@ def test_panel_reconciles_portable_hwm_proof_without_financial_acceptance(
     }
 
 
+def test_panel_portable_proof_does_not_upgrade_missing_governed_hwm(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    governed_candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        tmp_path / "governed-panel-output",
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    governed_data = _candidate_data(governed_candidate)
+    report = _report_with_baseline(inputs)
+    _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog())
+    receipt = _portable_hwm_receipt()
+    report["hwm_portable_proof"] = panel._panel_portable_hwm_proof(receipt)
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        hwm_portable_receipt=receipt,
+    )
+    data = _candidate_data(candidate)
+
+    assert data["hwm_summary"] == governed_data["hwm_summary"]
+    assert data["advisory"] == governed_data["advisory"]
+    assert data["hwm_portable_proof"]["financial_acceptance"] == (
+        "NOT_FINANCIAL_ACCEPTANCE"
+    )
+
+
 def test_panel_rejects_missing_or_tampered_portable_hwm_authority(
     inputs: dict[str, Any], tmp_path: Path
 ) -> None:
     report, _catalog = _envelope_report(inputs, tmp_path)
     receipt = _portable_hwm_receipt()
     report["hwm_portable_proof"] = panel._panel_portable_hwm_proof(receipt)
-    report["hwm_summary"] = {
-        **{
-            key: value
-            for key, value in report["hwm_summary"].items()
-            if key not in _NUMERICAL_KEYS
-        },
-        "hwm_numerical_status": "UNAVAILABLE",
-        "hwm_numerical_reason": "GOVERNED_HWM_AUTHORITY_ABSENT",
-    }
-    report["portfolio_summary"] = [
-        (
-            {**row, "value": "DO_NOT_EXPAND_SYSTEMATIC_RISK"}
-            if row["metric"] == "Advisory readiness"
-            else row
-        )
-        for row in report["portfolio_summary"]
-    ]
     _republish_report(inputs["report"], tmp_path, report)
 
     with pytest.raises(

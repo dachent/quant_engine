@@ -4535,12 +4535,7 @@ def _panel_data(
             raise ControlPanelValidationError(
                 "portable HWM proof differs from the accepted portfolio report"
             )
-        hwm_numerical = {
-            "hwm_numerical_status": "UNAVAILABLE",
-            "hwm_numerical_reason": "GOVERNED_HWM_AUTHORITY_ABSENT",
-        }
-    else:
-        hwm_numerical = _compute_panel_numerical_hwm(baseline_catalog)
+    hwm_numerical = _compute_panel_numerical_hwm(baseline_catalog)
     hwm_summary = {**hwm_summary, **hwm_numerical}
     report_hwm = report.get("hwm_summary")
     if report_hwm is None:

@@ -2128,7 +2128,6 @@ _HWM_NUMERICAL_REASONS: Final = (
     "POLICY_EXCLUSION_INVALID",
     "ENDPOINT_NOT_RECONCILED",
     "MISSING_CONSUMPTION_CONTEXT",
-    "GOVERNED_HWM_AUTHORITY_ABSENT",
 )
 
 # Shared consumption-boundary validator codes → report reason codes.
@@ -2588,11 +2587,6 @@ def build_report_data(
         else None
     )
     hwm_numerical = _hwm_numerical_from_envelope(catalog)
-    if portable_hwm_proof is not None:
-        hwm_numerical = {
-            "hwm_numerical_status": "UNAVAILABLE",
-            "hwm_numerical_reason": "GOVERNED_HWM_AUTHORITY_ABSENT",
-        }
     hwm_summary: dict[str, Any]
     hwm_provenance: list[dict[str, Any]] = []
     if freshness_health_path is not None:

@@ -2006,7 +2006,7 @@ def test_hwm_numerical_composite_matches_hand_computation(tmp_path: Path) -> Non
     assert report["hwm_inputs"]["contract_version"] == 1
 
 
-def test_portable_hwm_proof_reaches_report_and_workbook_without_acceptance(
+def test_portable_hwm_proof_coexists_with_governed_report_and_workbook_hwm(
     tmp_path: Path,
 ) -> None:
     catalog = _baseline_catalog()
@@ -2015,6 +2015,10 @@ def test_portable_hwm_proof_reaches_report_and_workbook_without_acceptance(
     catalog["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
     baseline_root = _published_baseline(tmp_path / "baseline", catalog)
     receipt = _portable_hwm_receipt()
+    governed_report, _governed_bytes, _governed_baseline = reporter.build_report_data(
+        baseline_root,
+        freshness_health_path=_hwm_freshness_file(tmp_path),
+    )
 
     candidate = reporter.build_candidate(
         baseline_root,
@@ -2028,13 +2032,10 @@ def test_portable_hwm_proof_reaches_report_and_workbook_without_acceptance(
     )
     proof = report["hwm_portable_proof"]
 
-    assert report["hwm_summary"]["hwm_numerical_status"] == "UNAVAILABLE"
-    assert (
-        report["hwm_summary"]["hwm_numerical_reason"] == "GOVERNED_HWM_AUTHORITY_ABSENT"
-    )
-    assert "hwm_index" not in report["hwm_summary"]
-    assert _summary_row(report, "Advisory readiness") == (
-        "DO_NOT_EXPAND_SYSTEMATIC_RISK"
+    assert report["hwm_summary"] == governed_report["hwm_summary"]
+    assert report["hwm_summary"]["hwm_index"] != proof["current_index"]
+    assert _summary_row(report, "Advisory readiness") == _summary_row(
+        governed_report, "Advisory readiness"
     )
     assert proof["financial_acceptance"] == "NOT_FINANCIAL_ACCEPTANCE"
     assert proof["assurance_profile"] == "DEVELOPMENT"
@@ -2092,7 +2093,7 @@ def test_portable_hwm_proof_reaches_report_and_workbook_without_acceptance(
     )
     assert workbook_contract["sentinel_cells"][0] == {
         "cell": "B4",
-        "expected": "DO_NOT_EXPAND_SYSTEMATIC_RISK",
+        "expected": "ELIGIBLE_FOR_REVIEW",
         "sheet": "Portfolio Summary",
     }
     workbook.close()
@@ -2109,6 +2110,32 @@ def test_portable_hwm_proof_reaches_report_and_workbook_without_acceptance(
     assert portable_schema["properties"]["assurance_profile"] == {
         "const": "DEVELOPMENT"
     }
+
+
+def test_portable_hwm_proof_does_not_upgrade_missing_governed_authority(
+    tmp_path: Path,
+) -> None:
+    catalog = _baseline_catalog()
+    catalog["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+    governed_report, _governed_bytes, _governed_path = reporter.build_report_data(
+        baseline_root,
+        freshness_health_path=_hwm_freshness_file(tmp_path),
+    )
+
+    report, _report_bytes, _baseline_path = reporter.build_report_data(
+        baseline_root,
+        freshness_health_path=_hwm_freshness_file(tmp_path),
+        hwm_portable_receipt=_portable_hwm_receipt(),
+    )
+
+    assert report["hwm_summary"] == governed_report["hwm_summary"]
+    assert _summary_row(report, "Advisory readiness") == _summary_row(
+        governed_report, "Advisory readiness"
+    )
+    assert report["hwm_portable_proof"]["financial_acceptance"] == (
+        "NOT_FINANCIAL_ACCEPTANCE"
+    )
 
 
 def test_report_rejects_tampered_portable_hwm_receipt(tmp_path: Path) -> None:
