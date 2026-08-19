@@ -217,13 +217,27 @@ receipt contains redacted strategy IDs and hashes, never roots or provider IDs.
 
 & $enginePython tools\portfolio_target_series.py `
   --verify-layered-history '<candidate-generation-root>' `
-  --financial-mvp-contract contracts\portfolio-financial-mvp-source-v1.json
+  --financial-mvp-contract contracts\portfolio-financial-mvp-source-v1.json `
+  --assurance-profile DEVELOPMENT `
+  --evaluated-on $asOfDate
 ```
 
 `--require-mode LIVE_ONLY` or `--require-mode LIVE_PLUS_BACKTEST` makes a
 required strategy disposition fail the command. Normal verification accepts an
 exact `REQUIRED_NOT_READY` disposition so scheduling can name the missing
 strategy without treating the mode as financially accepted.
+
+Verification evaluates the receipt separately from calculation data age.
+`DEVELOPMENT` and `WORKSTATION_QC` may reuse an otherwise fully verified
+immutable receipt and emit `WARN_VERIFIED_IMMUTABLE_RECEIPT_REUSE` with the
+receipt date and age. `RELEASE_QC` requires a receipt whose `as_of_date` equals
+`--evaluated-on`. This operational receipt warning never advances a financial
+as-of date: each calculation still uses its exact latest common complete date
+and reports `WARN_COMPLETE_DATA_AGE` when that boundary exceeds its threshold.
+Missing evidence, gaps, and version incompatibility remain fail-closed in every
+profile. An unavailable mode fails acceptance when selected with
+`--require-mode`; otherwise its exact `REQUIRED_NOT_READY` disposition remains
+visible for scheduling and remediation.
 
 Recompute the separate trade/implementation evidence for AI Factor,
 GrizzlyBears, and TuringTrader. Portfolio123 remains HAR-first; this command
