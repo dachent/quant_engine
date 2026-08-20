@@ -15,6 +15,7 @@ from quant_engine.core import (
     SourceArtifact,
     VerificationStatus,
 )
+from quant_engine.core.contracts import canonical_json_bytes
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,15 +38,23 @@ def _file_definition(path: Path) -> dict[str, object]:
 def _provider_ledger_generation(tmp_path: Path) -> Path:
     catalog = (
         json.dumps(
-            {"as_of_date": "2026-08-03", "catalog_schema_version": 1},
+            {"as_of_date": "2026-08-03", "catalog_schema_version": 2},
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
         + b"\n"
     )
+    receipt = canonical_json_bytes(
+        {
+            "admission_gate_status": "PASS",
+            "product_readiness": "REQUIRED_NOT_READY",
+            "receipt_type": "PROVIDER_ADMIT_OR_DECLARE_V1",
+            "schema_version": 1,
+        }
+    )
     manifest = GenerationManifest.build(
         as_of_date=builder.date.fromisoformat("2026-08-03"),
-        adapter=AdapterIdentity("quant-engine-provider-ledger", "1"),
+        adapter=AdapterIdentity("quant-engine-provider-ledger", "2"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="synthetic provider ledger",
@@ -55,12 +64,20 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
         ),
         artifacts=(
             SourceArtifact(
+                artifact_id="normalized/admit-or-declare-receipt.json",
+                sha256=hashlib.sha256(receipt).hexdigest(),
+                size_bytes=len(receipt),
+                as_of_date=builder.date.fromisoformat("2026-08-03"),
+                schema_name="provider-admission-receipt",
+                schema_version="1",
+            ),
+            SourceArtifact(
                 artifact_id="normalized/provider-ledger.json",
                 sha256=hashlib.sha256(catalog).hexdigest(),
                 size_bytes=len(catalog),
                 as_of_date=builder.date.fromisoformat("2026-08-03"),
                 schema_name="provider-ledger-catalog",
-                schema_version="1",
+                schema_version="2",
             ),
         ),
         verification=VerificationStatus.VERIFIED,
@@ -68,6 +85,7 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
     generation = tmp_path / manifest.generation_id
     generation.mkdir()
     (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+    (generation / "admit-or-declare-receipt.json").write_bytes(receipt)
     (generation / "provider-ledger.json").write_bytes(catalog)
     return generation
 
@@ -314,6 +332,18 @@ def test_reusable_provider_ledger_fails_when_catalog_identity_differs(
 ) -> None:
     generation = _provider_ledger_generation(tmp_path)
     (generation / "provider-ledger.json").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(builder.VerticalBuildError, match="identity differs"):
+        builder._validated_reusable_provider_ledger(generation)
+
+
+def test_reusable_provider_ledger_requires_hash_bound_admission_receipt(
+    tmp_path: Path,
+) -> None:
+    generation = _provider_ledger_generation(tmp_path)
+    (generation / "admit-or-declare-receipt.json").write_text(
+        '{"admission_gate_status":"PASS"}\n', encoding="utf-8"
+    )
 
     with pytest.raises(builder.VerticalBuildError, match="identity differs"):
         builder._validated_reusable_provider_ledger(generation)

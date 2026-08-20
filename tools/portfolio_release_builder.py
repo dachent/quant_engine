@@ -115,7 +115,11 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
         for item in path.rglob("*")
         if item.is_file()
     }
-    if set(files) != {"generation.json", "provider-ledger.json"}:
+    if set(files) != {
+        "admit-or-declare-receipt.json",
+        "generation.json",
+        "provider-ledger.json",
+    }:
         raise VerticalBuildError("reusable provider-ledger file boundary differs")
     if any(item.is_symlink() for item in files.values()):
         raise VerticalBuildError("reusable provider-ledger contains a link")
@@ -133,30 +137,50 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
         raise VerticalBuildError("reusable provider-ledger is not verified")
     if (
         manifest.adapter.name != "quant-engine-provider-ledger"
-        or manifest.adapter.version != "1"
+        or manifest.adapter.version != "2"
     ):
         raise VerticalBuildError("reusable provider-ledger adapter differs")
-    artifact = next(
-        (
-            item
-            for item in manifest.artifacts
-            if item.artifact_id == "normalized/provider-ledger.json"
+    required_artifacts = {
+        "normalized/admit-or-declare-receipt.json": (
+            "admit-or-declare-receipt.json",
+            "provider-admission-receipt",
+            "1",
         ),
-        None,
-    )
-    if artifact is None:
-        raise VerticalBuildError("reusable provider-ledger artifact is absent")
-    ledger_path = files["provider-ledger.json"]
-    try:
-        content = ledger_path.read_bytes()
-    except OSError as exc:
-        raise VerticalBuildError(
-            "reusable provider-ledger artifact is unavailable"
-        ) from exc
-    if artifact.sha256 != hashlib.sha256(
-        content
-    ).hexdigest() or artifact.size_bytes != len(content):
-        raise VerticalBuildError("reusable provider-ledger artifact identity differs")
+        "normalized/provider-ledger.json": (
+            "provider-ledger.json",
+            "provider-ledger-catalog",
+            "2",
+        ),
+    }
+    artifact_by_id = {item.artifact_id: item for item in manifest.artifacts}
+    contents: dict[str, bytes] = {}
+    for artifact_id, (
+        relative_path,
+        schema_name,
+        schema_version,
+    ) in required_artifacts.items():
+        artifact = artifact_by_id.get(artifact_id)
+        if artifact is None:
+            raise VerticalBuildError(
+                f"reusable provider-ledger artifact is absent: {artifact_id}"
+            )
+        try:
+            content = files[relative_path].read_bytes()
+        except OSError as exc:
+            raise VerticalBuildError(
+                "reusable provider-ledger artifact is unavailable"
+            ) from exc
+        if (
+            artifact.sha256 != hashlib.sha256(content).hexdigest()
+            or artifact.size_bytes != len(content)
+            or artifact.schema_name != schema_name
+            or artifact.schema_version != schema_version
+        ):
+            raise VerticalBuildError(
+                f"reusable provider-ledger artifact identity differs: {artifact_id}"
+            )
+        contents[relative_path] = content
+    content = contents["provider-ledger.json"]
     # Parse the SAME bytes that were just hashed — never reopen after hashing.
     try:
         catalog = json.loads(content.decode("utf-8"))
@@ -168,9 +192,29 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
         raise VerticalBuildError("reusable provider-ledger root must be an object")
     if (
         catalog.get("as_of_date") != manifest.as_of_date.isoformat()
-        or catalog.get("catalog_schema_version") != 1
+        or catalog.get("catalog_schema_version") != 2
     ):
         raise VerticalBuildError("reusable provider-ledger catalog contract differs")
+    try:
+        receipt = json.loads(contents["admit-or-declare-receipt.json"].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise VerticalBuildError(
+            "reusable provider-ledger admission receipt is not readable JSON"
+        ) from exc
+    if not isinstance(receipt, dict):
+        raise VerticalBuildError(
+            "reusable provider-ledger admission receipt root must be an object"
+        )
+    if (
+        receipt.get("receipt_type") != "PROVIDER_ADMIT_OR_DECLARE_V1"
+        or receipt.get("schema_version") != 1
+        or receipt.get("admission_gate_status") != "PASS"
+        or receipt.get("product_readiness")
+        not in {"READY_FOR_COMPOSITION", "REQUIRED_NOT_READY"}
+    ):
+        raise VerticalBuildError(
+            "reusable provider-ledger admission receipt contract differs"
+        )
     return manifest.generation_id, files["provider-ledger.json"]
 
 

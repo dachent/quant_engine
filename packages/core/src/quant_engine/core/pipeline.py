@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -15,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Final, Mapping, Self
+from typing import Any, Callable, Final, Mapping, Self, cast
 
 from quant_engine.core.authority import FreshnessPolicy
 from quant_engine.core.contracts import (
@@ -47,6 +48,17 @@ _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PORTFOLIO_CONTRACT_GATE: Final = "portfolio-orchestration-contract"
+_FINANCIAL_MVP_PRODUCT_GATE: Final = "financial-mvp-product-conformance"
+_FINANCIAL_MVP_AUTHORITY_GATES: Final = {
+    "contract": "financial-mvp-contract-authority",
+    "provider_catalog": "financial-mvp-provider-catalog-authority",
+    "provider_manifest": "financial-mvp-provider-manifest-authority",
+    "provider_receipt": "financial-mvp-provider-admission-authority",
+    "source_matrix": "financial-mvp-source-matrix-authority",
+}
+_CORRECTION_REGISTRY_GATE: Final = "portfolio-correction-registry"
+_REDERIVE_REGISTRY_GATE: Final = "portfolio-rederive-receipt-registry"
+_PORTFOLIO_PRODUCTION_REBIND_GATE: Final = "port-underwrite-production-rebind"
 _POST_BUILD_SEMANTIC_GATE: Final = "post-build-semantic"
 _PREDECESSOR_REPAIR_GATE: Final = "predecessor-authority-repair"
 _PORTFOLIO_PROFILE: Final = "PORTFOLIO_SOURCE_TO_PANEL_V1"
@@ -59,6 +71,30 @@ _PORTFOLIO_STAGE_ORDER: Final = (
     "workbook",
     "panel",
 )
+_PORTFOLIO_STAGE_DEPENDENCIES: Final = {
+    "ledger": (),
+    "baseline": ("ledger",),
+    "attribution": ("baseline", "ledger"),
+    "analytics": ("attribution",),
+    "report": ("baseline", "ledger", "analytics"),
+    "workbook": ("baseline", "ledger", "report"),
+    "panel": ("ledger", "attribution", "analytics", "workbook"),
+}
+_SEMANTIC_FIRST_STAGE: Final = {
+    "AS_HELD_COMPOSITE_HWM": "analytics",
+    "COMPOSITION": "ledger",
+    "PROVIDER_LEDGER": "ledger",
+    "LAYERED_HISTORY": "attribution",
+    "LAYERED_HISTORY_LIVE_PLUS_BACKTEST": "attribution",
+    "DECOMPOSITION": "attribution",
+    "HWM": "analytics",
+    "INVESTED_CAPITAL": "analytics",
+    "DEPENDENCE": "analytics",
+    "REPORT": "report",
+    "WORKBOOK": "workbook",
+    "PANEL": "panel",
+    "RELEASE_RECEIPT": "panel",
+}
 _POST_BUILD_CHECKS: Final = {
     "analytics_report_panel_equality",
     "financial_identities",
@@ -708,6 +744,993 @@ def _contains_ambient_current(value: object) -> bool:
     return any(part.strip().lower() in {"current", "current.json"} for part in parts)
 
 
+def _file_definition_value(value: object, name: str) -> tuple[Path, str, int]:
+    definition = _object(value, name)
+    _strict(definition, {"path", "sha256", "size_bytes"}, name)
+    path = _absolute(definition["path"], f"{name}.path")
+    sha256 = _hash(definition["sha256"], f"{name}.sha256")
+    size = definition["size_bytes"]
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        raise PipelineValidationError(f"{name}.size_bytes must be positive")
+    if _file_hash(path) != (sha256, size):
+        raise PipelineValidationError(f"{name} identity differs")
+    return path, sha256, size
+
+
+def _financial_mvp_product_authority_legacy(
+    spec: PipelineSpec,
+) -> dict[str, Any] | None:
+    matches = [
+        item for item in spec.gates if item.gate_id == _FINANCIAL_MVP_PRODUCT_GATE
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise PipelineValidationError("financial MVP product gate is ambiguous")
+    gate = matches[0]
+    if _file_hash(gate.path)[0] != gate.sha256:
+        raise PipelineValidationError("financial MVP product gate differs")
+    try:
+        authority = _object(
+            json.loads(gate.path.read_text(encoding="utf-8")),
+            "financial MVP product authority",
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PipelineValidationError(
+            "financial MVP product authority is unreadable"
+        ) from exc
+    _strict(
+        authority,
+        {
+            "contract",
+            "conformance",
+            "provider_generation_path",
+            "source_matrix",
+        },
+        "financial MVP product authority",
+    )
+    contract_path, contract_raw_sha256, _ = _file_definition_value(
+        authority["contract"], "financial MVP contract"
+    )
+    matrix_path, matrix_sha256, _ = _file_definition_value(
+        authority["source_matrix"], "financial MVP source matrix"
+    )
+    try:
+        contract = _object(
+            json.loads(contract_path.read_text(encoding="utf-8")),
+            "financial MVP contract",
+        )
+        matrix = _object(
+            json.loads(matrix_path.read_text(encoding="utf-8")),
+            "financial MVP source matrix",
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PipelineValidationError("financial MVP authority is unreadable") from exc
+    conformance = _object(authority["conformance"], "financial MVP conformance")
+    _strict(
+        conformance,
+        {
+            "blocking_reasons",
+            "census_memberships",
+            "census_sha256",
+            "contract_raw_sha256",
+            "contract_semantic_sha256",
+            "correction_authority",
+            "history_corrections",
+            "invested_capital_policy_sha256",
+            "outcomes",
+            "product_id",
+            "product_version",
+            "provider_admission",
+            "readiness",
+            "rederive_authority",
+            "schema_version",
+            "source_matrix_sha256",
+            "sources",
+            "strategies",
+        },
+        "financial MVP conformance",
+    )
+    semantic_sha256 = hashlib.sha256(canonical_json_bytes(contract)).hexdigest()
+    census = _object(contract.get("current_census"), "financial MVP current census")
+    census_sha256 = hashlib.sha256(canonical_json_bytes(census)).hexdigest()
+    product = _object(contract.get("product"), "financial MVP product")
+    if (
+        conformance.get("schema_version") != 1
+        or conformance.get("contract_raw_sha256") != contract_raw_sha256
+        or conformance.get("contract_semantic_sha256") != semantic_sha256
+        or conformance.get("census_sha256") != census_sha256
+        or conformance.get("source_matrix_sha256") != matrix_sha256
+        or conformance.get("product_id") != product.get("product_id")
+        or conformance.get("product_version") != product.get("product_version")
+        or matrix.get("contract_sha256") != semantic_sha256
+        or matrix.get("census_sha256") != census_sha256
+        or matrix.get("product_version") != product.get("product_version")
+    ):
+        raise PipelineValidationError("financial MVP authority identities differ")
+    sleeve_rows = _objects(census.get("account_sleeves", []), "census account sleeves")
+    expected_memberships = []
+    for sleeve in sleeve_rows:
+        assignments = _objects(sleeve.get("assignments"), "census assignments")
+        expected_memberships.append(
+            {
+                "assignments": sorted(
+                    (
+                        {
+                            "effective_end": row.get("effective_end"),
+                            "effective_start": row.get("effective_start"),
+                            "status": row.get("status"),
+                            "strategy_id": row.get("strategy_id"),
+                            "transition_group_id": row.get("transition_group_id"),
+                        }
+                        for row in assignments
+                    ),
+                    key=lambda row: (
+                        str(row["effective_start"]),
+                        str(row["strategy_id"]),
+                        str(row["effective_end"]),
+                    ),
+                ),
+                "current_strategy_id": sleeve.get("current_strategy_id"),
+                "provider_id": sleeve.get("provider_id"),
+                "role": sleeve.get("role"),
+                "sleeve_alias": sleeve.get("sleeve_alias"),
+                "source_segment_ids": sorted(
+                    _strings(sleeve.get("source_segment_ids"), "sleeve sources")
+                ),
+            }
+        )
+    expected_memberships.sort(key=lambda row: str(row["sleeve_alias"]))
+    if conformance.get("census_memberships") != expected_memberships:
+        raise PipelineValidationError("financial MVP census conformance differs")
+
+    def source_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "consumers": sorted(_strings(row.get("consumers"), "source consumers")),
+            "data_classes": sorted(
+                _strings(row.get("data_classes"), "source data_classes")
+            ),
+            "invalidated_outputs": sorted(
+                _strings(row.get("invalidated_outputs"), "invalidated outputs")
+            ),
+            "product_requirement": str(row.get("product_requirement")),
+            "readiness": str(row.get("readiness")),
+            "source_id": str(row.get("source_id")),
+        }
+
+    source_rows = _objects(contract.get("source_segments"), "source segments")
+    expected_sources = sorted(
+        (source_projection(row) for row in source_rows),
+        key=lambda row: row["source_id"],
+    )
+    if conformance.get("sources") != expected_sources or len(
+        {row["source_id"] for row in expected_sources}
+    ) != len(expected_sources):
+        raise PipelineValidationError("financial MVP source conformance differs")
+    outcome_rows = _objects(contract.get("financial_outcomes"), "financial outcomes")
+    expected_outcomes = sorted(
+        (
+            {
+                "blockers": sorted(int(value) for value in row.get("blockers", [])),
+                "consumers": sorted(
+                    _strings(row.get("consumers"), "outcome consumers")
+                ),
+                "outcome_id": str(row.get("outcome_id")),
+                "product_requirement": str(row.get("product_requirement")),
+                "readiness": str(row.get("readiness")),
+            }
+            for row in outcome_rows
+        ),
+        key=lambda row: str(row["outcome_id"]),
+    )
+    if conformance.get("outcomes") != expected_outcomes:
+        raise PipelineValidationError("financial MVP outcome conformance differs")
+    strategy_rows = _objects(contract.get("strategies"), "financial MVP strategies")
+    expected_strategies = sorted(
+        (
+            {
+                "product_requirement": str(row.get("product_requirement")),
+                "strategy_id": str(row.get("strategy_id")),
+            }
+            for row in strategy_rows
+        ),
+        key=lambda row: row["strategy_id"],
+    )
+    if conformance.get("strategies") != expected_strategies:
+        raise PipelineValidationError("financial MVP strategy conformance differs")
+    history = _object(contract.get("history_corrections"), "history corrections")
+    correction_rows = _objects(history.get("corrections"), "history correction rows")
+    expected_corrections = sorted(
+        (
+            {
+                "correction_id": str(row.get("correction_id")),
+                "evidence_layer": str(row.get("evidence_layer")),
+                "readiness": str(row.get("readiness")),
+            }
+            for row in correction_rows
+        ),
+        key=lambda row: row["correction_id"],
+    )
+    if conformance.get("history_corrections") != expected_corrections:
+        raise PipelineValidationError("financial MVP correction conformance differs")
+    invested_rows = [
+        row for row in outcome_rows if row.get("outcome_id") == "INVESTED_CAPITAL"
+    ]
+    if len(invested_rows) != 1 or not isinstance(
+        invested_rows[0].get("calculation_contract"), dict
+    ):
+        raise PipelineValidationError("invested-capital policy authority differs")
+    invested_sha256 = hashlib.sha256(
+        canonical_json_bytes(invested_rows[0]["calculation_contract"])
+    ).hexdigest()
+    if conformance.get("invested_capital_policy_sha256") != invested_sha256:
+        raise PipelineValidationError("invested-capital policy identity differs")
+
+    generation = _absolute(
+        authority["provider_generation_path"], "provider generation path"
+    )
+    if generation.is_symlink() or not generation.is_dir():
+        raise PipelineValidationError("provider generation is unavailable")
+    expected_files = {
+        "admit-or-declare-receipt.json",
+        "generation.json",
+        "provider-ledger.json",
+    }
+    actual_files = {
+        item.relative_to(generation).as_posix()
+        for item in generation.rglob("*")
+        if item.is_file()
+    }
+    if actual_files != expected_files:
+        raise PipelineValidationError("provider generation file boundary differs")
+    try:
+        manifest_bytes = (generation / "generation.json").read_bytes()
+        manifest = GenerationManifest.from_json_bytes(manifest_bytes)
+        receipt_bytes = (generation / "admit-or-declare-receipt.json").read_bytes()
+        receipt = _object(
+            json.loads(receipt_bytes.decode("utf-8")),
+            "provider admission receipt",
+        )
+        catalog_bytes = (generation / "provider-ledger.json").read_bytes()
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise PipelineValidationError(
+            "provider generation authority is invalid"
+        ) from exc
+    if (
+        manifest.generation_id != generation.name
+        or manifest.verification is not VerificationStatus.VERIFIED
+        or manifest.adapter.name != "quant-engine-provider-ledger"
+        or manifest.adapter.version != "2"
+    ):
+        raise PipelineValidationError("provider generation manifest differs")
+    admission = _object(conformance.get("provider_admission"), "provider admission")
+    _strict(
+        admission,
+        {
+            "admission_gate_status",
+            "catalog_sha256",
+            "generation_id",
+            "manifest_sha256",
+            "product_readiness",
+            "receipt_sha256",
+        },
+        "provider admission",
+    )
+    artifact_by_id = {item.artifact_id: item for item in manifest.artifacts}
+    receipt_artifact = artifact_by_id.get("normalized/admit-or-declare-receipt.json")
+    catalog_artifact = artifact_by_id.get("normalized/provider-ledger.json")
+    if (
+        receipt_artifact is None
+        or catalog_artifact is None
+        or receipt_artifact.sha256 != hashlib.sha256(receipt_bytes).hexdigest()
+        or receipt_artifact.size_bytes != len(receipt_bytes)
+        or catalog_artifact.sha256 != hashlib.sha256(catalog_bytes).hexdigest()
+        or catalog_artifact.size_bytes != len(catalog_bytes)
+        or admission.get("generation_id") != manifest.generation_id
+        or admission.get("manifest_sha256")
+        != hashlib.sha256(manifest_bytes).hexdigest()
+        or admission.get("receipt_sha256") != hashlib.sha256(receipt_bytes).hexdigest()
+        or admission.get("catalog_sha256") != hashlib.sha256(catalog_bytes).hexdigest()
+        or admission.get("admission_gate_status")
+        != receipt.get("admission_gate_status")
+        or admission.get("product_readiness") != receipt.get("product_readiness")
+        or receipt.get("contract_raw_sha256") != contract_raw_sha256
+        or receipt.get("contract_semantic_sha256") != semantic_sha256
+        or receipt.get("census_sha256") != census_sha256
+        or receipt.get("product_id") != product.get("product_id")
+        or receipt.get("product_version") != product.get("product_version")
+    ):
+        raise PipelineValidationError("provider admission authority differs")
+    blockers = conformance.get("blocking_reasons")
+    if not isinstance(blockers, list) or blockers != sorted(set(blockers)):
+        raise PipelineValidationError("financial MVP blockers differ")
+    expected_blockers = sorted(
+        {
+            *(
+                f"SOURCE:{row['source_id']}"
+                for row in expected_sources
+                if row["product_requirement"] == "REQUIRED"
+                and row["readiness"] != "READY"
+            ),
+            *(
+                f"OUTCOME:{row['outcome_id']}"
+                for row in expected_outcomes
+                if row["product_requirement"] == "REQUIRED"
+                and row["readiness"] != "READY"
+            ),
+            *(
+                ("PROVIDER_ADMISSION",)
+                if admission.get("product_readiness") != "READY_FOR_COMPOSITION"
+                else ()
+            ),
+            "CORRECTION_AUTHORITY_PENDING_326",
+        }
+    )
+    if (
+        blockers != expected_blockers
+        or conformance.get("correction_authority") != "REQUIRED_NOT_READY_PENDING_326"
+        or conformance.get("rederive_authority")
+        != "REFERENCE_ISSUE_322_NO_ACCEPTED_RECEIPT"
+        or admission.get("admission_gate_status") != "PASS"
+    ):
+        raise PipelineValidationError("financial MVP blocker authority differs")
+    expected_readiness = "READY_FOR_EXECUTION" if not blockers else "REQUIRED_NOT_READY"
+    if conformance.get("readiness") != expected_readiness:
+        raise PipelineValidationError("financial MVP readiness differs")
+    return {"conformance": dict(conformance), "raw": dict(authority)}
+
+
+def _single_gate(spec: PipelineSpec, gate_id: str) -> PipelineGate:
+    matches = [item for item in spec.gates if item.gate_id == gate_id]
+    if len(matches) != 1:
+        raise PipelineValidationError(f"pipeline gate is ambiguous: {gate_id}")
+    gate = matches[0]
+    if _file_hash(gate.path)[0] != gate.sha256:
+        raise PipelineValidationError(f"pipeline gate differs: {gate_id}")
+    return gate
+
+
+def _gate_json(spec: PipelineSpec, gate_id: str) -> tuple[dict[str, Any], bytes]:
+    gate = _single_gate(spec, gate_id)
+    try:
+        content = gate.path.read_bytes()
+        value = _object(json.loads(content.decode("utf-8")), gate_id)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PipelineValidationError(
+            f"pipeline gate is unreadable: {gate_id}"
+        ) from exc
+    return value, content
+
+
+def _provider_admission_validator() -> Callable[..., None]:
+    """Load the exact repository #303 validator without trusting module cache state."""
+
+    path = (
+        Path(__file__).resolve().parents[5]
+        / "packages"
+        / "portfolio-ledger"
+        / "src"
+        / "quant_engine"
+        / "portfolio_ledger"
+        / "provider_admission.py"
+    )
+    if path.is_symlink() or not path.is_file():
+        raise PipelineValidationError("provider admission validator is unavailable")
+    module_name = "quant_engine_core_pipeline_provider_admission_validator"
+    previous = sys.modules.pop(module_name, None)
+    try:
+        module_spec = importlib.util.spec_from_file_location(module_name, path)
+        if module_spec is None or module_spec.loader is None:
+            raise PipelineValidationError("provider admission validator is unavailable")
+        module = importlib.util.module_from_spec(module_spec)
+        sys.modules[module_name] = module
+        module_spec.loader.exec_module(module)
+        validator = getattr(module, "validate_admit_or_declare_receipt", None)
+        if not callable(validator):
+            raise PipelineValidationError("provider admission validator is unavailable")
+        return cast(Callable[..., None], validator)
+    finally:
+        sys.modules.pop(module_name, None)
+        if previous is not None:
+            sys.modules[module_name] = previous
+
+
+def _semantic_route(output_role: object) -> dict[str, Any]:
+    role = _identifier(str(output_role).lower().replace("_", "-"), "semantic output")
+    canonical_role = role.upper().replace("-", "_")
+    first_stage = _SEMANTIC_FIRST_STAGE.get(canonical_role)
+    if first_stage is None:
+        raise PipelineValidationError(
+            f"semantic output has no rebuild route: {canonical_role}"
+        )
+    affected = {first_stage}
+    changed = True
+    while changed:
+        changed = False
+        for stage in _PORTFOLIO_STAGE_ORDER:
+            if stage in affected:
+                continue
+            if any(
+                dependency in affected
+                for dependency in _PORTFOLIO_STAGE_DEPENDENCIES[stage]
+            ):
+                affected.add(stage)
+                changed = True
+    return {
+        "affected_stages": [
+            stage for stage in _PORTFOLIO_STAGE_ORDER if stage in affected
+        ],
+        "first_stage": first_stage,
+        "output_role": canonical_role,
+    }
+
+
+def _registry_boundary(
+    spec: PipelineSpec,
+    boundary: Mapping[str, Any],
+    *,
+    gate_id: str,
+    schema_name: str,
+    record_key: str,
+    contract_semantic_sha256: str,
+    census_sha256: str,
+) -> list[dict[str, Any]]:
+    state = boundary.get("authority_state")
+    matches = [item for item in spec.gates if item.gate_id == gate_id]
+    if state == "REQUIRED_NOT_READY_NOT_PROVIDED":
+        if matches:
+            raise PipelineValidationError(f"unexpected authority gate: {gate_id}")
+        if (
+            boundary.get("records") != []
+            or boundary.get("registry_sha256") is not None
+            or boundary.get("schema_name") != schema_name
+            or boundary.get("schema_version") != 1
+        ):
+            raise PipelineValidationError(f"{schema_name} absence differs")
+        return []
+    if state != "PROVIDED" or len(matches) != 1:
+        raise PipelineValidationError(f"{schema_name} authority differs")
+    payload, _ = _gate_json(spec, gate_id)
+    expected_keys = {
+        "census_sha256",
+        "contract_semantic_sha256",
+        record_key,
+        "registry_sha256",
+        "schema_name",
+        "schema_version",
+    }
+    _strict(payload, expected_keys, schema_name)
+    declared_digest = _hash(
+        payload["registry_sha256"], f"{schema_name}.registry_sha256"
+    )
+    digest_payload = dict(payload)
+    digest_payload.pop("registry_sha256")
+    if (
+        hashlib.sha256(canonical_json_bytes(digest_payload)).hexdigest()
+        != declared_digest
+        or payload.get("schema_name") != schema_name
+        or payload.get("schema_version") != 1
+        or payload.get("contract_semantic_sha256") != contract_semantic_sha256
+        or payload.get("census_sha256") != census_sha256
+        or boundary.get("contract_semantic_sha256") != contract_semantic_sha256
+        or boundary.get("census_sha256") != census_sha256
+        or boundary.get("registry_sha256") != declared_digest
+        or boundary.get("records") != payload.get(record_key)
+    ):
+        raise PipelineValidationError(f"{schema_name} identity differs")
+    return _objects(payload.get(record_key), f"{schema_name} records")
+
+
+def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | None:
+    product_matches = [
+        item for item in spec.gates if item.gate_id == _FINANCIAL_MVP_PRODUCT_GATE
+    ]
+    if not product_matches:
+        if any(
+            item.gate_id in set(_FINANCIAL_MVP_AUTHORITY_GATES.values())
+            for item in spec.gates
+        ):
+            raise PipelineValidationError("financial MVP authority gates are detached")
+        return None
+    if len(product_matches) != 1:
+        raise PipelineValidationError("financial MVP product gate is ambiguous")
+    gate_payload, _ = _gate_json(spec, _FINANCIAL_MVP_PRODUCT_GATE)
+    if gate_payload.get("schema_version") != 2:
+        return _financial_mvp_product_authority_legacy(spec)
+    _strict(
+        gate_payload,
+        {"authority_hashes", "conformance", "schema_version"},
+        "financial MVP product gate",
+    )
+    authority_hashes = _object(
+        gate_payload["authority_hashes"], "financial MVP authority hashes"
+    )
+    _strict(
+        authority_hashes,
+        {
+            "contract_raw_sha256",
+            "provider_catalog_sha256",
+            "provider_manifest_sha256",
+            "provider_receipt_sha256",
+            "source_matrix_sha256",
+        },
+        "financial MVP authority hashes",
+    )
+    payloads: dict[str, tuple[dict[str, Any], bytes]] = {}
+    for key, gate_id in _FINANCIAL_MVP_AUTHORITY_GATES.items():
+        payloads[key] = _gate_json(spec, gate_id)
+    contract, contract_bytes = payloads["contract"]
+    matrix, matrix_bytes = payloads["source_matrix"]
+    manifest_raw, manifest_bytes = payloads["provider_manifest"]
+    catalog, catalog_bytes = payloads["provider_catalog"]
+    receipt, receipt_bytes = payloads["provider_receipt"]
+    expected_hashes = {
+        "contract_raw_sha256": hashlib.sha256(contract_bytes).hexdigest(),
+        "provider_catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+        "provider_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "provider_receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+        "source_matrix_sha256": hashlib.sha256(matrix_bytes).hexdigest(),
+    }
+    if authority_hashes != expected_hashes:
+        raise PipelineValidationError("financial MVP authority file identities differ")
+    try:
+        manifest = GenerationManifest.from_json_bytes(manifest_bytes)
+    except ValueError as exc:
+        raise PipelineValidationError("provider admission manifest is invalid") from exc
+    if (
+        manifest.verification is not VerificationStatus.VERIFIED
+        or manifest.adapter.name != "quant-engine-provider-ledger"
+        or manifest.adapter.version != "2"
+        or catalog.get("catalog_schema_version") != 2
+    ):
+        raise PipelineValidationError("provider admission manifest authority differs")
+    artifact_by_id = {item.artifact_id: item for item in manifest.artifacts}
+    receipt_artifact = artifact_by_id.get("normalized/admit-or-declare-receipt.json")
+    catalog_artifact = artifact_by_id.get("normalized/provider-ledger.json")
+    if (
+        receipt_artifact is None
+        or catalog_artifact is None
+        or receipt_artifact.sha256 != expected_hashes["provider_receipt_sha256"]
+        or receipt_artifact.size_bytes != len(receipt_bytes)
+        or catalog_artifact.sha256 != expected_hashes["provider_catalog_sha256"]
+        or catalog_artifact.size_bytes != len(catalog_bytes)
+    ):
+        raise PipelineValidationError(
+            "provider admission artifacts are not manifest-bound"
+        )
+
+    conformance = _object(gate_payload["conformance"], "financial MVP conformance")
+    expected_conformance_keys = {
+        "blocking_reasons",
+        "census_memberships",
+        "census_sha256",
+        "contract_raw_sha256",
+        "contract_semantic_sha256",
+        "correction_authority",
+        "correction_invalidation_routes",
+        "history_corrections",
+        "invested_capital_policy_sha256",
+        "outcomes",
+        "product",
+        "product_id",
+        "product_version",
+        "provider_admission",
+        "readiness",
+        "rederive_authority",
+        "schema_version",
+        "source_invalidation_routes",
+        "source_matrix_sha256",
+        "sources",
+        "stage_identities",
+        "stage_order",
+        "strategies",
+    }
+    _strict(conformance, expected_conformance_keys, "financial MVP conformance")
+    semantic_sha256 = hashlib.sha256(canonical_json_bytes(contract)).hexdigest()
+    census = _object(contract.get("current_census"), "financial MVP current census")
+    census_sha256 = hashlib.sha256(canonical_json_bytes(census)).hexdigest()
+    product = _object(contract.get("product"), "financial MVP product")
+    if (
+        conformance.get("schema_version") != 2
+        or conformance.get("contract_raw_sha256")
+        != expected_hashes["contract_raw_sha256"]
+        or conformance.get("contract_semantic_sha256") != semantic_sha256
+        or conformance.get("census_sha256") != census_sha256
+        or conformance.get("source_matrix_sha256")
+        != expected_hashes["source_matrix_sha256"]
+        or conformance.get("product") != product
+        or conformance.get("product_id") != product.get("product_id")
+        or conformance.get("product_version") != product.get("product_version")
+        or matrix.get("contract_sha256") != semantic_sha256
+        or matrix.get("census_sha256") != census_sha256
+        or matrix.get("product_version") != product.get("product_version")
+    ):
+        raise PipelineValidationError("financial MVP authority identities differ")
+
+    source_rows = sorted(
+        _objects(contract.get("source_segments"), "source segments"),
+        key=lambda row: str(row.get("source_id")),
+    )
+    required_source_fields = {
+        "absence_behavior",
+        "acquisition",
+        "admission",
+        "authority",
+        "blockers",
+        "capture_status",
+        "consumers",
+        "current_generation",
+        "data_classes",
+        "endpoint_or_artifact_selector",
+        "evidence_layer",
+        "existence_status",
+        "freshness",
+        "interval",
+        "invalidated_outputs",
+        "owner_policy_decision",
+        "product_requirement",
+        "readiness",
+        "schema",
+        "source_id",
+        "source_version",
+        "strategy_version",
+        "subjects",
+        "temporal",
+        "units",
+    }
+    source_ids: set[str] = set()
+    for row in source_rows:
+        if not required_source_fields <= set(row):
+            raise PipelineValidationError(
+                "financial MVP source authority is incomplete"
+            )
+        source_id = _identifier(row["source_id"], "financial MVP source_id")
+        if source_id in source_ids:
+            raise PipelineValidationError("financial MVP source IDs are not unique")
+        source_ids.add(source_id)
+        for field in (
+            "acquisition",
+            "admission",
+            "current_generation",
+            "freshness",
+            "interval",
+            "schema",
+            "subjects",
+            "temporal",
+            "units",
+        ):
+            _object(row[field], f"financial MVP source {source_id}.{field}")
+        for field in (
+            "blockers",
+            "consumers",
+            "data_classes",
+            "invalidated_outputs",
+        ):
+            if not isinstance(row[field], list):
+                raise PipelineValidationError(
+                    f"financial MVP source {source_id}.{field} must be an array"
+                )
+    strategy_rows = sorted(
+        _objects(contract.get("strategies"), "financial MVP strategies"),
+        key=lambda row: str(row.get("strategy_id")),
+    )
+    outcome_rows = sorted(
+        _objects(contract.get("financial_outcomes"), "financial outcomes"),
+        key=lambda row: str(row.get("outcome_id")),
+    )
+    history = _object(contract.get("history_corrections"), "history corrections")
+    correction_rows = sorted(
+        _objects(history.get("corrections"), "history correction rows"),
+        key=lambda row: str(row.get("correction_id")),
+    )
+    if (
+        conformance.get("sources") != source_rows
+        or conformance.get("strategies") != strategy_rows
+        or conformance.get("outcomes") != outcome_rows
+        or conformance.get("history_corrections") != correction_rows
+    ):
+        raise PipelineValidationError("financial MVP full conformance differs")
+
+    sleeve_rows = _objects(census.get("account_sleeves"), "census account sleeves")
+    expected_memberships = []
+    for sleeve in sleeve_rows:
+        assignments = _objects(sleeve.get("assignments"), "census assignments")
+        expected_memberships.append(
+            {
+                "assignments": sorted(
+                    (
+                        {
+                            "effective_end": row.get("effective_end"),
+                            "effective_start": row.get("effective_start"),
+                            "status": row.get("status"),
+                            "strategy_id": row.get("strategy_id"),
+                            "transition_group_id": row.get("transition_group_id"),
+                        }
+                        for row in assignments
+                    ),
+                    key=lambda row: (
+                        str(row["effective_start"]),
+                        str(row["strategy_id"]),
+                        str(row["effective_end"]),
+                    ),
+                ),
+                "current_strategy_id": sleeve.get("current_strategy_id"),
+                "provider_id": sleeve.get("provider_id"),
+                "role": sleeve.get("role"),
+                "sleeve_alias": sleeve.get("sleeve_alias"),
+                "source_segment_ids": sorted(
+                    _strings(sleeve.get("source_segment_ids"), "sleeve sources")
+                ),
+            }
+        )
+    expected_memberships.sort(key=lambda row: str(row["sleeve_alias"]))
+    if conformance.get("census_memberships") != expected_memberships:
+        raise PipelineValidationError("financial MVP census conformance differs")
+
+    admission = _object(conformance.get("provider_admission"), "provider admission")
+    expected_admission = {
+        "admission_gate_status": receipt.get("admission_gate_status"),
+        "catalog_sha256": expected_hashes["provider_catalog_sha256"],
+        "disposition_count": len(_objects(receipt.get("dispositions"), "dispositions")),
+        "generation_id": manifest.generation_id,
+        "inventory_count": len(_objects(receipt.get("inventory"), "inventory")),
+        "manifest_sha256": expected_hashes["provider_manifest_sha256"],
+        "product_readiness": receipt.get("product_readiness"),
+        "provider_count": len(
+            _objects(receipt.get("provider_generations"), "provider generations")
+        ),
+        "receipt": receipt,
+        "receipt_sha256": expected_hashes["provider_receipt_sha256"],
+    }
+    if admission != expected_admission:
+        raise PipelineValidationError("provider admission conformance differs")
+    provider_rows = _objects(
+        receipt.get("provider_generations"), "provider generations"
+    )
+    provider_generations = {str(row.get("provider_id")): row for row in provider_rows}
+    source_segments = {str(row.get("source_id")): row for row in source_rows}
+    if set(provider_generations) != {
+        "alpaca",
+        "fidelity",
+        "ibkr",
+        "matrixport",
+        "portfolio123",
+        "quantbase",
+        "schwab",
+    }:
+        raise PipelineValidationError("provider admission family set differs")
+    try:
+        _provider_admission_validator()(
+            receipt,
+            product_authority={
+                "census_id": census.get("census_id"),
+                "census_sha256": census_sha256,
+                "contract_raw_sha256": expected_hashes["contract_raw_sha256"],
+                "contract_semantic_sha256": semantic_sha256,
+                "product_id": product.get("product_id"),
+                "product_version": product.get("product_version"),
+            },
+            source_segments=source_segments,
+            provider_generations=provider_generations,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise PipelineValidationError(
+            f"provider admission receipt is invalid: {exc}"
+        ) from exc
+    for row in provider_rows:
+        provider_id = str(row.get("provider_id"))
+        prefix = f"providers/{provider_id}/"
+        hashes = {
+            item.sha256
+            for item in manifest.artifacts
+            if item.artifact_id.startswith(prefix)
+        }
+        if (
+            row.get("manifest_sha256") not in hashes
+            or row.get("catalog_sha256") not in hashes
+        ):
+            raise PipelineValidationError(
+                f"provider admission generation is not manifest-bound: {provider_id}"
+            )
+
+    correction_boundary = _object(
+        conformance.get("correction_authority"), "correction authority"
+    )
+    rederive_boundary = _object(
+        conformance.get("rederive_authority"), "re-derivation authority"
+    )
+    runtime_corrections = _registry_boundary(
+        spec,
+        correction_boundary,
+        gate_id=_CORRECTION_REGISTRY_GATE,
+        schema_name="portfolio-correction-registry",
+        record_key="corrections",
+        contract_semantic_sha256=semantic_sha256,
+        census_sha256=census_sha256,
+    )
+    runtime_rederivations = _registry_boundary(
+        spec,
+        rederive_boundary,
+        gate_id=_REDERIVE_REGISTRY_GATE,
+        schema_name="portfolio-rederive-receipt-registry",
+        record_key="receipts",
+        contract_semantic_sha256=semantic_sha256,
+        census_sha256=census_sha256,
+    )
+
+    source_routes = []
+    for row in source_rows:
+        outputs = sorted(
+            _strings(row.get("invalidated_outputs"), "invalidated outputs")
+        )
+        rebuild_paths = [_semantic_route(output) for output in outputs]
+        source_routes.append(
+            {
+                "affected_stages": [
+                    stage
+                    for stage in _PORTFOLIO_STAGE_ORDER
+                    if any(stage in route["affected_stages"] for route in rebuild_paths)
+                ],
+                "invalidated_outputs": list(outputs),
+                "rebuild_paths": rebuild_paths,
+                "source_id": row.get("source_id"),
+            }
+        )
+    correction_routes = []
+    for row in runtime_corrections:
+        outputs = sorted(
+            _strings(row.get("invalidated_outputs"), "correction invalidated outputs")
+        )
+        rebuild_paths = [_semantic_route(output) for output in outputs]
+        correction_routes.append(
+            {
+                "affected_stages": [
+                    stage
+                    for stage in _PORTFOLIO_STAGE_ORDER
+                    if any(stage in route["affected_stages"] for route in rebuild_paths)
+                ],
+                "correction_id": row.get("correction_id"),
+                "invalidated_outputs": list(outputs),
+                "rebuild_paths": rebuild_paths,
+            }
+        )
+    source_routes.sort(key=lambda row: str(row["source_id"]))
+    correction_routes.sort(key=lambda row: str(row["correction_id"]))
+    if (
+        conformance.get("source_invalidation_routes") != source_routes
+        or conformance.get("correction_invalidation_routes") != correction_routes
+        or conformance.get("stage_order") != list(_PORTFOLIO_STAGE_ORDER)
+    ):
+        raise PipelineValidationError("financial MVP invalidation routes differ")
+
+    upstream_identity: dict[str, str] = {}
+    stage_identities = []
+    source_affected = {
+        str(route["source_id"]): cast(list[str], route["affected_stages"])
+        for route in source_routes
+    }
+    correction_affected = {
+        str(route["correction_id"]): cast(list[str], route["affected_stages"])
+        for route in correction_routes
+    }
+    for stage in _PORTFOLIO_STAGE_ORDER:
+        semantic_sources = [
+            row
+            for row in source_rows
+            if stage in source_affected[str(row["source_id"])]
+        ]
+        semantic_corrections = [
+            row
+            for row in runtime_corrections
+            if stage in correction_affected[str(row["correction_id"])]
+        ]
+        stage_payload = {
+            "corrections": semantic_corrections,
+            "outcomes": [
+                row
+                for row in outcome_rows
+                if stage in _semantic_route(row["outcome_id"])["affected_stages"]
+            ],
+            "provider_admission_receipt_sha256": expected_hashes[
+                "provider_receipt_sha256"
+            ],
+            "sources": semantic_sources,
+            "stage": stage,
+            "upstream_stage_identities": {
+                dependency: upstream_identity[dependency]
+                for dependency in _PORTFOLIO_STAGE_DEPENDENCIES[stage]
+            },
+        }
+        identity = hashlib.sha256(canonical_json_bytes(stage_payload)).hexdigest()
+        upstream_identity[stage] = identity
+        stage_identities.append(
+            {
+                "affected_by_corrections": sorted(
+                    str(row["correction_id"]) for row in semantic_corrections
+                ),
+                "semantic_input_sha256": identity,
+                "source_ids": sorted(str(row["source_id"]) for row in semantic_sources),
+                "stage": stage,
+                "upstream_stages": list(_PORTFOLIO_STAGE_DEPENDENCIES[stage]),
+            }
+        )
+    if conformance.get("stage_identities") != stage_identities:
+        raise PipelineValidationError("financial MVP stage identities differ")
+
+    applicable_open = sorted(
+        str(row["correction_id"])
+        for row in runtime_corrections
+        if row.get("status") == "OPEN" and row.get("applicability") == "APPLICABLE"
+    )
+    resolved_applicable = {
+        str(row["correction_id"]): set(
+            _strings(row.get("invalidated_outputs"), "correction outputs")
+        )
+        for row in runtime_corrections
+        if row.get("status") in {"RESOLVED", "DISPOSITIONED"}
+        and row.get("applicability") == "APPLICABLE"
+    }
+    rederived = {
+        str(row["correction_id"]): set(
+            _strings(row.get("invalidated_outputs"), "re-derivation outputs")
+        )
+        for row in runtime_rederivations
+        if row.get("status") == "VERIFIED"
+    }
+    missing_rederivations = sorted(
+        correction_id
+        for correction_id, outputs in resolved_applicable.items()
+        if rederived.get(correction_id) != outputs
+    )
+    if (
+        correction_boundary.get("applicable_open_correction_ids") != applicable_open
+        or rederive_boundary.get("missing_correction_ids") != missing_rederivations
+    ):
+        raise PipelineValidationError("correction readiness projection differs")
+    expected_blockers = sorted(
+        {
+            *(
+                f"SOURCE:{row['source_id']}"
+                for row in source_rows
+                if row.get("product_requirement") == "REQUIRED"
+                and row.get("readiness") != "READY"
+            ),
+            *(
+                f"OUTCOME:{row['outcome_id']}"
+                for row in outcome_rows
+                if row.get("product_requirement") == "REQUIRED"
+                and row.get("readiness") != "READY"
+            ),
+            *(
+                ("PROVIDER_ADMISSION",)
+                if receipt.get("product_readiness") != "READY_FOR_COMPOSITION"
+                else ()
+            ),
+            *(
+                ("CORRECTION_AUTHORITY_REQUIRED",)
+                if correction_boundary.get("authority_state") != "PROVIDED"
+                else ()
+            ),
+            *(f"OPEN_CORRECTION:{value}" for value in applicable_open),
+            *(
+                ("REDERIVE_AUTHORITY_REQUIRED",)
+                if resolved_applicable
+                and rederive_boundary.get("authority_state") != "PROVIDED"
+                else ()
+            ),
+            *(f"MISSING_REDERIVATION:{value}" for value in missing_rederivations),
+        }
+    )
+    if (
+        conformance.get("blocking_reasons") != expected_blockers
+        or conformance.get("readiness")
+        != ("READY_FOR_EXECUTION" if not expected_blockers else "REQUIRED_NOT_READY")
+        or receipt.get("admission_gate_status") != "PASS"
+    ):
+        raise PipelineValidationError("financial MVP readiness differs")
+    return {"conformance": dict(conformance), "raw": dict(gate_payload)}
+
+
 def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
     matches = [item for item in spec.gates if item.gate_id == _PORTFOLIO_CONTRACT_GATE]
     if not matches:
@@ -729,23 +1752,35 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
         raise PipelineValidationError(
             "portfolio orchestration contract is unreadable"
         ) from exc
-    _strict(
-        raw,
-        {
-            "authority_snapshot",
-            "command_sources",
-            "profile",
-            "release_commit",
-            "runtime",
-            "schema_version",
-            "semantic_reconciliation_node",
-            "source_acquisitions",
-            "stages",
-        },
-        "portfolio orchestration contract",
-    )
-    if raw["schema_version"] != 1 or raw["profile"] != _PORTFOLIO_PROFILE:
+    schema_version = raw.get("schema_version")
+    expected_keys = {
+        "authority_snapshot",
+        "command_sources",
+        "profile",
+        "release_commit",
+        "runtime",
+        "schema_version",
+        "semantic_reconciliation_node",
+        "source_acquisitions",
+        "stages",
+    }
+    if schema_version == 2:
+        expected_keys.add("product_authority")
+    _strict(raw, expected_keys, "portfolio orchestration contract")
+    if schema_version not in {1, 2} or raw["profile"] != _PORTFOLIO_PROFILE:
         raise PipelineValidationError("portfolio orchestration profile is unsupported")
+    product_authority = _financial_mvp_product_authority(spec)
+    if schema_version == 2:
+        if product_authority is None or canonical_json_bytes(
+            raw["product_authority"]
+        ) != canonical_json_bytes(product_authority["raw"]):
+            raise PipelineValidationError(
+                "portfolio product authority differs from product gate"
+            )
+    elif product_authority is not None:
+        raise PipelineValidationError(
+            "financial MVP product gate requires portfolio contract schema 2"
+        )
     release_commit = str(raw["release_commit"])
     if _COMMIT.fullmatch(release_commit) is None:
         raise PipelineValidationError("portfolio release_commit is invalid")
@@ -874,6 +1909,9 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
             "lock_sha256": lock_sha256,
             "repo_root": repo_root,
         },
+        "product_conformance": (
+            None if product_authority is None else product_authority["conformance"]
+        ),
         "semantic_node": semantic_node,
         "stages": stages,
     }
@@ -1243,12 +2281,16 @@ def _verify_post_build_semantic_gate(spec: PipelineSpec, path: Path) -> None:
         "post-build semantic gate",
     )
     checks = _object(payload["checks"], "post-build semantic checks")
-    if set(checks) != _POST_BUILD_CHECKS or any(
+    product_authority = _financial_mvp_product_authority(spec)
+    expected_checks = set(_POST_BUILD_CHECKS)
+    if product_authority is not None:
+        expected_checks.add("product_conformance")
+    if set(checks) != expected_checks or any(
         value != "PASS" for value in checks.values()
     ):
         raise PipelineValidationError("post-build semantic checks did not pass")
     if (
-        payload["schema_version"] != 1
+        payload["schema_version"] != (2 if product_authority is not None else 1)
         or payload["verdict"] != "PASS"
         or payload["unwaived_blocking_exceptions"] != 0
         or payload["as_of_date"] != spec.as_of_date.isoformat()
@@ -1695,10 +2737,211 @@ def _execute_node(
     raise AssertionError("bounded command loop did not terminate")
 
 
+def _financial_mvp_summary(
+    authority: Mapping[str, Any] | None,
+    spec: PipelineSpec | None = None,
+) -> dict[str, object] | None:
+    if authority is None:
+        return None
+    conformance = _object(authority["conformance"], "financial MVP conformance")
+    admission = _object(conformance["provider_admission"], "provider admission")
+    sources = _objects(conformance["sources"], "financial MVP sources")
+    outcomes = _objects(conformance["outcomes"], "financial MVP outcomes")
+    strategies = _objects(conformance["strategies"], "financial MVP strategies")
+    memberships = _objects(
+        conformance["census_memberships"], "financial MVP census memberships"
+    )
+    current_member_strategy_ids = sorted(
+        {
+            str(assignment["strategy_id"])
+            for membership in memberships
+            for assignment in _objects(
+                membership.get("assignments"), "financial MVP membership assignments"
+            )
+            if assignment.get("status") == "FUNDED_MEMBERSHIP"
+            and assignment.get("effective_end") is None
+        }
+    )
+    blocking_reasons = _strings(
+        conformance["blocking_reasons"], "financial MVP blocking reasons"
+    )
+    receipt = _object(admission["receipt"], "provider admission receipt")
+    provider_rows = _objects(
+        receipt["provider_generations"], "provider admission generations"
+    )
+    dispositions = _objects(receipt["dispositions"], "provider dispositions")
+    provider_summaries = []
+    for provider in sorted(provider_rows, key=lambda row: str(row["provider_id"])):
+        provider_id = str(provider["provider_id"])
+        provider_dispositions = [
+            row for row in dispositions if row.get("provider_id") == provider_id
+        ]
+        provider_summaries.append(
+            {
+                "admit_count": sum(
+                    row.get("action") == "ADMIT" for row in provider_dispositions
+                ),
+                "catalog_sha256": provider["catalog_sha256"],
+                "exclude_count": sum(
+                    row.get("action") == "EXCLUDE" for row in provider_dispositions
+                ),
+                "generation_id": provider["generation_id"],
+                "manifest_sha256": provider["manifest_sha256"],
+                "provider_id": provider_id,
+                "qualification": provider["qualification"],
+            }
+        )
+    data_class_dispositions = sorted(
+        (
+            {
+                "action": row["action"],
+                "data_class": row["data_class"],
+                "evidence_layer": row["evidence_layer"],
+                "invalidated_outputs": row["invalidated_outputs"],
+                "provider_id": row["provider_id"],
+                "readiness_impact": row["readiness_impact"],
+                "reason": row["reason"],
+                "source_segment_id": row["source_segment_id"],
+                "target_facts": row["target_facts"],
+            }
+            for row in dispositions
+            if row.get("item_kind") == "PRODUCT_DATA_CLASS"
+        ),
+        key=lambda row: (
+            str(row["provider_id"]),
+            str(row["source_segment_id"]),
+            str(row["data_class"]),
+        ),
+    )
+    source_routes = {
+        str(row["source_id"]): row
+        for row in _objects(
+            conformance["source_invalidation_routes"], "source invalidation routes"
+        )
+    }
+    source_summaries = []
+    for row in sources:
+        acquisition = _object(row["acquisition"], "source acquisition")
+        admission_row = _object(row["admission"], "source admission")
+        source_id = str(row["source_id"])
+        source_summaries.append(
+            {
+                "absence_behavior": row["absence_behavior"],
+                "acquisition_adapter": acquisition["adapter"],
+                "acquisition_mode": acquisition["mode"],
+                "admission_transform": admission_row["transform"],
+                "admission_version": admission_row["version"],
+                "blockers": row["blockers"],
+                "consumers": row["consumers"],
+                "current_generation": row["current_generation"],
+                "data_classes": row["data_classes"],
+                "evidence_layer": row["evidence_layer"],
+                "freshness": row["freshness"],
+                "interval": row["interval"],
+                "invalidated_outputs": row["invalidated_outputs"],
+                "readiness": row["readiness"],
+                "rebuild_route": source_routes[source_id],
+                "remediation": row["owner_policy_decision"],
+                "schema": row["schema"],
+                "source_id": source_id,
+                "temporal": row["temporal"],
+                "units": row["units"],
+            }
+        )
+    candidate_artifacts: list[dict[str, object]] = []
+    if spec is not None:
+        for node in spec.ordered_nodes:
+            if isinstance(node, GenerationNode):
+                candidate_artifacts.append(
+                    {
+                        "generation_id": node.generation_id,
+                        "manifest_sha256": node.manifest_sha256,
+                        "node_id": node.node_id,
+                        "release_target": node.release_target,
+                        "root_id": node.root_id,
+                    }
+                )
+    composition_digest = hashlib.sha256(canonical_json_bytes(conformance)).hexdigest()
+    return {
+        "blocking_reasons": list(blocking_reasons),
+        "candidate_artifacts": candidate_artifacts,
+        "census_sha256": conformance["census_sha256"],
+        "composition_digest": composition_digest,
+        "contract_semantic_sha256": conformance["contract_semantic_sha256"],
+        "correction_authority": conformance["correction_authority"],
+        "current_member_strategy_ids": current_member_strategy_ids,
+        "census_sleeve_count": len(memberships),
+        "data_class_dispositions": data_class_dispositions,
+        "outcome_count": len(outcomes),
+        "outcomes": outcomes,
+        "product_id": conformance["product_id"],
+        "product_version": conformance["product_version"],
+        "provider_admission_gate_status": admission["admission_gate_status"],
+        "provider_product_readiness": admission["product_readiness"],
+        "readiness": conformance["readiness"],
+        "rederive_authority": conformance["rederive_authority"],
+        "ready_for_execution": conformance["readiness"] == "READY_FOR_EXECUTION",
+        "required_not_ready_outcomes": sorted(
+            str(row["outcome_id"])
+            for row in outcomes
+            if row.get("product_requirement") == "REQUIRED"
+            and row.get("readiness") != "READY"
+        ),
+        "required_not_ready_sources": sorted(
+            str(row["source_id"])
+            for row in sources
+            if row.get("product_requirement") == "REQUIRED"
+            and row.get("readiness") != "READY"
+        ),
+        "source_count": len(sources),
+        "sources": source_summaries,
+        "stage_order": conformance["stage_order"],
+        "stages": conformance["stage_identities"],
+        "strategy_count": len(strategies),
+        "providers": provider_summaries,
+    }
+
+
+def _current_product_authority(authority: Mapping[str, Any] | None) -> bool:
+    if authority is None:
+        return False
+    raw = authority.get("raw")
+    return isinstance(raw, Mapping) and raw.get("schema_version") == 2
+
+
+def _requires_current_product(spec: PipelineSpec) -> bool:
+    return any(
+        gate.gate_id in {_PORTFOLIO_CONTRACT_GATE, _PORTFOLIO_PRODUCTION_REBIND_GATE}
+        for gate in spec.gates
+    )
+
+
+def _requires_production_product(spec: PipelineSpec) -> bool:
+    return any(gate.gate_id == _PORTFOLIO_PRODUCTION_REBIND_GATE for gate in spec.gates)
+
+
 def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
     """Return the exact non-mutating execution and release plan."""
 
     _validate_portfolio_orchestration(spec, verify_runtime=True)
+    product_authority = _financial_mvp_product_authority(spec)
+    if (_requires_current_product(spec) and product_authority is None) or (
+        product_authority is not None
+        and not _current_product_authority(product_authority)
+    ):
+        raise PipelineValidationError(
+            "legacy portfolio specification is recovery-only and cannot be planned"
+        )
+    product_summary = _financial_mvp_summary(product_authority, spec)
+    if product_summary is not None and not product_summary["ready_for_execution"]:
+        return {
+            "commit_effects": [],
+            "financial_mvp": product_summary,
+            "node_count": 0,
+            "nodes": [],
+            "pipeline_id": spec.pipeline_id,
+            "spec_sha256": spec.spec_sha256,
+        }
     nodes: list[dict[str, object]] = []
     for node in spec.ordered_nodes:
         row: dict[str, object] = {
@@ -1737,7 +2980,7 @@ def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
                 }
             )
         nodes.append(row)
-    return {
+    result: dict[str, object] = {
         "commit_effects": [
             *[
                 {
@@ -1762,6 +3005,9 @@ def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
         "pipeline_id": spec.pipeline_id,
         "spec_sha256": spec.spec_sha256,
     }
+    if product_summary is not None:
+        result["financial_mvp"] = product_summary
+    return result
 
 
 def _verify_freshness_provider_ledger(
@@ -2095,6 +3341,8 @@ def _verify_gates(
             _verify_freshness_gate(gate.path, evaluation_date, spec)
         elif gate.gate_id == _POST_BUILD_SEMANTIC_GATE:
             _verify_post_build_semantic_gate(spec, gate.path)
+        elif gate.gate_id == _FINANCIAL_MVP_PRODUCT_GATE:
+            _financial_mvp_product_authority(spec)
         elif gate.gate_id == _PREDECESSOR_REPAIR_GATE and verify_predecessor_repair:
             _verify_predecessor_repair_gate(spec, gate.path)
         result.append(GateEvidence(gate.gate_id, gate.sha256))
@@ -2157,6 +3405,23 @@ def execute_pipeline(
     """Build, verify, prepare, and optionally commit one explicit-ID DAG."""
 
     _validate_portfolio_orchestration(spec, verify_runtime=True)
+    product_authority = _financial_mvp_product_authority(spec)
+    if (_requires_current_product(spec) and product_authority is None) or (
+        product_authority is not None
+        and not _current_product_authority(product_authority)
+    ):
+        raise PipelineValidationError(
+            "legacy portfolio specification is recovery-only and cannot execute"
+        )
+    product_summary = _financial_mvp_summary(product_authority, spec)
+    if product_summary is not None and not product_summary["ready_for_execution"]:
+        blocking_reasons = product_summary["blocking_reasons"]
+        if not isinstance(blocking_reasons, list):
+            raise PipelineValidationError("financial MVP blockers are invalid")
+        raise PipelineExecutionError(
+            "financial MVP is required-not-ready: "
+            + ",".join(str(item) for item in blocking_reasons)
+        )
     existing_release = _read_prepared(spec)
     existing_state = None
     if existing_release is not None:
@@ -2246,6 +3511,15 @@ def execute_pipeline(
 
 
 def pipeline_status(spec: PipelineSpec) -> dict[str, object]:
+    _validate_portfolio_orchestration(spec, verify_runtime=False)
+    product_authority = _financial_mvp_product_authority(spec)
+    if _requires_production_product(spec) and not _current_product_authority(
+        product_authority
+    ):
+        raise PipelineValidationError(
+            "financial MVP production authority is recovery-only"
+        )
+    product_summary = _financial_mvp_summary(product_authority, spec)
     receipts = {
         node.node_id: (
             (_read_receipt(_receipt_path(spec, node.node_id)) or {}).get("state")
@@ -2258,13 +3532,16 @@ def pipeline_status(spec: PipelineSpec) -> dict[str, object]:
     if release_id is not None:
         _, journal = read_release(spec.coordination_root, release_id)
         release_state = journal.state.value
-    return {
+    result: dict[str, object] = {
         "pipeline_id": spec.pipeline_id,
         "receipts": receipts,
         "release_id": release_id,
         "release_state": release_state,
         "spec_sha256": spec.spec_sha256,
     }
+    if product_summary is not None:
+        result["financial_mvp"] = product_summary
+    return result
 
 
 def recover_pipeline(

@@ -65,6 +65,32 @@ uv run --frozen --no-sync python tools/data_pipeline.py plan `
   --spec 'C:\absolute\private\pipeline-spec.json'
 ```
 
+For the financial-MVP profile, the materializer recipe is schema 3. It binds
+the canonical #330 contract, its generated source matrix, the #302 census
+digest, and the manifest-co-member #303 `admit-or-declare-receipt.json` from a
+verified provider-ledger adapter-v2/catalog-v2 generation. The same generated
+product-conformance bytes are carried by the private proof and the production
+rebind; production rebases only the provider-generation path to the verified
+prepared copy and preserves every hash and status.
+
+`plan` and `status` print a value-redacted financial-MVP disposition. They exit
+nonzero while any required source, financial outcome, provider disposition,
+correction registry, or required re-derivation receipt is not ready. A blocked
+plan has zero nodes and zero commit effects, and `execute` fails before writing
+a node receipt, generation, release journal, companion, or pointer. Schema-2
+pipeline recipes remain readable only for historical status and recovery; they
+cannot create, plan, or execute a current financial-MVP composition.
+
+Correction and re-derivation authority are separate optional recipe inputs:
+`--correction-registry` and `--rederive-receipt-registry`. Omission is an
+explicit required-not-ready state. When supplied, the runtime validates their
+product/census identities, exact applicable scope, disposition state,
+invalidated outputs, and verified re-derivation mapping. An applicable open
+correction blocks before effects; a resolved applicable correction remains
+blocked until an exact verified re-derivation receipt covers the same outputs.
+An unrelated open correction remains visible but does not invalidate an
+unrelated stage.
+
 Build or verify all nodes and prepare the coordinated release without moving
 authority pointers:
 
@@ -131,6 +157,10 @@ then removes the orphan lock without changing the terminal state.
 - Provider/network acquisition remains a separate, explicitly authorized
   concern. The baseline rollforward can consume already accepted immutable
   generations without any external call.
+- Product conformance is an integrity gate, not a readiness override. A #303
+  receipt may correctly report `PASS` for exhaustive admit-or-declare while its
+  product disposition remains `REQUIRED_NOT_READY`; the latter continues to
+  block execution.
 
 The private release evidence must include the pipeline specification, exact
 plan, receipts, pipeline-evidence hash, release manifest/journal, gate files,

@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import sys
 from typing import Callable
 
@@ -16,9 +17,12 @@ from quant_engine.core import (
     CoverageStatus,
     GenerationManifest,
     PipelineSpec,
+    PipelineValidationError,
     SourceArtifact,
     VerificationStatus,
     inventory_generation,
+    pipeline_status,
+    plan_pipeline,
 )
 from quant_engine.core.contracts import canonical_json_bytes
 
@@ -31,6 +35,14 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 materializer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(materializer)
+FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "financial_mvp_fixture",
+    ROOT / "tests" / "core" / "financial_mvp_fixture.py",
+)
+assert FIXTURE_SPEC is not None and FIXTURE_SPEC.loader is not None
+financial_fixture = importlib.util.module_from_spec(FIXTURE_SPEC)
+sys.modules[FIXTURE_SPEC.name] = financial_fixture
+FIXTURE_SPEC.loader.exec_module(financial_fixture)
 
 AS_OF = date(2026, 8, 3)
 ROLES = ("ledger", "baseline", "report", "panel")
@@ -294,24 +306,29 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     return recipe_path, output_root
 
 
-def test_create_recipe_accepts_schema_v6_vertical_recipe(tmp_path: Path) -> None:
+def test_create_recipe_rejects_current_schema_v6_without_product_authority(
+    tmp_path: Path,
+) -> None:
     source_recipe, proof_root = _fixture(tmp_path)
     source = json.loads(source_recipe.read_text(encoding="utf-8"))
     output = tmp_path / "created-pipeline-recipe.json"
 
-    result = materializer.create_recipe(
-        vertical_recipe=Path(source["vertical_recipe"]["path"]),
-        proof_root=proof_root,
-        qa_dir=Path(source["qa_dir"]["path"]),
-        pipeline_id="schema-v6-release",
-        output=output,
-    )
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="requires financial MVP contract and source matrix",
+    ):
+        materializer.create_recipe(
+            vertical_recipe=Path(source["vertical_recipe"]["path"]),
+            proof_root=proof_root,
+            qa_dir=Path(source["qa_dir"]["path"]),
+            pipeline_id="schema-v6-release",
+            output=output,
+        )
 
-    assert result == {"pipeline_id": "schema-v6-release", "recipe": str(output)}
-    assert materializer._recipe(output)["release_commit"] == "a" * 40
 
-
-def test_create_recipe_accepts_schema_v7_provider_generation(tmp_path: Path) -> None:
+def test_schema_v7_provider_generation_is_discoverable_but_not_executable_without_product(
+    tmp_path: Path,
+) -> None:
     source_recipe, proof_root = _fixture(tmp_path)
     source = json.loads(source_recipe.read_text(encoding="utf-8"))
     vertical_path = Path(source["vertical_recipe"]["path"])
@@ -326,18 +343,327 @@ def test_create_recipe_accepts_schema_v7_provider_generation(tmp_path: Path) -> 
     _write_json(source_recipe, source)
     output = tmp_path / "created-schema-v7-pipeline-recipe.json"
 
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="requires financial MVP contract and source matrix",
+    ):
+        materializer.create_recipe(
+            vertical_recipe=vertical_path,
+            proof_root=proof_root,
+            qa_dir=Path(source["qa_dir"]["path"]),
+            pipeline_id="schema-v7-release",
+            output=output,
+        )
+    paths = materializer._vertical_source_paths(vertical_path)
+    assert provider_generation in paths
+    assert Path(vertical["base_factor_file"]["path"]) in paths
+
+
+def test_create_recipe_binds_financial_mvp_authority_and_admission_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_recipe, proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
+    generation = product.generation
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(generation)
+    vertical["schema_version"] = 7
+    _write_json(vertical_path, vertical)
+    monkeypatch.setattr(
+        materializer, "_financial_mvp_module", lambda: product.financial_module
+    )
+    output = tmp_path / "financial-mvp-pipeline-recipe.json"
+
     result = materializer.create_recipe(
         vertical_recipe=vertical_path,
         proof_root=proof_root,
         qa_dir=Path(source["qa_dir"]["path"]),
-        pipeline_id="schema-v7-release",
+        pipeline_id="financial-mvp-composition",
         output=output,
+        financial_mvp_contract=product.contract_path,
+        financial_mvp_source_matrix=product.matrix_path,
     )
 
-    assert result == {"pipeline_id": "schema-v7-release", "recipe": str(output)}
-    paths = materializer._vertical_source_paths(vertical_path)
-    assert provider_generation in paths
-    assert Path(vertical["base_factor_file"]["path"]) in paths
+    accepted = materializer._recipe(output)
+    assert result["recipe"] == str(output)
+    assert accepted["schema_version"] == 3
+    assert accepted["product_authority"]["conformance"]["readiness"] == (
+        "REQUIRED_NOT_READY"
+    )
+    assert (
+        accepted["product_authority"]["conformance"]["provider_admission"][
+            "receipt_sha256"
+        ]
+        == hashlib.sha256(
+            (generation / "admit-or-declare-receipt.json").read_bytes()
+        ).hexdigest()
+    )
+    monkeypatch.setenv("QE_PIPELINE_PYTHON", sys.executable)
+    monkeypatch.setattr(
+        materializer,
+        "_git",
+        lambda _repo, *args: "a" * 40 if args == ("rev-parse", "HEAD") else "",
+    )
+    monkeypatch.setattr(
+        materializer, "_validate_output_path_budget", lambda _root, _recipe: None
+    )
+    spec_path = tmp_path / "financial-mvp-dag" / "pipeline-spec.json"
+
+    materializer.build_spec(output, tmp_path / "financial-mvp-dag", spec_path)
+
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    PipelineSpec.from_json_bytes(spec_path.read_bytes())
+    assert {
+        "financial-mvp-contract-authority",
+        "financial-mvp-product-conformance",
+        "financial-mvp-provider-admission-authority",
+        "financial-mvp-provider-catalog-authority",
+        "financial-mvp-provider-manifest-authority",
+        "financial-mvp-source-matrix-authority",
+        "portfolio-orchestration-contract",
+        "post-build-semantic",
+    } <= {row["gate_id"] for row in spec["gates"]}
+    orchestration = json.loads(
+        spec_path.with_name("portfolio-orchestration-contract.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert orchestration["schema_version"] == 2
+    assert orchestration["product_authority"] == materializer._product_gate_payload(
+        accepted["product_authority"]
+    )
+    assert str(tmp_path) not in json.dumps(
+        orchestration["product_authority"], sort_keys=True
+    )
+
+
+def test_financial_mvp_authority_rejects_receipt_outside_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_recipe, _proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
+    generation = product.generation
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(generation)
+    vertical["schema_version"] = 7
+    _write_json(vertical_path, vertical)
+    monkeypatch.setattr(
+        materializer, "_financial_mvp_module", lambda: product.financial_module
+    )
+    (generation / "admit-or-declare-receipt.json").write_bytes(
+        canonical_json_bytes({"admission_gate_status": "PASS"})
+    )
+
+    with pytest.raises(materializer.MaterializationError, match="identity differs"):
+        materializer._derive_product_authority(
+            vertical_path,
+            product.contract_path,
+            product.matrix_path,
+        )
+
+
+def _runtime_registry(
+    tmp_path: Path,
+    *,
+    name: str,
+    semantic_sha256: str,
+    census_sha256: str,
+    records: list[dict[str, object]],
+) -> dict[str, object]:
+    schema_name, record_key = {
+        "corrections": ("portfolio-correction-registry", "corrections"),
+        "rederive": ("portfolio-rederive-receipt-registry", "receipts"),
+    }[name]
+    payload: dict[str, object] = {
+        "census_sha256": census_sha256,
+        "contract_semantic_sha256": semantic_sha256,
+        record_key: records,
+        "schema_name": schema_name,
+        "schema_version": 1,
+    }
+    payload["registry_sha256"] = hashlib.sha256(
+        canonical_json_bytes(payload)
+    ).hexdigest()
+    path = tmp_path / f"{name}.json"
+    _write_json(path, payload)
+    return materializer._authority_registry(
+        path, schema_name=schema_name, record_key=record_key
+    )
+
+
+def _fixture_conformance(
+    product: object,
+    correction_registry: dict[str, object],
+    rederive_registry: dict[str, object],
+) -> dict[str, object]:
+    contract = product.contract
+    contract_bytes = product.contract_path.read_bytes()
+    semantic_sha256 = hashlib.sha256(contract_bytes).hexdigest()
+    census_sha256 = hashlib.sha256(
+        canonical_json_bytes(contract["current_census"])
+    ).hexdigest()
+    admission = materializer._provider_admission_authority(
+        product.generation,
+        contract,
+        contract_raw_sha256=semantic_sha256,
+        contract_semantic_sha256=semantic_sha256,
+        census_sha256=census_sha256,
+    )
+    return materializer._product_conformance(
+        contract,
+        admission,
+        correction_registry,
+        rederive_registry,
+        contract_raw_sha256=semantic_sha256,
+        contract_semantic_sha256=semantic_sha256,
+        census_sha256=census_sha256,
+        source_matrix_sha256=hashlib.sha256(product.matrix_bytes).hexdigest(),
+        invested_capital_policy_sha256=hashlib.sha256(
+            canonical_json_bytes({"policy_id": "SYNTHETIC_INVESTED_CAPITAL"})
+        ).hexdigest(),
+    )
+
+
+def test_correction_identity_invalidates_only_its_dag_closure(tmp_path: Path) -> None:
+    product = financial_fixture.build_financial_mvp_fixture(
+        tmp_path / "product", ready=True
+    )
+    semantic_sha256 = hashlib.sha256(product.contract_path.read_bytes()).hexdigest()
+    census_sha256 = hashlib.sha256(
+        canonical_json_bytes(product.contract["current_census"])
+    ).hexdigest()
+    empty = _runtime_registry(
+        tmp_path / "empty",
+        name="corrections",
+        semantic_sha256=semantic_sha256,
+        census_sha256=census_sha256,
+        records=[],
+    )
+    correction = _runtime_registry(
+        tmp_path / "changed",
+        name="corrections",
+        semantic_sha256=semantic_sha256,
+        census_sha256=census_sha256,
+        records=[
+            {
+                "applicability": "NOT_APPLICABLE",
+                "correction_id": "unrelated-report-correction",
+                "disposition_sha256": None,
+                "evidence_sha256": "1" * 64,
+                "invalidated_outputs": ["REPORT"],
+                "rebuild_boundary": "REPORT",
+                "status": "OPEN",
+                "subject_ids": ["unrelated-strategy"],
+            }
+        ],
+    )
+    absent_rederive = materializer._authority_registry(
+        None,
+        schema_name="portfolio-rederive-receipt-registry",
+        record_key="receipts",
+    )
+    baseline = _fixture_conformance(product, empty, absent_rederive)
+    changed = _fixture_conformance(product, correction, absent_rederive)
+    baseline_ids = {
+        row["stage"]: row["semantic_input_sha256"]
+        for row in baseline["stage_identities"]
+    }
+    changed_ids = {
+        row["stage"]: row["semantic_input_sha256"]
+        for row in changed["stage_identities"]
+    }
+
+    assert changed["readiness"] == "READY_FOR_EXECUTION"
+    assert [
+        stage
+        for stage in materializer.STAGES
+        if baseline_ids[stage] != changed_ids[stage]
+    ] == ["report", "workbook", "panel"]
+    assert all(
+        baseline_ids[stage] == changed_ids[stage]
+        for stage in ("ledger", "baseline", "attribution", "analytics")
+    )
+
+
+def test_applicable_correction_and_rederive_receipt_are_runtime_authorities(
+    tmp_path: Path,
+) -> None:
+    product = financial_fixture.build_financial_mvp_fixture(
+        tmp_path / "product", ready=True
+    )
+    semantic_sha256 = hashlib.sha256(product.contract_path.read_bytes()).hexdigest()
+    census_sha256 = hashlib.sha256(
+        canonical_json_bytes(product.contract["current_census"])
+    ).hexdigest()
+    open_registry = _runtime_registry(
+        tmp_path / "open",
+        name="corrections",
+        semantic_sha256=semantic_sha256,
+        census_sha256=census_sha256,
+        records=[
+            {
+                "applicability": "APPLICABLE",
+                "correction_id": "correction-1",
+                "disposition_sha256": None,
+                "evidence_sha256": "2" * 64,
+                "invalidated_outputs": ["REPORT"],
+                "rebuild_boundary": "REPORT",
+                "status": "OPEN",
+                "subject_ids": ["strategy-1"],
+            }
+        ],
+    )
+    absent_rederive = materializer._authority_registry(
+        None,
+        schema_name="portfolio-rederive-receipt-registry",
+        record_key="receipts",
+    )
+    open_conformance = _fixture_conformance(product, open_registry, absent_rederive)
+    assert "OPEN_CORRECTION:correction-1" in open_conformance["blocking_reasons"]
+
+    resolved_records = [
+        {
+            **open_registry["records"][0],
+            "disposition_sha256": "3" * 64,
+            "status": "RESOLVED",
+        }
+    ]
+    resolved_registry = _runtime_registry(
+        tmp_path / "resolved",
+        name="corrections",
+        semantic_sha256=semantic_sha256,
+        census_sha256=census_sha256,
+        records=resolved_records,
+    )
+    unresolved = _fixture_conformance(product, resolved_registry, absent_rederive)
+    assert "REDERIVE_AUTHORITY_REQUIRED" in unresolved["blocking_reasons"]
+    assert "MISSING_REDERIVATION:correction-1" in unresolved["blocking_reasons"]
+
+    rederive = _runtime_registry(
+        tmp_path / "rederived",
+        name="rederive",
+        semantic_sha256=semantic_sha256,
+        census_sha256=census_sha256,
+        records=[
+            {
+                "correction_id": "correction-1",
+                "input_generation_id": "4" * 64,
+                "invalidated_outputs": ["REPORT"],
+                "output_generation_id": "5" * 64,
+                "receipt_sha256": "6" * 64,
+                "status": "VERIFIED",
+            }
+        ],
+    )
+    accepted = _fixture_conformance(product, resolved_registry, rederive)
+    assert accepted["blocking_reasons"] == []
+    assert accepted["readiness"] == "READY_FOR_EXECUTION"
 
 
 def test_generation_date_rule_allows_dated_ledger_only() -> None:
@@ -441,6 +767,37 @@ def test_production_spec_binds_stable_twenty_root_authority(
         short_stage_roots[root_id] = Path("stages") / "a" / str(index)
     monkeypatch.setattr(materializer, "PRODUCTION_STAGE_ROOTS", short_stage_roots)
     recipe_path, prepared_root = _fixture(tmp_path)
+    recipe_value = json.loads(recipe_path.read_text(encoding="utf-8"))
+    vertical_path = Path(recipe_value["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
+    admission_generation = product.generation
+    staged_ledger_root = prepared_root / "stages" / "ledger" / "generations"
+    for existing in staged_ledger_root.iterdir():
+        shutil.rmtree(existing)
+    staged_admission_generation = staged_ledger_root / admission_generation.name
+    shutil.copytree(admission_generation, staged_admission_generation)
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(admission_generation)
+    vertical["schema_version"] = 7
+    _write_json(vertical_path, vertical)
+    monkeypatch.setattr(
+        materializer, "_financial_mvp_module", lambda: product.financial_module
+    )
+    recipe_value["vertical_recipe"] = _definition(vertical_path)
+    recipe_value["product_authority"] = materializer._derive_product_authority(
+        vertical_path,
+        product.contract_path,
+        product.matrix_path,
+    )
+    recipe_value["schema_version"] = 3
+    staged_admission_inventory = inventory_generation(staged_admission_generation)
+    recipe_value["expected_generations"]["ledger"] = {
+        "files": staged_admission_inventory["files"],
+        "generation_id": staged_admission_inventory["generation_id"],
+        "manifest_sha256": staged_admission_inventory["manifest_sha256"],
+    }
+    _write_json(recipe_path, recipe_value)
     analytics_ids: dict[str, str] = {}
     for root_id, relative in materializer.PRODUCTION_STAGE_ROOTS.items():
         if root_id.startswith("portfolio-") or root_id == "provider-ledger":
@@ -515,6 +872,40 @@ def test_production_spec_binds_stable_twenty_root_authority(
     )
     semantic_payload = json.loads(semantic_gate.path.read_text(encoding="utf-8"))
     assert semantic_payload["release_generations"] == spec.release_generations
+    product_gate = next(
+        gate
+        for gate in spec.gates
+        if gate.gate_id == "financial-mvp-product-conformance"
+    )
+    production_authority = json.loads(product_gate.path.read_text(encoding="utf-8"))
+    accepted_recipe = materializer._recipe(recipe_path)
+    assert (
+        production_authority["conformance"]
+        == accepted_recipe["product_authority"]["conformance"]
+    )
+    assert "provider_generation_path" not in production_authority
+    assert str(prepared_root) not in json.dumps(production_authority, sort_keys=True)
+    production_contract = json.loads(
+        Path(result["contract"]).read_text(encoding="utf-8")
+    )
+    assert production_contract["schema_version"] == 2
+    assert production_contract["product_authority_sha256"] == product_gate.sha256
+    production_plan = plan_pipeline(spec)
+    assert production_plan["node_count"] == 0
+    assert production_plan["commit_effects"] == []
+    assert production_plan["financial_mvp"]["ready_for_execution"] is False
+
+    stripped = json.loads(spec_path.read_text(encoding="utf-8"))
+    stripped["gates"] = [
+        row
+        for row in stripped["gates"]
+        if not row["gate_id"].startswith("financial-mvp-")
+    ]
+    stripped_spec = PipelineSpec.from_json_bytes(canonical_json_bytes(stripped))
+    with pytest.raises(PipelineValidationError, match="recovery-only"):
+        plan_pipeline(stripped_spec)
+    with pytest.raises(PipelineValidationError, match="recovery-only"):
+        pipeline_status(stripped_spec)
 
 
 def test_semantic_accepts_explicitly_rendered_freshness_blocker(
@@ -745,6 +1136,23 @@ def test_generated_semantic_command_declares_exact_gate_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     recipe_path, _ = _fixture(tmp_path)
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    vertical_path = Path(recipe["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(product.generation)
+    vertical["schema_version"] = 7
+    _write_json(vertical_path, vertical)
+    monkeypatch.setattr(
+        materializer, "_financial_mvp_module", lambda: product.financial_module
+    )
+    recipe["vertical_recipe"] = _definition(vertical_path)
+    recipe["product_authority"] = materializer._derive_product_authority(
+        vertical_path, product.contract_path, product.matrix_path
+    )
+    recipe["schema_version"] = 3
+    _write_json(recipe_path, recipe)
     release_commit = "a" * 40
     monkeypatch.setenv("QE_PIPELINE_PYTHON", sys.executable)
     monkeypatch.setattr(

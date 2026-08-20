@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -20,6 +21,7 @@ from quant_engine.core import (
     SourceArtifact,
     VerificationStatus,
     execute_pipeline,
+    pipeline_status,
     plan_pipeline,
     publish_generation,
     read_current,
@@ -27,6 +29,24 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+
+
+ROOT = Path(__file__).resolve().parents[2]
+MATERIALIZER_SPEC = importlib.util.spec_from_file_location(
+    "portfolio_pipeline_materialize_for_orchestration",
+    ROOT / "tools" / "portfolio_pipeline_materialize.py",
+)
+assert MATERIALIZER_SPEC is not None and MATERIALIZER_SPEC.loader is not None
+materializer = importlib.util.module_from_spec(MATERIALIZER_SPEC)
+MATERIALIZER_SPEC.loader.exec_module(materializer)
+FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "financial_mvp_fixture_for_orchestration",
+    ROOT / "tests" / "core" / "financial_mvp_fixture.py",
+)
+assert FIXTURE_SPEC is not None and FIXTURE_SPEC.loader is not None
+financial_fixture = importlib.util.module_from_spec(FIXTURE_SPEC)
+sys.modules[FIXTURE_SPEC.name] = financial_fixture
+FIXTURE_SPEC.loader.exec_module(financial_fixture)
 
 
 AS_OF = date(2026, 8, 3)
@@ -102,7 +122,10 @@ def _command(
 
 
 def _portfolio_spec(
-    tmp_path: Path, *, semantic_verdict: str = "PASS"
+    tmp_path: Path,
+    *,
+    semantic_verdict: str = "PASS",
+    financial_mvp_ready: bool | None = True,
 ) -> tuple[dict[str, object], dict[str, bytes | Path], GenerationManifest]:
     runtime = Path(sys.executable).resolve()
     runtime_bytes = runtime.read_bytes()
@@ -335,6 +358,10 @@ def _portfolio_spec(
         "target": target,
     }
     outputs.update({f"stage_{key}": value for key, value in stage_outputs.items()})
+    if financial_mvp_ready is not None:
+        _attach_required_not_ready_product(
+            raw, outputs, tmp_path, ready=financial_mvp_ready
+        )
     return raw, outputs, proposed
 
 
@@ -365,6 +392,108 @@ def _runner(outputs: dict[str, bytes | Path], calls: list[str]):
     return run
 
 
+def _attach_required_not_ready_product(
+    raw: dict[str, object],
+    outputs: dict[str, bytes | Path],
+    tmp_path: Path,
+    *,
+    ready: bool = False,
+) -> Path:
+    product = financial_fixture.build_financial_mvp_fixture(
+        tmp_path / "product", ready=ready
+    )
+    contract = product.contract
+    contract_bytes = product.contract_path.read_bytes()
+    semantic_sha = _sha(contract_bytes)
+    census_sha = _sha(canonical_json_bytes(contract["current_census"]))
+    admission = materializer._provider_admission_authority(
+        product.generation,
+        contract,
+        contract_raw_sha256=semantic_sha,
+        contract_semantic_sha256=semantic_sha,
+        census_sha256=census_sha,
+    )
+    correction_path = None
+    if ready:
+        correction_payload = {
+            "census_sha256": census_sha,
+            "contract_semantic_sha256": semantic_sha,
+            "corrections": [],
+            "schema_name": "portfolio-correction-registry",
+            "schema_version": 1,
+        }
+        correction_payload["registry_sha256"] = _sha(
+            canonical_json_bytes(correction_payload)
+        )
+        correction_path = tmp_path / "portfolio-correction-registry.json"
+        correction_path.write_bytes(canonical_json_bytes(correction_payload))
+    correction_registry = materializer._authority_registry(
+        correction_path,
+        schema_name="portfolio-correction-registry",
+        record_key="corrections",
+    )
+    rederive_registry = materializer._authority_registry(
+        None,
+        schema_name="portfolio-rederive-receipt-registry",
+        record_key="receipts",
+    )
+    conformance = materializer._product_conformance(
+        contract,
+        admission,
+        correction_registry,
+        rederive_registry,
+        contract_raw_sha256=semantic_sha,
+        contract_semantic_sha256=semantic_sha,
+        census_sha256=census_sha,
+        source_matrix_sha256=_sha(product.matrix_bytes),
+        invested_capital_policy_sha256=_sha(
+            canonical_json_bytes({"policy_id": "SYNTHETIC_INVESTED_CAPITAL"})
+        ),
+    )
+    authority = {
+        "contract": materializer._file_definition(product.contract_path),
+        "conformance": conformance,
+        "correction_registry": correction_registry,
+        "provider_generation": {
+            "catalog": materializer._file_definition(
+                product.generation / "provider-ledger.json"
+            ),
+            "generation_id": product.generation.name,
+            "manifest": materializer._file_definition(
+                product.generation / "generation.json"
+            ),
+            "receipt": materializer._file_definition(
+                product.generation / "admit-or-declare-receipt.json"
+            ),
+        },
+        "rederive_registry": rederive_registry,
+        "source_matrix": materializer._file_definition(product.matrix_path),
+    }
+    authority_path = tmp_path / "financial-mvp-product-conformance.json"
+    gates = raw["gates"]
+    assert isinstance(gates, list)
+    gates.extend(materializer._product_gate_rows(authority, authority_path))
+    orchestration_path = Path(outputs["contract_path"])
+    orchestration = json.loads(orchestration_path.read_text(encoding="utf-8"))
+    orchestration["product_authority"] = materializer._product_gate_payload(authority)
+    orchestration["schema_version"] = 2
+    orchestration_bytes = canonical_json_bytes(orchestration)
+    orchestration_path.write_bytes(orchestration_bytes)
+    orchestration_gate = next(
+        row for row in gates if row["gate_id"] == "portfolio-orchestration-contract"
+    )
+    orchestration_gate["sha256"] = _sha(orchestration_bytes)
+    semantic = json.loads(bytes(outputs["semantic_bytes"]))
+    semantic["checks"]["product_conformance"] = "PASS"
+    semantic["schema_version"] = 2
+    semantic_bytes = canonical_json_bytes(semantic)
+    outputs["semantic_bytes"] = semantic_bytes
+    next(row for row in gates if row["gate_id"] == "post-build-semantic")["sha256"] = (
+        _sha(semantic_bytes)
+    )
+    return product.generation
+
+
 def test_portfolio_pipeline_builds_and_resumes_from_command_receipts(
     tmp_path: Path,
 ) -> None:
@@ -381,6 +510,245 @@ def test_portfolio_pipeline_builds_and_resumes_from_command_receipts(
     assert second["release_id"] == first["release_id"]
     assert len(calls) == 10
     assert (Path(outputs["target"]) / "generations" / proposed.generation_id).is_dir()
+
+
+def test_legacy_portfolio_spec_is_readable_only_for_status_and_recovery(
+    tmp_path: Path,
+) -> None:
+    raw, outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=None)
+    spec = PipelineSpec.from_json_bytes(json.dumps(raw).encode())
+
+    status = pipeline_status(spec)
+    with pytest.raises(PipelineValidationError, match="recovery-only"):
+        plan_pipeline(spec)
+    with pytest.raises(PipelineValidationError, match="recovery-only"):
+        execute_pipeline(spec, command_runner=_runner(outputs, []))
+
+    assert "financial_mvp" not in status
+
+
+def test_required_not_ready_financial_mvp_blocks_before_every_effect(
+    tmp_path: Path,
+) -> None:
+    raw, outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=False)
+    spec = PipelineSpec.from_json_bytes(json.dumps(raw).encode())
+    calls: list[str] = []
+
+    plan = plan_pipeline(spec)
+    status = pipeline_status(spec)
+    with pytest.raises(PipelineExecutionError, match="required-not-ready"):
+        execute_pipeline(spec, command_runner=_runner(outputs, calls))
+
+    assert plan["node_count"] == 0
+    assert plan["commit_effects"] == []
+    assert plan["financial_mvp"]["ready_for_execution"] is False
+    assert plan["financial_mvp"]["candidate_artifacts"]
+    assert len(plan["financial_mvp"]["data_class_dispositions"]) == 7
+    assert {
+        row["provider_id"] for row in plan["financial_mvp"]["data_class_dispositions"]
+    } == {
+        "alpaca",
+        "fidelity",
+        "ibkr",
+        "matrixport",
+        "portfolio123",
+        "quantbase",
+        "schwab",
+    }
+    assert status["financial_mvp"] == plan["financial_mvp"]
+    assert str(tmp_path) not in json.dumps(plan, sort_keys=True)
+    assert calls == []
+    assert not Path(raw["coordination_root"]).exists()
+
+
+def test_financial_mvp_contract_drift_rejects_coherent_gate_rehash(
+    tmp_path: Path,
+) -> None:
+    raw, outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=None)
+    _attach_required_not_ready_product(raw, outputs, tmp_path)
+    gates = raw["gates"]
+    assert isinstance(gates, list)
+    contract_gate = next(
+        row for row in gates if row["gate_id"] == "financial-mvp-contract-authority"
+    )
+    contract_path = Path(contract_gate["path"])
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["product"]["product_version"] = "forged-v2"
+    changed = canonical_json_bytes(contract)
+    contract_path.write_bytes(changed)
+    contract_gate["sha256"] = _sha(changed)
+
+    with pytest.raises(
+        PipelineValidationError, match="authority file identities differ"
+    ):
+        plan_pipeline(PipelineSpec.from_json_bytes(json.dumps(raw).encode()))
+
+
+def test_financial_mvp_rejects_admission_receipt_detached_from_manifest(
+    tmp_path: Path,
+) -> None:
+    raw, outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=None)
+    generation = _attach_required_not_ready_product(raw, outputs, tmp_path)
+    changed = canonical_json_bytes({"admission_gate_status": "PASS"})
+    receipt_path = generation / "admit-or-declare-receipt.json"
+    receipt_path.write_bytes(changed)
+    gates = raw["gates"]
+    assert isinstance(gates, list)
+    receipt_gate = next(
+        row
+        for row in gates
+        if row["gate_id"] == "financial-mvp-provider-admission-authority"
+    )
+    receipt_gate["sha256"] = _sha(changed)
+    product_gate = next(
+        row for row in gates if row["gate_id"] == "financial-mvp-product-conformance"
+    )
+    product_path = Path(product_gate["path"])
+    authority = json.loads(product_path.read_text(encoding="utf-8"))
+    authority["authority_hashes"]["provider_receipt_sha256"] = _sha(changed)
+    authority_bytes = canonical_json_bytes(authority)
+    product_path.write_bytes(authority_bytes)
+    product_gate["sha256"] = _sha(authority_bytes)
+    orchestration_path = Path(outputs["contract_path"])
+    orchestration = json.loads(orchestration_path.read_text(encoding="utf-8"))
+    orchestration["product_authority"] = authority
+    orchestration_bytes = canonical_json_bytes(orchestration)
+    orchestration_path.write_bytes(orchestration_bytes)
+    next(row for row in gates if row["gate_id"] == "portfolio-orchestration-contract")[
+        "sha256"
+    ] = _sha(orchestration_bytes)
+
+    with pytest.raises(PipelineValidationError, match="not manifest-bound"):
+        plan_pipeline(PipelineSpec.from_json_bytes(json.dumps(raw).encode()))
+
+
+def test_core_rejects_structurally_invalid_receipt_after_coherent_rehash(
+    tmp_path: Path,
+) -> None:
+    raw, outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=None)
+    generation = _attach_required_not_ready_product(raw, outputs, tmp_path)
+    gates = raw["gates"]
+    assert isinstance(gates, list)
+    by_id = {row["gate_id"]: row for row in gates}
+    receipt_path = generation / "admit-or-declare-receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    del receipt["schema_version"]
+    receipt_bytes = canonical_json_bytes(receipt)
+    receipt_path.write_bytes(receipt_bytes)
+    by_id["financial-mvp-provider-admission-authority"]["sha256"] = _sha(receipt_bytes)
+
+    original = GenerationManifest.from_json_bytes(
+        (generation / "generation.json").read_bytes()
+    )
+    artifacts = tuple(
+        SourceArtifact(
+            artifact_id=item.artifact_id,
+            sha256=_sha(receipt_bytes),
+            size_bytes=len(receipt_bytes),
+            as_of_date=item.as_of_date,
+            schema_name=item.schema_name,
+            schema_version=item.schema_version,
+        )
+        if item.artifact_id == "normalized/admit-or-declare-receipt.json"
+        else item
+        for item in original.artifacts
+    )
+    rewritten_manifest = GenerationManifest.build(
+        as_of_date=original.as_of_date,
+        adapter=original.adapter,
+        coverage=original.coverage,
+        artifacts=artifacts,
+        verification=original.verification,
+    )
+    manifest_bytes = rewritten_manifest.to_json_bytes()
+    (generation / "generation.json").write_bytes(manifest_bytes)
+    by_id["financial-mvp-provider-manifest-authority"]["sha256"] = _sha(manifest_bytes)
+
+    contract_path = Path(by_id["financial-mvp-contract-authority"]["path"])
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract_bytes = contract_path.read_bytes()
+    semantic_sha = _sha(canonical_json_bytes(contract))
+    census_sha = _sha(canonical_json_bytes(contract["current_census"]))
+    product_path = Path(by_id["financial-mvp-product-conformance"]["path"])
+    product_gate = json.loads(product_path.read_text(encoding="utf-8"))
+    prior_admission = product_gate["conformance"]["provider_admission"]
+    admission = {
+        **prior_admission,
+        "generation_id": rewritten_manifest.generation_id,
+        "manifest_sha256": _sha(manifest_bytes),
+        "receipt": receipt,
+        "receipt_sha256": _sha(receipt_bytes),
+    }
+    absent_corrections = materializer._authority_registry(
+        None,
+        schema_name="portfolio-correction-registry",
+        record_key="corrections",
+    )
+    absent_rederive = materializer._authority_registry(
+        None,
+        schema_name="portfolio-rederive-receipt-registry",
+        record_key="receipts",
+    )
+    conformance = materializer._product_conformance(
+        contract,
+        admission,
+        absent_corrections,
+        absent_rederive,
+        contract_raw_sha256=_sha(contract_bytes),
+        contract_semantic_sha256=semantic_sha,
+        census_sha256=census_sha,
+        source_matrix_sha256=product_gate["authority_hashes"]["source_matrix_sha256"],
+        invested_capital_policy_sha256=product_gate["conformance"][
+            "invested_capital_policy_sha256"
+        ],
+    )
+    product_gate["authority_hashes"]["provider_receipt_sha256"] = _sha(receipt_bytes)
+    product_gate["authority_hashes"]["provider_manifest_sha256"] = _sha(manifest_bytes)
+    product_gate["conformance"] = conformance
+    product_bytes = canonical_json_bytes(product_gate)
+    product_path.write_bytes(product_bytes)
+    by_id["financial-mvp-product-conformance"]["sha256"] = _sha(product_bytes)
+    orchestration_path = Path(outputs["contract_path"])
+    orchestration = json.loads(orchestration_path.read_text(encoding="utf-8"))
+    orchestration["product_authority"] = product_gate
+    orchestration_bytes = canonical_json_bytes(orchestration)
+    orchestration_path.write_bytes(orchestration_bytes)
+    by_id["portfolio-orchestration-contract"]["sha256"] = _sha(orchestration_bytes)
+
+    with pytest.raises(
+        PipelineValidationError, match="provider admission receipt is invalid"
+    ):
+        plan_pipeline(PipelineSpec.from_json_bytes(json.dumps(raw).encode()))
+
+
+def test_financial_mvp_rejects_coherent_invalidation_route_rewrite(
+    tmp_path: Path,
+) -> None:
+    raw, outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=None)
+    _attach_required_not_ready_product(raw, outputs, tmp_path)
+    gates = raw["gates"]
+    assert isinstance(gates, list)
+    product_gate = next(
+        row for row in gates if row["gate_id"] == "financial-mvp-product-conformance"
+    )
+    product_path = Path(product_gate["path"])
+    authority = json.loads(product_path.read_text(encoding="utf-8"))
+    authority["conformance"]["sources"][0]["invalidated_outputs"] = ["PANEL"]
+    product_bytes = canonical_json_bytes(authority)
+    product_path.write_bytes(product_bytes)
+    product_gate["sha256"] = _sha(product_bytes)
+    orchestration_path = Path(outputs["contract_path"])
+    orchestration = json.loads(orchestration_path.read_text(encoding="utf-8"))
+    orchestration["product_authority"] = authority
+    orchestration_bytes = canonical_json_bytes(orchestration)
+    orchestration_path.write_bytes(orchestration_bytes)
+    orchestration_gate = next(
+        row for row in gates if row["gate_id"] == "portfolio-orchestration-contract"
+    )
+    orchestration_gate["sha256"] = _sha(orchestration_bytes)
+
+    with pytest.raises(PipelineValidationError, match="full conformance differs"):
+        plan_pipeline(PipelineSpec.from_json_bytes(json.dumps(raw).encode()))
 
 
 def test_portfolio_pipeline_allows_one_workbook_resume_attempt(
