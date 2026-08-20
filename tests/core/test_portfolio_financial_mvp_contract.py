@@ -549,9 +549,38 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     _validate(coherently_repeated)
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
-        match="lacks independently verified governed history evidence: p123-ai-factor",
+        match="differs from accepted #319 authority: p123-ai-factor",
     ):
         contract_tool._verify_strategy_version_history_evidence(coherently_repeated)
+
+    rewritten_accepted_version = copy.deepcopy(baseline)
+    fake_p123_eu_version = "p123-eu-connected-model:" + "f" * 64
+    p123_eu = next(
+        row
+        for row in rewritten_accepted_version["strategies"]
+        if row["strategy_id"] == "p123-eu"
+    )
+    p123_eu["strategy_version"]["version_ref"] = fake_p123_eu_version
+    for source in rewritten_accepted_version["source_segments"]:
+        version_refs = source["strategy_version"]["version_refs"]
+        if "p123-eu" in version_refs:
+            version_refs["p123-eu"] = fake_p123_eu_version
+    for correction in rewritten_accepted_version["history_corrections"]["corrections"]:
+        if correction["strategy_id"] == "p123-eu":
+            correction["strategy_version"]["version_ref"] = fake_p123_eu_version
+    for identity in rewritten_accepted_version["history_corrections"][
+        "materialized_segment_identities"
+    ]:
+        if identity["strategy_id"] == "p123-eu":
+            identity["strategy_version"] = fake_p123_eu_version
+    _validate(rewritten_accepted_version)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="differs from accepted #319 authority: p123-eu",
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            rewritten_accepted_version
+        )
 
     transition_removed = copy.deepcopy(baseline)
     for sleeve in transition_removed["current_census"]["account_sleeves"]:

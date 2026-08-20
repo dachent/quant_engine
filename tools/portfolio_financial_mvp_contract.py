@@ -156,6 +156,13 @@ _CENSUS_OWNER_NON_DECISIONS: Final = (
     "POINTER_OR_PUBLICATION",
 )
 _CENSUS_TT_CONTINUITY_INTERVAL: Final = (date(2026, 7, 14), date(2026, 7, 30))
+_HISTORY_AUTHORITY_COMMIT: Final = "fad9d16ec6c77586c6db5d5c71da82266b763736"
+_HISTORY_AUTHORITY_RAW_SHA256: Final = (
+    "6481e790ceaf78f100db96466ab462340ff940feb38de2798da6c80fd397bfef"
+)
+_HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
+    "b520bcefdd197d5f04a91c628afcbaef72f5efaa82dd40b5c7d5b702c196065c"
+)
 
 
 class FinancialMvpContractError(ValueError):
@@ -358,6 +365,46 @@ def _verify_strategy_version_history_evidence(
     governed bytes by :func:`verify_history_evidence`.
     """
 
+    try:
+        result = subprocess.run(  # noqa: S603
+            [
+                "git",
+                "show",
+                f"{_HISTORY_AUTHORITY_COMMIT}:contracts/portfolio-financial-mvp-source-v1.json",
+            ],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise FinancialMvpContractError(
+            "accepted #319 history authority is unreachable"
+        ) from exc
+    authority_bytes = result.stdout
+    if (
+        result.returncode != 0
+        or hashlib.sha256(authority_bytes).hexdigest() != _HISTORY_AUTHORITY_RAW_SHA256
+    ):
+        raise FinancialMvpContractError("accepted #319 history authority differs")
+    try:
+        accepted_contract = json.loads(authority_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FinancialMvpContractError(
+            "accepted #319 history authority is invalid"
+        ) from exc
+    accepted = _object(accepted_contract, "accepted #319 history authority")
+    if contract_digest(accepted) != _HISTORY_AUTHORITY_SEMANTIC_SHA256:
+        raise FinancialMvpContractError(
+            "accepted #319 history semantic authority differs"
+        )
+    accepted_versions = {
+        _text(row.get("strategy_id"), "accepted #319 version strategy_id"): _object(
+            row.get("strategy_version"), "accepted #319 strategy_version"
+        )
+        for row in _objects(accepted.get("strategies"), "accepted #319 strategies")
+    }
+
     strategies = _objects(contract["strategies"], "strategies")
     history = _object(contract["history_corrections"], "history_corrections")
     corrections = _objects(history["corrections"], "history corrections")
@@ -370,6 +417,10 @@ def _verify_strategy_version_history_evidence(
             strategy.get("strategy_version"),
             f"governed version strategy {strategy_id}",
         )
+        if version != accepted_versions.get(strategy_id):
+            raise FinancialMvpContractError(
+                f"strategy design/version differs from accepted #319 authority: {strategy_id}"
+            )
         if version.get("status") != "EVIDENCED":
             continue
         version_ref = _text(
