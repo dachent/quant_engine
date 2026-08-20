@@ -2593,6 +2593,16 @@ def _validate_current_census(
             f"missing={sorted(expected_provider_ids - set(lane_by_id))} "
             f"extra={sorted(set(lane_by_id) - expected_provider_ids)}"
         )
+    lane_source_ids = {
+        source_id
+        for lane in lane_by_id.values()
+        if (
+            source_id := _optional_text(
+                lane["source_segment_id"], "census provider source"
+            )
+        )
+        is not None
+    }
 
     sleeves = _objects(census["account_sleeves"], "census account_sleeves")
     if len(sleeves) != 19:
@@ -2652,6 +2662,12 @@ def _validate_current_census(
         if lane_source_id is not None and lane_source_id not in source_ids:
             raise FinancialMvpContractError(
                 f"census sleeve lacks its provider source: {sleeve_id}"
+            )
+        foreign_lane_sources = (set(source_ids) & lane_source_ids) - {lane_source_id}
+        if foreign_lane_sources:
+            raise FinancialMvpContractError(
+                "census sleeve includes a foreign provider source: "
+                f"{sleeve_id}:{sorted(foreign_lane_sources)}"
             )
         unknown_sources = set(source_ids) - set(source_by_id)
         if unknown_sources:

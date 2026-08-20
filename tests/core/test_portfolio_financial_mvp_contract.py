@@ -891,6 +891,25 @@ def test_census_fails_on_missing_duplicate_overlap_and_stale_provider_binding() 
     ):
         _validate(coherent_lane_swap)
 
+    foreign_provider_sources = copy.deepcopy(contract)
+    ibkr_sleeve = next(
+        row
+        for row in foreign_provider_sources["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "ibkr-reserve-01"
+    )
+    schwab_sleeve = next(
+        row
+        for row in foreign_provider_sources["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "schwab-reserve-01"
+    )
+    ibkr_sleeve["source_segment_ids"].append("schwab-account-generation")
+    schwab_sleeve["source_segment_ids"].append("ibkr-account-generation")
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="sleeve includes a foreign provider source",
+    ):
+        _validate(foreign_provider_sources)
+
     invented_live_identity = copy.deepcopy(contract)
     p123_ai = next(
         row
