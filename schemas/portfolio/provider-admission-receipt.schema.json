@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/provider-admission-receipt.schema.json",
+  "title": "Provider dataset admit-or-declare receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "admission_gate_status",
+    "census_id",
+    "census_sha256",
+    "contract_raw_sha256",
+    "contract_semantic_sha256",
+    "disposition_sha256",
+    "dispositions",
+    "invalidated_outputs",
+    "inventory",
+    "inventory_sha256",
+    "product_id",
+    "product_readiness",
+    "product_version",
+    "provider_generations",
+    "receipt_type",
+    "schema_version"
+  ],
+  "properties": {
+    "admission_gate_status": {"const": "PASS"},
+    "census_id": {"$ref": "#/$defs/nonempty"},
+    "census_sha256": {"$ref": "#/$defs/sha256"},
+    "contract_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "contract_semantic_sha256": {"$ref": "#/$defs/sha256"},
+    "disposition_sha256": {"$ref": "#/$defs/sha256"},
+    "dispositions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/disposition"}
+    },
+    "invalidated_outputs": {"$ref": "#/$defs/uniqueStrings"},
+    "inventory": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/inventoryItem"}
+    },
+    "inventory_sha256": {"$ref": "#/$defs/sha256"},
+    "product_id": {"const": "FINANCIAL_MVP"},
+    "product_readiness": {
+      "enum": ["READY_FOR_COMPOSITION", "REQUIRED_NOT_READY"]
+    },
+    "product_version": {"$ref": "#/$defs/nonempty"},
+    "provider_generations": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {"$ref": "#/$defs/providerGeneration"}
+    },
+    "receipt_type": {"const": "PROVIDER_ADMIT_OR_DECLARE_V1"},
+    "schema_version": {"const": 1}
+  },
+  "$defs": {
+    "dateOrNull": {"type": ["string", "null"], "format": "date"},
+    "nonempty": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "uniqueStrings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/nonempty"}
+    },
+    "inventoryItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "item_kind",
+        "provider_id",
+        "record_count",
+        "schema_name",
+        "schema_version",
+        "sha256",
+        "size_bytes"
+      ],
+      "properties": {
+        "item_id": {"$ref": "#/$defs/nonempty"},
+        "item_kind": {
+          "enum": [
+            "ARTIFACT",
+            "CATALOG_DATASET",
+            "COVERAGE_FACT_TYPE",
+            "PRODUCT_DATA_CLASS"
+          ]
+        },
+        "provider_id": {"$ref": "#/$defs/nonempty"},
+        "record_count": {"type": ["integer", "null"], "minimum": 0},
+        "schema_name": {"$ref": "#/$defs/nonempty"},
+        "schema_version": {"$ref": "#/$defs/nonempty"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "authority_ref",
+        "calendar",
+        "consumers",
+        "currency",
+        "data_class",
+        "evidence_layer",
+        "invalidated_outputs",
+        "item_id",
+        "item_kind",
+        "item_sha256",
+        "materialized_record_count",
+        "materialized_sha256",
+        "observed_end",
+        "observed_start",
+        "policy_effective_end",
+        "policy_effective_start",
+        "policy_id",
+        "policy_owner",
+        "policy_version",
+        "provider_id",
+        "readiness_impact",
+        "reason",
+        "source_segment_id",
+        "source_segment_sha256",
+        "source_observed_end",
+        "source_observed_start",
+        "target_facts",
+        "timezone",
+        "transform",
+        "transform_version",
+        "units"
+      ],
+      "properties": {
+        "action": {"enum": ["ADMIT", "EXCLUDE"]},
+        "authority_ref": {"$ref": "#/$defs/nonempty"},
+        "calendar": {"$ref": "#/$defs/nonempty"},
+        "consumers": {"$ref": "#/$defs/uniqueStrings"},
+        "currency": {"$ref": "#/$defs/nonempty"},
+        "data_class": {"type": ["string", "null"], "minLength": 1},
+        "evidence_layer": {"$ref": "#/$defs/nonempty"},
+        "invalidated_outputs": {"$ref": "#/$defs/uniqueStrings"},
+        "item_id": {"$ref": "#/$defs/nonempty"},
+        "item_kind": {
+          "enum": [
+            "ARTIFACT",
+            "CATALOG_DATASET",
+            "COVERAGE_FACT_TYPE",
+            "PRODUCT_DATA_CLASS"
+          ]
+        },
+        "item_sha256": {"$ref": "#/$defs/sha256"},
+        "materialized_record_count": {"type": "integer", "minimum": 0},
+        "materialized_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "observed_end": {"$ref": "#/$defs/dateOrNull"},
+        "observed_start": {"$ref": "#/$defs/dateOrNull"},
+        "policy_effective_end": {"$ref": "#/$defs/dateOrNull"},
+        "policy_effective_start": {"type": "string", "format": "date"},
+        "policy_id": {"const": "PROVIDER_ADMIT_OR_DECLARE_V1"},
+        "policy_owner": {"const": "PRODUCT_OWNER_GOVERNING_ISSUE_303"},
+        "policy_version": {"const": "1"},
+        "provider_id": {"$ref": "#/$defs/nonempty"},
+        "readiness_impact": {"$ref": "#/$defs/nonempty"},
+        "reason": {"type": ["string", "null"], "minLength": 1},
+        "source_segment_id": {"$ref": "#/$defs/nonempty"},
+        "source_segment_sha256": {"$ref": "#/$defs/sha256"},
+        "source_observed_end": {"type": "string", "format": "date"},
+        "source_observed_start": {"type": "string", "format": "date"},
+        "target_facts": {"$ref": "#/$defs/uniqueStrings"},
+        "timezone": {"$ref": "#/$defs/nonempty"},
+        "transform": {"type": ["string", "null"], "minLength": 1},
+        "transform_version": {"type": ["string", "null"], "minLength": 1},
+        "units": {"$ref": "#/$defs/nonempty"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"action": {"const": "ADMIT"}}, "required": ["action"]},
+          "then": {
+            "properties": {
+              "invalidated_outputs": {"maxItems": 0},
+              "materialized_record_count": {"minimum": 1},
+              "materialized_sha256": {"$ref": "#/$defs/sha256"},
+              "observed_end": {"type": "string", "format": "date"},
+              "observed_start": {"type": "string", "format": "date"},
+              "readiness_impact": {"const": "ADMITTED"},
+              "reason": {"type": "null"},
+              "target_facts": {"minItems": 1},
+              "transform": {"$ref": "#/$defs/nonempty"},
+              "transform_version": {"$ref": "#/$defs/nonempty"}
+            }
+          },
+          "else": {
+            "properties": {
+              "invalidated_outputs": {"minItems": 1},
+              "materialized_record_count": {"const": 0},
+              "materialized_sha256": {"type": "null"},
+              "observed_end": {"type": "null"},
+              "observed_start": {"type": "null"},
+              "readiness_impact": {"not": {"const": "ADMITTED"}},
+              "reason": {"$ref": "#/$defs/nonempty"},
+              "target_facts": {"maxItems": 0},
+              "transform": {"type": "null"},
+              "transform_version": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"item_kind": {"const": "PRODUCT_DATA_CLASS"}},
+            "required": ["item_kind"]
+          },
+          "then": {"properties": {"data_class": {"$ref": "#/$defs/nonempty"}}},
+          "else": {"properties": {"data_class": {"type": "null"}}}
+        }
+      ]
+    },
+    "providerGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_name",
+        "adapter_version",
+        "catalog_sha256",
+        "coverage_boundary",
+        "coverage_status",
+        "generation_as_of_date",
+        "generation_id",
+        "manifest_sha256",
+        "observed_end",
+        "observed_start",
+        "provider_id",
+        "qualification",
+        "source_segment_id",
+        "source_segment_sha256"
+      ],
+      "properties": {
+        "adapter_name": {"$ref": "#/$defs/nonempty"},
+        "adapter_version": {"$ref": "#/$defs/nonempty"},
+        "catalog_sha256": {"$ref": "#/$defs/sha256"},
+        "coverage_boundary": {"$ref": "#/$defs/nonempty"},
+        "coverage_status": {
+          "enum": ["COMPLETE_WITHIN_DECLARED_BOUNDARY", "PARTIAL", "FAILED"]
+        },
+        "generation_as_of_date": {"type": "string", "format": "date"},
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "observed_end": {"type": "string", "format": "date"},
+        "observed_start": {"type": "string", "format": "date"},
+        "provider_id": {"$ref": "#/$defs/nonempty"},
+        "qualification": {
+          "enum": ["PUBLISHED_COMPLETE", "ACCEPTED_PARTIAL", "FINITE_STATIC"]
+        },
+        "source_segment_id": {"$ref": "#/$defs/nonempty"},
+        "source_segment_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

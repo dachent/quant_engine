@@ -4436,9 +4436,10 @@ def _validate_sources(
             )
         _text(freshness["rule"], "freshness.rule")
         admission = _object(row["admission"], "source_segment.admission")
-        _strict_keys(
-            admission, {"facts", "transform", "version"}, "source_segment.admission"
-        )
+        admission_keys = {"facts", "transform", "version"}
+        if source_id in REQUIRED_PROVIDER_SOURCE_IDS:
+            admission_keys.add("dataset_disposition_policy")
+        _strict_keys(admission, admission_keys, "source_segment.admission")
         facts = _strings(admission["facts"], "admission.facts")
         if not facts:
             raise FinancialMvpContractError(
@@ -4446,6 +4447,105 @@ def _validate_sources(
             )
         _text(admission["transform"], "admission.transform")
         _text(admission["version"], "admission.version")
+        if source_id in REQUIRED_PROVIDER_SOURCE_IDS:
+            policy = _object(
+                admission["dataset_disposition_policy"],
+                "admission.dataset_disposition_policy",
+            )
+            _strict_keys(
+                policy,
+                {
+                    "admitted_item_count",
+                    "admitted_item_set_sha256",
+                    "allowed_exclusion_reasons",
+                    "authority_issue",
+                    "effective_end",
+                    "effective_start",
+                    "exclusion_invalidated_outputs_rule",
+                    "exclusion_readiness_impact",
+                    "policy_id",
+                    "policy_owner",
+                    "policy_version",
+                    "product_data_class_count",
+                    "product_data_class_set_sha256",
+                    "upstream_inventory_sha256",
+                },
+                "admission.dataset_disposition_policy",
+            )
+            if (
+                not isinstance(policy["admitted_item_count"], int)
+                or policy["admitted_item_count"] < 0
+            ):
+                raise FinancialMvpContractError(
+                    "dataset disposition admitted item count is invalid"
+                )
+            _hash(
+                policy["admitted_item_set_sha256"],
+                "dataset disposition admitted item digest",
+            )
+            if not _strings(
+                policy["allowed_exclusion_reasons"],
+                "dataset disposition exclusion reasons",
+            ):
+                raise FinancialMvpContractError(
+                    "dataset disposition exclusion reasons are empty"
+                )
+            if policy["authority_issue"] != 303:
+                raise FinancialMvpContractError(
+                    "dataset disposition authority issue differs"
+                )
+            policy_start = _optional_date(
+                policy["effective_start"], "dataset disposition effective_start"
+            )
+            policy_end = _optional_date(
+                policy["effective_end"], "dataset disposition effective_end"
+            )
+            if policy_start is None or (
+                policy_end is not None and policy_end < policy_start
+            ):
+                raise FinancialMvpContractError(
+                    "dataset disposition effective interval is invalid"
+                )
+            if policy["exclusion_invalidated_outputs_rule"] != (
+                "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
+            ):
+                raise FinancialMvpContractError(
+                    "dataset disposition invalidated-output rule differs"
+                )
+            expected_readiness = (
+                "NO_CURRENT_PRODUCT_EFFECT"
+                if row["product_requirement"] == "EXCLUDED"
+                else "REQUIRED_NOT_READY"
+            )
+            if policy["exclusion_readiness_impact"] != expected_readiness:
+                raise FinancialMvpContractError(
+                    "dataset disposition readiness impact differs"
+                )
+            if policy["policy_id"] != "PROVIDER_ADMIT_OR_DECLARE_V1":
+                raise FinancialMvpContractError("dataset disposition policy differs")
+            if policy["policy_owner"] != "PRODUCT_OWNER_GOVERNING_ISSUE_303":
+                raise FinancialMvpContractError(
+                    "dataset disposition policy owner differs"
+                )
+            if policy["policy_version"] != "1":
+                raise FinancialMvpContractError(
+                    "dataset disposition policy version differs"
+                )
+            if (
+                not isinstance(policy["product_data_class_count"], int)
+                or policy["product_data_class_count"] < 1
+            ):
+                raise FinancialMvpContractError(
+                    "dataset disposition product data-class count is invalid"
+                )
+            _hash(
+                policy["product_data_class_set_sha256"],
+                "dataset disposition product data-class digest",
+            )
+            _hash(
+                policy["upstream_inventory_sha256"],
+                "dataset disposition upstream inventory digest",
+            )
         requirement = _text(
             row["product_requirement"], "source_segment.product_requirement"
         )
@@ -5796,6 +5896,9 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                             "freshness_rule": source["freshness"]["rule"],
                             "admission_transform": source["admission"]["transform"],
                             "admission_facts": source["admission"]["facts"],
+                            "admission_dataset_disposition_policy": source[
+                                "admission"
+                            ].get("dataset_disposition_policy"),
                             "declared_gap_policy": source.get("declared_gap_policy"),
                             "consumer": consumer,
                             "generation_id": source["current_generation"][

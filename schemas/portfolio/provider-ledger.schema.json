@@ -26,7 +26,7 @@
   "properties": {
     "admissions": {"type": "array", "items": {"$ref": "#/$defs/admission"}},
     "as_of_date": {"type": "string", "format": "date"},
-    "catalog_schema_version": {"const": 1},
+    "catalog_schema_version": {"const": 2},
     "corporate_actions": {"type": "array", "items": {"type": "object"}},
     "fact_counts": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/factCount"}},
     "flows": {"type": "array", "items": {"type": "object"}},
@@ -47,9 +47,10 @@
     "admission": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["account_id", "disposition", "effective_end", "effective_start", "evidence_layer", "fact_type", "pool_id", "provider_id", "strategy_id"],
+      "required": ["account_id", "account_reconciliation_sha256", "disposition", "effective_end", "effective_start", "evidence_layer", "fact_type", "pool_id", "provider_id", "strategy_id"],
       "properties": {
         "account_id": {"type": ["string", "null"]},
+        "account_reconciliation_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
         "disposition": {"enum": ["AUTHORITATIVE", "RECONCILIATION_ONLY", "REFERENCE_ONLY", "BLOCKED_GAP"]},
         "effective_end": {"type": "string", "format": "date"},
         "effective_start": {"type": "string", "format": "date"},
@@ -74,9 +75,10 @@
     "providerGeneration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["catalog_sha256", "generation_id", "manifest_sha256", "provider_id", "qualification"],
+      "required": ["catalog_sha256", "generation_as_of_date", "generation_id", "manifest_sha256", "provider_id", "qualification"],
       "properties": {
         "catalog_sha256": {"$ref": "#/$defs/sha256"},
+        "generation_as_of_date": {"type": "string", "format": "date"},
         "generation_id": {"$ref": "#/$defs/sha256"},
         "manifest_sha256": {"$ref": "#/$defs/sha256"},
         "provider_id": {"type": "string", "minLength": 1},

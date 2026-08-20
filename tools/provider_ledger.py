@@ -15,11 +15,13 @@ import csv
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
+import importlib.util
 import io
 import json
 from pathlib import Path
 import re
 import shutil
+import sys
 import tempfile
 from typing import Any, Final, Mapping, Sequence
 
@@ -37,16 +39,28 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core.publication import CurrentPointer
 from quant_engine.portfolio_ledger import (
     AdmissionDisposition,
+    DatasetDispositionAction,
+    DatasetItemKind,
     EvidenceLayer,
     GenerationQualification,
+    ProviderDatasetDisposition,
+    ProviderDatasetInventoryItem,
     ProviderFactAdmission,
     ProviderGenerationIdentity,
+    admitted_binding_set_digest,
+    product_data_class_set_digest,
+    provider_upstream_inventory_digest,
+    validate_admit_or_declare_receipt,
+    validate_dataset_dispositions,
     validate_provider_authority,
 )
 
 
-SCHEMA_VERSION: Final = 1
-CATALOG_SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
+CATALOG_SCHEMA_VERSION: Final = 2
+ADMIT_OR_DECLARE_SCHEMA_VERSION: Final = 1
+ADAPTER_VERSION: Final = "2"
+REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 _PROVIDER_CATALOGS: Final = {
     "alpaca": ("alpaca-generation.json", frozenset({1})),
     "fidelity": ("fidelity-generation.json", frozenset({1})),
@@ -67,8 +81,69 @@ _ACCOUNT_FACTS: Final = {
         "transactions",
     ),
     "matrixport": ("nav_observations",),
+    "portfolio123": (),
     "quantbase": ("flows", "nav_observations"),
     "schwab": ("nav_observations", "positions", "transactions"),
+}
+_PROVIDER_SOURCE_SEGMENTS: Final = {
+    "alpaca": "alpaca-account-generation",
+    "fidelity": "fidelity-account-generation",
+    "ibkr": "ibkr-account-generation",
+    "matrixport": "matrixport-account-generation",
+    "portfolio123": "portfolio123-model-generation",
+    "quantbase": "quantbase-account-generation",
+    "schwab": "schwab-account-generation",
+}
+
+
+def _canonical_json_value_bytes(value: object) -> bytes:
+    """Serialize any JSON value with the repository's canonical JSON settings."""
+
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
+
+
+_DATA_CLASS_TARGET_FACT: Final = {
+    "ACCOUNT_NAV": "nav_observations",
+    "POSITION": "positions",
+    "TRANSACTION": "transactions",
+    "EXTERNAL_FLOW": "flows",
+    "CORPORATE_ACTION": "corporate_actions",
+    "PROVIDER_LIVE_RETURN": "provider_strategy_returns",
+}
+_TARGET_ADMISSION_FACT: Final = {
+    "corporate_actions": "CORPORATE_ACTION",
+    "flows": "EXTERNAL_FLOW",
+    "nav_observations": "NAV_OBSERVATION",
+    "positions": "POSITION",
+    "provider_strategy_returns": (
+        "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1_CANDIDATE"
+    ),
+    "transactions": "TRANSACTION",
+}
+_DATA_CLASS_ADMISSION_FACT: Final = {
+    "ACCOUNT_NAV": "NAV_OBSERVATION",
+    "CAPITAL_ANCHOR": "CAPITAL_ANCHOR",
+    "CORPORATE_ACTION": "CORPORATE_ACTION",
+    "EXTERNAL_FLOW": "EXTERNAL_FLOW",
+    "FINANCING_COST": "FINANCING_COST",
+    "FINANCING_LIABILITY": "FINANCING_LIABILITY",
+    "LEVERAGE_EXPOSURE": "LEVERAGE_EXPOSURE",
+    "POSITION": "POSITION",
+    "PROVIDER_LIVE_RETURN": (
+        "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1_CANDIDATE"
+    ),
+    "TRANSACTION": "TRANSACTION",
+}
+_SOURCE_FACT_TARGET: Final = {
+    "cash_flows": "flows",
+    "corporate_actions": "corporate_actions",
+    "flows": "flows",
+    "nav_observations": "nav_observations",
+    "positions": "positions",
+    "transactions": "transactions",
 }
 _CSV_FACT_ACCOUNT: Final[dict[str, str]] = {
     "matrixport": "account-d2e5821e608e25f1",
@@ -113,6 +188,15 @@ def _objects(value: object, name: str) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
         raise ProviderLedgerError(f"{name} must contain objects")
     return list(value)
+
+
+def _strings(value: object, name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ProviderLedgerError(f"{name} must be a list")
+    rows = [_text(item, name) for item in value]
+    if len(set(rows)) != len(rows):
+        raise ProviderLedgerError(f"{name} must be unique")
+    return rows
 
 
 def _text(value: object, name: str) -> str:
@@ -590,7 +674,7 @@ def _quantbase_flows(
 
 def _load_spec(path: Path) -> dict[str, Any]:
     spec = _load_json(path, "provider-ledger spec")
-    expected = {
+    base_keys = {
         "as_of_date",
         "output_root",
         "provenance",
@@ -599,8 +683,30 @@ def _load_spec(path: Path) -> dict[str, Any]:
         "strategy_inputs",
         "strategy_provider_map",
     }
-    if set(spec) != expected or spec.get("schema_version") != SCHEMA_VERSION:
+    version = spec.get("schema_version")
+    expected = base_keys | ({"financial_mvp"} if version == SCHEMA_VERSION else set())
+    if set(spec) != expected or version not in {1, SCHEMA_VERSION}:
         raise ProviderLedgerError("provider-ledger spec keys or version differ")
+    if version == 1:
+        paths = {
+            "contract": REPOSITORY_ROOT
+            / "contracts"
+            / "portfolio-financial-mvp-source-v1.json",
+            "registry": REPOSITORY_ROOT
+            / "docs"
+            / "analytics"
+            / "current-strategy-decomposition-plan.json",
+            "schema": REPOSITORY_ROOT
+            / "schemas"
+            / "portfolio"
+            / "financial-mvp-source-contract.schema.json",
+        }
+        financial_mvp: dict[str, str] = {}
+        for name, value in paths.items():
+            financial_mvp[f"{name}_path"] = str(value)
+            financial_mvp[f"{name}_sha256"] = hash_file(value)[0]
+        spec = {**spec, "financial_mvp": financial_mvp}
+        spec["schema_version"] = SCHEMA_VERSION
     _day(spec["as_of_date"], "spec.as_of_date")
     providers = _object(spec["providers"], "providers")
     if set(providers) != set(_PROVIDER_CATALOGS):
@@ -608,6 +714,97 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "provider-ledger spec must name every current provider"
         )
     return spec
+
+
+def _financial_mvp_module() -> Any:
+    """Load the exact repository validator without trusting import state."""
+
+    module_path = (
+        Path(__file__).resolve().with_name("portfolio_financial_mvp_contract.py")
+    )
+    module_name = "_provider_ledger_financial_mvp_contract"
+    loaded = sys.modules.get(module_name)
+    if loaded is not None:
+        if Path(str(getattr(loaded, "__file__", ""))).resolve() != module_path:
+            raise ProviderLedgerError("financial MVP validator origin differs")
+        return loaded
+    module_spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if module_spec is None or module_spec.loader is None:
+        raise ProviderLedgerError("financial MVP validator is unavailable")
+    module = importlib.util.module_from_spec(module_spec)
+    sys.modules[module_name] = module
+    try:
+        module_spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise ProviderLedgerError("financial MVP validator failed to load") from exc
+    return module
+
+
+def _financial_mvp_authority(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Verify and load the accepted product, census, and source authority."""
+
+    ref = _object(spec["financial_mvp"], "financial_mvp")
+    expected = {
+        "contract_path",
+        "contract_sha256",
+        "registry_path",
+        "registry_sha256",
+        "schema_path",
+        "schema_sha256",
+    }
+    if set(ref) != expected:
+        raise ProviderLedgerError("financial MVP reference keys differ")
+    contract, contract_sha256, _ = _verified_json(
+        Path(_text(ref["contract_path"], "financial_mvp.contract_path")).resolve(),
+        ref["contract_sha256"],
+        "financial MVP contract",
+    )
+    registry, _, _ = _verified_json(
+        Path(_text(ref["registry_path"], "financial_mvp.registry_path")).resolve(),
+        ref["registry_sha256"],
+        "financial MVP strategy registry",
+    )
+    schema, _, _ = _verified_json(
+        Path(_text(ref["schema_path"], "financial_mvp.schema_path")).resolve(),
+        ref["schema_sha256"],
+        "financial MVP schema",
+    )
+    module = _financial_mvp_module()
+    try:
+        errors = module.schema_errors(schema, contract, schema)
+        if errors:
+            raise ProviderLedgerError(
+                "financial MVP schema validation failed: " + "; ".join(errors[:10])
+            )
+        module.validate_contract(contract, registry=registry)
+        semantic_digest = module.contract_digest(contract)
+        census_sha256 = module.census_digest(contract["current_census"])
+    except ProviderLedgerError:
+        raise
+    except Exception as exc:
+        raise ProviderLedgerError("financial MVP contract is invalid") from exc
+    sources = {
+        str(item.get("source_id")): item
+        for item in _objects(contract.get("source_segments"), "source_segments")
+    }
+    if not set(_PROVIDER_SOURCE_SEGMENTS.values()).issubset(sources):
+        raise ProviderLedgerError("financial MVP provider source set differs")
+    return {
+        "census_id": _text(
+            _object(contract["current_census"], "current_census").get("census_id"),
+            "current_census.census_id",
+        ),
+        "census_sha256": census_sha256,
+        "contract": contract,
+        "contract_raw_sha256": contract_sha256,
+        "contract_semantic_sha256": semantic_digest,
+        "product_id": _text(contract["product"].get("product_id"), "product_id"),
+        "product_version": _text(
+            contract["product"].get("product_version"), "product_version"
+        ),
+        "sources": sources,
+    }
 
 
 def _provenance(spec: Mapping[str, Any]) -> tuple[dict[str, Any], SourceArtifact]:
@@ -669,6 +866,13 @@ def _provider(
     catalog, catalog_hash, catalog_size = _verified_json(
         catalog_path, ref["catalog_sha256"], f"{provider_id} catalog"
     )
+    if not any(
+        artifact.sha256 == catalog_hash and artifact.size_bytes == catalog_size
+        for artifact in manifest.artifacts
+    ):
+        raise ProviderLedgerError(
+            f"{provider_id} catalog is not an artifact of its generation manifest"
+        )
     schema_version = catalog.get("catalog_schema_version")
     if schema_version not in versions:
         raise ProviderLedgerError(f"{provider_id} catalog schema is unsupported")
@@ -812,7 +1016,9 @@ def _project_account_facts(
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     projections: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exceptions: list[dict[str, Any]] = []
-    for source_fact in _ACCOUNT_FACTS.get(provider_id, ()):
+    if provider_id not in _ACCOUNT_FACTS:
+        raise ProviderLedgerError(f"unknown provider fact mapping: {provider_id}")
+    for source_fact in _ACCOUNT_FACTS[provider_id]:
         target_fact = "flows" if source_fact == "cash_flows" else source_fact
         if provider_id in _CSV_FACT_ACCOUNT and source_fact in {
             "flows",
@@ -869,7 +1075,12 @@ def _project_account_facts(
                         }
                     )
             continue
-        rows = _objects(catalog.get(source_fact, []), f"{provider_id}.{source_fact}")
+        if source_fact not in catalog:
+            raise ProviderLedgerError(
+                f"declared provider fact collection is missing: "
+                f"{provider_id}.{source_fact}"
+            )
+        rows = _objects(catalog[source_fact], f"{provider_id}.{source_fact}")
         for row in rows:
             day = _row_day(row)
             account_id = str(row.get("account_id") or "")
@@ -1754,7 +1965,19 @@ def _portfolio123_provider_returns(
 def _admissions(
     projections: Mapping[str, Sequence[Mapping[str, Any]]],
     evidence_rows: Sequence[Mapping[str, Any]],
+    authoritative_provider_ids: set[str] | None = None,
+    authoritative_strategy_ids: set[str] | None = None,
 ) -> tuple[ProviderFactAdmission, ...]:
+    provider_authority = (
+        set(_PROVIDER_CATALOGS)
+        if authoritative_provider_ids is None
+        else authoritative_provider_ids
+    )
+    strategy_authority = (
+        {str(item.get("strategy_id")) for item in evidence_rows}
+        if authoritative_strategy_ids is None
+        else authoritative_strategy_ids
+    )
     admissions: list[ProviderFactAdmission] = []
     by_provider_fact_account: dict[
         tuple[str, str, str, str], list[Mapping[str, Any]]
@@ -1783,7 +2006,7 @@ def _admissions(
                 evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
                 disposition=(
                     AdmissionDisposition.AUTHORITATIVE
-                    if mapping_status == "MAPPED"
+                    if mapping_status == "MAPPED" and provider_id in provider_authority
                     else AdmissionDisposition.REFERENCE_ONLY
                 ),
                 effective_start=start,
@@ -1827,7 +2050,11 @@ def _admissions(
                         provider_id=account_provider_id,
                         fact_type="strategy_returns",
                         evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
-                        disposition=AdmissionDisposition.AUTHORITATIVE,
+                        disposition=(
+                            AdmissionDisposition.AUTHORITATIVE
+                            if strategy_id in strategy_authority
+                            else AdmissionDisposition.REFERENCE_ONLY
+                        ),
                         effective_start=_day(
                             scope.get("observed_start"), "account observed_start"
                         ),
@@ -1907,10 +2134,594 @@ def _provider_coverage(
     return authoritative
 
 
-def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, bytes]:
+def _source_segment(
+    authority: Mapping[str, Any],
+    provider_id: str,
+    identity: ProviderGenerationIdentity,
+    manifest: GenerationManifest,
+) -> dict[str, Any]:
+    source_id = _PROVIDER_SOURCE_SEGMENTS[provider_id]
+    source = _object(
+        _object(authority["sources"], "financial MVP sources")[source_id],
+        f"source segment {source_id}",
+    )
+    generation = _object(source.get("current_generation"), f"{source_id}.generation")
+    if generation != {
+        "as_of": manifest.as_of_date.isoformat(),
+        "generation_id": identity.generation_id,
+        "sha256": identity.manifest_sha256,
+    }:
+        raise ProviderLedgerError(
+            f"{provider_id} generation differs from financial MVP authority"
+        )
+    admission = _object(source.get("admission"), f"{source_id}.admission")
+    if not str(admission.get("transform") or "").startswith("provider-ledger"):
+        raise ProviderLedgerError(
+            f"{provider_id} source is not authorized for provider-ledger admission"
+        )
+    if source.get("capture_status") != "CAPTURED_GOVERNED":
+        raise ProviderLedgerError(f"{provider_id} source is not governed capture")
+    admitted_facts = set(_strings(admission.get("facts"), f"{source_id}.facts"))
+    required_facts = {
+        _DATA_CLASS_ADMISSION_FACT[data_class]
+        for data_class in _strings(
+            source.get("data_classes"), f"{source_id}.data_classes"
+        )
+        if data_class in _DATA_CLASS_ADMISSION_FACT
+    }
+    if not required_facts.issubset(admitted_facts):
+        raise ProviderLedgerError(
+            f"{provider_id} product data classes differ from admission facts"
+        )
+    return source
+
+
+def _catalog_dataset_items(
+    provider_id: str, catalog: Mapping[str, Any], schema_version: str
+) -> list[ProviderDatasetInventoryItem]:
+    items: list[ProviderDatasetInventoryItem] = []
+
+    def visit(value: Mapping[str, Any], prefix: str = "") -> None:
+        for key in sorted(value):
+            child = value[key]
+            path = f"{prefix}/{key}" if prefix else str(key)
+            if isinstance(child, list):
+                content = _canonical_json_value_bytes(child)
+                items.append(
+                    ProviderDatasetInventoryItem(
+                        provider_id=provider_id,
+                        item_kind=DatasetItemKind.CATALOG_DATASET,
+                        item_id=path,
+                        sha256=hashlib.sha256(content).hexdigest(),
+                        size_bytes=len(content),
+                        schema_name=f"{provider_id}-catalog-dataset",
+                        schema_version=schema_version,
+                        record_count=len(child),
+                    )
+                )
+            elif isinstance(child, dict):
+                visit(child, path)
+
+    visit(catalog)
+    return items
+
+
+def _provider_inventory(
+    provider_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    source: Mapping[str, Any],
+) -> list[ProviderDatasetInventoryItem]:
+    items = [
+        ProviderDatasetInventoryItem(
+            provider_id=provider_id,
+            item_kind=DatasetItemKind.ARTIFACT,
+            item_id=artifact.artifact_id,
+            sha256=artifact.sha256,
+            size_bytes=artifact.size_bytes,
+            schema_name=artifact.schema_name,
+            schema_version=artifact.schema_version,
+        )
+        for artifact in manifest.artifacts
+    ]
+    items.extend(
+        ProviderDatasetInventoryItem(
+            provider_id=provider_id,
+            item_kind=DatasetItemKind.COVERAGE_FACT_TYPE,
+            item_id=fact_type,
+            sha256=hashlib.sha256(
+                canonical_json_bytes(
+                    {"fact_type": fact_type, "provider_id": provider_id}
+                )
+            ).hexdigest(),
+            size_bytes=len(fact_type.encode("utf-8")),
+            schema_name="generation-coverage-fact-type",
+            schema_version="1",
+            record_count=None,
+        )
+        for fact_type in sorted(manifest.coverage.fact_types)
+    )
+    items.extend(
+        _catalog_dataset_items(
+            provider_id, catalog, str(catalog.get("catalog_schema_version"))
+        )
+    )
+    # The product data-class item is an input to the policy's admitted-binding
+    # digest, so its identity must exclude that policy to avoid a digest cycle.
+    source_identity = dict(source)
+    source_admission = dict(_object(source.get("admission"), "source admission"))
+    source_admission.pop("dataset_disposition_policy", None)
+    source_identity["admission"] = source_admission
+    source_sha256 = hashlib.sha256(canonical_json_bytes(source_identity)).hexdigest()
+    items.extend(
+        ProviderDatasetInventoryItem(
+            provider_id=provider_id,
+            item_kind=DatasetItemKind.PRODUCT_DATA_CLASS,
+            item_id=str(data_class),
+            sha256=hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "data_class": data_class,
+                        "source_segment_id": source["source_id"],
+                        "source_segment_sha256": source_sha256,
+                    }
+                )
+            ).hexdigest(),
+            size_bytes=len(str(data_class).encode("utf-8")),
+            schema_name="financial-mvp-source-data-class",
+            schema_version="1",
+            record_count=None,
+        )
+        for data_class in sorted(
+            _text(item, f"{source['source_id']}.data_class")
+            for item in source.get("data_classes", [])
+        )
+    )
+    return items
+
+
+def _dataset_disposition_policy(source: Mapping[str, Any]) -> dict[str, Any]:
+    admission = _object(source.get("admission"), "source admission")
+    policy = _object(
+        admission.get("dataset_disposition_policy"),
+        "source admission dataset disposition policy",
+    )
+    if policy.get("policy_id") != "PROVIDER_ADMIT_OR_DECLARE_V1":
+        raise ProviderLedgerError("provider dataset disposition policy differs")
+    if policy.get("policy_version") != "1":
+        raise ProviderLedgerError("provider dataset disposition policy version differs")
+    if policy.get("policy_owner") != "PRODUCT_OWNER_GOVERNING_ISSUE_303":
+        raise ProviderLedgerError("provider dataset disposition policy owner differs")
+    if policy.get("authority_issue") != 303:
+        raise ProviderLedgerError("provider dataset disposition authority differs")
+    _run_id(
+        policy.get("upstream_inventory_sha256"),
+        "provider upstream inventory digest",
+    )
+    _run_id(
+        policy.get("admitted_item_set_sha256"),
+        "provider admitted item set digest",
+    )
+    _run_id(
+        policy.get("product_data_class_set_sha256"),
+        "provider product data-class set digest",
+    )
+    if (
+        not isinstance(policy.get("admitted_item_count"), int)
+        or policy["admitted_item_count"] < 0
+    ):
+        raise ProviderLedgerError("provider admitted item count is invalid")
+    if (
+        not isinstance(policy.get("product_data_class_count"), int)
+        or policy["product_data_class_count"] < 1
+    ):
+        raise ProviderLedgerError("provider product data-class count is invalid")
+    _strings(
+        policy.get("allowed_exclusion_reasons"),
+        "provider allowed exclusion reasons",
+    )
+    _day(policy.get("effective_start"), "provider disposition effective_start")
+    if policy.get("effective_end") is not None:
+        _day(policy["effective_end"], "provider disposition effective_end")
+    return policy
+
+
+def _inventory_digest(items: Sequence[ProviderDatasetInventoryItem]) -> str:
+    return provider_upstream_inventory_digest(items)
+
+
+def _admitted_item_set_digest(
+    dispositions: Sequence[ProviderDatasetDisposition],
+) -> tuple[int, str]:
+    return admitted_binding_set_digest(dispositions)
+
+
+def _product_data_class_set_digest(
+    inventory: Sequence[ProviderDatasetInventoryItem],
+) -> tuple[int, str]:
+    return product_data_class_set_digest(inventory)
+
+
+def _materialized_rows(
+    provider_id: str,
+    item: ProviderDatasetInventoryItem,
+    provider_facts: Mapping[str, Sequence[Mapping[str, Any]]],
+    provider_strategy_returns: Sequence[Mapping[str, Any]],
+) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
+    target_facts: tuple[str, ...] = ()
+    rows: Sequence[Mapping[str, Any]] = ()
+    if item.item_kind is DatasetItemKind.PRODUCT_DATA_CLASS:
+        target = _DATA_CLASS_TARGET_FACT.get(item.item_id)
+        if target == "provider_strategy_returns":
+            rows = [
+                row
+                for row in provider_strategy_returns
+                if row.get("provider_id") == provider_id
+            ]
+        elif target is not None:
+            rows = provider_facts.get(target, ())
+        if target is not None:
+            target_facts = (target,)
+    elif item.item_kind is DatasetItemKind.CATALOG_DATASET:
+        if "/" not in item.item_id:
+            target = _SOURCE_FACT_TARGET.get(item.item_id)
+            if target is not None:
+                target_facts = (target,)
+                rows = provider_facts.get(target, ())
+    elif item.item_kind is DatasetItemKind.COVERAGE_FACT_TYPE:
+        target = _SOURCE_FACT_TARGET.get(item.item_id)
+        if target is not None:
+            target_facts = (target,)
+            rows = provider_facts.get(target, ())
+    elif item.item_kind is DatasetItemKind.ARTIFACT:
+        if (
+            provider_id == "portfolio123"
+            and item.item_id == "tables/har_equity_curve.parquet"
+        ):
+            target_facts = ("provider_strategy_returns",)
+            rows = [
+                row
+                for row in provider_strategy_returns
+                if row.get("provider_id") == provider_id
+            ]
+        else:
+            matched: dict[str, list[Mapping[str, Any]]] = {}
+            for fact_name, fact_rows in provider_facts.items():
+                selected = [
+                    row
+                    for row in fact_rows
+                    if row.get("source_artifact_id") == item.item_id
+                ]
+                if selected:
+                    matched[fact_name] = selected
+            target_facts = tuple(sorted(matched))
+            rows = [row for fact_name in target_facts for row in matched[fact_name]]
+    return target_facts, [dict(row) for row in rows]
+
+
+def _row_bounds(rows: Sequence[Mapping[str, Any]]) -> tuple[date, date]:
+    observed = []
+    for row in rows:
+        raw = row.get("date")
+        observed.append(
+            _day(raw, "materialized row date")
+            if raw not in {None, ""}
+            else _row_day(row)
+        )
+    days = [item for item in observed if item is not None]
+    if len(days) != len(rows) or not days:
+        raise ProviderLedgerError("admitted dataset lacks an exact observed interval")
+    return min(days), max(days)
+
+
+def _dataset_disposition(
+    item: ProviderDatasetInventoryItem,
+    source: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    source_observed_start: date,
+    source_observed_end: date,
+    provider_facts: Mapping[str, Sequence[Mapping[str, Any]]],
+    provider_strategy_returns: Sequence[Mapping[str, Any]],
+    contract_digest: str,
+) -> ProviderDatasetDisposition:
+    target_facts, rows = _materialized_rows(
+        item.provider_id, item, provider_facts, provider_strategy_returns
+    )
+    source_sha256 = hashlib.sha256(canonical_json_bytes(source)).hexdigest()
+    consumers = tuple(sorted(_strings(source.get("consumers"), "source consumers")))
+    invalidated = tuple(
+        sorted(_strings(source.get("invalidated_outputs"), "invalidated outputs"))
+    ) or ("NO_CURRENT_PRODUCT_OUTPUT",)
+    units = _object(source.get("units"), "source units")
+    temporal = _object(source.get("temporal"), "source temporal")
+    admission = _object(source.get("admission"), "source admission")
+    evidence_layer = _text(source.get("evidence_layer"), "source evidence_layer")
+    actual_layers = {
+        str(row.get("evidence_layer"))
+        for row in rows
+        if row.get("evidence_layer") not in {None, ""}
+    }
+    reason: str | None = None
+    if not consumers:
+        reason = "NO_CURRENT_PRODUCT_CONSUMER"
+    elif not rows or not target_facts:
+        reason = (
+            "REQUIRED_DATA_CLASS_NOT_MATERIALIZED"
+            if item.item_kind is DatasetItemKind.PRODUCT_DATA_CLASS
+            else "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
+        )
+    elif actual_layers and actual_layers != {evidence_layer}:
+        reason = "MATERIALIZED_EVIDENCE_LAYER_DIFFERS_FROM_PRODUCT_AUTHORITY"
+    required_admission_facts = {
+        _TARGET_ADMISSION_FACT[target_fact]
+        for target_fact in target_facts
+        if target_fact in _TARGET_ADMISSION_FACT
+    }
+    if len(required_admission_facts) != len(target_facts):
+        raise ProviderLedgerError(
+            f"{item.provider_id} materialized target fact is not governed"
+        )
+    admitted_facts = set(_strings(admission.get("facts"), "source admission facts"))
+    if not required_admission_facts.issubset(admitted_facts):
+        raise ProviderLedgerError(
+            f"{item.provider_id} materialized target facts differ from authority"
+        )
+    authority_ref = (
+        f"contract:{contract_digest}#source_segments/{source['source_id']};"
+        f"issue:{policy['authority_issue']}"
+    )
+    policy_effective_start = _day(
+        policy["effective_start"], "provider disposition effective_start"
+    )
+    policy_effective_end = (
+        None
+        if policy.get("effective_end") is None
+        else _day(policy["effective_end"], "provider disposition effective_end")
+    )
+    policy_id = _text(policy["policy_id"], "provider disposition policy_id")
+    policy_version = _text(
+        policy["policy_version"], "provider disposition policy_version"
+    )
+    policy_owner = _text(policy["policy_owner"], "provider disposition policy_owner")
+    if reason is not None:
+        return ProviderDatasetDisposition(
+            provider_id=item.provider_id,
+            item_kind=item.item_kind,
+            item_id=item.item_id,
+            item_sha256=item.sha256,
+            action=DatasetDispositionAction.EXCLUDE,
+            source_segment_id=str(source["source_id"]),
+            source_segment_sha256=source_sha256,
+            authority_ref=authority_ref,
+            readiness_impact=(
+                "REQUIRED_NOT_READY"
+                if source.get("product_requirement") == "REQUIRED"
+                else "NO_CURRENT_PRODUCT_EFFECT"
+            ),
+            consumers=consumers,
+            invalidated_outputs=invalidated,
+            evidence_layer=evidence_layer,
+            units=_text(units.get("measurement"), "source measurement"),
+            currency=_text(units.get("currency"), "source currency"),
+            timezone=_text(temporal.get("timezone"), "source timezone"),
+            calendar=_text(temporal.get("calendar"), "source calendar"),
+            materialized_record_count=0,
+            policy_id=policy_id,
+            policy_version=policy_version,
+            policy_owner=policy_owner,
+            policy_effective_start=policy_effective_start,
+            policy_effective_end=policy_effective_end,
+            source_observed_start=source_observed_start,
+            source_observed_end=source_observed_end,
+            data_class=(
+                item.item_id
+                if item.item_kind is DatasetItemKind.PRODUCT_DATA_CLASS
+                else None
+            ),
+            reason=reason,
+        )
+    start, end = _row_bounds(rows)
+    materialized = _canonical_json_value_bytes(
+        {"rows": rows, "target_facts": list(target_facts)}
+    )
+    return ProviderDatasetDisposition(
+        provider_id=item.provider_id,
+        item_kind=item.item_kind,
+        item_id=item.item_id,
+        item_sha256=item.sha256,
+        action=DatasetDispositionAction.ADMIT,
+        source_segment_id=str(source["source_id"]),
+        source_segment_sha256=source_sha256,
+        authority_ref=authority_ref,
+        readiness_impact="ADMITTED",
+        consumers=consumers,
+        invalidated_outputs=(),
+        evidence_layer=evidence_layer,
+        units=_text(units.get("measurement"), "source measurement"),
+        currency=_text(units.get("currency"), "source currency"),
+        timezone=_text(temporal.get("timezone"), "source timezone"),
+        calendar=_text(temporal.get("calendar"), "source calendar"),
+        materialized_record_count=len(rows),
+        policy_id=policy_id,
+        policy_version=policy_version,
+        policy_owner=policy_owner,
+        policy_effective_start=policy_effective_start,
+        policy_effective_end=policy_effective_end,
+        source_observed_start=source_observed_start,
+        source_observed_end=source_observed_end,
+        materialized_sha256=hashlib.sha256(materialized).hexdigest(),
+        observed_start=start,
+        observed_end=end,
+        data_class=(
+            item.item_id
+            if item.item_kind is DatasetItemKind.PRODUCT_DATA_CLASS
+            else None
+        ),
+        target_facts=target_facts,
+        transform=_text(admission.get("transform"), "source admission transform"),
+        transform_version=_text(admission.get("version"), "source admission version"),
+    )
+
+
+def _admit_or_declare_receipt(
+    authority: Mapping[str, Any],
+    identities: Sequence[ProviderGenerationIdentity],
+    manifests: Mapping[str, GenerationManifest],
+    catalogs: Mapping[str, Mapping[str, Any]],
+    provider_facts: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+    provider_strategy_returns: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], bytes]:
+    inventory: list[ProviderDatasetInventoryItem] = []
+    dispositions: list[ProviderDatasetDisposition] = []
+    providers = []
+    by_provider = {item.provider_id: item for item in identities}
+    for provider_id in sorted(_PROVIDER_CATALOGS):
+        identity = by_provider[provider_id]
+        manifest = manifests[provider_id]
+        source = _source_segment(authority, provider_id, identity, manifest)
+        policy = _dataset_disposition_policy(source)
+        provider_items = _provider_inventory(
+            provider_id, manifest, catalogs[provider_id], source
+        )
+        if _inventory_digest(provider_items) != policy["upstream_inventory_sha256"]:
+            raise ProviderLedgerError(
+                f"{provider_id} upstream dataset inventory differs from authority"
+            )
+        product_class_count, product_class_digest = _product_data_class_set_digest(
+            provider_items
+        )
+        if (
+            product_class_count != policy["product_data_class_count"]
+            or product_class_digest != policy["product_data_class_set_sha256"]
+        ):
+            raise ProviderLedgerError(
+                f"{provider_id} product data-class set differs from authority"
+            )
+        if (
+            _day(policy["effective_start"], "provider disposition effective_start")
+            != manifest.as_of_date
+            or policy.get("effective_end") is not None
+        ):
+            raise ProviderLedgerError(
+                f"{provider_id} dataset disposition policy interval differs"
+            )
+        if (
+            manifest.coverage.observed_start is None
+            or manifest.coverage.observed_end is None
+        ):
+            raise ProviderLedgerError(
+                f"{provider_id} manifest lacks dataset disposition interval"
+            )
+        inventory.extend(provider_items)
+        provider_dispositions = [
+            _dataset_disposition(
+                item,
+                source,
+                policy,
+                manifest.coverage.observed_start,
+                manifest.coverage.observed_end,
+                provider_facts[provider_id],
+                provider_strategy_returns,
+                str(authority["contract_semantic_sha256"]),
+            )
+            for item in provider_items
+        ]
+        admitted_count, admitted_digest = _admitted_item_set_digest(
+            provider_dispositions
+        )
+        if (
+            admitted_count != policy["admitted_item_count"]
+            or admitted_digest != policy["admitted_item_set_sha256"]
+        ):
+            raise ProviderLedgerError(
+                f"{provider_id} admitted dataset set differs from authority"
+            )
+        allowed_reasons = set(
+            _strings(
+                policy["allowed_exclusion_reasons"],
+                "provider allowed exclusion reasons",
+            )
+        )
+        for disposition in provider_dispositions:
+            if disposition.action is DatasetDispositionAction.EXCLUDE:
+                if disposition.reason not in allowed_reasons:
+                    raise ProviderLedgerError(
+                        f"{provider_id} dataset exclusion is not authorized"
+                    )
+                if disposition.readiness_impact != policy["exclusion_readiness_impact"]:
+                    raise ProviderLedgerError(
+                        f"{provider_id} dataset exclusion readiness differs"
+                    )
+        dispositions.extend(provider_dispositions)
+        providers.append(
+            {
+                **identity.to_dict(),
+                "adapter_name": manifest.adapter.name,
+                "adapter_version": manifest.adapter.version,
+                "coverage_boundary": manifest.coverage.boundary,
+                "coverage_status": manifest.coverage.status.value,
+                "generation_as_of_date": manifest.as_of_date.isoformat(),
+                "observed_end": manifest.coverage.observed_end.isoformat(),
+                "observed_start": manifest.coverage.observed_start.isoformat(),
+                "source_segment_id": source["source_id"],
+                "source_segment_sha256": hashlib.sha256(
+                    canonical_json_bytes(source)
+                ).hexdigest(),
+            }
+        )
+    ordered_inventory, ordered_dispositions = validate_dataset_dispositions(
+        inventory, dispositions
+    )
+    inventory_rows = [item.to_dict() for item in ordered_inventory]
+    disposition_rows = [item.to_dict() for item in ordered_dispositions]
+    blocked = [
+        item
+        for item in ordered_dispositions
+        if item.action is DatasetDispositionAction.EXCLUDE
+        and item.readiness_impact == "REQUIRED_NOT_READY"
+    ]
+    receipt = {
+        "admission_gate_status": "PASS",
+        "census_id": authority["census_id"],
+        "census_sha256": authority["census_sha256"],
+        "contract_raw_sha256": authority["contract_raw_sha256"],
+        "contract_semantic_sha256": authority["contract_semantic_sha256"],
+        "disposition_sha256": hashlib.sha256(
+            _canonical_json_value_bytes(disposition_rows)
+        ).hexdigest(),
+        "dispositions": disposition_rows,
+        "invalidated_outputs": sorted(
+            {output for item in blocked for output in item.invalidated_outputs}
+        ),
+        "inventory": inventory_rows,
+        "inventory_sha256": hashlib.sha256(
+            _canonical_json_value_bytes(inventory_rows)
+        ).hexdigest(),
+        "product_id": authority["product_id"],
+        "product_readiness": (
+            "REQUIRED_NOT_READY" if blocked else "READY_FOR_COMPOSITION"
+        ),
+        "product_version": authority["product_version"],
+        "provider_generations": providers,
+        "receipt_type": "PROVIDER_ADMIT_OR_DECLARE_V1",
+        "schema_version": ADMIT_OR_DECLARE_SCHEMA_VERSION,
+    }
+    validate_admit_or_declare_receipt(
+        receipt,
+        product_authority=authority,
+        source_segments=_object(authority["sources"], "financial MVP sources"),
+        provider_generations={str(row["provider_id"]): row for row in providers},
+    )
+    return receipt, canonical_json_bytes(receipt)
+
+
+def build_catalog(
+    spec_path: Path,
+) -> tuple[dict[str, Any], GenerationManifest, bytes, bytes]:
     """Build one deterministic provider-ledger catalog and manifest."""
 
     spec = _load_spec(spec_path)
+    authority = _financial_mvp_authority(spec)
     as_of = _day(spec["as_of_date"], "spec.as_of_date")
     provenance, provenance_artifact = _provenance(spec)
     accounts, strategies, assignments = _assignment_index(provenance)
@@ -1921,6 +2732,7 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
     exceptions: list[dict[str, Any]] = []
     catalogs: dict[str, dict[str, Any]] = {}
     manifests: dict[str, GenerationManifest] = {}
+    provider_facts: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for provider_id in sorted(_PROVIDER_CATALOGS):
         identity, manifest, provider_catalog, artifacts, root = _provider(
             provider_id, _object(spec["providers"], "providers")[provider_id], as_of
@@ -1950,6 +2762,7 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
             manifest=manifest,
             root=root,
         )
+        provider_facts[provider_id] = facts
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
@@ -1992,7 +2805,33 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
         {item.provider_id: item for item in identities},
         {provider_id: item.as_of_date for provider_id, item in manifests.items()},
     )
-    admissions = _admissions(combined, evidence_rows)
+    authoritative_provider_ids = {
+        provider_id
+        for provider_id, source_id in _PROVIDER_SOURCE_SEGMENTS.items()
+        if _object(authority["sources"][source_id], source_id).get(
+            "product_requirement"
+        )
+        == "REQUIRED"
+    }
+    authoritative_strategy_ids = {
+        str(row.get("strategy_id"))
+        for row in _objects(authority["contract"].get("strategies"), "strategies")
+        if row.get("product_requirement") == "REQUIRED"
+    }
+    admissions = _admissions(
+        combined,
+        evidence_rows,
+        authoritative_provider_ids,
+        authoritative_strategy_ids,
+    )
+    admit_or_declare, admit_or_declare_bytes = _admit_or_declare_receipt(
+        authority,
+        identities,
+        manifests,
+        catalogs,
+        provider_facts,
+        provider_strategy_returns,
+    )
     fact_counts = []
     for fact_type, rows in sorted(combined.items()):
         rows.sort(
@@ -2086,14 +2925,31 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
         schema_name="provider-ledger-catalog",
         schema_version=str(CATALOG_SCHEMA_VERSION),
     )
+    receipt_artifact = SourceArtifact(
+        artifact_id="normalized/admit-or-declare-receipt.json",
+        sha256=hashlib.sha256(admit_or_declare_bytes).hexdigest(),
+        size_bytes=len(admit_or_declare_bytes),
+        as_of_date=as_of,
+        schema_name="provider-admission-receipt",
+        schema_version=str(ADMIT_OR_DECLARE_SCHEMA_VERSION),
+    )
     manifest = GenerationManifest.build(
         as_of_date=as_of,
-        adapter=AdapterIdentity(name="quant-engine-provider-ledger", version="1"),
+        adapter=AdapterIdentity(
+            name="quant-engine-provider-ledger", version=ADAPTER_VERSION
+        ),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="exact configured local provider generations and strategy evidence; upstream gaps are preserved per provider",
             fact_types=tuple(
-                sorted({*combined, "strategy_evidence", "strategy_returns"})
+                sorted(
+                    {
+                        *combined,
+                        "admit_or_declare_receipt",
+                        "strategy_evidence",
+                        "strategy_returns",
+                    }
+                )
             ),
             observed_start=min(
                 artifact.as_of_date
@@ -2110,37 +2966,53 @@ def build_catalog(spec_path: Path) -> tuple[dict[str, Any], GenerationManifest, 
             *provider_artifacts,
             *strategy_artifacts,
             catalog_artifact,
+            receipt_artifact,
         ),
         verification=VerificationStatus.VERIFIED,
     )
-    return catalog, manifest, catalog_bytes
+    if admit_or_declare["admission_gate_status"] != "PASS":
+        raise ProviderLedgerError("admit-or-declare gate did not pass")
+    return catalog, manifest, catalog_bytes, admit_or_declare_bytes
 
 
-def stage_candidate(spec_path: Path) -> dict[str, object]:
+def stage_candidate(
+    spec_path: Path, output_root_override: Path | None = None
+) -> dict[str, object]:
     """Stage immutable output without advancing an authority pointer."""
 
     spec = _load_spec(spec_path)
-    output_root = Path(_text(spec["output_root"], "output_root")).resolve()
-    catalog, manifest, catalog_bytes = build_catalog(spec_path)
+    output_root = (
+        output_root_override.resolve()
+        if output_root_override is not None
+        else Path(_text(spec["output_root"], "output_root")).resolve()
+    )
+    catalog, manifest, catalog_bytes, admit_or_declare_bytes = build_catalog(spec_path)
     final = output_root / "generations" / manifest.generation_id
     if final.exists():
         if final.is_symlink() or not final.is_dir():
             raise ProviderLedgerError("provider-ledger generation path conflicts")
-        if (final / "provider-ledger.json").read_bytes() != catalog_bytes or (
-            final / "generation.json"
-        ).read_bytes() != manifest.to_json_bytes():
+        if (
+            (final / "provider-ledger.json").read_bytes() != catalog_bytes
+            or (final / "admit-or-declare-receipt.json").read_bytes()
+            != admit_or_declare_bytes
+            or (final / "generation.json").read_bytes() != manifest.to_json_bytes()
+        ):
             raise ProviderLedgerError("provider-ledger generation differs")
     else:
         final.parent.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=".provider-ledger-", dir=final.parent))
         try:
             (temporary / "provider-ledger.json").write_bytes(catalog_bytes)
+            (temporary / "admit-or-declare-receipt.json").write_bytes(
+                admit_or_declare_bytes
+            )
             (temporary / "generation.json").write_bytes(manifest.to_json_bytes())
             rename_directory_with_retry(temporary, final)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
     return {
+        "admit_or_declare_sha256": hashlib.sha256(admit_or_declare_bytes).hexdigest(),
         "fact_counts": catalog["fact_counts"],
         "generation_id": manifest.generation_id,
         "manifest_sha256": hashlib.sha256(manifest.to_json_bytes()).hexdigest(),
@@ -2149,16 +3021,37 @@ def stage_candidate(spec_path: Path) -> dict[str, object]:
     }
 
 
-def verify_candidate(spec_path: Path, generation_id: str) -> dict[str, object]:
+def verify_candidate(
+    spec_path: Path,
+    generation_id: str,
+    output_root_override: Path | None = None,
+) -> dict[str, object]:
     spec = _load_spec(spec_path)
-    output_root = Path(_text(spec["output_root"], "output_root")).resolve()
-    _, manifest, catalog_bytes = build_catalog(spec_path)
+    output_root = (
+        output_root_override.resolve()
+        if output_root_override is not None
+        else Path(_text(spec["output_root"], "output_root")).resolve()
+    )
+    _, manifest, catalog_bytes, admit_or_declare_bytes = build_catalog(spec_path)
     if manifest.generation_id != generation_id:
         raise ProviderLedgerError("rebuilt provider-ledger generation differs")
     generation_root = output_root / "generations" / generation_id
-    if (generation_root / "provider-ledger.json").read_bytes() != catalog_bytes:
+    catalog_path = _exact_file(
+        generation_root, Path("provider-ledger.json"), "staged provider-ledger catalog"
+    )
+    receipt_path = _exact_file(
+        generation_root,
+        Path("admit-or-declare-receipt.json"),
+        "staged admit-or-declare receipt",
+    )
+    manifest_path = _exact_file(
+        generation_root, Path("generation.json"), "staged provider-ledger manifest"
+    )
+    if catalog_path.read_bytes() != catalog_bytes:
         raise ProviderLedgerError("staged provider-ledger catalog differs")
-    if (generation_root / "generation.json").read_bytes() != manifest.to_json_bytes():
+    if receipt_path.read_bytes() != admit_or_declare_bytes:
+        raise ProviderLedgerError("staged admit-or-declare receipt differs")
+    if manifest_path.read_bytes() != manifest.to_json_bytes():
         raise ProviderLedgerError("staged provider-ledger manifest differs")
     return {
         "generation_id": generation_id,
@@ -2171,18 +3064,20 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     stage = sub.add_parser("stage")
     stage.add_argument("--spec", type=Path, required=True)
+    stage.add_argument("--output-root", type=Path)
     verify = sub.add_parser("verify")
     verify.add_argument("--spec", type=Path, required=True)
     verify.add_argument("--generation-id", required=True)
+    verify.add_argument("--output-root", type=Path)
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
     result = (
-        stage_candidate(args.spec)
+        stage_candidate(args.spec, args.output_root)
         if args.command == "stage"
-        else verify_candidate(args.spec, args.generation_id)
+        else verify_candidate(args.spec, args.generation_id, args.output_root)
     )
     print(json.dumps(result, sort_keys=True))
     return 0
