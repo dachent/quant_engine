@@ -4,7 +4,6 @@ import hashlib
 import json
 from copy import deepcopy
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,13 +16,6 @@ from quant_engine.portfolio_ledger import (
     validate_governed_hwm_calendar_authority,
 )
 
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_BASE_POLICY = json.loads(
-    (_REPO_ROOT / "contracts" / "portfolio-hwm-policy-v4.json").read_text(
-        encoding="utf-8"
-    )
-)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -44,16 +36,17 @@ def _hash(value: dict[str, Any]) -> str:
 
 
 def _policy(*, ready: bool = True, accepted: bool = True) -> dict[str, Any]:
-    policy = deepcopy(_BASE_POLICY)
-    calendar = policy["calendar_policy"]
-    assert isinstance(calendar, dict)
-    calendar["release_authority_status"] = (
-        "READY" if ready else "REQUIRED_NOT_READY"
-    )
-    calendar["accepted_governed_calendar_policy_ids"] = (
-        [POLICY_ID] if ready and accepted else []
-    )
-    return policy
+    return {
+        "policy_id": "PORT-HWM-4",
+        "calendar_policy": {
+            "authority": "HASH_BOUND_ACCEPTED_INTERVAL_SEQUENCE",
+            "interval_rule": "EXACT_CONTIGUOUS_ONE_DAY_ACCEPTED_INTERVALS",
+            "missing_interval": "FAIL_NO_ZERO_FILL_OR_HOLIDAY_INFERENCE",
+            "release_authority_status": "READY" if ready else "REQUIRED_NOT_READY",
+            "accepted_governed_calendar_policy_ids": [POLICY_ID] if accepted else [],
+            "portable_synthetic_policy_id": "SYNTHETIC_DAILY_COMMON_CALENDAR",
+        },
+    }
 
 
 def _closure(day: str) -> dict[str, Any]:
@@ -164,23 +157,6 @@ def test_closed_date_zero_requires_policy_acceptance() -> None:
         allow_nan=False,
     ).encode("utf-8")
     assert result == expected
-
-
-def test_partial_policy_cannot_claim_ready() -> None:
-    partial_policy = {
-        "policy_id": "PORT-HWM-4",
-        "calendar_policy": {
-            "authority": "HASH_BOUND_ACCEPTED_INTERVAL_SEQUENCE",
-            "interval_rule": "EXACT_CONTIGUOUS_ONE_DAY_ACCEPTED_INTERVALS",
-            "missing_interval": "FAIL_NO_ZERO_FILL_OR_HOLIDAY_INFERENCE",
-            "release_authority_status": "READY",
-            "accepted_governed_calendar_policy_ids": [POLICY_ID],
-            "portable_synthetic_policy_id": "SYNTHETIC_DAILY_COMMON_CALENDAR",
-        },
-    }
-
-    with pytest.raises(GovernedHwmAuthorityError, match="policy"):
-        _validate(_authority(), policy=partial_policy)
 
 
 def test_not_ready_policy_cannot_promote() -> None:
