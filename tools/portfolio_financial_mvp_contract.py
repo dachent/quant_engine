@@ -5118,6 +5118,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             "",
             f"- Census ID: `{census['census_id']}`",
             f"- Census as-of: `{census['as_of']}`",
+            f"- Owner decision approved: `{census['decision_approved_on']}`",
             f"- Decision evidence: {census['decision_evidence_url']}",
             f"- Decision payload SHA-256: `{census['decision_payload_sha256']}`",
             f"- Census SHA-256: `{accepted_census_digest}`",

@@ -449,6 +449,7 @@ def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
         row["sleeve_alias"] for row in census["account_sleeves"]
     }
     assert b"Current provider/account census" in rendered.summary_markdown
+    assert b"Owner decision approved: `2026-08-19`" in rendered.summary_markdown
     assert census["decision_payload_sha256"].encode() in rendered.summary_markdown
 
     tampered = _census_owner_comment()

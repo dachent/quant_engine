@@ -135,6 +135,7 @@ Each receipt binds one independently changeable policy payload to its recorded o
 
 - Census ID: `PORTFOLIO_CURRENT_CENSUS_V1`
 - Census as-of: `2026-08-16`
+- Owner decision approved: `2026-08-19`
 - Decision evidence: https://github.com/dachent/quant_engine/issues/302#issuecomment-5350132900
 - Decision payload SHA-256: `535b6a35ecfe875d88e3cba86b3a0f6eb49c9bf0eac772e506d75dc5f7bda097`
 - Census SHA-256: `834f1a065fbd8c8ac800d44493116a37292daf1e98eaec14e0aab9e5bd55bbe9`
