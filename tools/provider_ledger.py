@@ -2597,13 +2597,19 @@ def _admit_or_declare_receipt(
             raise ProviderLedgerError(
                 f"{provider_id} product data-class set differs from authority"
             )
-        if (
-            _day(policy["effective_start"], "provider disposition effective_start")
-            != manifest.as_of_date
-            or policy.get("effective_end") is not None
+        policy_start = _day(
+            policy["effective_start"], "provider disposition effective_start"
+        )
+        policy_end = (
+            None
+            if policy.get("effective_end") is None
+            else _day(policy["effective_end"], "provider disposition effective_end")
+        )
+        if policy_start > manifest.as_of_date or (
+            policy_end is not None and policy_end < manifest.as_of_date
         ):
             raise ProviderLedgerError(
-                f"{provider_id} dataset disposition policy interval differs"
+                f"{provider_id} dataset disposition policy does not cover generation"
             )
         if (
             manifest.coverage.observed_start is None

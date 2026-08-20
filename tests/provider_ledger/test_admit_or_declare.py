@@ -47,6 +47,8 @@ def _fixture(
     quantbase_layer: str = "ACCOUNT_LIVE",
     extra_dataset: bool = False,
     missing_product_class: bool = False,
+    policy_effective_start: date = DAY,
+    policy_effective_end: date | None = None,
 ) -> tuple[
     dict[str, Any],
     list[ProviderGenerationIdentity],
@@ -116,8 +118,12 @@ def _fixture(
                         "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER",
                     ],
                     "authority_issue": 303,
-                    "effective_end": None,
-                    "effective_start": DAY.isoformat(),
+                    "effective_end": (
+                        None
+                        if policy_effective_end is None
+                        else policy_effective_end.isoformat()
+                    ),
+                    "effective_start": policy_effective_start.isoformat(),
                     "exclusion_invalidated_outputs_rule": (
                         "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
                     ),
@@ -313,6 +319,7 @@ def test_receipt_consumer_rejects_coherent_provider_authority_rewrite() -> None:
         "SOURCE_SWAP",
         "EVIDENCE_LAYER",
         "POLICY_OWNER",
+        "POLICY_INTERVAL",
         "UNKNOWN_PROVIDER",
         "CATALOG_SHA",
         "ADAPTER_NAME",
@@ -350,6 +357,8 @@ def test_receipt_consumer_rejects_coherent_authority_attacks(attack: str) -> Non
                 row["evidence_layer"] = "PROVIDER_LIVE"
     elif attack == "POLICY_OWNER":
         rewritten["dispositions"][0]["policy_owner"] = "UNAUTHORIZED_OWNER"
+    elif attack == "POLICY_INTERVAL":
+        rewritten["dispositions"][0]["policy_effective_start"] = "2026-08-01"
     elif attack == "UNKNOWN_PROVIDER":
         for row in rewritten["provider_generations"]:
             if row["provider_id"] == "alpaca":
@@ -479,6 +488,36 @@ def test_new_provider_dataset_fails_before_receipt() -> None:
         match="schwab upstream dataset inventory differs from authority",
     ):
         _receipt(extra_dataset=True)
+
+
+def test_bounded_policy_interval_covering_generation_is_accepted() -> None:
+    receipt, _, authority, provider_generations = _receipt(
+        policy_effective_start=date(2026, 8, 1),
+        policy_effective_end=date(2026, 8, 31),
+    )
+    ledger.validate_admit_or_declare_receipt(
+        receipt,
+        product_authority=authority,
+        source_segments=authority["sources"],
+        provider_generations=provider_generations,
+    )
+
+
+@pytest.mark.parametrize(
+    "start,end",
+    (
+        (date(2026, 8, 15), None),
+        (date(2026, 8, 1), date(2026, 8, 13)),
+    ),
+)
+def test_policy_interval_not_covering_generation_fails_before_receipt(
+    start: date, end: date | None
+) -> None:
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="dataset disposition policy does not cover generation",
+    ):
+        _receipt(policy_effective_start=start, policy_effective_end=end)
 
 
 def test_evidence_layer_conflict_blocks_the_product_data_class() -> None:

@@ -378,7 +378,6 @@ class ProviderDatasetDisposition:
             self.policy_id != _DATASET_POLICY_ID
             or self.policy_version != _DATASET_POLICY_VERSION
             or self.policy_owner != _DATASET_POLICY_OWNER
-            or self.policy_effective_end is not None
         ):
             raise ProviderAdmissionError("dataset disposition policy authority differs")
         if (self.observed_start is None) != (self.observed_end is None):
@@ -1113,8 +1112,6 @@ def validate_admit_or_declare_receipt(
             or item.currency != units.get("currency")
             or item.timezone != temporal.get("timezone")
             or item.calendar != temporal.get("calendar")
-            or item.policy_effective_start
-            != _date(provider_row["generation_as_of_date"], "generation_as_of_date")
             or item.source_observed_start
             != _date(provider_row["observed_start"], "observed_start")
             or item.source_observed_end
@@ -1127,9 +1124,23 @@ def validate_admit_or_declare_receipt(
             item.policy_id != policy.get("policy_id")
             or item.policy_version != policy.get("policy_version")
             or item.policy_owner != policy.get("policy_owner")
+            or item.policy_effective_start
+            != _date(policy.get("effective_start"), "policy effective_start")
+            or item.policy_effective_end
+            != _optional_date(policy.get("effective_end"), "policy effective_end")
         ):
             raise ProviderAdmissionError(
                 "provider disposition policy differs from product authority"
+            )
+        generation_as_of = _date(
+            provider_row["generation_as_of_date"], "generation_as_of_date"
+        )
+        if item.policy_effective_start > generation_as_of or (
+            item.policy_effective_end is not None
+            and item.policy_effective_end < generation_as_of
+        ):
+            raise ProviderAdmissionError(
+                "provider disposition policy does not cover provider generation"
             )
         if item.action is DatasetDispositionAction.ADMIT:
             if (
