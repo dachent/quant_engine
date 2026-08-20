@@ -22,7 +22,7 @@ from quant_engine.core.contracts import GenerationManifest, canonical_json_bytes
 
 
 BUILDER: Final = "portfolio-current-dependence-source"
-BUILDER_VERSION: Final = "1.0.0"
+BUILDER_VERSION: Final = "1.1.0"
 SCHEMA_VERSION: Final = 1
 POLICY_ID: Final = "PORT-DEPENDENCE-1"
 REQUIRED_HISTORY_FILES: Final = frozenset(
@@ -122,6 +122,12 @@ def _day(value: object, name: str) -> date:
     if parsed.isoformat() != accepted:
         raise CurrentDependenceError(f"{name} must be a canonical date")
     return parsed
+
+
+def _nonnegative_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise CurrentDependenceError(f"{name} is invalid")
+    return value
 
 
 def _financial_module() -> Any:
@@ -427,7 +433,10 @@ def _verified_history(
 
 
 def _verified_allocations(
-    generation_root: Path, policy: Mapping[str, Any], required_ids: Sequence[str]
+    generation_root: Path,
+    policy: Mapping[str, Any],
+    required_ids: Sequence[str],
+    evaluated_on: date,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     root = generation_root.resolve()
     if (
@@ -455,6 +464,8 @@ def _verified_allocations(
         or manifest.as_of_date.isoformat() != authority.get("as_of_date")
     ):
         raise CurrentDependenceError("allocation manifest authority differs")
+    if manifest.as_of_date > evaluated_on:
+        raise CurrentDependenceError("allocation manifest exceeds the evaluation date")
     artifacts = {item.artifact_id: item for item in manifest.artifacts}
     catalog_artifact = artifacts.get("normalized/portfolio-baseline.json")
     if catalog_artifact is None or (
@@ -483,6 +494,85 @@ def _verified_allocations(
         "catalog_sha256": _sha256(catalog_content),
         "generation_id": manifest.generation_id,
         "manifest_sha256": _sha256(manifest_content),
+    }
+
+
+def _age_evidence(
+    *,
+    contract: Mapping[str, Any],
+    policy_series: Sequence[Mapping[str, Any]],
+    selected_identities: Sequence[Mapping[str, Any]],
+    complete_through: date,
+    evaluated_on: date,
+) -> dict[str, Any]:
+    source_by_id: dict[str, Mapping[str, Any]] = {}
+    for row in _objects(contract.get("source_segments"), "financial MVP sources"):
+        source_id = _text(row.get("source_id"), "financial MVP source_id")
+        if source_id in source_by_id:
+            raise CurrentDependenceError("financial MVP source_id is duplicated")
+        source_by_id[source_id] = row
+    series_by_strategy = {
+        _text(row.get("strategy_id"), "dependence strategy_id"): _text(
+            row.get("series_id"), "dependence series_id"
+        )
+        for row in policy_series
+    }
+    limiting_inputs: list[dict[str, Any]] = []
+    for identity in selected_identities:
+        if (
+            _day(identity.get("observed_end"), "history observed_end")
+            != complete_through
+        ):
+            continue
+        strategy_id = _text(identity.get("strategy_id"), "history strategy_id")
+        source_id = _text(identity.get("source_id"), "history source_id")
+        source = source_by_id.get(source_id)
+        if source is None:
+            raise CurrentDependenceError("history source lacks product authority")
+        freshness = _object(source.get("freshness"), "history source freshness")
+        warning_after_days = _nonnegative_int(
+            freshness.get("max_age_days"), "history source max_age_days"
+        )
+        publication_lag_days = _nonnegative_int(
+            freshness.get("publication_lag_days"),
+            "history source publication_lag_days",
+        )
+        limiting_inputs.append(
+            {
+                "observed_end": complete_through.isoformat(),
+                "publication_lag_days": publication_lag_days,
+                "segment_id": _text(identity.get("segment_id"), "history segment_id"),
+                "series_id": series_by_strategy[strategy_id],
+                "source_generation_id": _hash(
+                    identity.get("source_generation_id"),
+                    "history source_generation_id",
+                ),
+                "source_id": source_id,
+                "strategy_id": strategy_id,
+                "warning_after_days": warning_after_days,
+            }
+        )
+    if not limiting_inputs:
+        raise CurrentDependenceError(
+            "latest common complete date lacks an exact limiting input"
+        )
+    strategy_order = list(series_by_strategy)
+    limiting_inputs.sort(key=lambda row: strategy_order.index(row["strategy_id"]))
+    warning_after_days = min(int(row["warning_after_days"]) for row in limiting_inputs)
+    calculation_age_days = (evaluated_on - complete_through).days
+    if calculation_age_days < 0:
+        raise CurrentDependenceError("dependence complete date exceeds evaluation date")
+    return {
+        "calculation_age_days": calculation_age_days,
+        "complete_through": complete_through.isoformat(),
+        "evaluated_on": evaluated_on.isoformat(),
+        "limiting_inputs": limiting_inputs,
+        "status": (
+            "WARN_COMPLETE_DATA_AGE"
+            if calculation_age_days > warning_after_days
+            else "CURRENT_WITHIN_AGE_THRESHOLD"
+        ),
+        "warning_after_days": warning_after_days,
     }
 
 
@@ -812,7 +902,7 @@ def build_source(
     policy_series = _objects(policy.get("series"), "dependence policy series")
     required_ids = [str(row["strategy_id"]) for row in policy_series]
     weights, allocation_identity = _verified_allocations(
-        allocation_generation_root, policy, required_ids
+        allocation_generation_root, policy, required_ids, evaluated_on
     )
     policy_weights = {
         str(row["strategy_id"]): str(row["allocation_weight"]) for row in policy_series
@@ -957,7 +1047,15 @@ def build_source(
         )
     )
     segments_content = _csv_content(SEGMENT_FIELDS, selected_segments)
+    age_evidence = _age_evidence(
+        contract=contract,
+        policy_series=policy_series,
+        selected_identities=segment_identities,
+        complete_through=complete_through,
+        evaluated_on=evaluated_on,
+    )
     source_identity = {
+        "age_evidence": age_evidence,
         "allocation_authority": allocation_identity,
         "allocation_scope": {
             "excluded_weight": format(Decimal("1") - required_weight, "f"),
@@ -966,7 +1064,7 @@ def build_source(
         },
         "builder": BUILDER,
         "builder_version": BUILDER_VERSION,
-        "calculation_age_days": (evaluated_on - complete_through).days,
+        "calculation_age_days": age_evidence["calculation_age_days"],
         "census_sha256": identities["census_sha256"],
         "complete_through": complete_through.isoformat(),
         "contract_raw_sha256": identities["contract_raw_sha256"],
@@ -1000,9 +1098,8 @@ def build_source(
         "returns_size_bytes": len(returns_content),
         "segments_sha256": _sha256(segments_content),
         "segments_size_bytes": len(segments_content),
-        "source_age_status": (
-            "CURRENT" if complete_through == evaluated_on else "WARN_COMPLETE_DATA_AGE"
-        ),
+        "source_age_status": age_evidence["status"],
+        "warning_after_days": age_evidence["warning_after_days"],
     }
     bundle_id = _sha256(canonical_json_bytes(source_identity))
     receipt = {"bundle_id": bundle_id, **source_identity}
@@ -1152,11 +1249,25 @@ def verify_packaged_source(
 
     policy_series = _objects(policy.get("series"), "dependence policy series")
     required_ids = [str(row["strategy_id"]) for row in policy_series]
+    allocation_authority = _object(
+        policy.get("allocation_authority"), "allocation authority"
+    )
+    if (
+        _day(allocation_authority.get("as_of_date"), "allocation as_of_date")
+        > evaluated_on
+    ):
+        raise CurrentDependenceError("allocation manifest exceeds the evaluation date")
     pair_count = len(required_ids) * (len(required_ids) - 1) // 2
+    age_evidence = _age_evidence(
+        contract=contract,
+        policy_series=policy_series,
+        selected_identities=selected_identities,
+        complete_through=complete_through,
+        evaluated_on=evaluated_on,
+    )
     expected_identity = {
-        "allocation_authority": _object(
-            policy.get("allocation_authority"), "allocation authority"
-        ),
+        "age_evidence": age_evidence,
+        "allocation_authority": allocation_authority,
         "allocation_scope": {
             "excluded_weight": format(Decimal("1") - required_weight, "f"),
             "normalization": "NORMALIZE_WITHIN_OWNER_APPROVED_REQUIRED_DEPENDENCE_PERIMETER",
@@ -1164,7 +1275,7 @@ def verify_packaged_source(
         },
         "builder": BUILDER,
         "builder_version": BUILDER_VERSION,
-        "calculation_age_days": (evaluated_on - complete_through).days,
+        "calculation_age_days": age_evidence["calculation_age_days"],
         "census_sha256": identities["census_sha256"],
         "complete_through": complete_through.isoformat(),
         "contract_raw_sha256": identities["contract_raw_sha256"],
@@ -1196,11 +1307,10 @@ def verify_packaged_source(
         "schema_version": SCHEMA_VERSION,
         "segments_sha256": _sha256(contents["segments.csv"]),
         "segments_size_bytes": len(contents["segments.csv"]),
-        "source_age_status": (
-            "CURRENT" if complete_through == evaluated_on else "WARN_COMPLETE_DATA_AGE"
-        ),
+        "source_age_status": age_evidence["status"],
         "spec_sha256": _sha256(spec_content),
         "spec_size_bytes": len(spec_content),
+        "warning_after_days": age_evidence["warning_after_days"],
     }
     if source_identity != expected_identity:
         raise CurrentDependenceError("dependence source receipt authority differs")

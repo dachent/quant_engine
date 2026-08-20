@@ -193,8 +193,12 @@ unordered pairs in each of two evidence modes, or 42 pair-mode rows. Composer
 Holy Grail is excluded as immaterial and EchoTrade is excluded as deprecated
 history-only; neither is silently treated as missing dependence data. The
 latest common complete boundary is 2026-08-13. Later evaluation dates retain
-that boundary and emit the structured complete-data-age warning instead of
-inventing observations or requiring a development refresh.
+that boundary and compare its exact age with the contract-derived warning
+threshold for the history series that limit the boundary. The receipt binds
+those limiting series, source generations, per-source publication lags, and the
+threshold; it warns instead of inventing observations or requiring a
+development refresh. Allocation snapshots after the evaluation date are never
+admitted.
 
 Both current modes are emitted. `LIVE_ONLY` uses the selected account-live
 segments. `LIVE_PLUS_BACKTEST` is presently live-only-equivalent because no

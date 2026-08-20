@@ -1187,6 +1187,9 @@ def _history_contract(
             }
         sha256, size = hash_file(path)
         return current_by_name, {
+            "age_evidence": _object(
+                payload.get("age_evidence"), "dependence age_evidence"
+            ),
             "as_of_date": _date(
                 payload.get("complete_through"), "dependence complete_through"
             ).isoformat(),

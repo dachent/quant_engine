@@ -227,7 +227,9 @@ For a current schema-7 vertical, `--correlation-source-root` names the verified
 four-file current dependence package, not a legacy correlation proof. Its
 receipt binds the exact seven required strategies, 21 unordered pairs, both
 evidence modes, current contract and policy identities, selected #320 history
-segments, baseline allocations, latest common complete date, and age warning.
+segments, baseline allocations, latest common complete date, contract-derived
+warning threshold, and exact limiting-input evidence. A future allocation
+snapshot fails before calculation.
 Composer and EchoTrade are owner-excluded from this financial-MVP calculation;
 the hybrid mode is retained only with zero version-unmatched backtest rows.
 

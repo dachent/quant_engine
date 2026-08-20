@@ -896,6 +896,25 @@ def test_current_dependence_reaches_report_workbook_and_receipt_identity(
         lambda *_args, **_kwargs: (
             {},
             {
+                "age_evidence": {
+                    "calculation_age_days": 0,
+                    "complete_through": "2026-01-03",
+                    "evaluated_on": "2026-01-03",
+                    "limiting_inputs": [
+                        {
+                            "observed_end": "2026-01-03",
+                            "publication_lag_days": 0,
+                            "segment_id": "synthetic-segment",
+                            "series_id": "Synthetic",
+                            "source_generation_id": "a" * 64,
+                            "source_id": "synthetic-source",
+                            "strategy_id": "synthetic-strategy",
+                            "warning_after_days": 2,
+                        }
+                    ],
+                    "status": "CURRENT_WITHIN_AGE_THRESHOLD",
+                    "warning_after_days": 2,
+                },
                 "as_of_date": "2026-01-03",
                 "bundle_id": "d" * 64,
                 "evaluated_on": "2026-01-03",

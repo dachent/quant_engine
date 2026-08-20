@@ -4,6 +4,7 @@ import json
 import importlib.util
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -51,7 +52,10 @@ def _rows() -> list[dict[str, str]]:
 
 
 def _fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    evaluated_on: current.date = current.date(2026, 1, 3),
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     rows = _rows()
     identities = []
@@ -117,6 +121,13 @@ def _fixture(
             ]
         },
         "history_corrections": {"materialized_segment_identities": identities},
+        "source_segments": [
+            {
+                "source_id": f"source-{strategy_id}",
+                "freshness": {"max_age_days": 2, "publication_lag_days": 0},
+            }
+            for strategy_id in ("alpha", "beta", "gamma")
+        ],
     }
     policy = {
         "history_authority": {
@@ -209,7 +220,7 @@ def _fixture(
         policy_path=tmp_path / "policy.json",
         history_generation_root=history,
         allocation_generation_root=tmp_path / "allocation",
-        evaluated_on=current.date(2026, 1, 3),
+        evaluated_on=evaluated_on,
     )
     receipt = built["receipt"]
     assert isinstance(receipt, dict)
@@ -257,7 +268,98 @@ def test_packaged_current_dependence_is_exact_and_self_verifying(
     receipt = json.loads((source / "dependence-source.json").read_text())
     assert receipt["required_strategy_ids"] == ["alpha", "beta", "gamma"]
     assert receipt["excluded_product_strategy_ids"] == ["deprecated"]
+    assert receipt["source_age_status"] == "CURRENT_WITHIN_AGE_THRESHOLD"
+    assert receipt["warning_after_days"] == 2
+    assert receipt["age_evidence"] == {
+        "calculation_age_days": 1,
+        "complete_through": "2026-01-02",
+        "evaluated_on": "2026-01-03",
+        "limiting_inputs": [
+            {
+                "observed_end": "2026-01-02",
+                "publication_lag_days": 0,
+                "segment_id": f"segment-{strategy_id}",
+                "series_id": series_id,
+                "source_generation_id": str(index) * 64,
+                "source_id": f"source-{strategy_id}",
+                "strategy_id": strategy_id,
+                "warning_after_days": 2,
+            }
+            for index, (strategy_id, series_id) in enumerate(
+                (("alpha", "Alpha"), ("beta", "Beta"), ("gamma", "Gamma")),
+                start=1,
+            )
+        ],
+        "status": "CURRENT_WITHIN_AGE_THRESHOLD",
+        "warning_after_days": 2,
+    }
+
+
+def test_dependence_age_warning_binds_threshold_limiters_and_rejects_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _contract, _policy = _fixture(
+        tmp_path,
+        monkeypatch,
+        evaluated_on=current.date(2026, 1, 5),
+    )
+    receipt = json.loads((source / "dependence-source.json").read_text())
+    assert receipt["calculation_age_days"] == 3
+    assert receipt["warning_after_days"] == 2
     assert receipt["source_age_status"] == "WARN_COMPLETE_DATA_AGE"
+    assert len(receipt["age_evidence"]["limiting_inputs"]) == 3
+
+    receipt["age_evidence"]["limiting_inputs"][0]["warning_after_days"] = 99
+    rewritten = _rewrite_bundle(source, receipt)
+    with pytest.raises(
+        current.CurrentDependenceError, match="receipt authority differs"
+    ):
+        current.verify_packaged_source(
+            rewritten,
+            contract_path=tmp_path / "contract.json",
+            policy_path=tmp_path / "policy.json",
+        )
+
+
+def test_allocation_snapshot_after_evaluation_date_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generation_id = "d" * 64
+    root = tmp_path / generation_id
+    root.mkdir()
+    manifest_content = b"{}"
+    catalog_content = canonical_json_bytes({"allocations": []})
+    (root / "generation.json").write_bytes(manifest_content)
+    (root / "portfolio-baseline.json").write_bytes(catalog_content)
+    manifest = SimpleNamespace(
+        artifacts=(),
+        as_of_date=current.date(2026, 1, 2),
+        generation_id=generation_id,
+        verification=SimpleNamespace(value="VERIFIED"),
+    )
+    monkeypatch.setattr(
+        current.GenerationManifest,
+        "from_json_bytes",
+        lambda _content: manifest,
+    )
+    policy = {
+        "allocation_authority": {
+            "as_of_date": "2026-01-02",
+            "catalog_sha256": current._sha256(catalog_content),
+            "generation_id": generation_id,
+            "manifest_sha256": current._sha256(manifest_content),
+        }
+    }
+    with pytest.raises(
+        current.CurrentDependenceError,
+        match="allocation manifest exceeds the evaluation date",
+    ):
+        current._verified_allocations(
+            root,
+            policy,
+            ("alpha",),
+            current.date(2026, 1, 1),
+        )
 
 
 def test_packaged_dependence_rejects_segment_and_mode_authority_rewrites(

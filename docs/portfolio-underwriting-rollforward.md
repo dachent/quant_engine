@@ -320,8 +320,9 @@ contains 21 unordered pairs for each of `LIVE_ONLY` and
 `LIVE_PLUS_BACKTEST`. The hybrid currently uses zero backtest rows and is
 truthfully live-only-equivalent. Composer is excluded as immaterial and
 EchoTrade as deprecated history-only. The common complete calculation boundary
-is disclosed with age telemetry; age alone does not invalidate a complete
-historical calculation. Schema-7 composition rejects a legacy correlation
+is disclosed with its contract-derived warning threshold and exact limiting
+history series; age alone does not invalidate a complete historical
+calculation, while a future allocation snapshot fails. Schema-7 composition rejects a legacy correlation
 evidence proof or any source package that fails independent verification.
 
 Choose exactly one provider-ledger source. Use `--provider-ledger-spec` when
