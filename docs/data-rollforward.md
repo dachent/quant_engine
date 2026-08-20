@@ -88,6 +88,10 @@ product/census identities, exact applicable scope, disposition state,
 invalidated outputs, and verified re-derivation mapping. An applicable open
 correction blocks before effects; a resolved applicable correction remains
 blocked until an exact verified re-derivation receipt covers the same outputs.
+The receipt hash is recomputed from its canonical payload; its input generation
+must be the admitted ledger candidate and its output generation must be the
+exact affected release candidate. A stale or fabricated `VERIFIED` label cannot
+clear the gate.
 An unrelated open correction remains visible but does not invalidate an
 unrelated stage.
 

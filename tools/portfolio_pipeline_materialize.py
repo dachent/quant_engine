@@ -664,12 +664,18 @@ def _product_conformance(
     correction_registry: Mapping[str, Any],
     rederive_registry: Mapping[str, Any],
     *,
+    candidate_generation_ids: Mapping[str, str],
     contract_raw_sha256: str,
     contract_semantic_sha256: str,
     census_sha256: str,
     source_matrix_sha256: str,
     invested_capital_policy_sha256: str,
 ) -> dict[str, Any]:
+    if set(candidate_generation_ids) != set(RELEASE_ROLES) or any(
+        not isinstance(value, str) or len(value) != 64
+        for value in candidate_generation_ids.values()
+    ):
+        raise MaterializationError("financial MVP candidate generations differ")
     product = contract["product"]
     strategies = contract["strategies"]
     sources = contract["source_segments"]
@@ -824,12 +830,44 @@ def _product_conformance(
                     f"re-derivation receipt identity differs: {correction_id}"
                 )
         outputs = raw["invalidated_outputs"]
-        if not isinstance(outputs, list) or not outputs:
+        if (
+            not isinstance(outputs, list)
+            or not outputs
+            or outputs != sorted(set(outputs))
+        ):
             raise MaterializationError(
                 f"re-derivation receipt scope differs: {correction_id}"
             )
-        for output in outputs:
-            _semantic_output_route(output)
+        rederive_affected_stages = {
+            stage
+            for output in outputs
+            for stage in _semantic_output_route(output)["affected_stages"]
+        }
+        output_role = next(
+            (
+                role
+                for role in RELEASE_ROLES
+                if GENERATION_STAGE[role] in rederive_affected_stages
+            ),
+            None,
+        )
+        receipt_payload = {
+            "correction_id": correction_id,
+            "input_generation_id": raw["input_generation_id"],
+            "invalidated_outputs": outputs,
+            "output_generation_id": raw["output_generation_id"],
+            "status": raw["status"],
+        }
+        if (
+            output_role is None
+            or raw["input_generation_id"] != candidate_generation_ids["ledger"]
+            or raw["output_generation_id"] != candidate_generation_ids[output_role]
+            or raw["receipt_sha256"]
+            != hashlib.sha256(canonical_json_bytes(receipt_payload)).hexdigest()
+        ):
+            raise MaterializationError(
+                f"re-derivation receipt candidate binding differs: {correction_id}"
+            )
         rederived[correction_id] = {str(value) for value in outputs}
     missing_rederivations = sorted(
         correction_id
@@ -1007,6 +1045,7 @@ def _derive_product_authority(
     vertical_path: Path,
     contract_path: Path,
     source_matrix_path: Path,
+    candidate_generation_ids: Mapping[str, str],
     correction_registry_path: Path | None = None,
     rederive_registry_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -1072,6 +1111,7 @@ def _derive_product_authority(
         admission,
         correction_registry,
         rederive_registry,
+        candidate_generation_ids=candidate_generation_ids,
         contract_raw_sha256=contract_raw_sha256,
         contract_semantic_sha256=contract_semantic_sha256,
         census_sha256=census_sha256,
@@ -1243,6 +1283,7 @@ def _recipe(path: Path) -> dict[str, Any]:
             vertical_path,
             contract_path,
             source_matrix_path,
+            {role: str(expected[role]["generation_id"]) for role in RELEASE_ROLES},
             registry_paths["correction_registry"],
             registry_paths["rederive_registry"],
         )
@@ -1351,6 +1392,10 @@ def create_recipe(
         vertical_recipe.resolve(),
         financial_mvp_contract.resolve(),
         financial_mvp_source_matrix.resolve(),
+        {
+            role: str(_generation_expectation(expected[role], role)["generation_id"])
+            for role in RELEASE_ROLES
+        },
         None if correction_registry is None else correction_registry.resolve(),
         (
             None

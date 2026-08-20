@@ -461,6 +461,9 @@ it is not the production cutover. Bind those exact generations to the stable
 20-root production authority, then plan, prepare, and commit that second
 immutable specification. This preserves the existing coordinated root set and
 prevents a private proof directory from being mistaken for production.
+The production rebind contract must hash-bind the same product gate and must
+publish the exact provider-ledger generation admitted by that gate; a coherent
+release-graph rewrite to a different provider generation fails before effects.
 
 ```powershell
 & $enginePython tools\portfolio_pipeline_materialize.py production-spec `

@@ -465,6 +465,12 @@ def test_financial_mvp_authority_rejects_receipt_outside_manifest(
             vertical_path,
             product.contract_path,
             product.matrix_path,
+            {
+                "ledger": product.generation.name,
+                "baseline": "b" * 64,
+                "report": "c" * 64,
+                "panel": "d" * 64,
+            },
         )
 
 
@@ -520,6 +526,12 @@ def _fixture_conformance(
         admission,
         correction_registry,
         rederive_registry,
+        candidate_generation_ids={
+            "ledger": product.generation.name,
+            "baseline": "b" * 64,
+            "report": "c" * 64,
+            "panel": "d" * 64,
+        },
         contract_raw_sha256=semantic_sha256,
         contract_semantic_sha256=semantic_sha256,
         census_sha256=census_sha256,
@@ -645,6 +657,13 @@ def test_applicable_correction_and_rederive_receipt_are_runtime_authorities(
     assert "REDERIVE_AUTHORITY_REQUIRED" in unresolved["blocking_reasons"]
     assert "MISSING_REDERIVATION:correction-1" in unresolved["blocking_reasons"]
 
+    rederive_payload = {
+        "correction_id": "correction-1",
+        "input_generation_id": product.generation.name,
+        "invalidated_outputs": ["REPORT"],
+        "output_generation_id": "c" * 64,
+        "status": "VERIFIED",
+    }
     rederive = _runtime_registry(
         tmp_path / "rederived",
         name="rederive",
@@ -652,18 +671,33 @@ def test_applicable_correction_and_rederive_receipt_are_runtime_authorities(
         census_sha256=census_sha256,
         records=[
             {
-                "correction_id": "correction-1",
-                "input_generation_id": "4" * 64,
-                "invalidated_outputs": ["REPORT"],
-                "output_generation_id": "5" * 64,
-                "receipt_sha256": "6" * 64,
-                "status": "VERIFIED",
+                **rederive_payload,
+                "receipt_sha256": hashlib.sha256(
+                    canonical_json_bytes(rederive_payload)
+                ).hexdigest(),
             }
         ],
     )
     accepted = _fixture_conformance(product, resolved_registry, rederive)
     assert accepted["blocking_reasons"] == []
     assert accepted["readiness"] == "READY_FOR_EXECUTION"
+
+    for field, replacement in (
+        ("input_generation_id", "7" * 64),
+        ("output_generation_id", "8" * 64),
+        ("receipt_sha256", "9" * 64),
+    ):
+        forged_record = dict(rederive["records"][0])
+        forged_record[field] = replacement
+        forged = {
+            **rederive,
+            "records": [forged_record],
+        }
+        with pytest.raises(
+            materializer.MaterializationError,
+            match="re-derivation receipt candidate binding differs",
+        ):
+            _fixture_conformance(product, resolved_registry, forged)
 
 
 def test_generation_date_rule_allows_dated_ledger_only() -> None:
@@ -789,6 +823,14 @@ def test_production_spec_binds_stable_twenty_root_authority(
         vertical_path,
         product.contract_path,
         product.matrix_path,
+        {
+            role: (
+                admission_generation.name
+                if role == "ledger"
+                else str(recipe_value["expected_generations"][role]["generation_id"])
+            )
+            for role in materializer.RELEASE_ROLES
+        },
     )
     recipe_value["schema_version"] = 3
     staged_admission_inventory = inventory_generation(staged_admission_generation)
@@ -894,6 +936,46 @@ def test_production_spec_binds_stable_twenty_root_authority(
     assert production_plan["node_count"] == 0
     assert production_plan["commit_effects"] == []
     assert production_plan["financial_mvp"]["ready_for_execution"] is False
+
+    rewritten = json.loads(spec_path.read_text(encoding="utf-8"))
+    rewritten_contract = dict(production_contract)
+    rewritten_contract["product_authority_sha256"] = "0" * 64
+    rewritten_contract_bytes = canonical_json_bytes(rewritten_contract)
+    Path(result["contract"]).write_bytes(rewritten_contract_bytes)
+    next(
+        row
+        for row in rewritten["gates"]
+        if row["gate_id"] == "port-underwrite-production-rebind"
+    )["sha256"] = hashlib.sha256(rewritten_contract_bytes).hexdigest()
+    with pytest.raises(
+        PipelineValidationError, match="financial MVP production binding differs"
+    ):
+        plan_pipeline(PipelineSpec.from_json_bytes(canonical_json_bytes(rewritten)))
+    Path(result["contract"]).write_bytes(canonical_json_bytes(production_contract))
+
+    rewritten = json.loads(spec_path.read_text(encoding="utf-8"))
+    rewritten_contract = dict(production_contract)
+    rewritten_contract["generation_ids"] = {
+        **rewritten_contract["generation_ids"],
+        "provider-ledger": "e" * 64,
+    }
+    next(
+        row
+        for row in rewritten["nodes"]
+        if row.get("kind") == "GENERATION" and row.get("root_id") == "provider-ledger"
+    )["generation_id"] = "e" * 64
+    rewritten_contract_bytes = canonical_json_bytes(rewritten_contract)
+    Path(result["contract"]).write_bytes(rewritten_contract_bytes)
+    next(
+        row
+        for row in rewritten["gates"]
+        if row["gate_id"] == "port-underwrite-production-rebind"
+    )["sha256"] = hashlib.sha256(rewritten_contract_bytes).hexdigest()
+    with pytest.raises(
+        PipelineValidationError, match="financial MVP production binding differs"
+    ):
+        plan_pipeline(PipelineSpec.from_json_bytes(canonical_json_bytes(rewritten)))
+    Path(result["contract"]).write_bytes(canonical_json_bytes(production_contract))
 
     stripped = json.loads(spec_path.read_text(encoding="utf-8"))
     stripped["gates"] = [
@@ -1149,7 +1231,13 @@ def test_generated_semantic_command_declares_exact_gate_file(
     )
     recipe["vertical_recipe"] = _definition(vertical_path)
     recipe["product_authority"] = materializer._derive_product_authority(
-        vertical_path, product.contract_path, product.matrix_path
+        vertical_path,
+        product.contract_path,
+        product.matrix_path,
+        {
+            role: str(recipe["expected_generations"][role]["generation_id"])
+            for role in materializer.RELEASE_ROLES
+        },
     )
     recipe["schema_version"] = 3
     _write_json(recipe_path, recipe)

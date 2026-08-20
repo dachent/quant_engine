@@ -80,6 +80,18 @@ _PORTFOLIO_STAGE_DEPENDENCIES: Final = {
     "workbook": ("baseline", "ledger", "report"),
     "panel": ("ledger", "attribution", "analytics", "workbook"),
 }
+_FINANCIAL_MVP_CANDIDATE_ROOT_IDS: Final = {
+    "ledger": ("provider-ledger",),
+    "baseline": ("baseline", "portfolio-baseline"),
+    "report": ("reporting", "portfolio-report"),
+    "panel": ("control-panel", "portfolio-panel"),
+}
+_FINANCIAL_MVP_GENERATION_STAGE: Final = {
+    "ledger": "ledger",
+    "baseline": "baseline",
+    "report": "workbook",
+    "panel": "panel",
+}
 _SEMANTIC_FIRST_STAGE: Final = {
     "AS_HELD_COMPOSITE_HWM": "analytics",
     "COMPOSITION": "ledger",
@@ -1221,6 +1233,95 @@ def _registry_boundary(
     return _objects(payload.get(record_key), f"{schema_name} records")
 
 
+def _financial_mvp_candidate_generations(spec: PipelineSpec) -> dict[str, str]:
+    candidates: dict[str, str] = {}
+    for role, root_ids in _FINANCIAL_MVP_CANDIDATE_ROOT_IDS.items():
+        matches = [
+            spec.release_generations[root_id]
+            for root_id in root_ids
+            if root_id in spec.release_generations
+        ]
+        if len(matches) != 1:
+            raise PipelineValidationError(
+                f"financial MVP {role} candidate generation is ambiguous"
+            )
+        candidates[role] = matches[0]
+    return candidates
+
+
+def _validate_financial_mvp_production_binding(
+    spec: PipelineSpec,
+    *,
+    product_gate_sha256: str,
+    provider_generation_id: str,
+) -> None:
+    matches = [
+        item for item in spec.gates if item.gate_id == _PORTFOLIO_PRODUCTION_REBIND_GATE
+    ]
+    if not matches:
+        return
+    contract, _ = _gate_json(spec, _PORTFOLIO_PRODUCTION_REBIND_GATE)
+    _strict(
+        contract,
+        {
+            "code_commit",
+            "generation_ids",
+            "orchestration_contract_sha256",
+            "pipeline_id",
+            "prepared_release_commit",
+            "production_roots",
+            "production_semantic_gate_sha256",
+            "product_authority_sha256",
+            "schema_version",
+            "semantic_gate_sha256",
+            "source_generations",
+        },
+        "portfolio production rebind contract",
+    )
+    generation_ids = _object(
+        contract["generation_ids"], "production generation identities"
+    )
+    production_roots = _object(contract["production_roots"], "production roots")
+    source_generations = _object(
+        contract["source_generations"], "production source generations"
+    )
+    product_gate = _single_gate(spec, _FINANCIAL_MVP_PRODUCT_GATE)
+    semantic_gate = _single_gate(spec, _POST_BUILD_SEMANTIC_GATE)
+    release_sources = {
+        node.root_id: node.source_dir
+        for node in spec.nodes
+        if isinstance(node, GenerationNode)
+        and node.release_target
+        and node.source_dir is not None
+    }
+    if (
+        contract["schema_version"] != 2
+        or contract["code_commit"] != spec.code_commit
+        or contract["prepared_release_commit"] != spec.code_commit
+        or contract["pipeline_id"] + "-production" != spec.pipeline_id
+        or generation_ids != spec.release_generations
+        or production_roots
+        != {root_id: str(path) for root_id, path in spec.roots.items()}
+        or set(source_generations) != set(spec.release_generations)
+        or set(release_sources) != set(spec.release_generations)
+        or contract["product_authority_sha256"] != product_gate_sha256
+        or product_gate.sha256 != product_gate_sha256
+        or contract["production_semantic_gate_sha256"] != semantic_gate.sha256
+        or spec.release_generations.get("provider-ledger") != provider_generation_id
+    ):
+        raise PipelineValidationError("financial MVP production binding differs")
+    for root_id, generation_id in spec.release_generations.items():
+        source = _absolute(source_generations[root_id], f"production source {root_id}")
+        if (
+            source.name != generation_id
+            or release_sources[root_id] is None
+            or not _same_path(source, release_sources[root_id])
+        ):
+            raise PipelineValidationError(
+                f"financial MVP production source differs: {root_id}"
+            )
+
+
 def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | None:
     product_matches = [
         item for item in spec.gates if item.gate_id == _FINANCIAL_MVP_PRODUCT_GATE
@@ -1234,7 +1335,7 @@ def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | Non
         return None
     if len(product_matches) != 1:
         raise PipelineValidationError("financial MVP product gate is ambiguous")
-    gate_payload, _ = _gate_json(spec, _FINANCIAL_MVP_PRODUCT_GATE)
+    gate_payload, product_gate_bytes = _gate_json(spec, _FINANCIAL_MVP_PRODUCT_GATE)
     if gate_payload.get("schema_version") != 2:
         return _financial_mvp_product_authority_legacy(spec)
     _strict(
@@ -1670,13 +1771,64 @@ def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | Non
         if row.get("status") in {"RESOLVED", "DISPOSITIONED"}
         and row.get("applicability") == "APPLICABLE"
     }
-    rederived = {
-        str(row["correction_id"]): set(
-            _strings(row.get("invalidated_outputs"), "re-derivation outputs")
+    candidate_generations = (
+        _financial_mvp_candidate_generations(spec) if runtime_rederivations else {}
+    )
+    rederived: dict[str, set[str]] = {}
+    for row in runtime_rederivations:
+        _strict(
+            row,
+            {
+                "correction_id",
+                "input_generation_id",
+                "invalidated_outputs",
+                "output_generation_id",
+                "receipt_sha256",
+                "status",
+            },
+            "re-derivation receipt",
         )
-        for row in runtime_rederivations
-        if row.get("status") == "VERIFIED"
-    }
+        correction_id = _identifier(row["correction_id"], "re-derivation correction_id")
+        outputs = list(_strings(row["invalidated_outputs"], "re-derivation outputs"))
+        if (
+            correction_id in rederived
+            or row["status"] != "VERIFIED"
+            or outputs != sorted(set(outputs))
+        ):
+            raise PipelineValidationError(
+                f"re-derivation receipt state differs: {correction_id}"
+            )
+        affected_stages = {
+            stage
+            for output in outputs
+            for stage in _semantic_route(output)["affected_stages"]
+        }
+        output_role = next(
+            (
+                role
+                for role in _FINANCIAL_MVP_CANDIDATE_ROOT_IDS
+                if _FINANCIAL_MVP_GENERATION_STAGE[role] in affected_stages
+            ),
+            None,
+        )
+        receipt_payload = {
+            "correction_id": correction_id,
+            "input_generation_id": row["input_generation_id"],
+            "invalidated_outputs": outputs,
+            "output_generation_id": row["output_generation_id"],
+            "status": row["status"],
+        }
+        if (
+            output_role is None
+            or row["input_generation_id"] != candidate_generations["ledger"]
+            or row["output_generation_id"] != candidate_generations[output_role]
+            or row["receipt_sha256"]
+            != hashlib.sha256(canonical_json_bytes(receipt_payload)).hexdigest()
+        ):
+            raise PipelineValidationError(
+                f"re-derivation receipt candidate binding differs: {correction_id}"
+            )
+        rederived[correction_id] = set(outputs)
     missing_rederivations = sorted(
         correction_id
         for correction_id, outputs in resolved_applicable.items()
@@ -1728,6 +1880,11 @@ def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | Non
         or receipt.get("admission_gate_status") != "PASS"
     ):
         raise PipelineValidationError("financial MVP readiness differs")
+    _validate_financial_mvp_production_binding(
+        spec,
+        product_gate_sha256=hashlib.sha256(product_gate_bytes).hexdigest(),
+        provider_generation_id=manifest.generation_id,
+    )
     return {"conformance": dict(conformance), "raw": dict(gate_payload)}
 
 
