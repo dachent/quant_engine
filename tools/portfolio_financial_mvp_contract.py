@@ -12,6 +12,7 @@ through caller-supplied governed local roots without emitting source values.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -128,7 +129,7 @@ HISTORY_SPLICE_POLICY: Final = (
     "STRICTLY_BEFORE_LIVE_INCEPTION; NEVER_RELABEL_PROVIDER_EVIDENCE_AS_ACCOUNT_LIVE"
 )
 HISTORY_EVIDENCE_ROOTS: Final = frozenset(
-    {"MATRIXPORT", "PORTFOLIO123", "PROVIDER_LEDGER", "QUANTBASE"}
+    {"BASELINE", "MATRIXPORT", "PORTFOLIO123", "PROVIDER_LEDGER", "QUANTBASE"}
 )
 HISTORY_RECEIPT_LOCATORS: Final = frozenset(
     {"CURRENT_POINTER", "GENERATION_ARTIFACT", "GENERATION_MANIFEST"}
@@ -141,6 +142,7 @@ _PRIVATE_ACCOUNT_RE: Final = re.compile(r"(?i)\baccount[-_ ]?(?:id[-_: ]*)?[0-9]
 _OWNER_RECEIPT_MARKER: Final = "<!-- financial-mvp-owner-decision-receipts-v1 -->"
 _JSON_FENCE_RE: Final = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 _GITHUB_COMMENT_API: Final = "repos/dachent/quant_engine/issues/comments/{comment_id}"
+_CENSUS_OWNER_COMMENT_ID: Final = 5350132900
 
 
 class FinancialMvpContractError(ValueError):
@@ -329,6 +331,198 @@ def verify_history_evidence(
         "contract_sha256": contract_digest(contract),
         "status": "VALID",
         "verified_receipts": verified,
+    }
+
+
+def _census_receipt_locator(role: str) -> str:
+    if role.endswith("_CURRENT_POINTER"):
+        return "CURRENT_POINTER"
+    if role.endswith("_GENERATION_MANIFEST"):
+        return "GENERATION_MANIFEST"
+    if role.endswith("_CATALOG"):
+        return "GENERATION_ARTIFACT"
+    raise FinancialMvpContractError(f"census evidence role differs: {role}")
+
+
+def _verify_census_provider_generation(
+    provider_id: str,
+    generation: Mapping[str, Any],
+    root: Path,
+) -> None:
+    generation_id = _hash(
+        generation["generation_id"], f"census provider generation {provider_id}"
+    )
+    pointer_path = _evidence_file(root, "CURRENT.json", f"{provider_id}/CURRENT")
+    pointer_hash, _pointer_size = _file_identity(pointer_path)
+    if pointer_hash != generation["pointer_sha256"]:
+        raise FinancialMvpContractError(
+            f"census provider current pointer differs: {provider_id}"
+        )
+    pointer = _load_json(pointer_path, f"{provider_id} current pointer")
+    manifest_path = _evidence_file(
+        root,
+        f"generations/{generation_id}/generation.json",
+        f"{provider_id}/{generation_id}/manifest",
+    )
+    manifest_hash, _manifest_size = _file_identity(manifest_path)
+    if (
+        pointer.get("state") != "PUBLISHED"
+        or pointer.get("generation_id") != generation_id
+        or pointer.get("manifest_sha256") != manifest_hash
+        or manifest_hash != generation["manifest_sha256"]
+    ):
+        raise FinancialMvpContractError(
+            f"census provider generation is not current: {provider_id}"
+        )
+    manifest = _load_json(manifest_path, f"{provider_id} generation manifest")
+    if (
+        manifest.get("verification") != "VERIFIED"
+        or manifest.get("generation_id") != generation_id
+    ):
+        raise FinancialMvpContractError(
+            f"census provider generation is not verified: {provider_id}"
+        )
+
+
+def _census_receipt_path(census: Mapping[str, Any], role: str, root: Path) -> Path:
+    receipts = _objects(census["evidence_receipts"], "census evidence_receipts")
+    matches = [row for row in receipts if row["role"] == role]
+    if len(matches) != 1:
+        raise FinancialMvpContractError(f"census evidence role is not unique: {role}")
+    return _evidence_file(root, matches[0]["artifact_selector"], role)
+
+
+def verify_census_evidence(
+    contract: Mapping[str, Any], authority_roots: Mapping[str, Path]
+) -> dict[str, object]:
+    """Verify #302 census receipts and public-safe aggregate mappings."""
+
+    census = _object(contract["current_census"], "current_census")
+    receipts = _objects(census["evidence_receipts"], "census evidence_receipts")
+    verified_receipts = 0
+    for receipt in receipts:
+        role = _text(receipt["role"], "census evidence role")
+        normalized = {
+            "artifact_role": role,
+            "authority_root": receipt["root"],
+            "generation_id": receipt["generation_id"],
+            "artifact_selector": receipt["artifact_selector"],
+            "locator_kind": _census_receipt_locator(role),
+            "manifest_artifact_id": receipt["manifest_artifact_id"],
+            "sha256": receipt["sha256"],
+        }
+        _verify_history_receipt(normalized, authority_roots)
+        verified_receipts += 1
+
+    provider_lanes = _objects(census["provider_lanes"], "census provider_lanes")
+    governed_provider_ids: list[str] = []
+    for lane in provider_lanes:
+        generation = lane["generation"]
+        if generation is None:
+            continue
+        provider_id = _text(lane["provider_id"], "census provider id")
+        root = authority_roots.get(provider_id)
+        if root is None:
+            raise FinancialMvpContractError(
+                f"census provider root was not supplied: {provider_id}"
+            )
+        _verify_census_provider_generation(
+            provider_id,
+            _object(generation, f"census provider generation {provider_id}"),
+            root,
+        )
+        governed_provider_ids.append(provider_id)
+
+    baseline_root = authority_roots.get("BASELINE")
+    ledger_root = authority_roots.get("PROVIDER_LEDGER")
+    if baseline_root is None or ledger_root is None:
+        raise FinancialMvpContractError(
+            "census baseline/ledger roots were not supplied"
+        )
+    baseline = _load_json(
+        _census_receipt_path(census, "BASELINE_CATALOG", baseline_root),
+        "census baseline catalog",
+    )
+    ledger = _load_json(
+        _census_receipt_path(census, "PROVIDER_LEDGER_CATALOG", ledger_root),
+        "census provider-ledger catalog",
+    )
+
+    sleeves = _objects(census["account_sleeves"], "census account_sleeves")
+    expected_provider_counts = Counter(
+        str(row["provider_id"]).replace("_", " ") for row in sleeves
+    )
+    accounts = _objects(baseline.get("accounts"), "baseline accounts")
+    actual_provider_counts = Counter(
+        _text(row.get("provider"), "baseline account provider") for row in accounts
+    )
+    if actual_provider_counts != expected_provider_counts:
+        raise FinancialMvpContractError("census redacted provider counts differ")
+
+    provider_by_account: dict[str, str] = {}
+    for row in accounts:
+        account_id = _text(row.get("account_id"), "baseline account identity")
+        if account_id in provider_by_account:
+            raise FinancialMvpContractError("baseline account identity is duplicated")
+        provider_by_account[account_id] = _text(
+            row.get("provider"), "baseline account provider"
+        )
+    actual_assignment_counts: Counter[tuple[str, str]] = Counter()
+    for row in _objects(baseline.get("assignments"), "baseline assignments"):
+        strategy_id = row.get("strategy_id")
+        if strategy_id is None:
+            continue
+        account_id = _text(row.get("account_id"), "baseline assignment account")
+        provider = provider_by_account.get(account_id)
+        if provider is None:
+            raise FinancialMvpContractError(
+                "baseline assignment references an unknown account"
+            )
+        actual_assignment_counts[
+            (provider, _text(strategy_id, "baseline strategy"))
+        ] += 1
+    expected_assignment_counts: Counter[tuple[str, str]] = Counter()
+    for sleeve in sleeves:
+        provider = str(sleeve["provider_id"]).replace("_", " ")
+        for assignment in _objects(sleeve["assignments"], "census sleeve assignments"):
+            expected_assignment_counts[(provider, str(assignment["strategy_id"]))] += 1
+    if actual_assignment_counts != expected_assignment_counts:
+        raise FinancialMvpContractError("census redacted assignment counts differ")
+
+    lane_generations = {
+        str(lane["provider_id"]).lower(): lane["generation"]
+        for lane in provider_lanes
+        if lane["generation"] is not None
+    }
+    ledger_generations = _objects(
+        ledger.get("provider_generations"), "provider-ledger generations"
+    )
+    if {str(row.get("provider_id")) for row in ledger_generations} != set(
+        lane_generations
+    ):
+        raise FinancialMvpContractError("census provider-ledger provider set differs")
+    for row in ledger_generations:
+        provider_id = str(row["provider_id"])
+        generation = _object(
+            lane_generations[provider_id], f"census provider generation {provider_id}"
+        )
+        if (
+            row.get("generation_id") != generation["generation_id"]
+            or row.get("manifest_sha256") != generation["manifest_sha256"]
+            or row.get("generation_as_of_date") != generation["as_of"]
+        ):
+            raise FinancialMvpContractError(
+                f"census provider-ledger generation differs: {provider_id}"
+            )
+
+    return {
+        "account_sleeves": len(sleeves),
+        "assignment_mappings": sum(actual_assignment_counts.values()),
+        "census_sha256": census_digest(census),
+        "contract_sha256": contract_digest(contract),
+        "governed_provider_lanes": sorted(governed_provider_ids),
+        "status": "VALID",
+        "verified_receipts": verified_receipts,
     }
 
 
@@ -1045,6 +1239,80 @@ def fetch_owner_evidence_comments(
     return comments
 
 
+def fetch_census_owner_evidence() -> dict[str, Any]:
+    """Fetch the one owner-authored #302 decision comment."""
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            [
+                "gh",
+                "api",
+                _GITHUB_COMMENT_API.format(comment_id=_CENSUS_OWNER_COMMENT_ID),
+                "--method",
+                "GET",
+            ],
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise FinancialMvpContractError(
+            "census owner evidence comment is unreachable"
+        ) from exc
+    if result.returncode != 0 or len(result.stdout) > 1_000_000:
+        raise FinancialMvpContractError("census owner evidence comment is unreachable")
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FinancialMvpContractError(
+            "census owner evidence comment is not JSON"
+        ) from exc
+    return _object(value, "census owner evidence comment")
+
+
+def reconcile_census_owner_evidence(
+    census: Mapping[str, Any], comment: Mapping[str, Any]
+) -> None:
+    """Bind the local census decision digest to the unedited owner comment."""
+
+    user = _object(comment.get("user"), "census owner evidence user")
+    expected_url = (
+        "https://github.com/dachent/quant_engine/issues/302#issuecomment-"
+        f"{_CENSUS_OWNER_COMMENT_ID}"
+    )
+    if (
+        user.get("login") != "dachent"
+        or comment.get("author_association") != "OWNER"
+        or comment.get("created_at") != comment.get("updated_at")
+        or comment.get("html_url") != expected_url
+        or census.get("decision_evidence_url") != expected_url
+    ):
+        raise FinancialMvpContractError("census owner evidence authority differs")
+    body = _text(comment.get("body"), "census owner evidence body")
+    matches = _JSON_FENCE_RE.findall(body)
+    if len(matches) != 1:
+        raise FinancialMvpContractError("census owner decision JSON block differs")
+    try:
+        decision = json.loads(matches[0])
+    except json.JSONDecodeError as exc:
+        raise FinancialMvpContractError(
+            "census owner decision JSON is invalid"
+        ) from exc
+    record = _object(decision, "census owner decision")
+    if (
+        record.get("decision_id")
+        != "DATA-CENSUS-001-OWNER-PERIMETER-AND-MEMBERSHIP-2026-08-19"
+        or record.get("authority_issue") != 302
+        or record.get("approved_on") != "2026-08-19"
+    ):
+        raise FinancialMvpContractError("census owner decision identity differs")
+    actual_digest = hashlib.sha256(canonical_json_bytes(record)).hexdigest()
+    if actual_digest != census.get("decision_payload_sha256"):
+        raise FinancialMvpContractError(
+            "census owner evidence does not approve the current decision payload"
+        )
+
+
 _POLICY_DECISION_KEYS: Final = {
     "approval_evidence",
     "calculation_effect",
@@ -1445,6 +1713,8 @@ def _validate_strategies(
                 "effective_product_interval",
                 "funded_membership",
                 "history_series_id",
+                "lifecycle_status",
+                "live_implementation_identity",
                 "outcome_dispositions",
                 "product_requirement",
                 "readiness",
@@ -1456,6 +1726,52 @@ def _validate_strategies(
         )
         strategy_id = _text(row["strategy_id"], "strategy.strategy_id")
         _optional_text(row["history_series_id"], "strategy.history_series_id")
+        lifecycle = _text(row["lifecycle_status"], "strategy.lifecycle_status")
+        if lifecycle not in {
+            "ACTIVE",
+            "DEPRECATED_HISTORY_ONLY",
+            "IMMATERIAL_EXCLUDED",
+        }:
+            raise FinancialMvpContractError(
+                f"unknown strategy lifecycle for {strategy_id}: {lifecycle}"
+            )
+        live_identity = _object(
+            row["live_implementation_identity"], "live_implementation_identity"
+        )
+        _strict_keys(
+            live_identity,
+            {"generation_id", "receipt_sha256", "status", "version_ref"},
+            "live_implementation_identity",
+        )
+        live_status = _text(
+            live_identity["status"], "live_implementation_identity.status"
+        )
+        if live_status not in {"EVIDENCED", "NOT_APPLICABLE", "REJECTED"}:
+            raise FinancialMvpContractError(
+                f"live implementation status differs: {strategy_id}"
+            )
+        live_version = _optional_text(
+            live_identity["version_ref"], "live_implementation_identity.version_ref"
+        )
+        live_generation = _optional_hash(
+            live_identity["generation_id"], "live_implementation_identity.generation_id"
+        )
+        live_receipt = _optional_hash(
+            live_identity["receipt_sha256"],
+            "live_implementation_identity.receipt_sha256",
+        )
+        if live_status in {"EVIDENCED", "REJECTED"} and (
+            live_version is None or live_generation is None or live_receipt is None
+        ):
+            raise FinancialMvpContractError(
+                f"live implementation identity is incomplete: {strategy_id}"
+            )
+        if live_status == "NOT_APPLICABLE" and any(
+            value is not None for value in (live_version, live_generation, live_receipt)
+        ):
+            raise FinancialMvpContractError(
+                f"not-applicable live implementation asserts identity: {strategy_id}"
+            )
         requirement = _text(row["product_requirement"], "strategy.product_requirement")
         if requirement not in {"REQUIRED", "OPTIONAL", "EXCLUDED"}:
             raise FinancialMvpContractError(
@@ -1494,7 +1810,7 @@ def _validate_strategies(
             )
         version = _object(row["strategy_version"], "strategy.strategy_version")
         _strict_keys(version, {"status", "version_ref"}, "strategy_version")
-        if version["status"] not in {"EVIDENCED", "UNRESOLVED"}:
+        if version["status"] not in {"EVIDENCED", "NOT_APPLICABLE", "UNRESOLVED"}:
             raise FinancialMvpContractError(
                 f"strategy version status differs: {strategy_id}"
             )
@@ -1508,6 +1824,10 @@ def _validate_strategies(
         if version["status"] == "UNRESOLVED" and version_ref is not None:
             raise FinancialMvpContractError(
                 f"unresolved strategy version asserts identity: {strategy_id}"
+            )
+        if version["status"] == "NOT_APPLICABLE" and version_ref is None:
+            raise FinancialMvpContractError(
+                f"not-applicable strategy version lacks governance identity: {strategy_id}"
             )
         membership = _object(row["funded_membership"], "strategy.funded_membership")
         _strict_keys(
@@ -1534,12 +1854,36 @@ def _validate_strategies(
             raise FinancialMvpContractError(
                 f"evidenced membership lacks a funding start: {strategy_id}"
             )
-        if readiness == "READY" and (
-            version["status"] != "EVIDENCED" or membership["status"] != "EVIDENCED"
-        ):
-            raise FinancialMvpContractError(
-                f"ready strategy lacks evidenced version/membership: {strategy_id}"
-            )
+        if requirement == "REQUIRED":
+            if lifecycle != "ACTIVE":
+                raise FinancialMvpContractError(
+                    f"required strategy is not active: {strategy_id}"
+                )
+            if live_status != "EVIDENCED":
+                raise FinancialMvpContractError(
+                    f"active strategy lacks evidenced live implementation: {strategy_id}"
+                )
+            if membership["status"] != "EVIDENCED":
+                raise FinancialMvpContractError(
+                    f"active strategy lacks evidenced membership: {strategy_id}"
+                )
+            if version["status"] != "EVIDENCED" and readiness != "REQUIRED_NOT_READY":
+                raise FinancialMvpContractError(
+                    f"strategy version/membership readiness differs: {strategy_id}"
+                )
+        elif requirement == "EXCLUDED":
+            if lifecycle == "ACTIVE" or readiness != "READY" or blockers:
+                raise FinancialMvpContractError(
+                    f"excluded strategy lifecycle/readiness differs: {strategy_id}"
+                )
+            if version["status"] != "NOT_APPLICABLE":
+                raise FinancialMvpContractError(
+                    f"excluded strategy design version is not not-applicable: {strategy_id}"
+                )
+            if membership["status"] != "EXCLUDED":
+                raise FinancialMvpContractError(
+                    f"excluded strategy asserts funded membership: {strategy_id}"
+                )
         dispositions = _object(row["outcome_dispositions"], "outcome_dispositions")
         if set(dispositions) != set(OUTCOME_IDS):
             raise FinancialMvpContractError(
@@ -1550,6 +1894,419 @@ def _validate_strategies(
                 raise FinancialMvpContractError(
                     f"invalid {outcome_id} disposition for {strategy_id}"
                 )
+        if requirement == "EXCLUDED" and set(dispositions.values()) != {
+            "EXCLUDED_BY_ACCEPTED_POLICY"
+        }:
+            raise FinancialMvpContractError(
+                f"excluded strategy retains a required outcome: {strategy_id}"
+            )
+
+
+def census_digest(census: Mapping[str, Any]) -> str:
+    """Return the deterministic identity of the accepted redacted census."""
+
+    return hashlib.sha256(canonical_json_bytes(dict(census))).hexdigest()
+
+
+def _validate_current_census(
+    census: Mapping[str, Any],
+    strategies: Sequence[Mapping[str, Any]],
+    sources: Sequence[Mapping[str, Any]],
+) -> None:
+    _strict_keys(
+        census,
+        {
+            "account_sleeves",
+            "as_of",
+            "authority_issue",
+            "census_id",
+            "decision_evidence_url",
+            "decision_payload_sha256",
+            "evidence_receipts",
+            "private_crosswalk_rule",
+            "provider_lanes",
+        },
+        "current_census",
+    )
+    if census["census_id"] != "PORTFOLIO_CURRENT_CENSUS_V1":
+        raise FinancialMvpContractError("current census identity differs")
+    if census["authority_issue"] != 302:
+        raise FinancialMvpContractError("current census authority differs")
+    _date(census["as_of"], "current_census.as_of")
+    evidence_url = _text(
+        census["decision_evidence_url"], "current_census.decision_evidence_url"
+    )
+    if evidence_url != (
+        "https://github.com/dachent/quant_engine/issues/302#issuecomment-5350132900"
+    ):
+        raise FinancialMvpContractError("current census decision evidence differs")
+    _hash(
+        census["decision_payload_sha256"],
+        "current_census.decision_payload_sha256",
+    )
+    if census["private_crosswalk_rule"] != (
+        "ONLY_STABLE_REDACTED_ALIASES_ARE_COMMITTED"
+    ):
+        raise FinancialMvpContractError("current census private crosswalk rule differs")
+
+    receipts = _objects(census["evidence_receipts"], "census evidence_receipts")
+    expected_receipt_roles = {
+        "BASELINE_CATALOG",
+        "BASELINE_CURRENT_POINTER",
+        "BASELINE_GENERATION_MANIFEST",
+        "PROVIDER_LEDGER_CATALOG",
+        "PROVIDER_LEDGER_CURRENT_POINTER",
+        "PROVIDER_LEDGER_GENERATION_MANIFEST",
+    }
+    receipt_roles: set[str] = set()
+    for receipt in receipts:
+        _strict_keys(
+            receipt,
+            {
+                "artifact_selector",
+                "generation_id",
+                "manifest_artifact_id",
+                "role",
+                "root",
+                "sha256",
+            },
+            "census evidence receipt",
+        )
+        role = _text(receipt["role"], "census evidence receipt role")
+        if role in receipt_roles:
+            raise FinancialMvpContractError(f"duplicate census evidence role: {role}")
+        receipt_roles.add(role)
+        if receipt["root"] not in {"BASELINE", "PROVIDER_LEDGER"}:
+            raise FinancialMvpContractError(f"census evidence root differs: {role}")
+        _hash(receipt["generation_id"], f"census evidence generation {role}")
+        _no_private_locator(
+            receipt["artifact_selector"], f"census evidence selector {role}"
+        )
+        _optional_text(
+            receipt["manifest_artifact_id"],
+            f"census evidence manifest artifact {role}",
+        )
+        _hash(receipt["sha256"], f"census evidence sha256 {role}")
+    if receipt_roles != expected_receipt_roles:
+        raise FinancialMvpContractError(
+            "census evidence roles differ: "
+            f"missing={sorted(expected_receipt_roles - receipt_roles)} "
+            f"extra={sorted(receipt_roles - expected_receipt_roles)}"
+        )
+
+    source_by_id = {
+        _text(row["source_id"], "source_segment.source_id"): row for row in sources
+    }
+    strategy_by_id = {
+        _text(row["strategy_id"], "strategy.strategy_id"): row for row in strategies
+    }
+    lanes = _objects(census["provider_lanes"], "census provider_lanes")
+    lane_by_id: dict[str, Mapping[str, Any]] = {}
+    declared_lane_sleeves: set[str] = set()
+    expected_provider_ids = {
+        "ALPACA",
+        "COMPOSER",
+        "FIDELITY",
+        "IBKR",
+        "INTERNAL",
+        "JOHN_HANCOCK",
+        "MATRIXPORT",
+        "PORTFOLIO123",
+        "QUANTBASE",
+        "SCHWAB",
+    }
+    for lane in lanes:
+        _strict_keys(
+            lane,
+            {
+                "account_sleeve_ids",
+                "generation",
+                "lane_role",
+                "lane_status",
+                "provider_id",
+                "source_segment_id",
+            },
+            "census provider lane",
+        )
+        provider_id = _text(lane["provider_id"], "census provider_id")
+        if provider_id in lane_by_id:
+            raise FinancialMvpContractError(f"duplicate census provider: {provider_id}")
+        lane_by_id[provider_id] = lane
+        if lane["lane_role"] not in {
+            "ACCOUNT_PROVIDER",
+            "INTERNAL",
+            "SUPPORTING_PROVIDER",
+        }:
+            raise FinancialMvpContractError(
+                f"census provider role differs: {provider_id}"
+            )
+        if lane["lane_status"] not in {
+            "ACTIVE_CURRENT_MEMBERS",
+            "EXCLUDED_IMMATERIAL",
+            "HISTORICAL_ONLY",
+            "INTERNAL_RESERVE",
+            "NO_CURRENT_CENSUS_MEMBER",
+            "RESERVE_ONLY",
+        }:
+            raise FinancialMvpContractError(
+                f"census provider status differs: {provider_id}"
+            )
+        sleeve_ids = _strings(
+            lane["account_sleeve_ids"], f"census provider sleeves {provider_id}"
+        )
+        overlap = declared_lane_sleeves & set(sleeve_ids)
+        if overlap:
+            raise FinancialMvpContractError(
+                f"census sleeve belongs to multiple providers: {sorted(overlap)}"
+            )
+        declared_lane_sleeves.update(sleeve_ids)
+        source_id = _optional_text(
+            lane["source_segment_id"], f"census provider source {provider_id}"
+        )
+        generation = lane["generation"]
+        if source_id is None:
+            if generation is not None:
+                raise FinancialMvpContractError(
+                    f"census provider without source asserts generation: {provider_id}"
+                )
+            continue
+        if source_id not in source_by_id:
+            raise FinancialMvpContractError(
+                f"census provider source is unknown: {provider_id}:{source_id}"
+            )
+        generated = _object(generation, f"census provider generation {provider_id}")
+        _strict_keys(
+            generated,
+            {"as_of", "generation_id", "manifest_sha256", "pointer_sha256"},
+            "census provider generation",
+        )
+        generation_id = _hash(
+            generated["generation_id"], f"census provider generation {provider_id}"
+        )
+        manifest_sha = _hash(
+            generated["manifest_sha256"], f"census provider manifest {provider_id}"
+        )
+        _hash(generated["pointer_sha256"], f"census provider pointer {provider_id}")
+        generated_as_of = _date(
+            generated["as_of"], f"census provider as_of {provider_id}"
+        ).isoformat()
+        source_generation = _object(
+            source_by_id[source_id]["current_generation"],
+            f"source current_generation {source_id}",
+        )
+        if (
+            source_generation.get("generation_id") != generation_id
+            or source_generation.get("sha256") != manifest_sha
+            or source_generation.get("as_of") != generated_as_of
+        ):
+            raise FinancialMvpContractError(
+                f"census provider/source generation differs: {provider_id}"
+            )
+    if set(lane_by_id) != expected_provider_ids:
+        raise FinancialMvpContractError(
+            "census provider set differs: "
+            f"missing={sorted(expected_provider_ids - set(lane_by_id))} "
+            f"extra={sorted(set(lane_by_id) - expected_provider_ids)}"
+        )
+
+    sleeves = _objects(census["account_sleeves"], "census account_sleeves")
+    if len(sleeves) != 19:
+        raise FinancialMvpContractError(
+            "current census must contain 19 redacted sleeves"
+        )
+    sleeve_by_id: dict[str, Mapping[str, Any]] = {}
+    transition_groups: dict[str, list[tuple[date, date | None, str, str]]] = {}
+    funded_starts: dict[str, list[date]] = {}
+    current_counts: dict[str, int] = {}
+    for sleeve in sleeves:
+        _strict_keys(
+            sleeve,
+            {
+                "assignments",
+                "current_strategy_id",
+                "provider_id",
+                "role",
+                "sleeve_alias",
+                "source_segment_ids",
+            },
+            "census account sleeve",
+        )
+        sleeve_id = _text(sleeve["sleeve_alias"], "census sleeve_alias")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*[a-z0-9]", sleeve_id):
+            raise FinancialMvpContractError(f"census sleeve alias differs: {sleeve_id}")
+        if sleeve_id in sleeve_by_id:
+            raise FinancialMvpContractError(f"duplicate census sleeve: {sleeve_id}")
+        sleeve_by_id[sleeve_id] = sleeve
+        provider_id = _text(sleeve["provider_id"], "census sleeve provider")
+        if provider_id not in lane_by_id:
+            raise FinancialMvpContractError(
+                f"census sleeve provider is unknown: {sleeve_id}"
+            )
+        source_ids = _strings(
+            sleeve["source_segment_ids"], f"census sleeve sources {sleeve_id}"
+        )
+        unknown_sources = set(source_ids) - set(source_by_id)
+        if unknown_sources:
+            raise FinancialMvpContractError(
+                f"census sleeve has unknown sources: {sleeve_id}:{sorted(unknown_sources)}"
+            )
+        current_strategy = _optional_text(
+            sleeve["current_strategy_id"], f"census current strategy {sleeve_id}"
+        )
+        role = _text(sleeve["role"], f"census sleeve role {sleeve_id}")
+        if role not in {
+            "ACTIVE_STRATEGY",
+            "EXCLUDED_IMMATERIAL",
+            "HISTORICAL_ONLY",
+            "RESERVE",
+            "UNASSIGNED_HISTORY",
+        }:
+            raise FinancialMvpContractError(f"census sleeve role differs: {sleeve_id}")
+        assignments = _objects(
+            sleeve["assignments"], f"census sleeve assignments {sleeve_id}"
+        )
+        parsed: list[tuple[date, date | None, str, str]] = []
+        for assignment in assignments:
+            _strict_keys(
+                assignment,
+                {
+                    "authority",
+                    "effective_end",
+                    "effective_start",
+                    "status",
+                    "strategy_id",
+                    "transition_group_id",
+                },
+                "census assignment",
+            )
+            strategy_id = _text(
+                assignment["strategy_id"], f"census assignment strategy {sleeve_id}"
+            )
+            if strategy_id not in strategy_by_id:
+                raise FinancialMvpContractError(
+                    f"census assignment strategy is unknown: {sleeve_id}:{strategy_id}"
+                )
+            start = _date(
+                assignment["effective_start"], f"census assignment start {sleeve_id}"
+            )
+            end = _optional_date(
+                assignment["effective_end"], f"census assignment end {sleeve_id}"
+            )
+            if end is not None and end < start:
+                raise FinancialMvpContractError(
+                    f"census assignment interval is reversed: {sleeve_id}"
+                )
+            status = _text(
+                assignment["status"], f"census assignment status {sleeve_id}"
+            )
+            if status not in {
+                "ASSIGNMENT_ONLY",
+                "DEPRECATED_HISTORY_ONLY",
+                "EXCLUDED_IMMATERIAL",
+                "FUNDED_MEMBERSHIP",
+            }:
+                raise FinancialMvpContractError(
+                    f"census assignment status differs: {sleeve_id}"
+                )
+            _text(assignment["authority"], f"census assignment authority {sleeve_id}")
+            transition_id = _optional_text(
+                assignment["transition_group_id"],
+                f"census transition group {sleeve_id}",
+            )
+            parsed.append((start, end, strategy_id, status))
+            if transition_id is not None:
+                transition_groups.setdefault(transition_id, []).append(
+                    (start, end, strategy_id, sleeve_id)
+                )
+            if status == "FUNDED_MEMBERSHIP":
+                funded_starts.setdefault(strategy_id, []).append(start)
+        for left, right in zip(sorted(parsed), sorted(parsed)[1:]):
+            left_end = left[1]
+            if left_end is None or right[0] <= left_end:
+                raise FinancialMvpContractError(
+                    f"census assignments overlap or have an open predecessor: {sleeve_id}"
+                )
+        if current_strategy is None:
+            if role == "ACTIVE_STRATEGY":
+                raise FinancialMvpContractError(
+                    f"active census sleeve lacks current strategy: {sleeve_id}"
+                )
+        else:
+            if role != "ACTIVE_STRATEGY":
+                raise FinancialMvpContractError(
+                    f"non-active census sleeve asserts current strategy: {sleeve_id}"
+                )
+            if strategy_by_id[current_strategy]["product_requirement"] != "REQUIRED":
+                raise FinancialMvpContractError(
+                    f"census current strategy is excluded: {sleeve_id}"
+                )
+            if not any(
+                strategy_id == current_strategy
+                and status == "FUNDED_MEMBERSHIP"
+                and end is None
+                for _start, end, strategy_id, status in parsed
+            ):
+                raise FinancialMvpContractError(
+                    f"census current strategy lacks open funded assignment: {sleeve_id}"
+                )
+            current_counts[current_strategy] = (
+                current_counts.get(current_strategy, 0) + 1
+            )
+    if set(sleeve_by_id) != declared_lane_sleeves:
+        raise FinancialMvpContractError(
+            "census provider/sleeve partition differs: "
+            f"missing={sorted(declared_lane_sleeves - set(sleeve_by_id))} "
+            f"extra={sorted(set(sleeve_by_id) - declared_lane_sleeves)}"
+        )
+    for transition_id, rows in transition_groups.items():
+        if len(rows) != 2 or len({row[3] for row in rows}) != 1:
+            raise FinancialMvpContractError(
+                f"census transition group does not bind one sleeve: {transition_id}"
+            )
+        ordered = sorted(rows)
+        if (
+            ordered[0][1] is None
+            or (ordered[1][0] - ordered[0][1]).days != 1
+            or ordered[0][2] == ordered[1][2]
+        ):
+            raise FinancialMvpContractError(
+                f"census transition is not adjacent: {transition_id}"
+            )
+    required_strategies = {
+        strategy_id
+        for strategy_id, row in strategy_by_id.items()
+        if row["product_requirement"] == "REQUIRED"
+    }
+    if set(current_counts) != required_strategies:
+        raise FinancialMvpContractError(
+            "current census active strategy set differs: "
+            f"missing={sorted(required_strategies - set(current_counts))} "
+            f"extra={sorted(set(current_counts) - required_strategies)}"
+        )
+    for strategy_id in required_strategies:
+        membership = _object(
+            strategy_by_id[strategy_id]["funded_membership"],
+            f"strategy funded_membership {strategy_id}",
+        )
+        accepted_start = _date(
+            membership["effective_start"], f"strategy funded start {strategy_id}"
+        )
+        if min(funded_starts.get(strategy_id, []), default=None) != accepted_start:
+            raise FinancialMvpContractError(
+                f"census funded start differs from strategy authority: {strategy_id}"
+            )
+    tt_rows = [
+        row
+        for sleeve in sleeves
+        for row in _objects(sleeve["assignments"], "census assignments")
+        if row["strategy_id"] == "tt-portfolio" and row["status"] == "FUNDED_MEMBERSHIP"
+    ]
+    if any(
+        row["effective_end"] is not None
+        and str(row["effective_end"]).startswith("2026-07")
+        for row in tt_rows
+    ):
+        raise FinancialMvpContractError("TT census invents a July exit or re-entry")
 
 
 def _validate_history_corrections(
@@ -2847,16 +3604,20 @@ def _validate_matrixport_gap_policy(row: Mapping[str, Any], source_id: str) -> N
         )
 
 
-def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> None:
+def _validate_sources(
+    sources: list[dict[str, Any]],
+    registry_ids: set[str],
+    required_strategy_ids: set[str],
+) -> None:
     source_ids: set[str] = set()
     data_classes: set[str] = set()
     evidence_layers: set[str] = set()
     outcome_consumers: set[str] = set()
     history_layers_by_strategy: dict[str, set[str]] = {
-        strategy_id: set() for strategy_id in registry_ids
+        strategy_id: set() for strategy_id in required_strategy_ids
     }
     decomposition_classes_by_strategy: dict[str, set[str]] = {
-        strategy_id: set() for strategy_id in registry_ids
+        strategy_id: set() for strategy_id in required_strategy_ids
     }
     for row in sources:
         expected_source_keys = {
@@ -3001,7 +3762,8 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
         evidence_layers.add(evidence_layer)
         if evidence_layer in {"PROVIDER_TRACK_RECORD", "PROVIDER_LIVE", "ACCOUNT_LIVE"}:
             for strategy_id in strategy_ids:
-                history_layers_by_strategy[strategy_id].add(evidence_layer)
+                if strategy_id in history_layers_by_strategy:
+                    history_layers_by_strategy[strategy_id].add(evidence_layer)
         interval = _object(row["interval"], "source_segment.interval")
         _strict_keys(
             interval,
@@ -3107,7 +3869,8 @@ def _validate_sources(sources: list[dict[str, Any]], registry_ids: set[str]) -> 
         outcome_consumers.update(set(consumers) & set(OUTCOME_IDS))
         if "DECOMPOSITION" in consumers:
             for strategy_id in strategy_ids:
-                decomposition_classes_by_strategy[strategy_id].update(classes)
+                if strategy_id in decomposition_classes_by_strategy:
+                    decomposition_classes_by_strategy[strategy_id].update(classes)
         generation = _object(
             row["current_generation"], "source_segment.current_generation"
         )
@@ -3807,6 +4570,7 @@ def validate_contract(
         {
             "$schema",
             "contract_schema_version",
+            "current_census",
             "financial_outcomes",
             "golden_case",
             "history_corrections",
@@ -3816,8 +4580,8 @@ def validate_contract(
         },
         "financial MVP contract",
     )
-    if contract["contract_schema_version"] != 5:
-        raise FinancialMvpContractError("contract_schema_version must be 5")
+    if contract["contract_schema_version"] != 6:
+        raise FinancialMvpContractError("contract_schema_version must be 6")
     if contract["$schema"] != (
         "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     ):
@@ -3830,7 +4594,17 @@ def validate_contract(
     outcomes = _objects(contract["financial_outcomes"], "financial_outcomes")
     _validate_outcomes(outcomes)
     sources = _objects(contract["source_segments"], "source_segments")
-    _validate_sources(sources, set(registry_ids))
+    required_strategy_ids = {
+        row["strategy_id"]
+        for row in strategies
+        if row["product_requirement"] == "REQUIRED"
+    }
+    _validate_sources(sources, set(registry_ids), required_strategy_ids)
+    _validate_current_census(
+        _object(contract["current_census"], "current_census"),
+        strategies,
+        sources,
+    )
     _validate_history_corrections(
         _object(contract["history_corrections"], "history_corrections"),
         strategies,
@@ -3864,6 +4638,8 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
 
     digest = contract_digest(contract)
     invested_policy_digest = invested_capital_policy_digest(contract)
+    census = _object(contract["current_census"], "current_census")
+    accepted_census_digest = census_digest(census)
     product = _object(contract["product"], "product")
     outcomes = _objects(contract["financial_outcomes"], "financial_outcomes")
     strategies = _objects(contract["strategies"], "strategies")
@@ -3881,6 +4657,7 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
         "",
         f"- Product version: `{product['product_version']}`",
         f"- Canonical contract SHA-256: `{digest}`",
+        f"- Current census SHA-256: `{accepted_census_digest}`",
         f"- Runtime profile: `{product['runtime_profile']}`",
         f"- Publication: `{product['publication_boundary']['status']}`",
         "",
@@ -4039,8 +4816,8 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             "",
             "## Current perimeter",
             "",
-            "| Strategy | History series | Requirement | Readiness | Version | Funded membership | Blockers |",
-            "|---|---|---|---|---|---|---|",
+            "| Strategy | Lifecycle | History series | Requirement | Readiness | Design/config version | Live implementation | Funded membership | Blockers |",
+            "|---|---|---|---|---|---|---|---|---|",
         ]
     )
     for row in strategies:
@@ -4048,12 +4825,69 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
         membership = row["funded_membership"]
         blockers = ", ".join(f"#{value}" for value in row["blockers"]) or "None"
         version_text = version["version_ref"] or version["status"]
+        live_identity = row["live_implementation_identity"]
+        live_text = live_identity["version_ref"] or live_identity["status"]
         history_series = row["history_series_id"] or "NOT_CAPTURED"
         lines.append(
-            f"| {row['strategy_id']} | {history_series} | "
+            f"| {row['strategy_id']} | {row['lifecycle_status']} | {history_series} | "
             f"{row['product_requirement']} | "
-            f"{row['readiness']} | {version_text} | {membership['status']} | "
+            f"{row['readiness']} | {version_text} | {live_text} | "
+            f"{membership['status']} | "
             f"{blockers} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Current provider/account census — #302",
+            "",
+            f"- Census ID: `{census['census_id']}`",
+            f"- Census as-of: `{census['as_of']}`",
+            f"- Decision evidence: {census['decision_evidence_url']}",
+            f"- Decision payload SHA-256: `{census['decision_payload_sha256']}`",
+            f"- Census SHA-256: `{accepted_census_digest}`",
+            f"- Private crosswalk: `{census['private_crosswalk_rule']}`",
+            "",
+            "### Provider lanes",
+            "",
+            "| Provider | Role | Status | Source | Redacted sleeves | Current generation |",
+            "|---|---|---|---|---:|---|",
+        ]
+    )
+    for lane in census["provider_lanes"]:
+        generation = lane["generation"]
+        generation_text = (
+            f"{generation['generation_id'][:12]} / {generation['as_of']}"
+            if isinstance(generation, dict)
+            else "NOT_APPLICABLE"
+        )
+        lines.append(
+            f"| {lane['provider_id']} | {lane['lane_role']} | "
+            f"{lane['lane_status']} | {lane['source_segment_id'] or 'NONE'} | "
+            f"{len(lane['account_sleeve_ids'])} | {generation_text} |"
+        )
+    lines.extend(
+        [
+            "",
+            "### Redacted account sleeves",
+            "",
+            "| Sleeve alias | Provider | Role | Current strategy | Effective assignments | Source segments |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
+    for sleeve in census["account_sleeves"]:
+        assignments = (
+            "; ".join(
+                f"{item['strategy_id']}:{item['status']}:"
+                f"{item['effective_start']}..{item['effective_end'] or 'OPEN'}"
+                for item in sleeve["assignments"]
+            )
+            or "NONE"
+        )
+        source_text = ", ".join(sleeve["source_segment_ids"]) or "NONE"
+        lines.append(
+            f"| {sleeve['sleeve_alias']} | {sleeve['provider_id']} | "
+            f"{sleeve['role']} | {sleeve['current_strategy_id'] or 'NONE'} | "
+            f"{assignments} | {source_text} |"
         )
     lines.extend(
         [
@@ -4316,17 +5150,68 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                             "owner_policy_decision": source["owner_policy_decision"],
                         }
                     )
+    source_by_id = {row["source_id"]: row for row in sources}
+    census_rows: list[dict[str, Any]] = []
+    for sleeve in census["account_sleeves"]:
+        census_assignments = [dict(item) for item in sleeve["assignments"]]
+        source_ids = sleeve["source_segment_ids"]
+        if not source_ids:
+            census_rows.append(
+                {
+                    "census_sha256": accepted_census_digest,
+                    "sleeve_alias": sleeve["sleeve_alias"],
+                    "provider_id": sleeve["provider_id"],
+                    "role": sleeve["role"],
+                    "current_strategy_id": sleeve["current_strategy_id"],
+                    "assignments": census_assignments,
+                    "source_id": None,
+                    "data_class": None,
+                    "source_requirement": None,
+                    "cadence": None,
+                    "publication_lag_days": None,
+                    "absence_behavior": None,
+                    "readiness": None,
+                    "current_generation": None,
+                }
+            )
+            continue
+        for source_id in source_ids:
+            source = source_by_id[source_id]
+            for data_class in source["data_classes"]:
+                census_rows.append(
+                    {
+                        "census_sha256": accepted_census_digest,
+                        "sleeve_alias": sleeve["sleeve_alias"],
+                        "provider_id": sleeve["provider_id"],
+                        "role": sleeve["role"],
+                        "current_strategy_id": sleeve["current_strategy_id"],
+                        "assignments": census_assignments,
+                        "source_id": source_id,
+                        "data_class": data_class,
+                        "source_requirement": source["product_requirement"],
+                        "cadence": source["temporal"]["cadence"],
+                        "publication_lag_days": source["freshness"][
+                            "publication_lag_days"
+                        ],
+                        "absence_behavior": source["absence_behavior"],
+                        "readiness": source["readiness"],
+                        "current_generation": source["current_generation"],
+                    }
+                )
     return GeneratedViews(
         summary_markdown=summary,
         source_matrix_json=canonical_json_bytes(
             {
                 "contract_sha256": digest,
+                "census_sha256": accepted_census_digest,
                 "invested_capital_policy_sha256": invested_policy_digest,
                 "owner_decision_receipts": {
                     decision_id: receipts[decision_id]["payload_sha256"]
                     for decision_id in OWNER_DECISION_IDS
                 },
                 "history_corrections": history,
+                "current_census": census,
+                "census_rows": census_rows,
                 "as_of_policy": product["as_of_policy"],
                 "product_version": product["product_version"],
                 "rows": matrix_rows,
@@ -4377,6 +5262,8 @@ def _parser() -> argparse.ArgumentParser:
             "generate",
             "check",
             "decision-digests",
+            "verify-census-evidence",
+            "verify-census-owner-evidence",
             "verify-history-evidence",
             "verify-owner-evidence",
         ),
@@ -4384,10 +5271,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_VIEW_ROOT)
+    parser.add_argument("--alpaca-root", type=Path)
+    parser.add_argument("--baseline-root", type=Path)
+    parser.add_argument("--fidelity-root", type=Path)
+    parser.add_argument("--ibkr-root", type=Path)
     parser.add_argument("--matrixport-root", type=Path)
     parser.add_argument("--portfolio123-root", type=Path)
     parser.add_argument("--provider-ledger-root", type=Path)
     parser.add_argument("--quantbase-root", type=Path)
+    parser.add_argument("--schwab-root", type=Path)
     return parser
 
 
@@ -4410,7 +5302,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     contract = load_contract(args.contract, args.registry)
     result: Mapping[str, object]
-    if args.command == "verify-history-evidence":
+    if args.command == "verify-census-evidence":
+        roots = {
+            "ALPACA": args.alpaca_root,
+            "BASELINE": args.baseline_root,
+            "FIDELITY": args.fidelity_root,
+            "IBKR": args.ibkr_root,
+            "MATRIXPORT": args.matrixport_root,
+            "PORTFOLIO123": args.portfolio123_root,
+            "PROVIDER_LEDGER": args.provider_ledger_root,
+            "QUANTBASE": args.quantbase_root,
+            "SCHWAB": args.schwab_root,
+        }
+        missing = sorted(name for name, path in roots.items() if path is None)
+        if missing:
+            raise FinancialMvpContractError(
+                f"census evidence roots were not supplied: {missing}"
+            )
+        result = verify_census_evidence(
+            contract,
+            {name: path for name, path in roots.items() if path is not None},
+        )
+    elif args.command == "verify-census-owner-evidence":
+        census = _object(contract["current_census"], "current_census")
+        reconcile_census_owner_evidence(census, fetch_census_owner_evidence())
+        result = {
+            "census_sha256": census_digest(census),
+            "contract_sha256": contract_digest(contract),
+            "status": "VALID",
+            "verified_comment_ids": [_CENSUS_OWNER_COMMENT_ID],
+        }
+    elif args.command == "verify-history-evidence":
         roots = {
             "MATRIXPORT": args.matrixport_root,
             "PORTFOLIO123": args.portfolio123_root,

@@ -1198,16 +1198,10 @@ def _validate_strategy_perimeter(
                 f"plan history series differs from the financial MVP contract: "
                 f"{strategy_id}"
             )
-        if (
-            _text(
-                contract_row.get("product_requirement"),
-                f"{strategy_id}.product_requirement",
-            )
-            != "REQUIRED"
-        ):
-            raise CurrentPlanError(
-                f"financial MVP strategy is not a required product member: {strategy_id}"
-            )
+        product_requirement = _text(
+            contract_row.get("product_requirement"),
+            f"{strategy_id}.product_requirement",
+        )
         outcome_dispositions = _object(
             contract_row.get("outcome_dispositions"),
             f"{strategy_id}.outcome_dispositions",
@@ -1230,7 +1224,10 @@ def _validate_strategy_perimeter(
                 f"strategy assignment source key is unknown: {strategy_id}"
             )
         cells = _source_dispositions(plan_row, source_keys)
-        if decomposition_disposition == "REQUIRED":
+        if (
+            product_requirement == "REQUIRED"
+            and decomposition_disposition == "REQUIRED"
+        ):
             ready_sources: set[str] = set()
             for source_key, cell in cells.items():
                 if cell["requirement"] != "REQUIRED":
@@ -1265,11 +1262,14 @@ def _validate_strategy_perimeter(
                     "strategy assignments differ from source disposition authority: "
                     f"{strategy_id}"
                 )
-        elif decomposition_disposition == "NOT_APPLICABLE_OWNER_APPROVED":
+        elif (
+            product_requirement == "EXCLUDED"
+            and decomposition_disposition == "EXCLUDED_BY_ACCEPTED_POLICY"
+        ):
             if assignments or any(
-                cell["requirement"] != decomposition_disposition
-                or cell["readiness"] != decomposition_disposition
-                or cell["reason"] != decomposition_disposition
+                cell["requirement"] != "NOT_APPLICABLE_OWNER_APPROVED"
+                or cell["readiness"] != "NOT_APPLICABLE_OWNER_APPROVED"
+                or cell["reason"] != "NOT_APPLICABLE_OWNER_APPROVED"
                 for cell in cells.values()
             ):
                 raise CurrentPlanError(

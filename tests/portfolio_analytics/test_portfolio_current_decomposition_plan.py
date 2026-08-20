@@ -211,7 +211,20 @@ def _reidentify_public_manifest(manifest: dict[str, Any]) -> None:
 
 def _bind_fixture_source_dispositions(plan: dict[str, Any]) -> None:
     source_keys = tuple(plan["sources"])
+    owner_excluded = {"composer-holy-grail", "echotrade-growth-pivots"}
     for strategy in plan["strategies"]:
+        if strategy["strategy_id"] in owner_excluded:
+            strategy["assignments"] = []
+            strategy["source_dispositions"] = {
+                source_key: {
+                    "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+                    "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+                    "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+                    "authority": "OWNER_302_SYNTHETIC_FIXTURE_BINDING",
+                }
+                for source_key in source_keys
+            }
+            continue
         assigned = {
             assignment["source_key"] for assignment in strategy.get("assignments", [])
         }
@@ -561,13 +574,31 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         "DYNAMIC_FLS",
     }
     assert {row["requirement"] for row in dispositions["candidate_dispositions"]} == {
-        "REQUIRED"
+        "NOT_APPLICABLE_OWNER_APPROVED",
+        "REQUIRED",
     }
+    required_rows = [
+        row
+        for row in dispositions["candidate_dispositions"]
+        if row["requirement"] == "REQUIRED"
+    ]
     assert not any(
         token in row["disposition"] or token in row["reason"]
-        for row in dispositions["candidate_dispositions"]
+        for row in required_rows
         for token in ("DROPPED", "OUT_OF_SCOPE", "NOT_APPLICABLE")
     )
+    excluded_rows = [
+        row
+        for row in dispositions["candidate_dispositions"]
+        if row["requirement"] == "NOT_APPLICABLE_OWNER_APPROVED"
+    ]
+    assert {row["strategy_id"] for row in excluded_rows} == {
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    }
+    assert {row["disposition"] for row in excluded_rows} == {
+        "NOT_APPLICABLE_OWNER_APPROVED"
+    }
     economic = json.loads(outputs["specs/economic.json"])
     dynamic_economic = json.loads(outputs["specs/economic-dynamic-fls.json"])
     assert {model["estimator"] for model in economic["models"]} == {"STATIC_RBSA"}
@@ -602,14 +633,14 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
     ]
     coverage = json.loads(outputs["inputs/history/coverage.json"])
     coverage_by_strategy = {row["strategy_id"]: row for row in coverage["strategies"]}
-    assert (
-        coverage_by_strategy["composer-holy-grail"]["modes"]["LIVE_ONLY"]["status"]
-        == "REQUIRED_NOT_READY"
-    )
-    assert (
-        coverage_by_strategy["echotrade-growth-pivots"]["modes"]["LIVE_ONLY"]["status"]
-        == "REQUIRED_NOT_READY"
-    )
+    assert coverage_by_strategy["composer-holy-grail"]["modes"]["LIVE_ONLY"] == {
+        "reason": "NOT_APPLICABLE_OWNER_APPROVED_IMMATERIAL",
+        "status": "NOT_APPLICABLE_OWNER_APPROVED",
+    }
+    assert coverage_by_strategy["echotrade-growth-pivots"]["modes"]["LIVE_ONLY"] == {
+        "reason": "NOT_APPLICABLE_OWNER_APPROVED_DEPRECATED",
+        "status": "NOT_APPLICABLE_OWNER_APPROVED",
+    }
 
 
 def test_dynamic_surface_policy_and_grid_fail_closed(tmp_path: Path) -> None:
@@ -696,19 +727,13 @@ def test_required_decomposition_perimeter_cannot_be_dropped_or_omitted() -> None
     source_keys = tuple(plan["sources"])
     planner._validate_strategy_perimeter(strategies, contract, source_keys)
     by_id = {row["strategy_id"]: row for row in strategies}
+    for strategy_id in ("composer-holy-grail", "echotrade-growth-pivots"):
+        cells = by_id[strategy_id]["source_dispositions"]
+        assert {cell["reason"] for cell in cells.values()} == {
+            "NOT_APPLICABLE_OWNER_APPROVED"
+        }
     for strategy_id, reason in (
-        (
-            "composer-holy-grail",
-            "REQUIRED_NOT_READY_MISSING_ACCOUNT_LIVE_TARGET_HISTORY",
-        ),
-        (
-            "echotrade-growth-pivots",
-            "REQUIRED_NOT_READY_CAPTURED_EVENT_ONLY_TARGET_NOT_ADMISSIBLE_DAILY_NAV",
-        ),
-        (
-            "robuxio-crypto",
-            "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE",
-        ),
+        ("robuxio-crypto", "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE"),
     ):
         cells = by_id[strategy_id]["source_dispositions"]
         assert {cell["reason"] for cell in cells.values()} == {reason}
@@ -724,7 +749,7 @@ def test_required_decomposition_perimeter_cannot_be_dropped_or_omitted() -> None
     )
     with pytest.raises(
         planner.CurrentPlanError,
-        match="required-not-ready decomposition reason differs",
+        match="owner-approved decomposition non-applicability differs",
     ):
         planner._validate_strategy_perimeter(
             planner._resolved_strategies(dropped), contract, source_keys

@@ -78,6 +78,83 @@ def _github_comment(comment_id: int, body: str = "") -> dict[str, object]:
     }
 
 
+def _census_owner_comment() -> dict[str, object]:
+    record = {
+        "decision_id": ("DATA-CENSUS-001-OWNER-PERIMETER-AND-MEMBERSHIP-2026-08-19"),
+        "authority_issue": 302,
+        "approved_on": "2026-08-19",
+        "perimeter": [
+            {
+                "strategy_id": "composer-holy-grail",
+                "disposition": "IMMATERIAL_EXCLUDED_FROM_CURRENT_FINANCIAL_MVP",
+            },
+            {
+                "strategy_id": "echotrade-growth-pivots",
+                "disposition": "DEPRECATED_EXCLUDED_FROM_CURRENT_FINANCIAL_MVP",
+            },
+        ],
+        "memberships": [
+            {
+                "strategy_id": "p123-ai-factor",
+                "effective_start": "2026-01-22",
+                "effective_end": None,
+            },
+            {
+                "strategy_id": "grizzlybears-vtma",
+                "effective_start": "2026-01-02",
+                "effective_end": None,
+            },
+            {
+                "strategy_id": "qsi",
+                "effective_start": "2026-01-05",
+                "effective_end": None,
+            },
+            {
+                "strategy_id": "tt-portfolio",
+                "effective_start": "2025-11-25",
+                "effective_end": None,
+            },
+        ],
+        "transitions": [
+            {
+                "from_strategy_id": "tt-portfolio",
+                "from_effective_end": "2026-01-04",
+                "to_strategy_id": "qsi",
+                "to_effective_start": "2026-01-05",
+                "scope": "TWO_REDACTED_SLEEVES",
+            }
+        ],
+        "continuity": [
+            {
+                "strategy_id": "tt-portfolio",
+                "rule": "CONTINUOUS_MEMBERSHIP",
+                "disconfirming_interval": "2026-07-14/2026-07-30",
+                "disposition": (
+                    "ZERO_OR_MISSING_COMPONENT_VALUE_DOES_NOT_CREATE_EXIT_OR_REENTRY"
+                ),
+            }
+        ],
+        "explicit_non_decisions": [
+            "TRANSACTION_OR_FLOW_CLASSIFICATION",
+            "UNSUPPORTED_STRATEGY_DESIGN_VERSION",
+            "PRIVATE_ACCOUNT_IDENTITY",
+            "POINTER_OR_PUBLICATION",
+        ],
+    }
+    return {
+        "id": contract_tool._CENSUS_OWNER_COMMENT_ID,
+        "html_url": (
+            "https://github.com/dachent/quant_engine/issues/302#issuecomment-"
+            f"{contract_tool._CENSUS_OWNER_COMMENT_ID}"
+        ),
+        "body": f"```json\n{json.dumps(record, sort_keys=True)}\n```",
+        "user": {"login": "dachent"},
+        "author_association": "OWNER",
+        "created_at": "2026-08-20T01:08:42Z",
+        "updated_at": "2026-08-20T01:08:42Z",
+    }
+
+
 def _owner_evidence_comments(
     contract: dict[str, object],
 ) -> dict[int, dict[str, object]]:
@@ -121,7 +198,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "00309632bf3afc35f4c3582883ffa765131e75d4a2a2999b59e6eb369f939512"
+        "74175e99bbf1af575dfddd66071e992b4c89e95bb9c52efa40d25dae81e76342"
     )
 
 
@@ -263,12 +340,22 @@ def test_strategy_perimeter_matches_discoverable_registry_without_disappearing_r
     expected = [row["strategy_id"] for row in registry["strategies"]]
     actual = [row["strategy_id"] for row in contract["strategies"]]
     assert actual == expected
-    assert all(
-        row["product_requirement"] == "REQUIRED" for row in contract["strategies"]
-    )
-    assert all(
-        row["readiness"] == "REQUIRED_NOT_READY" for row in contract["strategies"]
-    )
+    requirements = {
+        row["strategy_id"]: row["product_requirement"] for row in contract["strategies"]
+    }
+    assert {key for key, value in requirements.items() if value == "EXCLUDED"} == {
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    }
+    assert {key for key, value in requirements.items() if value == "REQUIRED"} == {
+        "grizzlybears-vtma",
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "robuxio-crypto",
+        "tt-portfolio",
+        "volatis-strategy",
+    }
     assert {
         row["strategy_id"]: row["history_series_id"] for row in contract["strategies"]
     } == {
@@ -292,12 +379,133 @@ def test_strategy_perimeter_matches_discoverable_registry_without_disappearing_r
         "composer-holy-grail",
         "echotrade-growth-pivots",
     }
-    assert all(
-        row["outcome_dispositions"]["INVESTED_CAPITAL"] == "REQUIRED"
-        and row["outcome_dispositions"]["DECOMPOSITION"] == "REQUIRED"
-        and row["outcome_dispositions"]["DEPENDENCE"] == "REQUIRED"
-        for row in contract["strategies"]
+    excluded = {
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    }
+    for row in contract["strategies"]:
+        expected = (
+            "EXCLUDED_BY_ACCEPTED_POLICY"
+            if row["strategy_id"] in excluded
+            else "REQUIRED"
+        )
+        assert set(row["outcome_dispositions"].values()) == {expected}
+
+
+def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> None:
+    contract = _contract()
+    census = contract["current_census"]
+    assert census["authority_issue"] == 302
+    assert len(census["account_sleeves"]) == 19
+    assert len(census["provider_lanes"]) == 10
+    assert len(census["evidence_receipts"]) == 6
+    current_counts: dict[str, int] = {}
+    transition_rows: list[dict[str, object]] = []
+    for sleeve in census["account_sleeves"]:
+        current = sleeve["current_strategy_id"]
+        if current is not None:
+            current_counts[current] = current_counts.get(current, 0) + 1
+        for assignment in sleeve["assignments"]:
+            if assignment["transition_group_id"] is not None:
+                transition_rows.append(assignment)
+    assert current_counts == {
+        "grizzlybears-vtma": 1,
+        "p123-ai-factor": 1,
+        "p123-eu": 1,
+        "qsi": 2,
+        "robuxio-crypto": 1,
+        "tt-portfolio": 4,
+        "volatis-strategy": 1,
+    }
+    assert len(transition_rows) == 4
+    assert {
+        (row["strategy_id"], row["effective_start"], row["effective_end"])
+        for row in transition_rows
+    } == {
+        ("tt-portfolio", "2025-11-25", "2026-01-04"),
+        ("qsi", "2026-01-05", None),
+    }
+    tt_funded = [
+        assignment
+        for sleeve in census["account_sleeves"]
+        for assignment in sleeve["assignments"]
+        if assignment["strategy_id"] == "tt-portfolio"
+        and assignment["status"] == "FUNDED_MEMBERSHIP"
+    ]
+    assert tt_funded
+    assert all(row["effective_end"] is None for row in tt_funded)
+
+
+def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
+    contract = _contract()
+    census = contract["current_census"]
+    contract_tool.reconcile_census_owner_evidence(census, _census_owner_comment())
+    rendered = contract_tool.render_views(contract)
+    matrix = json.loads(rendered.source_matrix_json)
+    assert matrix["current_census"] == census
+    assert matrix["census_sha256"] == contract_tool.census_digest(census)
+    assert matrix["census_rows"]
+    assert {row["sleeve_alias"] for row in matrix["census_rows"]} == {
+        row["sleeve_alias"] for row in census["account_sleeves"]
+    }
+    assert b"Current provider/account census" in rendered.summary_markdown
+    assert census["decision_payload_sha256"].encode() in rendered.summary_markdown
+
+    tampered = _census_owner_comment()
+    tampered["updated_at"] = "2026-08-20T01:08:43Z"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="census owner evidence authority differs",
+    ):
+        contract_tool.reconcile_census_owner_evidence(census, tampered)
+
+
+def test_census_fails_on_missing_duplicate_overlap_and_stale_provider_binding() -> None:
+    contract = _contract()
+
+    missing = copy.deepcopy(contract)
+    missing["current_census"]["account_sleeves"].pop()
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="19 redacted sleeves",
+    ):
+        _validate(missing)
+
+    duplicate = copy.deepcopy(contract)
+    duplicate["current_census"]["account_sleeves"][1]["sleeve_alias"] = duplicate[
+        "current_census"
+    ]["account_sleeves"][0]["sleeve_alias"]
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="duplicate census sleeve",
+    ):
+        _validate(duplicate)
+
+    overlap = copy.deepcopy(contract)
+    qsi = next(
+        row
+        for row in overlap["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "schwab-qsi-01"
     )
+    qsi["assignments"][1]["effective_start"] = "2026-01-04"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="assignments overlap",
+    ):
+        _validate(overlap)
+
+    stale = copy.deepcopy(contract)
+    ibkr = next(
+        row
+        for row in stale["current_census"]["provider_lanes"]
+        if row["provider_id"] == "IBKR"
+    )
+    ibkr["generation"]["generation_id"] = "0" * 64
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="provider/source generation differs",
+    ):
+        _validate(stale)
 
 
 def test_all_four_outcomes_are_required_and_generic_unavailable_is_not_accepted() -> (
@@ -1006,6 +1214,12 @@ def test_history_truth_recurrence_mutations_fail_closed() -> None:
         if row["strategy_id"] == "volatis-strategy"
     )
     strategy["funded_membership"]["effective_start"] = "2024-10-13"
+    volatis_sleeve = next(
+        row
+        for row in early_volatis["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "quantbase-volatis-01"
+    )
+    volatis_sleeve["assignments"][0]["effective_start"] = "2024-10-13"
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="valued governed evidence",
@@ -1188,10 +1402,8 @@ def test_per_strategy_history_and_decomposition_routes_fail_on_omission() -> Non
 
     contract = copy.deepcopy(_contract())
     factors = _source(contract, "public-economic-and-industry-factors")
-    factors["subjects"]["strategy_ids"].remove("composer-holy-grail")
-    with pytest.raises(
-        contract_tool.FinancialMvpContractError, match="composer-holy-grail"
-    ):
+    factors["subjects"]["strategy_ids"].remove("qsi")
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="qsi"):
         _validate(contract)
 
 
@@ -1309,7 +1521,7 @@ def test_public_factor_run_and_publication_timing_propagate_to_every_view() -> N
         for row in matrix["rows"]
         if row["source_id"] == "public-economic-and-industry-factors"
     ]
-    assert len(rows) == 135
+    assert len(rows) == 105
     assert all(
         row["cadence"] == expected_cadence
         and row["max_age_days"] == 0
@@ -1406,7 +1618,9 @@ def test_required_not_ready_needs_blocker_and_ready_needs_generation() -> None:
         _validate(contract)
 
     contract = copy.deepcopy(_contract())
-    strategy = contract["strategies"][0]
+    strategy = next(
+        row for row in contract["strategies"] if row["strategy_id"] == "p123-ai-factor"
+    )
     strategy["readiness"] = "READY"
     strategy["blockers"] = []
     with pytest.raises(
@@ -1599,7 +1813,7 @@ def test_generated_views_are_deterministic_and_match_authoritative_bytes(
         for row in rows
         if row["source_id"] == "alpaca-account-generation"
     }
-    assert unresolved == {"UNRESOLVED_SUBJECT_BINDING"}
+    assert unresolved == {"echotrade-growth-pivots"}
     assert all(row["strategy_id"] != "ALL_PORTFOLIO" for row in rows)
 
 

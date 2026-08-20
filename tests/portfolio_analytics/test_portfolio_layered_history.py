@@ -115,6 +115,16 @@ def _update_source_generation(
         "generation_id": generation["generation_id"],
         "sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
     }
+    for lane in contract["current_census"]["provider_lanes"]:
+        if lane["source_segment_id"] != source_id:
+            continue
+        assert pointer_path.exists()
+        lane["generation"] = {
+            "as_of": as_of,
+            "generation_id": generation["generation_id"],
+            "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            "pointer_sha256": hashlib.sha256(pointer_path.read_bytes()).hexdigest(),
+        }
 
 
 def _update_correction_generations(
@@ -1045,13 +1055,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.12.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.13.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.12.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.13.0"}
     assert (
         "strategy-history"
         in generation_schema["properties"]["source_manifests"]["properties"]
@@ -1068,14 +1078,22 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     coverage_by_strategy = {row["strategy_id"]: row for row in coverage["strategies"]}
     assert coverage_by_strategy["echotrade-growth-pivots"]["segments"] == []
     assert coverage_by_strategy["echotrade-growth-pivots"]["modes"]["LIVE_ONLY"] == {
-        "reason": "CAPTURED_EVENT_ONLY_RECONSTRUCTION_NOT_ADMISSIBLE_DAILY_NAV",
-        "status": "REQUIRED_NOT_READY",
+        "reason": "NOT_APPLICABLE_OWNER_APPROVED_DEPRECATED",
+        "status": "NOT_APPLICABLE_OWNER_APPROVED",
     }
     assert coverage_by_strategy["composer-holy-grail"]["segments"] == []
     assert coverage_by_strategy["composer-holy-grail"]["modes"]["LIVE_ONLY"] == {
-        "reason": "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT",
-        "status": "REQUIRED_NOT_READY",
+        "reason": "NOT_APPLICABLE_OWNER_APPROVED_IMMATERIAL",
+        "status": "NOT_APPLICABLE_OWNER_APPROVED",
     }
+    assert not {
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    } & set(
+        json.loads(manifest_content)["mode_status"]["LIVE_ONLY"][
+            "required_not_ready_strategy_ids"
+        ]
+    )
     assert coverage["correction_resolutions"]["p123-eu-provider-live"] == {
         "calendar": "WEEKDAY_SOURCE_CALENDAR",
         "cash_added_treatment": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",

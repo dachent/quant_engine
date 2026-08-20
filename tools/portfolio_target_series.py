@@ -64,7 +64,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.12.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.13.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 LAYERED_HISTORY_ASSURANCE_PROFILES: Final = frozenset(
     {"DEVELOPMENT", "WORKSTATION_QC", "RELEASE_QC"}
@@ -1685,7 +1685,7 @@ def _history_contract(
         strategy_id = str(raw.get("strategy_id", "")).strip()
         if (
             not strategy_id
-            or raw.get("product_requirement") != "REQUIRED"
+            or raw.get("product_requirement") not in {"REQUIRED", "EXCLUDED"}
             or strategy_id in strategies
         ):
             raise TargetSeriesError("financial MVP strategy identity differs")
@@ -1725,6 +1725,20 @@ def _history_contract(
     if not required_corrections <= set(corrections):
         raise TargetSeriesError("financial MVP history correction set is incomplete")
     return contract, strategies, sources, corrections
+
+
+def _excluded_strategy_mode_reason(strategy: Mapping[str, Any]) -> str | None:
+    requirement = strategy.get("product_requirement")
+    lifecycle = strategy.get("lifecycle_status")
+    if requirement == "REQUIRED":
+        return None
+    if requirement != "EXCLUDED":
+        raise TargetSeriesError("financial MVP strategy requirement differs")
+    if lifecycle == "DEPRECATED_HISTORY_ONLY":
+        return "NOT_APPLICABLE_OWNER_APPROVED_DEPRECATED"
+    if lifecycle == "IMMATERIAL_EXCLUDED":
+        return "NOT_APPLICABLE_OWNER_APPROVED_IMMATERIAL"
+    raise TargetSeriesError("excluded financial MVP strategy lifecycle differs")
 
 
 def _verified_current_generation(
@@ -2165,6 +2179,10 @@ def _contract_version(strategy: Mapping[str, Any]) -> tuple[str, str]:
     if status == "EVIDENCED":
         if not isinstance(version, str) or ":" not in version:
             raise TargetSeriesError("evidenced strategy version is invalid")
+        return status, version
+    if status == "NOT_APPLICABLE":
+        if not isinstance(version, str) or ":" not in version:
+            raise TargetSeriesError("not-applicable strategy version is invalid")
         return status, version
     if status != "UNRESOLVED" or version is not None:
         raise TargetSeriesError("strategy version status differs")
@@ -3080,7 +3098,16 @@ def build_layered_history_generation(
             if live_rows
             else None
         )
-        if not live_rows:
+        exclusion_reason = _excluded_strategy_mode_reason(strategy)
+        if exclusion_reason is not None:
+            if live_rows:
+                raise TargetSeriesError(
+                    f"excluded strategy entered account-live history: {strategy_id}"
+                )
+            live_state = "NOT_APPLICABLE_OWNER_APPROVED"
+            live_reason = exclusion_reason
+            live_data_age = None
+        elif not live_rows:
             live_state = "REQUIRED_NOT_READY"
             live_reason = (
                 "CAPTURED_EVENT_ONLY_RECONSTRUCTION_NOT_ADMISSIBLE_DAILY_NAV"
@@ -3098,9 +3125,17 @@ def build_layered_history_generation(
         if live_state == "REQUIRED_NOT_READY":
             live_not_ready.append(strategy_id)
         backtest_rows = admitted_backtests.get(strategy_id, [])
+        if exclusion_reason is not None and backtest_rows:
+            raise TargetSeriesError(
+                f"excluded strategy entered backtest history: {strategy_id}"
+            )
         hybrid_state = live_state
         hybrid_reason = live_reason
-        if hybrid_state == "AVAILABLE" and not backtest_rows:
+        if (
+            exclusion_reason is None
+            and hybrid_state == "AVAILABLE"
+            and not backtest_rows
+        ):
             hybrid_state = "REQUIRED_NOT_READY"
             if strategy_id in unadmitted_backtests:
                 hybrid_reason = (
@@ -4577,7 +4612,15 @@ def validate_layered_history_generation(
         expected_data_age: dict[str, object] | None = None
         live_status: str
         live_reason: str | None
-        if not live_rows:
+        exclusion_reason = _excluded_strategy_mode_reason(strategies[strategy_id])
+        if exclusion_reason is not None:
+            if actual_rows:
+                raise TargetSeriesError(
+                    f"excluded strategy entered layered history: {strategy_id}"
+                )
+            live_status = "NOT_APPLICABLE_OWNER_APPROVED"
+            live_reason = exclusion_reason
+        elif not live_rows:
             live_status = "REQUIRED_NOT_READY"
             live_reason = (
                 "CAPTURED_EVENT_ONLY_RECONSTRUCTION_NOT_ADMISSIBLE_DAILY_NAV"
@@ -4631,7 +4674,11 @@ def validate_layered_history_generation(
         )
         if admitted_backtest and expected_version_status != "EVIDENCED":
             raise TargetSeriesError("unapproved backtest entered a selected mode")
-        if hybrid_status == "AVAILABLE" and not admitted_backtest:
+        if (
+            exclusion_reason is None
+            and hybrid_status == "AVAILABLE"
+            and not admitted_backtest
+        ):
             hybrid_status = "REQUIRED_NOT_READY"
             if any(
                 row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP"
