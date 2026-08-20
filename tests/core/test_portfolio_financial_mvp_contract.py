@@ -517,6 +517,42 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     ):
         _validate(false_design)
 
+    coherently_repeated = copy.deepcopy(baseline)
+    fake_version = "unapproved-design-v999"
+    p123_ai = next(
+        row
+        for row in coherently_repeated["strategies"]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_ai["strategy_version"] = {
+        "status": "EVIDENCED",
+        "version_ref": fake_version,
+    }
+    for source_id in (
+        "owner-account-live-history",
+        "portfolio123-model-generation",
+    ):
+        source = _source(coherently_repeated, source_id)
+        source["strategy_version"]["version_refs"]["p123-ai-factor"] = fake_version
+        if set(source["strategy_version"]["version_refs"]) == set(
+            source["subjects"]["strategy_ids"]
+        ):
+            source["strategy_version"]["status"] = "EVIDENCED"
+    p123_identity = next(
+        row
+        for row in coherently_repeated["history_corrections"][
+            "materialized_segment_identities"
+        ]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_identity["strategy_version"] = fake_version
+    _validate(coherently_repeated)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="lacks independently verified governed history evidence: p123-ai-factor",
+    ):
+        contract_tool._verify_strategy_version_history_evidence(coherently_repeated)
+
     transition_removed = copy.deepcopy(baseline)
     for sleeve in transition_removed["current_census"]["account_sleeves"]:
         for assignment in sleeve["assignments"]:

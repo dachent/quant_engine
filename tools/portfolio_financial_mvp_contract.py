@@ -347,6 +347,60 @@ def verify_history_evidence(
     }
 
 
+def _verify_strategy_version_history_evidence(
+    contract: Mapping[str, Any],
+) -> int:
+    """Require evidenced product versions to have governed #319 support.
+
+    Repeating a version reference in two mutable source rows is not independent
+    evidence.  The workstation gate instead requires two distinct captured
+    history layers whose receipt selectors have already been resolved against
+    governed bytes by :func:`verify_history_evidence`.
+    """
+
+    strategies = _objects(contract["strategies"], "strategies")
+    history = _object(contract["history_corrections"], "history_corrections")
+    corrections = _objects(history["corrections"], "history corrections")
+    verified = 0
+    for strategy in strategies:
+        if strategy.get("product_requirement") != "REQUIRED":
+            continue
+        strategy_id = _text(strategy.get("strategy_id"), "governed version strategy_id")
+        version = _object(
+            strategy.get("strategy_version"),
+            f"governed version strategy {strategy_id}",
+        )
+        if version.get("status") != "EVIDENCED":
+            continue
+        version_ref = _text(
+            version.get("version_ref"), f"governed version ref {strategy_id}"
+        )
+        matches = [
+            row
+            for row in corrections
+            if row.get("strategy_id") == strategy_id
+            and row.get("capture", {}).get("status") == "CAPTURED_GOVERNED"
+            and row.get("strategy_version", {}).get("status") == "EVIDENCED"
+            and row.get("strategy_version", {}).get("version_ref") == version_ref
+        ]
+        layers = {str(row.get("evidence_layer")) for row in matches}
+        selectors = {
+            (str(receipt.get("authority_root")), str(receipt.get("artifact_selector")))
+            for row in matches
+            for receipt in _objects(
+                row.get("source_receipts"),
+                f"governed version receipts {strategy_id}",
+            )
+        }
+        if len(layers) < 2 or len(selectors) < 2:
+            raise FinancialMvpContractError(
+                "strategy design/version lacks independently verified governed "
+                f"history evidence: {strategy_id}"
+            )
+        verified += 1
+    return verified
+
+
 def _census_receipt_locator(role: str) -> str:
     if role.endswith("_CURRENT_POINTER"):
         return "CURRENT_POINTER"
@@ -426,6 +480,9 @@ def verify_census_evidence(
         }
         _verify_history_receipt(normalized, authority_roots)
         verified_receipts += 1
+
+    history_result = verify_history_evidence(contract, authority_roots)
+    verified_strategy_versions = _verify_strategy_version_history_evidence(contract)
 
     provider_lanes = _objects(census["provider_lanes"], "census provider_lanes")
     governed_provider_ids: list[str] = []
@@ -535,7 +592,9 @@ def verify_census_evidence(
         "contract_sha256": contract_digest(contract),
         "governed_provider_lanes": sorted(governed_provider_ids),
         "status": "VALID",
+        "verified_history_receipts": history_result["verified_receipts"],
         "verified_receipts": verified_receipts,
+        "verified_strategy_versions": verified_strategy_versions,
     }
 
 
