@@ -2626,6 +2626,16 @@ def _validate_current_census(
             raise FinancialMvpContractError(
                 f"census sleeve provider is unknown: {sleeve_id}"
             )
+        provider_sleeves = set(
+            _strings(
+                lane_by_id[provider_id]["account_sleeve_ids"],
+                f"census provider sleeves {provider_id}",
+            )
+        )
+        if sleeve_id not in provider_sleeves:
+            raise FinancialMvpContractError(
+                f"census sleeve differs from declared provider lane: {sleeve_id}"
+            )
         source_ids = _strings(
             sleeve["source_segment_ids"], f"census sleeve sources {sleeve_id}"
         )
@@ -3568,6 +3578,54 @@ def _validate_history_corrections(
         raise FinancialMvpContractError(
             "P123 EU membership transfer was misclassified as external capital"
         )
+    for strategy_id, strategy in strategy_by_id.items():
+        live_identity = _object(
+            strategy["live_implementation_identity"],
+            f"live implementation identity {strategy_id}",
+        )
+        if live_identity["status"] == "EVIDENCED":
+            account_segments = [
+                row
+                for row in segment_rows
+                if row["strategy_id"] == strategy_id
+                and row["evidence_layer"] == "ACCOUNT_LIVE"
+                and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+            ]
+            if len(account_segments) != 1:
+                raise FinancialMvpContractError(
+                    f"live implementation lacks one accepted segment: {strategy_id}"
+                )
+            segment = account_segments[0]
+            expected_identity = {
+                "status": "EVIDENCED",
+                "version_ref": f"account-live-segment:{segment['sha256']}",
+                "generation_id": segment["source_generation_id"],
+                "receipt_sha256": segment["source_generation_sha256"],
+            }
+            if live_identity != expected_identity:
+                raise FinancialMvpContractError(
+                    f"live implementation identity differs from accepted segment: {strategy_id}"
+                )
+        elif live_identity["status"] == "REJECTED":
+            if strategy_id != "echotrade-growth-pivots":
+                raise FinancialMvpContractError(
+                    f"rejected live implementation strategy differs: {strategy_id}"
+                )
+            rejected = correction_by_id["echotrade-event-only-account-live-rejected"]
+            rejected_evidence = _object(
+                rejected["rejected_evidence_identity"],
+                "EchoTrade rejected evidence identity",
+            )
+            expected_identity = {
+                "status": "REJECTED",
+                "version_ref": f"rejected-event-only:{rejected_evidence['sha256']}",
+                "generation_id": rejected["capture"]["generation_id"],
+                "receipt_sha256": rejected_evidence["source_receipt_sha256"],
+            }
+            if live_identity != expected_identity:
+                raise FinancialMvpContractError(
+                    "EchoTrade live implementation identity differs from rejected evidence"
+                )
     volatis_provider = correction_by_id["volatis-provider-live"]
     volatis_account = correction_by_id["volatis-account-live"]
     if (

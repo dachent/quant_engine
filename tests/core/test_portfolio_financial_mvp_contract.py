@@ -807,6 +807,45 @@ def test_census_fails_on_missing_duplicate_overlap_and_stale_provider_binding() 
     ):
         _validate(stale)
 
+    balanced_lane_swap = copy.deepcopy(contract)
+    ibkr_lane = next(
+        row
+        for row in balanced_lane_swap["current_census"]["provider_lanes"]
+        if row["provider_id"] == "IBKR"
+    )
+    schwab_lane = next(
+        row
+        for row in balanced_lane_swap["current_census"]["provider_lanes"]
+        if row["provider_id"] == "SCHWAB"
+    )
+    ibkr_lane["account_sleeve_ids"].remove("ibkr-reserve-01")
+    schwab_lane["account_sleeve_ids"].remove("schwab-reserve-01")
+    ibkr_lane["account_sleeve_ids"].append("schwab-reserve-01")
+    schwab_lane["account_sleeve_ids"].append("ibkr-reserve-01")
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="sleeve differs from declared provider lane",
+    ):
+        _validate(balanced_lane_swap)
+
+    invented_live_identity = copy.deepcopy(contract)
+    p123_ai = next(
+        row
+        for row in invented_live_identity["strategies"]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_ai["live_implementation_identity"] = {
+        "status": "EVIDENCED",
+        "version_ref": "account-live-segment:" + "0" * 64,
+        "generation_id": "1" * 64,
+        "receipt_sha256": "2" * 64,
+    }
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="live implementation identity differs from accepted segment",
+    ):
+        _validate(invented_live_identity)
+
 
 def test_all_four_outcomes_are_required_and_generic_unavailable_is_not_accepted() -> (
     None
