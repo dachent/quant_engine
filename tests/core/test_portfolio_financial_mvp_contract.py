@@ -198,7 +198,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "74175e99bbf1af575dfddd66071e992b4c89e95bb9c52efa40d25dae81e76342"
+        "01d7bd98a166736c10248dabffd36ae315e9c30baf59ae3d23024adc5e02cb39"
     )
 
 
@@ -439,7 +439,7 @@ def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> N
 def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
     contract = _contract()
     census = contract["current_census"]
-    contract_tool.reconcile_census_owner_evidence(census, _census_owner_comment())
+    contract_tool.reconcile_census_owner_evidence(contract, _census_owner_comment())
     rendered = contract_tool.render_views(contract)
     matrix = json.loads(rendered.source_matrix_json)
     assert matrix["current_census"] == census
@@ -457,7 +457,114 @@ def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
         contract_tool.FinancialMvpContractError,
         match="census owner evidence authority differs",
     ):
-        contract_tool.reconcile_census_owner_evidence(census, tampered)
+        contract_tool.reconcile_census_owner_evidence(contract, tampered)
+
+
+def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
+    baseline = _contract()
+    approved_digest = baseline["current_census"]["decision_payload_sha256"]
+    projection = contract_tool.census_owner_decision_projection(
+        baseline["current_census"], baseline["strategies"]
+    )
+    assert hashlib.sha256(
+        contract_tool.canonical_json_bytes(projection)
+    ).hexdigest() == (approved_digest)
+
+    promoted = copy.deepcopy(baseline)
+    composer = next(
+        row
+        for row in promoted["strategies"]
+        if row["strategy_id"] == "composer-holy-grail"
+    )
+    composer["product_requirement"] = "REQUIRED"
+    promoted_projection = contract_tool.census_owner_decision_projection(
+        promoted["current_census"], promoted["strategies"]
+    )
+    assert (
+        hashlib.sha256(
+            contract_tool.canonical_json_bytes(promoted_projection)
+        ).hexdigest()
+        != approved_digest
+    )
+
+    dropped = copy.deepcopy(baseline)
+    p123_ai = next(
+        row for row in dropped["strategies"] if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_ai["product_requirement"] = "OPTIONAL"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="owner membership is not propagated",
+    ):
+        contract_tool.census_owner_decision_projection(
+            dropped["current_census"], dropped["strategies"]
+        )
+
+    false_design = copy.deepcopy(baseline)
+    p123_ai = next(
+        row
+        for row in false_design["strategies"]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_ai["strategy_version"] = {
+        "status": "EVIDENCED",
+        "version_ref": "unapproved-design-v999",
+    }
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="falsely evidences strategy design",
+    ):
+        contract_tool.census_owner_decision_projection(
+            false_design["current_census"], false_design["strategies"]
+        )
+
+    transition_removed = copy.deepcopy(baseline)
+    for sleeve in transition_removed["current_census"]["account_sleeves"]:
+        for assignment in sleeve["assignments"]:
+            assignment["transition_group_id"] = None
+    transition_projection = contract_tool.census_owner_decision_projection(
+        transition_removed["current_census"], transition_removed["strategies"]
+    )
+    assert (
+        hashlib.sha256(
+            contract_tool.canonical_json_bytes(transition_projection)
+        ).hexdigest()
+        != approved_digest
+    )
+
+    july_split = copy.deepcopy(baseline)
+    tt_sleeve = next(
+        row
+        for row in july_split["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "schwab-tt-01"
+    )
+    tt_sleeve["assignments"][0]["effective_end"] = "2026-07-14"
+    tt_sleeve["assignments"].append(
+        {
+            "strategy_id": "tt-portfolio",
+            "status": "FUNDED_MEMBERSHIP",
+            "effective_start": "2026-07-31",
+            "effective_end": None,
+            "authority": "UNAPPROVED_REENTRY",
+            "transition_group_id": None,
+        }
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="invents a July exit or re-entry",
+    ):
+        contract_tool.census_owner_decision_projection(
+            july_split["current_census"], july_split["strategies"]
+        )
+
+    reintroduced = copy.deepcopy(baseline)
+    registry_source = _source(reintroduced, "current-strategy-registry")
+    registry_source["subjects"]["strategy_ids"].append("composer-holy-grail")
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="includes excluded strategies",
+    ):
+        _validate(reintroduced)
 
 
 def test_census_fails_on_missing_duplicate_overlap_and_stale_provider_binding() -> None:

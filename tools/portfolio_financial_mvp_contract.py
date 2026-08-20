@@ -143,6 +143,19 @@ _OWNER_RECEIPT_MARKER: Final = "<!-- financial-mvp-owner-decision-receipts-v1 --
 _JSON_FENCE_RE: Final = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 _GITHUB_COMMENT_API: Final = "repos/dachent/quant_engine/issues/comments/{comment_id}"
 _CENSUS_OWNER_COMMENT_ID: Final = 5350132900
+_CENSUS_OWNER_MEMBERSHIP_ORDER: Final = (
+    "p123-ai-factor",
+    "grizzlybears-vtma",
+    "qsi",
+    "tt-portfolio",
+)
+_CENSUS_OWNER_NON_DECISIONS: Final = (
+    "TRANSACTION_OR_FLOW_CLASSIFICATION",
+    "UNSUPPORTED_STRATEGY_DESIGN_VERSION",
+    "PRIVATE_ACCOUNT_IDENTITY",
+    "POINTER_OR_PUBLICATION",
+)
+_CENSUS_TT_CONTINUITY_INTERVAL: Final = (date(2026, 7, 14), date(2026, 7, 30))
 
 
 class FinancialMvpContractError(ValueError):
@@ -1271,10 +1284,11 @@ def fetch_census_owner_evidence() -> dict[str, Any]:
 
 
 def reconcile_census_owner_evidence(
-    census: Mapping[str, Any], comment: Mapping[str, Any]
+    contract: Mapping[str, Any], comment: Mapping[str, Any]
 ) -> None:
     """Bind the local census decision digest to the unedited owner comment."""
 
+    census = _object(contract.get("current_census"), "current_census")
     user = _object(comment.get("user"), "census owner evidence user")
     expected_url = (
         "https://github.com/dachent/quant_engine/issues/302#issuecomment-"
@@ -1310,6 +1324,13 @@ def reconcile_census_owner_evidence(
     if actual_digest != census.get("decision_payload_sha256"):
         raise FinancialMvpContractError(
             "census owner evidence does not approve the current decision payload"
+        )
+    local_projection = census_owner_decision_projection(
+        census, _objects(contract.get("strategies"), "strategies")
+    )
+    if local_projection != record:
+        raise FinancialMvpContractError(
+            "census owner evidence does not approve current contract semantics"
         )
 
 
@@ -1908,6 +1929,205 @@ def census_digest(census: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json_bytes(dict(census))).hexdigest()
 
 
+def census_owner_decision_projection(
+    census: Mapping[str, Any], strategies: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Derive the exact owner-approved #302 decision bytes from local authority.
+
+    The owner comment is not merely a detached digest receipt.  This projection
+    makes any coherent perimeter, membership, transition, continuity, or
+    unsupported-version rewrite change the decision payload identity.
+    """
+
+    strategy_by_id = {
+        _text(row.get("strategy_id"), "census owner strategy_id"): row
+        for row in strategies
+    }
+    lifecycle_dispositions = {
+        "DEPRECATED_HISTORY_ONLY": "DEPRECATED_EXCLUDED_FROM_CURRENT_FINANCIAL_MVP",
+        "IMMATERIAL_EXCLUDED": "IMMATERIAL_EXCLUDED_FROM_CURRENT_FINANCIAL_MVP",
+    }
+    perimeter: list[dict[str, str]] = []
+    for strategy_id, row in sorted(strategy_by_id.items()):
+        if row.get("product_requirement") != "EXCLUDED":
+            continue
+        lifecycle = _text(
+            row.get("lifecycle_status"), f"census owner lifecycle {strategy_id}"
+        )
+        disposition = lifecycle_dispositions.get(lifecycle)
+        if disposition is None:
+            raise FinancialMvpContractError(
+                f"census owner perimeter lifecycle differs: {strategy_id}"
+            )
+        membership = _object(
+            row.get("funded_membership"),
+            f"census owner funded membership {strategy_id}",
+        )
+        dispositions = _object(
+            row.get("outcome_dispositions"),
+            f"census owner outcome dispositions {strategy_id}",
+        )
+        if membership.get("status") != "EXCLUDED" or set(dispositions.values()) != {
+            "EXCLUDED_BY_ACCEPTED_POLICY"
+        }:
+            raise FinancialMvpContractError(
+                f"census owner perimeter is not propagated: {strategy_id}"
+            )
+        perimeter.append({"strategy_id": strategy_id, "disposition": disposition})
+
+    memberships: list[dict[str, object]] = []
+    for strategy_id in _CENSUS_OWNER_MEMBERSHIP_ORDER:
+        membership_strategy = strategy_by_id.get(strategy_id)
+        if membership_strategy is None:
+            raise FinancialMvpContractError(
+                f"census owner membership strategy is absent: {strategy_id}"
+            )
+        membership = _object(
+            membership_strategy.get("funded_membership"),
+            f"census owner funded membership {strategy_id}",
+        )
+        if (
+            membership_strategy.get("product_requirement") != "REQUIRED"
+            or membership_strategy.get("lifecycle_status") != "ACTIVE"
+            or membership.get("status") != "EVIDENCED"
+        ):
+            raise FinancialMvpContractError(
+                f"census owner membership is not propagated: {strategy_id}"
+            )
+        version = _object(
+            membership_strategy.get("strategy_version"),
+            f"census owner strategy version {strategy_id}",
+        )
+        if version != {"status": "UNRESOLVED", "version_ref": None}:
+            raise FinancialMvpContractError(
+                f"census owner decision falsely evidences strategy design: {strategy_id}"
+            )
+        membership_end = _optional_date(
+            membership.get("effective_end"),
+            f"census owner membership end {strategy_id}",
+        )
+        memberships.append(
+            {
+                "strategy_id": strategy_id,
+                "effective_start": _date(
+                    membership.get("effective_start"),
+                    f"census owner membership start {strategy_id}",
+                ).isoformat(),
+                "effective_end": (
+                    membership_end.isoformat() if membership_end is not None else None
+                ),
+            }
+        )
+
+    transition_groups: dict[str, list[dict[str, Any]]] = {}
+    tt_boundaries: list[date] = []
+    for sleeve in _objects(census.get("account_sleeves"), "census account_sleeves"):
+        for assignment in _objects(
+            sleeve.get("assignments"), "census sleeve assignments"
+        ):
+            strategy_id = _text(
+                assignment.get("strategy_id"), "census owner assignment strategy"
+            )
+            start = _date(
+                assignment.get("effective_start"), "census owner assignment start"
+            )
+            end = _optional_date(
+                assignment.get("effective_end"), "census owner assignment end"
+            )
+            if strategy_id == "tt-portfolio":
+                tt_boundaries.append(start)
+                if end is not None:
+                    tt_boundaries.append(end)
+            transition_id = _optional_text(
+                assignment.get("transition_group_id"),
+                "census owner transition group",
+            )
+            if transition_id is not None:
+                transition_groups.setdefault(transition_id, []).append(assignment)
+
+    transition_signatures: set[tuple[str, str, str, str]] = set()
+    for rows in transition_groups.values():
+        if len(rows) != 2:
+            raise FinancialMvpContractError(
+                "census owner transition cardinality differs"
+            )
+        ordered = sorted(rows, key=lambda row: str(row["effective_start"]))
+        predecessor, successor = ordered
+        predecessor_end = _optional_date(
+            predecessor.get("effective_end"), "census owner predecessor end"
+        )
+        successor_start = _date(
+            successor.get("effective_start"), "census owner successor start"
+        )
+        if predecessor_end is None:
+            raise FinancialMvpContractError(
+                "census owner transition predecessor is open"
+            )
+        transition_signatures.add(
+            (
+                _text(
+                    predecessor.get("strategy_id"),
+                    "census owner predecessor strategy",
+                ),
+                predecessor_end.isoformat(),
+                _text(
+                    successor.get("strategy_id"),
+                    "census owner successor strategy",
+                ),
+                successor_start.isoformat(),
+            )
+        )
+    transitions: list[dict[str, str]] = []
+    if transition_groups:
+        if len(transition_signatures) != 1:
+            raise FinancialMvpContractError("census owner transitions disagree")
+        predecessor_id, predecessor_end_text, successor_id, successor_start_text = next(
+            iter(transition_signatures)
+        )
+        scope = (
+            "TWO_REDACTED_SLEEVES"
+            if len(transition_groups) == 2
+            else f"{len(transition_groups)}_REDACTED_SLEEVES"
+        )
+        transitions.append(
+            {
+                "from_strategy_id": predecessor_id,
+                "from_effective_end": predecessor_end_text,
+                "to_strategy_id": successor_id,
+                "to_effective_start": successor_start_text,
+                "scope": scope,
+            }
+        )
+
+    continuity_start, continuity_end = _CENSUS_TT_CONTINUITY_INTERVAL
+    if any(
+        continuity_start <= boundary <= continuity_end for boundary in tt_boundaries
+    ):
+        raise FinancialMvpContractError("TT census invents a July exit or re-entry")
+
+    return {
+        "decision_id": ("DATA-CENSUS-001-OWNER-PERIMETER-AND-MEMBERSHIP-2026-08-19"),
+        "authority_issue": census.get("authority_issue"),
+        "approved_on": census.get("decision_approved_on"),
+        "perimeter": perimeter,
+        "memberships": memberships,
+        "transitions": transitions,
+        "continuity": [
+            {
+                "strategy_id": "tt-portfolio",
+                "rule": "CONTINUOUS_MEMBERSHIP",
+                "disconfirming_interval": (
+                    f"{continuity_start.isoformat()}/{continuity_end.isoformat()}"
+                ),
+                "disposition": (
+                    "ZERO_OR_MISSING_COMPONENT_VALUE_DOES_NOT_CREATE_EXIT_OR_REENTRY"
+                ),
+            }
+        ],
+        "explicit_non_decisions": list(_CENSUS_OWNER_NON_DECISIONS),
+    }
+
+
 def _validate_current_census(
     census: Mapping[str, Any],
     strategies: Sequence[Mapping[str, Any]],
@@ -1920,6 +2140,7 @@ def _validate_current_census(
             "as_of",
             "authority_issue",
             "census_id",
+            "decision_approved_on",
             "decision_evidence_url",
             "decision_payload_sha256",
             "evidence_receipts",
@@ -1933,6 +2154,7 @@ def _validate_current_census(
     if census["authority_issue"] != 302:
         raise FinancialMvpContractError("current census authority differs")
     _date(census["as_of"], "current_census.as_of")
+    _date(census["decision_approved_on"], "current_census.decision_approved_on")
     evidence_url = _text(
         census["decision_evidence_url"], "current_census.decision_evidence_url"
     )
@@ -2307,6 +2529,13 @@ def _validate_current_census(
         for row in tt_rows
     ):
         raise FinancialMvpContractError("TT census invents a July exit or re-entry")
+    owner_projection = census_owner_decision_projection(census, strategies)
+    if hashlib.sha256(canonical_json_bytes(owner_projection)).hexdigest() != census.get(
+        "decision_payload_sha256"
+    ):
+        raise FinancialMvpContractError(
+            "census owner decision projection differs from approved payload"
+        )
 
 
 def _validate_history_corrections(
@@ -3725,6 +3954,12 @@ def _validate_sources(
         if unknown:
             raise FinancialMvpContractError(
                 f"source segment {source_id} references unknown strategies: {sorted(unknown)}"
+            )
+        excluded_subjects = set(strategy_ids) - required_strategy_ids
+        if row["product_requirement"] == "REQUIRED" and excluded_subjects:
+            raise FinancialMvpContractError(
+                f"required source {source_id} includes excluded strategies: "
+                f"{sorted(excluded_subjects)}"
             )
         unbound_versions = set(version_refs) - set(strategy_ids)
         if unbound_versions:
@@ -5325,7 +5560,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     elif args.command == "verify-census-owner-evidence":
         census = _object(contract["current_census"], "current_census")
-        reconcile_census_owner_evidence(census, fetch_census_owner_evidence())
+        reconcile_census_owner_evidence(contract, fetch_census_owner_evidence())
         result = {
             "census_sha256": census_digest(census),
             "contract_sha256": contract_digest(contract),

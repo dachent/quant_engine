@@ -280,6 +280,7 @@
         "as_of",
         "authority_issue",
         "census_id",
+        "decision_approved_on",
         "decision_evidence_url",
         "decision_payload_sha256",
         "evidence_receipts",
@@ -295,6 +296,7 @@
         "as_of": {"type": "string", "format": "date"},
         "authority_issue": {"const": 302},
         "census_id": {"const": "PORTFOLIO_CURRENT_CENSUS_V1"},
+        "decision_approved_on": {"type": "string", "format": "date"},
         "decision_evidence_url": {"$ref": "#/$defs/nonempty_string"},
         "decision_payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "evidence_receipts": {

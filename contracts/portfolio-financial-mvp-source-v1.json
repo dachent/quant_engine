@@ -68,6 +68,7 @@
     "census_id": "PORTFOLIO_CURRENT_CENSUS_V1",
     "authority_issue": 302,
     "as_of": "2026-08-16",
+    "decision_approved_on": "2026-08-19",
     "decision_evidence_url": "https://github.com/dachent/quant_engine/issues/302#issuecomment-5350132900",
     "decision_payload_sha256": "535b6a35ecfe875d88e3cba86b3a0f6eb49c9bf0eac772e506d75dc5f7bda097",
     "private_crosswalk_rule": "ONLY_STABLE_REDACTED_ALIASES_ARE_COMMITTED",
