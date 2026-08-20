@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
 
 from quant_engine.core.contracts import canonical_json_bytes
-from tools import portfolio_current_dependence as current
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_current_dependence.py"
+SPEC = importlib.util.spec_from_file_location(
+    "portfolio_current_dependence", MODULE_PATH
+)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError("unable to load current dependence builder")
+current = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = current
+SPEC.loader.exec_module(current)
 
 
 def _rows() -> list[dict[str, str]]:
