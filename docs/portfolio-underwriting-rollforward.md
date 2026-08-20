@@ -430,6 +430,8 @@ advancing pointers.
   --proof-root $proofRoot `
   --qa-dir $qaRoot `
   --pipeline-id $cycleId `
+  --financial-mvp-contract (Join-Path $repoRoot 'contracts\portfolio-financial-mvp-source-v1.json') `
+  --financial-mvp-source-matrix (Join-Path $repoRoot 'generated\financial-mvp\source-matrix.json') `
   --output (Join-Path $cycleRoot 'pipeline-recipe.json')
 
 & $enginePython tools\portfolio_pipeline_materialize.py spec `
@@ -445,11 +447,23 @@ advancing pointers.
   --spec (Join-Path $runRoot 'pipeline-spec.json')
 ```
 
+The commands above deliberately return a nonzero plan/status and refuse
+execution until the generated financial-MVP disposition is ready. This is an
+expected fail-closed result while required sources/outcomes, the runtime
+correction registry, or an applicable correction's re-derivation receipt is
+unavailable; it is not a reason to refresh provider data or bypass the gate.
+Pass accepted registries through the optional `--correction-registry` and
+`--rederive-receipt-registry` recipe arguments. The runtime consumes those
+exact bytes; issue references alone never clear a correction.
+
 The prepared specification above proves the complete graph in a private root;
 it is not the production cutover. Bind those exact generations to the stable
-13-root production authority, then plan, prepare, and commit that second
+20-root production authority, then plan, prepare, and commit that second
 immutable specification. This preserves the existing coordinated root set and
 prevents a private proof directory from being mistaken for production.
+The production rebind contract must hash-bind the same product gate and must
+publish the exact provider-ledger generation admitted by that gate; a coherent
+release-graph rewrite to a different provider generation fails before effects.
 
 ```powershell
 & $enginePython tools\portfolio_pipeline_materialize.py production-spec `

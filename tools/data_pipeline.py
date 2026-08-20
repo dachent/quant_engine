@@ -69,6 +69,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"data-pipeline: FAIL: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    financial_mvp = result.get("financial_mvp")
+    if (
+        args.command in {"plan", "status"}
+        and isinstance(financial_mvp, dict)
+        and financial_mvp.get("ready_for_execution") is False
+    ):
+        return 1
     return 0
 
 
