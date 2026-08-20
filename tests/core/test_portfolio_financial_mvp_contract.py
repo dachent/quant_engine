@@ -78,6 +78,83 @@ def _github_comment(comment_id: int, body: str = "") -> dict[str, object]:
     }
 
 
+def _census_owner_comment() -> dict[str, object]:
+    record = {
+        "decision_id": ("DATA-CENSUS-001-OWNER-PERIMETER-AND-MEMBERSHIP-2026-08-19"),
+        "authority_issue": 302,
+        "approved_on": "2026-08-19",
+        "perimeter": [
+            {
+                "strategy_id": "composer-holy-grail",
+                "disposition": "IMMATERIAL_EXCLUDED_FROM_CURRENT_FINANCIAL_MVP",
+            },
+            {
+                "strategy_id": "echotrade-growth-pivots",
+                "disposition": "DEPRECATED_EXCLUDED_FROM_CURRENT_FINANCIAL_MVP",
+            },
+        ],
+        "memberships": [
+            {
+                "strategy_id": "p123-ai-factor",
+                "effective_start": "2026-01-22",
+                "effective_end": None,
+            },
+            {
+                "strategy_id": "grizzlybears-vtma",
+                "effective_start": "2026-01-02",
+                "effective_end": None,
+            },
+            {
+                "strategy_id": "qsi",
+                "effective_start": "2026-01-05",
+                "effective_end": None,
+            },
+            {
+                "strategy_id": "tt-portfolio",
+                "effective_start": "2025-11-25",
+                "effective_end": None,
+            },
+        ],
+        "transitions": [
+            {
+                "from_strategy_id": "tt-portfolio",
+                "from_effective_end": "2026-01-04",
+                "to_strategy_id": "qsi",
+                "to_effective_start": "2026-01-05",
+                "scope": "TWO_REDACTED_SLEEVES",
+            }
+        ],
+        "continuity": [
+            {
+                "strategy_id": "tt-portfolio",
+                "rule": "CONTINUOUS_MEMBERSHIP",
+                "disconfirming_interval": "2026-07-14/2026-07-30",
+                "disposition": (
+                    "ZERO_OR_MISSING_COMPONENT_VALUE_DOES_NOT_CREATE_EXIT_OR_REENTRY"
+                ),
+            }
+        ],
+        "explicit_non_decisions": [
+            "TRANSACTION_OR_FLOW_CLASSIFICATION",
+            "UNSUPPORTED_STRATEGY_DESIGN_VERSION",
+            "PRIVATE_ACCOUNT_IDENTITY",
+            "POINTER_OR_PUBLICATION",
+        ],
+    }
+    return {
+        "id": contract_tool._CENSUS_OWNER_COMMENT_ID,
+        "html_url": (
+            "https://github.com/dachent/quant_engine/issues/302#issuecomment-"
+            f"{contract_tool._CENSUS_OWNER_COMMENT_ID}"
+        ),
+        "body": f"```json\n{json.dumps(record, sort_keys=True)}\n```",
+        "user": {"login": "dachent"},
+        "author_association": "OWNER",
+        "created_at": "2026-08-20T01:08:42Z",
+        "updated_at": "2026-08-20T01:08:42Z",
+    }
+
+
 def _owner_evidence_comments(
     contract: dict[str, object],
 ) -> dict[int, dict[str, object]]:
@@ -121,7 +198,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "00309632bf3afc35f4c3582883ffa765131e75d4a2a2999b59e6eb369f939512"
+        "01d7bd98a166736c10248dabffd36ae315e9c30baf59ae3d23024adc5e02cb39"
     )
 
 
@@ -263,12 +340,22 @@ def test_strategy_perimeter_matches_discoverable_registry_without_disappearing_r
     expected = [row["strategy_id"] for row in registry["strategies"]]
     actual = [row["strategy_id"] for row in contract["strategies"]]
     assert actual == expected
-    assert all(
-        row["product_requirement"] == "REQUIRED" for row in contract["strategies"]
-    )
-    assert all(
-        row["readiness"] == "REQUIRED_NOT_READY" for row in contract["strategies"]
-    )
+    requirements = {
+        row["strategy_id"]: row["product_requirement"] for row in contract["strategies"]
+    }
+    assert {key for key, value in requirements.items() if value == "EXCLUDED"} == {
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    }
+    assert {key for key, value in requirements.items() if value == "REQUIRED"} == {
+        "grizzlybears-vtma",
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "robuxio-crypto",
+        "tt-portfolio",
+        "volatis-strategy",
+    }
     assert {
         row["strategy_id"]: row["history_series_id"] for row in contract["strategies"]
     } == {
@@ -292,12 +379,554 @@ def test_strategy_perimeter_matches_discoverable_registry_without_disappearing_r
         "composer-holy-grail",
         "echotrade-growth-pivots",
     }
-    assert all(
-        row["outcome_dispositions"]["INVESTED_CAPITAL"] == "REQUIRED"
-        and row["outcome_dispositions"]["DECOMPOSITION"] == "REQUIRED"
-        and row["outcome_dispositions"]["DEPENDENCE"] == "REQUIRED"
-        for row in contract["strategies"]
+    excluded = {
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    }
+    for row in contract["strategies"]:
+        expected = (
+            "EXCLUDED_BY_ACCEPTED_POLICY"
+            if row["strategy_id"] in excluded
+            else "REQUIRED"
+        )
+        assert set(row["outcome_dispositions"].values()) == {expected}
+
+
+def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> None:
+    contract = _contract()
+    census = contract["current_census"]
+    assert census["authority_issue"] == 302
+    assert len(census["account_sleeves"]) == 19
+    assert len(census["provider_lanes"]) == 10
+    assert len(census["evidence_receipts"]) == 6
+    current_counts: dict[str, int] = {}
+    transition_rows: list[dict[str, object]] = []
+    for sleeve in census["account_sleeves"]:
+        current = sleeve["current_strategy_id"]
+        if current is not None:
+            current_counts[current] = current_counts.get(current, 0) + 1
+        for assignment in sleeve["assignments"]:
+            if assignment["transition_group_id"] is not None:
+                transition_rows.append(assignment)
+    assert current_counts == {
+        "grizzlybears-vtma": 1,
+        "p123-ai-factor": 1,
+        "p123-eu": 1,
+        "qsi": 2,
+        "robuxio-crypto": 1,
+        "tt-portfolio": 4,
+        "volatis-strategy": 1,
+    }
+    assert len(transition_rows) == 4
+    assert {
+        (row["strategy_id"], row["effective_start"], row["effective_end"])
+        for row in transition_rows
+    } == {
+        ("tt-portfolio", "2025-11-25", "2026-01-04"),
+        ("qsi", "2026-01-05", None),
+    }
+    tt_funded = [
+        assignment
+        for sleeve in census["account_sleeves"]
+        for assignment in sleeve["assignments"]
+        if assignment["strategy_id"] == "tt-portfolio"
+        and assignment["status"] == "FUNDED_MEMBERSHIP"
+    ]
+    assert tt_funded
+    assert all(row["effective_end"] is None for row in tt_funded)
+
+
+def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
+    contract = _contract()
+    census = contract["current_census"]
+    contract_tool.reconcile_census_owner_evidence(contract, _census_owner_comment())
+    rendered = contract_tool.render_views(contract)
+    matrix = json.loads(rendered.source_matrix_json)
+    assert matrix["current_census"] == census
+    assert matrix["census_sha256"] == contract_tool.census_digest(census)
+    assert matrix["census_rows"]
+    assert {row["sleeve_alias"] for row in matrix["census_rows"]} == {
+        row["sleeve_alias"] for row in census["account_sleeves"]
+    }
+    assert b"Current provider/account census" in rendered.summary_markdown
+    assert b"Owner decision approved: `2026-08-19`" in rendered.summary_markdown
+    assert census["decision_payload_sha256"].encode() in rendered.summary_markdown
+
+    tampered = _census_owner_comment()
+    tampered["updated_at"] = "2026-08-20T01:08:43Z"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="census owner evidence authority differs",
+    ):
+        contract_tool.reconcile_census_owner_evidence(contract, tampered)
+
+
+def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
+    baseline = _contract()
+    approved_digest = baseline["current_census"]["decision_payload_sha256"]
+    projection = contract_tool.census_owner_decision_projection(
+        baseline["current_census"], baseline["strategies"]
     )
+    assert hashlib.sha256(
+        contract_tool.canonical_json_bytes(projection)
+    ).hexdigest() == (approved_digest)
+
+    promoted = copy.deepcopy(baseline)
+    composer = next(
+        row
+        for row in promoted["strategies"]
+        if row["strategy_id"] == "composer-holy-grail"
+    )
+    composer["product_requirement"] = "REQUIRED"
+    promoted_projection = contract_tool.census_owner_decision_projection(
+        promoted["current_census"], promoted["strategies"]
+    )
+    assert (
+        hashlib.sha256(
+            contract_tool.canonical_json_bytes(promoted_projection)
+        ).hexdigest()
+        != approved_digest
+    )
+
+    dropped = copy.deepcopy(baseline)
+    p123_ai = next(
+        row for row in dropped["strategies"] if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_ai["product_requirement"] = "OPTIONAL"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="owner membership is not propagated",
+    ):
+        contract_tool.census_owner_decision_projection(
+            dropped["current_census"], dropped["strategies"]
+        )
+
+    false_design = copy.deepcopy(baseline)
+    p123_ai = next(
+        row
+        for row in false_design["strategies"]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_ai["strategy_version"] = {
+        "status": "EVIDENCED",
+        "version_ref": "unapproved-design-v999",
+    }
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="design/version evidence is not independently bound",
+    ):
+        _validate(false_design)
+
+    coherently_repeated = copy.deepcopy(baseline)
+    fake_version = "unapproved-design-v999"
+    p123_ai = next(
+        row
+        for row in coherently_repeated["strategies"]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_ai["strategy_version"] = {
+        "status": "EVIDENCED",
+        "version_ref": fake_version,
+    }
+    for source_id in (
+        "owner-account-live-history",
+        "portfolio123-model-generation",
+    ):
+        source = _source(coherently_repeated, source_id)
+        source["strategy_version"]["version_refs"]["p123-ai-factor"] = fake_version
+        if set(source["strategy_version"]["version_refs"]) == set(
+            source["subjects"]["strategy_ids"]
+        ):
+            source["strategy_version"]["status"] = "EVIDENCED"
+    p123_identity = next(
+        row
+        for row in coherently_repeated["history_corrections"][
+            "materialized_segment_identities"
+        ]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_identity["strategy_version"] = fake_version
+    _validate(coherently_repeated)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="differs from accepted history authority",
+    ):
+        contract_tool._verify_strategy_version_history_evidence(coherently_repeated)
+
+    rewritten_accepted_version = copy.deepcopy(baseline)
+    fake_p123_eu_version = "p123-eu-connected-model:" + "f" * 64
+    p123_eu = next(
+        row
+        for row in rewritten_accepted_version["strategies"]
+        if row["strategy_id"] == "p123-eu"
+    )
+    p123_eu["strategy_version"]["version_ref"] = fake_p123_eu_version
+    for source in rewritten_accepted_version["source_segments"]:
+        version_refs = source["strategy_version"]["version_refs"]
+        if "p123-eu" in version_refs:
+            version_refs["p123-eu"] = fake_p123_eu_version
+    for correction in rewritten_accepted_version["history_corrections"]["corrections"]:
+        if correction["strategy_id"] == "p123-eu":
+            correction["strategy_version"]["version_ref"] = fake_p123_eu_version
+    for identity in rewritten_accepted_version["history_corrections"][
+        "materialized_segment_identities"
+    ]:
+        if identity["strategy_id"] == "p123-eu":
+            identity["strategy_version"] = fake_p123_eu_version
+    _validate(rewritten_accepted_version)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="differs from accepted history authority",
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            rewritten_accepted_version
+        )
+
+    partial_source_rewrite = copy.deepcopy(baseline)
+    _source(partial_source_rewrite, "ibkr-account-generation")["strategy_version"][
+        "version_refs"
+    ]["p123-eu"] = fake_p123_eu_version
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "source strategy design/version differs from product authority: "
+            "ibkr-account-generation/p123-eu"
+        ),
+    ):
+        _validate(partial_source_rewrite)
+
+    partial_correction_rewrite = copy.deepcopy(baseline)
+    correction = next(
+        row
+        for row in partial_correction_rewrite["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-eu-backtest-not-captured"
+    )
+    correction["strategy_version"]["version_ref"] = fake_p123_eu_version
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "history strategy version differs from product authority: "
+            "p123-eu-backtest-not-captured"
+        ),
+    ):
+        _validate(partial_correction_rewrite)
+
+    missing_source_assertion = copy.deepcopy(baseline)
+    ibkr_version = _source(missing_source_assertion, "ibkr-account-generation")[
+        "strategy_version"
+    ]
+    del ibkr_version["version_refs"]["p123-eu"]
+    ibkr_version["status"] = "UNRESOLVED"
+    _validate(missing_source_assertion)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "source strategy design/version projection differs from accepted "
+            "history authority: ibkr-account-generation"
+        ),
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            missing_source_assertion
+        )
+
+    invented_source_assertion = copy.deepcopy(baseline)
+    design_version = _source(
+        invented_source_assertion, "strategy-design-and-configuration"
+    )["strategy_version"]
+    design_version["version_refs"]["p123-eu"] = next(
+        row["strategy_version"]["version_ref"]
+        for row in baseline["strategies"]
+        if row["strategy_id"] == "p123-eu"
+    )
+    design_version["status"] = "MIXED"
+    _validate(invented_source_assertion)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "source strategy design/version projection differs from accepted "
+            "history authority: strategy-design-and-configuration"
+        ),
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            invented_source_assertion
+        )
+
+    erased_correction_assertion = copy.deepcopy(baseline)
+    erased_correction = next(
+        row
+        for row in erased_correction_assertion["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-eu-backtest-not-captured"
+    )
+    erased_correction["strategy_version"] = {
+        "status": "UNRESOLVED",
+        "version_ref": None,
+        "compatibility": "UNRESOLVED",
+        "authority": "CURRENT_CONNECTED_MODEL_VERSION_NOT_ASSERTED",
+    }
+    _validate(erased_correction_assertion)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "history correction version projection differs from accepted "
+            "history authority"
+        ),
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            erased_correction_assertion
+        )
+
+    swapped_correction_receipts = copy.deepcopy(baseline)
+    p123_ai_correction = next(
+        row
+        for row in swapped_correction_receipts["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-ai-backtest-candidate"
+    )
+    replacement_receipts = {
+        row["artifact_role"]: copy.deepcopy(row)
+        for row in p123_ai_correction["source_receipts"]
+    }
+    p123_eu_correction = next(
+        row
+        for row in swapped_correction_receipts["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-eu-provider-live"
+    )
+    p123_eu_correction["source_receipts"] = [
+        row
+        for row in p123_eu_correction["source_receipts"]
+        if row["artifact_role"]
+        not in {"portfolio123-managed-metadata", "portfolio123-equity-curve"}
+    ] + [
+        replacement_receipts["portfolio123-simulation-returns"],
+        replacement_receipts["portfolio123-strategy-relationships"],
+    ]
+    _validate(swapped_correction_receipts)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "history correction version projection differs from accepted "
+            "history authority"
+        ),
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            swapped_correction_receipts
+        )
+
+    rewritten_segment_identity = copy.deepcopy(baseline)
+    p123_ai_segment = next(
+        row
+        for row in rewritten_segment_identity["history_corrections"][
+            "materialized_segment_identities"
+        ]
+        if row["strategy_id"] == "p123-ai-factor"
+        and row["evidence_layer"] == "ACCOUNT_LIVE"
+    )
+    p123_ai_segment["sha256"] = "0" * 64
+    p123_ai = next(
+        row
+        for row in rewritten_segment_identity["strategies"]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_ai["live_implementation_identity"]["version_ref"] = (
+        "account-live-segment:" + "0" * 64
+    )
+    _validate(rewritten_segment_identity)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "materialized history version projection differs from accepted "
+            "history authority"
+        ),
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            rewritten_segment_identity
+        )
+
+    transition_removed = copy.deepcopy(baseline)
+    for sleeve in transition_removed["current_census"]["account_sleeves"]:
+        for assignment in sleeve["assignments"]:
+            assignment["transition_group_id"] = None
+    transition_projection = contract_tool.census_owner_decision_projection(
+        transition_removed["current_census"], transition_removed["strategies"]
+    )
+    assert (
+        hashlib.sha256(
+            contract_tool.canonical_json_bytes(transition_projection)
+        ).hexdigest()
+        != approved_digest
+    )
+
+    july_split = copy.deepcopy(baseline)
+    tt_sleeve = next(
+        row
+        for row in july_split["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "schwab-tt-01"
+    )
+    tt_sleeve["assignments"][0]["effective_end"] = "2026-07-14"
+    tt_sleeve["assignments"].append(
+        {
+            "strategy_id": "tt-portfolio",
+            "status": "FUNDED_MEMBERSHIP",
+            "effective_start": "2026-07-31",
+            "effective_end": None,
+            "authority": "UNAPPROVED_REENTRY",
+            "transition_group_id": None,
+        }
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="invents a July exit or re-entry",
+    ):
+        contract_tool.census_owner_decision_projection(
+            july_split["current_census"], july_split["strategies"]
+        )
+
+    reintroduced = copy.deepcopy(baseline)
+    registry_source = _source(reintroduced, "current-strategy-registry")
+    registry_source["subjects"]["strategy_ids"].append("composer-holy-grail")
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="includes excluded strategies",
+    ):
+        _validate(reintroduced)
+
+
+def test_census_fails_on_missing_duplicate_overlap_and_stale_provider_binding() -> None:
+    contract = _contract()
+
+    missing = copy.deepcopy(contract)
+    missing["current_census"]["account_sleeves"].pop()
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="19 redacted sleeves",
+    ):
+        _validate(missing)
+
+    duplicate = copy.deepcopy(contract)
+    duplicate["current_census"]["account_sleeves"][1]["sleeve_alias"] = duplicate[
+        "current_census"
+    ]["account_sleeves"][0]["sleeve_alias"]
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="duplicate census sleeve",
+    ):
+        _validate(duplicate)
+
+    overlap = copy.deepcopy(contract)
+    qsi = next(
+        row
+        for row in overlap["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "schwab-qsi-01"
+    )
+    qsi["assignments"][1]["effective_start"] = "2026-01-04"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="assignments overlap",
+    ):
+        _validate(overlap)
+
+    stale = copy.deepcopy(contract)
+    ibkr = next(
+        row
+        for row in stale["current_census"]["provider_lanes"]
+        if row["provider_id"] == "IBKR"
+    )
+    ibkr["generation"]["generation_id"] = "0" * 64
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="provider/source generation differs",
+    ):
+        _validate(stale)
+
+    balanced_lane_swap = copy.deepcopy(contract)
+    ibkr_lane = next(
+        row
+        for row in balanced_lane_swap["current_census"]["provider_lanes"]
+        if row["provider_id"] == "IBKR"
+    )
+    schwab_lane = next(
+        row
+        for row in balanced_lane_swap["current_census"]["provider_lanes"]
+        if row["provider_id"] == "SCHWAB"
+    )
+    ibkr_lane["account_sleeve_ids"].remove("ibkr-reserve-01")
+    schwab_lane["account_sleeve_ids"].remove("schwab-reserve-01")
+    ibkr_lane["account_sleeve_ids"].append("schwab-reserve-01")
+    schwab_lane["account_sleeve_ids"].append("ibkr-reserve-01")
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="sleeve differs from declared provider lane",
+    ):
+        _validate(balanced_lane_swap)
+
+    coherent_lane_swap = copy.deepcopy(contract)
+    ibkr_lane = next(
+        row
+        for row in coherent_lane_swap["current_census"]["provider_lanes"]
+        if row["provider_id"] == "IBKR"
+    )
+    schwab_lane = next(
+        row
+        for row in coherent_lane_swap["current_census"]["provider_lanes"]
+        if row["provider_id"] == "SCHWAB"
+    )
+    ibkr_sleeve = next(
+        row
+        for row in coherent_lane_swap["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "ibkr-reserve-01"
+    )
+    schwab_sleeve = next(
+        row
+        for row in coherent_lane_swap["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "schwab-reserve-01"
+    )
+    ibkr_lane["account_sleeve_ids"].remove("ibkr-reserve-01")
+    schwab_lane["account_sleeve_ids"].remove("schwab-reserve-01")
+    ibkr_lane["account_sleeve_ids"].append("schwab-reserve-01")
+    schwab_lane["account_sleeve_ids"].append("ibkr-reserve-01")
+    ibkr_sleeve["provider_id"] = "SCHWAB"
+    schwab_sleeve["provider_id"] = "IBKR"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="sleeve provider namespace differs",
+    ):
+        _validate(coherent_lane_swap)
+
+    foreign_provider_sources = copy.deepcopy(contract)
+    ibkr_sleeve = next(
+        row
+        for row in foreign_provider_sources["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "ibkr-reserve-01"
+    )
+    schwab_sleeve = next(
+        row
+        for row in foreign_provider_sources["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "schwab-reserve-01"
+    )
+    ibkr_sleeve["source_segment_ids"].append("schwab-account-generation")
+    schwab_sleeve["source_segment_ids"].append("ibkr-account-generation")
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="sleeve includes a foreign provider source",
+    ):
+        _validate(foreign_provider_sources)
+
+    invented_live_identity = copy.deepcopy(contract)
+    p123_ai = next(
+        row
+        for row in invented_live_identity["strategies"]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_ai["live_implementation_identity"] = {
+        "status": "EVIDENCED",
+        "version_ref": "account-live-segment:" + "0" * 64,
+        "generation_id": "1" * 64,
+        "receipt_sha256": "2" * 64,
+    }
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="live implementation identity differs from accepted segment",
+    ):
+        _validate(invented_live_identity)
 
 
 def test_all_four_outcomes_are_required_and_generic_unavailable_is_not_accepted() -> (
@@ -1006,6 +1635,12 @@ def test_history_truth_recurrence_mutations_fail_closed() -> None:
         if row["strategy_id"] == "volatis-strategy"
     )
     strategy["funded_membership"]["effective_start"] = "2024-10-13"
+    volatis_sleeve = next(
+        row
+        for row in early_volatis["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "quantbase-volatis-01"
+    )
+    volatis_sleeve["assignments"][0]["effective_start"] = "2024-10-13"
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="valued governed evidence",
@@ -1188,10 +1823,8 @@ def test_per_strategy_history_and_decomposition_routes_fail_on_omission() -> Non
 
     contract = copy.deepcopy(_contract())
     factors = _source(contract, "public-economic-and-industry-factors")
-    factors["subjects"]["strategy_ids"].remove("composer-holy-grail")
-    with pytest.raises(
-        contract_tool.FinancialMvpContractError, match="composer-holy-grail"
-    ):
+    factors["subjects"]["strategy_ids"].remove("qsi")
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="qsi"):
         _validate(contract)
 
 
@@ -1309,7 +1942,7 @@ def test_public_factor_run_and_publication_timing_propagate_to_every_view() -> N
         for row in matrix["rows"]
         if row["source_id"] == "public-economic-and-industry-factors"
     ]
-    assert len(rows) == 135
+    assert len(rows) == 105
     assert all(
         row["cadence"] == expected_cadence
         and row["max_age_days"] == 0
@@ -1406,7 +2039,9 @@ def test_required_not_ready_needs_blocker_and_ready_needs_generation() -> None:
         _validate(contract)
 
     contract = copy.deepcopy(_contract())
-    strategy = contract["strategies"][0]
+    strategy = next(
+        row for row in contract["strategies"] if row["strategy_id"] == "p123-ai-factor"
+    )
     strategy["readiness"] = "READY"
     strategy["blockers"] = []
     with pytest.raises(
@@ -1599,7 +2234,7 @@ def test_generated_views_are_deterministic_and_match_authoritative_bytes(
         for row in rows
         if row["source_id"] == "alpaca-account-generation"
     }
-    assert unresolved == {"UNRESOLVED_SUBJECT_BINDING"}
+    assert unresolved == {"echotrade-growth-pivots"}
     assert all(row["strategy_id"] != "ALL_PORTFOLIO" for row in rows)
 
 

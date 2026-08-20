@@ -115,6 +115,16 @@ def _update_source_generation(
         "generation_id": generation["generation_id"],
         "sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
     }
+    for lane in contract["current_census"]["provider_lanes"]:
+        if lane["source_segment_id"] != source_id:
+            continue
+        assert pointer_path.exists()
+        lane["generation"] = {
+            "as_of": as_of,
+            "generation_id": generation["generation_id"],
+            "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            "pointer_sha256": hashlib.sha256(pointer_path.read_bytes()).hexdigest(),
+        }
 
 
 def _update_correction_generations(
@@ -687,11 +697,10 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         "status": "EVIDENCED",
         "version_ref": p123_version,
     }
-    for source_id in ("portfolio123-model-generation", "owner-account-live-history"):
-        source = next(
-            row for row in contract["source_segments"] if row["source_id"] == source_id
-        )
-        source["strategy_version"]["version_refs"]["p123-eu"] = p123_version
+    for source in contract["source_segments"]:
+        version_refs = source["strategy_version"]["version_refs"]
+        if "p123-eu" in version_refs:
+            version_refs["p123-eu"] = p123_version
     for correction_id in (
         "p123-eu-backtest-not-captured",
         "p123-eu-provider-live",
@@ -849,6 +858,35 @@ def _build(fixture: dict[str, Any]) -> tuple[dict[str, bytes], bytes]:
     )
 
 
+def _refresh_live_implementation_identities(contract: dict[str, Any]) -> None:
+    account_segments = {
+        row["strategy_id"]: row
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+        if row["evidence_layer"] == "ACCOUNT_LIVE"
+        and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    }
+    strategies = {row["strategy_id"]: row for row in contract["strategies"]}
+    for strategy_id, segment in account_segments.items():
+        strategies[strategy_id]["live_implementation_identity"] = {
+            "status": "EVIDENCED",
+            "version_ref": f"account-live-segment:{segment['sha256']}",
+            "generation_id": segment["source_generation_id"],
+            "receipt_sha256": segment["source_generation_sha256"],
+        }
+    echo = next(
+        row
+        for row in contract["history_corrections"]["corrections"]
+        if row["correction_id"] == "echotrade-event-only-account-live-rejected"
+    )
+    rejected = echo["rejected_evidence_identity"]
+    strategies["echotrade-growth-pivots"]["live_implementation_identity"] = {
+        "status": "REJECTED",
+        "version_ref": f"rejected-event-only:{rejected['sha256']}",
+        "generation_id": echo["capture"]["generation_id"],
+        "receipt_sha256": rejected["source_receipt_sha256"],
+    }
+
+
 def _refresh_materialized_segment_identities(fixture: dict[str, Any]) -> None:
     contract_path = fixture["contract_path"]
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
@@ -863,6 +901,7 @@ def _refresh_materialized_segment_identities(fixture: dict[str, Any]) -> None:
         identity["strategy_version"] = (
             version_refs.get(identity["strategy_id"]) or "UNRESOLVED"
         )
+    _refresh_live_implementation_identities(contract)
     _write_json(contract_path, contract)
     artifacts, _manifest_content = _build(fixture)
     rows = list(csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8"))))
@@ -871,6 +910,7 @@ def _refresh_materialized_segment_identities(fixture: dict[str, Any]) -> None:
     contract["history_corrections"]["materialized_segment_identities"] = (
         target_series._materialized_segment_identities(rows, sources)
     )
+    _refresh_live_implementation_identities(contract)
     _write_json(contract_path, contract)
 
 
@@ -1045,13 +1085,13 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.12.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.13.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.12.0"}
+    assert generation_schema["properties"]["builder_version"] == {"const": "1.13.0"}
     assert (
         "strategy-history"
         in generation_schema["properties"]["source_manifests"]["properties"]
@@ -1068,14 +1108,22 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     coverage_by_strategy = {row["strategy_id"]: row for row in coverage["strategies"]}
     assert coverage_by_strategy["echotrade-growth-pivots"]["segments"] == []
     assert coverage_by_strategy["echotrade-growth-pivots"]["modes"]["LIVE_ONLY"] == {
-        "reason": "CAPTURED_EVENT_ONLY_RECONSTRUCTION_NOT_ADMISSIBLE_DAILY_NAV",
-        "status": "REQUIRED_NOT_READY",
+        "reason": "NOT_APPLICABLE_OWNER_APPROVED_DEPRECATED",
+        "status": "NOT_APPLICABLE_OWNER_APPROVED",
     }
     assert coverage_by_strategy["composer-holy-grail"]["segments"] == []
     assert coverage_by_strategy["composer-holy-grail"]["modes"]["LIVE_ONLY"] == {
-        "reason": "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT",
-        "status": "REQUIRED_NOT_READY",
+        "reason": "NOT_APPLICABLE_OWNER_APPROVED_IMMATERIAL",
+        "status": "NOT_APPLICABLE_OWNER_APPROVED",
     }
+    assert not {
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    } & set(
+        json.loads(manifest_content)["mode_status"]["LIVE_ONLY"][
+            "required_not_ready_strategy_ids"
+        ]
+    )
     assert coverage["correction_resolutions"]["p123-eu-provider-live"] == {
         "calendar": "WEEKDAY_SOURCE_CALENDAR",
         "cash_added_treatment": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
