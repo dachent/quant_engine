@@ -42,6 +42,16 @@ from quant_engine.portfolio_ledger.hwm import (
     validate_as_held_hwm_policy,
     verify_as_held_hwm_receipt,
 )
+from quant_engine.portfolio_ledger.hwm_governed import (
+    CLOSED_SOURCE_TREATMENT,
+    GOVERNED_HWM_CALENDAR_AUTHORITY_CLASS,
+    GOVERNED_HWM_CALENDAR_SCHEMA_VERSION,
+    GOVERNED_HWM_PORTFOLIO_CALENDAR,
+    GovernedHwmAuthorityError,
+    governed_closed_source_return,
+    governed_hwm_calendar_authority_bytes,
+    validate_governed_hwm_calendar_authority,
+)
 from quant_engine.portfolio_ledger.hwm_inputs import (
     HwmInputsContractError,
     hwm_policy_exclusions,
@@ -98,6 +108,7 @@ __all__ = [
     "AS_HELD_HWM_RETURN_BASIS",
     "AllocationBridgeReconciliation",
     "AllocationDecision",
+    "CLOSED_SOURCE_TREATMENT",
     "CashFlow",
     "CapitalPool",
     "CapitalPoolRole",
@@ -106,7 +117,11 @@ __all__ = [
     "DatasetItemKind",
     "EvidenceComparison",
     "EvidenceLayer",
+    "GOVERNED_HWM_CALENDAR_AUTHORITY_CLASS",
+    "GOVERNED_HWM_CALENDAR_SCHEMA_VERSION",
+    "GOVERNED_HWM_PORTFOLIO_CALENDAR",
     "GenerationQualification",
+    "GovernedHwmAuthorityError",
     "HWM_STATUS_CODE_VERSION",
     "HWM_STATUS_SEMANTICS",
     "HwmCoverageError",
@@ -143,6 +158,8 @@ __all__ = [
     "compute_as_held_composite_hwm",
     "compute_full_systematic_hwm_index",
     "decimal_text",
+    "governed_closed_source_return",
+    "governed_hwm_calendar_authority_bytes",
     "governed_hwm_coverage",
     "hwm_policy_exclusions",
     "product_data_class_set_digest",
@@ -153,6 +170,7 @@ __all__ = [
     "validate_as_held_hwm_policy",
     "validate_admit_or_declare_receipt",
     "validate_dataset_dispositions",
+    "validate_governed_hwm_calendar_authority",
     "verify_as_held_hwm_receipt",
     "validate_provider_authority",
 ]
