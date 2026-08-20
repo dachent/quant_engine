@@ -2956,6 +2956,18 @@ def _validate_history_corrections(
             raise FinancialMvpContractError(
                 f"unresolved history version asserts identity: {correction_id}"
             )
+        if version_status == "EVIDENCED":
+            product_version = _object(
+                strategy_by_id[strategy_id]["strategy_version"],
+                f"history product strategy_version {strategy_id}",
+            )
+            if (
+                product_version.get("status") != "EVIDENCED"
+                or product_version.get("version_ref") != version_ref
+            ):
+                raise FinancialMvpContractError(
+                    f"history strategy version differs from product authority: {correction_id}"
+                )
         if (
             compatibility in {"ACCOUNT_OWNED", "EXACT_MATCH"}
             and version_status != "EVIDENCED"
@@ -4337,6 +4349,12 @@ def _validate_strategy_version_evidence(
 ) -> None:
     """Keep #302 membership authority separate from design/version evidence."""
 
+    strategy_versions = {
+        _text(strategy.get("strategy_id"), "version evidence strategy"): _object(
+            strategy.get("strategy_version"), "version evidence strategy_version"
+        )
+        for strategy in strategies
+    }
     bindings: dict[str, list[tuple[str, str]]] = {}
     for source in sources:
         source_id = _text(source.get("source_id"), "version evidence source_id")
@@ -4348,6 +4366,16 @@ def _validate_strategy_version_evidence(
             version.get("version_refs"),
             f"version evidence refs {source_id}",
         ).items():
+            product_version = strategy_versions.get(str(strategy_id))
+            if (
+                product_version is None
+                or product_version.get("status") != "EVIDENCED"
+                or product_version.get("version_ref") != version_ref
+            ):
+                raise FinancialMvpContractError(
+                    "source strategy design/version differs from product authority: "
+                    f"{source_id}/{strategy_id}"
+                )
             bindings.setdefault(str(strategy_id), []).append(
                 (source_id, _text(version_ref, f"version evidence {strategy_id}"))
             )

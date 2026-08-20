@@ -582,6 +582,35 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
             rewritten_accepted_version
         )
 
+    partial_source_rewrite = copy.deepcopy(baseline)
+    _source(partial_source_rewrite, "ibkr-account-generation")["strategy_version"][
+        "version_refs"
+    ]["p123-eu"] = fake_p123_eu_version
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "source strategy design/version differs from product authority: "
+            "ibkr-account-generation/p123-eu"
+        ),
+    ):
+        _validate(partial_source_rewrite)
+
+    partial_correction_rewrite = copy.deepcopy(baseline)
+    correction = next(
+        row
+        for row in partial_correction_rewrite["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-eu-backtest-not-captured"
+    )
+    correction["strategy_version"]["version_ref"] = fake_p123_eu_version
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "history strategy version differs from product authority: "
+            "p123-eu-backtest-not-captured"
+        ),
+    ):
+        _validate(partial_correction_rewrite)
+
     transition_removed = copy.deepcopy(baseline)
     for sleeve in transition_removed["current_census"]["account_sleeves"]:
         for assignment in sleeve["assignments"]:
