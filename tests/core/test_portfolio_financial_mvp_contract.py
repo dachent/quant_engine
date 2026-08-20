@@ -675,6 +675,42 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
             erased_correction_assertion
         )
 
+    swapped_correction_receipts = copy.deepcopy(baseline)
+    p123_ai_correction = next(
+        row
+        for row in swapped_correction_receipts["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-ai-backtest-candidate"
+    )
+    replacement_receipts = {
+        row["artifact_role"]: copy.deepcopy(row)
+        for row in p123_ai_correction["source_receipts"]
+    }
+    p123_eu_correction = next(
+        row
+        for row in swapped_correction_receipts["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-eu-provider-live"
+    )
+    p123_eu_correction["source_receipts"] = [
+        row
+        for row in p123_eu_correction["source_receipts"]
+        if row["artifact_role"]
+        not in {"portfolio123-managed-metadata", "portfolio123-equity-curve"}
+    ] + [
+        replacement_receipts["portfolio123-simulation-returns"],
+        replacement_receipts["portfolio123-strategy-relationships"],
+    ]
+    _validate(swapped_correction_receipts)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "history correction version projection differs from accepted "
+            "history authority"
+        ),
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            swapped_correction_receipts
+        )
+
     transition_removed = copy.deepcopy(baseline)
     for sleeve in transition_removed["current_census"]["account_sleeves"]:
         for assignment in sleeve["assignments"]:

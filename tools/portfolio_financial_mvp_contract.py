@@ -482,6 +482,22 @@ def _verify_strategy_version_history_evidence(
             )
 
     def correction_projection(row: Mapping[str, Any]) -> dict[str, object]:
+        receipt_keys = (
+            "artifact_role",
+            "authority_root",
+            "generation_id",
+            "artifact_selector",
+            "locator_kind",
+            "manifest_artifact_id",
+            "sha256",
+        )
+        receipts = [
+            {key: receipt.get(key) for key in receipt_keys}
+            for receipt in _objects(
+                row.get("source_receipts"), "history correction source_receipts"
+            )
+        ]
+        receipts.sort(key=canonical_json_bytes)
         return {
             "strategy_id": row.get("strategy_id"),
             "evidence_layer": row.get("evidence_layer"),
@@ -492,6 +508,7 @@ def _verify_strategy_version_history_evidence(
             "strategy_version": _object(
                 row.get("strategy_version"), "history correction strategy_version"
             ),
+            "source_receipts": receipts,
         }
 
     accepted_history = _object(
