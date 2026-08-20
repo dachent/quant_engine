@@ -276,6 +276,55 @@ def test_provider_live_strategy_path_never_becomes_account_authority() -> None:
     assert admissions[0].account_id is None
 
 
+def test_account_admission_requires_current_product_provider_authority() -> None:
+    projections = {
+        "nav_observations": [
+            {
+                "account_id": "account-alpaca",
+                "as_of_date": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "provider_id": "alpaca",
+                "record_id": "alpaca:nav:1",
+            },
+            {
+                "account_id": "account-ibkr",
+                "as_of_date": "2026-01-01",
+                "mapping_status": "MAPPED",
+                "provider_id": "ibkr",
+                "record_id": "ibkr:nav:1",
+            },
+        ]
+    }
+
+    admissions = ledger._admissions(
+        projections,
+        [],
+        authoritative_provider_ids={"ibkr"},
+        authoritative_strategy_ids=set(),
+    )
+
+    by_provider = {item.provider_id: item.disposition.value for item in admissions}
+    assert by_provider == {
+        "alpaca": "REFERENCE_ONLY",
+        "ibkr": "AUTHORITATIVE",
+    }
+
+
+def test_declared_provider_fact_collection_cannot_fall_back_to_empty() -> None:
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="declared provider fact collection is missing: alpaca.nav_observations",
+    ):
+        ledger._project_account_facts(
+            "alpaca",
+            "a" * 64,
+            {},
+            set(),
+            set(),
+            {},
+        )
+
+
 def test_account_and_provider_lanes_keep_independent_provider_identity() -> None:
     ibkr = ProviderGenerationIdentity(
         provider_id="ibkr",

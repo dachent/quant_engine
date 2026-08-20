@@ -1268,6 +1268,62 @@
           "additionalProperties": false,
           "required": ["facts", "transform", "version"],
           "properties": {
+            "dataset_disposition_policy": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "admitted_item_count",
+                "admitted_item_set_sha256",
+                "allowed_exclusion_reasons",
+                "authority_issue",
+                "effective_end",
+                "effective_start",
+                "exclusion_invalidated_outputs_rule",
+                "exclusion_readiness_impact",
+                "policy_id",
+                "policy_owner",
+                "policy_version",
+                "product_data_class_count",
+                "product_data_class_set_sha256",
+                "upstream_inventory_sha256"
+              ],
+              "properties": {
+                "admitted_item_count": {"type": "integer", "minimum": 0},
+                "admitted_item_set_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "allowed_exclusion_reasons": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {"$ref": "#/$defs/nonempty_string"}
+                },
+                "authority_issue": {"const": 303},
+                "effective_end": {
+                  "anyOf": [{"type": "string", "format": "date"}, {"type": "null"}]
+                },
+                "effective_start": {"type": "string", "format": "date"},
+                "exclusion_invalidated_outputs_rule": {
+                  "enum": ["SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"]
+                },
+                "exclusion_readiness_impact": {
+                  "enum": ["NO_CURRENT_PRODUCT_EFFECT", "REQUIRED_NOT_READY"]
+                },
+                "policy_id": {"const": "PROVIDER_ADMIT_OR_DECLARE_V1"},
+                "policy_owner": {"const": "PRODUCT_OWNER_GOVERNING_ISSUE_303"},
+                "policy_version": {"const": "1"},
+                "product_data_class_count": {"type": "integer", "minimum": 1},
+                "product_data_class_set_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "upstream_inventory_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            },
             "facts": {"$ref": "#/$defs/unique_strings"},
             "transform": {"$ref": "#/$defs/nonempty_string"},
             "version": {"$ref": "#/$defs/nonempty_string"}

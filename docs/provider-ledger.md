@@ -14,6 +14,34 @@ effective interval, evidence layer, disposition, and upstream coverage. Only
 capital or performance. Unmapped facts are retained as `REFERENCE_ONLY` quality
 findings.
 
+Catalog schema 2 adds an exhaustive admit-or-declare gate before the candidate
+can be staged. The gate discovers every manifested source artifact, manifest
+coverage fact type, provider-catalog collection, and #330 product data class.
+Each discovered key has exactly one `ADMIT` or `EXCLUDE` disposition in
+`admit-or-declare-receipt.json`; missing, duplicate, extra, or hash-mismatched
+dispositions fail. The receipt binds the exact financial-MVP contract and #302
+census digests, all seven provider generation/manifest/catalog identities,
+source-segment identities, transform versions, materialized fact hashes and
+intervals, units, currency, timezone, calendar, consumers, readiness impact,
+and invalidated outputs. It contains no account identifiers, source roots, or
+financial values.
+
+The #330 source segment pins the complete upstream inventory, product data-class
+set, and admitted binding set. An admitted binding includes its exact sorted
+target facts, evidence layer, transform, and transform version; an artifact that
+feeds several fact collections cannot be collapsed to a generic artifact fact.
+Every exclusion is authorized by the #303 policy ID, owner, version, effective
+interval, permitted reason, readiness effect, and invalidated-output rule.
+Unknown or changed source items are not automatically excluded: they fail until
+the authoritative source policy is deliberately updated and revalidated.
+
+An exclusion is not a readiness waiver. A required data class without admitted
+materialized facts remains `REQUIRED_NOT_READY` and names every invalidated
+output. Provider-declared gaps are source evidence, not product authority.
+Deprecated or no-current-member lanes can be explicitly excluded with no
+current product consumer; their historical observations remain evidence and
+cannot become current account authority.
+
 Strategy curves retain their declared economic layer. In particular, the
 Matrixport Robuxio product path is `PROVIDER_LIVE` and
 `RECONCILIATION_ONLY`; it provides complete strategy NAV/HWM evidence but does
@@ -39,7 +67,10 @@ Provider qualifications are explicit:
 ## Build and verification
 
 The private spec contains absolute local roots and hashes and therefore remains
-outside Git. From the repository root:
+outside Git. Specification schema 2 can pin the contract, schema, and registry
+identities explicitly. A legacy schema-1 spec is upgraded in memory only by
+hash-binding those three files from the executing repository; generated output
+is always catalog schema 2 and adapter version 2. From the repository root:
 
 ```powershell
 uv run --frozen --no-sync python tools/provider_ledger.py stage `
@@ -50,11 +81,20 @@ uv run --frozen --no-sync python tools/provider_ledger.py verify `
   --generation-id <staged-generation-id>
 ```
 
+`--output-root <candidate-root>` may be supplied to both commands for isolated,
+create-only workstation evidence. It never changes the spec or advances a
+pointer.
+
 The output catalog conforms to
-`schemas/portfolio/provider-ledger.schema.json`. Rebuilding identical inputs
-must reproduce the same generation and bytes. The tool has no publish command;
-`DATA-PIPE-001` owns coordinated release of provider ledger, baseline, report,
-analytics, and panel pointers.
+`schemas/portfolio/provider-ledger.schema.json`; the sibling receipt conforms
+to `schemas/portfolio/provider-admission-receipt.schema.json`. Both artifacts
+are hash-bound by the one existing provider-ledger `GenerationManifest`.
+Receipt semantic validation also requires the independently loaded accepted
+product/census identity, source segments, and seven trusted provider-generation
+rows; receipt fields cannot authenticate themselves through coherent rehashing.
+Rebuilding identical inputs must reproduce the same generation and bytes. The
+tool has no publish command; `DATA-PIPE-001` owns coordinated release of
+provider ledger, baseline, report, analytics, and panel pointers.
 
 ## Downstream behavior
 

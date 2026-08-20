@@ -198,7 +198,36 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "01d7bd98a166736c10248dabffd36ae315e9c30baf59ae3d23024adc5e02cb39"
+        "277a028bb39c66966901a1e6dfb5291554317660a54d441289c0d700a2415071"
+    )
+
+
+def test_quantbase_generation_is_account_live_from_accepted_membership() -> None:
+    source = _source(_contract(), "quantbase-account-generation")
+    assert source["evidence_layer"] == "ACCOUNT_LIVE"
+    assert source["interval"] == {
+        "observed_start": "2024-10-15",
+        "observed_end": "2026-08-16",
+        "effective_start": "2024-10-15",
+        "effective_end": None,
+        "splice_policy": (
+            "OWNER_ACCOUNT_LIVE_FROM_ACCEPTED_2024_10_15_MEMBERSHIP; "
+            "PRESERVE_SEPARATE_PROVIDER_COMPARISON_ONLY_WHEN_EXPLICITLY_IDENTIFIED"
+        ),
+    }
+    admission = source["admission"]
+    assert admission["transform"] == "provider-ledger"
+    assert admission["version"] == "1"
+    assert admission["facts"] == [
+        "NAV_OBSERVATION",
+        "EXTERNAL_FLOW",
+        "CAPITAL_ANCHOR",
+        "FINANCING_LIABILITY",
+        "LEVERAGE_EXPOSURE",
+        "FINANCING_COST",
+    ]
+    assert admission["dataset_disposition_policy"]["policy_id"] == (
+        "PROVIDER_ADMIT_OR_DECLARE_V1"
     )
 
 
@@ -1222,17 +1251,19 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
     assert unavailable == missing | omitted
     assert source["readiness"] == "REQUIRED_NOT_READY"
     assert source["blockers"] == [324, 318]
-    assert source["admission"] == {
-        "facts": [
-            "NAV_OBSERVATION",
-            "CAPITAL_ANCHOR",
-            "FINANCING_LIABILITY",
-            "LEVERAGE_EXPOSURE",
-            "FINANCING_COST",
-        ],
-        "transform": "provider-ledger",
-        "version": "1",
-    }
+    admission = source["admission"]
+    assert admission["facts"] == [
+        "NAV_OBSERVATION",
+        "CAPITAL_ANCHOR",
+        "FINANCING_LIABILITY",
+        "LEVERAGE_EXPOSURE",
+        "FINANCING_COST",
+    ]
+    assert admission["transform"] == "provider-ledger"
+    assert admission["version"] == "1"
+    assert admission["dataset_disposition_policy"]["policy_id"] == (
+        "PROVIDER_ADMIT_OR_DECLARE_V1"
+    )
     assert policy["return_transform"] == {
         "facts": [
             "ACCOUNT_LIVE_DAILY_RETURN",

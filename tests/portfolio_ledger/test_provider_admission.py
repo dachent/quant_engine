@@ -7,13 +7,18 @@ import pytest
 from quant_engine.portfolio_ledger.provider_admission import (
     AdmissionDisposition,
     AnalyticalModelStatus,
+    DatasetDispositionAction,
+    DatasetItemKind,
     EvidenceLayer,
     GenerationQualification,
     ProviderAdmissionError,
+    ProviderDatasetDisposition,
+    ProviderDatasetInventoryItem,
     ProviderFactAdmission,
     ProviderGenerationIdentity,
     SourceAnalyticalStatus,
     SourceAvailability,
+    validate_dataset_dispositions,
     validate_provider_authority,
 )
 
@@ -136,3 +141,91 @@ def test_reference_evidence_may_overlap_authority() -> None:
         strategy_id="p123-ai-factor",
     )
     assert len(validate_provider_authority((authority, provider))) == 2
+
+
+def _inventory() -> ProviderDatasetInventoryItem:
+    return ProviderDatasetInventoryItem(
+        provider_id="schwab",
+        item_kind=DatasetItemKind.PRODUCT_DATA_CLASS,
+        item_id="ACCOUNT_NAV",
+        sha256="a" * 64,
+        size_bytes=11,
+        schema_name="financial-mvp-source-data-class",
+        schema_version="1",
+    )
+
+
+def _disposition(
+    *, action: DatasetDispositionAction = DatasetDispositionAction.ADMIT
+) -> ProviderDatasetDisposition:
+    admitted = action is DatasetDispositionAction.ADMIT
+    return ProviderDatasetDisposition(
+        provider_id="schwab",
+        item_kind=DatasetItemKind.PRODUCT_DATA_CLASS,
+        item_id="ACCOUNT_NAV",
+        item_sha256="a" * 64,
+        action=action,
+        source_segment_id="schwab-account-generation",
+        source_segment_sha256="b" * 64,
+        authority_ref="contract:accepted#source_segments/schwab-account-generation",
+        readiness_impact="ADMITTED" if admitted else "REQUIRED_NOT_READY",
+        consumers=("AS_HELD_COMPOSITE_HWM",),
+        invalidated_outputs=() if admitted else ("HWM",),
+        evidence_layer="ACCOUNT_LIVE",
+        units="PROVIDER_NATIVE_ACCOUNT_FACTS",
+        currency="SOURCE_DECLARED",
+        timezone="SOURCE_DECLARED",
+        calendar="ACCOUNT_DECLARED",
+        materialized_record_count=1 if admitted else 0,
+        policy_id="PROVIDER_ADMIT_OR_DECLARE_V1",
+        policy_version="1",
+        policy_owner="PRODUCT_OWNER_GOVERNING_ISSUE_303",
+        policy_effective_start=DAY,
+        policy_effective_end=None,
+        source_observed_start=DAY,
+        source_observed_end=DAY,
+        materialized_sha256="c" * 64 if admitted else None,
+        observed_start=DAY if admitted else None,
+        observed_end=DAY if admitted else None,
+        data_class="ACCOUNT_NAV",
+        target_facts=("nav_observations",) if admitted else (),
+        transform="provider-ledger" if admitted else None,
+        transform_version="1" if admitted else None,
+        reason=None if admitted else "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
+    )
+
+
+def test_dataset_inventory_requires_one_exact_disposition() -> None:
+    inventory, dispositions = validate_dataset_dispositions(
+        (_inventory(),), (_disposition(),)
+    )
+    assert inventory[0].identity == dispositions[0].identity
+
+    with pytest.raises(ProviderAdmissionError, match="coverage differs"):
+        validate_dataset_dispositions((_inventory(),), ())
+
+    with pytest.raises(ProviderAdmissionError, match="duplicated"):
+        validate_dataset_dispositions((_inventory(),), (_disposition(), _disposition()))
+
+
+def test_dataset_disposition_rejects_hash_or_exclusion_semantic_drift() -> None:
+    wrong_hash = _disposition()
+    object.__setattr__(wrong_hash, "item_sha256", "d" * 64)
+    with pytest.raises(ProviderAdmissionError, match="hash differs"):
+        validate_dataset_dispositions((_inventory(),), (wrong_hash,))
+
+    with pytest.raises(ProviderAdmissionError, match="requires reason"):
+        ProviderDatasetDisposition(
+            **{
+                **_disposition(action=DatasetDispositionAction.EXCLUDE).__dict__,
+                "reason": None,
+            }
+        )
+
+    with pytest.raises(ProviderAdmissionError, match="policy authority differs"):
+        ProviderDatasetDisposition(
+            **{
+                **_disposition().__dict__,
+                "policy_owner": "UNAUTHORIZED_POLICY_OWNER",
+            }
+        )
