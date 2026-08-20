@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import date
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -222,6 +223,39 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
     correlation_root = _path(
         recipe["correlation_source_root"]["path"], "correlation source root"
     )
+    current_receipt = correlation_root / "dependence-source.json"
+    if current_receipt.exists():
+        module_path = TOOLS_ROOT / "portfolio_current_dependence.py"
+        module_name = "portfolio_current_dependence_for_release_builder"
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise VerticalBuildError("current dependence verifier is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            result = module.verify_packaged_source(
+                correlation_root,
+                contract_path=REPOSITORY_ROOT
+                / "contracts"
+                / "portfolio-financial-mvp-source-v1.json",
+                policy_path=REPOSITORY_ROOT
+                / "contracts"
+                / "portfolio-dependence-policy-v1.json",
+            )
+        except Exception as exc:
+            raise VerticalBuildError(
+                f"current dependence source is invalid: {exc}"
+            ) from exc
+        finally:
+            sys.modules.pop(module_name, None)
+        if result.get("verification") != "VALID":
+            raise VerticalBuildError("current dependence source is not verified")
+        return current_receipt
+    if recipe.get("schema_version") != 6:
+        raise VerticalBuildError(
+            "current vertical build requires the verified dependence source"
+        )
     proof_path = correlation_root / "evidence-proof.json"
     proof = _load(proof_path, "strategy history compatibility contract")
     if proof.get("builder") != "portfolio-target-series/layered-correlation-1":
@@ -1091,6 +1125,7 @@ def build_report_candidate(
     implementation_return_attribution: Path,
     attribution_root: Path,
     output_root: Path,
+    correlation_root: Path | None = None,
 ) -> dict[str, Any]:
     built = _tool(
         "portfolio_report.py",
@@ -1109,6 +1144,11 @@ def build_report_candidate(
         str(implementation_return_attribution),
         "--attribution-root",
         str(attribution_root),
+        *(
+            ("--correlation-root", str(correlation_root))
+            if correlation_root is not None
+            else ()
+        ),
         "--output-root",
         str(output_root),
         timeout=7200,
@@ -1127,6 +1167,7 @@ def build_workbook(
     attribution_root: Path,
     candidate: Path,
     output_root: Path,
+    correlation_root: Path | None = None,
 ) -> dict[str, Any]:
     if not XLSX_RUNTIME.is_file() or not XLSX_CLI.is_file():
         raise VerticalBuildError("xlsx-win durable runtime is unavailable")
@@ -1206,6 +1247,11 @@ def build_workbook(
         str(implementation_return_attribution),
         "--attribution-root",
         str(attribution_root),
+        *(
+            ("--correlation-root", str(correlation_root))
+            if correlation_root is not None
+            else ()
+        ),
     )
     published = _tool(
         "portfolio_report.py",
@@ -1234,6 +1280,11 @@ def build_workbook(
         str(implementation_return_attribution),
         "--attribution-root",
         str(attribution_root),
+        *(
+            ("--correlation-root", str(correlation_root))
+            if correlation_root is not None
+            else ()
+        ),
         timeout=7200,
     )
     return {
@@ -1254,6 +1305,7 @@ def build_report(
     implementation_return_attribution: Path,
     attribution_root: Path,
     output_root: Path,
+    correlation_root: Path | None = None,
 ) -> dict[str, Any]:
     candidate = build_report_candidate(
         baseline_root,
@@ -1264,6 +1316,7 @@ def build_report(
         implementation_return_attribution,
         attribution_root,
         output_root,
+        correlation_root,
     )
     return build_workbook(
         baseline_root,
@@ -1275,6 +1328,7 @@ def build_report(
         attribution_root,
         Path(_text(candidate.get("candidate_dir"), "report candidate")),
         output_root,
+        correlation_root,
     )
 
 
@@ -1450,7 +1504,7 @@ def build_stage(
         )
     elif role == "report":
         ledger = _stage_result(output_root, "ledger")
-        _stage_result(output_root, "analytics")
+        analytics = _stage_result(output_root, "analytics")
         result = build_report_candidate(
             stages / "baseline",
             stages / "ledger",
@@ -1460,10 +1514,12 @@ def build_stage(
             implementation_return_attribution,
             strategy_attribution_root,
             stages / "report-candidate",
+            _path(analytics.get("correlation_root"), "correlation root"),
         )
     elif role == "workbook":
         ledger = _stage_result(output_root, "ledger")
         report = _stage_result(output_root, "report")
+        analytics = _stage_result(output_root, "analytics")
         result = build_workbook(
             stages / "baseline",
             stages / "ledger",
@@ -1474,6 +1530,7 @@ def build_stage(
             strategy_attribution_root,
             _path(report.get("candidate_dir"), "report candidate"),
             stages / "report",
+            _path(analytics.get("correlation_root"), "correlation root"),
         )
     elif role in {"panel-candidate", "panel"}:
         ledger = _stage_result(output_root, "ledger")

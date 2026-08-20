@@ -24,6 +24,8 @@
     "reconciliation_checks",
     "coverage_data_quality",
     "corrections",
+    "dependence_analysis",
+    "dependence_rows",
     "methodology",
     "provenance",
     "hwm_summary"
@@ -119,7 +121,106 @@
     },
     "hwm_portable_proof": {"$ref": "#/$defs/portable_hwm_proof"},
     "hwm_inputs": {"$ref": "baseline-catalog.schema.json#/properties/hwm_inputs"},
+    "strategy_history_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of_date", "evidence_mode_policy", "returns_sha256", "returns_size_bytes", "schema", "series_count", "sha256", "size_bytes"],
+      "properties": {
+        "as_of_date": {"type": "string", "format": "date"},
+        "bundle_id": {"$ref": "#/$defs/sha256"},
+        "evaluated_on": {"type": "string", "format": "date"},
+        "evidence_mode_policy": {"type": "object"},
+        "returns_sha256": {"$ref": "#/$defs/sha256"},
+        "returns_size_bytes": {"type": "integer", "minimum": 1},
+        "schema": {"enum": ["portfolio-current-dependence-source/1", "portfolio-target-series-evidence-proof/1"]},
+        "series_count": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"schema": {"const": "portfolio-current-dependence-source/1"}}, "required": ["schema"]},
+          "then": {"required": ["bundle_id", "evaluated_on"]}
+        }
+      ]
+    },
     "corrections": {"type": "array", "items": {"type": "object"}},
+    "dependence_analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default_evidence_mode", "mode_count", "pair_count", "pair_mode_count", "schema_version", "series_ids", "status"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "status": {"enum": ["AVAILABLE", "UNAVAILABLE_NOT_CONFIGURED"]},
+        "analytics_hash": {"$ref": "#/$defs/sha256"},
+        "as_of_date": {"type": "string", "format": "date"},
+        "default_evidence_mode": {"const": "LIVE_ONLY"},
+        "mode_count": {"type": "integer", "minimum": 0, "maximum": 2},
+        "pair_count": {"type": "integer", "minimum": 0},
+        "pair_mode_count": {"type": "integer", "minimum": 0},
+        "series_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["correlation_sha256", "generation_id", "manifest_sha256"],
+          "properties": {
+            "correlation_sha256": {"$ref": "#/$defs/sha256"},
+            "generation_id": {"$ref": "#/$defs/sha256"},
+            "manifest_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "mode_payload_sha256": {"$ref": "#/$defs/sha256"},
+        "mode_summaries": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+          "properties": {
+            "LIVE_ONLY": {"type": "object"},
+            "LIVE_PLUS_BACKTEST": {"type": "object"}
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact_id", "sha256", "size_bytes"],
+          "properties": {
+            "artifact_id": {"type": "string", "minLength": 1},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "size_bytes": {"type": "integer", "minimum": 1}
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "AVAILABLE"}}, "required": ["status"]},
+          "then": {
+            "required": ["analytics_hash", "as_of_date", "identity", "mode_payload_sha256", "mode_summaries", "source"],
+            "properties": {
+              "mode_count": {"const": 2},
+              "pair_count": {"const": 21},
+              "pair_mode_count": {"const": 42},
+              "series_ids": {"minItems": 7, "maxItems": 7}
+            }
+          }
+        }
+      ]
+    },
+    "dependence_rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["evidence_mode", "left", "right", "status", "implementation_status", "mapping_scope"],
+        "properties": {
+          "evidence_mode": {"enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]},
+          "left": {"type": "string", "minLength": 1},
+          "right": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "minLength": 1},
+          "implementation_status": {"const": "AVAILABLE_PROVIDER_LANE_CONCENTRATION"},
+          "mapping_scope": {"const": "CENSUS_PROVIDER_LANE_ONLY"}
+        }
+      }
+    },
     "methodology": {"type": "array", "minItems": 7, "items": {"type": "object"}},
     "observation_windows": {"type": "array", "items": {"type": "object"}},
     "attribution_dispositions": {"type": "array", "items": {"type": "object"}},

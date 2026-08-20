@@ -254,18 +254,22 @@
         "analytics_hash": { "$ref": "#/$defs/hash" },
         "as_of_date": { "type": "string", "format": "date" },
         "available_pair_count": { "type": "integer", "minimum": 0 },
-        "cells": { "type": "array", "minItems": 36, "maxItems": 36, "items": { "type": "object" } },
+        "cells": { "type": "array", "minItems": 21, "maxItems": 36, "items": { "type": "object" } },
         "central_case": { "type": "object" },
         "correlation_one": { "type": "object" },
         "economic_driver_cluster_budget": { "type": "object" },
         "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
         "generation_id": { "$ref": "#/$defs/hash" },
         "matrices": { "type": "object", "minProperties": 6, "maxProperties": 6 },
-        "pair_count": { "const": 36 },
-        "series_ids": { "type": "array", "minItems": 9, "maxItems": 9, "items": { "type": "string" }, "uniqueItems": true },
+        "pair_count": { "enum": [21, 36] },
+        "series_ids": { "type": "array", "minItems": 7, "maxItems": 9, "items": { "type": "string" }, "uniqueItems": true },
         "series_composition": { "type": "object", "additionalProperties": { "type": "object" } },
         "source_sha256": { "$ref": "#/$defs/hash" }
-      }
+      },
+      "oneOf": [
+        {"properties": {"cells": {"minItems": 21, "maxItems": 21}, "pair_count": {"const": 21}, "series_ids": {"minItems": 7, "maxItems": 7}}},
+        {"properties": {"cells": {"minItems": 36, "maxItems": 36}, "pair_count": {"const": 36}, "series_ids": {"minItems": 9, "maxItems": 9}}}
+      ]
     },
     "dependence_modes": {
       "type": "object",

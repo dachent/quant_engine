@@ -175,3 +175,40 @@ generations are not overwritten.
 
 The output is read-only evidence. It contains no optimizer, allocation change,
 trade recommendation, alert, provider call, or broker path.
+
+## Current financial-MVP authority
+
+`contracts/portfolio-dependence-policy-v1.json` is the single current
+dependence policy. `tools/portfolio_current_dependence.py` combines that policy
+with the exact accepted #320 layered-history generation, the current financial
+MVP contract, and the immutable baseline allocation generation. It emits a
+four-file content-addressed source package: `dependence-source.json`,
+`returns.csv`, `segments.csv`, and `spec.json`. The packaged verifier rebuilds
+the return projection, specification, receipt, and bundle identity from those
+bytes and the current authorities; a caller cannot relabel a segment, mode,
+provider lane, strategy perimeter, or artifact hash.
+
+The current product perimeter is seven required strategies and therefore 21
+unordered pairs in each of two evidence modes, or 42 pair-mode rows. Composer
+Holy Grail is excluded as immaterial and EchoTrade is excluded as deprecated
+history-only; neither is silently treated as missing dependence data. The
+latest common complete boundary is 2026-08-13. Later evaluation dates retain
+that boundary and emit the structured complete-data-age warning instead of
+inventing observations or requiring a development refresh.
+
+Both current modes are emitted. `LIVE_ONLY` uses the selected account-live
+segments. `LIVE_PLUS_BACKTEST` is presently live-only-equivalent because no
+version-matched backtest rows are admitted for this perimeter; it carries zero
+backtest observations and is not relabeled as historical evidence. Any
+unresolved version that consumes a backtest row fails closed.
+
+Implementation concentration is currently measured only at the accepted
+census provider-lane scope. Instrument and venue concentration remain explicitly
+unassessed; those empty dimensions cannot earn diversification credit.
+`portfolio-correlation` v1.6 binds `correlation.json` into its own verified
+generation. The report projects all 42 rows into `portfolio-report-data.json`
+and the `Dependence` workbook sheet, and the panel independently reconciles the
+same generation, manifest, mode payload, seven-series perimeter, and pair
+counts. A current schema-7 vertical recipe must use the verified four-file
+source package; the historical evidence adapter is accepted only for archival
+schema-6 replay.

@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-engine.local/schemas/portfolio/dependence-policy.schema.json",
+  "title": "Current portfolio dependence policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "allocation_authority",
+    "calculation_parameters",
+    "conceptual_priors",
+    "history_authority",
+    "owner_issue",
+    "policy_id",
+    "schema_version",
+    "series"
+  ],
+  "properties": {
+    "$schema": {"const": "../schemas/portfolio/dependence-policy.schema.json"},
+    "schema_version": {"const": 1},
+    "policy_id": {"const": "PORT-DEPENDENCE-1"},
+    "owner_issue": {"const": 336},
+    "history_authority": {"$ref": "#/$defs/history_authority"},
+    "allocation_authority": {"$ref": "#/$defs/allocation_authority"},
+    "series": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/series"}
+    },
+    "conceptual_priors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/prior"}
+    },
+    "calculation_parameters": {"$ref": "#/$defs/calculation_parameters"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonempty": {"type": "string", "minLength": 1},
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "size_bytes"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/hash"},
+        "size_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "history_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "receipt_sha256", "outputs"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/hash"},
+        "receipt_sha256": {"$ref": "#/$defs/hash"},
+        "outputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "coverage.json",
+            "excluded.csv",
+            "live-only.csv",
+            "live-plus-backtest.csv",
+            "returns.csv",
+            "segments.csv"
+          ],
+          "properties": {
+            "coverage.json": {"$ref": "#/$defs/output"},
+            "excluded.csv": {"$ref": "#/$defs/output"},
+            "live-only.csv": {"$ref": "#/$defs/output"},
+            "live-plus-backtest.csv": {"$ref": "#/$defs/output"},
+            "returns.csv": {"$ref": "#/$defs/output"},
+            "segments.csv": {"$ref": "#/$defs/output"}
+          }
+        }
+      }
+    },
+    "allocation_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "as_of_date",
+        "catalog_sha256",
+        "generation_id",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "as_of_date": {"type": "string", "format": "date"},
+        "catalog_sha256": {"$ref": "#/$defs/hash"},
+        "generation_id": {"$ref": "#/$defs/hash"},
+        "manifest_sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "series": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adverse_loss_fraction", "allocation_weight", "series_id", "strategy_id"],
+      "properties": {
+        "strategy_id": {"$ref": "#/$defs/nonempty"},
+        "series_id": {"$ref": "#/$defs/nonempty"},
+        "adverse_loss_fraction": {
+          "type": "string",
+          "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
+        },
+        "allocation_weight": {
+          "type": "string",
+          "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
+        }
+      }
+    },
+    "prior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_note", "left_strategy_id", "right_strategy_id", "value"],
+      "properties": {
+        "left_strategy_id": {"$ref": "#/$defs/nonempty"},
+        "right_strategy_id": {"$ref": "#/$defs/nonempty"},
+        "value": {"type": "string", "pattern": "^-?(0(\\.[0-9]+)?|1(\\.0+)?)$"},
+        "evidence_note": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "calculation_parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "correlation_one_tolerance",
+        "eigenvalue_floor",
+        "full_observed_weight_observations",
+        "maximum_observed_weight",
+        "minimum_downside_observations",
+        "minimum_observations",
+        "minimum_rolling_windows",
+        "rolling_window",
+        "stress_cap",
+        "stress_uplift",
+        "tail_quantile"
+      ],
+      "properties": {
+        "minimum_observations": {"type": "integer", "minimum": 2},
+        "minimum_downside_observations": {"type": "integer", "minimum": 2},
+        "rolling_window": {"type": "integer", "minimum": 2},
+        "minimum_rolling_windows": {"type": "integer", "minimum": 1},
+        "full_observed_weight_observations": {"type": "integer", "minimum": 1},
+        "maximum_observed_weight": {"type": "string", "pattern": "^0\\.[0-9]+$"},
+        "tail_quantile": {"type": "string", "pattern": "^0\\.[0-9]+$"},
+        "stress_uplift": {"type": "string", "pattern": "^0\\.[0-9]+$"},
+        "stress_cap": {"type": "string", "pattern": "^0\\.[0-9]+$"},
+        "eigenvalue_floor": {"type": "string", "pattern": "^0\\.[0-9]+$"},
+        "correlation_one_tolerance": {"type": "string", "pattern": "^0\\.[0-9]+$"}
+      }
+    }
+  }
+}

@@ -313,6 +313,17 @@ dynamic authority. #331 binds exact `LIVE_ONLY` and `LIVE_PLUS_BACKTEST` plan
 bundles into the vertical builder. Until that composition is present, the
 hybrid factor control remains disabled and release QC fails closed.
 
+The current dependence source is a separate, verified four-file package built
+from the accepted #320 layered-history receipt, the exact seven-strategy
+financial-MVP perimeter, and the immutable baseline allocation generation. It
+contains 21 unordered pairs for each of `LIVE_ONLY` and
+`LIVE_PLUS_BACKTEST`. The hybrid currently uses zero backtest rows and is
+truthfully live-only-equivalent. Composer is excluded as immaterial and
+EchoTrade as deprecated history-only. The common complete calculation boundary
+is disclosed with age telemetry; age alone does not invalidate a complete
+historical calculation. Schema-7 composition rejects a legacy correlation
+evidence proof or any source package that fails independent verification.
+
 Choose exactly one provider-ledger source. Use `--provider-ledger-spec` when
 provider facts changed and the ledger must be rebuilt. Use
 `--provider-ledger-generation` when the analysis plan is deliberately bound to

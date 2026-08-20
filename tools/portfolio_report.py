@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import hashlib
+import importlib.util
 import io
 import json
 import math
@@ -52,7 +53,7 @@ from quant_engine.portfolio_ledger import (
 
 REPORT_SCHEMA_VERSION: Final = 1
 _CURRENT_READ_RETRY_DELAYS: Final = (0.25, 0.5, 1.0, 2.0)
-BUILDER_VERSION: Final = "1.4.0"
+BUILDER_VERSION: Final = "1.5.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
@@ -74,6 +75,7 @@ SHEET_NAMES: Final = (
     "Source Reconciliation",
     "Coverage Data Quality",
     "Corrections",
+    "Dependence",
     "Methodology",
     "Provenance",
 )
@@ -89,6 +91,7 @@ TABLE_NAMES: Final = (
     "tblSourceRecon",
     "tblCoverage",
     "tblCorrections",
+    "tblDependence",
     "tblMethodology",
     "tblProvenance",
 )
@@ -255,6 +258,223 @@ def _attribution(
         {"catalog_sha256": sha256, "generation_id": pointer.generation_id},
         catalog_path,
     )
+
+
+def _dependence_report(
+    root: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str], Path]:
+    try:
+        pointer = read_current(root)
+        manifest = read_generation(root, pointer.generation_id)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ReportValidationError("dependence generation is not accepted") from exc
+    if (
+        manifest.generation_id != pointer.generation_id
+        or manifest.verification is not VerificationStatus.VERIFIED
+        or manifest.adapter.name != "portfolio-correlation"
+        or manifest.adapter.version != "1.6.0"
+    ):
+        raise ReportValidationError("dependence generation contract differs")
+    generation_root = root / "generations" / pointer.generation_id
+    correlation_path = generation_root / "correlation.json"
+    manifest_path = generation_root / "generation.json"
+    if correlation_path.is_symlink() or not correlation_path.is_file():
+        raise ReportValidationError("dependence artifact is missing or linked")
+    content = correlation_path.read_bytes()
+    correlation_sha256 = hashlib.sha256(content).hexdigest()
+    artifacts = {item.artifact_id: item for item in manifest.artifacts}
+    artifact = artifacts.get("normalized/correlation.json")
+    if artifact is None or (
+        artifact.sha256,
+        artifact.size_bytes,
+        artifact.schema_name,
+        artifact.schema_version,
+    ) != (
+        correlation_sha256,
+        len(content),
+        "portfolio-correlation-analysis",
+        "2",
+    ):
+        raise ReportValidationError("dependence artifact identity differs")
+    correlation = _load_json(correlation_path, "dependence correlation")
+    if (
+        correlation.get("analytics_schema_version") != 2
+        or correlation.get("default_evidence_mode") != "LIVE_ONLY"
+    ):
+        raise ReportValidationError("dependence analytics contract differs")
+    modes = _object(correlation.get("dependence_modes"), "dependence modes")
+    if set(modes) != {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}:
+        raise ReportValidationError("dependence evidence mode set differs")
+    if modes["LIVE_ONLY"] != correlation.get("dependence"):
+        raise ReportValidationError("dependence default mode differs")
+    source = _object(correlation.get("source"), "dependence source")
+    if set(source) != {"artifact_id", "sha256", "size_bytes"}:
+        raise ReportValidationError("dependence source identity differs")
+    source_artifact_id = _text(
+        source.get("artifact_id"), "dependence source artifact_id"
+    )
+    source_sha256 = _text(source.get("sha256"), "dependence source sha256")
+    source_size = source.get("size_bytes")
+    if len(source_sha256) != 64 or not isinstance(source_size, int) or source_size <= 0:
+        raise ReportValidationError("dependence source identity is invalid")
+    source_identity = {
+        "artifact_id": source_artifact_id,
+        "sha256": source_sha256,
+        "size_bytes": source_size,
+    }
+    series_ids: list[str] | None = None
+    rows: list[dict[str, Any]] = []
+    summaries: dict[str, Any] = {}
+    expected_pairs: set[frozenset[str]] | None = None
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        payload = _object(modes[mode], f"dependence mode {mode}")
+        raw_series = payload.get("series_ids")
+        if not isinstance(raw_series, list):
+            raise ReportValidationError("dependence series boundary is invalid")
+        current_series = [_text(item, "dependence series_id") for item in raw_series]
+        if len(current_series) != 7 or len(set(current_series)) != 7:
+            raise ReportValidationError("dependence series boundary differs")
+        if series_ids is None:
+            series_ids = current_series
+        elif current_series != series_ids:
+            raise ReportValidationError("dependence mode series order differs")
+        observed = _objects(payload.get("observed_cells"), "dependence observed cells")
+        blends = _objects(payload.get("blend_cells"), "dependence blend cells")
+        implementation = _objects(
+            payload.get("implementation_cells"), "dependence implementation cells"
+        )
+
+        def _index(
+            values: Sequence[Mapping[str, Any]], label: str
+        ) -> dict[frozenset[str], Mapping[str, Any]]:
+            result: dict[frozenset[str], Mapping[str, Any]] = {}
+            for value in values:
+                key = frozenset(
+                    (
+                        _text(value.get("left"), f"{label} left"),
+                        _text(value.get("right"), f"{label} right"),
+                    )
+                )
+                if len(key) != 2 or key in result:
+                    raise ReportValidationError(
+                        f"dependence {label} pair boundary differs"
+                    )
+                result[key] = value
+            return result
+
+        observed_by_pair = _index(observed, "observed")
+        blend_by_pair = _index(blends, "blend")
+        implementation_by_pair = _index(implementation, "implementation")
+        if (
+            not (
+                set(observed_by_pair)
+                == set(blend_by_pair)
+                == set(implementation_by_pair)
+            )
+            or len(observed_by_pair) != 21
+        ):
+            raise ReportValidationError("dependence pair-mode coverage differs")
+        if expected_pairs is None:
+            expected_pairs = set(observed_by_pair)
+        elif set(observed_by_pair) != expected_pairs:
+            raise ReportValidationError("dependence mode pair sets differ")
+        for key, observed_row in observed_by_pair.items():
+            blend = blend_by_pair[key]
+            implementation_row = implementation_by_pair[key]
+            coverage = _object(observed_row.get("coverage"), "dependence coverage")
+            rows.append(
+                {
+                    "evidence_mode": mode,
+                    "left": observed_row["left"],
+                    "right": observed_row["right"],
+                    "status": observed_row["status"],
+                    "observations": coverage.get("common_observations"),
+                    "observed_start": coverage.get("observed_start"),
+                    "observed_end": coverage.get("observed_end"),
+                    "pearson": observed_row.get("pearson"),
+                    "spearman": observed_row.get("spearman"),
+                    "decision_correlation": blend.get("decision_correlation"),
+                    "decision_status": blend.get("decision_status"),
+                    "implementation_status": implementation_row.get("status"),
+                    "mapping_scope": implementation_row.get("mapping_scope"),
+                    "shared_providers": ", ".join(
+                        str(item)
+                        for item in implementation_row.get("shared_providers", [])
+                    ),
+                    "unassessed_dimensions": ", ".join(
+                        str(item)
+                        for item in implementation_row.get("unassessed_dimensions", [])
+                    ),
+                    "horizons_json": canonical_json_bytes(
+                        observed_row.get("horizons", {})
+                    )
+                    .decode("utf-8")
+                    .strip(),
+                    "rolling_json": canonical_json_bytes(
+                        observed_row.get("rolling_pearson", {})
+                    )
+                    .decode("utf-8")
+                    .strip(),
+                    "downside_json": canonical_json_bytes(
+                        observed_row.get("downside", {})
+                    )
+                    .decode("utf-8")
+                    .strip(),
+                    "drawdown_regimes_json": canonical_json_bytes(
+                        observed_row.get("drawdown_regimes", {})
+                    )
+                    .decode("utf-8")
+                    .strip(),
+                    "joint_tail_json": canonical_json_bytes(
+                        observed_row.get("joint_tail", {})
+                    )
+                    .decode("utf-8")
+                    .strip(),
+                }
+            )
+        summaries[mode] = {
+            "central_case": payload.get("central_case"),
+            "correlation_one": payload.get("correlation_one"),
+            "drawdown_matrices": payload.get("drawdown_matrices"),
+            "horizon_matrices": payload.get("horizon_matrices"),
+            "matrices": payload.get("matrices"),
+            "performance": payload.get("performance"),
+            "series_composition": payload.get("series_composition"),
+        }
+    assert series_ids is not None
+    rows.sort(
+        key=lambda row: (
+            ("LIVE_ONLY", "LIVE_PLUS_BACKTEST").index(str(row["evidence_mode"])),
+            series_ids.index(str(row["left"])),
+            series_ids.index(str(row["right"])),
+        )
+    )
+    manifest_sha256, _ = hash_file(manifest_path)
+    identity = {
+        "correlation_sha256": correlation_sha256,
+        "generation_id": manifest.generation_id,
+        "manifest_sha256": manifest_sha256,
+    }
+    projection = {
+        "analytics_hash": _text(
+            correlation.get("analytics_hash"), "dependence analytics_hash"
+        ),
+        "as_of_date": _date(
+            correlation.get("as_of_date"), "dependence as_of_date"
+        ).isoformat(),
+        "default_evidence_mode": "LIVE_ONLY",
+        "identity": identity,
+        "mode_count": 2,
+        "mode_payload_sha256": hashlib.sha256(canonical_json_bytes(modes)).hexdigest(),
+        "mode_summaries": summaries,
+        "pair_count": 21,
+        "pair_mode_count": 42,
+        "schema_version": 1,
+        "series_ids": series_ids,
+        "source": source_identity,
+        "status": "AVAILABLE",
+    }
+    return projection, rows, identity, correlation_path
 
 
 def _merge_attribution(
@@ -901,6 +1121,93 @@ def _history_contract(
     strategy_names: set[str],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "strategy history compatibility contract")
+    if payload.get("builder") == "portfolio-current-dependence-source":
+        module_path = (
+            Path(__file__).resolve().with_name("portfolio_current_dependence.py")
+        )
+        module_name = "portfolio_current_dependence_for_portfolio_report"
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise ReportValidationError("current dependence verifier is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            verification = module.verify_packaged_source(
+                path.parent,
+                contract_path=Path(__file__).resolve().parents[1]
+                / "contracts"
+                / "portfolio-financial-mvp-source-v1.json",
+                policy_path=Path(__file__).resolve().parents[1]
+                / "contracts"
+                / "portfolio-dependence-policy-v1.json",
+            )
+        except Exception as exc:
+            raise ReportValidationError(
+                f"current dependence source is invalid: {exc}"
+            ) from exc
+        finally:
+            sys.modules.pop(module_name, None)
+        if verification.get("verification") != "VALID":
+            raise ReportValidationError("current dependence source is not verified")
+        dependence_spec = _load_json(path.parent / "spec.json", "dependence spec")
+        required_rows = _objects(
+            dependence_spec.get("evidence_mode_series"),
+            "dependence evidence_mode_series",
+        )
+        required_names = {
+            _text(row.get("series_id"), "dependence series_id") for row in required_rows
+        }
+        if not required_names or not required_names < strategy_names:
+            raise ReportValidationError("current dependence strategy boundary differs")
+        current_by_name = {
+            _text(row.get("series_id"), "dependence series_id"): {
+                "backtest_observations": 0,
+                "history_disposition_reason": (
+                    "No version-matched backtest prehistory is admitted; the hybrid "
+                    "mode is the exact live-only path."
+                ),
+                "history_status": "UNAVAILABLE_NO_MATCHED_BACKTEST_PREHISTORY",
+                "implementation_reconciliation_status": "ACCEPTED_ACCOUNT_LIVE",
+                "series_id": row["series_id"],
+                "strategy_version": row["strategy_version"],
+            }
+            for row in required_rows
+        }
+        for name in sorted(strategy_names - required_names):
+            current_by_name[name] = {
+                "backtest_observations": 0,
+                "history_disposition_reason": (
+                    "Strategy is outside the owner-approved current dependence perimeter."
+                ),
+                "history_status": "EXCLUDED_OWNER_APPROVED_CURRENT_DEPENDENCE",
+                "implementation_reconciliation_status": "NOT_APPLICABLE",
+                "series_id": name,
+                "strategy_version": "UNRESOLVED",
+            }
+        sha256, size = hash_file(path)
+        return current_by_name, {
+            "as_of_date": _date(
+                payload.get("complete_through"), "dependence complete_through"
+            ).isoformat(),
+            "bundle_id": _text(payload.get("bundle_id"), "dependence bundle_id"),
+            "evidence_mode_policy": {
+                "default": "LIVE_ONLY",
+                "hybrid": "LIVE_ONLY_WHEN_NO_MATCHED_BACKTEST_PREHISTORY",
+                "post_inception_backtest_fill": False,
+            },
+            "evaluated_on": _date(
+                payload.get("evaluated_on"), "dependence evaluated_on"
+            ).isoformat(),
+            "schema": "portfolio-current-dependence-source/1",
+            "returns_sha256": _text(
+                payload.get("returns_sha256"), "dependence returns_sha256"
+            ),
+            "returns_size_bytes": payload.get("returns_size_bytes"),
+            "series_count": len(current_by_name),
+            "sha256": sha256,
+            "size_bytes": size,
+        }
     if payload.get("builder") != "portfolio-target-series/layered-correlation-1":
         raise ReportValidationError("strategy history contract builder differs")
     contract_as_of = _date(payload.get("as_of_date"), "history contract as_of_date")
@@ -957,6 +1264,9 @@ def _history_contract(
         "as_of_date": contract_as_of.isoformat(),
         "evidence_mode_policy": dict(policy),
         "series_count": len(by_name),
+        "schema": "portfolio-target-series-evidence-proof/1",
+        "returns_sha256": _text(payload.get("target_sha256"), "history target_sha256"),
+        "returns_size_bytes": payload.get("target_size_bytes"),
         "sha256": sha256,
         "size_bytes": size,
     }
@@ -2521,6 +2831,7 @@ def build_report_data(
     implementation_reconciliation_path: Path | None = None,
     implementation_return_attribution_path: Path | None = None,
     hwm_portable_receipt: Mapping[str, Any] | None = None,
+    correlation_root: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -2575,6 +2886,39 @@ def build_report_data(
         )
         strategy_summary = _merge_attribution(strategy_summary, attribution_catalog)
     coverage = _coverage(catalog)
+    dependence_analysis: dict[str, Any] = {
+        "default_evidence_mode": "LIVE_ONLY",
+        "mode_count": 0,
+        "pair_count": 0,
+        "pair_mode_count": 0,
+        "schema_version": 1,
+        "series_ids": [],
+        "status": "UNAVAILABLE_NOT_CONFIGURED",
+    }
+    dependence_rows: list[dict[str, Any]] = []
+    dependence_identity: dict[str, str] | None = None
+    if correlation_root is not None:
+        if history_contract_ref is None:
+            raise ReportValidationError(
+                "current dependence requires a verified history contract"
+            )
+        (
+            dependence_analysis,
+            dependence_rows,
+            dependence_identity,
+            _dependence_path,
+        ) = _dependence_report(correlation_root)
+        dependence_source = _object(
+            dependence_analysis.get("source"), "dependence source identity"
+        )
+        if dependence_source.get("sha256") != history_contract_ref.get(
+            "returns_sha256"
+        ) or dependence_source.get("size_bytes") != history_contract_ref.get(
+            "returns_size_bytes"
+        ):
+            raise ReportValidationError(
+                "dependence source differs from verified history contract"
+            )
     # The numerical composite consumes only the governed hwm_inputs envelope
     # and is computed independently of the freshness argument: the perimeter
     # is governed by PORT-HWM-3 regardless of whether a freshness assessment
@@ -2634,6 +2978,8 @@ def build_report_data(
         "baseline": baseline_ref,
         "corrections": _corrections(catalog),
         "coverage_data_quality": coverage,
+        "dependence_analysis": dependence_analysis,
+        "dependence_rows": dependence_rows,
         "fact_coverage_matrix": catalog.get("fact_coverage_matrix", []),
         "flow_reconciliation": _flow_reconciliation(catalog),
         "methodology": [
@@ -2669,6 +3015,10 @@ def build_report_data(
             {
                 "item": "Strategy attribution",
                 "value": "Provider/model comparisons use exact common dates only. Version-unresolved results remain descriptive; benchmark, cash-drag, fee, or after-tax gaps stay unavailable rather than becoming zero.",
+            },
+            {
+                "item": "Dependence",
+                "value": "Both LIVE_ONLY and LIVE_PLUS_BACKTEST modes retain exact pairwise observations, horizons, rolling/downside/drawdown/tail evidence, conservative bounds, and provider-lane-only implementation concentration; instrument and venue dimensions remain explicitly unassessed.",
             },
         ],
         "portfolio_summary": [
@@ -2712,6 +3062,18 @@ def build_report_data(
             *(
                 [
                     {
+                        "artifact": "portfolio-dependence-analysis",
+                        "as_of_date": dependence_analysis["as_of_date"],
+                        "schema": "portfolio-correlation-analysis/2",
+                        "sha256": dependence_identity["correlation_sha256"],
+                    }
+                ]
+                if dependence_identity is not None
+                else []
+            ),
+            *(
+                [
+                    {
                         "artifact": "portfolio-hwm-4-portable-proof",
                         "as_of_date": portable_hwm_proof["complete_through"],
                         "schema": "portfolio-hwm-calculation-receipt/2",
@@ -2726,7 +3088,7 @@ def build_report_data(
                     {
                         "artifact": "strategy-history-compatibility-contract",
                         "as_of_date": history_contract_ref["as_of_date"],
-                        "schema": "portfolio-target-series-evidence-proof/1",
+                        "schema": history_contract_ref["schema"],
                         "sha256": history_contract_ref["sha256"],
                     }
                 ]
@@ -3045,6 +3407,12 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
             ("category", "item", "status"),
         ),
         ("Corrections", "corrections", "tblCorrections", ("correction_id",)),
+        (
+            "Dependence",
+            "dependence_rows",
+            "tblDependence",
+            ("evidence_mode", "left", "right", "status"),
+        ),
         ("Methodology", "methodology", "tblMethodology", ("item", "value")),
         ("Provenance", "provenance", "tblProvenance", ("artifact", "sha256")),
     ]
@@ -3188,6 +3556,7 @@ def build_candidate(
     implementation_reconciliation_path: Path | None = None,
     implementation_return_attribution_path: Path | None = None,
     hwm_portable_receipt: Mapping[str, Any] | None = None,
+    correlation_root: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -3198,6 +3567,7 @@ def build_candidate(
         implementation_reconciliation_path,
         implementation_return_attribution_path,
         hwm_portable_receipt,
+        correlation_root,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -3211,6 +3581,7 @@ def build_candidate(
             "tblAccounts": 1,
             "tblAllocations": 10,
             "tblCoverage": 1,
+            "tblDependence": 1 if report["dependence_rows"] else 0,
             "tblMethodology": 7,
             "tblPortfolioSummary": 8,
             "tblPositions": 1,
@@ -3573,6 +3944,7 @@ def verify_candidate(
     implementation_reconciliation_path: Path | None = None,
     implementation_return_attribution_path: Path | None = None,
     hwm_portable_receipt: Mapping[str, Any] | None = None,
+    correlation_root: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -3583,6 +3955,7 @@ def verify_candidate(
         implementation_reconciliation_path,
         implementation_return_attribution_path,
         hwm_portable_receipt,
+        correlation_root,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:
@@ -3644,6 +4017,7 @@ def publish_report(
     history_contract_path: Path | None = None,
     implementation_reconciliation_path: Path | None = None,
     implementation_return_attribution_path: Path | None = None,
+    correlation_root: Path | None = None,
 ) -> dict[str, Any]:
     _validate_canonicalization_evidence(candidate_dir, excel_workbook)
     verification = verify_candidate(
@@ -3656,6 +4030,8 @@ def publish_report(
         history_contract_path,
         implementation_reconciliation_path,
         implementation_return_attribution_path,
+        None,
+        correlation_root,
     )
     run = _load_json(xlsx_result, "xlsx-win run result")
     validation = _load_json(validation_result, "xlsx-win validation result")
@@ -3671,6 +4047,8 @@ def publish_report(
         history_contract_path,
         implementation_reconciliation_path,
         implementation_return_attribution_path,
+        None,
+        correlation_root,
     )
     as_of = _date(report.get("as_of_date"), "report.as_of_date")
     verification_bytes = canonical_json_bytes(verification)
@@ -3733,12 +4111,32 @@ def publish_report(
                 "1",
             )
         )
+    if correlation_root is not None:
+        _projection, _rows, _identity, correlation_path = _dependence_report(
+            correlation_root
+        )
+        artifact_specs.append(
+            (
+                correlation_path,
+                "input/portfolio-correlation.json",
+                "portfolio-correlation-analysis",
+                "2",
+            )
+        )
     if history_contract_path is not None:
+        history_payload = _load_json(
+            history_contract_path, "strategy history compatibility contract"
+        )
+        history_schema_name = (
+            "portfolio-current-dependence-source"
+            if history_payload.get("builder") == "portfolio-current-dependence-source"
+            else "portfolio-target-series-evidence-proof"
+        )
         artifact_specs.append(
             (
                 history_contract_path,
                 "input/strategy-history-compatibility-contract.json",
-                "portfolio-target-series-evidence-proof",
+                history_schema_name,
                 "1",
             )
         )
@@ -3854,6 +4252,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--history-contract", type=Path)
     build.add_argument("--implementation-reconciliation", type=Path)
     build.add_argument("--implementation-return-attribution", type=Path)
+    build.add_argument("--correlation-root", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -3865,6 +4264,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--history-contract", type=Path)
     verify.add_argument("--implementation-reconciliation", type=Path)
     verify.add_argument("--implementation-return-attribution", type=Path)
+    verify.add_argument("--correlation-root", type=Path)
     canonicalize = commands.add_parser("canonicalize")
     canonicalize.add_argument("--workbook", type=Path, required=True)
     canonicalize.add_argument("--evidence", type=Path, required=True)
@@ -3884,6 +4284,7 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--history-contract", type=Path)
     publish.add_argument("--implementation-reconciliation", type=Path)
     publish.add_argument("--implementation-return-attribution", type=Path)
+    publish.add_argument("--correlation-root", type=Path)
     return parser
 
 
@@ -3900,6 +4301,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.history_contract,
                 args.implementation_reconciliation,
                 args.implementation_return_attribution,
+                None,
+                args.correlation_root,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -3912,6 +4315,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.history_contract,
                 args.implementation_reconciliation,
                 args.implementation_return_attribution,
+                None,
+                args.correlation_root,
             )
         elif args.command == "canonicalize":
             result = canonicalize_workbook(args.workbook, args.evidence)
@@ -3931,6 +4336,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.history_contract,
                 args.implementation_reconciliation,
                 args.implementation_return_attribution,
+                args.correlation_root,
             )
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         print(f"portfolio-report: FAIL: {exc}", file=sys.stderr)

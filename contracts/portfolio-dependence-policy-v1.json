@@ -1,0 +1,69 @@
+{
+  "$schema": "../schemas/portfolio/dependence-policy.schema.json",
+  "schema_version": 1,
+  "policy_id": "PORT-DEPENDENCE-1",
+  "owner_issue": 336,
+  "history_authority": {
+    "generation_id": "b6dbca561ff5154e8a451a733ce9a7147e19941ad1cd9c61f7de77cad6eef976",
+    "receipt_sha256": "ffe789f6c5a556a9af6d3f3e3342edf2e58bceae81841b3f5c43f752afb07987",
+    "outputs": {
+      "coverage.json": {"sha256": "7d0113b307045041797abb167b8d74c1f9fef9acc1a737cc203c837e13a426a1", "size_bytes": 15025},
+      "excluded.csv": {"sha256": "ab6e8a2cbe3d1f0419946d55e4e8ad0c65db3e6bb176f18ab8592dd6172ad3d5", "size_bytes": 1340},
+      "live-only.csv": {"sha256": "87fced25daa7a3bd93283df4e800430cb6b6e805aeb3b751ed2a041b90dc9ff1", "size_bytes": 237227},
+      "live-plus-backtest.csv": {"sha256": "87fced25daa7a3bd93283df4e800430cb6b6e805aeb3b751ed2a041b90dc9ff1", "size_bytes": 237227},
+      "returns.csv": {"sha256": "87fced25daa7a3bd93283df4e800430cb6b6e805aeb3b751ed2a041b90dc9ff1", "size_bytes": 237227},
+      "segments.csv": {"sha256": "c9250605c24acd775598e99eee7d0fe8e9330f8007ba789048b3531ec26f3c8e", "size_bytes": 681422}
+    }
+  },
+  "allocation_authority": {
+    "generation_id": "20709bfd5f9a5846879854bf3166c11223a100cc62fcb13fe0b76040f881b542",
+    "manifest_sha256": "c5a1580b4a30480783b3ad54c8077687c2cf95bfe4c46ad1daf07c7d7f97ccf0",
+    "catalog_sha256": "0a9b5b243dc16786e41099dde6d02cd0c03431534bc50376352837f36d4734f4",
+    "as_of_date": "2026-08-16"
+  },
+  "series": [
+    {"strategy_id": "p123-ai-factor", "series_id": "AI Factor [P123]", "allocation_weight": "0.12320999714360502", "adverse_loss_fraction": "0.216625"},
+    {"strategy_id": "p123-eu", "series_id": "EU [P123]", "allocation_weight": "0.08984989216554397", "adverse_loss_fraction": "0.2299085840914843"},
+    {"strategy_id": "qsi", "series_id": "QSI", "allocation_weight": "0.14379451661370632", "adverse_loss_fraction": "0.5912499999999999"},
+    {"strategy_id": "tt-portfolio", "series_id": "TT Portfolio", "allocation_weight": "0.2388013485382236", "adverse_loss_fraction": "0.2147017180299854"},
+    {"strategy_id": "volatis-strategy", "series_id": "Volatis Strategy", "allocation_weight": "0.16198260380134283", "adverse_loss_fraction": "0.535"},
+    {"strategy_id": "grizzlybears-vtma", "series_id": "GrizzlyBears VTMA", "allocation_weight": "0.1219130051622533", "adverse_loss_fraction": "0.3432903380422486"},
+    {"strategy_id": "robuxio-crypto", "series_id": "Robuxio Crypto (High Sharpe High Vol)", "allocation_weight": "0.11784392803035076", "adverse_loss_fraction": "0.4899999999999999"}
+  ],
+  "conceptual_priors": [
+    {"left_strategy_id": "p123-ai-factor", "right_strategy_id": "p123-eu", "value": "0.65", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "p123-ai-factor", "right_strategy_id": "qsi", "value": "0.45", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "p123-ai-factor", "right_strategy_id": "tt-portfolio", "value": "0.45", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "p123-ai-factor", "right_strategy_id": "volatis-strategy", "value": "0.45", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "p123-ai-factor", "right_strategy_id": "grizzlybears-vtma", "value": "0.45", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "p123-ai-factor", "right_strategy_id": "robuxio-crypto", "value": "0.3", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "p123-eu", "right_strategy_id": "qsi", "value": "0.45", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "p123-eu", "right_strategy_id": "tt-portfolio", "value": "0.45", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "p123-eu", "right_strategy_id": "volatis-strategy", "value": "0.45", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "p123-eu", "right_strategy_id": "grizzlybears-vtma", "value": "0.45", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "p123-eu", "right_strategy_id": "robuxio-crypto", "value": "0.3", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "qsi", "right_strategy_id": "tt-portfolio", "value": "0.75", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "qsi", "right_strategy_id": "volatis-strategy", "value": "0.75", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "qsi", "right_strategy_id": "grizzlybears-vtma", "value": "0.75", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "qsi", "right_strategy_id": "robuxio-crypto", "value": "0.35", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "tt-portfolio", "right_strategy_id": "volatis-strategy", "value": "0.75", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "tt-portfolio", "right_strategy_id": "grizzlybears-vtma", "value": "0.75", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "tt-portfolio", "right_strategy_id": "robuxio-crypto", "value": "0.35", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "volatis-strategy", "right_strategy_id": "grizzlybears-vtma", "value": "0.75", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "volatis-strategy", "right_strategy_id": "robuxio-crypto", "value": "0.35", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"},
+    {"left_strategy_id": "grizzlybears-vtma", "right_strategy_id": "robuxio-crypto", "value": "0.35", "evidence_note": "Frozen 2026-07 audit conceptual family prior; not measured data"}
+  ],
+  "calculation_parameters": {
+    "minimum_observations": 30,
+    "minimum_downside_observations": 20,
+    "rolling_window": 60,
+    "minimum_rolling_windows": 1,
+    "tail_quantile": "0.1",
+    "full_observed_weight_observations": 500,
+    "maximum_observed_weight": "0.4",
+    "stress_uplift": "0.15",
+    "stress_cap": "0.95",
+    "eigenvalue_floor": "0.00000001",
+    "correlation_one_tolerance": "0.0000000001"
+  }
+}
