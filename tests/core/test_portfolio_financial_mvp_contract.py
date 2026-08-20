@@ -549,7 +549,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     _validate(coherently_repeated)
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
-        match="differs from accepted #319 authority: p123-ai-factor",
+        match="differs from accepted history authority",
     ):
         contract_tool._verify_strategy_version_history_evidence(coherently_repeated)
 
@@ -576,7 +576,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     _validate(rewritten_accepted_version)
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
-        match="differs from accepted #319 authority: p123-eu",
+        match="differs from accepted history authority",
     ):
         contract_tool._verify_strategy_version_history_evidence(
             rewritten_accepted_version
@@ -610,6 +610,70 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
         ),
     ):
         _validate(partial_correction_rewrite)
+
+    missing_source_assertion = copy.deepcopy(baseline)
+    ibkr_version = _source(missing_source_assertion, "ibkr-account-generation")[
+        "strategy_version"
+    ]
+    del ibkr_version["version_refs"]["p123-eu"]
+    ibkr_version["status"] = "UNRESOLVED"
+    _validate(missing_source_assertion)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "source strategy design/version projection differs from accepted "
+            "history authority: ibkr-account-generation"
+        ),
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            missing_source_assertion
+        )
+
+    invented_source_assertion = copy.deepcopy(baseline)
+    design_version = _source(
+        invented_source_assertion, "strategy-design-and-configuration"
+    )["strategy_version"]
+    design_version["version_refs"]["p123-eu"] = next(
+        row["strategy_version"]["version_ref"]
+        for row in baseline["strategies"]
+        if row["strategy_id"] == "p123-eu"
+    )
+    design_version["status"] = "MIXED"
+    _validate(invented_source_assertion)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "source strategy design/version projection differs from accepted "
+            "history authority: strategy-design-and-configuration"
+        ),
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            invented_source_assertion
+        )
+
+    erased_correction_assertion = copy.deepcopy(baseline)
+    erased_correction = next(
+        row
+        for row in erased_correction_assertion["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-eu-backtest-not-captured"
+    )
+    erased_correction["strategy_version"] = {
+        "status": "UNRESOLVED",
+        "version_ref": None,
+        "compatibility": "UNRESOLVED",
+        "authority": "CURRENT_CONNECTED_MODEL_VERSION_NOT_ASSERTED",
+    }
+    _validate(erased_correction_assertion)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "history correction version projection differs from accepted "
+            "history authority"
+        ),
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            erased_correction_assertion
+        )
 
     transition_removed = copy.deepcopy(baseline)
     for sleeve in transition_removed["current_census"]["account_sleeves"]:

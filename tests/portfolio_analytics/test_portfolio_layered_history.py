@@ -697,11 +697,10 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         "status": "EVIDENCED",
         "version_ref": p123_version,
     }
-    for source_id in ("portfolio123-model-generation", "owner-account-live-history"):
-        source = next(
-            row for row in contract["source_segments"] if row["source_id"] == source_id
-        )
-        source["strategy_version"]["version_refs"]["p123-eu"] = p123_version
+    for source in contract["source_segments"]:
+        version_refs = source["strategy_version"]["version_refs"]
+        if "p123-eu" in version_refs:
+            version_refs["p123-eu"] = p123_version
     for correction_id in (
         "p123-eu-backtest-not-captured",
         "p123-eu-provider-live",

@@ -156,13 +156,40 @@ _CENSUS_OWNER_NON_DECISIONS: Final = (
     "POINTER_OR_PUBLICATION",
 )
 _CENSUS_TT_CONTINUITY_INTERVAL: Final = (date(2026, 7, 14), date(2026, 7, 30))
-_HISTORY_AUTHORITY_COMMIT: Final = "fad9d16ec6c77586c6db5d5c71da82266b763736"
+_HISTORY_AUTHORITY_COMMIT: Final = "41473d47dc9cba6e6a6e189b05f1268c56bd5fa4"
 _HISTORY_AUTHORITY_RAW_SHA256: Final = (
-    "6481e790ceaf78f100db96466ab462340ff940feb38de2798da6c80fd397bfef"
+    "b267305a59682e660379abb58f380209f86391e193d24c420af201b8168fbc6b"
 )
 _HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
-    "b520bcefdd197d5f04a91c628afcbaef72f5efaa82dd40b5c7d5b702c196065c"
+    "00309632bf3afc35f4c3582883ffa765131e75d4a2a2999b59e6eb369f939512"
 )
+_CENSUS_SOURCE_VERSION_OVERRIDES: Final = {
+    "alpaca-account-generation": {
+        "binding": "DEPRECATED_ECHOTRADE_EVENT_HISTORY_ONLY",
+        "status": "NOT_APPLICABLE",
+        "strategy_ids": (),
+    },
+    "fidelity-account-generation": {
+        "binding": "NO_CURRENT_CENSUS_MEMBER",
+        "status": "NOT_APPLICABLE",
+        "strategy_ids": (),
+    },
+    "ibkr-account-generation": {
+        "binding": (
+            "P123_EU_DESIGN_EVIDENCED_P123_AI_DESIGN_UNRESOLVED; "
+            "LIVE_PATH_IDENTITIES_SEPARATE"
+        ),
+        "status": "MIXED",
+        "strategy_ids": ("p123-eu",),
+    },
+    "schwab-account-generation": {
+        "binding": (
+            "ECONOMIC_DESIGN_CONFIGURATION_UNRESOLVED; LIVE_PATH_IDENTITIES_SEPARATE"
+        ),
+        "status": "UNRESOLVED",
+        "strategy_ids": (),
+    },
+}
 
 
 class FinancialMvpContractError(ValueError):
@@ -357,12 +384,14 @@ def verify_history_evidence(
 def _verify_strategy_version_history_evidence(
     contract: Mapping[str, Any],
 ) -> int:
-    """Require evidenced product versions to have governed #319 support.
+    """Require product version assertions to match accepted history authority.
 
     Repeating a version reference in two mutable source rows is not independent
-    evidence.  The workstation gate instead requires two distinct captured
-    history layers whose receipt selectors have already been resolved against
-    governed bytes by :func:`verify_history_evidence`.
+    evidence.  The workstation gate freezes the exact pre-census product,
+    source, correction, and materialized-segment version projection, permits
+    only the explicit #302 provider-lane deltas, and then requires two distinct
+    captured history layers whose receipt selectors have already been resolved
+    against governed bytes by :func:`verify_history_evidence`.
     """
 
     try:
@@ -404,6 +433,120 @@ def _verify_strategy_version_history_evidence(
         )
         for row in _objects(accepted.get("strategies"), "accepted #319 strategies")
     }
+
+    accepted_sources = {
+        _text(row.get("source_id"), "accepted history source_id"): _object(
+            row.get("strategy_version"), "accepted history source strategy_version"
+        )
+        for row in _objects(
+            accepted.get("source_segments"), "accepted history source_segments"
+        )
+    }
+    expected_sources = dict(accepted_sources)
+    for source_id, override in _CENSUS_SOURCE_VERSION_OVERRIDES.items():
+        version_refs: dict[str, str] = {}
+        for strategy_id in override["strategy_ids"]:
+            accepted_version = accepted_versions.get(strategy_id)
+            if (
+                accepted_version is None
+                or accepted_version.get("status") != "EVIDENCED"
+            ):
+                raise FinancialMvpContractError(
+                    f"accepted history version is unavailable: {strategy_id}"
+                )
+            version_refs[strategy_id] = _text(
+                accepted_version.get("version_ref"),
+                f"accepted history version ref {strategy_id}",
+            )
+        expected_sources[source_id] = {
+            "status": override["status"],
+            "binding": override["binding"],
+            "version_refs": version_refs,
+        }
+
+    current_sources = {
+        _text(row.get("source_id"), "governed history source_id"): _object(
+            row.get("strategy_version"), "governed history source strategy_version"
+        )
+        for row in _objects(contract.get("source_segments"), "source_segments")
+    }
+    if set(current_sources) != set(expected_sources):
+        raise FinancialMvpContractError(
+            "source strategy design/version authority set differs"
+        )
+    for source_id, expected_version in expected_sources.items():
+        if current_sources[source_id] != expected_version:
+            raise FinancialMvpContractError(
+                "source strategy design/version projection differs from accepted "
+                f"history authority: {source_id}"
+            )
+
+    def correction_projection(row: Mapping[str, Any]) -> dict[str, object]:
+        return {
+            "strategy_id": row.get("strategy_id"),
+            "evidence_layer": row.get("evidence_layer"),
+            "source_id": row.get("source_id"),
+            "capture_status": _object(
+                row.get("capture"), "history correction capture"
+            ).get("status"),
+            "strategy_version": _object(
+                row.get("strategy_version"), "history correction strategy_version"
+            ),
+        }
+
+    accepted_history = _object(
+        accepted.get("history_corrections"), "accepted history corrections"
+    )
+    current_history = _object(
+        contract.get("history_corrections"), "history_corrections"
+    )
+    accepted_corrections = {
+        _text(
+            row.get("correction_id"), "accepted history correction_id"
+        ): correction_projection(row)
+        for row in _objects(
+            accepted_history.get("corrections"), "accepted history corrections"
+        )
+    }
+    current_corrections = {
+        _text(row.get("correction_id"), "history correction_id"): correction_projection(
+            row
+        )
+        for row in _objects(current_history.get("corrections"), "history corrections")
+    }
+    if current_corrections != accepted_corrections:
+        raise FinancialMvpContractError(
+            "history correction version projection differs from accepted history authority"
+        )
+
+    def segment_projection(row: Mapping[str, Any]) -> dict[str, object]:
+        return {
+            "strategy_id": row.get("strategy_id"),
+            "evidence_layer": row.get("evidence_layer"),
+            "source_id": row.get("source_id"),
+            "strategy_version": row.get("strategy_version"),
+        }
+
+    accepted_segments = {
+        _text(row.get("segment_id"), "accepted history segment_id"): segment_projection(
+            row
+        )
+        for row in _objects(
+            accepted_history.get("materialized_segment_identities"),
+            "accepted history materialized_segment_identities",
+        )
+    }
+    current_segments = {
+        _text(row.get("segment_id"), "history segment_id"): segment_projection(row)
+        for row in _objects(
+            current_history.get("materialized_segment_identities"),
+            "history materialized_segment_identities",
+        )
+    }
+    if current_segments != accepted_segments:
+        raise FinancialMvpContractError(
+            "materialized history version projection differs from accepted history authority"
+        )
 
     strategies = _objects(contract["strategies"], "strategies")
     history = _object(contract["history_corrections"], "history_corrections")
