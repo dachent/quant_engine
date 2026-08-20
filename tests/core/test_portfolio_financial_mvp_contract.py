@@ -198,7 +198,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "277a028bb39c66966901a1e6dfb5291554317660a54d441289c0d700a2415071"
+        "519d955eddbf88415cfd49a3746aa3cab432e092ac8f1de89ae1bde38d49f2f7"
     )
 
 
@@ -965,7 +965,10 @@ def test_all_four_outcomes_are_required_and_generic_unavailable_is_not_accepted(
     outcomes = contract["financial_outcomes"]
     assert [row["outcome_id"] for row in outcomes] == list(contract_tool.OUTCOME_IDS)
     assert all(row["product_requirement"] == "REQUIRED" for row in outcomes)
-    assert all(row["blockers"] for row in outcomes)
+    assert all(
+        (row["readiness"] == "READY") == (row["blockers"] == []) for row in outcomes
+    )
+    assert _outcome(contract, "DEPENDENCE")["readiness"] == "READY"
     assert all("UNAVAILABLE" not in row["accepted_statuses"] for row in outcomes)
 
 

@@ -1699,7 +1699,7 @@ def test_weekly_hybrid_rejects_a_registry_version_mismatch() -> None:
         panel._govern_weekly_hybrid_modes(weekly, gate)
 
 
-def test_unresolved_versions_suppress_layered_hybrid_analytics(
+def test_unresolved_versions_reject_hybrid_backtest_observations(
     inputs: dict[str, Path],
 ) -> None:
     _publish_analytics(
@@ -1707,6 +1707,35 @@ def test_unresolved_versions_suppress_layered_hybrid_analytics(
         "correlation.json",
         _correlation_v2(),
         "synthetic-correlation-v2",
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="unresolved strategy uses backtest history in hybrid dependence",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+        )
+
+
+def test_unresolved_versions_retain_zero_backtest_hybrid_as_live_only_equivalent(
+    inputs: dict[str, Path],
+) -> None:
+    correlation = _correlation_v2()
+    for row in correlation["dependence_modes"]["LIVE_PLUS_BACKTEST"][
+        "series_composition"
+    ].values():
+        row["backtest_observations_used"] = 0
+        row["observed_start"] = row["live_inception"]
+        row["status"] = "AVAILABLE_LIVE_ONLY_NO_COMPATIBLE_BACKTEST"
+    _publish_analytics(
+        inputs["correlation"],
+        "correlation.json",
+        correlation,
+        "synthetic-correlation-v2-zero-backtest",
     )
     result = panel.build_candidate(
         inputs["report"],
@@ -1721,7 +1750,7 @@ def test_unresolved_versions_suppress_layered_hybrid_analytics(
         )
     )
 
-    assert list(data["dependence_modes"]) == ["LIVE_ONLY"]
+    assert list(data["dependence_modes"]) == ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]
     assert data["weekly_returns"]["strategy_evidence_modes"] == ["LIVE_ONLY"]
     assert data["hybrid_mode_gate"]["status"] == (
         "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"

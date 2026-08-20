@@ -35,7 +35,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
 
-BUILDER_VERSION: Final = "1.5.1"
+BUILDER_VERSION: Final = "1.6.0"
 TRADING_OBSERVATION_HORIZONS: Final = (5, 21, 22, 63, 126, 130, 252, 260)
 RETURN_HEADERS: Final = ("series_id", "date", "return", "evidence_layer")
 RETURN_HEADERS_V2: Final = (*RETURN_HEADERS, "strategy_version")
@@ -97,6 +97,7 @@ class ImplementationMapping:
     instruments: tuple[str, ...]
     providers: tuple[str, ...]
     venues: tuple[str, ...]
+    scope: str = "FULL_INSTRUMENT_PROVIDER_VENUE"
 
 
 @dataclass(frozen=True)
@@ -297,12 +298,21 @@ def _implementation_mapping(
     value: Mapping[str, Any], index: int
 ) -> ImplementationMapping:
     name = f"implementation_mappings[{index}]"
-    _strict_keys(value, {"instruments", "providers", "series_id", "venues"}, name)
+    required = {"instruments", "providers", "series_id", "venues"}
+    if not required <= set(value) <= required | {"scope"}:
+        raise CorrelationError(f"{name} keys differ")
+    scope = value.get("scope", "FULL_INSTRUMENT_PROVIDER_VENUE")
+    if scope not in {
+        "FULL_INSTRUMENT_PROVIDER_VENUE",
+        "CENSUS_PROVIDER_LANE_ONLY",
+    }:
+        raise CorrelationError(f"{name}.scope is unsupported")
     return ImplementationMapping(
         series_id=_text(value["series_id"], f"{name}.series_id"),
         instruments=_strings(value["instruments"], f"{name}.instruments"),
         providers=_strings(value["providers"], f"{name}.providers"),
         venues=_strings(value["venues"], f"{name}.venues"),
+        scope=str(scope),
     )
 
 
@@ -1234,6 +1244,12 @@ def _implementation_cells(
             results.append(
                 {
                     "left": left,
+                    "mapping_scope": (
+                        "CENSUS_PROVIDER_LANE_ONLY"
+                        if "CENSUS_PROVIDER_LANE_ONLY"
+                        in {left_map.scope, right_map.scope}
+                        else "FULL_INSTRUMENT_PROVIDER_VENUE"
+                    ),
                     "right": right,
                     "shared_instruments": sorted(
                         set(left_map.instruments) & set(right_map.instruments)
@@ -1244,7 +1260,18 @@ def _implementation_cells(
                     "shared_venues": sorted(
                         set(left_map.venues) & set(right_map.venues)
                     ),
-                    "status": "AVAILABLE",
+                    "status": (
+                        "AVAILABLE_PROVIDER_LANE_CONCENTRATION"
+                        if "CENSUS_PROVIDER_LANE_ONLY"
+                        in {left_map.scope, right_map.scope}
+                        else "AVAILABLE"
+                    ),
+                    "unassessed_dimensions": (
+                        ["INSTRUMENT", "VENUE"]
+                        if "CENSUS_PROVIDER_LANE_ONLY"
+                        in {left_map.scope, right_map.scope}
+                        else []
+                    ),
                 }
             )
     return results
@@ -1685,6 +1712,14 @@ def build_correlation(
             observed_end=max(item.day for item in observed_rows),
         ),
         artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/correlation.json",
+                sha256=hashlib.sha256(result_bytes).hexdigest(),
+                size_bytes=len(result_bytes),
+                as_of_date=spec.as_of_date,
+                schema_name="portfolio-correlation-analysis",
+                schema_version=str(spec.schema_version),
+            ),
             SourceArtifact.from_path(
                 spec_path,
                 artifact_id="spec/correlation-spec.json",

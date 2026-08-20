@@ -775,6 +775,230 @@ def _published_baseline(tmp_path: Path, catalog: dict[str, Any] | None = None) -
     return root
 
 
+def _published_dependence(tmp_path: Path) -> Path:
+    root = tmp_path / "dependence"
+    series_ids = [f"Current Strategy {index}" for index in range(1, 8)]
+    pairs = [
+        (left, right)
+        for left_index, left in enumerate(series_ids)
+        for right in series_ids[left_index + 1 :]
+    ]
+
+    def mode_payload() -> dict[str, Any]:
+        return {
+            "series_ids": series_ids,
+            "observed_cells": [
+                {
+                    "left": left,
+                    "right": right,
+                    "status": "AVAILABLE",
+                    "coverage": {
+                        "common_observations": 2,
+                        "observed_start": "2026-01-02",
+                        "observed_end": "2026-01-03",
+                    },
+                    "pearson": "0.1",
+                    "spearman": "0.2",
+                    "horizons": {},
+                    "rolling_pearson": {},
+                    "downside": {},
+                    "drawdown_regimes": {},
+                    "joint_tail": {},
+                }
+                for left, right in pairs
+            ],
+            "blend_cells": [
+                {
+                    "left": left,
+                    "right": right,
+                    "decision_correlation": "0.3",
+                    "decision_status": "POSTERIOR_STRESS_PSD",
+                }
+                for left, right in pairs
+            ],
+            "implementation_cells": [
+                {
+                    "left": left,
+                    "right": right,
+                    "mapping_scope": "CENSUS_PROVIDER_LANE_ONLY",
+                    "shared_providers": [],
+                    "status": "AVAILABLE_PROVIDER_LANE_CONCENTRATION",
+                    "unassessed_dimensions": ["INSTRUMENT", "VENUE"],
+                }
+                for left, right in pairs
+            ],
+            "central_case": {},
+            "correlation_one": {},
+            "drawdown_matrices": {},
+            "horizon_matrices": {},
+            "matrices": {},
+            "performance": {},
+            "series_composition": {},
+        }
+
+    live = mode_payload()
+    hybrid = mode_payload()
+    correlation = {
+        "analytics_hash": "a" * 64,
+        "analytics_schema_version": 2,
+        "as_of_date": "2026-01-03",
+        "builder_version": "1.6.0",
+        "default_evidence_mode": "LIVE_ONLY",
+        "dependence": live,
+        "dependence_modes": {
+            "LIVE_ONLY": live,
+            "LIVE_PLUS_BACKTEST": hybrid,
+        },
+        "source": {
+            "artifact_id": "current-dependence/returns.csv",
+            "sha256": "b" * 64,
+            "size_bytes": 100,
+        },
+    }
+    content = canonical_json_bytes(correlation)
+    artifact = SourceArtifact(
+        artifact_id="normalized/correlation.json",
+        sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        as_of_date=date(2026, 1, 3),
+        schema_name="portfolio-correlation-analysis",
+        schema_version="2",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 1, 3),
+        adapter=AdapterIdentity("portfolio-correlation", "1.6.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="SYNTHETIC current dependence",
+            fact_types=("dependence",),
+            observed_start=date(2026, 1, 2),
+            observed_end=date(2026, 1, 3),
+        ),
+        artifacts=(artifact,),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    (manifest_path.parent / "correlation.json").write_bytes(content)
+    publish_generation(root, manifest.generation_id)
+    return root
+
+
+def test_current_dependence_reaches_report_workbook_and_receipt_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    dependence_root = _published_dependence(tmp_path)
+    history_path = tmp_path / "dependence-source.json"
+    monkeypatch.setattr(
+        reporter,
+        "_history_contract",
+        lambda *_args, **_kwargs: (
+            {},
+            {
+                "age_evidence": {
+                    "calculation_age_days": 0,
+                    "complete_through": "2026-01-03",
+                    "evaluated_on": "2026-01-03",
+                    "limiting_inputs": [
+                        {
+                            "observed_end": "2026-01-03",
+                            "publication_lag_days": 0,
+                            "segment_id": "synthetic-segment",
+                            "series_id": "Synthetic",
+                            "source_generation_id": "a" * 64,
+                            "source_id": "synthetic-source",
+                            "strategy_id": "synthetic-strategy",
+                            "warning_after_days": 2,
+                        }
+                    ],
+                    "status": "CURRENT_WITHIN_AGE_THRESHOLD",
+                    "warning_after_days": 2,
+                },
+                "as_of_date": "2026-01-03",
+                "bundle_id": "d" * 64,
+                "evaluated_on": "2026-01-03",
+                "evidence_mode_policy": {},
+                "returns_sha256": "b" * 64,
+                "returns_size_bytes": 100,
+                "schema": "portfolio-current-dependence-source/1",
+                "series_count": 9,
+                "sha256": "c" * 64,
+                "size_bytes": 100,
+            },
+        ),
+    )
+    built = reporter.build_candidate(
+        baseline_root,
+        tmp_path / "reporting",
+        history_contract_path=history_path,
+        correlation_root=dependence_root,
+    )
+    candidate = Path(built["candidate_dir"])
+    report = json.loads(
+        (candidate / reporter.REPORT_DATA_NAME).read_text(encoding="utf-8")
+    )
+    assert report["dependence_analysis"]["status"] == "AVAILABLE"
+    assert report["dependence_analysis"]["pair_count"] == 21
+    assert report["dependence_analysis"]["pair_mode_count"] == 42
+    assert len(report["dependence_analysis"]["series_ids"]) == 7
+    assert len(report["dependence_rows"]) == 42
+    workbook = load_workbook(Path(built["workbook_path"]), data_only=True)
+    assert workbook["Dependence"].max_row == 47
+    assert "tblDependence" in workbook["Dependence"].tables
+    verified = reporter.verify_candidate(
+        baseline_root,
+        candidate,
+        Path(built["workbook_path"]),
+        history_contract_path=history_path,
+        correlation_root=dependence_root,
+    )
+    assert verified["table_count"] == 14
+
+
+def test_current_dependence_report_rejects_mismatched_verified_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    dependence_root = _published_dependence(tmp_path)
+    monkeypatch.setattr(
+        reporter,
+        "_history_contract",
+        lambda *_args, **_kwargs: (
+            {},
+            {
+                "returns_sha256": "0" * 64,
+                "returns_size_bytes": 100,
+                "schema": "portfolio-current-dependence-source/1",
+            },
+        ),
+    )
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="dependence source differs from verified history contract",
+    ):
+        reporter.build_report_data(
+            baseline_root,
+            history_contract_path=tmp_path / "dependence-source.json",
+            correlation_root=dependence_root,
+        )
+
+
+def test_current_dependence_report_rejects_coherently_unbound_output(
+    tmp_path: Path,
+) -> None:
+    dependence_root = _published_dependence(tmp_path)
+    pointer = read_current(dependence_root)
+    path = dependence_root / "generations" / pointer.generation_id / "correlation.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["analytics_hash"] = "f" * 64
+    path.write_bytes(canonical_json_bytes(payload))
+    with pytest.raises(
+        reporter.ReportValidationError, match="generation is not accepted"
+    ):
+        reporter._dependence_report(dependence_root)
+
+
 def test_baseline_retries_transient_pointer_io(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -987,8 +1211,8 @@ def test_workbook_is_deterministic_structured_and_has_no_external_surface(
     candidate = Path(first["candidate_dir"])
     workbook = Path(first["workbook_path"])
     evidence = reporter.verify_candidate(baseline_root, candidate, workbook)
-    assert evidence["sheet_count"] == 13
-    assert evidence["table_count"] == 13
+    assert evidence["sheet_count"] == 14
+    assert evidence["table_count"] == 14
     assert evidence["external_links"] == 0
     assert evidence["macro_parts"] == 0
     assert evidence["formula_count"] >= 1

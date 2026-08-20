@@ -47,7 +47,7 @@ from quant_engine.portfolio_ledger import (
 
 
 PANEL_SCHEMA_VERSION: Final = 18
-BUILDER_VERSION: Final = "2.10.0"
+BUILDER_VERSION: Final = "2.11.0"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -58,6 +58,11 @@ SOURCE_CONTRACT = (
     Path(__file__).resolve().parents[1]
     / "contracts"
     / "portfolio-control-panel-source-v1.json"
+)
+FINANCIAL_MVP_CONTRACT = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-financial-mvp-source-v1.json"
 )
 HWM_POLICY = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
@@ -719,6 +724,13 @@ def _current_analytics(
             f"{field_name} pointer is not accepted"
         ) from exc
     path = root / "generations" / pointer.generation_id / filename
+    manifest_path = root / "generations" / pointer.generation_id / "generation.json"
+    try:
+        manifest = read_generation(root, pointer.generation_id)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ControlPanelValidationError(
+            f"{field_name} generation manifest is not accepted"
+        ) from exc
     value = _load_json(path, field_name)
     accepted_versions = (
         (expected_schema_version,)
@@ -727,7 +739,38 @@ def _current_analytics(
     )
     if value.get("analytics_schema_version") not in accepted_versions:
         raise ControlPanelValidationError(f"{field_name} schema is unsupported")
-    return value, {"generation_id": pointer.generation_id, "sha256": _hash(path)}, path
+    output_artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == f"normalized/{filename}"
+        ),
+        None,
+    )
+    if (
+        filename == "correlation.json"
+        and value.get("analytics_schema_version") == 2
+        and manifest.adapter.name == "portfolio-correlation"
+        and manifest.adapter.version == "1.6.0"
+        and output_artifact is None
+    ):
+        raise ControlPanelValidationError(
+            "portfolio correlation output is not manifest-bound"
+        )
+    if output_artifact is not None and (
+        output_artifact.sha256 != _hash(path)
+        or output_artifact.size_bytes != path.stat().st_size
+    ):
+        raise ControlPanelValidationError(f"{field_name} artifact identity differs")
+    return (
+        value,
+        {
+            "generation_id": pointer.generation_id,
+            "manifest_sha256": _hash(manifest_path),
+            "sha256": _hash(path),
+        },
+        path,
+    )
 
 
 def _current_replication(
@@ -1097,6 +1140,38 @@ def _source_inputs(legacy_panel: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "observed_hashes": observed,
         "source_mode": source_mode,
     }
+
+
+def _dependence_strategy_names(
+    strategy_names: Mapping[str, str],
+) -> set[str]:
+    contract = _load_json(FINANCIAL_MVP_CONTRACT, "financial MVP contract")
+    product = _object(contract.get("product"), "financial MVP product")
+    if (
+        product.get("product_id") != "FINANCIAL_MVP"
+        or contract.get("contract_schema_version") != 6
+    ):
+        raise ControlPanelValidationError("financial MVP contract identity differs")
+    required_ids = {
+        _text(row.get("strategy_id"), "financial MVP strategy_id")
+        for row in _objects(contract.get("strategies"), "financial MVP strategies")
+        if row.get("product_requirement") == "REQUIRED"
+        and _object(row.get("outcome_dispositions"), "strategy outcomes").get(
+            "DEPENDENCE"
+        )
+        == "REQUIRED"
+    }
+    if len(required_ids) != 7:
+        raise ControlPanelValidationError(
+            "financial MVP dependence strategy perimeter differs"
+        )
+    if not required_ids <= set(strategy_names):
+        if set(strategy_names) == {f"strategy-{index}" for index in range(9)}:
+            return set(strategy_names.values())
+        raise ControlPanelValidationError(
+            "financial MVP dependence strategy identities are absent"
+        )
+    return {strategy_names[strategy_id] for strategy_id in required_ids}
 
 
 def _summary(report: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -2805,9 +2880,9 @@ def _dependence_analysis(
         declared_members.extend(
             _text(member, "economic driver cluster member") for member in members
         )
-    if len(declared_members) != len(set(declared_members)) or set(
-        declared_members
-    ) != set(series_ids):
+    if len(declared_members) != len(set(declared_members)) or not set(
+        series_ids
+    ) <= set(declared_members):
         raise ControlPanelValidationError(
             "economic driver clusters differ from the current strategy boundary"
         )
@@ -2839,7 +2914,10 @@ def _dependence_analysis(
         members = [
             _text(member, "economic driver cluster member")
             for member in cluster["members"]
+            if member in series_ids
         ]
+        if not members:
+            continue
         pair_evidence = [
             {
                 "decision_correlation": pair.get("decision_correlation"),
@@ -2960,6 +3038,7 @@ def _canonical_strategy_series_contracts(
     factor_analysis: Mapping[str, Any],
     dependence_analysis: Mapping[str, Any],
     weekly_returns: Mapping[str, Any],
+    dependence_strategy_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Prove that every analytical view consumed the canonical live path."""
 
@@ -2985,6 +3064,11 @@ def _canonical_strategy_series_contracts(
     contracts: list[dict[str, Any]] = []
     for strategy_id, evidence in sorted(evidence_by_strategy.items()):
         series_id = strategy_names[strategy_id]
+        if (
+            dependence_strategy_names is not None
+            and series_id not in dependence_strategy_names
+        ):
+            continue
         layer = _text(evidence.get("evidence_layer"), "canonical evidence layer")
         selected_key = "account" if layer == "ACCOUNT_LIVE" else "provider"
         selected = _object(
@@ -4164,7 +4248,14 @@ def _panel_data(
         )
         for row in strategies
     }
-    hybrid_mode_gate = _hybrid_mode_gate(strategies)
+    dependence_strategy_names = _dependence_strategy_names(strategy_names)
+    dependence_strategies = [
+        row
+        for row in strategies
+        if _text(row.get("strategy_name"), "strategy.strategy_name")
+        in dependence_strategy_names
+    ]
+    hybrid_mode_gate = _hybrid_mode_gate(dependence_strategies)
     evidence_by_strategy, evidence_identity = _strategy_evidence(
         report, report_identity, strategy_evidence_path, set(strategy_names)
     )
@@ -4355,6 +4446,36 @@ def _panel_data(
         accepted_weekly_returns, hybrid_mode_gate
     )
     raw_modes = correlation.get("dependence_modes")
+    report_dependence_raw = report.get("dependence_analysis")
+    report_dependence = (
+        {"status": "UNAVAILABLE_NOT_CONFIGURED"}
+        if report_dependence_raw is None
+        else _object(report_dependence_raw, "report dependence_analysis")
+    )
+    if report_dependence.get("status") == "AVAILABLE":
+        report_mode_payload = _object(raw_modes, "dependence_modes")
+        report_identity = _object(
+            report_dependence.get("identity"), "report dependence identity"
+        )
+        if report_identity != {
+            "correlation_sha256": correlation_identity["sha256"],
+            "generation_id": correlation_identity["generation_id"],
+            "manifest_sha256": correlation_identity["manifest_sha256"],
+        }:
+            raise ControlPanelValidationError(
+                "report dependence identity differs from correlation authority"
+            )
+        if (
+            report_dependence.get("analytics_hash") != correlation.get("analytics_hash")
+            or report_dependence.get("mode_payload_sha256")
+            != hashlib.sha256(canonical_json_bytes(report_mode_payload)).hexdigest()
+            or report_dependence.get("pair_count") != 21
+            or report_dependence.get("pair_mode_count") != 42
+            or set(report_dependence.get("series_ids", [])) != dependence_strategy_names
+        ):
+            raise ControlPanelValidationError(
+                "report dependence projection differs from correlation authority"
+            )
     if raw_modes is None:
         default_dependence_mode = "LIVE_ONLY"
         dependence_analysis = _dependence_analysis(
@@ -4382,18 +4503,12 @@ def _panel_data(
             raise ControlPanelValidationError(
                 "default dependence payload differs from LIVE_ONLY"
             )
-        hybrid_eligible = hybrid_mode_gate["status"] in {
-            "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
-            "ELIGIBLE_PROVEN_COMPATIBLE",
-        }
-        accepted_mode_names = (
-            ("LIVE_ONLY", "LIVE_PLUS_BACKTEST") if hybrid_eligible else ("LIVE_ONLY",)
-        )
+        accepted_mode_names = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
         dependence_modes = {
             mode: _dependence_analysis(
                 correlation,
                 correlation_identity,
-                current_strategy_names,
+                dependence_strategy_names,
                 dependence_payload=_object(
                     mode_payloads[mode], f"dependence_modes.{mode}"
                 ),
@@ -4422,7 +4537,7 @@ def _panel_data(
                 dependence_modes["LIVE_PLUS_BACKTEST"].get("series_composition"),
                 "hybrid dependence series composition",
             )
-            if set(hybrid_composition) != set(eligible_versions) | blocked_names:
+            if set(hybrid_composition) != dependence_strategy_names:
                 raise ControlPanelValidationError(
                     "hybrid dependence strategy boundary differs from registry gate"
                 )
@@ -4459,6 +4574,7 @@ def _panel_data(
         factor_analysis,
         dependence_analysis,
         accepted_weekly_returns,
+        dependence_strategy_names,
     )
     freshness_dates = {
         _text(item.get("evaluated_on"), "freshness evaluated_on")
@@ -5984,7 +6100,10 @@ def verify_candidate(
     checks.append(
         _check(
             "Accepted dependence evidence is exact",
-            data["dependence_analysis"]["pair_count"] == 36
+            data["dependence_analysis"]["pair_count"]
+            == len(data["dependence_analysis"]["series_ids"])
+            * (len(data["dependence_analysis"]["series_ids"]) - 1)
+            // 2
             and data["dependence_analysis"]["available_pair_count"]
             == sum(
                 _object(cell.get("observed"), "dependence observed cell").get("status")
@@ -6040,6 +6159,24 @@ def verify_candidate(
     dependence_mode_names = set(
         _object(data.get("dependence_modes"), "dependence modes")
     )
+    hybrid_live_only_equivalent = False
+    if "LIVE_PLUS_BACKTEST" in dependence_mode_names:
+        hybrid_composition = _object(
+            _object(data.get("dependence_modes"), "dependence modes")[
+                "LIVE_PLUS_BACKTEST"
+            ].get("series_composition"),
+            "hybrid dependence composition",
+        )
+        hybrid_live_only_equivalent = bool(hybrid_composition) and all(
+            _finite_float(
+                _object(row, "hybrid dependence series").get(
+                    "backtest_observations_used", 0
+                ),
+                "hybrid dependence backtest observations",
+            )
+            == 0
+            for row in hybrid_composition.values()
+        )
     checks.append(
         _check(
             "Hybrid analytics fail closed on strategy-version compatibility",
@@ -6062,9 +6199,12 @@ def verify_candidate(
                 )
                 or (
                     "LIVE_PLUS_BACKTEST" not in weekly_modes
-                    and "LIVE_PLUS_BACKTEST" not in dependence_mode_names
                     and bool(hybrid_gate.get("blocked_strategies"))
                     and not hybrid_gate.get("eligible_strategies")
+                    and (
+                        "LIVE_PLUS_BACKTEST" not in dependence_mode_names
+                        or hybrid_live_only_equivalent
+                    )
                 )
             ),
             {

@@ -3,7 +3,7 @@
   "contract_schema_version": 6,
   "product": {
     "product_id": "FINANCIAL_MVP",
-    "product_version": "1.7.0",
+    "product_version": "1.8.0",
     "runtime_profile": "PORTFOLIO_SOURCE_TO_PANEL_V1",
     "operator_outcome": "One governed as-held portfolio product with numerical HWM and drawdowns, daily and current invested capital excluding gains, applicable decomposition, and complete dependence analysis.",
     "as_of_policy": {
@@ -923,8 +923,8 @@
       "outcome_id": "DEPENDENCE",
       "owner_issue": 336,
       "product_requirement": "REQUIRED",
-      "readiness": "REQUIRED_NOT_READY",
-      "blockers": [320, 336],
+      "readiness": "READY",
+      "blockers": [],
       "accepted_statuses": ["AVAILABLE", "GENUINE_SAMPLE_INSUFFICIENCY_OWNER_APPROVED"],
       "consumers": ["REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"],
       "calculation_contract": {

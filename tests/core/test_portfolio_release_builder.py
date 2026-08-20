@@ -294,11 +294,19 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
 
 def test_create_recipe_can_bind_verified_immutable_provider_ledger(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_recipe = _recipe(tmp_path)
     payload = json.loads(source_recipe.read_text(encoding="utf-8"))
     generation = _provider_ledger_generation(tmp_path)
     output = tmp_path / "reused-ledger-recipe.json"
+    monkeypatch.setattr(
+        builder,
+        "_history_contract_path",
+        lambda recipe: (
+            Path(recipe["correlation_source_root"]["path"]) / "dependence-source.json"
+        ),
+    )
 
     result = builder.create_recipe(
         provider_ledger_spec=None,
@@ -325,6 +333,25 @@ def test_create_recipe_can_bind_verified_immutable_provider_ledger(
     accepted = builder._recipe(output)
     assert accepted["schema_version"] == 7
     assert accepted["provider_ledger_generation"]["path"] == str(generation)
+
+
+def test_current_schema_rejects_legacy_dependence_source(tmp_path: Path) -> None:
+    recipe_path = _recipe(tmp_path)
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    generation = _provider_ledger_generation(tmp_path)
+    recipe.pop("provider_ledger_spec")
+    recipe["provider_ledger_generation"] = {
+        "path": str(generation),
+        **builder._directory_inventory(generation),
+    }
+    recipe["schema_version"] = 7
+    recipe_path.write_bytes(canonical_json_bytes(recipe))
+
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="current vertical build requires the verified dependence source",
+    ):
+        builder._recipe(recipe_path)
 
 
 def test_reusable_provider_ledger_fails_when_catalog_identity_differs(
