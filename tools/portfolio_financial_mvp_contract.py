@@ -537,12 +537,13 @@ def _verify_strategy_version_history_evidence(
         )
 
     def segment_projection(row: Mapping[str, Any]) -> dict[str, object]:
-        return {
-            "strategy_id": row.get("strategy_id"),
-            "evidence_layer": row.get("evidence_layer"),
-            "source_id": row.get("source_id"),
-            "strategy_version": row.get("strategy_version"),
-        }
+        # A live implementation identity is derived from the materialized
+        # segment hash and its governed source generation.  Freezing only the
+        # version-bearing fields would let a caller coherently replace both the
+        # segment hash and the derived live identity while retaining a real
+        # generation receipt.  #302 does not authorize any change to the
+        # accepted #319 materialized rows, so bind the complete row.
+        return dict(row)
 
     accepted_segments = {
         _text(row.get("segment_id"), "accepted history segment_id"): segment_projection(
@@ -2626,6 +2627,11 @@ def _validate_current_census(
             raise FinancialMvpContractError(
                 f"census sleeve provider is unknown: {sleeve_id}"
             )
+        expected_provider_prefix = provider_id.lower().replace("_", "-") + "-"
+        if not sleeve_id.startswith(expected_provider_prefix):
+            raise FinancialMvpContractError(
+                f"census sleeve provider namespace differs: {sleeve_id}"
+            )
         provider_sleeves = set(
             _strings(
                 lane_by_id[provider_id]["account_sleeve_ids"],
@@ -2639,6 +2645,14 @@ def _validate_current_census(
         source_ids = _strings(
             sleeve["source_segment_ids"], f"census sleeve sources {sleeve_id}"
         )
+        lane_source_id = _optional_text(
+            lane_by_id[provider_id]["source_segment_id"],
+            f"census provider source {provider_id}",
+        )
+        if lane_source_id is not None and lane_source_id not in source_ids:
+            raise FinancialMvpContractError(
+                f"census sleeve lacks its provider source: {sleeve_id}"
+            )
         unknown_sources = set(source_ids) - set(source_by_id)
         if unknown_sources:
             raise FinancialMvpContractError(

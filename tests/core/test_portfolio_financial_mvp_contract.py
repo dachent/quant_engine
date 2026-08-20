@@ -711,6 +711,36 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
             swapped_correction_receipts
         )
 
+    rewritten_segment_identity = copy.deepcopy(baseline)
+    p123_ai_segment = next(
+        row
+        for row in rewritten_segment_identity["history_corrections"][
+            "materialized_segment_identities"
+        ]
+        if row["strategy_id"] == "p123-ai-factor"
+        and row["evidence_layer"] == "ACCOUNT_LIVE"
+    )
+    p123_ai_segment["sha256"] = "0" * 64
+    p123_ai = next(
+        row
+        for row in rewritten_segment_identity["strategies"]
+        if row["strategy_id"] == "p123-ai-factor"
+    )
+    p123_ai["live_implementation_identity"]["version_ref"] = (
+        "account-live-segment:" + "0" * 64
+    )
+    _validate(rewritten_segment_identity)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "materialized history version projection differs from accepted "
+            "history authority"
+        ),
+    ):
+        contract_tool._verify_strategy_version_history_evidence(
+            rewritten_segment_identity
+        )
+
     transition_removed = copy.deepcopy(baseline)
     for sleeve in transition_removed["current_census"]["account_sleeves"]:
         for assignment in sleeve["assignments"]:
@@ -827,6 +857,39 @@ def test_census_fails_on_missing_duplicate_overlap_and_stale_provider_binding() 
         match="sleeve differs from declared provider lane",
     ):
         _validate(balanced_lane_swap)
+
+    coherent_lane_swap = copy.deepcopy(contract)
+    ibkr_lane = next(
+        row
+        for row in coherent_lane_swap["current_census"]["provider_lanes"]
+        if row["provider_id"] == "IBKR"
+    )
+    schwab_lane = next(
+        row
+        for row in coherent_lane_swap["current_census"]["provider_lanes"]
+        if row["provider_id"] == "SCHWAB"
+    )
+    ibkr_sleeve = next(
+        row
+        for row in coherent_lane_swap["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "ibkr-reserve-01"
+    )
+    schwab_sleeve = next(
+        row
+        for row in coherent_lane_swap["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "schwab-reserve-01"
+    )
+    ibkr_lane["account_sleeve_ids"].remove("ibkr-reserve-01")
+    schwab_lane["account_sleeve_ids"].remove("schwab-reserve-01")
+    ibkr_lane["account_sleeve_ids"].append("schwab-reserve-01")
+    schwab_lane["account_sleeve_ids"].append("ibkr-reserve-01")
+    ibkr_sleeve["provider_id"] = "SCHWAB"
+    schwab_sleeve["provider_id"] = "IBKR"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="sleeve provider namespace differs",
+    ):
+        _validate(coherent_lane_swap)
 
     invented_live_identity = copy.deepcopy(contract)
     p123_ai = next(
