@@ -1994,14 +1994,6 @@ def census_owner_decision_projection(
             raise FinancialMvpContractError(
                 f"census owner membership is not propagated: {strategy_id}"
             )
-        version = _object(
-            membership_strategy.get("strategy_version"),
-            f"census owner strategy version {strategy_id}",
-        )
-        if version != {"status": "UNRESOLVED", "version_ref": None}:
-            raise FinancialMvpContractError(
-                f"census owner decision falsely evidences strategy design: {strategy_id}"
-            )
         membership_end = _optional_date(
             membership.get("effective_end"),
             f"census owner membership end {strategy_id}",
@@ -4229,6 +4221,54 @@ def _validate_sources(
             )
 
 
+def _validate_strategy_version_evidence(
+    strategies: Sequence[Mapping[str, Any]],
+    sources: Sequence[Mapping[str, Any]],
+) -> None:
+    """Keep #302 membership authority separate from design/version evidence."""
+
+    bindings: dict[str, list[tuple[str, str]]] = {}
+    for source in sources:
+        source_id = _text(source.get("source_id"), "version evidence source_id")
+        version = _object(
+            source.get("strategy_version"),
+            f"version evidence source {source_id}",
+        )
+        for strategy_id, version_ref in _object(
+            version.get("version_refs"),
+            f"version evidence refs {source_id}",
+        ).items():
+            bindings.setdefault(str(strategy_id), []).append(
+                (source_id, _text(version_ref, f"version evidence {strategy_id}"))
+            )
+
+    for strategy in strategies:
+        strategy_id = _text(strategy.get("strategy_id"), "version evidence strategy")
+        if strategy.get("product_requirement") != "REQUIRED":
+            continue
+        version = _object(
+            strategy.get("strategy_version"),
+            f"version evidence strategy {strategy_id}",
+        )
+        if version.get("status") != "EVIDENCED":
+            continue
+        version_ref = _text(
+            version.get("version_ref"), f"version evidence ref {strategy_id}"
+        )
+        matching_sources = {
+            source_id
+            for source_id, source_ref in bindings.get(strategy_id, [])
+            if source_ref == version_ref
+        }
+        if (
+            "owner-account-live-history" not in matching_sources
+            or len(matching_sources) < 2
+        ):
+            raise FinancialMvpContractError(
+                f"strategy design/version evidence is not independently bound: {strategy_id}"
+            )
+
+
 def _validate_golden_case(golden: Mapping[str, Any]) -> None:
     _strict_keys(
         golden,
@@ -4835,6 +4875,7 @@ def validate_contract(
         if row["product_requirement"] == "REQUIRED"
     }
     _validate_sources(sources, set(registry_ids), required_strategy_ids)
+    _validate_strategy_version_evidence(strategies, sources)
     _validate_current_census(
         _object(contract["current_census"], "current_census"),
         strategies,

@@ -512,11 +512,9 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     }
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
-        match="falsely evidences strategy design",
+        match="design/version evidence is not independently bound",
     ):
-        contract_tool.census_owner_decision_projection(
-            false_design["current_census"], false_design["strategies"]
-        )
+        _validate(false_design)
 
     transition_removed = copy.deepcopy(baseline)
     for sleeve in transition_removed["current_census"]["account_sleeves"]:
