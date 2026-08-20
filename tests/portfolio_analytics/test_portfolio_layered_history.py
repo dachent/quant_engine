@@ -858,6 +858,35 @@ def _build(fixture: dict[str, Any]) -> tuple[dict[str, bytes], bytes]:
     )
 
 
+def _refresh_live_implementation_identities(contract: dict[str, Any]) -> None:
+    account_segments = {
+        row["strategy_id"]: row
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+        if row["evidence_layer"] == "ACCOUNT_LIVE"
+        and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    }
+    strategies = {row["strategy_id"]: row for row in contract["strategies"]}
+    for strategy_id, segment in account_segments.items():
+        strategies[strategy_id]["live_implementation_identity"] = {
+            "status": "EVIDENCED",
+            "version_ref": f"account-live-segment:{segment['sha256']}",
+            "generation_id": segment["source_generation_id"],
+            "receipt_sha256": segment["source_generation_sha256"],
+        }
+    echo = next(
+        row
+        for row in contract["history_corrections"]["corrections"]
+        if row["correction_id"] == "echotrade-event-only-account-live-rejected"
+    )
+    rejected = echo["rejected_evidence_identity"]
+    strategies["echotrade-growth-pivots"]["live_implementation_identity"] = {
+        "status": "REJECTED",
+        "version_ref": f"rejected-event-only:{rejected['sha256']}",
+        "generation_id": echo["capture"]["generation_id"],
+        "receipt_sha256": rejected["source_receipt_sha256"],
+    }
+
+
 def _refresh_materialized_segment_identities(fixture: dict[str, Any]) -> None:
     contract_path = fixture["contract_path"]
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
@@ -872,6 +901,7 @@ def _refresh_materialized_segment_identities(fixture: dict[str, Any]) -> None:
         identity["strategy_version"] = (
             version_refs.get(identity["strategy_id"]) or "UNRESOLVED"
         )
+    _refresh_live_implementation_identities(contract)
     _write_json(contract_path, contract)
     artifacts, _manifest_content = _build(fixture)
     rows = list(csv.DictReader(io.StringIO(artifacts["segments.csv"].decode("utf-8"))))
@@ -880,6 +910,7 @@ def _refresh_materialized_segment_identities(fixture: dict[str, Any]) -> None:
     contract["history_corrections"]["materialized_segment_identities"] = (
         target_series._materialized_segment_identities(rows, sources)
     )
+    _refresh_live_implementation_identities(contract)
     _write_json(contract_path, contract)
 
 
