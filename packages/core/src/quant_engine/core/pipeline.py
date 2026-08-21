@@ -49,6 +49,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PORTFOLIO_CONTRACT_GATE: Final = "portfolio-orchestration-contract"
 _FINANCIAL_MVP_PRODUCT_GATE: Final = "financial-mvp-product-conformance"
+_FINANCIAL_MVP_HWM_INPUT_AUTHORITY_GATE: Final = "financial-mvp-hwm-input-authority"
 _FINANCIAL_MVP_AUTHORITY_GATES: Final = {
     "contract": "financial-mvp-contract-authority",
     "provider_catalog": "financial-mvp-provider-catalog-authority",
@@ -1322,13 +1323,84 @@ def _validate_financial_mvp_production_binding(
             )
 
 
+def _expected_hwm_input_authority(
+    conformance: Mapping[str, Any],
+    authority_hashes: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Independently rederive the fail-closed PORT-HWM-4 input assessment."""
+
+    sources = _objects(conformance.get("sources"), "financial MVP HWM sources")
+    outcomes = _objects(conformance.get("outcomes"), "financial MVP HWM outcomes")
+    strategies = _objects(conformance.get("strategies"), "financial MVP HWM strategies")
+    hwm_outcomes = [
+        row for row in outcomes if row.get("outcome_id") == "AS_HELD_COMPOSITE_HWM"
+    ]
+    if len(hwm_outcomes) > 1:
+        raise PipelineValidationError("financial MVP HWM outcome is ambiguous")
+    unresolved_source_ids = sorted(
+        str(row["source_id"])
+        for row in sources
+        if isinstance(row.get("consumers"), list)
+        and "AS_HELD_COMPOSITE_HWM" in row["consumers"]
+        and isinstance(row.get("current_generation"), Mapping)
+        and (
+            row["current_generation"].get("generation_id") is None
+            or row["current_generation"].get("sha256") is None
+        )
+    )
+    required_strategy_ids = sorted(
+        str(row["strategy_id"])
+        for row in strategies
+        if row.get("product_requirement") == "REQUIRED"
+    )
+    outcome_readiness = (
+        str(hwm_outcomes[0].get("readiness")) if hwm_outcomes else "NOT_DECLARED"
+    )
+    blockers = {
+        "ACCEPTED_HWM_INPUT_GENERATION_ABSENT",
+        "ACCEPTED_MIXED_CALENDAR_AUTHORITY_ABSENT",
+        *({"OUTCOME:AS_HELD_COMPOSITE_HWM"} if outcome_readiness != "READY" else set()),
+        *(f"SOURCE:{source_id}" for source_id in unresolved_source_ids),
+    }
+    provider_admission = _object(
+        conformance.get("provider_admission"), "financial MVP HWM provider authority"
+    )
+    if provider_admission.get("product_readiness") != "READY_FOR_COMPOSITION":
+        blockers.add("PROVIDER_ADMISSION")
+    return {
+        "assessment_scope": "CURRENT_PRODUCT_AND_PROVIDER_ADMISSION_ONLY",
+        "authority_hashes": {
+            "census_sha256": conformance["census_sha256"],
+            "contract_raw_sha256": authority_hashes["contract_raw_sha256"],
+            "contract_semantic_sha256": conformance["contract_semantic_sha256"],
+            "provider_catalog_sha256": authority_hashes["provider_catalog_sha256"],
+            "provider_manifest_sha256": authority_hashes["provider_manifest_sha256"],
+            "provider_receipt_sha256": authority_hashes["provider_receipt_sha256"],
+            "source_matrix_sha256": authority_hashes["source_matrix_sha256"],
+        },
+        "blocking_reasons": sorted(blockers),
+        "calendar_authority_sha256": None,
+        "input_generation_sha256": None,
+        "outcome_id": "AS_HELD_COMPOSITE_HWM",
+        "outcome_readiness": outcome_readiness,
+        "required_strategy_ids": required_strategy_ids,
+        "schema_version": 1,
+        "state": "REQUIRED_NOT_READY",
+        "unresolved_source_ids": unresolved_source_ids,
+    }
+
+
 def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | None:
     product_matches = [
         item for item in spec.gates if item.gate_id == _FINANCIAL_MVP_PRODUCT_GATE
     ]
     if not product_matches:
         if any(
-            item.gate_id in set(_FINANCIAL_MVP_AUTHORITY_GATES.values())
+            item.gate_id
+            in {
+                *_FINANCIAL_MVP_AUTHORITY_GATES.values(),
+                _FINANCIAL_MVP_HWM_INPUT_AUTHORITY_GATE,
+            }
             for item in spec.gates
         ):
             raise PipelineValidationError("financial MVP authority gates are detached")
@@ -1336,7 +1408,17 @@ def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | Non
     if len(product_matches) != 1:
         raise PipelineValidationError("financial MVP product gate is ambiguous")
     gate_payload, product_gate_bytes = _gate_json(spec, _FINANCIAL_MVP_PRODUCT_GATE)
-    if gate_payload.get("schema_version") != 2:
+    product_schema_version = gate_payload.get("schema_version")
+    hwm_gate_matches = [
+        item
+        for item in spec.gates
+        if item.gate_id == _FINANCIAL_MVP_HWM_INPUT_AUTHORITY_GATE
+    ]
+    if product_schema_version != 3 and hwm_gate_matches:
+        raise PipelineValidationError(
+            "financial MVP HWM input authority requires product schema 3"
+        )
+    if product_schema_version not in {2, 3}:
         return _financial_mvp_product_authority_legacy(spec)
     _strict(
         gate_payload,
@@ -1880,12 +1962,28 @@ def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | Non
         or receipt.get("admission_gate_status") != "PASS"
     ):
         raise PipelineValidationError("financial MVP readiness differs")
+    hwm_input_authority = None
+    if product_schema_version == 3:
+        hwm_input_authority, _ = _gate_json(
+            spec, _FINANCIAL_MVP_HWM_INPUT_AUTHORITY_GATE
+        )
+        expected_hwm_input_authority = _expected_hwm_input_authority(
+            conformance, expected_hashes
+        )
+        if hwm_input_authority != expected_hwm_input_authority:
+            raise PipelineValidationError("financial MVP HWM input authority differs")
     _validate_financial_mvp_production_binding(
         spec,
         product_gate_sha256=hashlib.sha256(product_gate_bytes).hexdigest(),
         provider_generation_id=manifest.generation_id,
     )
-    return {"conformance": dict(conformance), "raw": dict(gate_payload)}
+    result = {
+        "conformance": dict(conformance),
+        "raw": dict(gate_payload),
+    }
+    if hwm_input_authority is not None:
+        result["hwm_input_authority"] = dict(hwm_input_authority)
+    return result
 
 
 def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
@@ -2901,6 +2999,12 @@ def _financial_mvp_summary(
     if authority is None:
         return None
     conformance = _object(authority["conformance"], "financial MVP conformance")
+    hwm_input_authority_raw = authority.get("hwm_input_authority")
+    hwm_input_authority = (
+        _object(hwm_input_authority_raw, "financial MVP HWM input authority")
+        if hwm_input_authority_raw is not None
+        else None
+    )
     admission = _object(conformance["provider_admission"], "provider admission")
     sources = _objects(conformance["sources"], "financial MVP sources")
     outcomes = _objects(conformance["outcomes"], "financial MVP outcomes")
@@ -2919,8 +3023,22 @@ def _financial_mvp_summary(
             and assignment.get("effective_end") is None
         }
     )
-    blocking_reasons = _strings(
+    conformance_blocking_reasons = _strings(
         conformance["blocking_reasons"], "financial MVP blocking reasons"
+    )
+    hwm_blocking_reasons = (
+        _strings(
+            hwm_input_authority["blocking_reasons"],
+            "financial MVP HWM blocking reasons",
+        )
+        if hwm_input_authority is not None
+        else ("HWM_INPUT_AUTHORITY_REQUIRED",)
+    )
+    blocking_reasons = sorted({*conformance_blocking_reasons, *hwm_blocking_reasons})
+    ready_for_execution = (
+        conformance["readiness"] == "READY_FOR_EXECUTION"
+        and hwm_input_authority is not None
+        and hwm_input_authority.get("state") == "AVAILABLE"
     )
     receipt = _object(admission["receipt"], "provider admission receipt")
     provider_rows = _objects(
@@ -3019,7 +3137,7 @@ def _financial_mvp_summary(
                     }
                 )
     composition_digest = hashlib.sha256(canonical_json_bytes(conformance)).hexdigest()
-    return {
+    result = {
         "blocking_reasons": list(blocking_reasons),
         "candidate_artifacts": candidate_artifacts,
         "census_sha256": conformance["census_sha256"],
@@ -3035,9 +3153,11 @@ def _financial_mvp_summary(
         "product_version": conformance["product_version"],
         "provider_admission_gate_status": admission["admission_gate_status"],
         "provider_product_readiness": admission["product_readiness"],
-        "readiness": conformance["readiness"],
+        "readiness": (
+            "READY_FOR_EXECUTION" if ready_for_execution else "REQUIRED_NOT_READY"
+        ),
         "rederive_authority": conformance["rederive_authority"],
-        "ready_for_execution": conformance["readiness"] == "READY_FOR_EXECUTION",
+        "ready_for_execution": ready_for_execution,
         "required_not_ready_outcomes": sorted(
             str(row["outcome_id"])
             for row in outcomes
@@ -3057,13 +3177,16 @@ def _financial_mvp_summary(
         "strategy_count": len(strategies),
         "providers": provider_summaries,
     }
+    if hwm_input_authority is not None:
+        result["hwm_input_authority"] = dict(hwm_input_authority)
+    return result
 
 
 def _current_product_authority(authority: Mapping[str, Any] | None) -> bool:
     if authority is None:
         return False
     raw = authority.get("raw")
-    return isinstance(raw, Mapping) and raw.get("schema_version") == 2
+    return isinstance(raw, Mapping) and raw.get("schema_version") == 3
 
 
 def _requires_current_product(spec: PipelineSpec) -> bool:
@@ -3670,8 +3793,12 @@ def execute_pipeline(
 def pipeline_status(spec: PipelineSpec) -> dict[str, object]:
     _validate_portfolio_orchestration(spec, verify_runtime=False)
     product_authority = _financial_mvp_product_authority(spec)
-    if _requires_production_product(spec) and not _current_product_authority(
-        product_authority
+    status_authority = (
+        product_authority.get("raw") if isinstance(product_authority, Mapping) else None
+    )
+    if _requires_production_product(spec) and (
+        not isinstance(status_authority, Mapping)
+        or status_authority.get("schema_version") not in {2, 3}
     ):
         raise PipelineValidationError(
             "financial MVP production authority is recovery-only"
