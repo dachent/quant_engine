@@ -392,6 +392,29 @@ def _runner(outputs: dict[str, bytes | Path], calls: list[str]):
     return run
 
 
+def _as_execution_engine_fixture(
+    raw: dict[str, object], outputs: dict[str, bytes | Path]
+) -> None:
+    """Remove product gates when a test targets only generic engine mechanics."""
+
+    gates = raw["gates"]
+    assert isinstance(gates, list)
+    raw["gates"] = [
+        row
+        for row in gates
+        if row["gate_id"] != "portfolio-orchestration-contract"
+        and not str(row["gate_id"]).startswith("financial-mvp-")
+    ]
+    semantic = json.loads(bytes(outputs["semantic_bytes"]))
+    semantic["checks"].pop("product_conformance")
+    semantic["schema_version"] = 1
+    semantic_bytes = canonical_json_bytes(semantic)
+    outputs["semantic_bytes"] = semantic_bytes
+    next(row for row in raw["gates"] if row["gate_id"] == "post-build-semantic")[
+        "sha256"
+    ] = _sha(semantic_bytes)
+
+
 def _attach_required_not_ready_product(
     raw: dict[str, object],
     outputs: dict[str, bytes | Path],
@@ -504,6 +527,7 @@ def test_portfolio_pipeline_builds_and_resumes_from_command_receipts(
     tmp_path: Path,
 ) -> None:
     raw, outputs, proposed = _portfolio_spec(tmp_path)
+    _as_execution_engine_fixture(raw, outputs)
     spec = PipelineSpec.from_json_bytes(json.dumps(raw).encode())
     calls: list[str] = []
 
@@ -549,6 +573,13 @@ def test_required_not_ready_financial_mvp_blocks_before_every_effect(
     assert plan["commit_effects"] == []
     assert plan["financial_mvp"]["ready_for_execution"] is False
     assert plan["financial_mvp"]["candidate_artifacts"]
+    gates = raw["gates"]
+    assert isinstance(gates, list)
+    hwm_gate = next(
+        row for row in gates if row["gate_id"] == "financial-mvp-hwm-input-authority"
+    )
+    hwm_input_authority = json.loads(Path(hwm_gate["path"]).read_text(encoding="utf-8"))
+    assert plan["financial_mvp"]["hwm_input_authority"] == hwm_input_authority
     assert len(plan["financial_mvp"]["data_class_dispositions"]) == 7
     assert {
         row["provider_id"] for row in plan["financial_mvp"]["data_class_dispositions"]
@@ -565,6 +596,115 @@ def test_required_not_ready_financial_mvp_blocks_before_every_effect(
     assert str(tmp_path) not in json.dumps(plan, sort_keys=True)
     assert calls == []
     assert not Path(raw["coordination_root"]).exists()
+
+
+def test_hwm_required_not_ready_blocks_ready_conformance_before_every_effect(
+    tmp_path: Path,
+) -> None:
+    raw, outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=True)
+    spec = PipelineSpec.from_json_bytes(json.dumps(raw).encode())
+    calls: list[str] = []
+
+    plan = plan_pipeline(spec)
+    assert plan["node_count"] == 0
+    assert plan["commit_effects"] == []
+    assert plan["financial_mvp"]["ready_for_execution"] is False
+    assert plan["financial_mvp"]["hwm_input_authority"]["state"] == (
+        "REQUIRED_NOT_READY"
+    )
+    with pytest.raises(
+        PipelineExecutionError, match="ACCEPTED_HWM_INPUT_GENERATION_ABSENT"
+    ):
+        execute_pipeline(spec, command_runner=_runner(outputs, calls))
+
+    assert calls == []
+    assert not Path(raw["coordination_root"]).exists()
+    assert not Path(str(raw["state_root"])).exists()
+
+
+def test_pre_hwm_schema_two_product_is_status_readable_and_recovery_only(
+    tmp_path: Path,
+) -> None:
+    raw, outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=False)
+    gates = raw["gates"]
+    assert isinstance(gates, list)
+    product_gate = next(
+        row for row in gates if row["gate_id"] == "financial-mvp-product-conformance"
+    )
+    product_path = Path(product_gate["path"])
+    product_authority = json.loads(product_path.read_text(encoding="utf-8"))
+    product_authority["schema_version"] = 2
+    product_bytes = canonical_json_bytes(product_authority)
+    product_path.write_bytes(product_bytes)
+    product_gate["sha256"] = _sha(product_bytes)
+    orchestration_path = Path(outputs["contract_path"])
+    orchestration = json.loads(orchestration_path.read_text(encoding="utf-8"))
+    orchestration["product_authority"] = product_authority
+    orchestration_bytes = canonical_json_bytes(orchestration)
+    orchestration_path.write_bytes(orchestration_bytes)
+    next(row for row in gates if row["gate_id"] == "portfolio-orchestration-contract")[
+        "sha256"
+    ] = _sha(orchestration_bytes)
+    raw["gates"] = [
+        row for row in gates if row["gate_id"] != "financial-mvp-hwm-input-authority"
+    ]
+    spec = PipelineSpec.from_json_bytes(json.dumps(raw).encode())
+
+    status = pipeline_status(spec)
+    assert status["financial_mvp"]["readiness"] == "REQUIRED_NOT_READY"
+    assert "hwm_input_authority" not in status["financial_mvp"]
+    with pytest.raises(PipelineValidationError, match="recovery-only"):
+        plan_pipeline(spec)
+
+
+def test_hwm_gate_rejects_product_schema_downgrade(tmp_path: Path) -> None:
+    raw, outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=False)
+    gates = raw["gates"]
+    assert isinstance(gates, list)
+    product_gate = next(
+        row for row in gates if row["gate_id"] == "financial-mvp-product-conformance"
+    )
+    product_path = Path(product_gate["path"])
+    product_authority = json.loads(product_path.read_text(encoding="utf-8"))
+    product_authority["schema_version"] = 2
+    product_bytes = canonical_json_bytes(product_authority)
+    product_path.write_bytes(product_bytes)
+    product_gate["sha256"] = _sha(product_bytes)
+    orchestration_path = Path(outputs["contract_path"])
+    orchestration = json.loads(orchestration_path.read_text(encoding="utf-8"))
+    orchestration["product_authority"] = product_authority
+    orchestration_bytes = canonical_json_bytes(orchestration)
+    orchestration_path.write_bytes(orchestration_bytes)
+    next(row for row in gates if row["gate_id"] == "portfolio-orchestration-contract")[
+        "sha256"
+    ] = _sha(orchestration_bytes)
+
+    with pytest.raises(PipelineValidationError, match="requires product schema 3"):
+        pipeline_status(PipelineSpec.from_json_bytes(json.dumps(raw).encode()))
+
+
+def test_hwm_input_assessment_rejects_coherent_candidate_rehash(
+    tmp_path: Path,
+) -> None:
+    raw, _outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=False)
+    gates = raw["gates"]
+    assert isinstance(gates, list)
+    hwm_gate = next(
+        row for row in gates if row["gate_id"] == "financial-mvp-hwm-input-authority"
+    )
+    hwm_path = Path(hwm_gate["path"])
+    candidate = json.loads(hwm_path.read_text(encoding="utf-8"))
+    candidate["state"] = "AVAILABLE"
+    candidate["input_generation_sha256"] = "f" * 64
+    changed = canonical_json_bytes(candidate)
+    hwm_path.write_bytes(changed)
+    hwm_gate["sha256"] = _sha(changed)
+
+    with pytest.raises(PipelineValidationError, match="HWM input authority differs"):
+        plan_pipeline(PipelineSpec.from_json_bytes(json.dumps(raw).encode()))
+
+    assert not Path(raw["coordination_root"]).exists()
+    assert not Path(str(raw["state_root"])).exists()
 
 
 def test_financial_mvp_contract_drift_rejects_coherent_gate_rehash(
@@ -767,6 +907,7 @@ def test_portfolio_pipeline_allows_one_workbook_resume_attempt(
     tmp_path: Path,
 ) -> None:
     raw, outputs, _ = _portfolio_spec(tmp_path)
+    _as_execution_engine_fixture(raw, outputs)
     spec = PipelineSpec.from_json_bytes(json.dumps(raw).encode())
     calls: list[str] = []
     successful_runner = _runner(outputs, calls)
@@ -830,6 +971,7 @@ def test_portfolio_pipeline_requires_explicit_stage_inputs(tmp_path: Path) -> No
 
 def test_post_build_semantic_failure_blocks_preparation(tmp_path: Path) -> None:
     raw, outputs, _ = _portfolio_spec(tmp_path, semantic_verdict="FAIL")
+    _as_execution_engine_fixture(raw, outputs)
     spec = PipelineSpec.from_json_bytes(json.dumps(raw).encode())
     previous = read_current(Path(outputs["target"])).generation_id
 
@@ -883,7 +1025,8 @@ def test_entrypoint_hash_is_verified_from_the_repository(tmp_path: Path) -> None
 
 
 def test_failed_source_acquisition_is_not_retried(tmp_path: Path) -> None:
-    raw, _, _ = _portfolio_spec(tmp_path)
+    raw, outputs, _ = _portfolio_spec(tmp_path)
+    _as_execution_engine_fixture(raw, outputs)
     spec = PipelineSpec.from_json_bytes(json.dumps(raw).encode())
     calls = 0
 

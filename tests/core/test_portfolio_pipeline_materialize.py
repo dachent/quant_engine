@@ -418,6 +418,7 @@ def test_create_recipe_binds_financial_mvp_authority_and_admission_receipt(
     PipelineSpec.from_json_bytes(spec_path.read_bytes())
     assert {
         "financial-mvp-contract-authority",
+        "financial-mvp-hwm-input-authority",
         "financial-mvp-product-conformance",
         "financial-mvp-provider-admission-authority",
         "financial-mvp-provider-catalog-authority",
@@ -426,12 +427,71 @@ def test_create_recipe_binds_financial_mvp_authority_and_admission_receipt(
         "portfolio-orchestration-contract",
         "post-build-semantic",
     } <= {row["gate_id"] for row in spec["gates"]}
+    hwm_gate = next(
+        gate
+        for gate in spec["gates"]
+        if gate["gate_id"] == "financial-mvp-hwm-input-authority"
+    )
+    assessment = json.loads(Path(hwm_gate["path"]).read_text(encoding="utf-8"))
+    assert assessment["schema_version"] == 1
+    assert assessment["assessment_scope"] == (
+        "CURRENT_PRODUCT_AND_PROVIDER_ADMISSION_ONLY"
+    )
+    assert assessment["outcome_id"] == "AS_HELD_COMPOSITE_HWM"
+    assert assessment["state"] == "REQUIRED_NOT_READY"
+    assert assessment["input_generation_sha256"] is None
+    assert assessment["calendar_authority_sha256"] is None
+    assert assessment["outcome_readiness"] == "NOT_DECLARED"
+    assert assessment["required_strategy_ids"] == ["strategy-1"]
+    assert assessment["unresolved_source_ids"] == []
+    assert assessment["blocking_reasons"] == [
+        "ACCEPTED_HWM_INPUT_GENERATION_ABSENT",
+        "ACCEPTED_MIXED_CALENDAR_AUTHORITY_ABSENT",
+        "OUTCOME:AS_HELD_COMPOSITE_HWM",
+    ]
+    assert (
+        assessment["authority_hashes"]["provider_receipt_sha256"]
+        == (accepted["product_authority"]["provider_generation"]["receipt"]["sha256"])
+    )
+    assert (
+        hashlib.sha256(canonical_json_bytes(assessment)).hexdigest()
+        == hwm_gate["sha256"]
+    )
+    missing_source_authority = json.loads(
+        canonical_json_bytes(accepted["product_authority"])
+    )
+    missing_source = missing_source_authority["conformance"]["sources"][0]
+    missing_source["consumers"] = sorted(
+        {*missing_source["consumers"], "AS_HELD_COMPOSITE_HWM"}
+    )
+    missing_source["capture_status"] = "NOT_CAPTURED"
+    missing_source["existence_status"] = "DOES_NOT_EXIST"
+    missing_source["readiness"] = "REQUIRED_NOT_READY"
+    missing_source["blockers"] = [324]
+    missing_source["current_generation"] = {
+        "as_of": None,
+        "generation_id": None,
+        "sha256": None,
+    }
+    missing_source_assessment = materializer._hwm_input_authority_assessment(
+        missing_source_authority
+    )
+    assert missing_source_assessment["unresolved_source_ids"] == [
+        missing_source["source_id"]
+    ]
+    assert missing_source_assessment["blocking_reasons"] == [
+        "ACCEPTED_HWM_INPUT_GENERATION_ABSENT",
+        "ACCEPTED_MIXED_CALENDAR_AUTHORITY_ABSENT",
+        "OUTCOME:AS_HELD_COMPOSITE_HWM",
+        f"SOURCE:{missing_source['source_id']}",
+    ]
     orchestration = json.loads(
         spec_path.with_name("portfolio-orchestration-contract.json").read_text(
             encoding="utf-8"
         )
     )
     assert orchestration["schema_version"] == 2
+    assert orchestration["product_authority"]["schema_version"] == 3
     assert orchestration["product_authority"] == materializer._product_gate_payload(
         accepted["product_authority"]
     )
@@ -936,6 +996,40 @@ def test_production_spec_binds_stable_twenty_root_authority(
     assert production_plan["node_count"] == 0
     assert production_plan["commit_effects"] == []
     assert production_plan["financial_mvp"]["ready_for_execution"] is False
+
+    pre_hwm = json.loads(spec_path.read_text(encoding="utf-8"))
+    pre_hwm_product = dict(production_authority)
+    pre_hwm_product["schema_version"] = 2
+    pre_hwm_product_bytes = canonical_json_bytes(pre_hwm_product)
+    product_gate.path.write_bytes(pre_hwm_product_bytes)
+    pre_hwm_product_sha256 = hashlib.sha256(pre_hwm_product_bytes).hexdigest()
+    next(
+        row
+        for row in pre_hwm["gates"]
+        if row["gate_id"] == "financial-mvp-product-conformance"
+    )["sha256"] = pre_hwm_product_sha256
+    pre_hwm["gates"] = [
+        row
+        for row in pre_hwm["gates"]
+        if row["gate_id"] != "financial-mvp-hwm-input-authority"
+    ]
+    pre_hwm_production_contract = dict(production_contract)
+    pre_hwm_production_contract["product_authority_sha256"] = pre_hwm_product_sha256
+    pre_hwm_production_bytes = canonical_json_bytes(pre_hwm_production_contract)
+    Path(result["contract"]).write_bytes(pre_hwm_production_bytes)
+    next(
+        row
+        for row in pre_hwm["gates"]
+        if row["gate_id"] == "port-underwrite-production-rebind"
+    )["sha256"] = hashlib.sha256(pre_hwm_production_bytes).hexdigest()
+    pre_hwm_spec = PipelineSpec.from_json_bytes(canonical_json_bytes(pre_hwm))
+    pre_hwm_status = pipeline_status(pre_hwm_spec)
+    assert pre_hwm_status["financial_mvp"]["ready_for_execution"] is False
+    assert "hwm_input_authority" not in pre_hwm_status["financial_mvp"]
+    with pytest.raises(PipelineValidationError, match="recovery-only"):
+        plan_pipeline(pre_hwm_spec)
+    product_gate.path.write_bytes(canonical_json_bytes(production_authority))
+    Path(result["contract"]).write_bytes(canonical_json_bytes(production_contract))
 
     rewritten = json.loads(spec_path.read_text(encoding="utf-8"))
     rewritten_contract = dict(production_contract)

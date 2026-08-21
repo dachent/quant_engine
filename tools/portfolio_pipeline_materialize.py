@@ -1148,7 +1148,94 @@ def _product_gate_payload(authority: Mapping[str, Any]) -> dict[str, Any]:
             "source_matrix_sha256": authority["source_matrix"]["sha256"],
         },
         "conformance": _canonical_clone(authority["conformance"]),
-        "schema_version": 2,
+        "schema_version": 3,
+    }
+
+
+def _hwm_input_authority_assessment(
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project the accepted runtime authority that exists for PORT-HWM-4 inputs.
+
+    This is deliberately an assessment, not an input generation.  It binds the
+    current product/provider authority while naming the accepted authorities
+    that are still absent; it cannot promote portable inputs or call the HWM
+    calculator.
+    """
+
+    conformance = authority.get("conformance")
+    provider = authority.get("provider_generation")
+    if not isinstance(conformance, Mapping) or not isinstance(provider, Mapping):
+        raise MaterializationError("financial MVP HWM authority differs")
+    sources = conformance.get("sources")
+    outcomes = conformance.get("outcomes")
+    strategies = conformance.get("strategies")
+    if (
+        not isinstance(sources, list)
+        or not isinstance(outcomes, list)
+        or not isinstance(strategies, list)
+    ):
+        raise MaterializationError("financial MVP HWM authority differs")
+
+    hwm_outcomes = [
+        row
+        for row in outcomes
+        if isinstance(row, Mapping) and row.get("outcome_id") == "AS_HELD_COMPOSITE_HWM"
+    ]
+    if len(hwm_outcomes) > 1:
+        raise MaterializationError("financial MVP HWM outcome is ambiguous")
+    unresolved_source_ids = sorted(
+        str(row["source_id"])
+        for row in sources
+        if isinstance(row, Mapping)
+        and isinstance(row.get("consumers"), list)
+        and "AS_HELD_COMPOSITE_HWM" in row["consumers"]
+        and isinstance(row.get("current_generation"), Mapping)
+        and (
+            row["current_generation"].get("generation_id") is None
+            or row["current_generation"].get("sha256") is None
+        )
+    )
+    required_strategy_ids = sorted(
+        str(row["strategy_id"])
+        for row in strategies
+        if isinstance(row, Mapping) and row.get("product_requirement") == "REQUIRED"
+    )
+    outcome_readiness = (
+        str(hwm_outcomes[0].get("readiness")) if hwm_outcomes else "NOT_DECLARED"
+    )
+    blockers = {
+        "ACCEPTED_HWM_INPUT_GENERATION_ABSENT",
+        "ACCEPTED_MIXED_CALENDAR_AUTHORITY_ABSENT",
+        *({"OUTCOME:AS_HELD_COMPOSITE_HWM"} if outcome_readiness != "READY" else set()),
+        *(f"SOURCE:{source_id}" for source_id in unresolved_source_ids),
+    }
+    provider_admission = conformance.get("provider_admission")
+    if not isinstance(provider_admission, Mapping):
+        raise MaterializationError("financial MVP HWM provider authority differs")
+    if provider_admission.get("product_readiness") != "READY_FOR_COMPOSITION":
+        blockers.add("PROVIDER_ADMISSION")
+
+    return {
+        "assessment_scope": "CURRENT_PRODUCT_AND_PROVIDER_ADMISSION_ONLY",
+        "authority_hashes": {
+            "census_sha256": conformance["census_sha256"],
+            "contract_raw_sha256": authority["contract"]["sha256"],
+            "contract_semantic_sha256": conformance["contract_semantic_sha256"],
+            "provider_catalog_sha256": provider["catalog"]["sha256"],
+            "provider_manifest_sha256": provider["manifest"]["sha256"],
+            "provider_receipt_sha256": provider["receipt"]["sha256"],
+            "source_matrix_sha256": authority["source_matrix"]["sha256"],
+        },
+        "blocking_reasons": sorted(blockers),
+        "calendar_authority_sha256": None,
+        "input_generation_sha256": None,
+        "outcome_id": "AS_HELD_COMPOSITE_HWM",
+        "outcome_readiness": outcome_readiness,
+        "required_strategy_ids": required_strategy_ids,
+        "schema_version": 1,
+        "state": "REQUIRED_NOT_READY",
+        "unresolved_source_ids": unresolved_source_ids,
     }
 
 
@@ -1174,6 +1261,16 @@ def _product_gate_rows(
             "sha256": hashlib.sha256(product_bytes).hexdigest(),
         }
     ]
+    hwm_path = product_path.with_name("financial-mvp-hwm-input-authority.json")
+    hwm_bytes = canonical_json_bytes(_hwm_input_authority_assessment(authority))
+    _write_exact(hwm_path, hwm_bytes)
+    rows.append(
+        {
+            "gate_id": "financial-mvp-hwm-input-authority",
+            "path": str(hwm_path),
+            "sha256": hashlib.sha256(hwm_bytes).hexdigest(),
+        }
+    )
     for key, gate_id in PRODUCT_AUTHORITY_GATE_IDS.items():
         definition = definitions[key]
         rows.append(
