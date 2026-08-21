@@ -296,10 +296,10 @@ def validate_as_held_hwm_policy(policy: Mapping[str, Any]) -> None:
         raise HwmCoverageError("HWM release calendar authority status differs")
     if (
         not isinstance(accepted_calendar_ids, list)
-        or len(accepted_calendar_ids) != len(set(accepted_calendar_ids))
         or any(
             not isinstance(value, str) or not value for value in accepted_calendar_ids
         )
+        or len(accepted_calendar_ids) != len(set(accepted_calendar_ids))
         or (release_calendar_status == "REQUIRED_NOT_READY" and accepted_calendar_ids)
         or (release_calendar_status == "READY" and not accepted_calendar_ids)
         or calendar_policy["portable_synthetic_policy_id"]
