@@ -501,6 +501,15 @@ def _bind_receipt_to_generation(
     return generation_bytes
 
 
+def _generation_binding_kwargs(fixture: dict[str, object]) -> dict[str, bytes]:
+    return {
+        "product_contract_bytes": fixture["product_contract_bytes"],  # type: ignore[dict-item]
+        "performance_policy_bytes": fixture["performance_policy_bytes"],  # type: ignore[dict-item]
+        "legacy_policy_bytes": fixture["legacy_policy_bytes"],  # type: ignore[dict-item]
+        "calendar_bytes": fixture["calendar_bytes"],  # type: ignore[dict-item]
+    }
+
+
 def _refresh_membership_evidence(row: dict[str, object]) -> None:
     row["membership_evidence_sha256"] = _fixture_sha256(
         {
@@ -2250,10 +2259,11 @@ def test_generation_binding_rejects_coherent_unadmitted_subperiod_evidence() -> 
     )
     _refresh_receipt_self_hashes(receipt)
 
-    with pytest.raises(HwmCoverageError, match="evidence is not admitted"):
+    with pytest.raises(HwmCoverageError, match="generation evidence differs"):
         validate_as_held_hwm_receipt_generation_binding(
             receipt,
             fixture["input_generation_bytes"],  # type: ignore[arg-type]
+            **_generation_binding_kwargs(fixture),
         )
 
 
@@ -2265,7 +2275,11 @@ def test_generation_binding_rejects_declared_component_mode_mismatch() -> None:
     generation_bytes = _bind_receipt_to_generation(receipt, generation)
 
     with pytest.raises(HwmCoverageError, match="component financial modes differ"):
-        validate_as_held_hwm_receipt_generation_binding(receipt, generation_bytes)
+        validate_as_held_hwm_receipt_generation_binding(
+            receipt,
+            generation_bytes,
+            **_generation_binding_kwargs(fixture),
+        )
 
 
 def test_generation_binding_rejects_membership_payload_rewrite() -> None:
@@ -2279,6 +2293,7 @@ def test_generation_binding_rejects_membership_payload_rewrite() -> None:
         validate_as_held_hwm_receipt_generation_binding(
             receipt,
             fixture["input_generation_bytes"],  # type: ignore[arg-type]
+            **_generation_binding_kwargs(fixture),
         )
 
 
@@ -2290,7 +2305,52 @@ def test_generation_binding_rejects_authority_header_mismatch() -> None:
     generation_bytes = _bind_receipt_to_generation(receipt, generation)
 
     with pytest.raises(HwmCoverageError, match="generation authority differs"):
-        validate_as_held_hwm_receipt_generation_binding(receipt, generation_bytes)
+        validate_as_held_hwm_receipt_generation_binding(
+            receipt,
+            generation_bytes,
+            **_generation_binding_kwargs(fixture),
+        )
+
+
+def test_generation_binding_rejects_incomplete_evidence_registry() -> None:
+    fixture = _as_held_direct_net_return_fixture()
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+    generation = json.loads(fixture["input_generation_bytes"])  # type: ignore[arg-type]
+    calendar = json.loads(fixture["calendar_bytes"])  # type: ignore[arg-type]
+    generation["evidence_sha256s"].remove(calendar["authority_evidence_sha256"])
+    generation_bytes = _bind_receipt_to_generation(receipt, generation)
+
+    with pytest.raises(HwmCoverageError, match="generation evidence differs"):
+        validate_as_held_hwm_receipt_generation_binding(
+            receipt,
+            generation_bytes,
+            **_generation_binding_kwargs(fixture),
+        )
+
+
+@pytest.mark.parametrize(
+    "authority_field",
+    [
+        "product_contract_sha256",
+        "performance_policy_sha256",
+        "legacy_policy_sha256",
+    ],
+)
+def test_generation_binding_rejects_untrusted_authority_hash(
+    authority_field: str,
+) -> None:
+    fixture = _as_held_direct_net_return_fixture()
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+    generation = json.loads(fixture["input_generation_bytes"])  # type: ignore[arg-type]
+    generation["authority_bindings"][authority_field] = "b" * 64
+    generation_bytes = _bind_receipt_to_generation(receipt, generation)
+
+    with pytest.raises(HwmCoverageError, match="generation authority differs"):
+        validate_as_held_hwm_receipt_generation_binding(
+            receipt,
+            generation_bytes,
+            **_generation_binding_kwargs(fixture),
+        )
 
 
 def test_as_held_hwm_receipt_rejects_missing_independent_capital_anchor() -> None:
@@ -2326,6 +2386,23 @@ def test_as_held_hwm_receipt_rejects_membership_exit_with_residual_nav() -> None
     _refresh_receipt_self_hashes(receipt)
 
     with pytest.raises(HwmCoverageError, match="membership exit retains residual NAV"):
+        as_held_hwm_receipt(receipt)
+
+
+def test_as_held_hwm_receipt_rejects_zero_nav_for_ongoing_membership() -> None:
+    fixture = _single_strategy_flow_fixture(external_flow="-100")
+    membership = fixture["memberships"][0]  # type: ignore[index]
+    membership["effective_end"] = "2026-08-11"
+    _refresh_fixture_authorities(fixture)
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+    receipt_membership = receipt["input_evidence"]["memberships"][0]  # type: ignore[index]
+    receipt_membership["effective_end"] = None
+    _refresh_membership_evidence(receipt_membership)
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(
+        HwmCoverageError, match="ongoing membership has zero ending NAV"
+    ):
         as_held_hwm_receipt(receipt)
 
 
@@ -2366,7 +2443,11 @@ def test_as_held_hwm_v3_numeric_schema_version_round_trips_as_integer() -> None:
     assert receipt["schema_version"] == 3
     assert isinstance(receipt["schema_version"], int)
     assert (
-        validate_as_held_hwm_receipt_generation_binding(receipt, generation_bytes)
+        validate_as_held_hwm_receipt_generation_binding(
+            receipt,
+            generation_bytes,
+            **_generation_binding_kwargs(fixture),
+        )
         == receipt
     )
     verify_as_held_hwm_receipt(
@@ -2415,6 +2496,7 @@ def test_as_held_hwm_receipt_generation_binding_rejects_schema_downgrade() -> No
         validate_as_held_hwm_receipt_generation_binding(
             v2_receipt,
             v3_fixture["input_generation_bytes"],
+            **_generation_binding_kwargs(v3_fixture),
         )
 
 

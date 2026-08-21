@@ -1519,15 +1519,24 @@ def _panel_portable_hwm_proof(
     """Independently project a verified portable proof for panel reconciliation."""
 
     try:
+        policy_bytes = _PORTABLE_HWM_POLICY.read_bytes()
+        product_contract_bytes = _PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes()
+        performance_policy_bytes = _PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes()
+        legacy_policy_bytes = HWM_POLICY.read_bytes()
         accepted = validate_as_held_hwm_receipt_generation_binding(
-            receipt, input_generation_bytes
+            receipt,
+            input_generation_bytes,
+            product_contract_bytes=product_contract_bytes,
+            performance_policy_bytes=performance_policy_bytes,
+            legacy_policy_bytes=legacy_policy_bytes,
+            calendar_bytes=calendar_bytes,
         )
         verify_as_held_hwm_receipt(
             accepted,
-            policy_bytes=_PORTABLE_HWM_POLICY.read_bytes(),
-            product_contract_bytes=_PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes(),
-            performance_policy_bytes=_PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes(),
-            legacy_policy_bytes=HWM_POLICY.read_bytes(),
+            policy_bytes=policy_bytes,
+            product_contract_bytes=product_contract_bytes,
+            performance_policy_bytes=performance_policy_bytes,
+            legacy_policy_bytes=legacy_policy_bytes,
             calendar_bytes=calendar_bytes,
             input_generation_bytes=input_generation_bytes,
         )

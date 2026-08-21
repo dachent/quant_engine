@@ -3650,6 +3650,13 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
             raise HwmCoverageError(
                 "as-held HWM receipt membership exit retains residual NAV"
             )
+        if (
+            component_membership["effective_end"] != component_interval["interval_end"]
+            and ending_nav == 0
+        ):
+            raise HwmCoverageError(
+                "as-held HWM receipt ongoing membership has zero ending NAV"
+            )
         components_by_strategy[strategy_id].append(
             {
                 "interval_id": interval_id,
@@ -3789,7 +3796,13 @@ def as_held_hwm_receipt_bytes(result: Mapping[str, Any]) -> bytes:
 
 
 def validate_as_held_hwm_receipt_generation_binding(
-    receipt: Mapping[str, Any], input_generation_bytes: bytes
+    receipt: Mapping[str, Any],
+    input_generation_bytes: bytes,
+    *,
+    product_contract_bytes: bytes,
+    performance_policy_bytes: bytes,
+    legacy_policy_bytes: bytes,
+    calendar_bytes: bytes,
 ) -> dict[str, Any]:
     """Bind a portable receipt to the exact generation bytes supplied with it."""
 
@@ -3857,14 +3870,46 @@ def validate_as_held_hwm_receipt_generation_binding(
         field_name: _sha256(value, f"HWM input authority {field_name}")
         for field_name, value in authority_bindings.items()
     }
+    expected_authority_bindings = {
+        "policy_sha256": accepted["policy_sha256"],
+        "policy_semantic_digest": accepted["policy_semantic_digest"],
+        "product_contract_sha256": hashlib.sha256(product_contract_bytes).hexdigest(),
+        "performance_policy_sha256": hashlib.sha256(
+            performance_policy_bytes
+        ).hexdigest(),
+        "legacy_policy_sha256": hashlib.sha256(legacy_policy_bytes).hexdigest(),
+        "calendar_sha256": hashlib.sha256(calendar_bytes).hexdigest(),
+    }
     if (
-        normalized_authority_bindings["policy_sha256"] != accepted["policy_sha256"]
-        or normalized_authority_bindings["policy_semantic_digest"]
-        != accepted["policy_semantic_digest"]
-        or normalized_authority_bindings["calendar_sha256"]
-        != accepted["calendar_sha256"]
+        normalized_authority_bindings != expected_authority_bindings
+        or expected_authority_bindings["calendar_sha256"] != accepted["calendar_sha256"]
     ):
         raise HwmCoverageError("as-held HWM receipt generation authority differs")
+
+    calendar = _json_mapping_from_bytes(calendar_bytes, "calendar_bytes")
+    _strict_keys(
+        calendar,
+        {
+            "schema_version",
+            "calendar_policy_id",
+            "authority_status",
+            "accepted_intervals",
+            "authority_evidence_sha256",
+        },
+        "calendar",
+    )
+    calendar_evidence_sha256 = _sha256(
+        calendar["authority_evidence_sha256"],
+        "calendar.authority_evidence_sha256",
+    )
+    if calendar_evidence_sha256 != _canonical_sha256(
+        {
+            key: value
+            for key, value in calendar.items()
+            if key != "authority_evidence_sha256"
+        }
+    ):
+        raise HwmCoverageError("as-held HWM receipt generation evidence differs")
 
     evidence_values = generation["evidence_sha256s"]
     if not isinstance(evidence_values, list) or not evidence_values:
@@ -3927,8 +3972,28 @@ def validate_as_held_hwm_receipt_generation_binding(
             )
             for subperiod in subperiods
         )
-    if not receipt_evidence_sha256s <= evidence_registry:
-        raise HwmCoverageError("as-held HWM receipt evidence is not admitted")
+    flow_event_values = generation["flow_events"]
+    if not isinstance(flow_event_values, list):
+        raise HwmCoverageError("as-held HWM receipt generation evidence differs")
+    generation_only_evidence_sha256s = {calendar_evidence_sha256}
+    for event_value in flow_event_values:
+        event = _mapping(event_value, "HWM input flow event")
+        generation_only_evidence_sha256s.update(
+            {
+                _sha256(
+                    event.get("event_evidence_sha256"),
+                    "HWM input flow event evidence",
+                ),
+                _sha256(
+                    event.get("fx_generation_sha256"),
+                    "HWM input flow event FX generation",
+                ),
+            }
+        )
+    if evidence_registry != (
+        receipt_evidence_sha256s | generation_only_evidence_sha256s
+    ):
+        raise HwmCoverageError("as-held HWM receipt generation evidence differs")
 
     if schema_version == 3:
         declared_modes = generation["component_financial_modes"]
