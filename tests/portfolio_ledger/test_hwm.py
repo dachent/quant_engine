@@ -437,6 +437,30 @@ def _fixture_sha256(value: dict[str, object]) -> str:
     ).hexdigest()
 
 
+def _refresh_receipt_self_hashes(receipt: dict[str, object]) -> None:
+    evidence = receipt["input_evidence"]
+    assert isinstance(evidence, dict)
+    normalized_input = {
+        "policy_id": receipt["policy_id"],
+        "policy_sha256": receipt["policy_sha256"],
+        "policy_semantic_digest": receipt["policy_semantic_digest"],
+        "calendar_sha256": receipt["calendar_sha256"],
+        "input_generation_sha256": receipt["input_generation_sha256"],
+        "input_authority_class": receipt["input_authority_class"],
+        "calendar_authority_status": receipt["calendar_authority_status"],
+        "return_basis": receipt["return_basis"],
+        "evaluated_on": receipt["evaluated_on"],
+        "complete_through": receipt["complete_through"],
+        "maximum_age_days": receipt["maximum_age_days"],
+        "assurance_profile": receipt["assurance_profile"],
+        **evidence,
+    }
+    receipt["input_sha256"] = _fixture_sha256(normalized_input)
+    receipt["receipt_sha256"] = _fixture_sha256(
+        {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    )
+
+
 def _refresh_membership_evidence(row: dict[str, object]) -> None:
     row["membership_evidence_sha256"] = _fixture_sha256(
         {
@@ -1736,6 +1760,127 @@ def test_as_held_hwm_direct_mode_rejects_fabricated_zero_leverage() -> None:
         _compute_as_held(fixture)
 
 
+@pytest.mark.parametrize(
+    "forbidden_field",
+    [
+        "beginning_gross_assets_usd",
+        "beginning_financing_liability_usd",
+        "ending_gross_assets_before_flow_usd",
+        "ending_financing_liability_before_flow_usd",
+        "margin_principal_flow_after_subperiod_usd",
+        "financing_cost_usd",
+    ],
+)
+def test_as_held_hwm_direct_mode_rejects_forbidden_subperiod_fields(
+    forbidden_field: str,
+) -> None:
+    fixture = _as_held_direct_net_return_fixture()
+    subperiod = fixture["component_periods"][0]["subperiods"][0]  # type: ignore[index]
+    subperiod[forbidden_field] = "0"
+
+    with pytest.raises(
+        HwmCoverageError, match=r"component\.subperiods\[0\] keys differ"
+    ):
+        _compute_as_held(fixture)
+
+
+def test_as_held_hwm_direct_mode_rejects_offsetting_margin_events() -> None:
+    fixture = _as_held_direct_net_return_fixture()
+    periods: list[dict[str, object]] = fixture["component_periods"]  # type: ignore[assignment]
+    component = periods[0]
+    subperiod = component["subperiods"][0]  # type: ignore[index]
+    generation = json.loads(fixture["input_generation_bytes"])  # type: ignore[arg-type]
+    product_sha256 = hashlib.sha256(_PRODUCT_CONTRACT_BYTES).hexdigest()
+
+    margin_events = []
+    for event_type, amount in (("MARGIN_BORROW", "10"), ("MARGIN_REPAYMENT", "-10")):
+        event_without_evidence = {
+            "event_id": f"{component['strategy_id']}:{component['interval_id']}:{event_type}",
+            "strategy_id": component["strategy_id"],
+            "interval_id": component["interval_id"],
+            "subperiod_id": subperiod["subperiod_id"],
+            "event_type": event_type,
+            "capital_treatment": "MARGIN_PRINCIPAL",
+            "effective_at_utc": subperiod["subperiod_end_utc"],
+            "effective_timezone": "UTC",
+            "timing_basis": "DATE_ONLY_END_OF_DAY",
+            "original_amount": amount,
+            "original_currency": "USD",
+            "fx_rate_to_usd": "1",
+            "fx_authority_id": "IDENTITY_USD",
+            "fx_generation_sha256": _IDENTITY_USD_SHA256,
+            "usd_amount": amount,
+            "correction_kind": "ORIGINAL",
+            "related_event_id": None,
+            "transfer_group_id": None,
+            "counterparty_strategy_id": None,
+            "classification_authority_sha256": product_sha256,
+        }
+        margin_events.append(
+            {
+                **event_without_evidence,
+                "event_evidence_sha256": _fixture_sha256(event_without_evidence),
+            }
+        )
+    generation["flow_events"].extend(margin_events)
+
+    subperiod_without_evidence = {
+        key: value
+        for key, value in subperiod.items()
+        if key != "flow_event_evidence_sha256"
+    }
+    subperiod["flow_event_evidence_sha256"] = _fixture_sha256(
+        {
+            "schema_version": 3,
+            "evidence_type": "FLOW_EVENT",
+            "component_financial_mode": component["component_financial_mode"],
+            "strategy_id": component["strategy_id"],
+            "interval_id": component["interval_id"],
+            "subperiod": {
+                **subperiod_without_evidence,
+                "flow_event_ids": [event["event_id"] for event in margin_events],
+                "flow_event_sha256s": [
+                    event["event_evidence_sha256"] for event in margin_events
+                ],
+            },
+        }
+    )
+    component_common = {
+        "schema_version": 2,
+        "component_financial_mode": component["component_financial_mode"],
+        "strategy_id": component["strategy_id"],
+        "interval_id": component["interval_id"],
+    }
+    component["flow_reconciliation_sha256"] = _fixture_sha256(
+        {
+            **component_common,
+            "evidence_type": "FLOW_RECONCILIATION",
+            "flow_timing": component["flow_timing"],
+            "external_flow_usd": component["external_flow_usd"],
+            "internal_transfer_usd": component["internal_transfer_usd"],
+            "subperiod_flow_evidence_sha256s": [
+                subperiod["flow_event_evidence_sha256"]
+            ],
+        }
+    )
+    component["return_evidence_sha256"] = _fixture_sha256(
+        _direct_return_evidence_payload(component)
+    )
+    fixture["input_generation_bytes"] = (
+        json.dumps(
+            generation,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    _refresh_v3_generation(fixture, ["DIRECT_NET_TOTAL_FLOW_NEUTRAL_RETURN"])
+
+    with pytest.raises(HwmCoverageError, match="component flow facts differ"):
+        _compute_as_held(fixture)
+
+
 def test_as_held_hwm_direct_mode_cannot_downgrade_to_schema_two() -> None:
     fixture = _as_held_direct_net_return_fixture()
     generation = json.loads(fixture["input_generation_bytes"])  # type: ignore[arg-type]
@@ -1964,27 +2109,112 @@ def test_as_held_hwm_v3_direct_receipt_rejects_forbidden_component_fields(
     component[forbidden_field] = (
         "a" * 64 if forbidden_field == "leverage_evidence_sha256" else "0"
     )
-    evidence = receipt["input_evidence"]
-    normalized_input = {
-        "policy_id": receipt["policy_id"],
-        "policy_sha256": receipt["policy_sha256"],
-        "policy_semantic_digest": receipt["policy_semantic_digest"],
-        "calendar_sha256": receipt["calendar_sha256"],
-        "input_generation_sha256": receipt["input_generation_sha256"],
-        "input_authority_class": receipt["input_authority_class"],
-        "calendar_authority_status": receipt["calendar_authority_status"],
-        "return_basis": receipt["return_basis"],
-        "evaluated_on": receipt["evaluated_on"],
-        "complete_through": receipt["complete_through"],
-        "maximum_age_days": receipt["maximum_age_days"],
-        "assurance_profile": receipt["assurance_profile"],
-        **evidence,  # type: ignore[arg-type]
-    }
-    receipt["input_sha256"] = _fixture_sha256(normalized_input)
-    unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
-    receipt["receipt_sha256"] = _fixture_sha256(unsigned)
+    _refresh_receipt_self_hashes(receipt)
 
     with pytest.raises(HwmCoverageError, match="receipt input component keys differ"):
+        as_held_hwm_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "forbidden_field",
+    [
+        "beginning_gross_assets_usd",
+        "beginning_financing_liability_usd",
+        "ending_gross_assets_before_flow_usd",
+        "ending_financing_liability_before_flow_usd",
+        "margin_principal_flow_after_subperiod_usd",
+        "financing_cost_usd",
+    ],
+)
+def test_as_held_hwm_v3_direct_receipt_rejects_forbidden_subperiod_fields(
+    forbidden_field: str,
+) -> None:
+    receipt = as_held_hwm_receipt(
+        _compute_as_held(_as_held_direct_net_return_fixture())
+    )
+    subperiod = receipt["input_evidence"]["component_periods"][0]["subperiods"][0]  # type: ignore[index]
+    subperiod[forbidden_field] = "0"
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(HwmCoverageError, match="receipt input subperiod keys differ"):
+        as_held_hwm_receipt(receipt)
+
+
+def test_as_held_hwm_receipt_rejects_unhashable_schema_version() -> None:
+    receipt = as_held_hwm_receipt(
+        _compute_as_held(_as_held_direct_net_return_fixture())
+    )
+    receipt["schema_version"] = []
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(HwmCoverageError, match="receipt identity is invalid"):
+        as_held_hwm_receipt(receipt)
+
+
+def test_as_held_hwm_v3_numeric_schema_version_round_trips_as_integer() -> None:
+    fixture = _as_held_direct_net_return_fixture()
+    generation = json.loads(fixture["input_generation_bytes"])  # type: ignore[arg-type]
+    generation["schema_version"] = 3.0
+    generation_bytes = (
+        json.dumps(
+            generation,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    generation_sha256 = hashlib.sha256(generation_bytes).hexdigest()
+    periods = fixture["component_periods"]
+    assert isinstance(periods, list)
+    for period in periods:
+        assert isinstance(period, dict)
+        period["portable_input_generation_sha256"] = generation_sha256
+    fixture["input_generation_bytes"] = generation_bytes
+
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+
+    assert receipt["schema_version"] == 3
+    assert isinstance(receipt["schema_version"], int)
+    assert (
+        validate_as_held_hwm_receipt_generation_binding(receipt, generation_bytes)
+        == receipt
+    )
+    verify_as_held_hwm_receipt(
+        receipt,
+        policy_bytes=fixture["policy_bytes"],  # type: ignore[arg-type]
+        product_contract_bytes=fixture["product_contract_bytes"],  # type: ignore[arg-type]
+        performance_policy_bytes=fixture["performance_policy_bytes"],  # type: ignore[arg-type]
+        legacy_policy_bytes=fixture["legacy_policy_bytes"],  # type: ignore[arg-type]
+        calendar_bytes=fixture["calendar_bytes"],  # type: ignore[arg-type]
+        input_generation_bytes=generation_bytes,
+    )
+
+
+@pytest.mark.parametrize(
+    ("collection_name", "expected_error"),
+    [
+        ("accepted_intervals", "receipt input interval keys differ"),
+        ("memberships", "receipt input membership keys differ"),
+    ],
+)
+def test_as_held_hwm_v3_receipt_rejects_forbidden_evidence_row_fields(
+    collection_name: str,
+    expected_error: str,
+) -> None:
+    receipt = as_held_hwm_receipt(
+        _compute_as_held(_as_held_direct_net_return_fixture())
+    )
+    evidence = receipt["input_evidence"]
+    assert isinstance(evidence, dict)
+    rows = evidence[collection_name]
+    assert isinstance(rows, list)
+    row = rows[0]
+    assert isinstance(row, dict)
+    row["unexpected"] = "forbidden"
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(HwmCoverageError, match=expected_error):
         as_held_hwm_receipt(receipt)
 
 

@@ -26,6 +26,18 @@ _PORTABLE_INPUT_AUTHORITY: Final = "PORTABLE_SYNTHETIC"
 _PORTABLE_PROOF_STATUS: Final = "PORTABLE_SYNTHETIC_PROOF"
 _DETAILED_COMPONENT_MODE: Final = AS_HELD_HWM_DETAILED_COMPONENT_MODE
 _DIRECT_NET_COMPONENT_MODE: Final = AS_HELD_HWM_DIRECT_NET_COMPONENT_MODE
+_INPUT_INTERVAL_KEYS: Final = {
+    "interval_id",
+    "interval_start",
+    "interval_end",
+    "interval_evidence_sha256",
+}
+_INPUT_MEMBERSHIP_KEYS: Final = {
+    "strategy_id",
+    "effective_start",
+    "effective_end",
+    "membership_evidence_sha256",
+}
 _FLOW_EVENT_TREATMENTS: Final = {
     "OWNER_CONTRIBUTION": "EXTERNAL_FLOW",
     "OWNER_WITHDRAWAL": "EXTERNAL_FLOW",
@@ -116,6 +128,12 @@ def _strict_keys(value: Mapping[str, Any], expected: set[str], field_name: str) 
         )
 
 
+def _generation_schema_version(value: object, error_message: str) -> int:
+    if isinstance(value, bool) or value not in (2, 3):
+        raise HwmCoverageError(error_message)
+    return int(value)
+
+
 def _component_period_keys(
     schema_version: int,
     component_financial_mode: str,
@@ -169,6 +187,31 @@ def _component_period_keys(
             "component_financial_mode",
             "portable_input_generation_sha256",
             "portable_return_basis_declaration_sha256",
+        }
+    raise HwmCoverageError("component financial mode is invalid")
+
+
+def _component_subperiod_keys(component_financial_mode: str) -> set[str]:
+    common_keys = {
+        "subperiod_id",
+        "subperiod_start_utc",
+        "subperiod_end_utc",
+        "beginning_nav_usd",
+        "ending_nav_before_flow_usd",
+        "external_flow_after_subperiod_usd",
+        "internal_transfer_after_subperiod_usd",
+        "flow_event_evidence_sha256",
+    }
+    if component_financial_mode == _DIRECT_NET_COMPONENT_MODE:
+        return common_keys
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        return common_keys | {
+            "beginning_gross_assets_usd",
+            "beginning_financing_liability_usd",
+            "ending_gross_assets_before_flow_usd",
+            "ending_financing_liability_before_flow_usd",
+            "margin_principal_flow_after_subperiod_usd",
+            "financing_cost_usd",
         }
     raise HwmCoverageError("component financial mode is invalid")
 
@@ -904,19 +947,13 @@ def _compute_as_held_composite_hwm(
         raise HwmCoverageError("complete_through cannot be after evaluated_on")
     age_days = (evaluation_date - complete_date).days
 
-    interval_keys = {
-        "interval_id",
-        "interval_start",
-        "interval_end",
-        "interval_evidence_sha256",
-    }
     normalized_intervals: list[dict[str, str]] = []
     interval_by_id: dict[str, dict[str, Any]] = {}
     previous_end: date | None = None
     for index, original in enumerate(accepted_intervals):
         if not isinstance(original, Mapping):
             raise HwmCoverageError("accepted interval must be an object")
-        _strict_keys(original, interval_keys, f"accepted_intervals[{index}]")
+        _strict_keys(original, _INPUT_INTERVAL_KEYS, f"accepted_intervals[{index}]")
         interval_id = _text(original["interval_id"], "interval.interval_id")
         if interval_id in interval_by_id:
             raise HwmCoverageError("accepted interval identity is duplicated")
@@ -1018,7 +1055,9 @@ def _compute_as_held_composite_hwm(
     generation = _json_mapping_from_bytes(
         input_generation_bytes, "input_generation_bytes"
     )
-    generation_schema_version = generation.get("schema_version")
+    generation_schema_version = _generation_schema_version(
+        generation.get("schema_version"), "HWM input generation identity differs"
+    )
     generation_keys = {
         "schema_version",
         "builder",
@@ -1332,12 +1371,6 @@ def _compute_as_held_composite_hwm(
     for events in effective_flow_events_by_subperiod.values():
         events.sort(key=lambda item: (item["effective_at"], item["event_id"]))
 
-    membership_keys = {
-        "strategy_id",
-        "effective_start",
-        "effective_end",
-        "membership_evidence_sha256",
-    }
     normalized_memberships: list[dict[str, str | None]] = []
     membership_by_strategy: dict[str, dict[str, Any]] = {}
     interval_starts = {item["start_date"] for item in interval_by_id.values()}
@@ -1349,7 +1382,7 @@ def _compute_as_held_composite_hwm(
     for index, original in enumerate(memberships):
         if not isinstance(original, Mapping):
             raise HwmCoverageError("membership must be an object")
-        _strict_keys(original, membership_keys, f"memberships[{index}]")
+        _strict_keys(original, _INPUT_MEMBERSHIP_KEYS, f"memberships[{index}]")
         strategy_id = _text(original["strategy_id"], "membership.strategy_id")
         if strategy_id in membership_by_strategy:
             raise HwmCoverageError("strategy membership is duplicated")
@@ -1674,29 +1707,7 @@ def _compute_as_held_composite_hwm(
             subperiod_values, str | bytes
         ):
             raise HwmCoverageError("component subperiods must be an array")
-        subperiod_common_keys = {
-            "subperiod_id",
-            "subperiod_start_utc",
-            "subperiod_end_utc",
-            "beginning_nav_usd",
-            "ending_nav_before_flow_usd",
-            "external_flow_after_subperiod_usd",
-            "internal_transfer_after_subperiod_usd",
-            "flow_event_evidence_sha256",
-        }
-        subperiod_leverage_keys = {
-            "beginning_gross_assets_usd",
-            "beginning_financing_liability_usd",
-            "ending_gross_assets_before_flow_usd",
-            "ending_financing_liability_before_flow_usd",
-            "margin_principal_flow_after_subperiod_usd",
-            "financing_cost_usd",
-        }
-        subperiod_keys = (
-            subperiod_common_keys | subperiod_leverage_keys
-            if component_financial_mode == _DETAILED_COMPONENT_MODE
-            else subperiod_common_keys
-        )
+        subperiod_keys = _component_subperiod_keys(component_financial_mode)
         normalized_subperiods: list[dict[str, str]] = []
         linked_return = Fraction(1, 1)
         linked_gross_return = Fraction(1, 1)
@@ -1859,7 +1870,11 @@ def _compute_as_held_composite_hwm(
                 )
                 or (
                     component_financial_mode == _DIRECT_NET_COMPONENT_MODE
-                    and (derived_margin_principal != 0 or derived_financing_cost != 0)
+                    and any(
+                        event["capital_treatment"]
+                        in {"MARGIN_PRINCIPAL", "FINANCING_COST"}
+                        for event in effective_events
+                    )
                 )
             ):
                 raise HwmCoverageError(
@@ -2639,7 +2654,9 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
 
     receipt_schema_version = receipt["schema_version"]
     if (
-        receipt_schema_version not in {2, 3}
+        not isinstance(receipt_schema_version, int)
+        or isinstance(receipt_schema_version, bool)
+        or receipt_schema_version not in {2, 3}
         or receipt["status"] != _PORTABLE_PROOF_STATUS
         or receipt["policy_id"] != AS_HELD_HWM_POLICY_ID
         or receipt["return_basis"] != AS_HELD_HWM_RETURN_BASIS
@@ -2922,14 +2939,42 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
     if _canonical_sha256(normalized_input) != receipt["input_sha256"]:
         raise HwmCoverageError("as-held HWM receipt input identity differs")
 
+    intervals = evidence["accepted_intervals"]
+    memberships = evidence["memberships"]
     limiting_values = receipt["complete_through_limiting_inputs"]
     components = evidence["component_periods"]
     if (
-        not isinstance(limiting_values, list)
+        not isinstance(intervals, list)
+        or not intervals
+        or not isinstance(memberships, list)
+        or not memberships
+        or not isinstance(limiting_values, list)
         or not limiting_values
         or not isinstance(components, list)
+        or not components
     ):
-        raise HwmCoverageError("as-held HWM receipt limiting inputs differ")
+        raise HwmCoverageError("as-held HWM receipt input evidence differs")
+    for interval_value in intervals:
+        interval = _mapping(interval_value, "receipt input interval")
+        _strict_keys(interval, _INPUT_INTERVAL_KEYS, "receipt input interval")
+        _text(interval["interval_id"], "receipt input interval identity")
+        _canonical_date(interval["interval_start"], "receipt input interval start")
+        _canonical_date(interval["interval_end"], "receipt input interval end")
+        _sha256(
+            interval["interval_evidence_sha256"],
+            "receipt input interval evidence",
+        )
+    for membership_value in memberships:
+        membership = _mapping(membership_value, "receipt input membership")
+        _strict_keys(membership, _INPUT_MEMBERSHIP_KEYS, "receipt input membership")
+        _text(membership["strategy_id"], "receipt input membership strategy")
+        _canonical_date(membership["effective_start"], "receipt input membership start")
+        if membership["effective_end"] is not None:
+            _canonical_date(membership["effective_end"], "receipt input membership end")
+        _sha256(
+            membership["membership_evidence_sha256"],
+            "receipt input membership evidence",
+        )
     expected_limiting = []
     evidence_component_keys: set[tuple[str, str]] = set()
     for component_value in components:
@@ -2947,6 +2992,16 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
             _component_period_keys(receipt_schema_version, component_financial_mode),
             "receipt input component",
         )
+        subperiods = component["subperiods"]
+        if not isinstance(subperiods, list) or not subperiods:
+            raise HwmCoverageError("receipt input subperiods differ")
+        for subperiod_value in subperiods:
+            subperiod = _mapping(subperiod_value, "receipt input subperiod")
+            _strict_keys(
+                subperiod,
+                _component_subperiod_keys(component_financial_mode),
+                "receipt input subperiod",
+            )
         component_key = (
             _text(component["interval_id"], "receipt input component interval"),
             _text(component["strategy_id"], "receipt input component strategy"),
@@ -3081,7 +3136,10 @@ def validate_as_held_hwm_receipt_generation_binding(
     generation = _json_mapping_from_bytes(
         input_generation_bytes, "input_generation_bytes"
     )
-    schema_version = generation.get("schema_version")
+    schema_version = _generation_schema_version(
+        generation.get("schema_version"),
+        "as-held HWM receipt generation identity differs",
+    )
     generation_keys = {
         "schema_version",
         "builder",
@@ -3096,14 +3154,9 @@ def validate_as_held_hwm_receipt_generation_binding(
     if schema_version == 3:
         generation_keys.add("component_financial_modes")
     _strict_keys(generation, generation_keys, "HWM input generation")
-    expected_builder_version = (
-        {2: "0.2.0", 3: "0.3.0"}.get(schema_version)
-        if isinstance(schema_version, int) and not isinstance(schema_version, bool)
-        else None
-    )
+    expected_builder_version = {2: "0.2.0", 3: "0.3.0"}[schema_version]
     if (
         schema_version != accepted["schema_version"]
-        or expected_builder_version is None
         or generation["builder"] != "portfolio-hwm-inputs"
         or generation["builder_version"] != expected_builder_version
         or generation["authority_profile"] != _PORTABLE_INPUT_AUTHORITY
