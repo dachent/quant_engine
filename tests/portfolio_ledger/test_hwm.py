@@ -2259,7 +2259,7 @@ def test_generation_binding_rejects_coherent_unadmitted_subperiod_evidence() -> 
     )
     _refresh_receipt_self_hashes(receipt)
 
-    with pytest.raises(HwmCoverageError, match="generation evidence differs"):
+    with pytest.raises(HwmCoverageError, match="flow event coverage differs"):
         validate_as_held_hwm_receipt_generation_binding(
             receipt,
             fixture["input_generation_bytes"],  # type: ignore[arg-type]
@@ -2321,6 +2321,33 @@ def test_generation_binding_rejects_incomplete_evidence_registry() -> None:
     generation_bytes = _bind_receipt_to_generation(receipt, generation)
 
     with pytest.raises(HwmCoverageError, match="generation evidence differs"):
+        validate_as_held_hwm_receipt_generation_binding(
+            receipt,
+            generation_bytes,
+            **_generation_binding_kwargs(fixture),
+        )
+
+
+def test_generation_binding_rejects_unused_flow_event() -> None:
+    fixture = _single_strategy_flow_fixture(external_flow="10")
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+    generation = json.loads(fixture["input_generation_bytes"])  # type: ignore[arg-type]
+    extra_event = deepcopy(generation["flow_events"][0])
+    extra_event["event_id"] = f"{extra_event['event_id']}:unused"
+    extra_event["event_evidence_sha256"] = _fixture_sha256(
+        {
+            key: value
+            for key, value in extra_event.items()
+            if key != "event_evidence_sha256"
+        }
+    )
+    generation["flow_events"].append(extra_event)
+    generation["evidence_sha256s"] = sorted(
+        {*generation["evidence_sha256s"], extra_event["event_evidence_sha256"]}
+    )
+    generation_bytes = _bind_receipt_to_generation(receipt, generation)
+
+    with pytest.raises(HwmCoverageError, match="flow event coverage differs"):
         validate_as_held_hwm_receipt_generation_binding(
             receipt,
             generation_bytes,

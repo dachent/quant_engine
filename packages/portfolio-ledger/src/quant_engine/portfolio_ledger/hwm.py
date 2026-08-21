@@ -3976,20 +3976,128 @@ def validate_as_held_hwm_receipt_generation_binding(
     if not isinstance(flow_event_values, list):
         raise HwmCoverageError("as-held HWM receipt generation evidence differs")
     generation_only_evidence_sha256s = {calendar_evidence_sha256}
+    generation_flow_events: list[dict[str, Any]] = []
+    generation_flow_event_ids: set[str] = set()
+    source_correction_target_ids: set[str] = set()
     for event_value in flow_event_values:
         event = _mapping(event_value, "HWM input flow event")
+        event_id = _text(event.get("event_id"), "HWM input flow event identity")
+        if event_id in generation_flow_event_ids:
+            raise HwmCoverageError("as-held HWM receipt flow event coverage differs")
+        generation_flow_event_ids.add(event_id)
+        event_evidence_sha256 = _sha256(
+            event.get("event_evidence_sha256"),
+            "HWM input flow event evidence",
+        )
+        fx_generation_sha256 = _sha256(
+            event.get("fx_generation_sha256"),
+            "HWM input flow event FX generation",
+        )
         generation_only_evidence_sha256s.update(
+            {event_evidence_sha256, fx_generation_sha256}
+        )
+        correction_kind = _text(
+            event.get("correction_kind"), "HWM input flow event correction kind"
+        )
+        related_event_id = event.get("related_event_id")
+        if correction_kind == "SOURCE_CORRECTION":
+            if not isinstance(related_event_id, str) or not related_event_id:
+                raise HwmCoverageError(
+                    "as-held HWM receipt flow event coverage differs"
+                )
+            source_correction_target_ids.add(related_event_id)
+        generation_flow_events.append(
             {
-                _sha256(
-                    event.get("event_evidence_sha256"),
-                    "HWM input flow event evidence",
+                "event_id": event_id,
+                "strategy_id": _text(
+                    event.get("strategy_id"), "HWM input flow event strategy"
                 ),
-                _sha256(
-                    event.get("fx_generation_sha256"),
-                    "HWM input flow event FX generation",
+                "interval_id": _text(
+                    event.get("interval_id"), "HWM input flow event interval"
                 ),
+                "subperiod_id": _text(
+                    event.get("subperiod_id"), "HWM input flow event subperiod"
+                ),
+                "effective_at": _canonical_utc_timestamp(
+                    event.get("effective_at_utc"),
+                    "HWM input flow event effective time",
+                ),
+                "event_evidence_sha256": event_evidence_sha256,
             }
         )
+    effective_flow_events_by_subperiod: dict[
+        tuple[str, str, str], list[dict[str, Any]]
+    ] = defaultdict(list)
+    for event in generation_flow_events:
+        if event["event_id"] in source_correction_target_ids:
+            continue
+        effective_flow_events_by_subperiod[
+            (event["strategy_id"], event["interval_id"], event["subperiod_id"])
+        ].append(event)
+    for events in effective_flow_events_by_subperiod.values():
+        events.sort(key=lambda item: (item["effective_at"], item["event_id"]))
+
+    used_effective_flow_event_ids: set[str] = set()
+    for component_value in components:
+        component = _mapping(component_value, "receipt input component")
+        component_financial_mode = (
+            _text(
+                component.get("component_financial_mode"),
+                "receipt input component financial mode",
+            )
+            if schema_version == 3
+            else _DETAILED_COMPONENT_MODE
+        )
+        subperiods = component["subperiods"]
+        assert isinstance(subperiods, list)
+        for subperiod_value in subperiods:
+            subperiod = _mapping(subperiod_value, "receipt input subperiod")
+            subperiod_events = effective_flow_events_by_subperiod.get(
+                (
+                    _text(component["strategy_id"], "receipt input strategy"),
+                    _text(component["interval_id"], "receipt input interval"),
+                    _text(subperiod["subperiod_id"], "receipt input subperiod"),
+                ),
+                [],
+            )
+            used_effective_flow_event_ids.update(
+                event["event_id"] for event in subperiod_events
+            )
+            flow_evidence_payload = {
+                "schema_version": schema_version,
+                "evidence_type": "FLOW_EVENT",
+                "strategy_id": component["strategy_id"],
+                "interval_id": component["interval_id"],
+                "subperiod": {
+                    **{
+                        key: value
+                        for key, value in subperiod.items()
+                        if key != "flow_event_evidence_sha256"
+                    },
+                    "flow_event_ids": [event["event_id"] for event in subperiod_events],
+                    "flow_event_sha256s": [
+                        event["event_evidence_sha256"] for event in subperiod_events
+                    ],
+                },
+            }
+            if schema_version == 3:
+                flow_evidence_payload["component_financial_mode"] = (
+                    component_financial_mode
+                )
+            if _sha256(
+                subperiod["flow_event_evidence_sha256"],
+                "receipt input subperiod flow evidence",
+            ) != _canonical_sha256(flow_evidence_payload):
+                raise HwmCoverageError(
+                    "as-held HWM receipt flow event coverage differs"
+                )
+    expected_effective_flow_event_ids = {
+        event["event_id"]
+        for event in generation_flow_events
+        if event["event_id"] not in source_correction_target_ids
+    }
+    if used_effective_flow_event_ids != expected_effective_flow_event_ids:
+        raise HwmCoverageError("as-held HWM receipt flow event coverage differs")
     if evidence_registry != (
         receipt_evidence_sha256s | generation_only_evidence_sha256s
     ):
