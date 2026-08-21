@@ -1941,6 +1941,53 @@ def test_as_held_hwm_v3_receipt_rejects_coherent_component_return_rewrite() -> N
         as_held_hwm_receipt(receipt)
 
 
+@pytest.mark.parametrize(
+    "forbidden_field",
+    [
+        "beginning_gross_assets_usd",
+        "beginning_financing_liability_usd",
+        "ending_gross_assets_usd",
+        "ending_financing_liability_usd",
+        "margin_principal_flow_usd",
+        "financing_cost_usd",
+        "gross_asset_return",
+        "leverage_evidence_sha256",
+    ],
+)
+def test_as_held_hwm_v3_direct_receipt_rejects_forbidden_component_fields(
+    forbidden_field: str,
+) -> None:
+    receipt = as_held_hwm_receipt(
+        _compute_as_held(_as_held_direct_net_return_fixture())
+    )
+    component = receipt["input_evidence"]["component_periods"][0]  # type: ignore[index]
+    component[forbidden_field] = (
+        "a" * 64 if forbidden_field == "leverage_evidence_sha256" else "0"
+    )
+    evidence = receipt["input_evidence"]
+    normalized_input = {
+        "policy_id": receipt["policy_id"],
+        "policy_sha256": receipt["policy_sha256"],
+        "policy_semantic_digest": receipt["policy_semantic_digest"],
+        "calendar_sha256": receipt["calendar_sha256"],
+        "input_generation_sha256": receipt["input_generation_sha256"],
+        "input_authority_class": receipt["input_authority_class"],
+        "calendar_authority_status": receipt["calendar_authority_status"],
+        "return_basis": receipt["return_basis"],
+        "evaluated_on": receipt["evaluated_on"],
+        "complete_through": receipt["complete_through"],
+        "maximum_age_days": receipt["maximum_age_days"],
+        "assurance_profile": receipt["assurance_profile"],
+        **evidence,  # type: ignore[arg-type]
+    }
+    receipt["input_sha256"] = _fixture_sha256(normalized_input)
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    receipt["receipt_sha256"] = _fixture_sha256(unsigned)
+
+    with pytest.raises(HwmCoverageError, match="receipt input component keys differ"):
+        as_held_hwm_receipt(receipt)
+
+
 def test_as_held_hwm_receipt_generation_binding_rejects_schema_downgrade() -> None:
     v2_receipt = as_held_hwm_receipt(_compute_as_held(_as_held_hwm_fixture()))
     v3_fixture = _as_held_direct_net_return_fixture()

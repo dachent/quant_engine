@@ -116,6 +116,63 @@ def _strict_keys(value: Mapping[str, Any], expected: set[str], field_name: str) 
         )
 
 
+def _component_period_keys(
+    schema_version: int,
+    component_financial_mode: str,
+) -> set[str]:
+    common_keys = {
+        "strategy_id",
+        "interval_id",
+        "interval_start",
+        "interval_end",
+        "beginning_capital_usd",
+        "ending_nav_usd",
+        "external_flow_usd",
+        "internal_transfer_usd",
+        "flow_adjusted_ending_nav_usd",
+        "period_return",
+        "flow_timing",
+        "subperiods",
+        "capital_basis",
+        "capital_evidence_sha256",
+        "flow_reconciliation_sha256",
+        "return_evidence_sha256",
+        "policy_sha256",
+        "calendar_sha256",
+        "return_basis",
+    }
+    leverage_keys = {
+        "beginning_gross_assets_usd",
+        "beginning_financing_liability_usd",
+        "ending_gross_assets_usd",
+        "ending_financing_liability_usd",
+        "margin_principal_flow_usd",
+        "financing_cost_usd",
+        "gross_asset_return",
+        "leverage_evidence_sha256",
+    }
+    if schema_version == 2:
+        if component_financial_mode != _DETAILED_COMPONENT_MODE:
+            raise HwmCoverageError("component financial mode is invalid")
+        return common_keys | leverage_keys | {"source_generation_sha256"}
+    if schema_version == 3 and component_financial_mode == _DETAILED_COMPONENT_MODE:
+        return (
+            common_keys
+            | leverage_keys
+            | {
+                "component_financial_mode",
+                "portable_input_generation_sha256",
+            }
+        )
+    if schema_version == 3 and component_financial_mode == _DIRECT_NET_COMPONENT_MODE:
+        return common_keys | {
+            "component_financial_mode",
+            "portable_input_generation_sha256",
+            "portable_return_basis_declaration_sha256",
+        }
+    raise HwmCoverageError("component financial mode is invalid")
+
+
 def _decimal_text(value: Decimal) -> str:
     text = format(value, "f")
     if "." in text:
@@ -1466,37 +1523,6 @@ def _compute_as_held_composite_hwm(
             )
         opening_event_ids.add(positive["event_id"])
 
-    component_common_keys = {
-        "strategy_id",
-        "interval_id",
-        "interval_start",
-        "interval_end",
-        "beginning_capital_usd",
-        "ending_nav_usd",
-        "external_flow_usd",
-        "internal_transfer_usd",
-        "flow_adjusted_ending_nav_usd",
-        "period_return",
-        "flow_timing",
-        "subperiods",
-        "capital_basis",
-        "capital_evidence_sha256",
-        "flow_reconciliation_sha256",
-        "return_evidence_sha256",
-        "policy_sha256",
-        "calendar_sha256",
-        "return_basis",
-    }
-    component_leverage_keys = {
-        "beginning_gross_assets_usd",
-        "beginning_financing_liability_usd",
-        "ending_gross_assets_usd",
-        "ending_financing_liability_usd",
-        "margin_principal_flow_usd",
-        "financing_cost_usd",
-        "gross_asset_return",
-        "leverage_evidence_sha256",
-    }
     normalized_components: list[dict[str, Any]] = []
     component_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     components_by_strategy: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1508,34 +1534,16 @@ def _compute_as_held_composite_hwm(
         if generation_schema_version == 2:
             component_financial_mode = _DETAILED_COMPONENT_MODE
             component_generation_identity_field = "source_generation_sha256"
-            component_keys = (
-                component_common_keys
-                | component_leverage_keys
-                | {component_generation_identity_field}
-            )
         else:
             component_generation_identity_field = "portable_input_generation_sha256"
             component_financial_mode = _text(
                 original.get("component_financial_mode"),
                 "component.component_financial_mode",
             )
-            if component_financial_mode == _DETAILED_COMPONENT_MODE:
-                component_keys = (
-                    component_common_keys
-                    | component_leverage_keys
-                    | {
-                        "component_financial_mode",
-                        component_generation_identity_field,
-                    }
-                )
-            elif component_financial_mode == _DIRECT_NET_COMPONENT_MODE:
-                component_keys = component_common_keys | {
-                    "component_financial_mode",
-                    component_generation_identity_field,
-                    "portable_return_basis_declaration_sha256",
-                }
-            else:
-                raise HwmCoverageError("component financial mode is invalid")
+        component_keys = _component_period_keys(
+            generation_schema_version,
+            component_financial_mode,
+        )
         if component_financial_mode not in declared_component_modes:
             raise HwmCoverageError("component financial mode is not declared")
         observed_component_modes.add(component_financial_mode)
@@ -2933,6 +2941,11 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
             )
             if receipt_schema_version == 3
             else _DETAILED_COMPONENT_MODE
+        )
+        _strict_keys(
+            component,
+            _component_period_keys(receipt_schema_version, component_financial_mode),
+            "receipt input component",
         )
         component_key = (
             _text(component["interval_id"], "receipt input component interval"),
