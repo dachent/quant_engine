@@ -201,6 +201,21 @@ def test_malformed_policy_bytes_are_rejected() -> None:
         )
 
 
+def test_duplicate_policy_members_are_rejected() -> None:
+    policy_bytes = _json_bytes(_policy())
+    duplicate_policy_bytes = b'{"schema_version":999,' + policy_bytes[1:]
+    authority = _authority()
+    authority["hwm_policy_sha256"] = hashlib.sha256(duplicate_policy_bytes).hexdigest()
+    _rehash(authority)
+
+    with pytest.raises(GovernedHwmAuthorityError, match="duplicate"):
+        validate_governed_hwm_calendar_authority(
+            authority,
+            hwm_policy_bytes=duplicate_policy_bytes,
+            accepted_authority_sha256=_accepted_hash(authority),
+        )
+
+
 def test_semantically_invalid_complete_policy_is_rejected() -> None:
     invalid_policy = _policy()
     invalid_policy["calculation"]["method"] = "ARITHMETIC_NOT_GEOMETRIC"

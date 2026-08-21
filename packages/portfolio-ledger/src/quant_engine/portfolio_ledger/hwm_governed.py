@@ -104,13 +104,27 @@ def _objects(value: object, field: str) -> list[Row]:
     return [_mapping(item, field) for item in value]
 
 
+def _reject_duplicate_json_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in parsed:
+            raise GovernedHwmAuthorityError(
+                f"HWM policy JSON contains duplicate member: {key}"
+            )
+        parsed[key] = value
+    return parsed
+
+
 def _policy_calendar(hwm_policy_bytes: bytes, expected_sha256: str) -> Row:
     if not isinstance(hwm_policy_bytes, bytes) or not hwm_policy_bytes:
         raise GovernedHwmAuthorityError("HWM policy must be non-empty bytes")
     if hashlib.sha256(hwm_policy_bytes).hexdigest() != expected_sha256:
         raise GovernedHwmAuthorityError("HWM policy identity differs")
     try:
-        parsed = json.loads(hwm_policy_bytes)
+        parsed = json.loads(
+            hwm_policy_bytes,
+            object_pairs_hook=_reject_duplicate_json_members,
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise GovernedHwmAuthorityError("HWM policy bytes must contain JSON") from exc
     hwm_policy = _mapping(parsed, "HWM policy bytes")
