@@ -16,12 +16,28 @@ HWM_STATUS_CODE_VERSION: Final = 2
 HWM_STATUS_SEMANTICS: Final = "EXPLICIT_GOVERNED_HWM_PERIMETER"
 AS_HELD_HWM_POLICY_ID: Final = "PORT-HWM-4"
 AS_HELD_HWM_RETURN_BASIS: Final = "LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL"
+AS_HELD_HWM_DETAILED_COMPONENT_MODE: Final = "DETAILED_RECONCILED_LEVERAGE"
+AS_HELD_HWM_DIRECT_NET_COMPONENT_MODE: Final = "DIRECT_NET_TOTAL_FLOW_NEUTRAL_RETURN"
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _UTC_TIMESTAMP_RE: Final = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$"
 )
 _PORTABLE_INPUT_AUTHORITY: Final = "PORTABLE_SYNTHETIC"
 _PORTABLE_PROOF_STATUS: Final = "PORTABLE_SYNTHETIC_PROOF"
+_DETAILED_COMPONENT_MODE: Final = AS_HELD_HWM_DETAILED_COMPONENT_MODE
+_DIRECT_NET_COMPONENT_MODE: Final = AS_HELD_HWM_DIRECT_NET_COMPONENT_MODE
+_INPUT_INTERVAL_KEYS: Final = {
+    "interval_id",
+    "interval_start",
+    "interval_end",
+    "interval_evidence_sha256",
+}
+_INPUT_MEMBERSHIP_KEYS: Final = {
+    "strategy_id",
+    "effective_start",
+    "effective_end",
+    "membership_evidence_sha256",
+}
 _FLOW_EVENT_TREATMENTS: Final = {
     "OWNER_CONTRIBUTION": "EXTERNAL_FLOW",
     "OWNER_WITHDRAWAL": "EXTERNAL_FLOW",
@@ -112,11 +128,106 @@ def _strict_keys(value: Mapping[str, Any], expected: set[str], field_name: str) 
         )
 
 
+def _generation_schema_version(value: object, error_message: str) -> int:
+    if isinstance(value, bool) or value not in (2, 3):
+        raise HwmCoverageError(error_message)
+    return int(value)
+
+
+def _component_period_keys(
+    schema_version: int,
+    component_financial_mode: str,
+) -> set[str]:
+    common_keys = {
+        "strategy_id",
+        "interval_id",
+        "interval_start",
+        "interval_end",
+        "beginning_capital_usd",
+        "ending_nav_usd",
+        "external_flow_usd",
+        "internal_transfer_usd",
+        "flow_adjusted_ending_nav_usd",
+        "period_return",
+        "flow_timing",
+        "subperiods",
+        "capital_basis",
+        "capital_evidence_sha256",
+        "flow_reconciliation_sha256",
+        "return_evidence_sha256",
+        "policy_sha256",
+        "calendar_sha256",
+        "return_basis",
+    }
+    leverage_keys = {
+        "beginning_gross_assets_usd",
+        "beginning_financing_liability_usd",
+        "ending_gross_assets_usd",
+        "ending_financing_liability_usd",
+        "margin_principal_flow_usd",
+        "financing_cost_usd",
+        "gross_asset_return",
+        "leverage_evidence_sha256",
+    }
+    if schema_version == 2:
+        if component_financial_mode != _DETAILED_COMPONENT_MODE:
+            raise HwmCoverageError("component financial mode is invalid")
+        return common_keys | leverage_keys | {"source_generation_sha256"}
+    if schema_version == 3 and component_financial_mode == _DETAILED_COMPONENT_MODE:
+        return (
+            common_keys
+            | leverage_keys
+            | {
+                "component_financial_mode",
+                "portable_input_generation_sha256",
+            }
+        )
+    if schema_version == 3 and component_financial_mode == _DIRECT_NET_COMPONENT_MODE:
+        return common_keys | {
+            "component_financial_mode",
+            "portable_input_generation_sha256",
+            "portable_return_basis_declaration_sha256",
+        }
+    raise HwmCoverageError("component financial mode is invalid")
+
+
+def _component_subperiod_keys(component_financial_mode: str) -> set[str]:
+    common_keys = {
+        "subperiod_id",
+        "subperiod_start_utc",
+        "subperiod_end_utc",
+        "beginning_nav_usd",
+        "ending_nav_before_flow_usd",
+        "external_flow_after_subperiod_usd",
+        "internal_transfer_after_subperiod_usd",
+        "flow_event_evidence_sha256",
+    }
+    if component_financial_mode == _DIRECT_NET_COMPONENT_MODE:
+        return common_keys
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        return common_keys | {
+            "beginning_gross_assets_usd",
+            "beginning_financing_liability_usd",
+            "ending_gross_assets_before_flow_usd",
+            "ending_financing_liability_before_flow_usd",
+            "margin_principal_flow_after_subperiod_usd",
+            "financing_cost_usd",
+        }
+    raise HwmCoverageError("component financial mode is invalid")
+
+
 def _decimal_text(value: Decimal) -> str:
     text = format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return "0" if text in {"", "-0"} else text
+
+
+def _canonical_decimal(value: object, field_name: str) -> Decimal:
+    accepted = _decimal(value, field_name)
+    if not isinstance(value, str) or value != _decimal_text(accepted):
+        raise HwmCoverageError(f"{field_name} must be a canonical decimal")
+    return accepted
 
 
 def _canonical_sha256(value: Mapping[str, Any]) -> str:
@@ -843,19 +954,13 @@ def _compute_as_held_composite_hwm(
         raise HwmCoverageError("complete_through cannot be after evaluated_on")
     age_days = (evaluation_date - complete_date).days
 
-    interval_keys = {
-        "interval_id",
-        "interval_start",
-        "interval_end",
-        "interval_evidence_sha256",
-    }
     normalized_intervals: list[dict[str, str]] = []
     interval_by_id: dict[str, dict[str, Any]] = {}
     previous_end: date | None = None
     for index, original in enumerate(accepted_intervals):
         if not isinstance(original, Mapping):
             raise HwmCoverageError("accepted interval must be an object")
-        _strict_keys(original, interval_keys, f"accepted_intervals[{index}]")
+        _strict_keys(original, _INPUT_INTERVAL_KEYS, f"accepted_intervals[{index}]")
         interval_id = _text(original["interval_id"], "interval.interval_id")
         if interval_id in interval_by_id:
             raise HwmCoverageError("accepted interval identity is duplicated")
@@ -957,28 +1062,50 @@ def _compute_as_held_composite_hwm(
     generation = _json_mapping_from_bytes(
         input_generation_bytes, "input_generation_bytes"
     )
-    _strict_keys(
-        generation,
-        {
-            "schema_version",
-            "builder",
-            "builder_version",
-            "authority_profile",
-            "authority_bindings",
-            "upstream_receipt_sha256",
-            "maximum_age_days",
-            "evidence_sha256s",
-            "flow_events",
-        },
-        "HWM input generation",
+    generation_schema_version = _generation_schema_version(
+        generation.get("schema_version"), "HWM input generation identity differs"
     )
+    generation_keys = {
+        "schema_version",
+        "builder",
+        "builder_version",
+        "authority_profile",
+        "authority_bindings",
+        "upstream_receipt_sha256",
+        "maximum_age_days",
+        "evidence_sha256s",
+        "flow_events",
+    }
+    if generation_schema_version == 3:
+        generation_keys.add("component_financial_modes")
+    _strict_keys(generation, generation_keys, "HWM input generation")
     if (
-        generation["schema_version"] != 2
-        or generation["builder"] != "portfolio-hwm-inputs"
-        or generation["builder_version"] != "0.2.0"
+        generation["builder"] != "portfolio-hwm-inputs"
         or generation["authority_profile"] != _PORTABLE_INPUT_AUTHORITY
         or generation["upstream_receipt_sha256"] is not None
     ):
+        raise HwmCoverageError("HWM input generation identity differs")
+    if generation_schema_version == 2:
+        if generation["builder_version"] != "0.2.0":
+            raise HwmCoverageError("HWM input generation identity differs")
+        declared_component_modes = {_DETAILED_COMPONENT_MODE}
+    elif generation_schema_version == 3:
+        if generation["builder_version"] != "0.3.0":
+            raise HwmCoverageError("HWM input generation identity differs")
+        component_financial_modes = generation["component_financial_modes"]
+        if (
+            not isinstance(component_financial_modes, list)
+            or not component_financial_modes
+            or any(not isinstance(mode, str) for mode in component_financial_modes)
+            or component_financial_modes != sorted(set(component_financial_modes))
+            or any(
+                mode not in {_DETAILED_COMPONENT_MODE, _DIRECT_NET_COMPONENT_MODE}
+                for mode in component_financial_modes
+            )
+        ):
+            raise HwmCoverageError("HWM input component financial modes differ")
+        declared_component_modes = set(component_financial_modes)
+    else:
         raise HwmCoverageError("HWM input generation identity differs")
     if generation["maximum_age_days"] != maximum_age_days:
         raise HwmCoverageError("HWM input generation freshness threshold differs")
@@ -1251,12 +1378,6 @@ def _compute_as_held_composite_hwm(
     for events in effective_flow_events_by_subperiod.values():
         events.sort(key=lambda item: (item["effective_at"], item["event_id"]))
 
-    membership_keys = {
-        "strategy_id",
-        "effective_start",
-        "effective_end",
-        "membership_evidence_sha256",
-    }
     normalized_memberships: list[dict[str, str | None]] = []
     membership_by_strategy: dict[str, dict[str, Any]] = {}
     interval_starts = {item["start_date"] for item in interval_by_id.values()}
@@ -1268,7 +1389,7 @@ def _compute_as_held_composite_hwm(
     for index, original in enumerate(memberships):
         if not isinstance(original, Mapping):
             raise HwmCoverageError("membership must be an object")
-        _strict_keys(original, membership_keys, f"memberships[{index}]")
+        _strict_keys(original, _INPUT_MEMBERSHIP_KEYS, f"memberships[{index}]")
         strategy_id = _text(original["strategy_id"], "membership.strategy_id")
         if strategy_id in membership_by_strategy:
             raise HwmCoverageError("strategy membership is duplicated")
@@ -1442,43 +1563,30 @@ def _compute_as_held_composite_hwm(
             )
         opening_event_ids.add(positive["event_id"])
 
-    component_keys = {
-        "strategy_id",
-        "interval_id",
-        "interval_start",
-        "interval_end",
-        "beginning_capital_usd",
-        "beginning_gross_assets_usd",
-        "beginning_financing_liability_usd",
-        "ending_gross_assets_usd",
-        "ending_financing_liability_usd",
-        "margin_principal_flow_usd",
-        "financing_cost_usd",
-        "gross_asset_return",
-        "ending_nav_usd",
-        "external_flow_usd",
-        "internal_transfer_usd",
-        "flow_adjusted_ending_nav_usd",
-        "period_return",
-        "flow_timing",
-        "subperiods",
-        "capital_basis",
-        "capital_evidence_sha256",
-        "flow_reconciliation_sha256",
-        "return_evidence_sha256",
-        "leverage_evidence_sha256",
-        "source_generation_sha256",
-        "policy_sha256",
-        "calendar_sha256",
-        "return_basis",
-    }
     normalized_components: list[dict[str, Any]] = []
     component_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     components_by_strategy: dict[str, list[dict[str, Any]]] = defaultdict(list)
     used_effective_flow_event_ids: set[str] = set()
+    observed_component_modes: set[str] = set()
     for index, original in enumerate(component_periods):
         if not isinstance(original, Mapping):
             raise HwmCoverageError("component period must be an object")
+        if generation_schema_version == 2:
+            component_financial_mode = _DETAILED_COMPONENT_MODE
+            component_generation_identity_field = "source_generation_sha256"
+        else:
+            component_generation_identity_field = "portable_input_generation_sha256"
+            component_financial_mode = _text(
+                original.get("component_financial_mode"),
+                "component.component_financial_mode",
+            )
+        component_keys = _component_period_keys(
+            generation_schema_version,
+            component_financial_mode,
+        )
+        if component_financial_mode not in declared_component_modes:
+            raise HwmCoverageError("component financial mode is not declared")
+        observed_component_modes.add(component_financial_mode)
         _strict_keys(original, component_keys, f"component_periods[{index}]")
         strategy_id = _text(original["strategy_id"], "component.strategy_id")
         interval_id = _text(original["interval_id"], "component.interval_id")
@@ -1507,32 +1615,6 @@ def _compute_as_held_composite_hwm(
             original["beginning_capital_usd"],
             "component.beginning_capital_usd",
         )
-        beginning_gross_assets = _decimal(
-            original["beginning_gross_assets_usd"],
-            "component.beginning_gross_assets_usd",
-        )
-        beginning_financing_liability = _decimal(
-            original["beginning_financing_liability_usd"],
-            "component.beginning_financing_liability_usd",
-        )
-        gross_assets = _decimal(
-            original["ending_gross_assets_usd"],
-            "component.ending_gross_assets_usd",
-        )
-        financing_liability = _decimal(
-            original["ending_financing_liability_usd"],
-            "component.ending_financing_liability_usd",
-        )
-        margin_principal_flow = _decimal(
-            original["margin_principal_flow_usd"],
-            "component.margin_principal_flow_usd",
-        )
-        financing_cost = _decimal(
-            original["financing_cost_usd"], "component.financing_cost_usd"
-        )
-        gross_asset_return = _decimal(
-            original["gross_asset_return"], "component.gross_asset_return"
-        )
         ending_nav = _decimal(original["ending_nav_usd"], "component.ending_nav_usd")
         external_flow = _decimal(
             original["external_flow_usd"], "component.external_flow_usd"
@@ -1548,21 +1630,64 @@ def _compute_as_held_composite_hwm(
         period_return = _decimal(original["period_return"], "component.period_return")
         if beginning_capital <= 0:
             raise HwmCoverageError("component beginning capital must be positive")
-        if (
-            beginning_gross_assets < 0
-            or beginning_financing_liability < 0
-            or gross_assets < 0
-            or financing_liability < 0
-            or financing_cost < 0
-            or gross_asset_return <= Decimal("-1")
-        ):
-            raise HwmCoverageError("component leverage facts cannot be negative")
-        if beginning_gross_assets - beginning_financing_liability != beginning_capital:
-            raise HwmCoverageError(
-                "component beginning net NAV differs from leverage facts"
+        if component_financial_mode == _DETAILED_COMPONENT_MODE:
+            beginning_gross_assets = _decimal(
+                original["beginning_gross_assets_usd"],
+                "component.beginning_gross_assets_usd",
             )
-        if beginning_financing_liability + margin_principal_flow != financing_liability:
-            raise HwmCoverageError("component margin principal reconciliation differs")
+            beginning_financing_liability = _decimal(
+                original["beginning_financing_liability_usd"],
+                "component.beginning_financing_liability_usd",
+            )
+            gross_assets = _decimal(
+                original["ending_gross_assets_usd"],
+                "component.ending_gross_assets_usd",
+            )
+            financing_liability = _decimal(
+                original["ending_financing_liability_usd"],
+                "component.ending_financing_liability_usd",
+            )
+            margin_principal_flow = _decimal(
+                original["margin_principal_flow_usd"],
+                "component.margin_principal_flow_usd",
+            )
+            financing_cost = _decimal(
+                original["financing_cost_usd"], "component.financing_cost_usd"
+            )
+            gross_asset_return = _decimal(
+                original["gross_asset_return"], "component.gross_asset_return"
+            )
+            if (
+                beginning_gross_assets < 0
+                or beginning_financing_liability < 0
+                or gross_assets < 0
+                or financing_liability < 0
+                or financing_cost < 0
+                or gross_asset_return <= Decimal("-1")
+            ):
+                raise HwmCoverageError("component leverage facts cannot be negative")
+            if (
+                beginning_gross_assets - beginning_financing_liability
+                != beginning_capital
+            ):
+                raise HwmCoverageError(
+                    "component beginning net NAV differs from leverage facts"
+                )
+            if (
+                beginning_financing_liability + margin_principal_flow
+                != financing_liability
+            ):
+                raise HwmCoverageError(
+                    "component margin principal reconciliation differs"
+                )
+        else:
+            beginning_gross_assets = None
+            beginning_financing_liability = None
+            gross_assets = None
+            financing_liability = None
+            margin_principal_flow = None
+            financing_cost = None
+            gross_asset_return = None
         membership_ends_at_interval = (
             membership_by_strategy[strategy_id]["end_date"] == interval_end
         )
@@ -1574,10 +1699,13 @@ def _compute_as_held_composite_hwm(
             or (ending_nav == 0 and not membership_ends_at_interval)
         ):
             raise HwmCoverageError("component ending net NAV is invalid")
-        if gross_assets - financing_liability != ending_nav:
-            raise HwmCoverageError(
-                "component net NAV differs from gross assets less financing liability"
-            )
+        if component_financial_mode == _DETAILED_COMPONENT_MODE:
+            assert gross_assets is not None
+            assert financing_liability is not None
+            if gross_assets - financing_liability != ending_nav:
+                raise HwmCoverageError(
+                    "component net NAV differs from gross assets less financing liability"
+                )
         if period_return <= Decimal("-1"):
             raise HwmCoverageError("component return must be greater than negative one")
         flow_timing = _text(original["flow_timing"], "component.flow_timing")
@@ -1586,22 +1714,7 @@ def _compute_as_held_composite_hwm(
             subperiod_values, str | bytes
         ):
             raise HwmCoverageError("component subperiods must be an array")
-        subperiod_keys = {
-            "subperiod_id",
-            "subperiod_start_utc",
-            "subperiod_end_utc",
-            "beginning_nav_usd",
-            "ending_nav_before_flow_usd",
-            "beginning_gross_assets_usd",
-            "beginning_financing_liability_usd",
-            "ending_gross_assets_before_flow_usd",
-            "ending_financing_liability_before_flow_usd",
-            "margin_principal_flow_after_subperiod_usd",
-            "financing_cost_usd",
-            "external_flow_after_subperiod_usd",
-            "internal_transfer_after_subperiod_usd",
-            "flow_event_evidence_sha256",
-        }
+        subperiod_keys = _component_subperiod_keys(component_financial_mode)
         normalized_subperiods: list[dict[str, str]] = []
         linked_return = Fraction(1, 1)
         linked_gross_return = Fraction(1, 1)
@@ -1665,30 +1778,6 @@ def _compute_as_held_composite_hwm(
                 subperiod_value["ending_nav_before_flow_usd"],
                 "subperiod.ending_nav_before_flow_usd",
             )
-            subperiod_beginning_gross_assets = _decimal(
-                subperiod_value["beginning_gross_assets_usd"],
-                "subperiod.beginning_gross_assets_usd",
-            )
-            subperiod_beginning_financing_liability = _decimal(
-                subperiod_value["beginning_financing_liability_usd"],
-                "subperiod.beginning_financing_liability_usd",
-            )
-            subperiod_ending_gross_assets = _decimal(
-                subperiod_value["ending_gross_assets_before_flow_usd"],
-                "subperiod.ending_gross_assets_before_flow_usd",
-            )
-            subperiod_ending_financing_liability = _decimal(
-                subperiod_value["ending_financing_liability_before_flow_usd"],
-                "subperiod.ending_financing_liability_before_flow_usd",
-            )
-            subperiod_margin_principal_flow = _decimal(
-                subperiod_value["margin_principal_flow_after_subperiod_usd"],
-                "subperiod.margin_principal_flow_after_subperiod_usd",
-            )
-            subperiod_financing_cost = _decimal(
-                subperiod_value["financing_cost_usd"],
-                "subperiod.financing_cost_usd",
-            )
             subperiod_external_flow = _decimal(
                 subperiod_value["external_flow_after_subperiod_usd"],
                 "subperiod.external_flow_after_subperiod_usd",
@@ -1697,6 +1786,38 @@ def _compute_as_held_composite_hwm(
                 subperiod_value["internal_transfer_after_subperiod_usd"],
                 "subperiod.internal_transfer_after_subperiod_usd",
             )
+            if component_financial_mode == _DETAILED_COMPONENT_MODE:
+                subperiod_beginning_gross_assets = _decimal(
+                    subperiod_value["beginning_gross_assets_usd"],
+                    "subperiod.beginning_gross_assets_usd",
+                )
+                subperiod_beginning_financing_liability = _decimal(
+                    subperiod_value["beginning_financing_liability_usd"],
+                    "subperiod.beginning_financing_liability_usd",
+                )
+                subperiod_ending_gross_assets = _decimal(
+                    subperiod_value["ending_gross_assets_before_flow_usd"],
+                    "subperiod.ending_gross_assets_before_flow_usd",
+                )
+                subperiod_ending_financing_liability = _decimal(
+                    subperiod_value["ending_financing_liability_before_flow_usd"],
+                    "subperiod.ending_financing_liability_before_flow_usd",
+                )
+                subperiod_margin_principal_flow = _decimal(
+                    subperiod_value["margin_principal_flow_after_subperiod_usd"],
+                    "subperiod.margin_principal_flow_after_subperiod_usd",
+                )
+                subperiod_financing_cost = _decimal(
+                    subperiod_value["financing_cost_usd"],
+                    "subperiod.financing_cost_usd",
+                )
+            else:
+                subperiod_beginning_gross_assets = None
+                subperiod_beginning_financing_liability = None
+                subperiod_ending_gross_assets = None
+                subperiod_ending_financing_liability = None
+                subperiod_margin_principal_flow = None
+                subperiod_financing_cost = None
             effective_events = effective_flow_events_by_subperiod.get(
                 (strategy_id, interval_id, subperiod_id), []
             )
@@ -1747,8 +1868,21 @@ def _compute_as_held_composite_hwm(
             if (
                 derived_external_flow != subperiod_external_flow
                 or derived_internal_transfer != subperiod_internal_transfer
-                or derived_margin_principal != subperiod_margin_principal_flow
-                or derived_financing_cost != subperiod_financing_cost
+                or (
+                    component_financial_mode == _DETAILED_COMPONENT_MODE
+                    and (
+                        derived_margin_principal != subperiod_margin_principal_flow
+                        or derived_financing_cost != subperiod_financing_cost
+                    )
+                )
+                or (
+                    component_financial_mode == _DIRECT_NET_COMPONENT_MODE
+                    and any(
+                        event["capital_treatment"]
+                        in {"MARGIN_PRINCIPAL", "FINANCING_COST"}
+                        for event in effective_events
+                    )
+                )
             ):
                 raise HwmCoverageError(
                     "component flow facts differ from admitted events"
@@ -1756,37 +1890,47 @@ def _compute_as_held_composite_hwm(
             used_effective_flow_event_ids.update(
                 event["event_id"] for event in effective_events
             )
-            if (
-                subperiod_beginning <= 0
-                or subperiod_ending <= 0
-                or subperiod_beginning_gross_assets <= 0
-                or subperiod_ending_gross_assets < 0
-                or subperiod_beginning_financing_liability < 0
-                or subperiod_ending_financing_liability < 0
-                or subperiod_financing_cost < 0
-            ):
+            if subperiod_beginning <= 0 or subperiod_ending <= 0:
                 raise HwmCoverageError("component subperiod NAV must be positive")
-            if (
-                subperiod_beginning_gross_assets
-                - subperiod_beginning_financing_liability
-                != subperiod_beginning
-                or subperiod_ending_gross_assets - subperiod_ending_financing_liability
-                != subperiod_ending
-            ):
-                raise HwmCoverageError("component subperiod leverage facts differ")
-            if (
-                subperiod_ending_financing_liability
-                != subperiod_beginning_financing_liability
-            ):
-                raise HwmCoverageError(
-                    "component subperiod liability changes without principal flow"
-                )
+            if component_financial_mode == _DETAILED_COMPONENT_MODE:
+                assert subperiod_beginning_gross_assets is not None
+                assert subperiod_ending_gross_assets is not None
+                assert subperiod_beginning_financing_liability is not None
+                assert subperiod_ending_financing_liability is not None
+                assert subperiod_financing_cost is not None
+                if (
+                    subperiod_beginning_gross_assets <= 0
+                    or subperiod_ending_gross_assets < 0
+                    or subperiod_beginning_financing_liability < 0
+                    or subperiod_ending_financing_liability < 0
+                    or subperiod_financing_cost < 0
+                ):
+                    raise HwmCoverageError("component subperiod leverage facts differ")
+                if (
+                    subperiod_beginning_gross_assets
+                    - subperiod_beginning_financing_liability
+                    != subperiod_beginning
+                    or subperiod_ending_gross_assets
+                    - subperiod_ending_financing_liability
+                    != subperiod_ending
+                ):
+                    raise HwmCoverageError("component subperiod leverage facts differ")
+                if (
+                    subperiod_ending_financing_liability
+                    != subperiod_beginning_financing_liability
+                ):
+                    raise HwmCoverageError(
+                        "component subperiod liability changes without principal flow"
+                    )
             if subperiod_index == 0 and subperiod_beginning != beginning_capital:
                 raise HwmCoverageError("first subperiod differs from beginning capital")
-            if subperiod_index == 0 and (
-                subperiod_beginning_gross_assets != beginning_gross_assets
-                or subperiod_beginning_financing_liability
-                != beginning_financing_liability
+            if component_financial_mode == _DETAILED_COMPONENT_MODE and (
+                subperiod_index == 0
+                and (
+                    subperiod_beginning_gross_assets != beginning_gross_assets
+                    or subperiod_beginning_financing_liability
+                    != beginning_financing_liability
+                )
             ):
                 raise HwmCoverageError("first subperiod leverage facts differ")
             if (
@@ -1794,10 +1938,14 @@ def _compute_as_held_composite_hwm(
                 and subperiod_beginning != previous_post_flow_nav
             ):
                 raise HwmCoverageError("component subperiod flow linkage differs")
-            if previous_post_flow_gross_assets is not None and (
-                subperiod_beginning_gross_assets != previous_post_flow_gross_assets
-                or subperiod_beginning_financing_liability
-                != previous_post_flow_financing_liability
+            if (
+                component_financial_mode == _DETAILED_COMPONENT_MODE
+                and previous_post_flow_gross_assets is not None
+                and (
+                    subperiod_beginning_gross_assets != previous_post_flow_gross_assets
+                    or subperiod_beginning_financing_liability
+                    != previous_post_flow_financing_liability
+                )
             ):
                 raise HwmCoverageError("component subperiod leverage linkage differs")
             normalized_subperiod_without_evidence = {
@@ -1812,22 +1960,6 @@ def _compute_as_held_composite_hwm(
                 ),
                 "beginning_nav_usd": _decimal_text(subperiod_beginning),
                 "ending_nav_before_flow_usd": _decimal_text(subperiod_ending),
-                "beginning_gross_assets_usd": _decimal_text(
-                    subperiod_beginning_gross_assets
-                ),
-                "beginning_financing_liability_usd": _decimal_text(
-                    subperiod_beginning_financing_liability
-                ),
-                "ending_gross_assets_before_flow_usd": _decimal_text(
-                    subperiod_ending_gross_assets
-                ),
-                "ending_financing_liability_before_flow_usd": _decimal_text(
-                    subperiod_ending_financing_liability
-                ),
-                "margin_principal_flow_after_subperiod_usd": _decimal_text(
-                    subperiod_margin_principal_flow
-                ),
-                "financing_cost_usd": _decimal_text(subperiod_financing_cost),
                 "external_flow_after_subperiod_usd": _decimal_text(
                     subperiod_external_flow
                 ),
@@ -1835,52 +1967,92 @@ def _compute_as_held_composite_hwm(
                     subperiod_internal_transfer
                 ),
             }
+            if component_financial_mode == _DETAILED_COMPONENT_MODE:
+                assert subperiod_beginning_gross_assets is not None
+                assert subperiod_beginning_financing_liability is not None
+                assert subperiod_ending_gross_assets is not None
+                assert subperiod_ending_financing_liability is not None
+                assert subperiod_margin_principal_flow is not None
+                assert subperiod_financing_cost is not None
+                normalized_subperiod_without_evidence.update(
+                    {
+                        "beginning_gross_assets_usd": _decimal_text(
+                            subperiod_beginning_gross_assets
+                        ),
+                        "beginning_financing_liability_usd": _decimal_text(
+                            subperiod_beginning_financing_liability
+                        ),
+                        "ending_gross_assets_before_flow_usd": _decimal_text(
+                            subperiod_ending_gross_assets
+                        ),
+                        "ending_financing_liability_before_flow_usd": _decimal_text(
+                            subperiod_ending_financing_liability
+                        ),
+                        "margin_principal_flow_after_subperiod_usd": _decimal_text(
+                            subperiod_margin_principal_flow
+                        ),
+                        "financing_cost_usd": _decimal_text(subperiod_financing_cost),
+                    }
+                )
             flow_evidence_sha256 = _sha256(
                 subperiod_value["flow_event_evidence_sha256"],
                 "subperiod.flow_event_evidence_sha256",
             )
-            expected_flow_evidence_sha256 = _canonical_sha256(
-                {
-                    "schema_version": 2,
-                    "evidence_type": "FLOW_EVENT",
-                    "strategy_id": strategy_id,
-                    "interval_id": interval_id,
-                    "subperiod": {
-                        **normalized_subperiod_without_evidence,
-                        "flow_event_ids": [
-                            event["event_id"] for event in effective_events
-                        ],
-                        "flow_event_sha256s": [
-                            event["event_evidence_sha256"] for event in effective_events
-                        ],
-                    },
-                }
-            )
+            flow_evidence_payload = {
+                "schema_version": 2 if generation_schema_version == 2 else 3,
+                "evidence_type": "FLOW_EVENT",
+                "strategy_id": strategy_id,
+                "interval_id": interval_id,
+                "subperiod": {
+                    **normalized_subperiod_without_evidence,
+                    "flow_event_ids": [event["event_id"] for event in effective_events],
+                    "flow_event_sha256s": [
+                        event["event_evidence_sha256"] for event in effective_events
+                    ],
+                },
+            }
+            if generation_schema_version == 3:
+                flow_evidence_payload["component_financial_mode"] = (
+                    component_financial_mode
+                )
+            expected_flow_evidence_sha256 = _canonical_sha256(flow_evidence_payload)
             if flow_evidence_sha256 != expected_flow_evidence_sha256:
                 raise HwmCoverageError("subperiod flow evidence identity differs")
             if flow_evidence_sha256 not in evidence_registry:
                 raise HwmCoverageError("subperiod flow evidence is not admitted")
             used_evidence_sha256s.add(flow_evidence_sha256)
             linked_return *= Fraction(subperiod_ending) / Fraction(subperiod_beginning)
-            linked_gross_return *= Fraction(
-                subperiod_ending_gross_assets + subperiod_financing_cost
-            ) / Fraction(subperiod_beginning_gross_assets)
+            if component_financial_mode == _DETAILED_COMPONENT_MODE:
+                assert subperiod_ending_gross_assets is not None
+                assert subperiod_financing_cost is not None
+                assert subperiod_beginning_gross_assets is not None
+                linked_gross_return *= Fraction(
+                    subperiod_ending_gross_assets + subperiod_financing_cost
+                ) / Fraction(subperiod_beginning_gross_assets)
             summed_external_flow += subperiod_external_flow
             summed_internal_transfer += subperiod_internal_transfer
-            summed_margin_principal_flow += subperiod_margin_principal_flow
-            summed_financing_cost += subperiod_financing_cost
+            if component_financial_mode == _DETAILED_COMPONENT_MODE:
+                assert subperiod_margin_principal_flow is not None
+                assert subperiod_financing_cost is not None
+                summed_margin_principal_flow += subperiod_margin_principal_flow
+                summed_financing_cost += subperiod_financing_cost
             previous_post_flow_nav = (
                 subperiod_ending + subperiod_external_flow + subperiod_internal_transfer
             )
-            previous_post_flow_gross_assets = (
-                subperiod_ending_gross_assets
-                + subperiod_external_flow
-                + subperiod_internal_transfer
-                + subperiod_margin_principal_flow
-            )
-            previous_post_flow_financing_liability = (
-                subperiod_ending_financing_liability + subperiod_margin_principal_flow
-            )
+            if component_financial_mode == _DETAILED_COMPONENT_MODE:
+                assert subperiod_ending_gross_assets is not None
+                assert subperiod_margin_principal_flow is not None
+                assert subperiod_ending_financing_liability is not None
+                previous_post_flow_gross_assets = (
+                    subperiod_ending_gross_assets
+                    + subperiod_external_flow
+                    + subperiod_internal_transfer
+                    + subperiod_margin_principal_flow
+                )
+                previous_post_flow_financing_liability = (
+                    subperiod_ending_financing_liability
+                    + subperiod_margin_principal_flow
+                )
             previous_subperiod_end = subperiod_end
             normalized_subperiods.append(
                 {
@@ -1900,7 +2072,7 @@ def _compute_as_held_composite_hwm(
             raise HwmCoverageError("component subperiod time boundaries differ")
         if previous_post_flow_nav != ending_nav:
             raise HwmCoverageError("component ending NAV differs from subperiods")
-        if (
+        if component_financial_mode == _DETAILED_COMPONENT_MODE and (
             previous_post_flow_gross_assets != gross_assets
             or previous_post_flow_financing_liability != financing_liability
         ):
@@ -1913,18 +2085,17 @@ def _compute_as_held_composite_hwm(
                 (strategy_id, interval_id, final_subperiod_id), []
             )
             if (
-                gross_assets != 0
-                or financing_liability != 0
-                or not any(
-                    event["event_type"]
-                    in {
-                        "OWNER_WITHDRAWAL",
-                        "INTERNAL_TRANSFER",
-                        "PREDECESSOR_TRANSITION",
-                    }
-                    and event["usd_amount_decimal"] < 0
-                    for event in terminal_events
-                )
+                component_financial_mode == _DETAILED_COMPONENT_MODE
+                and (gross_assets != 0 or financing_liability != 0)
+            ) or not any(
+                event["event_type"]
+                in {
+                    "OWNER_WITHDRAWAL",
+                    "INTERNAL_TRANSFER",
+                    "PREDECESSOR_TRANSITION",
+                }
+                and event["usd_amount_decimal"] < 0
+                for event in terminal_events
             ):
                 raise HwmCoverageError(
                     "zero ending NAV lacks an admitted funded-exit event"
@@ -1935,9 +2106,15 @@ def _compute_as_held_composite_hwm(
             raise HwmCoverageError(
                 "component internal transfer differs from subperiods"
             )
-        if summed_margin_principal_flow != margin_principal_flow:
+        if (
+            component_financial_mode == _DETAILED_COMPONENT_MODE
+            and summed_margin_principal_flow != margin_principal_flow
+        ):
             raise HwmCoverageError("component margin principal differs from subperiods")
-        if summed_financing_cost != financing_cost:
+        if (
+            component_financial_mode == _DETAILED_COMPONENT_MODE
+            and summed_financing_cost != financing_cost
+        ):
             raise HwmCoverageError("component financing cost differs from subperiods")
         if flow_timing == "NO_EXTERNAL_OR_INTERNAL_FLOW":
             if external_flow != 0 or internal_transfer != 0:
@@ -1980,16 +2157,12 @@ def _compute_as_held_composite_hwm(
         else:
             raise HwmCoverageError("component flow timing is invalid")
         derived_return_fraction = linked_return - Fraction(1, 1)
-        derived_gross_return_fraction = linked_gross_return - Fraction(1, 1)
         with localcontext() as ctx:
             ctx.prec = 34
             ctx.rounding = ROUND_HALF_EVEN
             derived_period_return = Decimal(
                 derived_return_fraction.numerator
             ) / Decimal(derived_return_fraction.denominator)
-            derived_gross_asset_return = Decimal(
-                derived_gross_return_fraction.numerator
-            ) / Decimal(derived_gross_return_fraction.denominator)
         if Fraction(flow_adjusted_ending_nav) != (
             Fraction(beginning_capital) * linked_return
         ):
@@ -2000,10 +2173,18 @@ def _compute_as_held_composite_hwm(
             raise HwmCoverageError(
                 "component return differs from flow-adjusted net NAV"
             )
-        if derived_gross_asset_return != gross_asset_return:
-            raise HwmCoverageError(
-                "component gross asset return differs from leverage facts"
-            )
+        if component_financial_mode == _DETAILED_COMPONENT_MODE:
+            derived_gross_return_fraction = linked_gross_return - Fraction(1, 1)
+            with localcontext() as ctx:
+                ctx.prec = 34
+                ctx.rounding = ROUND_HALF_EVEN
+                derived_gross_asset_return = Decimal(
+                    derived_gross_return_fraction.numerator
+                ) / Decimal(derived_gross_return_fraction.denominator)
+            if derived_gross_asset_return != gross_asset_return:
+                raise HwmCoverageError(
+                    "component gross asset return differs from leverage facts"
+                )
         capital_basis = _text(original["capital_basis"], "component.capital_basis")
         if capital_basis not in {
             "OBSERVED_INDEPENDENT",
@@ -2023,64 +2204,109 @@ def _compute_as_held_composite_hwm(
             != accepted_calendar_sha256
         ):
             raise HwmCoverageError("component calendar identity differs")
+        evidence_hash_fields = {
+            "capital_evidence_sha256",
+            "flow_reconciliation_sha256",
+            "return_evidence_sha256",
+            component_generation_identity_field,
+        }
+        if component_financial_mode == _DETAILED_COMPONENT_MODE:
+            evidence_hash_fields.add("leverage_evidence_sha256")
+        else:
+            evidence_hash_fields.add("portable_return_basis_declaration_sha256")
         hashes = {
             field: _sha256(original[field], f"component.{field}")
-            for field in {
-                "capital_evidence_sha256",
-                "flow_reconciliation_sha256",
-                "return_evidence_sha256",
-                "leverage_evidence_sha256",
-                "source_generation_sha256",
-            }
+            for field in evidence_hash_fields
+        }
+        evidence_common: dict[str, Any] = {
+            "schema_version": 1 if generation_schema_version == 2 else 2,
+            "strategy_id": strategy_id,
+            "interval_id": interval_id,
+        }
+        if generation_schema_version == 3:
+            evidence_common["component_financial_mode"] = component_financial_mode
+        capital_evidence_payload = {
+            **evidence_common,
+            "evidence_type": "BEGINNING_CAPITAL",
+            "beginning_capital_usd": _decimal_text(beginning_capital),
+            "capital_basis": capital_basis,
+        }
+        component_flow_evidence_payload: dict[str, Any] = {
+            **evidence_common,
+            "evidence_type": "FLOW_RECONCILIATION",
+            "flow_timing": flow_timing,
+            "external_flow_usd": _decimal_text(external_flow),
+            "internal_transfer_usd": _decimal_text(internal_transfer),
+            "subperiod_flow_evidence_sha256s": [
+                item["flow_event_evidence_sha256"] for item in normalized_subperiods
+            ],
+        }
+        if component_financial_mode == _DETAILED_COMPONENT_MODE:
+            assert margin_principal_flow is not None
+            component_flow_evidence_payload["margin_principal_flow_usd"] = (
+                _decimal_text(margin_principal_flow)
+            )
+        return_evidence_payload = {
+            **evidence_common,
+            "evidence_type": (
+                "LEVERED_NET_RETURN"
+                if component_financial_mode == _DETAILED_COMPONENT_MODE
+                else "DIRECT_NET_TOTAL_FLOW_NEUTRAL_RETURN"
+            ),
+            "beginning_capital_usd": _decimal_text(beginning_capital),
+            "ending_nav_usd": _decimal_text(ending_nav),
+            "flow_adjusted_ending_nav_usd": _decimal_text(flow_adjusted_ending_nav),
+            "period_return": _decimal_text(period_return),
+            "subperiods": normalized_subperiods,
         }
         expected_component_evidence = {
-            "capital_evidence_sha256": _canonical_sha256(
-                {
-                    "schema_version": 1,
-                    "evidence_type": "BEGINNING_CAPITAL",
-                    "strategy_id": strategy_id,
-                    "interval_id": interval_id,
-                    "beginning_capital_usd": _decimal_text(beginning_capital),
-                    "capital_basis": capital_basis,
-                }
-            ),
+            "capital_evidence_sha256": _canonical_sha256(capital_evidence_payload),
             "flow_reconciliation_sha256": _canonical_sha256(
-                {
-                    "schema_version": 1,
-                    "evidence_type": "FLOW_RECONCILIATION",
-                    "strategy_id": strategy_id,
-                    "interval_id": interval_id,
-                    "flow_timing": flow_timing,
-                    "external_flow_usd": _decimal_text(external_flow),
-                    "internal_transfer_usd": _decimal_text(internal_transfer),
-                    "margin_principal_flow_usd": _decimal_text(margin_principal_flow),
-                    "subperiod_flow_evidence_sha256s": [
-                        item["flow_event_evidence_sha256"]
-                        for item in normalized_subperiods
-                    ],
-                }
+                component_flow_evidence_payload
             ),
-            "return_evidence_sha256": _canonical_sha256(
+        }
+        if component_financial_mode == _DIRECT_NET_COMPONENT_MODE:
+            portable_return_basis_declaration_sha256 = hashes[
+                "portable_return_basis_declaration_sha256"
+            ]
+            return_evidence_payload.update(
                 {
-                    "schema_version": 1,
-                    "evidence_type": "LEVERED_NET_RETURN",
-                    "strategy_id": strategy_id,
-                    "interval_id": interval_id,
-                    "beginning_capital_usd": _decimal_text(beginning_capital),
-                    "ending_nav_usd": _decimal_text(ending_nav),
-                    "flow_adjusted_ending_nav_usd": _decimal_text(
-                        flow_adjusted_ending_nav
+                    "return_basis": return_basis,
+                    "portable_return_basis_declaration_sha256": (
+                        portable_return_basis_declaration_sha256
                     ),
-                    "period_return": _decimal_text(period_return),
-                    "subperiods": normalized_subperiods,
                 }
-            ),
-            "leverage_evidence_sha256": _canonical_sha256(
+            )
+            expected_component_evidence["return_evidence_sha256"] = _canonical_sha256(
+                return_evidence_payload
+            )
+            expected_component_evidence["portable_return_basis_declaration_sha256"] = (
+                _canonical_sha256(
+                    {
+                        "schema_version": 1,
+                        "evidence_type": "PORTABLE_RETURN_BASIS_DECLARATION",
+                        "authority_profile": _PORTABLE_INPUT_AUTHORITY,
+                        "component_financial_mode": _DIRECT_NET_COMPONENT_MODE,
+                        "return_basis": return_basis,
+                        **expected_authority_bindings,
+                    }
+                )
+            )
+        else:
+            expected_component_evidence["return_evidence_sha256"] = _canonical_sha256(
+                return_evidence_payload
+            )
+            assert beginning_gross_assets is not None
+            assert beginning_financing_liability is not None
+            assert gross_assets is not None
+            assert financing_liability is not None
+            assert margin_principal_flow is not None
+            assert financing_cost is not None
+            assert gross_asset_return is not None
+            expected_component_evidence["leverage_evidence_sha256"] = _canonical_sha256(
                 {
-                    "schema_version": 1,
+                    **evidence_common,
                     "evidence_type": "LEVERAGE_RECONCILIATION",
-                    "strategy_id": strategy_id,
-                    "interval_id": interval_id,
                     "beginning_gross_assets_usd": _decimal_text(beginning_gross_assets),
                     "beginning_financing_liability_usd": _decimal_text(
                         beginning_financing_liability
@@ -2094,21 +2320,15 @@ def _compute_as_held_composite_hwm(
                     "gross_asset_return": _decimal_text(gross_asset_return),
                     "subperiods": normalized_subperiods,
                 }
-            ),
-        }
+            )
         for field_name, expected_sha256 in expected_component_evidence.items():
             if hashes[field_name] != expected_sha256:
                 raise HwmCoverageError(f"component {field_name} identity differs")
-        if hashes["source_generation_sha256"] != accepted_generation_sha256:
-            raise HwmCoverageError("component source generation identity differs")
+        if hashes[component_generation_identity_field] != accepted_generation_sha256:
+            raise HwmCoverageError("component input generation identity differs")
         if any(
             hashes[field] not in evidence_registry
-            for field in {
-                "capital_evidence_sha256",
-                "flow_reconciliation_sha256",
-                "return_evidence_sha256",
-                "leverage_evidence_sha256",
-            }
+            for field in expected_component_evidence
         ):
             raise HwmCoverageError("component evidence is not admitted")
         used_evidence_sha256s.update(expected_component_evidence.values())
@@ -2118,15 +2338,6 @@ def _compute_as_held_composite_hwm(
             "interval_start": interval_start.isoformat(),
             "interval_end": interval_end.isoformat(),
             "beginning_capital_usd": _decimal_text(beginning_capital),
-            "beginning_gross_assets_usd": _decimal_text(beginning_gross_assets),
-            "beginning_financing_liability_usd": _decimal_text(
-                beginning_financing_liability
-            ),
-            "ending_gross_assets_usd": _decimal_text(gross_assets),
-            "ending_financing_liability_usd": _decimal_text(financing_liability),
-            "margin_principal_flow_usd": _decimal_text(margin_principal_flow),
-            "financing_cost_usd": _decimal_text(financing_cost),
-            "gross_asset_return": _decimal_text(gross_asset_return),
             "ending_nav_usd": _decimal_text(ending_nav),
             "external_flow_usd": _decimal_text(external_flow),
             "internal_transfer_usd": _decimal_text(internal_transfer),
@@ -2140,6 +2351,31 @@ def _compute_as_held_composite_hwm(
             "calendar_sha256": accepted_calendar_sha256,
             "return_basis": return_basis,
         }
+        if generation_schema_version == 3:
+            component_normalized["component_financial_mode"] = component_financial_mode
+        if component_financial_mode == _DETAILED_COMPONENT_MODE:
+            assert beginning_gross_assets is not None
+            assert beginning_financing_liability is not None
+            assert gross_assets is not None
+            assert financing_liability is not None
+            assert margin_principal_flow is not None
+            assert financing_cost is not None
+            assert gross_asset_return is not None
+            component_normalized.update(
+                {
+                    "beginning_gross_assets_usd": _decimal_text(beginning_gross_assets),
+                    "beginning_financing_liability_usd": _decimal_text(
+                        beginning_financing_liability
+                    ),
+                    "ending_gross_assets_usd": _decimal_text(gross_assets),
+                    "ending_financing_liability_usd": _decimal_text(
+                        financing_liability
+                    ),
+                    "margin_principal_flow_usd": _decimal_text(margin_principal_flow),
+                    "financing_cost_usd": _decimal_text(financing_cost),
+                    "gross_asset_return": _decimal_text(gross_asset_return),
+                }
+            )
         enriched = {
             **component_normalized,
             "beginning_capital": beginning_capital,
@@ -2150,6 +2386,8 @@ def _compute_as_held_composite_hwm(
         component_by_key[key] = enriched
         components_by_strategy[strategy_id].append(enriched)
 
+    if observed_component_modes != declared_component_modes:
+        raise HwmCoverageError("HWM input component financial modes differ")
     expected_keys = {
         (interval_id, strategy_id)
         for interval_id, members in active_members_by_interval.items()
@@ -2254,6 +2492,11 @@ def _compute_as_held_composite_hwm(
                     "beginning_capital_usd": item["beginning_capital"],
                     "weight": item["beginning_capital"] / total_capital,
                     "period_return": item["period_return_decimal"],
+                    **(
+                        {"component_financial_mode": item["component_financial_mode"]}
+                        if generation_schema_version == 3
+                        else {}
+                    ),
                 }
                 for item in components
             ]
@@ -2285,21 +2528,41 @@ def _compute_as_held_composite_hwm(
 
     warning = age_days > maximum_age_days
     final_interval_id = normalized_intervals[-1]["interval_id"]
-    complete_through_limiting_inputs = [
-        {
+    complete_through_limiting_inputs = []
+    for item in normalized_components:
+        if item["interval_id"] != final_interval_id:
+            continue
+        limiting_input = {
             "strategy_id": item["strategy_id"],
             "interval_id": item["interval_id"],
-            "source_generation_sha256": item["source_generation_sha256"],
             "capital_evidence_sha256": item["capital_evidence_sha256"],
             "flow_reconciliation_sha256": item["flow_reconciliation_sha256"],
             "return_evidence_sha256": item["return_evidence_sha256"],
-            "leverage_evidence_sha256": item["leverage_evidence_sha256"],
         }
-        for item in normalized_components
-        if item["interval_id"] == final_interval_id
-    ]
+        if generation_schema_version == 3:
+            limiting_input["portable_input_generation_sha256"] = item[
+                "portable_input_generation_sha256"
+            ]
+            limiting_input["component_financial_mode"] = item[
+                "component_financial_mode"
+            ]
+        else:
+            limiting_input["source_generation_sha256"] = item[
+                "source_generation_sha256"
+            ]
+        if item.get("component_financial_mode", _DETAILED_COMPONENT_MODE) == (
+            _DIRECT_NET_COMPONENT_MODE
+        ):
+            limiting_input["portable_return_basis_declaration_sha256"] = item[
+                "portable_return_basis_declaration_sha256"
+            ]
+        else:
+            limiting_input["leverage_evidence_sha256"] = item[
+                "leverage_evidence_sha256"
+            ]
+        complete_through_limiting_inputs.append(limiting_input)
     result: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": generation_schema_version,
         "status": _PORTABLE_PROOF_STATUS,
         "policy_id": AS_HELD_HWM_POLICY_ID,
         "policy_sha256": accepted_policy_sha256,
@@ -2332,14 +2595,528 @@ def _compute_as_held_composite_hwm(
             "component_periods": normalized_components,
         },
     }
+    if generation_schema_version == 3:
+        result["authority_bindings"] = dict(expected_authority_bindings)
 
     result["receipt_sha256"] = _canonical_sha256(_json_safe(result))
     return result
 
 
+def _validate_receipt_component_subperiods(
+    component: Mapping[str, Any],
+    *,
+    receipt_schema_version: int,
+    component_financial_mode: str,
+    receipt_policy_sha256: str,
+    receipt_calendar_sha256: str,
+    receipt_generation_sha256: str,
+    receipt_authority_bindings: Mapping[str, str] | None,
+) -> None:
+    """Reconcile receipt-only component evidence without trusting its self-hash."""
+
+    strategy_id = _text(component["strategy_id"], "receipt input component strategy")
+    interval_id = _text(component["interval_id"], "receipt input component interval")
+    interval_start = _canonical_date(
+        component["interval_start"], "receipt input component start"
+    )
+    interval_end = _canonical_date(
+        component["interval_end"], "receipt input component end"
+    )
+    if (interval_end - interval_start).days != 1:
+        raise HwmCoverageError("receipt input component interval differs")
+
+    beginning_capital = _canonical_decimal(
+        component["beginning_capital_usd"], "receipt input component capital"
+    )
+    ending_nav = _canonical_decimal(
+        component["ending_nav_usd"], "receipt input component ending NAV"
+    )
+    external_flow = _canonical_decimal(
+        component["external_flow_usd"], "receipt input component external flow"
+    )
+    internal_transfer = _canonical_decimal(
+        component["internal_transfer_usd"],
+        "receipt input component internal transfer",
+    )
+    flow_adjusted_ending_nav = _canonical_decimal(
+        component["flow_adjusted_ending_nav_usd"],
+        "receipt input component flow-adjusted ending NAV",
+    )
+    period_return = _canonical_decimal(
+        component["period_return"], "receipt input component return"
+    )
+    if (
+        beginning_capital <= 0
+        or ending_nav < 0
+        or flow_adjusted_ending_nav <= 0
+        or period_return <= -1
+    ):
+        raise HwmCoverageError("receipt input component NAV semantics differ")
+
+    flow_timing = _text(component["flow_timing"], "receipt input component flow timing")
+    capital_basis = _text(
+        component["capital_basis"], "receipt input component capital basis"
+    )
+    if capital_basis not in {
+        "OBSERVED_INDEPENDENT",
+        "ROLLFORWARD_FROM_PRIOR_INTERVAL",
+    }:
+        raise HwmCoverageError("receipt input component capital basis differs")
+    return_basis = _text(
+        component["return_basis"], "receipt input component return basis"
+    )
+    if return_basis != AS_HELD_HWM_RETURN_BASIS:
+        raise HwmCoverageError("receipt input component return basis differs")
+    if (
+        _sha256(component["policy_sha256"], "receipt input component policy")
+        != receipt_policy_sha256
+        or _sha256(component["calendar_sha256"], "receipt input component calendar")
+        != receipt_calendar_sha256
+    ):
+        raise HwmCoverageError("receipt input component authority differs")
+    generation_identity_field = (
+        "source_generation_sha256"
+        if receipt_schema_version == 2
+        else "portable_input_generation_sha256"
+    )
+    if (
+        _sha256(
+            component[generation_identity_field],
+            f"receipt input component {generation_identity_field}",
+        )
+        != receipt_generation_sha256
+    ):
+        raise HwmCoverageError("receipt input component generation identity differs")
+
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        beginning_gross_assets = _canonical_decimal(
+            component["beginning_gross_assets_usd"],
+            "receipt input component beginning gross assets",
+        )
+        beginning_financing_liability = _canonical_decimal(
+            component["beginning_financing_liability_usd"],
+            "receipt input component beginning financing liability",
+        )
+        ending_gross_assets = _canonical_decimal(
+            component["ending_gross_assets_usd"],
+            "receipt input component ending gross assets",
+        )
+        ending_financing_liability = _canonical_decimal(
+            component["ending_financing_liability_usd"],
+            "receipt input component ending financing liability",
+        )
+        margin_principal_flow = _canonical_decimal(
+            component["margin_principal_flow_usd"],
+            "receipt input component margin principal flow",
+        )
+        financing_cost = _canonical_decimal(
+            component["financing_cost_usd"],
+            "receipt input component financing cost",
+        )
+        gross_asset_return = _canonical_decimal(
+            component["gross_asset_return"],
+            "receipt input component gross asset return",
+        )
+        if (
+            beginning_gross_assets < 0
+            or beginning_financing_liability < 0
+            or ending_gross_assets < 0
+            or ending_financing_liability < 0
+            or financing_cost < 0
+            or gross_asset_return <= -1
+            or beginning_gross_assets - beginning_financing_liability
+            != beginning_capital
+            or beginning_financing_liability + margin_principal_flow
+            != ending_financing_liability
+            or ending_gross_assets - ending_financing_liability != ending_nav
+        ):
+            raise HwmCoverageError("receipt input component leverage semantics differ")
+    else:
+        beginning_gross_assets = None
+        beginning_financing_liability = None
+        ending_gross_assets = None
+        ending_financing_liability = None
+        margin_principal_flow = None
+        financing_cost = None
+        gross_asset_return = None
+
+    subperiod_values = component["subperiods"]
+    if not isinstance(subperiod_values, list) or not subperiod_values:
+        raise HwmCoverageError("receipt input subperiods differ")
+    subperiod_keys = _component_subperiod_keys(component_financial_mode)
+    normalized_subperiods: list[dict[str, str]] = []
+    linked_return = Fraction(1, 1)
+    linked_gross_return = Fraction(1, 1)
+    summed_external_flow = Decimal("0")
+    summed_internal_transfer = Decimal("0")
+    summed_margin_principal_flow = Decimal("0")
+    summed_financing_cost = Decimal("0")
+    previous_post_flow_nav: Decimal | None = None
+    previous_post_flow_gross_assets: Decimal | None = None
+    previous_post_flow_financing_liability: Decimal | None = None
+    previous_subperiod_end: datetime | None = None
+    subperiod_ids: set[str] = set()
+    expected_interval_start = datetime(
+        interval_start.year,
+        interval_start.month,
+        interval_start.day,
+        tzinfo=timezone.utc,
+    )
+    expected_interval_end = datetime(
+        interval_end.year,
+        interval_end.month,
+        interval_end.day,
+        tzinfo=timezone.utc,
+    )
+    for subperiod_index, subperiod_value in enumerate(subperiod_values):
+        subperiod = _mapping(subperiod_value, "receipt input subperiod")
+        _strict_keys(subperiod, subperiod_keys, "receipt input subperiod")
+        subperiod_id = _text(
+            subperiod["subperiod_id"], "receipt input subperiod identity"
+        )
+        if subperiod_id in subperiod_ids:
+            raise HwmCoverageError("receipt input subperiod identity is duplicated")
+        subperiod_ids.add(subperiod_id)
+        subperiod_start = _canonical_utc_timestamp(
+            subperiod["subperiod_start_utc"], "receipt input subperiod start"
+        )
+        subperiod_end = _canonical_utc_timestamp(
+            subperiod["subperiod_end_utc"], "receipt input subperiod end"
+        )
+        if (
+            subperiod_end <= subperiod_start
+            or (subperiod_index == 0 and subperiod_start != expected_interval_start)
+            or (
+                previous_subperiod_end is not None
+                and subperiod_start != previous_subperiod_end
+            )
+        ):
+            raise HwmCoverageError("receipt input subperiod boundaries differ")
+        subperiod_beginning = _canonical_decimal(
+            subperiod["beginning_nav_usd"], "receipt input subperiod beginning NAV"
+        )
+        subperiod_ending = _canonical_decimal(
+            subperiod["ending_nav_before_flow_usd"],
+            "receipt input subperiod ending NAV",
+        )
+        subperiod_external_flow = _canonical_decimal(
+            subperiod["external_flow_after_subperiod_usd"],
+            "receipt input subperiod external flow",
+        )
+        subperiod_internal_transfer = _canonical_decimal(
+            subperiod["internal_transfer_after_subperiod_usd"],
+            "receipt input subperiod internal transfer",
+        )
+        if subperiod_beginning <= 0 or subperiod_ending <= 0:
+            raise HwmCoverageError("receipt input subperiod NAV semantics differ")
+        if subperiod_index == 0 and subperiod_beginning != beginning_capital:
+            raise HwmCoverageError("receipt input first subperiod capital differs")
+        if (
+            previous_post_flow_nav is not None
+            and subperiod_beginning != previous_post_flow_nav
+        ):
+            raise HwmCoverageError("receipt input subperiod NAV linkage differs")
+
+        normalized_subperiod: dict[str, str] = {
+            "subperiod_id": subperiod_id,
+            "subperiod_start_utc": _text(
+                subperiod["subperiod_start_utc"],
+                "receipt input subperiod start",
+            ),
+            "subperiod_end_utc": _text(
+                subperiod["subperiod_end_utc"], "receipt input subperiod end"
+            ),
+            "beginning_nav_usd": _decimal_text(subperiod_beginning),
+            "ending_nav_before_flow_usd": _decimal_text(subperiod_ending),
+            "external_flow_after_subperiod_usd": _decimal_text(subperiod_external_flow),
+            "internal_transfer_after_subperiod_usd": _decimal_text(
+                subperiod_internal_transfer
+            ),
+        }
+        if component_financial_mode == _DETAILED_COMPONENT_MODE:
+            subperiod_beginning_gross_assets = _canonical_decimal(
+                subperiod["beginning_gross_assets_usd"],
+                "receipt input subperiod beginning gross assets",
+            )
+            subperiod_beginning_financing_liability = _canonical_decimal(
+                subperiod["beginning_financing_liability_usd"],
+                "receipt input subperiod beginning financing liability",
+            )
+            subperiod_ending_gross_assets = _canonical_decimal(
+                subperiod["ending_gross_assets_before_flow_usd"],
+                "receipt input subperiod ending gross assets",
+            )
+            subperiod_ending_financing_liability = _canonical_decimal(
+                subperiod["ending_financing_liability_before_flow_usd"],
+                "receipt input subperiod ending financing liability",
+            )
+            subperiod_margin_principal_flow = _canonical_decimal(
+                subperiod["margin_principal_flow_after_subperiod_usd"],
+                "receipt input subperiod margin principal flow",
+            )
+            subperiod_financing_cost = _canonical_decimal(
+                subperiod["financing_cost_usd"],
+                "receipt input subperiod financing cost",
+            )
+            if (
+                subperiod_beginning_gross_assets <= 0
+                or subperiod_ending_gross_assets < 0
+                or subperiod_beginning_financing_liability < 0
+                or subperiod_ending_financing_liability < 0
+                or subperiod_financing_cost < 0
+                or subperiod_beginning_gross_assets
+                - subperiod_beginning_financing_liability
+                != subperiod_beginning
+                or subperiod_ending_gross_assets - subperiod_ending_financing_liability
+                != subperiod_ending
+                or subperiod_ending_financing_liability
+                != subperiod_beginning_financing_liability
+            ):
+                raise HwmCoverageError(
+                    "receipt input subperiod leverage semantics differ"
+                )
+            if subperiod_index == 0 and (
+                subperiod_beginning_gross_assets != beginning_gross_assets
+                or subperiod_beginning_financing_liability
+                != beginning_financing_liability
+            ):
+                raise HwmCoverageError(
+                    "receipt input first subperiod leverage facts differ"
+                )
+            if previous_post_flow_gross_assets is not None and (
+                subperiod_beginning_gross_assets != previous_post_flow_gross_assets
+                or subperiod_beginning_financing_liability
+                != previous_post_flow_financing_liability
+            ):
+                raise HwmCoverageError(
+                    "receipt input subperiod leverage linkage differs"
+                )
+            normalized_subperiod.update(
+                {
+                    "beginning_gross_assets_usd": _decimal_text(
+                        subperiod_beginning_gross_assets
+                    ),
+                    "beginning_financing_liability_usd": _decimal_text(
+                        subperiod_beginning_financing_liability
+                    ),
+                    "ending_gross_assets_before_flow_usd": _decimal_text(
+                        subperiod_ending_gross_assets
+                    ),
+                    "ending_financing_liability_before_flow_usd": _decimal_text(
+                        subperiod_ending_financing_liability
+                    ),
+                    "margin_principal_flow_after_subperiod_usd": _decimal_text(
+                        subperiod_margin_principal_flow
+                    ),
+                    "financing_cost_usd": _decimal_text(subperiod_financing_cost),
+                }
+            )
+            linked_gross_return *= Fraction(
+                subperiod_ending_gross_assets + subperiod_financing_cost
+            ) / Fraction(subperiod_beginning_gross_assets)
+            summed_margin_principal_flow += subperiod_margin_principal_flow
+            summed_financing_cost += subperiod_financing_cost
+            previous_post_flow_gross_assets = (
+                subperiod_ending_gross_assets
+                + subperiod_external_flow
+                + subperiod_internal_transfer
+                + subperiod_margin_principal_flow
+            )
+            previous_post_flow_financing_liability = (
+                subperiod_ending_financing_liability + subperiod_margin_principal_flow
+            )
+        flow_event_evidence_sha256 = _sha256(
+            subperiod["flow_event_evidence_sha256"],
+            "receipt input subperiod flow evidence",
+        )
+        normalized_subperiod["flow_event_evidence_sha256"] = flow_event_evidence_sha256
+        normalized_subperiods.append(normalized_subperiod)
+        linked_return *= Fraction(subperiod_ending) / Fraction(subperiod_beginning)
+        summed_external_flow += subperiod_external_flow
+        summed_internal_transfer += subperiod_internal_transfer
+        previous_post_flow_nav = (
+            subperiod_ending + subperiod_external_flow + subperiod_internal_transfer
+        )
+        previous_subperiod_end = subperiod_end
+
+    if previous_subperiod_end != expected_interval_end:
+        raise HwmCoverageError("receipt input subperiod boundaries differ")
+    if previous_post_flow_nav != ending_nav:
+        raise HwmCoverageError("receipt input component ending NAV differs")
+    if (
+        summed_external_flow != external_flow
+        or summed_internal_transfer != internal_transfer
+    ):
+        raise HwmCoverageError("receipt input component flow totals differ")
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        if (
+            previous_post_flow_gross_assets != ending_gross_assets
+            or previous_post_flow_financing_liability != ending_financing_liability
+            or summed_margin_principal_flow != margin_principal_flow
+            or summed_financing_cost != financing_cost
+        ):
+            raise HwmCoverageError("receipt input component leverage totals differ")
+    if flow_timing == "NO_EXTERNAL_OR_INTERNAL_FLOW":
+        if external_flow != 0 or internal_transfer != 0:
+            raise HwmCoverageError("receipt input component flow timing differs")
+    elif flow_timing == "DATE_ONLY_END_OF_DAY":
+        if len(normalized_subperiods) != 1 or (
+            external_flow == 0 and internal_transfer == 0
+        ):
+            raise HwmCoverageError("receipt input component flow timing differs")
+    elif flow_timing == "EXACT_TIMESTAMP_SEGMENTED":
+        if len(normalized_subperiods) < 2 or all(
+            _decimal(item["external_flow_after_subperiod_usd"], "flow") == 0
+            and _decimal(item["internal_transfer_after_subperiod_usd"], "transfer") == 0
+            for item in normalized_subperiods[:-1]
+        ):
+            raise HwmCoverageError("receipt input component flow timing differs")
+    else:
+        raise HwmCoverageError("receipt input component flow timing differs")
+
+    derived_return_fraction = linked_return - Fraction(1, 1)
+    with localcontext() as ctx:
+        ctx.prec = 34
+        ctx.rounding = ROUND_HALF_EVEN
+        derived_period_return = Decimal(derived_return_fraction.numerator) / Decimal(
+            derived_return_fraction.denominator
+        )
+    if (
+        Fraction(flow_adjusted_ending_nav)
+        != Fraction(beginning_capital) * linked_return
+        or derived_period_return != period_return
+    ):
+        raise HwmCoverageError("receipt input component return differs")
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        assert gross_asset_return is not None
+        derived_gross_return_fraction = linked_gross_return - Fraction(1, 1)
+        with localcontext() as ctx:
+            ctx.prec = 34
+            ctx.rounding = ROUND_HALF_EVEN
+            derived_gross_asset_return = Decimal(
+                derived_gross_return_fraction.numerator
+            ) / Decimal(derived_gross_return_fraction.denominator)
+        if derived_gross_asset_return != gross_asset_return:
+            raise HwmCoverageError("receipt input component gross return differs")
+
+    evidence_common: dict[str, Any] = {
+        "schema_version": 1 if receipt_schema_version == 2 else 2,
+        "strategy_id": strategy_id,
+        "interval_id": interval_id,
+    }
+    if receipt_schema_version == 3:
+        evidence_common["component_financial_mode"] = component_financial_mode
+    capital_evidence_payload = {
+        **evidence_common,
+        "evidence_type": "BEGINNING_CAPITAL",
+        "beginning_capital_usd": _decimal_text(beginning_capital),
+        "capital_basis": capital_basis,
+    }
+    flow_evidence_payload: dict[str, Any] = {
+        **evidence_common,
+        "evidence_type": "FLOW_RECONCILIATION",
+        "flow_timing": flow_timing,
+        "external_flow_usd": _decimal_text(external_flow),
+        "internal_transfer_usd": _decimal_text(internal_transfer),
+        "subperiod_flow_evidence_sha256s": [
+            item["flow_event_evidence_sha256"] for item in normalized_subperiods
+        ],
+    }
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        assert margin_principal_flow is not None
+        flow_evidence_payload["margin_principal_flow_usd"] = _decimal_text(
+            margin_principal_flow
+        )
+    return_evidence_payload: dict[str, Any] = {
+        **evidence_common,
+        "evidence_type": (
+            "LEVERED_NET_RETURN"
+            if component_financial_mode == _DETAILED_COMPONENT_MODE
+            else "DIRECT_NET_TOTAL_FLOW_NEUTRAL_RETURN"
+        ),
+        "beginning_capital_usd": _decimal_text(beginning_capital),
+        "ending_nav_usd": _decimal_text(ending_nav),
+        "flow_adjusted_ending_nav_usd": _decimal_text(flow_adjusted_ending_nav),
+        "period_return": _decimal_text(period_return),
+        "subperiods": normalized_subperiods,
+    }
+    expected_evidence_sha256s = {
+        "capital_evidence_sha256": _canonical_sha256(capital_evidence_payload),
+        "flow_reconciliation_sha256": _canonical_sha256(flow_evidence_payload),
+    }
+    if component_financial_mode == _DIRECT_NET_COMPONENT_MODE:
+        declaration_sha256 = _sha256(
+            component["portable_return_basis_declaration_sha256"],
+            "receipt input component return-basis declaration",
+        )
+        if (
+            receipt_authority_bindings is None
+            or declaration_sha256
+            != _canonical_sha256(
+                {
+                    "schema_version": 1,
+                    "evidence_type": "PORTABLE_RETURN_BASIS_DECLARATION",
+                    "authority_profile": _PORTABLE_INPUT_AUTHORITY,
+                    "component_financial_mode": _DIRECT_NET_COMPONENT_MODE,
+                    "return_basis": return_basis,
+                    **receipt_authority_bindings,
+                }
+            )
+        ):
+            raise HwmCoverageError(
+                "portable_return_basis_declaration_sha256 identity differs"
+            )
+        return_evidence_payload.update(
+            {
+                "return_basis": return_basis,
+                "portable_return_basis_declaration_sha256": declaration_sha256,
+            }
+        )
+    expected_evidence_sha256s["return_evidence_sha256"] = _canonical_sha256(
+        return_evidence_payload
+    )
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        assert beginning_gross_assets is not None
+        assert beginning_financing_liability is not None
+        assert ending_gross_assets is not None
+        assert ending_financing_liability is not None
+        assert margin_principal_flow is not None
+        assert financing_cost is not None
+        assert gross_asset_return is not None
+        expected_evidence_sha256s["leverage_evidence_sha256"] = _canonical_sha256(
+            {
+                **evidence_common,
+                "evidence_type": "LEVERAGE_RECONCILIATION",
+                "beginning_gross_assets_usd": _decimal_text(beginning_gross_assets),
+                "beginning_financing_liability_usd": _decimal_text(
+                    beginning_financing_liability
+                ),
+                "ending_gross_assets_usd": _decimal_text(ending_gross_assets),
+                "ending_financing_liability_usd": _decimal_text(
+                    ending_financing_liability
+                ),
+                "margin_principal_flow_usd": _decimal_text(margin_principal_flow),
+                "financing_cost_usd": _decimal_text(financing_cost),
+                "gross_asset_return": _decimal_text(gross_asset_return),
+                "subperiods": normalized_subperiods,
+            }
+        )
+    for field_name, expected_sha256 in expected_evidence_sha256s.items():
+        if (
+            _sha256(component[field_name], f"receipt input component {field_name}")
+            != expected_sha256
+        ):
+            raise HwmCoverageError(
+                f"receipt input component {field_name} identity differs"
+            )
+
+
 def as_held_hwm_receipt(result: Mapping[str, Any]) -> dict[str, Any]:
     """Return and verify the canonical JSON-safe PORT-HWM-4 receipt."""
 
+    receipt_schema_version = _generation_schema_version(
+        result.get("schema_version"), "as-held HWM receipt identity is invalid"
+    )
     expected_keys = {
         "schema_version",
         "status",
@@ -2371,6 +3148,8 @@ def as_held_hwm_receipt(result: Mapping[str, Any]) -> dict[str, Any]:
         "input_evidence",
         "receipt_sha256",
     }
+    if receipt_schema_version == 3:
+        expected_keys.add("authority_bindings")
     _strict_keys(result, expected_keys, "as-held HWM result")
     receipt = _json_safe(result)
     assert isinstance(receipt, dict)
@@ -2396,8 +3175,11 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
 ) -> None:
     """Reject internally contradictory receipts even after a coherent rehash."""
 
+    receipt_schema_version = receipt["schema_version"]
     if (
-        receipt["schema_version"] != 2
+        not isinstance(receipt_schema_version, int)
+        or isinstance(receipt_schema_version, bool)
+        or receipt_schema_version not in {2, 3}
         or receipt["status"] != _PORTABLE_PROOF_STATUS
         or receipt["policy_id"] != AS_HELD_HWM_POLICY_ID
         or receipt["return_basis"] != AS_HELD_HWM_RETURN_BASIS
@@ -2411,6 +3193,35 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
         "input_sha256",
     }:
         _sha256(receipt[field_name], f"receipt.{field_name}")
+    receipt_authority_bindings: dict[str, str] | None = None
+    if receipt_schema_version == 3:
+        authority_bindings = _mapping(
+            receipt["authority_bindings"], "receipt.authority_bindings"
+        )
+        _strict_keys(
+            authority_bindings,
+            {
+                "policy_sha256",
+                "policy_semantic_digest",
+                "product_contract_sha256",
+                "performance_policy_sha256",
+                "legacy_policy_sha256",
+                "calendar_sha256",
+            },
+            "receipt.authority_bindings",
+        )
+        receipt_authority_bindings = {
+            field_name: _sha256(value, f"receipt authority {field_name}")
+            for field_name, value in authority_bindings.items()
+        }
+        if (
+            receipt_authority_bindings["policy_sha256"] != receipt["policy_sha256"]
+            or receipt_authority_bindings["policy_semantic_digest"]
+            != receipt["policy_semantic_digest"]
+            or receipt_authority_bindings["calendar_sha256"]
+            != receipt["calendar_sha256"]
+        ):
+            raise HwmCoverageError("as-held HWM receipt authority bindings differ")
     assurance_profile = _text(receipt["assurance_profile"], "receipt.assurance_profile")
     if assurance_profile != "DEVELOPMENT":
         raise HwmCoverageError("as-held HWM receipt assurance profile differs")
@@ -2509,6 +3320,8 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
     ):
         raise HwmCoverageError("as-held HWM receipt path boundary differs")
 
+    calculated_components: dict[tuple[str, str], tuple[str, Decimal, Decimal]] = {}
+    calculated_interval_dates: dict[str, tuple[date, date]] = {}
     for index, value in enumerate(period_values):
         period = _mapping(value, f"receipt.periods[{index}]")
         _strict_keys(
@@ -2523,13 +3336,18 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
             },
             f"receipt.periods[{index}]",
         )
-        _text(period["interval_id"], f"receipt.periods[{index}].interval_id")
+        interval_id = _text(
+            period["interval_id"], f"receipt.periods[{index}].interval_id"
+        )
         start = _canonical_date(
             period["interval_start"], f"receipt.periods[{index}].interval_start"
         )
         end = _canonical_date(
             period["interval_end"], f"receipt.periods[{index}].interval_end"
         )
+        if interval_id in calculated_interval_dates:
+            raise HwmCoverageError("as-held HWM receipt period identity is duplicated")
+        calculated_interval_dates[interval_id] = (start, end)
         if (
             start != normalized_path[index]["as_of"]
             or end != normalized_path[index + 1]["as_of"]
@@ -2560,15 +3378,42 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
                 component_value,
                 f"receipt.periods[{index}].components[{component_index}]",
             )
+            component_keys = {
+                "strategy_id",
+                "beginning_capital_usd",
+                "weight",
+                "period_return",
+            }
+            if receipt_schema_version == 3:
+                component_keys.add("component_financial_mode")
             _strict_keys(
                 component,
-                {"strategy_id", "beginning_capital_usd", "weight", "period_return"},
+                component_keys,
                 f"receipt.periods[{index}].components[{component_index}]",
             )
             strategy_id = _text(component["strategy_id"], "receipt component strategy")
             if strategy_id in strategy_ids:
                 raise HwmCoverageError("as-held HWM receipt component is duplicated")
             strategy_ids.add(strategy_id)
+            if receipt_schema_version == 3:
+                component_financial_mode = _text(
+                    component["component_financial_mode"],
+                    "receipt component financial mode",
+                )
+                if component_financial_mode not in {
+                    _DETAILED_COMPONENT_MODE,
+                    _DIRECT_NET_COMPONENT_MODE,
+                }:
+                    raise HwmCoverageError(
+                        "as-held HWM receipt component financial mode differs"
+                    )
+            else:
+                component_financial_mode = _DETAILED_COMPONENT_MODE
+            component_key = (interval_id, strategy_id)
+            if component_key in calculated_components:
+                raise HwmCoverageError(
+                    "as-held HWM receipt component identity is duplicated"
+                )
             capital = receipt_decimal(
                 component["beginning_capital_usd"], "receipt component capital"
             )
@@ -2578,6 +3423,11 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
             )
             if capital <= 0 or accepted_return <= -1:
                 raise HwmCoverageError("as-held HWM receipt component semantics differ")
+            calculated_components[component_key] = (
+                component_financial_mode,
+                capital,
+                accepted_return,
+            )
             component_capital += capital
             weighted_return += capital * accepted_return
             with localcontext() as ctx:
@@ -2645,49 +3495,371 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
     if _canonical_sha256(normalized_input) != receipt["input_sha256"]:
         raise HwmCoverageError("as-held HWM receipt input identity differs")
 
+    intervals = evidence["accepted_intervals"]
+    memberships = evidence["memberships"]
     limiting_values = receipt["complete_through_limiting_inputs"]
     components = evidence["component_periods"]
     if (
-        not isinstance(limiting_values, list)
+        not isinstance(intervals, list)
+        or not intervals
+        or not isinstance(memberships, list)
+        or not memberships
+        or not isinstance(limiting_values, list)
         or not limiting_values
         or not isinstance(components, list)
+        or not components
     ):
-        raise HwmCoverageError("as-held HWM receipt limiting inputs differ")
-    expected_limiting = [
-        {
+        raise HwmCoverageError("as-held HWM receipt input evidence differs")
+    normalized_intervals: list[dict[str, Any]] = []
+    interval_by_id: dict[str, dict[str, Any]] = {}
+    previous_interval_end: date | None = None
+    for interval_value in intervals:
+        interval = _mapping(interval_value, "receipt input interval")
+        _strict_keys(interval, _INPUT_INTERVAL_KEYS, "receipt input interval")
+        interval_id = _text(interval["interval_id"], "receipt input interval identity")
+        if interval_id in interval_by_id:
+            raise HwmCoverageError("receipt input interval identity is duplicated")
+        interval_start = _canonical_date(
+            interval["interval_start"], "receipt input interval start"
+        )
+        interval_end = _canonical_date(
+            interval["interval_end"], "receipt input interval end"
+        )
+        interval_evidence_sha256 = _sha256(
+            interval["interval_evidence_sha256"],
+            "receipt input interval evidence",
+        )
+        if (
+            (interval_end - interval_start).days != 1
+            or (
+                previous_interval_end is not None
+                and interval_start != previous_interval_end
+            )
+            or interval_evidence_sha256 != receipt["calendar_sha256"]
+        ):
+            raise HwmCoverageError("receipt input interval authority differs")
+        normalized_interval = {
+            "interval_id": interval_id,
+            "interval_start": interval_start,
+            "interval_end": interval_end,
+        }
+        normalized_intervals.append(normalized_interval)
+        interval_by_id[interval_id] = normalized_interval
+        previous_interval_end = interval_end
+    if (
+        normalized_intervals[0]["interval_start"] != normalized_path[0]["as_of"]
+        or normalized_intervals[-1]["interval_end"] != complete_through
+    ):
+        raise HwmCoverageError("receipt input interval boundary differs")
+    if set(calculated_interval_dates) != set(interval_by_id) or any(
+        calculated_interval_dates[interval_id]
+        != (interval["interval_start"], interval["interval_end"])
+        for interval_id, interval in interval_by_id.items()
+    ):
+        raise HwmCoverageError("as-held HWM receipt period interval identity differs")
+
+    membership_by_strategy: dict[str, dict[str, Any]] = {}
+    interval_starts = {item["interval_start"] for item in normalized_intervals}
+    interval_boundaries = interval_starts | {
+        item["interval_end"] for item in normalized_intervals
+    }
+    first_interval_start = normalized_intervals[0]["interval_start"]
+    final_interval_end = normalized_intervals[-1]["interval_end"]
+    for membership_value in memberships:
+        membership = _mapping(membership_value, "receipt input membership")
+        _strict_keys(membership, _INPUT_MEMBERSHIP_KEYS, "receipt input membership")
+        strategy_id = _text(
+            membership["strategy_id"], "receipt input membership strategy"
+        )
+        if strategy_id in membership_by_strategy:
+            raise HwmCoverageError("receipt input membership is duplicated")
+        effective_start = _canonical_date(
+            membership["effective_start"], "receipt input membership start"
+        )
+        effective_end = (
+            None
+            if membership["effective_end"] is None
+            else _canonical_date(
+                membership["effective_end"], "receipt input membership end"
+            )
+        )
+        if (
+            (effective_end is not None and effective_end <= effective_start)
+            or (
+                first_interval_start < effective_start < final_interval_end
+                and effective_start not in interval_starts
+            )
+            or (
+                effective_end is not None
+                and first_interval_start < effective_end < final_interval_end
+                and effective_end not in interval_boundaries
+            )
+        ):
+            raise HwmCoverageError("receipt input membership boundary differs")
+        membership_evidence_sha256 = _sha256(
+            membership["membership_evidence_sha256"],
+            "receipt input membership evidence",
+        )
+        if membership_evidence_sha256 != _canonical_sha256(
+            {
+                "schema_version": 1,
+                "evidence_type": "FUNDED_MEMBERSHIP",
+                "strategy_id": strategy_id,
+                "effective_start": effective_start.isoformat(),
+                "effective_end": (
+                    effective_end.isoformat() if effective_end is not None else None
+                ),
+            }
+        ):
+            raise HwmCoverageError("membership evidence identity differs")
+        membership_by_strategy[strategy_id] = {
+            "effective_start": effective_start,
+            "effective_end": effective_end,
+            "membership_evidence_sha256": membership_evidence_sha256,
+        }
+
+    active_members_by_interval = {
+        interval["interval_id"]: {
+            strategy_id
+            for strategy_id, membership in membership_by_strategy.items()
+            if membership["effective_start"] <= interval["interval_start"]
+            and (
+                membership["effective_end"] is None
+                or interval["interval_start"] < membership["effective_end"]
+            )
+        }
+        for interval in normalized_intervals
+    }
+    if any(not members for members in active_members_by_interval.values()):
+        raise HwmCoverageError("receipt input interval has no effective members")
+    inactive_members = set(membership_by_strategy) - set().union(
+        *active_members_by_interval.values()
+    )
+    if inactive_members:
+        raise HwmCoverageError("receipt input membership has no effective interval")
+
+    expected_limiting = []
+    evidence_component_keys: set[tuple[str, str]] = set()
+    components_by_strategy: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    interval_order = {
+        item["interval_id"]: index for index, item in enumerate(normalized_intervals)
+    }
+    for component_value in components:
+        component = _mapping(component_value, "receipt input component")
+        component_financial_mode = (
+            _text(
+                component.get("component_financial_mode"),
+                "receipt input component financial mode",
+            )
+            if receipt_schema_version == 3
+            else _DETAILED_COMPONENT_MODE
+        )
+        _strict_keys(
+            component,
+            _component_period_keys(receipt_schema_version, component_financial_mode),
+            "receipt input component",
+        )
+        subperiods = component["subperiods"]
+        if not isinstance(subperiods, list) or not subperiods:
+            raise HwmCoverageError("receipt input subperiods differ")
+        for subperiod_value in subperiods:
+            subperiod = _mapping(subperiod_value, "receipt input subperiod")
+            _strict_keys(
+                subperiod,
+                _component_subperiod_keys(component_financial_mode),
+                "receipt input subperiod",
+            )
+        _validate_receipt_component_subperiods(
+            component,
+            receipt_schema_version=receipt_schema_version,
+            component_financial_mode=component_financial_mode,
+            receipt_policy_sha256=receipt["policy_sha256"],
+            receipt_calendar_sha256=receipt["calendar_sha256"],
+            receipt_generation_sha256=receipt["input_generation_sha256"],
+            receipt_authority_bindings=receipt_authority_bindings,
+        )
+        component_key = (
+            _text(component["interval_id"], "receipt input component interval"),
+            _text(component["strategy_id"], "receipt input component strategy"),
+        )
+        if component_key in evidence_component_keys:
+            raise HwmCoverageError(
+                "as-held HWM receipt input component identity is duplicated"
+            )
+        evidence_component_keys.add(component_key)
+        interval_id, strategy_id = component_key
+        component_interval = interval_by_id.get(interval_id)
+        component_membership = membership_by_strategy.get(strategy_id)
+        if (
+            component_interval is None
+            or component_membership is None
+            or strategy_id not in active_members_by_interval[interval_id]
+            or component["interval_start"]
+            != component_interval["interval_start"].isoformat()
+            or component["interval_end"]
+            != component_interval["interval_end"].isoformat()
+        ):
+            raise HwmCoverageError(
+                "as-held HWM receipt component membership coverage differs"
+            )
+        beginning_capital = receipt_decimal(
+            component["beginning_capital_usd"], "receipt input component capital"
+        )
+        ending_nav = receipt_decimal(
+            component["ending_nav_usd"], "receipt input component ending NAV"
+        )
+        if (
+            component_membership["effective_end"] == component_interval["interval_end"]
+            and ending_nav != 0
+        ):
+            raise HwmCoverageError(
+                "as-held HWM receipt membership exit retains residual NAV"
+            )
+        if (
+            component_financial_mode == _DETAILED_COMPONENT_MODE
+            and component_membership["effective_end"]
+            == component_interval["interval_end"]
+        ):
+            ending_gross_assets = receipt_decimal(
+                component["ending_gross_assets_usd"],
+                "receipt input component ending gross assets",
+            )
+            ending_financing_liability = receipt_decimal(
+                component["ending_financing_liability_usd"],
+                "receipt input component ending financing liability",
+            )
+            if ending_gross_assets != 0 or ending_financing_liability != 0:
+                raise HwmCoverageError(
+                    "as-held HWM receipt membership exit retains assets or debt"
+                )
+        if (
+            component_membership["effective_end"] != component_interval["interval_end"]
+            and ending_nav == 0
+        ):
+            raise HwmCoverageError(
+                "as-held HWM receipt ongoing membership has zero ending NAV"
+            )
+        components_by_strategy[strategy_id].append(
+            {
+                "interval_id": interval_id,
+                "capital_basis": component["capital_basis"],
+                "beginning_capital": beginning_capital,
+                "ending_nav": ending_nav,
+            }
+        )
+        input_component = (
+            component_financial_mode,
+            beginning_capital,
+            receipt_decimal(
+                component["period_return"],
+                "receipt input component return",
+            ),
+        )
+        calculated_component = calculated_components.get(component_key)
+        if calculated_component is None:
+            raise HwmCoverageError(
+                "as-held HWM receipt calculated component coverage differs from input evidence"
+            )
+        if calculated_component[0] != input_component[0]:
+            raise HwmCoverageError(
+                "as-held HWM receipt component financial mode differs from input evidence"
+            )
+        if calculated_component[1:] != input_component[1:]:
+            raise HwmCoverageError(
+                "as-held HWM receipt calculated component differs from input evidence"
+            )
+        if component["interval_end"] != receipt["complete_through"]:
+            continue
+        limiting = {
             "strategy_id": component["strategy_id"],
             "interval_id": component["interval_id"],
-            "source_generation_sha256": component["source_generation_sha256"],
             "capital_evidence_sha256": component["capital_evidence_sha256"],
             "flow_reconciliation_sha256": component["flow_reconciliation_sha256"],
             "return_evidence_sha256": component["return_evidence_sha256"],
-            "leverage_evidence_sha256": component["leverage_evidence_sha256"],
         }
-        for component_value in components
-        for component in [_mapping(component_value, "receipt input component")]
-        if component["interval_end"] == receipt["complete_through"]
-    ]
+        if receipt_schema_version == 3:
+            limiting["portable_input_generation_sha256"] = component[
+                "portable_input_generation_sha256"
+            ]
+            limiting["component_financial_mode"] = component_financial_mode
+        else:
+            limiting["source_generation_sha256"] = component["source_generation_sha256"]
+        if component_financial_mode == _DIRECT_NET_COMPONENT_MODE:
+            limiting["portable_return_basis_declaration_sha256"] = component[
+                "portable_return_basis_declaration_sha256"
+            ]
+        elif component_financial_mode == _DETAILED_COMPONENT_MODE:
+            limiting["leverage_evidence_sha256"] = component["leverage_evidence_sha256"]
+        else:
+            raise HwmCoverageError(
+                "as-held HWM receipt component financial mode differs"
+            )
+        expected_limiting.append(limiting)
+    if evidence_component_keys != set(calculated_components):
+        raise HwmCoverageError(
+            "as-held HWM receipt calculated component coverage differs from input evidence"
+        )
+    expected_component_keys = {
+        (interval_id, strategy_id)
+        for interval_id, members in active_members_by_interval.items()
+        for strategy_id in members
+    }
+    if evidence_component_keys != expected_component_keys:
+        raise HwmCoverageError(
+            "as-held HWM receipt component membership coverage differs"
+        )
+    for strategy_components in components_by_strategy.values():
+        ordered = sorted(
+            strategy_components, key=lambda item: interval_order[item["interval_id"]]
+        )
+        if ordered[0]["capital_basis"] != "OBSERVED_INDEPENDENT":
+            raise HwmCoverageError(
+                "as-held HWM receipt membership begins without an independent capital anchor"
+            )
+        for previous, current in zip(ordered, ordered[1:], strict=False):
+            if current["beginning_capital"] != previous["ending_nav"]:
+                raise HwmCoverageError(
+                    "as-held HWM receipt beginning capital differs from prior ending NAV"
+                )
     if limiting_values != expected_limiting:
         raise HwmCoverageError("as-held HWM receipt limiting inputs differ")
     for index, value in enumerate(limiting_values):
-        limiting = _mapping(value, f"receipt limiting input {index}")
-        _strict_keys(
-            limiting,
-            {
-                "strategy_id",
-                "interval_id",
-                "source_generation_sha256",
-                "capital_evidence_sha256",
-                "flow_reconciliation_sha256",
-                "return_evidence_sha256",
-                "leverage_evidence_sha256",
-            },
-            f"receipt limiting input {index}",
+        limiting_mapping = _mapping(value, f"receipt limiting input {index}")
+        limiting_keys = {
+            "strategy_id",
+            "interval_id",
+            "capital_evidence_sha256",
+            "flow_reconciliation_sha256",
+            "return_evidence_sha256",
+        }
+        if receipt_schema_version == 3:
+            limiting_keys.update(
+                {"component_financial_mode", "portable_input_generation_sha256"}
+            )
+        else:
+            limiting_keys.add("source_generation_sha256")
+        component_financial_mode = limiting_mapping.get(
+            "component_financial_mode", _DETAILED_COMPONENT_MODE
         )
-        _text(limiting["strategy_id"], "receipt limiting strategy")
-        _text(limiting["interval_id"], "receipt limiting interval")
-        for field_name in set(limiting) - {"strategy_id", "interval_id"}:
-            _sha256(limiting[field_name], f"receipt limiting input {field_name}")
+        if component_financial_mode == _DIRECT_NET_COMPONENT_MODE:
+            limiting_keys.add("portable_return_basis_declaration_sha256")
+        elif component_financial_mode == _DETAILED_COMPONENT_MODE:
+            limiting_keys.add("leverage_evidence_sha256")
+        else:
+            raise HwmCoverageError(
+                "as-held HWM receipt component financial mode differs"
+            )
+        _strict_keys(limiting_mapping, limiting_keys, f"receipt limiting input {index}")
+        _text(limiting_mapping["strategy_id"], "receipt limiting strategy")
+        _text(limiting_mapping["interval_id"], "receipt limiting interval")
+        for field_name in set(limiting_mapping) - {
+            "strategy_id",
+            "interval_id",
+            "component_financial_mode",
+        }:
+            _sha256(
+                limiting_mapping[field_name], f"receipt limiting input {field_name}"
+            )
 
 
 def as_held_hwm_receipt_bytes(result: Mapping[str, Any]) -> bytes:
@@ -2705,6 +3877,346 @@ def as_held_hwm_receipt_bytes(result: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def validate_as_held_hwm_receipt_generation_binding(
+    receipt: Mapping[str, Any],
+    input_generation_bytes: bytes,
+    *,
+    policy_bytes: bytes,
+    product_contract_bytes: bytes,
+    performance_policy_bytes: bytes,
+    legacy_policy_bytes: bytes,
+    calendar_bytes: bytes,
+) -> dict[str, Any]:
+    """Bind a portable receipt to exact authorities and fully re-derive it."""
+
+    accepted = as_held_hwm_receipt(receipt)
+    if (
+        hashlib.sha256(input_generation_bytes).hexdigest()
+        != accepted["input_generation_sha256"]
+    ):
+        raise HwmCoverageError("as-held HWM receipt generation identity differs")
+    generation = _json_mapping_from_bytes(
+        input_generation_bytes, "input_generation_bytes"
+    )
+    schema_version = _generation_schema_version(
+        generation.get("schema_version"),
+        "as-held HWM receipt generation identity differs",
+    )
+    generation_keys = {
+        "schema_version",
+        "builder",
+        "builder_version",
+        "authority_profile",
+        "authority_bindings",
+        "upstream_receipt_sha256",
+        "maximum_age_days",
+        "evidence_sha256s",
+        "flow_events",
+    }
+    if schema_version == 3:
+        generation_keys.add("component_financial_modes")
+    _strict_keys(generation, generation_keys, "HWM input generation")
+    expected_builder_version = {2: "0.2.0", 3: "0.3.0"}[schema_version]
+    if (
+        schema_version != accepted["schema_version"]
+        or generation["builder"] != "portfolio-hwm-inputs"
+        or generation["builder_version"] != expected_builder_version
+        or generation["authority_profile"] != _PORTABLE_INPUT_AUTHORITY
+        or generation["upstream_receipt_sha256"] is not None
+    ):
+        raise HwmCoverageError("as-held HWM receipt generation identity differs")
+    generation_maximum_age_days = generation["maximum_age_days"]
+    if (
+        not isinstance(generation_maximum_age_days, int)
+        or isinstance(generation_maximum_age_days, bool)
+        or generation_maximum_age_days < 0
+        or generation_maximum_age_days != accepted["maximum_age_days"]
+    ):
+        raise HwmCoverageError("as-held HWM receipt generation freshness differs")
+
+    authority_bindings = _mapping(
+        generation["authority_bindings"], "HWM input authority bindings"
+    )
+    _strict_keys(
+        authority_bindings,
+        {
+            "policy_sha256",
+            "policy_semantic_digest",
+            "product_contract_sha256",
+            "performance_policy_sha256",
+            "legacy_policy_sha256",
+            "calendar_sha256",
+        },
+        "HWM input authority bindings",
+    )
+    normalized_authority_bindings = {
+        field_name: _sha256(value, f"HWM input authority {field_name}")
+        for field_name, value in authority_bindings.items()
+    }
+    expected_authority_bindings = {
+        "policy_sha256": accepted["policy_sha256"],
+        "policy_semantic_digest": accepted["policy_semantic_digest"],
+        "product_contract_sha256": hashlib.sha256(product_contract_bytes).hexdigest(),
+        "performance_policy_sha256": hashlib.sha256(
+            performance_policy_bytes
+        ).hexdigest(),
+        "legacy_policy_sha256": hashlib.sha256(legacy_policy_bytes).hexdigest(),
+        "calendar_sha256": hashlib.sha256(calendar_bytes).hexdigest(),
+    }
+    if (
+        normalized_authority_bindings != expected_authority_bindings
+        or expected_authority_bindings["calendar_sha256"] != accepted["calendar_sha256"]
+    ):
+        raise HwmCoverageError("as-held HWM receipt generation authority differs")
+
+    calendar = _json_mapping_from_bytes(calendar_bytes, "calendar_bytes")
+    _strict_keys(
+        calendar,
+        {
+            "schema_version",
+            "calendar_policy_id",
+            "authority_status",
+            "accepted_intervals",
+            "authority_evidence_sha256",
+        },
+        "calendar",
+    )
+    calendar_evidence_sha256 = _sha256(
+        calendar["authority_evidence_sha256"],
+        "calendar.authority_evidence_sha256",
+    )
+    if calendar_evidence_sha256 != _canonical_sha256(
+        {
+            key: value
+            for key, value in calendar.items()
+            if key != "authority_evidence_sha256"
+        }
+    ):
+        raise HwmCoverageError("as-held HWM receipt generation evidence differs")
+
+    evidence_values = generation["evidence_sha256s"]
+    if not isinstance(evidence_values, list) or not evidence_values:
+        raise HwmCoverageError("as-held HWM receipt generation evidence differs")
+    evidence_registry = {
+        _sha256(value, "HWM input evidence sha256") for value in evidence_values
+    }
+    if len(evidence_registry) != len(evidence_values):
+        raise HwmCoverageError("as-held HWM receipt generation evidence differs")
+
+    evidence = _mapping(accepted["input_evidence"], "receipt.input_evidence")
+    components = evidence["component_periods"]
+    memberships = evidence["memberships"]
+    if not isinstance(components, list) or not isinstance(memberships, list):
+        raise HwmCoverageError("as-held HWM receipt input evidence differs")
+    observed_component_modes: set[str] = set()
+    receipt_evidence_sha256s: set[str] = set()
+    for membership_value in memberships:
+        membership = _mapping(membership_value, "receipt input membership")
+        receipt_evidence_sha256s.add(
+            _sha256(
+                membership["membership_evidence_sha256"],
+                "receipt input membership evidence",
+            )
+        )
+    for component_value in components:
+        component = _mapping(component_value, "receipt input component")
+        component_financial_mode = (
+            _text(
+                component.get("component_financial_mode"),
+                "receipt input component financial mode",
+            )
+            if schema_version == 3
+            else _DETAILED_COMPONENT_MODE
+        )
+        observed_component_modes.add(component_financial_mode)
+        component_evidence_fields = {
+            "capital_evidence_sha256",
+            "flow_reconciliation_sha256",
+            "return_evidence_sha256",
+            (
+                "portable_return_basis_declaration_sha256"
+                if component_financial_mode == _DIRECT_NET_COMPONENT_MODE
+                else "leverage_evidence_sha256"
+            ),
+        }
+        receipt_evidence_sha256s.update(
+            _sha256(component[field_name], f"receipt input component {field_name}")
+            for field_name in component_evidence_fields
+        )
+        subperiods = component["subperiods"]
+        if not isinstance(subperiods, list):
+            raise HwmCoverageError("receipt input subperiods differ")
+        receipt_evidence_sha256s.update(
+            _sha256(
+                _mapping(subperiod, "receipt input subperiod")[
+                    "flow_event_evidence_sha256"
+                ],
+                "receipt input subperiod flow evidence",
+            )
+            for subperiod in subperiods
+        )
+    flow_event_values = generation["flow_events"]
+    if not isinstance(flow_event_values, list):
+        raise HwmCoverageError("as-held HWM receipt generation evidence differs")
+    generation_only_evidence_sha256s = {calendar_evidence_sha256}
+    generation_flow_events: list[dict[str, Any]] = []
+    generation_flow_event_ids: set[str] = set()
+    source_correction_target_ids: set[str] = set()
+    for event_value in flow_event_values:
+        event = _mapping(event_value, "HWM input flow event")
+        event_id = _text(event.get("event_id"), "HWM input flow event identity")
+        if event_id in generation_flow_event_ids:
+            raise HwmCoverageError("as-held HWM receipt flow event coverage differs")
+        generation_flow_event_ids.add(event_id)
+        event_evidence_sha256 = _sha256(
+            event.get("event_evidence_sha256"),
+            "HWM input flow event evidence",
+        )
+        fx_generation_sha256 = _sha256(
+            event.get("fx_generation_sha256"),
+            "HWM input flow event FX generation",
+        )
+        generation_only_evidence_sha256s.update(
+            {event_evidence_sha256, fx_generation_sha256}
+        )
+        correction_kind = _text(
+            event.get("correction_kind"), "HWM input flow event correction kind"
+        )
+        related_event_id = event.get("related_event_id")
+        if correction_kind == "SOURCE_CORRECTION":
+            if not isinstance(related_event_id, str) or not related_event_id:
+                raise HwmCoverageError(
+                    "as-held HWM receipt flow event coverage differs"
+                )
+            source_correction_target_ids.add(related_event_id)
+        generation_flow_events.append(
+            {
+                "event_id": event_id,
+                "strategy_id": _text(
+                    event.get("strategy_id"), "HWM input flow event strategy"
+                ),
+                "interval_id": _text(
+                    event.get("interval_id"), "HWM input flow event interval"
+                ),
+                "subperiod_id": _text(
+                    event.get("subperiod_id"), "HWM input flow event subperiod"
+                ),
+                "effective_at": _canonical_utc_timestamp(
+                    event.get("effective_at_utc"),
+                    "HWM input flow event effective time",
+                ),
+                "event_evidence_sha256": event_evidence_sha256,
+            }
+        )
+    effective_flow_events_by_subperiod: dict[
+        tuple[str, str, str], list[dict[str, Any]]
+    ] = defaultdict(list)
+    for event in generation_flow_events:
+        if event["event_id"] in source_correction_target_ids:
+            continue
+        effective_flow_events_by_subperiod[
+            (event["strategy_id"], event["interval_id"], event["subperiod_id"])
+        ].append(event)
+    for events in effective_flow_events_by_subperiod.values():
+        events.sort(key=lambda item: (item["effective_at"], item["event_id"]))
+
+    used_effective_flow_event_ids: set[str] = set()
+    for component_value in components:
+        component = _mapping(component_value, "receipt input component")
+        component_financial_mode = (
+            _text(
+                component.get("component_financial_mode"),
+                "receipt input component financial mode",
+            )
+            if schema_version == 3
+            else _DETAILED_COMPONENT_MODE
+        )
+        subperiods = component["subperiods"]
+        assert isinstance(subperiods, list)
+        for subperiod_value in subperiods:
+            subperiod = _mapping(subperiod_value, "receipt input subperiod")
+            subperiod_events = effective_flow_events_by_subperiod.get(
+                (
+                    _text(component["strategy_id"], "receipt input strategy"),
+                    _text(component["interval_id"], "receipt input interval"),
+                    _text(subperiod["subperiod_id"], "receipt input subperiod"),
+                ),
+                [],
+            )
+            used_effective_flow_event_ids.update(
+                event["event_id"] for event in subperiod_events
+            )
+            flow_evidence_payload = {
+                "schema_version": schema_version,
+                "evidence_type": "FLOW_EVENT",
+                "strategy_id": component["strategy_id"],
+                "interval_id": component["interval_id"],
+                "subperiod": {
+                    **{
+                        key: value
+                        for key, value in subperiod.items()
+                        if key != "flow_event_evidence_sha256"
+                    },
+                    "flow_event_ids": [event["event_id"] for event in subperiod_events],
+                    "flow_event_sha256s": [
+                        event["event_evidence_sha256"] for event in subperiod_events
+                    ],
+                },
+            }
+            if schema_version == 3:
+                flow_evidence_payload["component_financial_mode"] = (
+                    component_financial_mode
+                )
+            if _sha256(
+                subperiod["flow_event_evidence_sha256"],
+                "receipt input subperiod flow evidence",
+            ) != _canonical_sha256(flow_evidence_payload):
+                raise HwmCoverageError(
+                    "as-held HWM receipt flow event coverage differs"
+                )
+    expected_effective_flow_event_ids = {
+        event["event_id"]
+        for event in generation_flow_events
+        if event["event_id"] not in source_correction_target_ids
+    }
+    if used_effective_flow_event_ids != expected_effective_flow_event_ids:
+        raise HwmCoverageError("as-held HWM receipt flow event coverage differs")
+    if evidence_registry != (
+        receipt_evidence_sha256s | generation_only_evidence_sha256s
+    ):
+        raise HwmCoverageError("as-held HWM receipt generation evidence differs")
+
+    if schema_version == 3:
+        declared_modes = generation["component_financial_modes"]
+        if (
+            not isinstance(declared_modes, list)
+            or not declared_modes
+            or any(not isinstance(mode, str) for mode in declared_modes)
+            or declared_modes != sorted(set(declared_modes))
+            or any(
+                mode not in {_DETAILED_COMPONENT_MODE, _DIRECT_NET_COMPONENT_MODE}
+                for mode in declared_modes
+            )
+        ):
+            raise HwmCoverageError(
+                "as-held HWM receipt component financial modes differ"
+            )
+        declared_component_modes = set(declared_modes)
+    else:
+        declared_component_modes = {_DETAILED_COMPONENT_MODE}
+    if observed_component_modes != declared_component_modes:
+        raise HwmCoverageError("as-held HWM receipt component financial modes differ")
+    return verify_as_held_hwm_receipt(
+        accepted,
+        policy_bytes=policy_bytes,
+        product_contract_bytes=product_contract_bytes,
+        performance_policy_bytes=performance_policy_bytes,
+        legacy_policy_bytes=legacy_policy_bytes,
+        calendar_bytes=calendar_bytes,
+        input_generation_bytes=input_generation_bytes,
+    )
+
+
 def verify_as_held_hwm_receipt(
     receipt: Mapping[str, Any],
     *,
@@ -2714,7 +4226,7 @@ def verify_as_held_hwm_receipt(
     legacy_policy_bytes: bytes,
     calendar_bytes: bytes,
     input_generation_bytes: bytes,
-) -> None:
+) -> dict[str, Any]:
     """Re-derive a PORT-HWM-4 receipt from its hash-bound input evidence."""
 
     accepted = as_held_hwm_receipt(receipt)
@@ -2760,3 +4272,4 @@ def verify_as_held_hwm_receipt(
     )
     if as_held_hwm_receipt(recalculated) != accepted:
         raise HwmCoverageError("as-held HWM receipt re-derivation differs")
+    return accepted

@@ -40,9 +40,24 @@ HWM_TEST_NAMESPACE = runpy.run_path(
 )
 
 
-def _portable_hwm_receipt() -> dict[str, Any]:
-    fixture = HWM_TEST_NAMESPACE["_as_held_hwm_fixture"]()
-    return HWM_TEST_NAMESPACE["_compute_as_held"](fixture)
+def _portable_hwm_bundle(
+    *, schema_version: int = 2
+) -> tuple[dict[str, Any], bytes, bytes]:
+    fixture_name = (
+        "_as_held_direct_net_return_fixture"
+        if schema_version == 3
+        else "_as_held_hwm_fixture"
+    )
+    fixture = HWM_TEST_NAMESPACE[fixture_name]()
+    return (
+        HWM_TEST_NAMESPACE["_compute_as_held"](fixture),
+        fixture["input_generation_bytes"],
+        fixture["calendar_bytes"],
+    )
+
+
+def _portable_hwm_receipt(*, schema_version: int = 2) -> dict[str, Any]:
+    return _portable_hwm_bundle(schema_version=schema_version)[0]
 
 
 STRATEGY_NAMES = (
@@ -3588,8 +3603,12 @@ def test_panel_reconciles_portable_proof_without_replacing_governed_hwm(
         baseline_root=inputs["baseline"],
     )
     governed_data = _candidate_data(governed_candidate)
-    receipt = _portable_hwm_receipt()
-    proof = panel._panel_portable_hwm_proof(receipt)
+    receipt, input_generation_bytes, calendar_bytes = _portable_hwm_bundle(
+        schema_version=3
+    )
+    proof = panel._panel_portable_hwm_proof(
+        receipt, input_generation_bytes, calendar_bytes
+    )
     report["hwm_portable_proof"] = proof
     _republish_report(inputs["report"], tmp_path, report)
 
@@ -3600,6 +3619,8 @@ def test_panel_reconciles_portable_proof_without_replacing_governed_hwm(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         hwm_portable_receipt=receipt,
+        hwm_portable_generation_bytes=input_generation_bytes,
+        hwm_portable_calendar_bytes=calendar_bytes,
     )
     data = _candidate_data(candidate)
 
@@ -3620,6 +3641,8 @@ def test_panel_reconciles_portable_proof_without_replacing_governed_hwm(
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             hwm_portable_receipt=receipt,
+            hwm_portable_generation_bytes=input_generation_bytes,
+            hwm_portable_calendar_bytes=calendar_bytes,
         )["all_passed"]
         is True
     )
@@ -3636,6 +3659,7 @@ def test_panel_reconciles_portable_proof_without_replacing_governed_hwm(
         ).read_text(encoding="utf-8")
     )
     portable_schema = schema["$defs"]["portable_hwm_proof"]
+    assert set(portable_schema["required"]) == set(proof)
     assert portable_schema["properties"]["financial_acceptance"] == {
         "const": "NOT_FINANCIAL_ACCEPTANCE"
     }
@@ -3657,8 +3681,10 @@ def test_panel_portable_proof_does_not_upgrade_missing_governed_hwm(
     governed_data = _candidate_data(governed_candidate)
     report = _report_with_baseline(inputs)
     _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog())
-    receipt = _portable_hwm_receipt()
-    report["hwm_portable_proof"] = panel._panel_portable_hwm_proof(receipt)
+    receipt, input_generation_bytes, calendar_bytes = _portable_hwm_bundle()
+    report["hwm_portable_proof"] = panel._panel_portable_hwm_proof(
+        receipt, input_generation_bytes, calendar_bytes
+    )
     _republish_report(inputs["report"], tmp_path, report)
 
     candidate = panel.build_candidate(
@@ -3668,6 +3694,8 @@ def test_panel_portable_proof_does_not_upgrade_missing_governed_hwm(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         hwm_portable_receipt=receipt,
+        hwm_portable_generation_bytes=input_generation_bytes,
+        hwm_portable_calendar_bytes=calendar_bytes,
     )
     data = _candidate_data(candidate)
 
@@ -3682,8 +3710,10 @@ def test_panel_rejects_missing_or_tampered_portable_hwm_authority(
     inputs: dict[str, Any], tmp_path: Path
 ) -> None:
     report, _catalog = _envelope_report(inputs, tmp_path)
-    receipt = _portable_hwm_receipt()
-    report["hwm_portable_proof"] = panel._panel_portable_hwm_proof(receipt)
+    receipt, input_generation_bytes, calendar_bytes = _portable_hwm_bundle()
+    report["hwm_portable_proof"] = panel._panel_portable_hwm_proof(
+        receipt, input_generation_bytes, calendar_bytes
+    )
     _republish_report(inputs["report"], tmp_path, report)
 
     with pytest.raises(
@@ -3698,7 +3728,7 @@ def test_panel_rejects_missing_or_tampered_portable_hwm_authority(
             baseline_root=inputs["baseline"],
         )
 
-    tampered = panel.as_held_hwm_receipt(receipt)
+    tampered = HWM_TEST_NAMESPACE["as_held_hwm_receipt"](receipt)
     tampered["status"] = "AVAILABLE"
     unsigned = {
         key: value for key, value in tampered.items() if key != "receipt_sha256"
@@ -3715,6 +3745,8 @@ def test_panel_rejects_missing_or_tampered_portable_hwm_authority(
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             hwm_portable_receipt=tampered,
+            hwm_portable_generation_bytes=input_generation_bytes,
+            hwm_portable_calendar_bytes=calendar_bytes,
         )
 
 
