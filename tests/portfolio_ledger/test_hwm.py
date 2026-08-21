@@ -2529,6 +2529,33 @@ def test_as_held_hwm_receipt_rejects_membership_exit_with_residual_nav() -> None
         as_held_hwm_receipt(receipt)
 
 
+def test_as_held_hwm_receipt_rejects_membership_exit_with_assets_and_debt() -> None:
+    fixture = _single_strategy_flow_fixture(external_flow="-100")
+    membership = fixture["memberships"][0]  # type: ignore[index]
+    membership["effective_end"] = "2026-08-11"
+    _refresh_fixture_authorities(fixture)
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+    component = receipt["input_evidence"]["component_periods"][0]  # type: ignore[index]
+    component["ending_gross_assets_usd"] = "50"
+    component["ending_financing_liability_usd"] = "50"
+    component["margin_principal_flow_usd"] = "50"
+    component["subperiods"][0]["margin_principal_flow_after_subperiod_usd"] = "50"
+    _refresh_component_evidence(component)
+    limiting = receipt["complete_through_limiting_inputs"][0]  # type: ignore[index]
+    for field_name in (
+        "flow_reconciliation_sha256",
+        "return_evidence_sha256",
+        "leverage_evidence_sha256",
+    ):
+        limiting[field_name] = component[field_name]
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(
+        HwmCoverageError, match="membership exit retains assets or debt"
+    ):
+        as_held_hwm_receipt(receipt)
+
+
 def test_as_held_hwm_receipt_rejects_zero_nav_for_ongoing_membership() -> None:
     fixture = _single_strategy_flow_fixture(external_flow="-100")
     membership = fixture["memberships"][0]  # type: ignore[index]

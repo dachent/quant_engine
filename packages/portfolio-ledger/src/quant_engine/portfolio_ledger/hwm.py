@@ -3716,6 +3716,23 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
                 "as-held HWM receipt membership exit retains residual NAV"
             )
         if (
+            component_financial_mode == _DETAILED_COMPONENT_MODE
+            and component_membership["effective_end"]
+            == component_interval["interval_end"]
+        ):
+            ending_gross_assets = receipt_decimal(
+                component["ending_gross_assets_usd"],
+                "receipt input component ending gross assets",
+            )
+            ending_financing_liability = receipt_decimal(
+                component["ending_financing_liability_usd"],
+                "receipt input component ending financing liability",
+            )
+            if ending_gross_assets != 0 or ending_financing_liability != 0:
+                raise HwmCoverageError(
+                    "as-held HWM receipt membership exit retains assets or debt"
+                )
+        if (
             component_membership["effective_end"] != component_interval["interval_end"]
             and ending_nav == 0
         ):
