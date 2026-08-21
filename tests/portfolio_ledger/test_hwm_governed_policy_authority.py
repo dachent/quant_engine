@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -11,6 +14,13 @@ from quant_engine.portfolio_ledger import (
     validate_governed_hwm_calendar_authority,
 )
 
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_BASE_POLICY = json.loads(
+    (_REPO_ROOT / "contracts" / "portfolio-hwm-policy-v4.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 POLICY_ID = "HWM_ALWAYS_ON_DECLARED_SOURCE_CLOSURES_V1"
 SHA_A = "a" * 64
@@ -26,6 +36,24 @@ def _hash(value: dict[str, object]) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _policy_bytes(value: dict[str, Any]) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+
+
+def _ready_policy() -> dict[str, Any]:
+    policy = deepcopy(_BASE_POLICY)
+    calendar = policy["calendar_policy"]
+    assert isinstance(calendar, dict)
+    calendar["release_authority_status"] = "READY"
+    calendar["accepted_governed_calendar_policy_ids"] = [POLICY_ID]
+    return policy
 
 
 def _authority() -> dict[str, object]:
@@ -82,4 +110,29 @@ def test_partial_caller_policy_cannot_claim_ready() -> None:
             authority,
             hwm_policy=partial_policy,
             accepted_authority_sha256=accepted_hash,
+        )
+
+
+def test_complete_policy_cannot_replace_accepted_policy_bytes() -> None:
+    authority = _authority()
+    accepted_authority_hash = authority["authority_evidence_sha256"]
+    assert isinstance(accepted_authority_hash, str)
+
+    accepted_policy = _ready_policy()
+    accepted_policy_bytes = _policy_bytes(accepted_policy)
+    accepted_policy_hash = hashlib.sha256(accepted_policy_bytes).hexdigest()
+
+    forged_policy = deepcopy(accepted_policy)
+    receipts = forged_policy["owner_decision_receipts"]
+    assert isinstance(receipts, dict)
+    receipts["FX_BASE_CURRENCY"] = "f" * 64
+    forged_policy_bytes = _policy_bytes(forged_policy)
+
+    with pytest.raises(GovernedHwmAuthorityError, match="externally accepted policy"):
+        validate_governed_hwm_calendar_authority(
+            authority,
+            hwm_policy=forged_policy,
+            hwm_policy_bytes=forged_policy_bytes,
+            accepted_hwm_policy_sha256=accepted_policy_hash,
+            accepted_authority_sha256=accepted_authority_hash,
         )
