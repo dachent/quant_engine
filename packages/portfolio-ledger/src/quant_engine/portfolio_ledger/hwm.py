@@ -223,6 +223,13 @@ def _decimal_text(value: Decimal) -> str:
     return "0" if text in {"", "-0"} else text
 
 
+def _canonical_decimal(value: object, field_name: str) -> Decimal:
+    accepted = _decimal(value, field_name)
+    if not isinstance(value, str) or value != _decimal_text(accepted):
+        raise HwmCoverageError(f"{field_name} must be a canonical decimal")
+    return accepted
+
+
 def _canonical_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json_bytes(value, newline=False)).hexdigest()
 
@@ -2593,6 +2600,497 @@ def _compute_as_held_composite_hwm(
     return result
 
 
+def _validate_receipt_component_subperiods(
+    component: Mapping[str, Any],
+    *,
+    receipt_schema_version: int,
+    component_financial_mode: str,
+    receipt_policy_sha256: str,
+    receipt_calendar_sha256: str,
+    receipt_generation_sha256: str,
+) -> None:
+    """Reconcile receipt-only component evidence without trusting its self-hash."""
+
+    strategy_id = _text(component["strategy_id"], "receipt input component strategy")
+    interval_id = _text(component["interval_id"], "receipt input component interval")
+    interval_start = _canonical_date(
+        component["interval_start"], "receipt input component start"
+    )
+    interval_end = _canonical_date(
+        component["interval_end"], "receipt input component end"
+    )
+    if (interval_end - interval_start).days != 1:
+        raise HwmCoverageError("receipt input component interval differs")
+
+    beginning_capital = _canonical_decimal(
+        component["beginning_capital_usd"], "receipt input component capital"
+    )
+    ending_nav = _canonical_decimal(
+        component["ending_nav_usd"], "receipt input component ending NAV"
+    )
+    external_flow = _canonical_decimal(
+        component["external_flow_usd"], "receipt input component external flow"
+    )
+    internal_transfer = _canonical_decimal(
+        component["internal_transfer_usd"],
+        "receipt input component internal transfer",
+    )
+    flow_adjusted_ending_nav = _canonical_decimal(
+        component["flow_adjusted_ending_nav_usd"],
+        "receipt input component flow-adjusted ending NAV",
+    )
+    period_return = _canonical_decimal(
+        component["period_return"], "receipt input component return"
+    )
+    if (
+        beginning_capital <= 0
+        or ending_nav < 0
+        or flow_adjusted_ending_nav <= 0
+        or period_return <= -1
+    ):
+        raise HwmCoverageError("receipt input component NAV semantics differ")
+
+    flow_timing = _text(component["flow_timing"], "receipt input component flow timing")
+    capital_basis = _text(
+        component["capital_basis"], "receipt input component capital basis"
+    )
+    if capital_basis not in {
+        "OBSERVED_INDEPENDENT",
+        "ROLLFORWARD_FROM_PRIOR_INTERVAL",
+    }:
+        raise HwmCoverageError("receipt input component capital basis differs")
+    return_basis = _text(
+        component["return_basis"], "receipt input component return basis"
+    )
+    if return_basis != AS_HELD_HWM_RETURN_BASIS:
+        raise HwmCoverageError("receipt input component return basis differs")
+    if (
+        _sha256(component["policy_sha256"], "receipt input component policy")
+        != receipt_policy_sha256
+        or _sha256(component["calendar_sha256"], "receipt input component calendar")
+        != receipt_calendar_sha256
+    ):
+        raise HwmCoverageError("receipt input component authority differs")
+    generation_identity_field = (
+        "source_generation_sha256"
+        if receipt_schema_version == 2
+        else "portable_input_generation_sha256"
+    )
+    if (
+        _sha256(
+            component[generation_identity_field],
+            f"receipt input component {generation_identity_field}",
+        )
+        != receipt_generation_sha256
+    ):
+        raise HwmCoverageError("receipt input component generation identity differs")
+
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        beginning_gross_assets = _canonical_decimal(
+            component["beginning_gross_assets_usd"],
+            "receipt input component beginning gross assets",
+        )
+        beginning_financing_liability = _canonical_decimal(
+            component["beginning_financing_liability_usd"],
+            "receipt input component beginning financing liability",
+        )
+        ending_gross_assets = _canonical_decimal(
+            component["ending_gross_assets_usd"],
+            "receipt input component ending gross assets",
+        )
+        ending_financing_liability = _canonical_decimal(
+            component["ending_financing_liability_usd"],
+            "receipt input component ending financing liability",
+        )
+        margin_principal_flow = _canonical_decimal(
+            component["margin_principal_flow_usd"],
+            "receipt input component margin principal flow",
+        )
+        financing_cost = _canonical_decimal(
+            component["financing_cost_usd"],
+            "receipt input component financing cost",
+        )
+        gross_asset_return = _canonical_decimal(
+            component["gross_asset_return"],
+            "receipt input component gross asset return",
+        )
+        if (
+            beginning_gross_assets < 0
+            or beginning_financing_liability < 0
+            or ending_gross_assets < 0
+            or ending_financing_liability < 0
+            or financing_cost < 0
+            or gross_asset_return <= -1
+            or beginning_gross_assets - beginning_financing_liability
+            != beginning_capital
+            or beginning_financing_liability + margin_principal_flow
+            != ending_financing_liability
+            or ending_gross_assets - ending_financing_liability != ending_nav
+        ):
+            raise HwmCoverageError("receipt input component leverage semantics differ")
+    else:
+        beginning_gross_assets = None
+        beginning_financing_liability = None
+        ending_gross_assets = None
+        ending_financing_liability = None
+        margin_principal_flow = None
+        financing_cost = None
+        gross_asset_return = None
+
+    subperiod_values = component["subperiods"]
+    if not isinstance(subperiod_values, list) or not subperiod_values:
+        raise HwmCoverageError("receipt input subperiods differ")
+    subperiod_keys = _component_subperiod_keys(component_financial_mode)
+    normalized_subperiods: list[dict[str, str]] = []
+    linked_return = Fraction(1, 1)
+    linked_gross_return = Fraction(1, 1)
+    summed_external_flow = Decimal("0")
+    summed_internal_transfer = Decimal("0")
+    summed_margin_principal_flow = Decimal("0")
+    summed_financing_cost = Decimal("0")
+    previous_post_flow_nav: Decimal | None = None
+    previous_post_flow_gross_assets: Decimal | None = None
+    previous_post_flow_financing_liability: Decimal | None = None
+    previous_subperiod_end: datetime | None = None
+    subperiod_ids: set[str] = set()
+    expected_interval_start = datetime(
+        interval_start.year,
+        interval_start.month,
+        interval_start.day,
+        tzinfo=timezone.utc,
+    )
+    expected_interval_end = datetime(
+        interval_end.year,
+        interval_end.month,
+        interval_end.day,
+        tzinfo=timezone.utc,
+    )
+    for subperiod_index, subperiod_value in enumerate(subperiod_values):
+        subperiod = _mapping(subperiod_value, "receipt input subperiod")
+        _strict_keys(subperiod, subperiod_keys, "receipt input subperiod")
+        subperiod_id = _text(
+            subperiod["subperiod_id"], "receipt input subperiod identity"
+        )
+        if subperiod_id in subperiod_ids:
+            raise HwmCoverageError("receipt input subperiod identity is duplicated")
+        subperiod_ids.add(subperiod_id)
+        subperiod_start = _canonical_utc_timestamp(
+            subperiod["subperiod_start_utc"], "receipt input subperiod start"
+        )
+        subperiod_end = _canonical_utc_timestamp(
+            subperiod["subperiod_end_utc"], "receipt input subperiod end"
+        )
+        if (
+            subperiod_end <= subperiod_start
+            or (subperiod_index == 0 and subperiod_start != expected_interval_start)
+            or (
+                previous_subperiod_end is not None
+                and subperiod_start != previous_subperiod_end
+            )
+        ):
+            raise HwmCoverageError("receipt input subperiod boundaries differ")
+        subperiod_beginning = _canonical_decimal(
+            subperiod["beginning_nav_usd"], "receipt input subperiod beginning NAV"
+        )
+        subperiod_ending = _canonical_decimal(
+            subperiod["ending_nav_before_flow_usd"],
+            "receipt input subperiod ending NAV",
+        )
+        subperiod_external_flow = _canonical_decimal(
+            subperiod["external_flow_after_subperiod_usd"],
+            "receipt input subperiod external flow",
+        )
+        subperiod_internal_transfer = _canonical_decimal(
+            subperiod["internal_transfer_after_subperiod_usd"],
+            "receipt input subperiod internal transfer",
+        )
+        if subperiod_beginning <= 0 or subperiod_ending <= 0:
+            raise HwmCoverageError("receipt input subperiod NAV semantics differ")
+        if subperiod_index == 0 and subperiod_beginning != beginning_capital:
+            raise HwmCoverageError("receipt input first subperiod capital differs")
+        if (
+            previous_post_flow_nav is not None
+            and subperiod_beginning != previous_post_flow_nav
+        ):
+            raise HwmCoverageError("receipt input subperiod NAV linkage differs")
+
+        normalized_subperiod: dict[str, str] = {
+            "subperiod_id": subperiod_id,
+            "subperiod_start_utc": _text(
+                subperiod["subperiod_start_utc"],
+                "receipt input subperiod start",
+            ),
+            "subperiod_end_utc": _text(
+                subperiod["subperiod_end_utc"], "receipt input subperiod end"
+            ),
+            "beginning_nav_usd": _decimal_text(subperiod_beginning),
+            "ending_nav_before_flow_usd": _decimal_text(subperiod_ending),
+            "external_flow_after_subperiod_usd": _decimal_text(subperiod_external_flow),
+            "internal_transfer_after_subperiod_usd": _decimal_text(
+                subperiod_internal_transfer
+            ),
+        }
+        if component_financial_mode == _DETAILED_COMPONENT_MODE:
+            subperiod_beginning_gross_assets = _canonical_decimal(
+                subperiod["beginning_gross_assets_usd"],
+                "receipt input subperiod beginning gross assets",
+            )
+            subperiod_beginning_financing_liability = _canonical_decimal(
+                subperiod["beginning_financing_liability_usd"],
+                "receipt input subperiod beginning financing liability",
+            )
+            subperiod_ending_gross_assets = _canonical_decimal(
+                subperiod["ending_gross_assets_before_flow_usd"],
+                "receipt input subperiod ending gross assets",
+            )
+            subperiod_ending_financing_liability = _canonical_decimal(
+                subperiod["ending_financing_liability_before_flow_usd"],
+                "receipt input subperiod ending financing liability",
+            )
+            subperiod_margin_principal_flow = _canonical_decimal(
+                subperiod["margin_principal_flow_after_subperiod_usd"],
+                "receipt input subperiod margin principal flow",
+            )
+            subperiod_financing_cost = _canonical_decimal(
+                subperiod["financing_cost_usd"],
+                "receipt input subperiod financing cost",
+            )
+            if (
+                subperiod_beginning_gross_assets <= 0
+                or subperiod_ending_gross_assets < 0
+                or subperiod_beginning_financing_liability < 0
+                or subperiod_ending_financing_liability < 0
+                or subperiod_financing_cost < 0
+                or subperiod_beginning_gross_assets
+                - subperiod_beginning_financing_liability
+                != subperiod_beginning
+                or subperiod_ending_gross_assets - subperiod_ending_financing_liability
+                != subperiod_ending
+                or subperiod_ending_financing_liability
+                != subperiod_beginning_financing_liability
+            ):
+                raise HwmCoverageError(
+                    "receipt input subperiod leverage semantics differ"
+                )
+            if subperiod_index == 0 and (
+                subperiod_beginning_gross_assets != beginning_gross_assets
+                or subperiod_beginning_financing_liability
+                != beginning_financing_liability
+            ):
+                raise HwmCoverageError(
+                    "receipt input first subperiod leverage facts differ"
+                )
+            if previous_post_flow_gross_assets is not None and (
+                subperiod_beginning_gross_assets != previous_post_flow_gross_assets
+                or subperiod_beginning_financing_liability
+                != previous_post_flow_financing_liability
+            ):
+                raise HwmCoverageError(
+                    "receipt input subperiod leverage linkage differs"
+                )
+            normalized_subperiod.update(
+                {
+                    "beginning_gross_assets_usd": _decimal_text(
+                        subperiod_beginning_gross_assets
+                    ),
+                    "beginning_financing_liability_usd": _decimal_text(
+                        subperiod_beginning_financing_liability
+                    ),
+                    "ending_gross_assets_before_flow_usd": _decimal_text(
+                        subperiod_ending_gross_assets
+                    ),
+                    "ending_financing_liability_before_flow_usd": _decimal_text(
+                        subperiod_ending_financing_liability
+                    ),
+                    "margin_principal_flow_after_subperiod_usd": _decimal_text(
+                        subperiod_margin_principal_flow
+                    ),
+                    "financing_cost_usd": _decimal_text(subperiod_financing_cost),
+                }
+            )
+            linked_gross_return *= Fraction(
+                subperiod_ending_gross_assets + subperiod_financing_cost
+            ) / Fraction(subperiod_beginning_gross_assets)
+            summed_margin_principal_flow += subperiod_margin_principal_flow
+            summed_financing_cost += subperiod_financing_cost
+            previous_post_flow_gross_assets = (
+                subperiod_ending_gross_assets
+                + subperiod_external_flow
+                + subperiod_internal_transfer
+                + subperiod_margin_principal_flow
+            )
+            previous_post_flow_financing_liability = (
+                subperiod_ending_financing_liability + subperiod_margin_principal_flow
+            )
+        flow_event_evidence_sha256 = _sha256(
+            subperiod["flow_event_evidence_sha256"],
+            "receipt input subperiod flow evidence",
+        )
+        normalized_subperiod["flow_event_evidence_sha256"] = flow_event_evidence_sha256
+        normalized_subperiods.append(normalized_subperiod)
+        linked_return *= Fraction(subperiod_ending) / Fraction(subperiod_beginning)
+        summed_external_flow += subperiod_external_flow
+        summed_internal_transfer += subperiod_internal_transfer
+        previous_post_flow_nav = (
+            subperiod_ending + subperiod_external_flow + subperiod_internal_transfer
+        )
+        previous_subperiod_end = subperiod_end
+
+    if previous_subperiod_end != expected_interval_end:
+        raise HwmCoverageError("receipt input subperiod boundaries differ")
+    if previous_post_flow_nav != ending_nav:
+        raise HwmCoverageError("receipt input component ending NAV differs")
+    if (
+        summed_external_flow != external_flow
+        or summed_internal_transfer != internal_transfer
+    ):
+        raise HwmCoverageError("receipt input component flow totals differ")
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        if (
+            previous_post_flow_gross_assets != ending_gross_assets
+            or previous_post_flow_financing_liability != ending_financing_liability
+            or summed_margin_principal_flow != margin_principal_flow
+            or summed_financing_cost != financing_cost
+        ):
+            raise HwmCoverageError("receipt input component leverage totals differ")
+    if flow_timing == "NO_EXTERNAL_OR_INTERNAL_FLOW":
+        if external_flow != 0 or internal_transfer != 0:
+            raise HwmCoverageError("receipt input component flow timing differs")
+    elif flow_timing == "DATE_ONLY_END_OF_DAY":
+        if len(normalized_subperiods) != 1 or (
+            external_flow == 0 and internal_transfer == 0
+        ):
+            raise HwmCoverageError("receipt input component flow timing differs")
+    elif flow_timing == "EXACT_TIMESTAMP_SEGMENTED":
+        if len(normalized_subperiods) < 2 or all(
+            _decimal(item["external_flow_after_subperiod_usd"], "flow") == 0
+            and _decimal(item["internal_transfer_after_subperiod_usd"], "transfer") == 0
+            for item in normalized_subperiods[:-1]
+        ):
+            raise HwmCoverageError("receipt input component flow timing differs")
+    else:
+        raise HwmCoverageError("receipt input component flow timing differs")
+
+    derived_return_fraction = linked_return - Fraction(1, 1)
+    with localcontext() as ctx:
+        ctx.prec = 34
+        ctx.rounding = ROUND_HALF_EVEN
+        derived_period_return = Decimal(derived_return_fraction.numerator) / Decimal(
+            derived_return_fraction.denominator
+        )
+    if (
+        Fraction(flow_adjusted_ending_nav)
+        != Fraction(beginning_capital) * linked_return
+        or derived_period_return != period_return
+    ):
+        raise HwmCoverageError("receipt input component return differs")
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        assert gross_asset_return is not None
+        derived_gross_return_fraction = linked_gross_return - Fraction(1, 1)
+        with localcontext() as ctx:
+            ctx.prec = 34
+            ctx.rounding = ROUND_HALF_EVEN
+            derived_gross_asset_return = Decimal(
+                derived_gross_return_fraction.numerator
+            ) / Decimal(derived_gross_return_fraction.denominator)
+        if derived_gross_asset_return != gross_asset_return:
+            raise HwmCoverageError("receipt input component gross return differs")
+
+    evidence_common: dict[str, Any] = {
+        "schema_version": 1 if receipt_schema_version == 2 else 2,
+        "strategy_id": strategy_id,
+        "interval_id": interval_id,
+    }
+    if receipt_schema_version == 3:
+        evidence_common["component_financial_mode"] = component_financial_mode
+    capital_evidence_payload = {
+        **evidence_common,
+        "evidence_type": "BEGINNING_CAPITAL",
+        "beginning_capital_usd": _decimal_text(beginning_capital),
+        "capital_basis": capital_basis,
+    }
+    flow_evidence_payload: dict[str, Any] = {
+        **evidence_common,
+        "evidence_type": "FLOW_RECONCILIATION",
+        "flow_timing": flow_timing,
+        "external_flow_usd": _decimal_text(external_flow),
+        "internal_transfer_usd": _decimal_text(internal_transfer),
+        "subperiod_flow_evidence_sha256s": [
+            item["flow_event_evidence_sha256"] for item in normalized_subperiods
+        ],
+    }
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        assert margin_principal_flow is not None
+        flow_evidence_payload["margin_principal_flow_usd"] = _decimal_text(
+            margin_principal_flow
+        )
+    return_evidence_payload: dict[str, Any] = {
+        **evidence_common,
+        "evidence_type": (
+            "LEVERED_NET_RETURN"
+            if component_financial_mode == _DETAILED_COMPONENT_MODE
+            else "DIRECT_NET_TOTAL_FLOW_NEUTRAL_RETURN"
+        ),
+        "beginning_capital_usd": _decimal_text(beginning_capital),
+        "ending_nav_usd": _decimal_text(ending_nav),
+        "flow_adjusted_ending_nav_usd": _decimal_text(flow_adjusted_ending_nav),
+        "period_return": _decimal_text(period_return),
+        "subperiods": normalized_subperiods,
+    }
+    expected_evidence_sha256s = {
+        "capital_evidence_sha256": _canonical_sha256(capital_evidence_payload),
+        "flow_reconciliation_sha256": _canonical_sha256(flow_evidence_payload),
+    }
+    if component_financial_mode == _DIRECT_NET_COMPONENT_MODE:
+        declaration_sha256 = _sha256(
+            component["portable_return_basis_declaration_sha256"],
+            "receipt input component return-basis declaration",
+        )
+        return_evidence_payload.update(
+            {
+                "return_basis": return_basis,
+                "portable_return_basis_declaration_sha256": declaration_sha256,
+            }
+        )
+    expected_evidence_sha256s["return_evidence_sha256"] = _canonical_sha256(
+        return_evidence_payload
+    )
+    if component_financial_mode == _DETAILED_COMPONENT_MODE:
+        assert beginning_gross_assets is not None
+        assert beginning_financing_liability is not None
+        assert ending_gross_assets is not None
+        assert ending_financing_liability is not None
+        assert margin_principal_flow is not None
+        assert financing_cost is not None
+        assert gross_asset_return is not None
+        expected_evidence_sha256s["leverage_evidence_sha256"] = _canonical_sha256(
+            {
+                **evidence_common,
+                "evidence_type": "LEVERAGE_RECONCILIATION",
+                "beginning_gross_assets_usd": _decimal_text(beginning_gross_assets),
+                "beginning_financing_liability_usd": _decimal_text(
+                    beginning_financing_liability
+                ),
+                "ending_gross_assets_usd": _decimal_text(ending_gross_assets),
+                "ending_financing_liability_usd": _decimal_text(
+                    ending_financing_liability
+                ),
+                "margin_principal_flow_usd": _decimal_text(margin_principal_flow),
+                "financing_cost_usd": _decimal_text(financing_cost),
+                "gross_asset_return": _decimal_text(gross_asset_return),
+                "subperiods": normalized_subperiods,
+            }
+        )
+    for field_name, expected_sha256 in expected_evidence_sha256s.items():
+        if (
+            _sha256(component[field_name], f"receipt input component {field_name}")
+            != expected_sha256
+        ):
+            raise HwmCoverageError(
+                f"receipt input component {field_name} identity differs"
+            )
+
+
 def as_held_hwm_receipt(result: Mapping[str, Any]) -> dict[str, Any]:
     """Return and verify the canonical JSON-safe PORT-HWM-4 receipt."""
 
@@ -3002,6 +3500,14 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
                 _component_subperiod_keys(component_financial_mode),
                 "receipt input subperiod",
             )
+        _validate_receipt_component_subperiods(
+            component,
+            receipt_schema_version=receipt_schema_version,
+            component_financial_mode=component_financial_mode,
+            receipt_policy_sha256=receipt["policy_sha256"],
+            receipt_calendar_sha256=receipt["calendar_sha256"],
+            receipt_generation_sha256=receipt["input_generation_sha256"],
+        )
         component_key = (
             _text(component["interval_id"], "receipt input component interval"),
             _text(component["strategy_id"], "receipt input component strategy"),

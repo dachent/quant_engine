@@ -2140,6 +2140,47 @@ def test_as_held_hwm_v3_direct_receipt_rejects_forbidden_subperiod_fields(
         as_held_hwm_receipt(receipt)
 
 
+def test_as_held_hwm_v3_receipt_rejects_coherent_subperiod_value_rewrite() -> None:
+    receipt = as_held_hwm_receipt(
+        _compute_as_held(_as_held_direct_net_return_fixture())
+    )
+    component = receipt["input_evidence"]["component_periods"][0]  # type: ignore[index]
+    subperiod = component["subperiods"][0]
+    subperiod["ending_nav_before_flow_usd"] = "999"
+    component["return_evidence_sha256"] = _fixture_sha256(
+        _direct_return_evidence_payload(component)
+    )
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(HwmCoverageError, match="component ending NAV differs"):
+        as_held_hwm_receipt(receipt)
+
+
+def test_as_held_hwm_v3_receipt_rejects_subperiod_evidence_hash_rewrite() -> None:
+    receipt = as_held_hwm_receipt(
+        _compute_as_held(_as_held_direct_net_return_fixture())
+    )
+    subperiod = receipt["input_evidence"]["component_periods"][0]["subperiods"][0]  # type: ignore[index]
+    subperiod["flow_event_evidence_sha256"] = "a" * 64
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(
+        HwmCoverageError,
+        match="component flow_reconciliation_sha256 identity differs",
+    ):
+        as_held_hwm_receipt(receipt)
+
+
+def test_as_held_hwm_v3_detailed_receipt_rejects_subperiod_leverage_rewrite() -> None:
+    receipt = as_held_hwm_receipt(_compute_as_held(_as_held_detailed_v3_fixture()))
+    subperiod = receipt["input_evidence"]["component_periods"][0]["subperiods"][0]  # type: ignore[index]
+    subperiod["ending_gross_assets_before_flow_usd"] = "999"
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(HwmCoverageError, match="subperiod leverage semantics differ"):
+        as_held_hwm_receipt(receipt)
+
+
 def test_as_held_hwm_receipt_rejects_unhashable_schema_version() -> None:
     receipt = as_held_hwm_receipt(
         _compute_as_held(_as_held_direct_net_return_fixture())
