@@ -3452,29 +3452,134 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
         or not components
     ):
         raise HwmCoverageError("as-held HWM receipt input evidence differs")
+    normalized_intervals: list[dict[str, Any]] = []
+    interval_by_id: dict[str, dict[str, Any]] = {}
+    previous_interval_end: date | None = None
     for interval_value in intervals:
         interval = _mapping(interval_value, "receipt input interval")
         _strict_keys(interval, _INPUT_INTERVAL_KEYS, "receipt input interval")
-        _text(interval["interval_id"], "receipt input interval identity")
-        _canonical_date(interval["interval_start"], "receipt input interval start")
-        _canonical_date(interval["interval_end"], "receipt input interval end")
-        _sha256(
+        interval_id = _text(interval["interval_id"], "receipt input interval identity")
+        if interval_id in interval_by_id:
+            raise HwmCoverageError("receipt input interval identity is duplicated")
+        interval_start = _canonical_date(
+            interval["interval_start"], "receipt input interval start"
+        )
+        interval_end = _canonical_date(
+            interval["interval_end"], "receipt input interval end"
+        )
+        interval_evidence_sha256 = _sha256(
             interval["interval_evidence_sha256"],
             "receipt input interval evidence",
         )
+        if (
+            (interval_end - interval_start).days != 1
+            or (
+                previous_interval_end is not None
+                and interval_start != previous_interval_end
+            )
+            or interval_evidence_sha256 != receipt["calendar_sha256"]
+        ):
+            raise HwmCoverageError("receipt input interval authority differs")
+        normalized_interval = {
+            "interval_id": interval_id,
+            "interval_start": interval_start,
+            "interval_end": interval_end,
+        }
+        normalized_intervals.append(normalized_interval)
+        interval_by_id[interval_id] = normalized_interval
+        previous_interval_end = interval_end
+    if (
+        normalized_intervals[0]["interval_start"] != normalized_path[0]["as_of"]
+        or normalized_intervals[-1]["interval_end"] != complete_through
+    ):
+        raise HwmCoverageError("receipt input interval boundary differs")
+
+    membership_by_strategy: dict[str, dict[str, Any]] = {}
+    interval_starts = {item["interval_start"] for item in normalized_intervals}
+    interval_boundaries = interval_starts | {
+        item["interval_end"] for item in normalized_intervals
+    }
+    first_interval_start = normalized_intervals[0]["interval_start"]
+    final_interval_end = normalized_intervals[-1]["interval_end"]
     for membership_value in memberships:
         membership = _mapping(membership_value, "receipt input membership")
         _strict_keys(membership, _INPUT_MEMBERSHIP_KEYS, "receipt input membership")
-        _text(membership["strategy_id"], "receipt input membership strategy")
-        _canonical_date(membership["effective_start"], "receipt input membership start")
-        if membership["effective_end"] is not None:
-            _canonical_date(membership["effective_end"], "receipt input membership end")
-        _sha256(
+        strategy_id = _text(
+            membership["strategy_id"], "receipt input membership strategy"
+        )
+        if strategy_id in membership_by_strategy:
+            raise HwmCoverageError("receipt input membership is duplicated")
+        effective_start = _canonical_date(
+            membership["effective_start"], "receipt input membership start"
+        )
+        effective_end = (
+            None
+            if membership["effective_end"] is None
+            else _canonical_date(
+                membership["effective_end"], "receipt input membership end"
+            )
+        )
+        if (
+            (effective_end is not None and effective_end <= effective_start)
+            or (
+                first_interval_start < effective_start < final_interval_end
+                and effective_start not in interval_starts
+            )
+            or (
+                effective_end is not None
+                and first_interval_start < effective_end < final_interval_end
+                and effective_end not in interval_boundaries
+            )
+        ):
+            raise HwmCoverageError("receipt input membership boundary differs")
+        membership_evidence_sha256 = _sha256(
             membership["membership_evidence_sha256"],
             "receipt input membership evidence",
         )
+        if membership_evidence_sha256 != _canonical_sha256(
+            {
+                "schema_version": 1,
+                "evidence_type": "FUNDED_MEMBERSHIP",
+                "strategy_id": strategy_id,
+                "effective_start": effective_start.isoformat(),
+                "effective_end": (
+                    effective_end.isoformat() if effective_end is not None else None
+                ),
+            }
+        ):
+            raise HwmCoverageError("membership evidence identity differs")
+        membership_by_strategy[strategy_id] = {
+            "effective_start": effective_start,
+            "effective_end": effective_end,
+            "membership_evidence_sha256": membership_evidence_sha256,
+        }
+
+    active_members_by_interval = {
+        interval["interval_id"]: {
+            strategy_id
+            for strategy_id, membership in membership_by_strategy.items()
+            if membership["effective_start"] <= interval["interval_start"]
+            and (
+                membership["effective_end"] is None
+                or interval["interval_start"] < membership["effective_end"]
+            )
+        }
+        for interval in normalized_intervals
+    }
+    if any(not members for members in active_members_by_interval.values()):
+        raise HwmCoverageError("receipt input interval has no effective members")
+    inactive_members = set(membership_by_strategy) - set().union(
+        *active_members_by_interval.values()
+    )
+    if inactive_members:
+        raise HwmCoverageError("receipt input membership has no effective interval")
+
     expected_limiting = []
     evidence_component_keys: set[tuple[str, str]] = set()
+    components_by_strategy: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    interval_order = {
+        item["interval_id"]: index for index, item in enumerate(normalized_intervals)
+    }
     for component_value in components:
         component = _mapping(component_value, "receipt input component")
         component_financial_mode = (
@@ -3517,12 +3622,45 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
                 "as-held HWM receipt input component identity is duplicated"
             )
         evidence_component_keys.add(component_key)
+        interval_id, strategy_id = component_key
+        component_interval = interval_by_id.get(interval_id)
+        component_membership = membership_by_strategy.get(strategy_id)
+        if (
+            component_interval is None
+            or component_membership is None
+            or strategy_id not in active_members_by_interval[interval_id]
+            or component["interval_start"]
+            != component_interval["interval_start"].isoformat()
+            or component["interval_end"]
+            != component_interval["interval_end"].isoformat()
+        ):
+            raise HwmCoverageError(
+                "as-held HWM receipt component membership coverage differs"
+            )
+        beginning_capital = receipt_decimal(
+            component["beginning_capital_usd"], "receipt input component capital"
+        )
+        ending_nav = receipt_decimal(
+            component["ending_nav_usd"], "receipt input component ending NAV"
+        )
+        if (
+            component_membership["effective_end"] == component_interval["interval_end"]
+            and ending_nav != 0
+        ):
+            raise HwmCoverageError(
+                "as-held HWM receipt membership exit retains residual NAV"
+            )
+        components_by_strategy[strategy_id].append(
+            {
+                "interval_id": interval_id,
+                "capital_basis": component["capital_basis"],
+                "beginning_capital": beginning_capital,
+                "ending_nav": ending_nav,
+            }
+        )
         input_component = (
             component_financial_mode,
-            receipt_decimal(
-                component["beginning_capital_usd"],
-                "receipt input component capital",
-            ),
+            beginning_capital,
             receipt_decimal(
                 component["period_return"],
                 "receipt input component return",
@@ -3572,6 +3710,28 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
         raise HwmCoverageError(
             "as-held HWM receipt calculated component coverage differs from input evidence"
         )
+    expected_component_keys = {
+        (interval_id, strategy_id)
+        for interval_id, members in active_members_by_interval.items()
+        for strategy_id in members
+    }
+    if evidence_component_keys != expected_component_keys:
+        raise HwmCoverageError(
+            "as-held HWM receipt component membership coverage differs"
+        )
+    for strategy_components in components_by_strategy.values():
+        ordered = sorted(
+            strategy_components, key=lambda item: interval_order[item["interval_id"]]
+        )
+        if ordered[0]["capital_basis"] != "OBSERVED_INDEPENDENT":
+            raise HwmCoverageError(
+                "as-held HWM receipt membership begins without an independent capital anchor"
+            )
+        for previous, current in zip(ordered, ordered[1:], strict=False):
+            if current["beginning_capital"] != previous["ending_nav"]:
+                raise HwmCoverageError(
+                    "as-held HWM receipt beginning capital differs from prior ending NAV"
+                )
     if limiting_values != expected_limiting:
         raise HwmCoverageError("as-held HWM receipt limiting inputs differ")
     for index, value in enumerate(limiting_values):
@@ -3669,6 +3829,127 @@ def validate_as_held_hwm_receipt_generation_binding(
         or generation["upstream_receipt_sha256"] is not None
     ):
         raise HwmCoverageError("as-held HWM receipt generation identity differs")
+    generation_maximum_age_days = generation["maximum_age_days"]
+    if (
+        not isinstance(generation_maximum_age_days, int)
+        or isinstance(generation_maximum_age_days, bool)
+        or generation_maximum_age_days < 0
+        or generation_maximum_age_days != accepted["maximum_age_days"]
+    ):
+        raise HwmCoverageError("as-held HWM receipt generation freshness differs")
+
+    authority_bindings = _mapping(
+        generation["authority_bindings"], "HWM input authority bindings"
+    )
+    _strict_keys(
+        authority_bindings,
+        {
+            "policy_sha256",
+            "policy_semantic_digest",
+            "product_contract_sha256",
+            "performance_policy_sha256",
+            "legacy_policy_sha256",
+            "calendar_sha256",
+        },
+        "HWM input authority bindings",
+    )
+    normalized_authority_bindings = {
+        field_name: _sha256(value, f"HWM input authority {field_name}")
+        for field_name, value in authority_bindings.items()
+    }
+    if (
+        normalized_authority_bindings["policy_sha256"] != accepted["policy_sha256"]
+        or normalized_authority_bindings["policy_semantic_digest"]
+        != accepted["policy_semantic_digest"]
+        or normalized_authority_bindings["calendar_sha256"]
+        != accepted["calendar_sha256"]
+    ):
+        raise HwmCoverageError("as-held HWM receipt generation authority differs")
+
+    evidence_values = generation["evidence_sha256s"]
+    if not isinstance(evidence_values, list) or not evidence_values:
+        raise HwmCoverageError("as-held HWM receipt generation evidence differs")
+    evidence_registry = {
+        _sha256(value, "HWM input evidence sha256") for value in evidence_values
+    }
+    if len(evidence_registry) != len(evidence_values):
+        raise HwmCoverageError("as-held HWM receipt generation evidence differs")
+
+    evidence = _mapping(accepted["input_evidence"], "receipt.input_evidence")
+    components = evidence["component_periods"]
+    memberships = evidence["memberships"]
+    if not isinstance(components, list) or not isinstance(memberships, list):
+        raise HwmCoverageError("as-held HWM receipt input evidence differs")
+    observed_component_modes: set[str] = set()
+    receipt_evidence_sha256s: set[str] = set()
+    for membership_value in memberships:
+        membership = _mapping(membership_value, "receipt input membership")
+        receipt_evidence_sha256s.add(
+            _sha256(
+                membership["membership_evidence_sha256"],
+                "receipt input membership evidence",
+            )
+        )
+    for component_value in components:
+        component = _mapping(component_value, "receipt input component")
+        component_financial_mode = (
+            _text(
+                component.get("component_financial_mode"),
+                "receipt input component financial mode",
+            )
+            if schema_version == 3
+            else _DETAILED_COMPONENT_MODE
+        )
+        observed_component_modes.add(component_financial_mode)
+        component_evidence_fields = {
+            "capital_evidence_sha256",
+            "flow_reconciliation_sha256",
+            "return_evidence_sha256",
+            (
+                "portable_return_basis_declaration_sha256"
+                if component_financial_mode == _DIRECT_NET_COMPONENT_MODE
+                else "leverage_evidence_sha256"
+            ),
+        }
+        receipt_evidence_sha256s.update(
+            _sha256(component[field_name], f"receipt input component {field_name}")
+            for field_name in component_evidence_fields
+        )
+        subperiods = component["subperiods"]
+        if not isinstance(subperiods, list):
+            raise HwmCoverageError("receipt input subperiods differ")
+        receipt_evidence_sha256s.update(
+            _sha256(
+                _mapping(subperiod, "receipt input subperiod")[
+                    "flow_event_evidence_sha256"
+                ],
+                "receipt input subperiod flow evidence",
+            )
+            for subperiod in subperiods
+        )
+    if not receipt_evidence_sha256s <= evidence_registry:
+        raise HwmCoverageError("as-held HWM receipt evidence is not admitted")
+
+    if schema_version == 3:
+        declared_modes = generation["component_financial_modes"]
+        if (
+            not isinstance(declared_modes, list)
+            or not declared_modes
+            or any(not isinstance(mode, str) for mode in declared_modes)
+            or declared_modes != sorted(set(declared_modes))
+            or any(
+                mode not in {_DETAILED_COMPONENT_MODE, _DIRECT_NET_COMPONENT_MODE}
+                for mode in declared_modes
+            )
+        ):
+            raise HwmCoverageError(
+                "as-held HWM receipt component financial modes differ"
+            )
+        declared_component_modes = set(declared_modes)
+    else:
+        declared_component_modes = {_DETAILED_COMPONENT_MODE}
+    if observed_component_modes != declared_component_modes:
+        raise HwmCoverageError("as-held HWM receipt component financial modes differ")
     return accepted
 
 

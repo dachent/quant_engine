@@ -461,6 +461,46 @@ def _refresh_receipt_self_hashes(receipt: dict[str, object]) -> None:
     )
 
 
+def _bind_receipt_to_generation(
+    receipt: dict[str, object], generation: dict[str, object]
+) -> bytes:
+    generation_bytes = (
+        json.dumps(
+            generation,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    generation_sha256 = hashlib.sha256(generation_bytes).hexdigest()
+    receipt["input_generation_sha256"] = generation_sha256
+    evidence = receipt["input_evidence"]
+    assert isinstance(evidence, dict)
+    components = evidence["component_periods"]
+    assert isinstance(components, list)
+    for component in components:
+        assert isinstance(component, dict)
+        identity_field = (
+            "source_generation_sha256"
+            if receipt["schema_version"] == 2
+            else "portable_input_generation_sha256"
+        )
+        component[identity_field] = generation_sha256
+    limiting_inputs = receipt["complete_through_limiting_inputs"]
+    assert isinstance(limiting_inputs, list)
+    for limiting_input in limiting_inputs:
+        assert isinstance(limiting_input, dict)
+        identity_field = (
+            "source_generation_sha256"
+            if receipt["schema_version"] == 2
+            else "portable_input_generation_sha256"
+        )
+        limiting_input[identity_field] = generation_sha256
+    _refresh_receipt_self_hashes(receipt)
+    return generation_bytes
+
+
 def _refresh_membership_evidence(row: dict[str, object]) -> None:
     row["membership_evidence_sha256"] = _fixture_sha256(
         {
@@ -2178,6 +2218,114 @@ def test_as_held_hwm_v3_detailed_receipt_rejects_subperiod_leverage_rewrite() ->
     _refresh_receipt_self_hashes(receipt)
 
     with pytest.raises(HwmCoverageError, match="subperiod leverage semantics differ"):
+        as_held_hwm_receipt(receipt)
+
+
+def test_generation_binding_rejects_coherent_unadmitted_subperiod_evidence() -> None:
+    fixture = _as_held_direct_net_return_fixture()
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+    component = receipt["input_evidence"]["component_periods"][0]  # type: ignore[index]
+    subperiod = component["subperiods"][0]
+    subperiod["flow_event_evidence_sha256"] = "a" * 64
+    evidence_common = {
+        "schema_version": 2,
+        "component_financial_mode": component["component_financial_mode"],
+        "strategy_id": component["strategy_id"],
+        "interval_id": component["interval_id"],
+    }
+    component["flow_reconciliation_sha256"] = _fixture_sha256(
+        {
+            **evidence_common,
+            "evidence_type": "FLOW_RECONCILIATION",
+            "flow_timing": component["flow_timing"],
+            "external_flow_usd": component["external_flow_usd"],
+            "internal_transfer_usd": component["internal_transfer_usd"],
+            "subperiod_flow_evidence_sha256s": [
+                item["flow_event_evidence_sha256"] for item in component["subperiods"]
+            ],
+        }
+    )
+    component["return_evidence_sha256"] = _fixture_sha256(
+        _direct_return_evidence_payload(component)
+    )
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(HwmCoverageError, match="evidence is not admitted"):
+        validate_as_held_hwm_receipt_generation_binding(
+            receipt,
+            fixture["input_generation_bytes"],  # type: ignore[arg-type]
+        )
+
+
+def test_generation_binding_rejects_declared_component_mode_mismatch() -> None:
+    fixture = _as_held_direct_net_return_fixture()
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+    generation = json.loads(fixture["input_generation_bytes"])  # type: ignore[arg-type]
+    generation["component_financial_modes"] = ["DETAILED_RECONCILED_LEVERAGE"]
+    generation_bytes = _bind_receipt_to_generation(receipt, generation)
+
+    with pytest.raises(HwmCoverageError, match="component financial modes differ"):
+        validate_as_held_hwm_receipt_generation_binding(receipt, generation_bytes)
+
+
+def test_generation_binding_rejects_membership_payload_rewrite() -> None:
+    fixture = _as_held_direct_net_return_fixture()
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+    membership = receipt["input_evidence"]["memberships"][0]  # type: ignore[index]
+    membership["effective_start"] = "2023-12-31"
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(HwmCoverageError, match="membership evidence identity differs"):
+        validate_as_held_hwm_receipt_generation_binding(
+            receipt,
+            fixture["input_generation_bytes"],  # type: ignore[arg-type]
+        )
+
+
+def test_generation_binding_rejects_authority_header_mismatch() -> None:
+    fixture = _as_held_direct_net_return_fixture()
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+    generation = json.loads(fixture["input_generation_bytes"])  # type: ignore[arg-type]
+    generation["authority_bindings"]["calendar_sha256"] = "b" * 64
+    generation_bytes = _bind_receipt_to_generation(receipt, generation)
+
+    with pytest.raises(HwmCoverageError, match="generation authority differs"):
+        validate_as_held_hwm_receipt_generation_binding(receipt, generation_bytes)
+
+
+def test_as_held_hwm_receipt_rejects_missing_independent_capital_anchor() -> None:
+    receipt = as_held_hwm_receipt(
+        _compute_as_held(_as_held_direct_net_return_fixture())
+    )
+    component = receipt["input_evidence"]["component_periods"][0]  # type: ignore[index]
+    component["capital_basis"] = "ROLLFORWARD_FROM_PRIOR_INTERVAL"
+    component["capital_evidence_sha256"] = _fixture_sha256(
+        {
+            "schema_version": 2,
+            "component_financial_mode": component["component_financial_mode"],
+            "strategy_id": component["strategy_id"],
+            "interval_id": component["interval_id"],
+            "evidence_type": "BEGINNING_CAPITAL",
+            "beginning_capital_usd": component["beginning_capital_usd"],
+            "capital_basis": component["capital_basis"],
+        }
+    )
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(HwmCoverageError, match="independent capital anchor"):
+        as_held_hwm_receipt(receipt)
+
+
+def test_as_held_hwm_receipt_rejects_membership_exit_with_residual_nav() -> None:
+    receipt = as_held_hwm_receipt(
+        _compute_as_held(_as_held_direct_net_return_fixture())
+    )
+    membership = receipt["input_evidence"]["memberships"][0]  # type: ignore[index]
+    membership["effective_end"] = "2026-08-11"
+    _refresh_membership_evidence(membership)
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(HwmCoverageError, match="membership exit retains residual NAV"):
         as_held_hwm_receipt(receipt)
 
 
