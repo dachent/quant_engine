@@ -5,8 +5,8 @@ This module verifies that distinction without inferring holidays or weekends.
 A candidate payload cannot accept itself: callers must supply the exact
 authority SHA-256 already accepted by an external governed receipt.
 
-Callers must validate the complete PORT-HWM-4 policy before using this
-calendar-specific seam.
+The complete PORT-HWM-4 policy is validated inside this calendar-specific seam
+before any release-readiness field is honored.
 """
 
 from __future__ import annotations
@@ -18,6 +18,11 @@ from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
+
+from quant_engine.portfolio_ledger.hwm import (
+    HwmCoverageError,
+    validate_as_held_hwm_policy,
+)
 
 
 GOVERNED_HWM_CALENDAR_SCHEMA_VERSION: Final = 1
@@ -100,8 +105,12 @@ def _objects(value: object, field: str) -> list[Row]:
 
 
 def _policy_calendar(hwm_policy: Row) -> Row:
-    if hwm_policy.get("policy_id") != "PORT-HWM-4":
-        raise GovernedHwmAuthorityError("HWM policy must be PORT-HWM-4")
+    try:
+        validate_as_held_hwm_policy(hwm_policy)
+    except HwmCoverageError as exc:
+        raise GovernedHwmAuthorityError(
+            "HWM policy is not a complete PORT-HWM-4 policy"
+        ) from exc
 
     calendar = _mapping(hwm_policy.get("calendar_policy"), "policy.calendar_policy")
     required = {
