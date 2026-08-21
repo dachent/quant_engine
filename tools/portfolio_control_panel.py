@@ -43,7 +43,6 @@ from quant_engine.portfolio_ledger import (
     hwm_policy_exclusions,
     validate_hwm_inputs_envelope,
     validate_as_held_hwm_receipt_generation_binding,
-    verify_as_held_hwm_receipt,
 )
 
 
@@ -1526,19 +1525,11 @@ def _panel_portable_hwm_proof(
         accepted = validate_as_held_hwm_receipt_generation_binding(
             receipt,
             input_generation_bytes,
-            product_contract_bytes=product_contract_bytes,
-            performance_policy_bytes=performance_policy_bytes,
-            legacy_policy_bytes=legacy_policy_bytes,
-            calendar_bytes=calendar_bytes,
-        )
-        verify_as_held_hwm_receipt(
-            accepted,
             policy_bytes=policy_bytes,
             product_contract_bytes=product_contract_bytes,
             performance_policy_bytes=performance_policy_bytes,
             legacy_policy_bytes=legacy_policy_bytes,
             calendar_bytes=calendar_bytes,
-            input_generation_bytes=input_generation_bytes,
         )
     except HwmCoverageError as exc:
         raise ControlPanelValidationError(

@@ -503,6 +503,7 @@ def _bind_receipt_to_generation(
 
 def _generation_binding_kwargs(fixture: dict[str, object]) -> dict[str, bytes]:
     return {
+        "policy_bytes": fixture["policy_bytes"],  # type: ignore[dict-item]
         "product_contract_bytes": fixture["product_contract_bytes"],  # type: ignore[dict-item]
         "performance_policy_bytes": fixture["performance_policy_bytes"],  # type: ignore[dict-item]
         "legacy_policy_bytes": fixture["legacy_policy_bytes"],  # type: ignore[dict-item]
@@ -2348,6 +2349,62 @@ def test_generation_binding_rejects_unused_flow_event() -> None:
     generation_bytes = _bind_receipt_to_generation(receipt, generation)
 
     with pytest.raises(HwmCoverageError, match="flow event coverage differs"):
+        validate_as_held_hwm_receipt_generation_binding(
+            receipt,
+            generation_bytes,
+            **_generation_binding_kwargs(fixture),
+        )
+
+
+@pytest.mark.parametrize("correction_kind", ["SOURCE_CORRECTION", "ECONOMIC_REVERSAL"])
+def test_generation_binding_rejects_invalid_flow_event_lineage(
+    correction_kind: str,
+) -> None:
+    fixture = _single_strategy_flow_fixture(external_flow="10")
+    receipt = as_held_hwm_receipt(_compute_as_held(fixture))
+    generation = json.loads(fixture["input_generation_bytes"])  # type: ignore[arg-type]
+    event = generation["flow_events"][0]
+    old_event_sha256 = event["event_evidence_sha256"]
+    event["correction_kind"] = correction_kind
+    event["related_event_id"] = "missing-original"
+    event["event_evidence_sha256"] = _fixture_sha256(
+        {key: value for key, value in event.items() if key != "event_evidence_sha256"}
+    )
+    component = receipt["input_evidence"]["component_periods"][0]  # type: ignore[index]
+    evidence_fields = (
+        "capital_evidence_sha256",
+        "flow_reconciliation_sha256",
+        "return_evidence_sha256",
+        "leverage_evidence_sha256",
+    )
+    old_component_evidence = {field: component[field] for field in evidence_fields}
+    old_subperiod_evidence = component["subperiods"][0]["flow_event_evidence_sha256"]
+    event_key = (
+        str(component["strategy_id"]),
+        str(component["interval_id"]),
+        str(component["subperiods"][0]["subperiod_id"]),
+    )
+    _refresh_component_evidence(component, {event_key: [event]})
+    evidence_replacements = {
+        old_event_sha256: event["event_evidence_sha256"],
+        old_subperiod_evidence: component["subperiods"][0][
+            "flow_event_evidence_sha256"
+        ],
+        **{
+            old_component_evidence[field_name]: component[field_name]
+            for field_name in evidence_fields
+        },
+    }
+    generation["evidence_sha256s"] = sorted(
+        evidence_replacements.get(value, value)
+        for value in generation["evidence_sha256s"]
+    )
+    limiting = receipt["complete_through_limiting_inputs"][0]  # type: ignore[index]
+    for field_name in evidence_fields:
+        limiting[field_name] = component[field_name]
+    generation_bytes = _bind_receipt_to_generation(receipt, generation)
+
+    with pytest.raises(HwmCoverageError, match="corrected flow event lineage differs"):
         validate_as_held_hwm_receipt_generation_binding(
             receipt,
             generation_bytes,

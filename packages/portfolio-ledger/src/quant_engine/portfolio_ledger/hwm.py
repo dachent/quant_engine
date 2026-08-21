@@ -3799,12 +3799,13 @@ def validate_as_held_hwm_receipt_generation_binding(
     receipt: Mapping[str, Any],
     input_generation_bytes: bytes,
     *,
+    policy_bytes: bytes,
     product_contract_bytes: bytes,
     performance_policy_bytes: bytes,
     legacy_policy_bytes: bytes,
     calendar_bytes: bytes,
 ) -> dict[str, Any]:
-    """Bind a portable receipt to the exact generation bytes supplied with it."""
+    """Bind a portable receipt to exact authorities and fully re-derive it."""
 
     accepted = as_held_hwm_receipt(receipt)
     if (
@@ -4123,7 +4124,15 @@ def validate_as_held_hwm_receipt_generation_binding(
         declared_component_modes = {_DETAILED_COMPONENT_MODE}
     if observed_component_modes != declared_component_modes:
         raise HwmCoverageError("as-held HWM receipt component financial modes differ")
-    return accepted
+    return verify_as_held_hwm_receipt(
+        accepted,
+        policy_bytes=policy_bytes,
+        product_contract_bytes=product_contract_bytes,
+        performance_policy_bytes=performance_policy_bytes,
+        legacy_policy_bytes=legacy_policy_bytes,
+        calendar_bytes=calendar_bytes,
+        input_generation_bytes=input_generation_bytes,
+    )
 
 
 def verify_as_held_hwm_receipt(
@@ -4135,7 +4144,7 @@ def verify_as_held_hwm_receipt(
     legacy_policy_bytes: bytes,
     calendar_bytes: bytes,
     input_generation_bytes: bytes,
-) -> None:
+) -> dict[str, Any]:
     """Re-derive a PORT-HWM-4 receipt from its hash-bound input evidence."""
 
     accepted = as_held_hwm_receipt(receipt)
@@ -4181,3 +4190,4 @@ def verify_as_held_hwm_receipt(
     )
     if as_held_hwm_receipt(recalculated) != accepted:
         raise HwmCoverageError("as-held HWM receipt re-derivation differs")
+    return accepted
