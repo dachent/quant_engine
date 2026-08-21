@@ -37,12 +37,13 @@ from quant_engine.portfolio_ledger import (
     HWM_STATUS_SEMANTICS,
     HwmCoverageError,
     HwmInputsContractError,
-    as_held_hwm_receipt,
     compute_full_systematic_hwm_index,
     decimal_text,
     governed_hwm_coverage,
     hwm_policy_exclusions,
     validate_hwm_inputs_envelope,
+    validate_as_held_hwm_receipt_generation_binding,
+    verify_as_held_hwm_receipt,
 )
 
 
@@ -66,6 +67,15 @@ FINANCIAL_MVP_CONTRACT = (
 )
 HWM_POLICY = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
+)
+_PORTABLE_HWM_POLICY: Final = (
+    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v4.json"
+)
+_PORTABLE_HWM_PRODUCT_CONTRACT: Final = FINANCIAL_MVP_CONTRACT
+_PORTABLE_HWM_PERFORMANCE_POLICY: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-performance-policy-v1.json"
 )
 ECONOMIC_DRIVER_CLUSTERS = (
     Path(__file__).resolve().parents[1]
@@ -1501,11 +1511,26 @@ def _compute_panel_numerical_hwm(catalog: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _panel_portable_hwm_proof(receipt: Mapping[str, Any]) -> dict[str, Any]:
+def _panel_portable_hwm_proof(
+    receipt: Mapping[str, Any],
+    input_generation_bytes: bytes,
+    calendar_bytes: bytes,
+) -> dict[str, Any]:
     """Independently project a verified portable proof for panel reconciliation."""
 
     try:
-        accepted = as_held_hwm_receipt(receipt)
+        accepted = validate_as_held_hwm_receipt_generation_binding(
+            receipt, input_generation_bytes
+        )
+        verify_as_held_hwm_receipt(
+            accepted,
+            policy_bytes=_PORTABLE_HWM_POLICY.read_bytes(),
+            product_contract_bytes=_PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes(),
+            performance_policy_bytes=_PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes(),
+            legacy_policy_bytes=HWM_POLICY.read_bytes(),
+            calendar_bytes=calendar_bytes,
+            input_generation_bytes=input_generation_bytes,
+        )
     except HwmCoverageError as exc:
         raise ControlPanelValidationError(
             f"portable HWM proof is invalid: {exc}"
@@ -4175,6 +4200,8 @@ def _panel_data(
     candidate_driver_map_identity: Mapping[str, str] | None = None,
     baseline_catalog: Mapping[str, Any] | None = None,
     hwm_portable_receipt: Mapping[str, Any] | None = None,
+    hwm_portable_generation_bytes: bytes | None = None,
+    hwm_portable_calendar_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -4629,9 +4656,24 @@ def _panel_data(
     # Independently recompute the numerical composite from the governed
     # catalog (never the report's copies); the full-summary equality check
     # below then reconciles the numerical HWM fields against the report.
+    portable_bundle_presence = {
+        hwm_portable_receipt is not None,
+        hwm_portable_generation_bytes is not None,
+        hwm_portable_calendar_bytes is not None,
+    }
+    if len(portable_bundle_presence) != 1:
+        raise ControlPanelValidationError(
+            "portable HWM receipt, input generation, and calendar bytes must be supplied together"
+        )
     portable_hwm_proof = (
-        _panel_portable_hwm_proof(hwm_portable_receipt)
+        _panel_portable_hwm_proof(
+            hwm_portable_receipt,
+            hwm_portable_generation_bytes,
+            hwm_portable_calendar_bytes,
+        )
         if hwm_portable_receipt is not None
+        and hwm_portable_generation_bytes is not None
+        and hwm_portable_calendar_bytes is not None
         else None
     )
     report_portable_hwm_proof = report.get("hwm_portable_proof")
@@ -5158,6 +5200,8 @@ def _rendered_files(
     candidate_driver_map_path: Path | None = None,
     baseline_root: Path | None = None,
     hwm_portable_receipt: Mapping[str, Any] | None = None,
+    hwm_portable_generation_bytes: bytes | None = None,
+    hwm_portable_calendar_bytes: bytes | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -5262,6 +5306,8 @@ def _rendered_files(
         candidate_driver_map_identity,
         baseline_catalog,
         hwm_portable_receipt,
+        hwm_portable_generation_bytes,
+        hwm_portable_calendar_bytes,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -5343,6 +5389,8 @@ def build_candidate(
     candidate_driver_map_path: Path | None = None,
     baseline_root: Path | None = None,
     hwm_portable_receipt: Mapping[str, Any] | None = None,
+    hwm_portable_generation_bytes: bytes | None = None,
+    hwm_portable_calendar_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -5359,6 +5407,8 @@ def build_candidate(
         candidate_driver_map_path,
         baseline_root,
         hwm_portable_receipt,
+        hwm_portable_generation_bytes,
+        hwm_portable_calendar_bytes,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -5436,6 +5486,8 @@ def verify_candidate(
     candidate_driver_map_path: Path | None = None,
     baseline_root: Path | None = None,
     hwm_portable_receipt: Mapping[str, Any] | None = None,
+    hwm_portable_generation_bytes: bytes | None = None,
+    hwm_portable_calendar_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -5452,6 +5504,8 @@ def verify_candidate(
         candidate_driver_map_path,
         baseline_root,
         hwm_portable_receipt,
+        hwm_portable_generation_bytes,
+        hwm_portable_calendar_bytes,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []

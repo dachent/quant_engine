@@ -42,12 +42,13 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     HwmInputsContractError,
-    as_held_hwm_receipt,
     compute_full_systematic_hwm_index,
     decimal_text,
     governed_hwm_coverage,
     hwm_policy_exclusions,
     validate_hwm_inputs_envelope,
+    validate_as_held_hwm_receipt_generation_binding,
+    verify_as_held_hwm_receipt,
 )
 
 
@@ -59,6 +60,19 @@ WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
 HWM_POLICY: Final = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
+)
+_PORTABLE_HWM_POLICY: Final = (
+    Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v4.json"
+)
+_PORTABLE_HWM_PRODUCT_CONTRACT: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-financial-mvp-source-v1.json"
+)
+_PORTABLE_HWM_PERFORMANCE_POLICY: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-performance-policy-v1.json"
 )
 _P123_ENTITY_REF_RE: Final = re.compile(r"\bp123-entity:\d+\b", re.IGNORECASE)
 _P123_ENTITY_TEXT_RE: Final = re.compile(r"\bPortfolio123 entity \d+\b", re.IGNORECASE)
@@ -2645,11 +2659,26 @@ def _hwm_numerical_from_envelope(
     }
 
 
-def _report_portable_hwm_proof(receipt: Mapping[str, Any]) -> dict[str, Any]:
+def _report_portable_hwm_proof(
+    receipt: Mapping[str, Any],
+    input_generation_bytes: bytes,
+    calendar_bytes: bytes,
+) -> dict[str, Any]:
     """Project a verified PORT-HWM-4 portable proof without upgrading authority."""
 
     try:
-        accepted = as_held_hwm_receipt(receipt)
+        accepted = validate_as_held_hwm_receipt_generation_binding(
+            receipt, input_generation_bytes
+        )
+        verify_as_held_hwm_receipt(
+            accepted,
+            policy_bytes=_PORTABLE_HWM_POLICY.read_bytes(),
+            product_contract_bytes=_PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes(),
+            performance_policy_bytes=_PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes(),
+            legacy_policy_bytes=HWM_POLICY.read_bytes(),
+            calendar_bytes=calendar_bytes,
+            input_generation_bytes=input_generation_bytes,
+        )
     except HwmCoverageError as exc:
         raise ReportValidationError(f"portable HWM proof is invalid: {exc}") from exc
     return {
@@ -2835,6 +2864,8 @@ def build_report_data(
     implementation_return_attribution_path: Path | None = None,
     hwm_portable_receipt: Mapping[str, Any] | None = None,
     correlation_root: Path | None = None,
+    hwm_portable_generation_bytes: bytes | None = None,
+    hwm_portable_calendar_bytes: bytes | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -2928,8 +2959,28 @@ def build_report_data(
     # is supplied, so the NO_HWM_INPUTS/envelope-derived status always
     # publishes.  Absence or any internal defect yields UNAVAILABLE with a
     # structured reason, never an error or a fallback.
+    portable_bundle_presence = {
+        hwm_portable_receipt is not None,
+        hwm_portable_generation_bytes is not None,
+        hwm_portable_calendar_bytes is not None,
+    }
+    if len(portable_bundle_presence) != 1:
+        raise ReportValidationError(
+            "portable HWM receipt, input generation, and calendar bytes must be supplied together"
+        )
     portable_hwm_proof = (
-        _report_portable_hwm_proof(hwm_portable_receipt)
+        _report_portable_hwm_proof(
+            hwm_portable_receipt,
+            hwm_portable_generation_bytes,
+            hwm_portable_calendar_bytes,
+        )
+        if hwm_portable_receipt is not None
+        and hwm_portable_generation_bytes is not None
+        and hwm_portable_calendar_bytes is not None
+        else None
+    )
+    portable_hwm_receipt_schema_version = (
+        int(hwm_portable_receipt["schema_version"])
         if hwm_portable_receipt is not None
         else None
     )
@@ -3079,7 +3130,10 @@ def build_report_data(
                     {
                         "artifact": "portfolio-hwm-4-portable-proof",
                         "as_of_date": portable_hwm_proof["complete_through"],
-                        "schema": "portfolio-hwm-calculation-receipt/2",
+                        "schema": (
+                            "portfolio-hwm-calculation-receipt/"
+                            f"{portable_hwm_receipt_schema_version}"
+                        ),
                         "sha256": portable_hwm_proof["receipt_sha256"],
                     }
                 ]
@@ -3560,6 +3614,8 @@ def build_candidate(
     implementation_return_attribution_path: Path | None = None,
     hwm_portable_receipt: Mapping[str, Any] | None = None,
     correlation_root: Path | None = None,
+    hwm_portable_generation_bytes: bytes | None = None,
+    hwm_portable_calendar_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -3571,6 +3627,8 @@ def build_candidate(
         implementation_return_attribution_path,
         hwm_portable_receipt,
         correlation_root,
+        hwm_portable_generation_bytes,
+        hwm_portable_calendar_bytes,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -3948,6 +4006,8 @@ def verify_candidate(
     implementation_return_attribution_path: Path | None = None,
     hwm_portable_receipt: Mapping[str, Any] | None = None,
     correlation_root: Path | None = None,
+    hwm_portable_generation_bytes: bytes | None = None,
+    hwm_portable_calendar_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -3959,6 +4019,8 @@ def verify_candidate(
         implementation_return_attribution_path,
         hwm_portable_receipt,
         correlation_root,
+        hwm_portable_generation_bytes,
+        hwm_portable_calendar_bytes,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:

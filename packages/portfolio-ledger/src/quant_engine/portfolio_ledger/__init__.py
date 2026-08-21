@@ -29,6 +29,8 @@ from quant_engine.portfolio_ledger.models import (
     decimal_text,
 )
 from quant_engine.portfolio_ledger.hwm import (
+    AS_HELD_HWM_DETAILED_COMPONENT_MODE,
+    AS_HELD_HWM_DIRECT_NET_COMPONENT_MODE,
     AS_HELD_HWM_POLICY_ID,
     AS_HELD_HWM_RETURN_BASIS,
     HWM_STATUS_CODE_VERSION,
@@ -40,6 +42,7 @@ from quant_engine.portfolio_ledger.hwm import (
     compute_full_systematic_hwm_index,
     governed_hwm_coverage,
     validate_as_held_hwm_policy,
+    validate_as_held_hwm_receipt_generation_binding,
     verify_as_held_hwm_receipt,
 )
 from quant_engine.portfolio_ledger.hwm_governed import (
@@ -104,6 +107,8 @@ __all__ = [
     "AccountStrategyAssignment",
     "AdmissionDisposition",
     "AnalyticalModelStatus",
+    "AS_HELD_HWM_DETAILED_COMPONENT_MODE",
+    "AS_HELD_HWM_DIRECT_NET_COMPONENT_MODE",
     "AS_HELD_HWM_POLICY_ID",
     "AS_HELD_HWM_RETURN_BASIS",
     "AllocationBridgeReconciliation",
@@ -168,6 +173,7 @@ __all__ = [
     "reconcile_allocation_bridge",
     "validate_hwm_inputs_envelope",
     "validate_as_held_hwm_policy",
+    "validate_as_held_hwm_receipt_generation_binding",
     "validate_admit_or_declare_receipt",
     "validate_dataset_dispositions",
     "validate_governed_hwm_calendar_authority",

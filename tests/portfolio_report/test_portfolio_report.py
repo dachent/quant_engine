@@ -46,9 +46,24 @@ HWM_TEST_NAMESPACE = runpy.run_path(
 )
 
 
-def _portable_hwm_receipt() -> dict[str, Any]:
-    fixture = HWM_TEST_NAMESPACE["_as_held_hwm_fixture"]()
-    return HWM_TEST_NAMESPACE["_compute_as_held"](fixture)
+def _portable_hwm_bundle(
+    *, schema_version: int = 2
+) -> tuple[dict[str, Any], bytes, bytes]:
+    fixture_name = (
+        "_as_held_direct_net_return_fixture"
+        if schema_version == 3
+        else "_as_held_hwm_fixture"
+    )
+    fixture = HWM_TEST_NAMESPACE[fixture_name]()
+    return (
+        HWM_TEST_NAMESPACE["_compute_as_held"](fixture),
+        fixture["input_generation_bytes"],
+        fixture["calendar_bytes"],
+    )
+
+
+def _portable_hwm_receipt(*, schema_version: int = 2) -> dict[str, Any]:
+    return _portable_hwm_bundle(schema_version=schema_version)[0]
 
 
 def test_public_report_value_redacts_portfolio123_entity_identifiers() -> None:
@@ -2238,7 +2253,9 @@ def test_portable_hwm_proof_coexists_with_governed_report_and_workbook_hwm(
     _attach_hwm_envelope(catalog, crosswalk)
     catalog["replay"]["portfolio_action"] = "ELIGIBLE_FOR_REVIEW"
     baseline_root = _published_baseline(tmp_path / "baseline", catalog)
-    receipt = _portable_hwm_receipt()
+    receipt, input_generation_bytes, calendar_bytes = _portable_hwm_bundle(
+        schema_version=3
+    )
     governed_report, _governed_bytes, _governed_baseline = reporter.build_report_data(
         baseline_root,
         freshness_health_path=_hwm_freshness_file(tmp_path),
@@ -2249,6 +2266,8 @@ def test_portable_hwm_proof_coexists_with_governed_report_and_workbook_hwm(
         tmp_path / "report-output",
         freshness_health_path=_hwm_freshness_file(tmp_path),
         hwm_portable_receipt=receipt,
+        hwm_portable_generation_bytes=input_generation_bytes,
+        hwm_portable_calendar_bytes=calendar_bytes,
     )
     candidate_dir = Path(candidate["candidate_dir"])
     report = json.loads(
@@ -2277,6 +2296,14 @@ def test_portable_hwm_proof_coexists_with_governed_report_and_workbook_hwm(
     assert proof["maximum_drawdown"] == "-0.1"
     assert proof["age_status"] == "COMPLETE_DATA_AGE_WARNING"
     assert proof["warnings"] == ["HWM_COMPLETE_DATA_AGE"]
+    assert (
+        next(
+            row
+            for row in report["provenance"]
+            if row["artifact"] == "portfolio-hwm-4-portable-proof"
+        )["schema"]
+        == "portfolio-hwm-calculation-receipt/3"
+    )
     assert _summary_row(report, "PORT-HWM-4 proof status") == (
         "DEVELOPMENT_NOT_FINANCIAL_ACCEPTANCE"
     )
@@ -2328,6 +2355,7 @@ def test_portable_hwm_proof_coexists_with_governed_report_and_workbook_hwm(
         )
     )
     portable_schema = schema["$defs"]["portable_hwm_proof"]
+    assert set(portable_schema["required"]) == set(proof)
     assert portable_schema["properties"]["financial_acceptance"] == {
         "const": "NOT_FINANCIAL_ACCEPTANCE"
     }
@@ -2347,10 +2375,13 @@ def test_portable_hwm_proof_does_not_upgrade_missing_governed_authority(
         freshness_health_path=_hwm_freshness_file(tmp_path),
     )
 
+    receipt, input_generation_bytes, calendar_bytes = _portable_hwm_bundle()
     report, _report_bytes, _baseline_path = reporter.build_report_data(
         baseline_root,
         freshness_health_path=_hwm_freshness_file(tmp_path),
-        hwm_portable_receipt=_portable_hwm_receipt(),
+        hwm_portable_receipt=receipt,
+        hwm_portable_generation_bytes=input_generation_bytes,
+        hwm_portable_calendar_bytes=calendar_bytes,
     )
 
     assert report["hwm_summary"] == governed_report["hwm_summary"]
@@ -2365,7 +2396,7 @@ def test_portable_hwm_proof_does_not_upgrade_missing_governed_authority(
 def test_report_rejects_tampered_portable_hwm_receipt(tmp_path: Path) -> None:
     catalog = _baseline_catalog()
     baseline_root = _published_baseline(tmp_path / "baseline", catalog)
-    receipt = _portable_hwm_receipt()
+    receipt, input_generation_bytes, calendar_bytes = _portable_hwm_bundle()
     receipt["current_hwm"] = Decimal("999")
 
     with pytest.raises(
@@ -2375,6 +2406,8 @@ def test_report_rejects_tampered_portable_hwm_receipt(tmp_path: Path) -> None:
             baseline_root,
             freshness_health_path=_hwm_freshness_file(tmp_path),
             hwm_portable_receipt=receipt,
+            hwm_portable_generation_bytes=input_generation_bytes,
+            hwm_portable_calendar_bytes=calendar_bytes,
         )
 
 

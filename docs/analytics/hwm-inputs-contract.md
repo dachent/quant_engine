@@ -65,19 +65,35 @@ bytes:
 - exactly one component period for every member effective in every accepted
   interval.
 
-The input receipt is schema v2 (`hwm-input-generation.schema.json`). In this
-first slice it is deliberately limited to `PORTABLE_SYNTHETIC`: it binds the
-policy, product, performance, perimeter and calendar bytes, the complete
-evidence registry, and typed flow events, but it cannot claim workstation or
-release assurance. `ACCEPTED_GOVERNED` remains reserved for the existing
-pipeline/materializer receipt added by #331; a self-rehashed local bundle can
-never upgrade itself to that class.
+Portable input receipts retain schema v2
+(`hwm-input-generation.schema.json`) for the original detailed-leverage proof.
+Schema v3 (`hwm-input-generation-v3.schema.json`) adds an explicit, closed
+`component_financial_modes` declaration. Both versions remain deliberately
+limited to `PORTABLE_SYNTHETIC`: they bind the policy, product, performance,
+perimeter and calendar bytes, the complete evidence registry, and typed flow
+events, but cannot claim workstation or release assurance.
+When both v3 modes occur, the declaration uses canonical order:
+`DETAILED_RECONCILED_LEVERAGE` followed by
+`DIRECT_NET_TOTAL_FLOW_NEUTRAL_RETURN`.
+`ACCEPTED_GOVERNED` remains reserved for a separately verified existing-runtime
+authority; a self-rehashed local bundle can never upgrade itself to that class.
 
-Each component period carries beginning and ending gross assets and financing
-liabilities, ending net NAV, flow-adjusted ending net NAV, gross-asset return,
-and the accepted levered period return. External flow, internal transfer,
-margin principal and financing cost are rederived from typed events rather
-than trusted as caller labels. Every event binds its classification authority,
+Schema v3 has two disjoint component representations:
+
+- `DETAILED_RECONCILED_LEVERAGE` carries beginning and ending gross assets and
+  financing liabilities, margin principal, financing cost, gross-asset return,
+  and leverage evidence.
+- `DIRECT_NET_TOTAL_FLOW_NEUTRAL_RETURN` carries a portable declared net/total
+  flow-neutral return and a canonically derived return-basis declaration. Gross
+  assets, debt, margin, financing cost, gross return, and leverage evidence are
+  absent—not null and never synthetic zeroes.
+
+Both modes carry beginning and ending net NAV, flow-adjusted ending net NAV,
+and the accepted levered period return. External flow and internal transfer are
+rederived from typed events rather than trusted as caller labels. Detailed mode
+also rederives margin principal and financing cost. Direct mode rejects any
+margin-principal or financing-cost event it cannot reconcile without leverage
+facts. Every event binds its classification authority,
 canonical UTC effective time, source timezone, original amount/currency,
 event-time FX authority/rate, exact USD amount, and correction/reversal
 lineage. All PORT-HWM-4 arithmetic, including FX conversion, runs under the
@@ -92,16 +108,20 @@ taxes, expenses and rebates remain investment results; they cannot become
 owner flows. Exact-timestamp
 events are represented as contiguous timestamped subperiods; date-only events
 enter after the single daily subperiod. The kernel proves
-`net NAV = gross assets - financing liability` at
-every subperiod boundary, proves margin principal changes gross assets and debt
-without becoming owner flow, includes financing cost in the levered net-NAV
-return, and rejects any return basis other than
+`net NAV = gross assets - financing liability` at every detailed-mode
+subperiod boundary, proves margin principal changes gross assets and debt
+without becoming owner flow, and includes financing cost in the levered
+net-NAV return. Direct mode instead proves the net-NAV subperiod chain and binds
+its portable return-basis declaration without inventing leverage detail.
+Both modes reject any return basis other than
 `LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL`.  First membership periods
 require independent beginning-capital anchors. Later exact rollforwards must
 equal the preceding ending net NAV; a terminal value cannot be backcast. An
-effective membership exit must reconcile to zero gross assets, debt and net
-NAV through an admitted terminal withdrawal or transfer; positive residual NAV
-cannot silently disappear.
+effective membership exit in detailed mode must reconcile to zero gross assets,
+debt, and net NAV through an admitted terminal withdrawal or transfer. Direct
+mode proves zero terminal net NAV plus that admitted exit event because
+gross/debt facts are intentionally absent. Positive residual NAV cannot silently
+disappear in either mode.
 
 The composite return is beginning-net-NAV weighted over the complete as-held
 membership set and geometrically linked from 100.  Current and maximum
@@ -110,17 +130,35 @@ corresponding positive magnitude.  Missing members, extra members, interval
 gaps, policy/calendar identity drift, inferred holiday zeros, and survivor
 renormalization fail before a numerical receipt exists.
 
+Portable evidence hashes are integrity identities within a self-contained
+synthetic bundle. They do not establish provider provenance, #303/#331
+admission, owner acceptance, or governed financial authority. In v3,
+`portable_input_generation_sha256` is explicitly the SHA-256 of the HWM input
+bundle—not an upstream provider/source generation—and
+`portable_return_basis_declaration_sha256` is derived from the portable
+profile, financial mode, return basis, and all bound policy/contract/calendar
+identities. Governed acceptance requires separately verified upstream receipt
+bytes; portable v3 requires `upstream_receipt_sha256=null`.
+Receipt-only normalization proves arithmetic and internal shape, not origin.
+Report and control-panel consumers therefore require the receipt together with
+the exact input-generation and calendar bytes, then fully rederive it against
+the repository-bound PORT-HWM-4, product, performance, and legacy authorities.
+This prevents a coherently rehashed v3 receipt from downgrading itself to v2 or
+rewriting component evidence at consumption.
+
 The portable proof records `evaluated_on`, `complete_through`, age, assurance
-profile, warnings, the exact source/capital/flow/return/leverage identities that
-limit the complete-through boundary, component weights/returns, the dated
+profile, warnings, the exact portable-input/capital/flow/return and mode-specific
+leverage or return-basis identities that limit the complete-through boundary,
+component weights/returns, the dated
 index/HWM path, and input/policy/output hashes. Its status is
 `PORTABLE_SYNTHETIC_PROOF`, never `AVAILABLE`, and it is DEVELOPMENT-only.
 The policy still requires older complete accepted data to calculate with
 `HWM_COMPLETE_DATA_AGE`; age alone is not a financial failure. Workstation and
 release execution currently fail because the governed source/calendar receipt
 is not yet admitted, not because the complete data is older than a threshold.
-The deterministic JSON view is governed by
-`schemas/portfolio/hwm-calculation-receipt.schema.json`.
+The deterministic JSON views are governed by
+`schemas/portfolio/hwm-calculation-receipt.schema.json` (v2 detailed proof) and
+`schemas/portfolio/hwm-calculation-receipt-v3.schema.json` (explicit modes).
 
 This first boundary does not promote a PORT-HWM-4 baseline source, emit an
 `AVAILABLE` financial receipt, or replace
