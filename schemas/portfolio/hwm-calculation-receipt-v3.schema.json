@@ -11,6 +11,7 @@
     "policy_sha256",
     "policy_semantic_digest",
     "calendar_sha256",
+    "authority_bindings",
     "input_generation_sha256",
     "input_authority_class",
     "calendar_authority_status",
@@ -42,6 +43,26 @@
     "policy_sha256": {"$ref": "#/$defs/sha256"},
     "policy_semantic_digest": {"$ref": "#/$defs/sha256"},
     "calendar_sha256": {"$ref": "#/$defs/sha256"},
+    "authority_bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_sha256",
+        "policy_semantic_digest",
+        "product_contract_sha256",
+        "performance_policy_sha256",
+        "legacy_policy_sha256",
+        "calendar_sha256"
+      ],
+      "properties": {
+        "policy_sha256": {"$ref": "#/$defs/sha256"},
+        "policy_semantic_digest": {"$ref": "#/$defs/sha256"},
+        "product_contract_sha256": {"$ref": "#/$defs/sha256"},
+        "performance_policy_sha256": {"$ref": "#/$defs/sha256"},
+        "legacy_policy_sha256": {"$ref": "#/$defs/sha256"},
+        "calendar_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
     "input_generation_sha256": {"$ref": "#/$defs/sha256"},
     "input_authority_class": {"const": "PORTABLE_SYNTHETIC"},
     "calendar_authority_status": {"const": "PORTABLE_SYNTHETIC"},

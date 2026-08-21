@@ -2595,6 +2595,8 @@ def _compute_as_held_composite_hwm(
             "component_periods": normalized_components,
         },
     }
+    if generation_schema_version == 3:
+        result["authority_bindings"] = dict(expected_authority_bindings)
 
     result["receipt_sha256"] = _canonical_sha256(_json_safe(result))
     return result
@@ -2608,6 +2610,7 @@ def _validate_receipt_component_subperiods(
     receipt_policy_sha256: str,
     receipt_calendar_sha256: str,
     receipt_generation_sha256: str,
+    receipt_authority_bindings: Mapping[str, str] | None,
 ) -> None:
     """Reconcile receipt-only component evidence without trusting its self-hash."""
 
@@ -3046,6 +3049,23 @@ def _validate_receipt_component_subperiods(
             component["portable_return_basis_declaration_sha256"],
             "receipt input component return-basis declaration",
         )
+        if (
+            receipt_authority_bindings is None
+            or declaration_sha256
+            != _canonical_sha256(
+                {
+                    "schema_version": 1,
+                    "evidence_type": "PORTABLE_RETURN_BASIS_DECLARATION",
+                    "authority_profile": _PORTABLE_INPUT_AUTHORITY,
+                    "component_financial_mode": _DIRECT_NET_COMPONENT_MODE,
+                    "return_basis": return_basis,
+                    **receipt_authority_bindings,
+                }
+            )
+        ):
+            raise HwmCoverageError(
+                "portable_return_basis_declaration_sha256 identity differs"
+            )
         return_evidence_payload.update(
             {
                 "return_basis": return_basis,
@@ -3094,6 +3114,9 @@ def _validate_receipt_component_subperiods(
 def as_held_hwm_receipt(result: Mapping[str, Any]) -> dict[str, Any]:
     """Return and verify the canonical JSON-safe PORT-HWM-4 receipt."""
 
+    receipt_schema_version = _generation_schema_version(
+        result.get("schema_version"), "as-held HWM receipt identity is invalid"
+    )
     expected_keys = {
         "schema_version",
         "status",
@@ -3125,6 +3148,8 @@ def as_held_hwm_receipt(result: Mapping[str, Any]) -> dict[str, Any]:
         "input_evidence",
         "receipt_sha256",
     }
+    if receipt_schema_version == 3:
+        expected_keys.add("authority_bindings")
     _strict_keys(result, expected_keys, "as-held HWM result")
     receipt = _json_safe(result)
     assert isinstance(receipt, dict)
@@ -3168,6 +3193,35 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
         "input_sha256",
     }:
         _sha256(receipt[field_name], f"receipt.{field_name}")
+    receipt_authority_bindings: dict[str, str] | None = None
+    if receipt_schema_version == 3:
+        authority_bindings = _mapping(
+            receipt["authority_bindings"], "receipt.authority_bindings"
+        )
+        _strict_keys(
+            authority_bindings,
+            {
+                "policy_sha256",
+                "policy_semantic_digest",
+                "product_contract_sha256",
+                "performance_policy_sha256",
+                "legacy_policy_sha256",
+                "calendar_sha256",
+            },
+            "receipt.authority_bindings",
+        )
+        receipt_authority_bindings = {
+            field_name: _sha256(value, f"receipt authority {field_name}")
+            for field_name, value in authority_bindings.items()
+        }
+        if (
+            receipt_authority_bindings["policy_sha256"] != receipt["policy_sha256"]
+            or receipt_authority_bindings["policy_semantic_digest"]
+            != receipt["policy_semantic_digest"]
+            or receipt_authority_bindings["calendar_sha256"]
+            != receipt["calendar_sha256"]
+        ):
+            raise HwmCoverageError("as-held HWM receipt authority bindings differ")
     assurance_profile = _text(receipt["assurance_profile"], "receipt.assurance_profile")
     if assurance_profile != "DEVELOPMENT":
         raise HwmCoverageError("as-held HWM receipt assurance profile differs")
@@ -3267,6 +3321,7 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
         raise HwmCoverageError("as-held HWM receipt path boundary differs")
 
     calculated_components: dict[tuple[str, str], tuple[str, Decimal, Decimal]] = {}
+    calculated_interval_dates: dict[str, tuple[date, date]] = {}
     for index, value in enumerate(period_values):
         period = _mapping(value, f"receipt.periods[{index}]")
         _strict_keys(
@@ -3290,6 +3345,9 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
         end = _canonical_date(
             period["interval_end"], f"receipt.periods[{index}].interval_end"
         )
+        if interval_id in calculated_interval_dates:
+            raise HwmCoverageError("as-held HWM receipt period identity is duplicated")
+        calculated_interval_dates[interval_id] = (start, end)
         if (
             start != normalized_path[index]["as_of"]
             or end != normalized_path[index + 1]["as_of"]
@@ -3493,6 +3551,12 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
         or normalized_intervals[-1]["interval_end"] != complete_through
     ):
         raise HwmCoverageError("receipt input interval boundary differs")
+    if set(calculated_interval_dates) != set(interval_by_id) or any(
+        calculated_interval_dates[interval_id]
+        != (interval["interval_start"], interval["interval_end"])
+        for interval_id, interval in interval_by_id.items()
+    ):
+        raise HwmCoverageError("as-held HWM receipt period interval identity differs")
 
     membership_by_strategy: dict[str, dict[str, Any]] = {}
     interval_starts = {item["interval_start"] for item in normalized_intervals}
@@ -3612,6 +3676,7 @@ def _validate_as_held_hwm_receipt_semantics_in_context(
             receipt_policy_sha256=receipt["policy_sha256"],
             receipt_calendar_sha256=receipt["calendar_sha256"],
             receipt_generation_sha256=receipt["input_generation_sha256"],
+            receipt_authority_bindings=receipt_authority_bindings,
         )
         component_key = (
             _text(component["interval_id"], "receipt input component interval"),

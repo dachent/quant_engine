@@ -2231,6 +2231,62 @@ def test_as_held_hwm_v3_detailed_receipt_rejects_subperiod_leverage_rewrite() ->
         as_held_hwm_receipt(receipt)
 
 
+def test_as_held_hwm_v3_receipt_rejects_direct_declaration_rewrite() -> None:
+    receipt = as_held_hwm_receipt(
+        _compute_as_held(_as_held_direct_net_return_fixture())
+    )
+    component = receipt["input_evidence"]["component_periods"][-2]  # type: ignore[index]
+    component["portable_return_basis_declaration_sha256"] = "a" * 64
+    component["return_evidence_sha256"] = _fixture_sha256(
+        _direct_return_evidence_payload(component)
+    )
+    limiting = receipt["complete_through_limiting_inputs"][0]  # type: ignore[index]
+    limiting["portable_return_basis_declaration_sha256"] = "a" * 64
+    limiting["return_evidence_sha256"] = component["return_evidence_sha256"]
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(
+        HwmCoverageError,
+        match="portable_return_basis_declaration_sha256 identity differs",
+    ):
+        as_held_hwm_receipt(receipt)
+
+
+def test_as_held_hwm_receipt_binds_period_ids_to_interval_dates() -> None:
+    receipt = as_held_hwm_receipt(_compute_as_held(_as_held_hwm_fixture()))
+    periods = receipt["periods"]
+    assert isinstance(periods, list)
+    first_dates = (periods[0]["interval_start"], periods[0]["interval_end"])
+    second_dates = (periods[1]["interval_start"], periods[1]["interval_end"])
+    periods[0], periods[1] = deepcopy(periods[1]), deepcopy(periods[0])
+    periods[0]["interval_start"], periods[0]["interval_end"] = first_dates
+    periods[1]["interval_start"], periods[1]["interval_end"] = second_dates
+
+    path = receipt["index_path"]
+    assert isinstance(path, list)
+    index_value = Decimal("100")
+    running_hwm = index_value
+    maximum_drawdown = Decimal("0")
+    for path_index, point in enumerate(path):
+        point["index"] = _fixture_decimal_text(index_value)
+        point["hwm"] = _fixture_decimal_text(running_hwm)
+        drawdown = index_value / running_hwm - 1
+        point["drawdown"] = _fixture_decimal_text(drawdown)
+        maximum_drawdown = min(maximum_drawdown, drawdown)
+        if path_index < len(periods):
+            index_value *= 1 + Decimal(periods[path_index]["composite_return"])
+            running_hwm = max(running_hwm, index_value)
+    receipt["current_index"] = _fixture_decimal_text(index_value)
+    receipt["current_hwm"] = _fixture_decimal_text(running_hwm)
+    receipt["current_drawdown"] = _fixture_decimal_text(index_value / running_hwm - 1)
+    receipt["maximum_drawdown"] = _fixture_decimal_text(maximum_drawdown)
+    receipt["governor_drawdown_loss"] = _fixture_decimal_text(-maximum_drawdown)
+    _refresh_receipt_self_hashes(receipt)
+
+    with pytest.raises(HwmCoverageError, match="period interval identity differs"):
+        as_held_hwm_receipt(receipt)
+
+
 def test_generation_binding_rejects_coherent_unadmitted_subperiod_evidence() -> None:
     fixture = _as_held_direct_net_return_fixture()
     receipt = as_held_hwm_receipt(_compute_as_held(fixture))
