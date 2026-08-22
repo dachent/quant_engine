@@ -401,6 +401,43 @@ def _mapped_strategy_for_account(
     )
 
 
+def _matrixport_account_snapshot_usd(
+    manifest: GenerationManifest,
+    run_root: Path,
+) -> Decimal:
+    """Return the hash-bound current account valuation from Matrixport holdings."""
+    artifact_id = "csv/holdings.csv"
+    artifact = _find_manifest_artifact(
+        manifest, artifact_id, "matrixport account holdings"
+    )
+    path = _exact_file(run_root, Path(artifact_id), "matrixport account holdings")
+    rows = _verified_csv_rows(
+        path,
+        artifact.sha256,
+        {"usd_valuation"},
+        "matrixport account holdings",
+    )
+    total = Decimal()
+    observed = False
+    for row in rows:
+        value = _observed_decimal(
+            row.get("usd_valuation"), "matrixport holdings usd_valuation"
+        )
+        if value is None or value == 0:
+            continue
+        if value < 0:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_SNAPSHOT_INVALID: holdings valuation is negative"
+            )
+        total += value
+        observed = True
+    if not observed or total <= 0:
+        raise ProviderLedgerError(
+            "MATRIXPORT_ACCOUNT_SNAPSHOT_UNAVAILABLE: no positive holdings valuation"
+        )
+    return total
+
+
 def _matrixport_nav_observations(
     generation_id: str,
     manifest: GenerationManifest,
@@ -413,12 +450,13 @@ def _matrixport_nav_observations(
     """Admit Matrixport daily portfolio totals as account NAV observations."""
     account_id = _CSV_FACT_ACCOUNT["matrixport"]
     source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
+    run_root = root / "output" / source_run_id
     artifact_id = "csv/daily_portfolio_totals.csv"
     artifact = _find_manifest_artifact(
         manifest, artifact_id, "matrixport daily portfolio totals"
     )
     path = _exact_file(
-        root / "output" / source_run_id,
+        run_root,
         Path(artifact_id),
         "matrixport daily portfolio totals",
     )
@@ -470,8 +508,30 @@ def _matrixport_nav_observations(
                 "source_artifact_id": artifact_id,
                 "source_record_id": source_id,
                 "strategy_id": strategy_id,
+                "value_basis": "ACCOUNT_TOTAL",
             }
         )
+    if observations:
+        snapshot_total = _matrixport_account_snapshot_usd(manifest, run_root)
+        latest = max(observations, key=lambda item: str(item["as_of_date"]))
+        latest_total = _observed_decimal(
+            latest["nav"], "matrixport latest account total"
+        )
+        if latest_total is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_TOTAL_UNAVAILABLE: latest total is absent"
+            )
+        ratio = latest_total / snapshot_total
+        # This is a same-generation basis check, not a return or jump cap.
+        # The broad 0.5x..2x envelope is already the Matrixport valuation
+        # layer's independently reviewed scale-consistency perimeter. It
+        # permits timing/coverage differences while rejecting quota/AUM fields
+        # that are orders of magnitude away from the account snapshot.
+        if ratio < Decimal("0.5") or ratio > Decimal("2"):
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_TOTAL_BASIS_MISMATCH: latest account total "
+                "is inconsistent with the hash-bound holdings snapshot"
+            )
     return observations
 
 

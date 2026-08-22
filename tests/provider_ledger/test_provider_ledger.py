@@ -507,6 +507,83 @@ def _make_manifest(csv_path: Path, artifact_id: str) -> GenerationManifest:
     )
 
 
+def _make_matrixport_manifest(
+    totals_path: Path,
+    *,
+    holding_usd_values: tuple[str, ...],
+) -> GenerationManifest:
+    holdings_path = totals_path.with_name("holdings.csv")
+    holdings_path.write_text(
+        "usd_valuation\n" + "\n".join(holding_usd_values) + "\n",
+        encoding="utf-8-sig",
+    )
+    artifacts = []
+    for artifact_id, path in (
+        ("csv/daily_portfolio_totals.csv", totals_path),
+        ("csv/holdings.csv", holdings_path),
+    ):
+        digest, size = hash_file(path)
+        artifacts.append(
+            SourceArtifact(
+                artifact_id=artifact_id,
+                sha256=digest,
+                size_bytes=size,
+                as_of_date=date(2026, 8, 16),
+                schema_name="test-csv",
+                schema_version="1",
+            )
+        )
+    return GenerationManifest.build(
+        as_of_date=date(2026, 8, 16),
+        adapter=AdapterIdentity(name="test-provider-ledger", version="1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="test",
+            fact_types=("nav_observations",),
+            observed_start=date(2026, 8, 13),
+            observed_end=date(2026, 8, 14),
+        ),
+        artifacts=tuple(artifacts),
+        verification=VerificationStatus.VERIFIED,
+    )
+
+
+def test_matrixport_product_quota_scale_cannot_be_admitted_as_account_nav(
+    tmp_path: Path,
+) -> None:
+    """A stable product-wide quota is not an account NAV merely because its
+    values are positive, hash-bound, and free of day-over-day jumps."""
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-13,2000000000,2000000000,true\n"
+        "2026-08-14,2000000000,2000000000,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        holding_usd_values=("50000",),
+    )
+    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_ACCOUNT_TOTAL_BASIS_MISMATCH",
+    ):
+        ledger._matrixport_nav_observations(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            {},
+        )
+
+
 def test_matrixport_daily_portfolio_totals_admitted_as_nav_observations(
     tmp_path: Path,
 ) -> None:
@@ -521,7 +598,10 @@ def test_matrixport_daily_portfolio_totals_admitted_as_nav_observations(
         "2026-08-14,48663.88457193982560558809181,48663.88457193982560558809181,true\n",
         encoding="utf-8-sig",
     )
-    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    manifest = _make_matrixport_manifest(
+        csv_path,
+        holding_usd_values=("48663.88457193982560558809181",),
+    )
     catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
     accounts = {"account-d2e5821e608e25f1"}
     strategies = {"robuxio-crypto"}
@@ -555,6 +635,7 @@ def test_matrixport_daily_portfolio_totals_admitted_as_nav_observations(
     assert rows[0]["provider_id"] == "matrixport"
     assert rows[0]["record_id"] == "matrixport:2026-08-13"
     assert rows[0]["source_artifact_id"] == "csv/daily_portfolio_totals.csv"
+    assert rows[0]["value_basis"] == "ACCOUNT_TOTAL"
     assert rows[0]["strategy_id"] == "robuxio-crypto"
     assert rows[0]["mapping_status"] == "MAPPED"
     assert rows[1]["as_of_date"] == "2026-08-14"
@@ -574,7 +655,10 @@ def test_matrixport_blank_nav_day_is_skipped_not_fatal(tmp_path: Path) -> None:
         "2026-01-28,49520.75,49520.75,true\n",
         encoding="utf-8-sig",
     )
-    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    manifest = _make_matrixport_manifest(
+        csv_path,
+        holding_usd_values=("49520.75",),
+    )
     catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
     assignments = {
         "account-d2e5821e608e25f1": [
@@ -611,7 +695,10 @@ def test_matrixport_csv_hash_tamper_fails_closed(tmp_path: Path) -> None:
         "2026-08-13,48663.88,48663.88,true\n",
         encoding="utf-8-sig",
     )
-    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    manifest = _make_matrixport_manifest(
+        csv_path,
+        holding_usd_values=("48663.88",),
+    )
     for artifact in manifest.artifacts:
         artifact.__dict__["sha256"] = "0" * 64  # tamper
     catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
@@ -791,7 +878,10 @@ def test_matrixport_incomplete_totals_never_admitted(tmp_path: Path) -> None:
         "2026-08-14,9000.00,,false\n",
         encoding="utf-8-sig",
     )
-    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    manifest = _make_matrixport_manifest(
+        csv_path,
+        holding_usd_values=("48663.88",),
+    )
     catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
     assignments = {
         "account-d2e5821e608e25f1": [
@@ -828,7 +918,10 @@ def test_matrixport_source_run_id_traversal_rejected(tmp_path: Path) -> None:
         "2026-08-13,48663.88,48663.88,true\n",
         encoding="utf-8-sig",
     )
-    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    manifest = _make_matrixport_manifest(
+        csv_path,
+        holding_usd_values=("48663.88",),
+    )
     catalog = {"catalog_schema_version": 2, "source_run_id": "../escape"}
 
     with pytest.raises(ledger.ProviderLedgerError, match="not a safe run identifier"):
@@ -893,7 +986,10 @@ def test_matrixport_non_positive_totals_never_admitted(tmp_path: Path) -> None:
         "2026-08-15,0,0,true\n",
         encoding="utf-8-sig",
     )
-    manifest = _make_manifest(csv_path, "csv/daily_portfolio_totals.csv")
+    manifest = _make_matrixport_manifest(
+        csv_path,
+        holding_usd_values=("48663.88",),
+    )
     catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
     assignments = {
         "account-d2e5821e608e25f1": [
