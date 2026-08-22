@@ -45,7 +45,7 @@ def main() -> int:
             "view",
             str(number),
             "--json",
-            "state,headRefOid,mergeStateStatus,statusCheckRollup",
+            "state,headRefOid,mergeStateStatus",
         )
     )
 
@@ -78,12 +78,14 @@ def main() -> int:
         failures.append(f"mergeStateStatus={state}")
 
     if require_checks:
+        checks = json.loads(
+            _gh("api", f"repos/{REPO}/commits/{pr.get('headRefOid')}/check-runs")
+        )
         pending = [
-            check.get("name", "?")
-            for check in pr.get("statusCheckRollup") or []
-            if (check.get("status") or "").upper() not in {"COMPLETED"}
-            or (check.get("conclusion") or "").upper()
-            not in {"SUCCESS", "SKIPPED", "NEUTRAL"}
+            item.get("name", "?")
+            for item in checks.get("check_runs", [])
+            if item.get("status") != "completed"
+            or item.get("conclusion") not in {"success", "skipped", "neutral"}
         ]
         if pending:
             failures.append(f"checks not green: {', '.join(pending)}")

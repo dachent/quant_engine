@@ -15,13 +15,20 @@ import yaml
 
 
 EXPECTED_WORKFLOWS = frozenset(
-    {"data-boundary.yml", "issue-guard.yml", "quality.yml", "security.yml"}
+    {
+        "data-boundary.yml",
+        "issue-guard.yml",
+        "merge-readiness.yml",
+        "quality.yml",
+        "security.yml",
+    }
 )
 READ_ONLY_PERMISSIONS = {"contents": "read"}
 ISSUE_GUARD_PERMISSIONS = {
     "validate": {"contents": "read"},
     "reconcile": {"contents": "read", "issues": "write"},
 }
+MERGE_READINESS_PERMISSIONS = {"contents": "read", "pull-requests": "read"}
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 ACTION_REFERENCE = re.compile(r"^(?P<target>[^@]+)@(?P<sha>[0-9a-f]{40})$")
 LOCKED_AUDIT_COMMAND = (
@@ -364,7 +371,8 @@ def validate_workflow_document(
                 "piped installers are forbidden",
             )
         )
-    if "github.token" in lowered_text and workflow_name != "issue-guard.yml":
+    TOKEN_ALLOWED_WORKFLOWS = frozenset({"issue-guard.yml", "merge-readiness.yml"})
+    if "github.token" in lowered_text and workflow_name not in TOKEN_ALLOWED_WORKFLOWS:
         findings.append(
             Finding(
                 workflow_name,
@@ -374,7 +382,13 @@ def validate_workflow_document(
         )
 
     top_permissions = _permissions(document.get("permissions"))
-    expected_top = {} if workflow_name == "issue-guard.yml" else READ_ONLY_PERMISSIONS
+    expected_top = (
+        {}
+        if workflow_name == "issue-guard.yml"
+        else MERGE_READINESS_PERMISSIONS
+        if workflow_name == "merge-readiness.yml"
+        else READ_ONLY_PERMISSIONS
+    )
     if top_permissions != expected_top:
         findings.append(
             Finding(
@@ -440,6 +454,17 @@ def validate_workflow_document(
                         locator,
                         "ISSUE_GUARD_RECONCILE_GATE_INVALID",
                         "reconcile must follow validation and exclude pull requests",
+                    )
+                )
+        elif workflow_name == "merge-readiness.yml":
+            if job_permissions is not None and job_permissions != {
+                key: value for key, value in MERGE_READINESS_PERMISSIONS.items()
+            }:
+                findings.append(
+                    Finding(
+                        locator,
+                        "JOB_PERMISSIONS_INVALID",
+                        "merge-readiness job permissions are invalid",
                     )
                 )
         elif job_permissions is not None and job_permissions != READ_ONLY_PERMISSIONS:
