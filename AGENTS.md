@@ -109,6 +109,12 @@ A general phase `PROCEED` does not authorize any of the following:
   revoked;
 - deletion of worktree or data-root content, overwriting authoritative data,
   archive/removal of a legacy source, or another action that is hard to recover;
+  except that an agent-created disposable clone or worktree that (a) the agent
+  created itself in a designated workspace root during this project, (b) is
+  clean with zero stashes, and (c) has every local commit reachable from a
+  remote ref, may be deleted under A1.6 without a separate approval — anything
+  failing (a)–(c), including owner-created trees and snapshot-bearing trees,
+  remains under this boundary;
 - live trading, compensating orders, account-setting changes, or expansion from
   read-only/dry-run/PAPER behavior.
 
@@ -141,3 +147,87 @@ Never close with pending final evidence, and never move unfinished acceptance
 scope to a successor key merely to close the governing issue. A successor is
 valid only for a genuinely independent outcome; otherwise the original issue
 stays open.
+
+---
+
+# Amendment A1 — momentum, proportionality, and seam ownership (2026-08-22)
+
+Source: `audit_20260822_ox_zcode/quant_engine_retrospective_20260822.md`, plus the
+PR #363 RCCA in #328. This addendum narrows implementation detail only; it does
+not weaken any rule above.
+
+## A1.1 Authority bands and default proceed
+
+When the governing mandate covers the candidate and the only obstacle is
+interpretation ambiguity inside its recorded scope, proceed under the least
+consequential reading, record the interpretation taken in the governing issue,
+and continue. Stopping is reserved for the Hard approval boundaries above,
+material scope/authority/effect changes, and genuinely irreversible risk — it is
+never a default for ambiguity. Classify each ask as:
+
+- **GREEN (proceed without asking):** branch writes, PRs, CI runs, closing
+  superseded PRs with cross-links, creating/cleaning own clones and subagents,
+  and **merging when merge-readiness (A1.4) is proven for the exact head SHA**.
+- **YELLOW (one structured issue comment, then continue independent work):**
+  scope changes, new governing issues, protected surfaces, accepting any
+  substitute for a REQUIRED outcome family.
+- **RED:** the Hard approval boundaries list; never proceed.
+
+A YELLOW ask must not pause the session: park it in the issue, move to the next
+eligible item per the priority rules above.
+
+## A1.2 Mission linkage
+
+Every branch, pull request, and issue opened under a governing issue must state
+which REQUIRED financial-MVP outcome family it advances toward `AVAILABLE`.
+Work that advances none requires a recorded YELLOW approval first. Prerequisite
+chains deeper than two hops return to the owner for re-scoping instead of
+expanding in place.
+
+## A1.3 Seam ownership
+
+Any change to an output layout, schema, or file contract must enumerate the
+in-repo consumers of that contract and update every one of them in the same
+pull request; the PR body lists producer and consumers. A consumer suite that
+mocks the producer does not satisfy this rule — the seam needs at least one
+end-to-end regression from the producer's own output (see #364 as the pattern).
+
+## A1.4 Merge readiness
+
+A candidate is merge-ready only when all of the following hold for the exact
+head SHA: required workflow contexts completed successfully, zero unresolved
+review conversations, and `gh pr view` reports a merge state with no named
+unmet rule. Green checks alone are not merge readiness. Record the SHA and the
+observed merge state in the governing issue before merging.
+
+## A1.5 Proportionate evidence tiers
+
+- Per commit: green checks plus diff reference. No additional artifact.
+- Per merged PR: body carries test evidence and resolution links for all review
+  threads.
+- REQUIRED-family acceptance only: the full tier — provenance parity across
+  report/workbook/panel/release receipt showing identical values, hashes and
+  digests, adversarial tests, deterministic rebuild proof — exactly as the
+  governing issue's criteria require.
+
+Heavier tiers must not be substituted for lighter ones at intermediate steps.
+
+## A1.6 Delegation leases and workspace hygiene
+
+Every delegated task packet carries a lease TTL (default 2 hours). The
+delegating session reaps expired leases at least hourly and records the
+reaping. Agent-created clones and worktrees live only in designated workspace
+roots, are single-writer, and are deleted upon merge; leftover clones
+discovered in the workspace are cleaned up before new fan-out begins.
+Administrative tasks create issues through the standard tracker template
+(stable key, backlog state, Blocked by) — see #360.
+
+## A1.7 Session lifecycle and momentum accounting
+
+An orchestrator session is bounded by sprint length (target ≤ 4 wall-clock
+hours or one milestone). At session end, record in the governing issue: wall
+clock vs active-work minutes, stall count with causes, and owner interventions
+required. If interventions exceed two in one sprint, escalate the scaffold
+defect itself to the owner rather than repeating the pattern. When context
+pressure degrades recall, end early with complete issue-recorded evidence
+rather than pushing on.
