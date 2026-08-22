@@ -510,17 +510,22 @@ def _make_manifest(csv_path: Path, artifact_id: str) -> GenerationManifest:
 def _make_matrixport_manifest(
     totals_path: Path,
     *,
-    holding_usd_values: tuple[str, ...],
+    component_date: str,
+    component_usd_values: tuple[str, ...],
 ) -> GenerationManifest:
-    holdings_path = totals_path.with_name("holdings.csv")
-    holdings_path.write_text(
-        "usd_valuation\n" + "\n".join(holding_usd_values) + "\n",
+    daily_holdings_path = totals_path.with_name("daily_holdings.csv")
+    daily_holdings_path.write_text(
+        "utc_date,product_id,share,value_usd_strict_component\n"
+        + "".join(
+            f"{component_date},P{index},1,{value}\n"
+            for index, value in enumerate(component_usd_values, start=1)
+        ),
         encoding="utf-8-sig",
     )
     artifacts = []
     for artifact_id, path in (
         ("csv/daily_portfolio_totals.csv", totals_path),
-        ("csv/holdings.csv", holdings_path),
+        ("csv/daily_holdings.csv", daily_holdings_path),
     ):
         digest, size = hash_file(path)
         artifacts.append(
@@ -548,6 +553,43 @@ def _make_matrixport_manifest(
     )
 
 
+def test_matrixport_strict_total_does_not_require_optional_current_snapshot(
+    tmp_path: Path,
+) -> None:
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-14,50000,50000,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        component_date="2026-08-14",
+        component_usd_values=("20000", "30000"),
+    )
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-14",
+        "source_run_id": run_id,
+    }
+
+    rows = ledger._matrixport_nav_observations(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        {},
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["value_basis"] == "ACCOUNT_TOTAL"
+
+
 def test_matrixport_product_quota_scale_cannot_be_admitted_as_account_nav(
     tmp_path: Path,
 ) -> None:
@@ -565,7 +607,8 @@ def test_matrixport_product_quota_scale_cannot_be_admitted_as_account_nav(
     )
     manifest = _make_matrixport_manifest(
         totals_path,
-        holding_usd_values=("50000",),
+        component_date="2026-08-14",
+        component_usd_values=("50000",),
     )
     catalog = {
         "catalog_schema_version": 2,
@@ -605,7 +648,8 @@ def test_matrixport_stale_total_is_not_compared_to_current_holdings(
     )
     manifest = _make_matrixport_manifest(
         totals_path,
-        holding_usd_values=("200000",),
+        component_date="2026-08-14",
+        component_usd_values=("200000",),
     )
     catalog = {
         "catalog_schema_version": 2,
@@ -643,7 +687,8 @@ def test_matrixport_duplicate_total_date_fails_closed(tmp_path: Path) -> None:
     )
     manifest = _make_matrixport_manifest(
         totals_path,
-        holding_usd_values=("50000",),
+        component_date="2026-08-14",
+        component_usd_values=("50000",),
     )
     catalog = {
         "catalog_schema_version": 2,
@@ -682,7 +727,8 @@ def test_matrixport_daily_portfolio_totals_admitted_as_nav_observations(
     )
     manifest = _make_matrixport_manifest(
         csv_path,
-        holding_usd_values=("20000", "28663.88457193982560558809181"),
+        component_date="2026-08-14",
+        component_usd_values=("20000", "28663.88457193982560558809181"),
     )
     catalog = {
         "catalog_schema_version": 2,
@@ -743,7 +789,8 @@ def test_matrixport_blank_nav_day_is_skipped_not_fatal(tmp_path: Path) -> None:
     )
     manifest = _make_matrixport_manifest(
         csv_path,
-        holding_usd_values=("49520.75",),
+        component_date="2026-01-28",
+        component_usd_values=("49520.75",),
     )
     catalog = {
         "catalog_schema_version": 2,
@@ -787,7 +834,8 @@ def test_matrixport_csv_hash_tamper_fails_closed(tmp_path: Path) -> None:
     )
     manifest = _make_matrixport_manifest(
         csv_path,
-        holding_usd_values=("48663.88",),
+        component_date="2026-08-13",
+        component_usd_values=("48663.88",),
     )
     for artifact in manifest.artifacts:
         artifact.__dict__["sha256"] = "0" * 64  # tamper
@@ -809,7 +857,7 @@ def test_matrixport_csv_hash_tamper_fails_closed(tmp_path: Path) -> None:
         )
 
 
-def test_matrixport_holdings_hash_tamper_fails_closed(tmp_path: Path) -> None:
+def test_matrixport_daily_holdings_hash_tamper_fails_closed(tmp_path: Path) -> None:
     run_id = "20260816T141010.494Z"
     output_root = tmp_path / "output" / run_id
     (output_root / "csv").mkdir(parents=True)
@@ -821,14 +869,15 @@ def test_matrixport_holdings_hash_tamper_fails_closed(tmp_path: Path) -> None:
     )
     manifest = _make_matrixport_manifest(
         totals_path,
-        holding_usd_values=("50000",),
+        component_date="2026-08-13",
+        component_usd_values=("50000",),
     )
-    holdings_artifact = next(
+    daily_holdings_artifact = next(
         artifact
         for artifact in manifest.artifacts
-        if artifact.artifact_id == "csv/holdings.csv"
+        if artifact.artifact_id == "csv/daily_holdings.csv"
     )
-    holdings_artifact.__dict__["sha256"] = "0" * 64
+    daily_holdings_artifact.__dict__["sha256"] = "0" * 64
     catalog = {
         "catalog_schema_version": 2,
         "observed_boundary_date": "2026-08-13",
@@ -837,7 +886,7 @@ def test_matrixport_holdings_hash_tamper_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(
         ledger.ProviderLedgerError,
-        match="matrixport account holdings hash differs",
+        match="matrixport daily holdings hash differs",
     ):
         ledger._matrixport_nav_observations(
             "gen-1",
@@ -851,17 +900,16 @@ def test_matrixport_holdings_hash_tamper_fails_closed(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("holdings_total", "expect_mismatch"),
+    ("component_total", "expect_mismatch"),
     (
-        ("25000", False),
-        ("100000", False),
-        ("24999.99", True),
-        ("100000.01", True),
+        ("50000", False),
+        ("49999.99", True),
+        ("50000.01", True),
     ),
 )
-def test_matrixport_account_snapshot_scale_boundaries(
+def test_matrixport_account_component_reconciliation_is_exact(
     tmp_path: Path,
-    holdings_total: str,
+    component_total: str,
     expect_mismatch: bool,
 ) -> None:
     run_id = "20260816T141010.494Z"
@@ -875,7 +923,8 @@ def test_matrixport_account_snapshot_scale_boundaries(
     )
     manifest = _make_matrixport_manifest(
         totals_path,
-        holding_usd_values=(holdings_total,),
+        component_date="2026-08-13",
+        component_usd_values=(component_total,),
     )
     catalog = {
         "catalog_schema_version": 2,
@@ -1067,7 +1116,8 @@ def test_matrixport_incomplete_totals_never_admitted(tmp_path: Path) -> None:
     )
     manifest = _make_matrixport_manifest(
         csv_path,
-        holding_usd_values=("48663.88",),
+        component_date="2026-08-13",
+        component_usd_values=("48663.88",),
     )
     catalog = {
         "catalog_schema_version": 2,
@@ -1111,7 +1161,8 @@ def test_matrixport_source_run_id_traversal_rejected(tmp_path: Path) -> None:
     )
     manifest = _make_matrixport_manifest(
         csv_path,
-        holding_usd_values=("48663.88",),
+        component_date="2026-08-13",
+        component_usd_values=("48663.88",),
     )
     catalog = {
         "catalog_schema_version": 2,
@@ -1183,7 +1234,8 @@ def test_matrixport_non_positive_totals_never_admitted(tmp_path: Path) -> None:
     )
     manifest = _make_matrixport_manifest(
         csv_path,
-        holding_usd_values=("48663.88",),
+        component_date="2026-08-13",
+        component_usd_values=("48663.88",),
     )
     catalog = {
         "catalog_schema_version": 2,

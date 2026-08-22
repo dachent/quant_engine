@@ -401,39 +401,52 @@ def _mapped_strategy_for_account(
     )
 
 
-def _matrixport_account_snapshot_usd(
+def _matrixport_daily_component_total(
     manifest: GenerationManifest,
     run_root: Path,
+    boundary_date: date,
 ) -> Decimal:
-    """Return the hash-bound current account valuation from Matrixport holdings."""
-    artifact_id = "csv/holdings.csv"
+    """Sum the hash-bound per-product components for one account-total date."""
+    artifact_id = "csv/daily_holdings.csv"
     artifact = _find_manifest_artifact(
-        manifest, artifact_id, "matrixport account holdings"
+        manifest, artifact_id, "matrixport daily holdings"
     )
-    path = _exact_file(run_root, Path(artifact_id), "matrixport account holdings")
+    path = _exact_file(run_root, Path(artifact_id), "matrixport daily holdings")
     rows = _verified_csv_rows(
         path,
         artifact.sha256,
-        {"usd_valuation"},
-        "matrixport account holdings",
+        {"product_id", "share", "utc_date", "value_usd_strict_component"},
+        "matrixport daily holdings",
     )
     total = Decimal()
     observed = False
     for row in rows:
-        value = _observed_decimal(
-            row.get("usd_valuation"), "matrixport holdings usd_valuation"
-        )
-        if value is None or value == 0:
+        if _day(row.get("utc_date"), "matrixport daily holdings utc_date") != (
+            boundary_date
+        ):
             continue
-        if value < 0:
+        share = _observed_decimal(row.get("share"), "matrixport daily holdings share")
+        if share is None:
             raise ProviderLedgerError(
-                "MATRIXPORT_ACCOUNT_SNAPSHOT_INVALID: holdings valuation is negative"
+                "MATRIXPORT_ACCOUNT_COMPONENT_INVALID: active share is absent"
+            )
+        if share == 0:
+            continue
+        value = _observed_decimal(
+            row.get("value_usd_strict_component"),
+            "matrixport daily holdings strict component",
+        )
+        if value is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_COMPONENT_UNAVAILABLE: active holding lacks "
+                "a strict USD component"
             )
         total += value
         observed = True
-    if not observed or total <= 0:
+    if not observed:
         raise ProviderLedgerError(
-            "MATRIXPORT_ACCOUNT_SNAPSHOT_UNAVAILABLE: no positive holdings valuation"
+            "MATRIXPORT_ACCOUNT_COMPONENTS_UNAVAILABLE: no active daily holdings "
+            "exist at the account-total boundary"
         )
     return total
 
@@ -463,7 +476,12 @@ def _matrixport_nav_observations(
     rows = _verified_csv_rows(
         path,
         artifact.sha256,
-        {"utc_date", "portfolio_value_usd_observed", "strict_complete"},
+        {
+            "portfolio_value_usd_observed",
+            "portfolio_value_usd_strict",
+            "strict_complete",
+            "utc_date",
+        },
         "matrixport daily portfolio totals",
     )
     observations: list[dict[str, Any]] = []
@@ -477,7 +495,18 @@ def _matrixport_nav_observations(
             row.get("portfolio_value_usd_observed"),
             "matrixport portfolio_value_usd_observed",
         )
-        if value is None or value <= 0:
+        strict_value = _observed_decimal(
+            row.get("portfolio_value_usd_strict"),
+            "matrixport portfolio_value_usd_strict",
+        )
+        if value is None and strict_value is None:
+            continue
+        if value is None or strict_value is None or value != strict_value:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_TOTAL_STRICT_MISMATCH: a strict-complete row "
+                "has inconsistent observed and strict totals"
+            )
+        if value <= 0:
             # A blank cell is an absent observation; a non-positive total is
             # not a plausible portfolio NAV — never admit either.
             continue
@@ -529,9 +558,11 @@ def _matrixport_nav_observations(
         if latest["as_of_date"] != snapshot_date.isoformat():
             raise ProviderLedgerError(
                 "MATRIXPORT_ACCOUNT_SNAPSHOT_DATE_MISMATCH: latest strict "
-                "account total is not aligned with the holdings snapshot"
+                "account total is not aligned with the daily-holdings boundary"
             )
-        snapshot_total = _matrixport_account_snapshot_usd(manifest, run_root)
+        component_total = _matrixport_daily_component_total(
+            manifest, run_root, snapshot_date
+        )
         latest_total = _observed_decimal(
             latest["nav"], "matrixport latest account total"
         )
@@ -539,16 +570,13 @@ def _matrixport_nav_observations(
             raise ProviderLedgerError(
                 "MATRIXPORT_ACCOUNT_TOTAL_UNAVAILABLE: latest total is absent"
             )
-        ratio = latest_total / snapshot_total
-        # This is a same-generation basis check, not a return or jump cap.
-        # The broad 0.5x..2x envelope is already the Matrixport valuation
-        # layer's independently reviewed scale-consistency perimeter. It
-        # permits timing/coverage differences while rejecting quota/AUM fields
-        # that are orders of magnitude away from the account snapshot.
-        if ratio < Decimal("0.5") or ratio > Decimal("2"):
+        # This is the producer's exact roll-up identity, not a return or jump
+        # cap: a strict account total is the sum of the same-date active
+        # holdings' strict USD components.
+        if latest_total != component_total:
             raise ProviderLedgerError(
                 "MATRIXPORT_ACCOUNT_TOTAL_BASIS_MISMATCH: latest account total "
-                "is inconsistent with the hash-bound holdings snapshot"
+                "does not equal its hash-bound daily holding components"
             )
     return observations
 
