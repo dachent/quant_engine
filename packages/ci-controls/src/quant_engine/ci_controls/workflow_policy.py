@@ -28,7 +28,11 @@ ISSUE_GUARD_PERMISSIONS = {
     "validate": {"contents": "read"},
     "reconcile": {"contents": "read", "issues": "write"},
 }
-MERGE_READINESS_PERMISSIONS = {"contents": "read", "pull-requests": "read"}
+MERGE_READINESS_PERMISSIONS = {
+    "contents": "read",
+    "pull-requests": "read",
+    "checks": "read",
+}
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 ACTION_REFERENCE = re.compile(r"^(?P<target>[^@]+)@(?P<sha>[0-9a-f]{40})$")
 LOCKED_AUDIT_COMMAND = (
