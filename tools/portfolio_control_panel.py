@@ -2090,12 +2090,26 @@ def _decomposition_lenses_for_mode(
     manifest = _load_json(manifest_path, "decomposition plan manifest")
     plan = _load_json(plan_path, "current decomposition plan")
     dispositions = _load_json(dispositions_path, "candidate dispositions")
-    if (
+    current_plan = (
+        manifest.get("builder") == "portfolio-current-decomposition-plan"
+        and manifest.get("builder_version") == "0.17.0"
+        and manifest.get("schema_version") == 2
+    )
+    if current_plan:
+        if manifest.get("bundle_id") != plan_bundle.name:
+            raise ControlPanelValidationError(
+                "current decomposition plan identity differs"
+            )
+    elif (
         manifest.get("schema_version") != 1
         or manifest.get("bundle_id") != plan_bundle.name
     ):
         raise ControlPanelValidationError("decomposition plan identity differs")
-    if plan.get("schema_version") != 1 or dispositions.get("schema_version") != 1:
+    expected_plan_schema = 3 if current_plan else 1
+    if (
+        plan.get("schema_version") != expected_plan_schema
+        or dispositions.get("schema_version") != 1
+    ):
         raise ControlPanelValidationError("decomposition plan schema is unsupported")
     manifest_artifacts = {
         _text(item.get("path"), "plan artifact path"): _text(
@@ -2124,25 +2138,89 @@ def _decomposition_lenses_for_mode(
             "decomposition plan differs from current strategy identities"
         )
     series_to_reason: dict[str, str] = {}
+    disposition_reasons: dict[str, dict[str, str]] = {}
     for strategy_id, strategy_name in strategy_names.items():
         item = planned_by_id[strategy_id]
         if _text(item.get("series_id"), "plan series_id") != strategy_name:
             raise ControlPanelValidationError(
                 f"decomposition plan series differs: {strategy_id}"
             )
-        series_to_reason[strategy_name] = _text(
-            item.get("default_disposition"), "plan default_disposition"
-        )
+        if current_plan:
+            raw_cells = _object(
+                item.get("source_dispositions"), "plan source_dispositions"
+            )
+            cells: dict[str, str] = {}
+            for cell_source_key, raw_cell in raw_cells.items():
+                cells[_text(cell_source_key, "plan source_key")] = _text(
+                    _object(raw_cell, "plan source disposition").get("reason"),
+                    "plan disposition reason",
+                )
+            disposition_reasons[strategy_name] = cells
+            ordered_default = next(
+                (
+                    cells[key]
+                    for key, _label in DECOMPOSITION_LENS_SOURCES.items()
+                    if key in cells
+                ),
+                "UNAVAILABLE_ABSENT_FROM_ALL_DECOMPOSITION_LENSES",
+            )
+            series_to_reason[strategy_name] = ordered_default
+        else:
+            series_to_reason[strategy_name] = _text(
+                item.get("default_disposition"), "plan default_disposition"
+            )
 
     source_analyses: dict[str, dict[str, Any]] = {}
     source_paths: list[Path] = []
     for source_key, (expected_lens, source_label) in DECOMPOSITION_LENS_SOURCES.items():
-        decomposition, identity, path = _current_analytics(
-            root / source_key,
-            filename="decomposition.json",
-            field_name=f"{source_label} decomposition",
-            expected_schema_version=(1, 2),
-        )
+        if current_plan:
+            mode_root = root / "LIVE_ONLY"
+            if not mode_root.is_dir() or mode_root.is_symlink():
+                raise ControlPanelValidationError(
+                    "current plan requires a LIVE_ONLY lens layout"
+                )
+            static_root = mode_root / "STATIC" / source_key
+            dynamic_surface_root = mode_root / "DYNAMIC_FLS" / source_key
+            if not dynamic_surface_root.is_dir() or dynamic_surface_root.is_symlink():
+                raise ControlPanelValidationError(
+                    f"current plan requires the DYNAMIC_FLS surface: {source_key}"
+                )
+            try:
+                dynamic_pointer = read_current(dynamic_surface_root)
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise ControlPanelValidationError(
+                    f"{source_label} DYNAMIC_FLS pointer is not accepted"
+                ) from exc
+            decomposition, identity, path = _current_analytics(
+                static_root,
+                filename="decomposition.json",
+                field_name=f"{source_label} STATIC decomposition",
+                expected_schema_version=(1, 2),
+            )
+            source_paths.append(path)
+            source_paths.append(
+                dynamic_surface_root
+                / "generations"
+                / dynamic_pointer.generation_id
+                / "decomposition.json"
+            )
+            decomposition = {
+                **decomposition,
+                "surface_composition": {
+                    "policy": "STATIC_IS_LENS_RECORD_DYNAMIC_PARITY_CHECKED",
+                    "source_key": source_key,
+                    "source_label": source_label,
+                    "static_generation_id": identity["generation_id"],
+                    "dynamic_generation_id": dynamic_pointer.generation_id,
+                },
+            }
+        else:
+            decomposition, identity, path = _current_analytics(
+                root / source_key,
+                filename="decomposition.json",
+                field_name=f"{source_label} decomposition",
+                expected_schema_version=(1, 2),
+            )
         if decomposition.get("analysis_lens") != expected_lens:
             raise ControlPanelValidationError(
                 f"decomposition lens differs for {source_key}"
@@ -2195,6 +2273,16 @@ def _decomposition_lenses_for_mode(
                 _unavailable_factor_row(series_id, series_to_reason[series_id]),
             )
         rows = [rows_by_series[name] for name in sorted(rows_by_series)]
+        for row in rows:
+            if (
+                row["status"] == "UNAVAILABLE"
+                and not row["unavailable_reasons"]
+                and current_plan
+            ):
+                reason = disposition_reasons.get(row["series_id"], {}).get(source_key)
+                if reason:
+                    row["unavailable_reasons"] = [reason]
+                    row["selection_status"] = reason
         source_identity = [
             {
                 "analytics_hash": item["analytics_hash"],

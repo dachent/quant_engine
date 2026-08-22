@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,34 @@ SPEC = importlib.util.spec_from_file_location("portfolio_release_builder", MODUL
 assert SPEC is not None and SPEC.loader is not None
 builder = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(builder)
+
+
+@pytest.fixture(autouse=True)
+def _stub_current_plan_upstream_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def synthetic_evidence(
+        attribution_bundle: Path,
+        _inputs: object,
+        _plan: object,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        specification_path = next(
+            path
+            for path in sorted((attribution_bundle / "specs").glob("*.json"))
+            if path.is_file()
+        )
+        first_spec = json.loads(specification_path.read_text(encoding="utf-8"))
+        return {
+            "layered_composition": {
+                "Strategy 0": {"authority": "SYNTHETIC_LAYERED_HISTORY"}
+            },
+            "provenance_sources": first_spec["provenance_sources"],
+        }
+
+    monkeypatch.setattr(
+        builder, "_verify_current_plan_upstream_evidence", synthetic_evidence
+    )
 
 
 def _file_definition(path: Path) -> dict[str, object]:
@@ -549,10 +578,1448 @@ def _legacy_plan_manifest(specs: list[dict[str, object]]) -> dict[str, object]:
     return manifest
 
 
+def _current_plan_bundle(
+    tmp_path: Path,
+    *,
+    source_keys: tuple[str, ...] = ("us-economic",),
+    surfaces: tuple[str, ...] = ("STATIC", "DYNAMIC_FLS"),
+    plan_mutator: Callable[[dict[str, object]], None] | None = None,
+) -> Path:
+    staging = tmp_path / "current-plan-staging"
+    staging.mkdir()
+    governed_plan = {
+        "schema_version": 3,
+        "split_policy": {
+            "cv_folds": 3,
+            "holdout_fraction": "0.20",
+            "minimum_holdout_observations": 1,
+            "minimum_training_observations_per_factor": 1,
+            "parsimony_tolerance": "0.01",
+            "ridge_candidates": ["0.0001"],
+            "dynamic": {
+                "constraint": "UNCONSTRAINED",
+                "smoothness_candidates": ["0.00001"],
+                "state_ridge": "0.0000001",
+            },
+        },
+        "sources": {
+            source_key: {
+                "column_policy": "LOWER_CANDIDATE_ID",
+                "freshness_policy_id": "KENNETH_FRENCH_MONTHLY_DAILY_45D_V1",
+                "input_key": "us_factors",
+                "lens": "ECONOMIC_FACTOR",
+                "return_type": "EXCESS_RETURN",
+                "risk_free_column": "rf",
+                "universe_id": f"{source_key}-universe",
+            }
+            for source_key in source_keys
+        },
+        "strategies": [
+            {
+                "assignments": [
+                    {
+                        "constraint": "UNCONSTRAINED",
+                        "factor_sets": [["MKT_RF"]],
+                        "source_key": source_key,
+                    }
+                    for source_key in source_keys
+                ],
+                "series_id": "Strategy 0",
+                "source_dispositions": {
+                    source_key: {
+                        "authority": "SYNTHETIC_GOVERNED_PLAN",
+                        "readiness": "READY_TO_MODEL",
+                        "reason": "APPLICABLE_SYNTHETIC_GOVERNED_ASSIGNMENT",
+                        "requirement": "REQUIRED",
+                    }
+                    for source_key in source_keys
+                },
+                "strategy_id": "strategy-0",
+            }
+        ],
+    }
+    if plan_mutator is not None:
+        plan_mutator(governed_plan)
+    governed_plan_content = builder.canonical_json_bytes(governed_plan)
+    governed_plan_relative = (
+        "inputs/governance/current-strategy-decomposition-plan.json"
+    )
+    governed_plan_path = staging / governed_plan_relative
+    governed_plan_path.parent.mkdir(parents=True)
+    governed_plan_path.write_bytes(governed_plan_content)
+    governed_plan_sha256 = hashlib.sha256(governed_plan_content).hexdigest()
+    financial_contract = {
+        "product": {
+            "as_of_policy": {
+                "execution_profiles": {
+                    "DEVELOPMENT": "WARN_STALE_INPUTS",
+                    "RELEASE_QC": "FAIL_STALE_REQUIRED_INPUTS",
+                    "WORKSTATION_QC": "WARN_STALE_INPUTS",
+                }
+            }
+        },
+        "strategies": [
+            {
+                "history_series_id": "Strategy 0",
+                "outcome_dispositions": {"DECOMPOSITION": "REQUIRED"},
+                "product_requirement": "REQUIRED",
+                "strategy_id": "strategy-0",
+            }
+        ],
+        "source_segments": [
+            {
+                "admission": {
+                    "facts": ["DECOMPOSITION_APPLICABILITY"],
+                    "transform": "portfolio-current-product-strategy-census",
+                    "version": "3",
+                },
+                "capture_status": "CAPTURED_GOVERNED",
+                "consumers": ["DECOMPOSITION"],
+                "current_generation": {
+                    "generation_id": governed_plan_sha256,
+                    "sha256": governed_plan_sha256,
+                },
+                "data_classes": ["DECOMPOSITION_APPLICABILITY"],
+                "endpoint_or_artifact_selector": (
+                    "docs/analytics/current-strategy-decomposition-plan.json"
+                ),
+                "existence_status": "EXISTS",
+                "product_requirement": "REQUIRED",
+                "schema": {
+                    "name": "current-strategy-decomposition-plan",
+                    "version": "3",
+                },
+                "source_id": "current-strategy-registry",
+                "source_version": "decomposition-plan-v3",
+            }
+        ],
+    }
+    financial_contract_content = builder.canonical_json_bytes(financial_contract)
+    financial_contract_relative = "inputs/history/financial-mvp-contract.json"
+    financial_contract_path = staging / financial_contract_relative
+    financial_contract_path.parent.mkdir(parents=True)
+    financial_contract_path.write_bytes(financial_contract_content)
+    public_factor_manifest = {
+        "acquisition_run": {"evaluation_date": "2026-08-03"},
+        "builder": "portfolio-public-decomposition-sources",
+        "builder_version": "0.3.0",
+        "schema_version": 2,
+    }
+    public_factor_manifest_content = builder.canonical_json_bytes(
+        public_factor_manifest
+    )
+    public_factor_manifest_relative = (
+        "inputs/governance/public-factor-source-manifest.json"
+    )
+    public_factor_manifest_path = staging / public_factor_manifest_relative
+    public_factor_manifest_path.write_bytes(public_factor_manifest_content)
+    style_manifest_relative = "inputs/governance/style-source-manifest.json"
+    style_manifest_content = builder.canonical_json_bytes({"synthetic": "style"})
+    (staging / style_manifest_relative).write_bytes(style_manifest_content)
+    sector_manifest_relative = "inputs/governance/sector-source-manifest.json"
+    sector_manifest_content = builder.canonical_json_bytes({"synthetic": "sector"})
+    (staging / sector_manifest_relative).write_bytes(sector_manifest_content)
+    plan_provenance = {
+        "artifact_id": "plan/current-strategy-decomposition-plan.json",
+        "expected_sha256": governed_plan_sha256,
+        "expected_size_bytes": len(governed_plan_content),
+        "relative_path": governed_plan_relative,
+        "schema_name": "current-strategy-decomposition-plan",
+        "schema_version": "3",
+    }
+    source_catalog = {
+        "universes": [
+            {
+                "candidates": [{"candidate_id": "MKT_RF"}],
+                "universe_id": f"{source_key}-universe",
+            }
+            for source_key in source_keys
+        ]
+    }
+    source_catalog_content = builder.canonical_json_bytes(source_catalog)
+    source_catalog_relative = "inputs/governance/decomposition-source-catalog.json"
+    source_catalog_path = staging / source_catalog_relative
+    source_catalog_path.write_bytes(source_catalog_content)
+    provenance_content = builder.canonical_json_bytes({"source": "synthetic"})
+    provenance_relative = "inputs/base/provenance/source.json"
+    provenance_path = staging / provenance_relative
+    provenance_path.parent.mkdir(parents=True)
+    provenance_path.write_bytes(provenance_content)
+    base_spec = {
+        "provenance_sources": [
+            {
+                "expected_sha256": hashlib.sha256(provenance_content).hexdigest(),
+                "expected_size_bytes": len(provenance_content),
+                "relative_path": "provenance/source.json",
+            }
+        ]
+    }
+    base_spec_relative = "inputs/governance/base-decomposition-spec.json"
+    base_spec_content = builder.canonical_json_bytes(base_spec)
+    base_spec_path = staging / base_spec_relative
+    base_spec_path.parent.mkdir(parents=True, exist_ok=True)
+    base_spec_path.write_bytes(base_spec_content)
+
+    dated_returns = (
+        ("2026-07-25", "0.001", "0.010"),
+        ("2026-07-26", "0.001", "0.011"),
+        ("2026-07-27", "0.001", "0.012"),
+        ("2026-07-28", "0.001", "0.013"),
+        ("2026-07-29", "0.001", "0.014"),
+        ("2026-07-30", "0.001", "0.015"),
+        ("2026-07-31", "0.001", "0.016"),
+        ("2026-08-01", "0.001", "0.017"),
+        ("2026-08-02", "0.001", "0.018"),
+        ("2026-08-03", "0.001", "0.019"),
+    )
+    model_sources: dict[str, dict[str, object]] = {}
+    for source_key in source_keys:
+        factor_relative = f"inputs/lenses/{source_key}-factors.csv"
+        factor_content = (
+            "date,rf,mkt_rf\n"
+            + "".join(
+                f"{observed},{risk_free},{factor_return}\n"
+                for observed, risk_free, factor_return in dated_returns
+            )
+        ).encode("utf-8")
+        factor_path = staging / factor_relative
+        factor_path.parent.mkdir(parents=True, exist_ok=True)
+        factor_path.write_bytes(factor_content)
+        target_relative = f"inputs/lenses/{source_key}-targets.csv"
+        target_content = (
+            "series_id,date,return,evidence_layer,return_basis,return_type,cost\n"
+            + "".join(
+                f"Strategy 0,{observed},{factor_return},LIVE,NET,STRATEGY,INCOMPLETE\n"
+                for observed, _risk_free, factor_return in dated_returns
+            )
+        ).encode("utf-8")
+        target_path = staging / target_relative
+        target_path.write_bytes(target_content)
+        model_sources[source_key] = {
+            "factor_content": factor_content,
+            "factor_relative": factor_relative,
+            "target_content": target_content,
+            "target_relative": target_relative,
+        }
+    first_model_source = model_sources[source_keys[0]]
+    raw_factor_relative = "inputs/market/us_factors.csv"
+    raw_factor_content = first_model_source["factor_content"]
+    assert isinstance(raw_factor_content, bytes)
+    raw_factor_path = staging / raw_factor_relative
+    raw_factor_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_factor_path.write_bytes(raw_factor_content)
+    supplemental_market_sources: dict[str, bytes] = {}
+    for input_key in (
+        "europe_factors",
+        "style_returns",
+        "sector_returns",
+        "us_industries",
+    ):
+        relative = f"inputs/market/{input_key}.csv"
+        (staging / relative).write_bytes(raw_factor_content)
+        supplemental_market_sources[relative] = raw_factor_content
+    raw_target_relative = "inputs/history/selected-targets.csv"
+    raw_target_content = first_model_source["target_content"]
+    assert isinstance(raw_target_content, bytes)
+    raw_target_path = staging / raw_target_relative
+    raw_target_path.write_bytes(raw_target_content)
+
+    specs: list[dict[str, object]] = []
+    outputs: list[dict[str, object]] = []
+    for source_key in source_keys:
+        for surface in surfaces:
+            estimator = "STATIC_RBSA" if surface == "STATIC" else "DYNAMIC_FLS"
+            surface_slug = surface.lower().replace("_", "-")
+            suffix = "" if surface == "STATIC" else f"-{surface_slug}"
+            relative = f"specs/{source_key}{suffix}.json"
+            base_model_id = f"strategy-0-{source_key}-01"
+            model_id = f"{base_model_id}-{surface_slug}"
+            model = {
+                "as_of_date": "2026-08-03",
+                "constraint": "UNCONSTRAINED",
+                "cost_coverage": "INCOMPLETE",
+                "cv_folds": 3,
+                "estimator": estimator,
+                "factor_ids": ["MKT_RF"],
+                "minimum_test_observations": 1,
+                "minimum_train_observations": 3,
+                "model_id": model_id,
+                "parsimony_tolerance": "0.01",
+                "periods_per_year": 252,
+                "ridge_candidates": (
+                    ["0.0001"] if surface == "STATIC" else ["0.0000001"]
+                ),
+                "series_id": "Strategy 0",
+                "test_start": "2026-08-02",
+                "train_end": "2026-08-01",
+            }
+            if surface == "DYNAMIC_FLS":
+                model["smoothness_candidates"] = ["0.00001"]
+            age_boundary = {
+                "age_days": 0,
+                "complete_through": "2026-08-03",
+                "evaluated_on": "2026-08-03",
+                "limiting_inputs": [
+                    "factor:us_factors:MKT_RF:rf",
+                    "target:Strategy 0",
+                ],
+                "status": "CURRENT_WITHIN_AGE_THRESHOLD",
+                "warning_after_days": 0,
+            }
+            spec = {
+                "analysis_lens": "ECONOMIC_FACTOR",
+                "as_of_date": "2026-08-03",
+                "evidence_mode": "LIVE_ONLY",
+                "factor_source": {
+                    "artifact_id": f"market/{source_key}.csv",
+                    "date_column": "date",
+                    "expected_sha256": hashlib.sha256(
+                        model_sources[source_key]["factor_content"]
+                    ).hexdigest(),
+                    "expected_size_bytes": len(
+                        model_sources[source_key]["factor_content"]
+                    ),
+                    "factors": [
+                        {
+                            "column": "mkt_rf",
+                            "economic_family": "UNCLASSIFIED",
+                            "effective_end": "2026-08-03",
+                            "effective_start": "2026-07-25",
+                            "factor_id": "MKT_RF",
+                            "raw_orthogonal": False,
+                            "redundancy_policy": (
+                                "TRAIN_ONLY_NEAR_DUPLICATE_VIF_CONDITION_NUMBER_AND_"
+                                "PARSIMONY_GATES"
+                            ),
+                            "return_source_id": "UNAVAILABLE_NOT_DECLARED",
+                            "return_type": "EXCESS_RETURN",
+                            "selection_rationale": (
+                                "MKT_RF represents the declared UNCLASSIFIED family "
+                                "for the ECONOMIC_FACTOR candidate universe using "
+                                "UNAVAILABLE_NOT_DECLARED; raw orthogonality is not "
+                                "assumed, and final inclusion is determined only by "
+                                "training-period validation, collinearity diagnostics, "
+                                "and the declared parsimony rule."
+                            ),
+                            "source_id": "UNAVAILABLE_NOT_DECLARED",
+                        }
+                    ],
+                    "relative_path": model_sources[source_key]["factor_relative"],
+                    "risk_free_column": "rf",
+                    "schema_name": f"portfolio-{source_key}-returns",
+                    "schema_version": "1",
+                },
+                "maximum_factor_staleness_days": 0,
+                "models": [model],
+                "provenance_sources": [plan_provenance],
+                "schema_version": 1,
+                "series_composition": {
+                    "Strategy 0": {"authority": "SYNTHETIC_LAYERED_HISTORY"}
+                },
+                "target_source": {
+                    "artifact_id": f"target/{source_key}.csv",
+                    "expected_sha256": hashlib.sha256(
+                        model_sources[source_key]["target_content"]
+                    ).hexdigest(),
+                    "expected_size_bytes": len(
+                        model_sources[source_key]["target_content"]
+                    ),
+                    "relative_path": model_sources[source_key]["target_relative"],
+                    "schema_name": "portfolio-decomposition-target-series",
+                    "schema_version": "1",
+                },
+            }
+            content = builder.canonical_json_bytes(spec)
+            path = staging / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            artifact = {
+                "path": relative,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+            }
+            outputs.append(artifact)
+            specs.append(
+                {
+                    "analysis_lens": "ECONOMIC_FACTOR",
+                    "as_of_date": "2026-08-03",
+                    "data_boundary": {
+                        **age_boundary,
+                        "limiting_inputs": [f"model:{base_model_id}"],
+                    },
+                    "model_calculation_boundaries": {model_id: age_boundary},
+                    "model_count": 1,
+                    **artifact,
+                    "source_key": source_key,
+                    "spec_id": f"{source_key}:{surface}",
+                    "surface": surface,
+                }
+            )
+    governed_strategy = governed_plan["strategies"][0]
+    governed_assignments = {
+        assignment["source_key"] for assignment in governed_strategy["assignments"]
+    }
+    disposition_content = builder.canonical_json_bytes(
+        {
+            "candidate_dispositions": [
+                {
+                    "authority": governed_strategy["source_dispositions"][source_key][
+                        "authority"
+                    ],
+                    "candidate_id": "MKT_RF",
+                    "disposition": (
+                        "PLANNED_MODEL_CANDIDATE"
+                        if source_key in governed_assignments
+                        else governed_strategy["source_dispositions"][source_key][
+                            "readiness"
+                        ]
+                    ),
+                    "lens": "ECONOMIC_FACTOR",
+                    "readiness": governed_strategy["source_dispositions"][source_key][
+                        "readiness"
+                    ],
+                    "reason": governed_strategy["source_dispositions"][source_key][
+                        "reason"
+                    ],
+                    "requirement": governed_strategy["source_dispositions"][source_key][
+                        "requirement"
+                    ],
+                    "source_key": source_key,
+                    "strategy_id": "strategy-0",
+                    "surface": surface,
+                }
+                for source_key in source_keys
+                for surface in ("STATIC", "DYNAMIC_FLS")
+            ],
+            "policy": "EVERY_CURRENT_STRATEGY_BY_EVERY_PLANNED_CANDIDATE_UNIVERSE",
+            "schema_version": 2,
+        }
+    )
+    disposition_relative = "candidate-dispositions.json"
+    (staging / disposition_relative).write_bytes(disposition_content)
+    outputs.append(
+        {
+            "path": disposition_relative,
+            "sha256": hashlib.sha256(disposition_content).hexdigest(),
+            "size_bytes": len(disposition_content),
+        }
+    )
+    inputs = []
+    for relative, content in (
+        (base_spec_relative, base_spec_content),
+        (provenance_relative, provenance_content),
+        (governed_plan_relative, governed_plan_content),
+        (source_catalog_relative, source_catalog_content),
+        (financial_contract_relative, financial_contract_content),
+        (public_factor_manifest_relative, public_factor_manifest_content),
+        (style_manifest_relative, style_manifest_content),
+        (sector_manifest_relative, sector_manifest_content),
+    ):
+        inputs.append(
+            {
+                "path": relative,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+            }
+        )
+    for source_key in source_keys:
+        for relative_key, content_key in (
+            ("factor_relative", "factor_content"),
+            ("target_relative", "target_content"),
+        ):
+            relative = str(model_sources[source_key][relative_key])
+            content = model_sources[source_key][content_key]
+            assert isinstance(content, bytes)
+            inputs.append(
+                {
+                    "path": relative,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size_bytes": len(content),
+                }
+            )
+    for relative, content in (
+        (raw_factor_relative, raw_factor_content),
+        (raw_target_relative, raw_target_content),
+        *supplemental_market_sources.items(),
+    ):
+        inputs.append(
+            {
+                "path": relative,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+            }
+        )
+    manifest: dict[str, object] = {
+        "assurance_profile": "DEVELOPMENT",
+        "builder": "portfolio-current-decomposition-plan",
+        "builder_version": "0.17.0",
+        "data_age": {
+            "market_sources": [],
+            "public_factor_capture": {
+                "age_days": 0,
+                "complete_through": "2026-08-03",
+                "evaluated_on": "2026-08-03",
+                "limiting_inputs": ["public-factor-acquisition-run"],
+                "status": "CURRENT_WITHIN_AGE_THRESHOLD",
+                "warning_after_days": 0,
+            },
+            "spec_calculation_boundaries": {
+                str(row["spec_id"]): row["data_boundary"] for row in specs
+            },
+        },
+        "evaluation_date": "2026-08-03",
+        "inputs": inputs,
+        "layered_history": {
+            "assurance_profile": "DEVELOPMENT",
+            "assurance_profile_policy": "WARN_STALE_INPUTS",
+            "mode": "LIVE_ONLY",
+        },
+        "outputs": outputs,
+        "policies": {
+            "calendar": "EXACT_DATE_COMPLETE_CANDIDATE_UNIVERSE_NO_FILL",
+            "data_age": (
+                "WARN_IN_DEVELOPMENT_AND_WORKSTATION; "
+                "FAIL_REQUIRED_STALE_SOURCE_IN_RELEASE_QC"
+            ),
+            "holdout": {
+                "fraction": "0.20",
+                "minimum_observations": 1,
+                "selection": "TRAILING_SEALED_HOLDOUT",
+            },
+            "model_dimension": {
+                "absolute_minimum_training_observations": 3,
+                "dynamic_constraint": "UNCONSTRAINED",
+                "dynamic_smoothness_candidates": ["0.00001"],
+                "dynamic_state_ridge": "0.0000001",
+                "minimum_training_observations_per_factor": 1,
+                "required_surfaces": ["STATIC", "DYNAMIC_FLS"],
+            },
+            "publication": "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE",
+            "strategy_evidence_mode": "LIVE_ONLY",
+        },
+        "release_qc_eligibility": "NOT_ELIGIBLE_NON_RELEASE_PROFILE",
+        "schema_version": 2,
+        "specs": specs,
+    }
+    manifest["bundle_id"] = hashlib.sha256(
+        builder.canonical_json_bytes(manifest)
+    ).hexdigest()
+    (staging / "plan-manifest.json").write_bytes(builder.canonical_json_bytes(manifest))
+    destination = tmp_path / str(manifest["bundle_id"])
+    staging.rename(destination)
+    return destination
+
+
+def _bind_recipe_plan_bundle(recipe_path: Path, bundle: Path) -> None:
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    recipe["decomposition_plan_bundle"] = {
+        "path": str(bundle),
+        **builder._directory_inventory(bundle),
+    }
+    recipe_path.write_text(json.dumps(recipe), encoding="utf-8")
+
+
+def _current_manifest(bundle: Path) -> dict[str, object]:
+    return json.loads((bundle / "plan-manifest.json").read_text(encoding="utf-8"))
+
+
+def _rebind_current_bundle(
+    bundle: Path, manifest: dict[str, object]
+) -> tuple[Path, dict[str, object]]:
+    manifest.pop("bundle_id", None)
+    manifest["bundle_id"] = hashlib.sha256(
+        builder.canonical_json_bytes(manifest)
+    ).hexdigest()
+    (bundle / "plan-manifest.json").write_bytes(builder.canonical_json_bytes(manifest))
+    destination = bundle.parent / str(manifest["bundle_id"])
+    bundle.rename(destination)
+    return destination, manifest
+
+
+def _rewrite_current_spec(
+    bundle: Path, *, surface: str, spec_updates: dict[str, object]
+) -> tuple[Path, dict[str, object]]:
+    manifest = _current_manifest(bundle)
+    row = next(item for item in manifest["specs"] if item["surface"] == surface)
+    relative = str(row["path"])
+    specification = json.loads((bundle / relative).read_text(encoding="utf-8"))
+    specification.update(spec_updates)
+    content = builder.canonical_json_bytes(specification)
+    (bundle / relative).write_bytes(content)
+    sha256 = hashlib.sha256(content).hexdigest()
+    row.update({"sha256": sha256, "size_bytes": len(content)})
+    output = next(item for item in manifest["outputs"] if item["path"] == relative)
+    output.update({"sha256": sha256, "size_bytes": len(content)})
+    return _rebind_current_bundle(bundle, manifest)
+
+
+def test_current_analytics_rejects_recipe_plan_as_of_drift(tmp_path: Path) -> None:
+    recipe_root = tmp_path / "recipe-fixture"
+    recipe_root.mkdir()
+    recipe = _recipe(recipe_root)
+    recipe_value = json.loads(recipe.read_text(encoding="utf-8"))
+    recipe_value["as_of_date"] = "2026-08-02"
+    recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
+    bundle = _current_plan_bundle(tmp_path)
+    _bind_recipe_plan_bundle(recipe, bundle)
+
+    with pytest.raises(builder.VerticalBuildError, match="as-of date differs"):
+        builder.build_analytics(recipe, bundle, tmp_path / "analytics")
+
+
+@pytest.mark.parametrize("value", (None, "not-a-generation", "g" * 64))
+def test_generation_id_requires_canonical_hash(value: object) -> None:
+    with pytest.raises(builder.VerticalBuildError, match="generation"):
+        builder._generation_id(value, "synthetic generation_id")
+
+
+def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe_root = tmp_path / "recipe-fixture"
+    recipe_root.mkdir()
+    recipe = _recipe(recipe_root)
+    bundle = _current_plan_bundle(tmp_path)
+    _bind_recipe_plan_bundle(recipe, bundle)
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        if args[0:2] == ("portfolio_weekly_returns.py", "build"):
+            return {"candidate_dir": str(tmp_path / "weekly-candidate")}
+        if args[1] == "publish":
+            output_root = str(args[args.index("--output-root") + 1])
+            return {"generation_id": hashlib.sha256(output_root.encode()).hexdigest()}
+        return {}
+
+    def reject_hybrid(**_kwargs: object) -> dict[str, object]:
+        raise AssertionError("current surface plan must not call the hybrid adapter")
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    monkeypatch.setattr(builder, "_build_hybrid_decomposition", reject_hybrid)
+
+    output_root = tmp_path / "analytics"
+    result = builder.build_analytics(recipe, bundle, output_root)
+
+    assert set(result["lens_generations"]) == {
+        "us-economic:DYNAMIC_FLS",
+        "us-economic:STATIC",
+    }
+    assert result["schema_version"] == 2
+    assert result["plan_bundle_id"] == bundle.name
+    bindings = {row["spec_id"]: row for row in result["lens_generation_bindings"]}
+    assert Path(bindings["us-economic:STATIC"]["root"]) == (
+        output_root / "decomposition-lenses" / "LIVE_ONLY" / "STATIC" / "us-economic"
+    )
+    assert Path(bindings["us-economic:DYNAMIC_FLS"]["root"]) == (
+        output_root
+        / "decomposition-lenses"
+        / "LIVE_ONLY"
+        / "DYNAMIC_FLS"
+        / "us-economic"
+    )
+    assert (
+        bindings["us-economic:STATIC"]["generation_id"]
+        != bindings["us-economic:DYNAMIC_FLS"]["generation_id"]
+    )
+    assert not any(
+        call[0] == "portfolio_decomposition_evidence_modes.py" for call in calls
+    )
+
+
+def test_current_surface_plan_rejects_missing_surface_before_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _current_plan_bundle(tmp_path, surfaces=("STATIC",))
+
+    def unexpected_tool(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("tool execution preceded current-plan admission")
+
+    monkeypatch.setattr(builder, "_tool", unexpected_tool)
+    with pytest.raises(builder.VerticalBuildError, match="exact STATIC/DYNAMIC_FLS"):
+        builder._current_release_plan_specs(bundle, _current_manifest(bundle))
+
+
+def test_current_surface_plan_rejects_duplicate_surface_identity(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(
+        tmp_path, surfaces=("STATIC", "STATIC", "DYNAMIC_FLS")
+    )
+
+    with pytest.raises(builder.VerticalBuildError, match="duplicated"):
+        builder._current_release_plan_specs(bundle, _current_manifest(bundle))
+
+
+def test_current_surface_plan_rejects_wrong_spec_id(tmp_path: Path) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["specs"][0]["spec_id"] = "us-economic:FORGED"
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="spec_id differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    ("../escape.json", "C:/escape.json", "specs\\us-economic.json"),
+)
+def test_current_surface_plan_rejects_nonportable_spec_path(
+    tmp_path: Path, unsafe_path: str
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["specs"][0]["path"] = unsafe_path
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="portable relative path"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_nonportable_manifest_input(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["inputs"][0]["path"] = "../escape.json"
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="portable relative path"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+@pytest.mark.parametrize(
+    "required_path",
+    (
+        "inputs/governance/base-decomposition-spec.json",
+        "inputs/governance/current-strategy-decomposition-plan.json",
+        "candidate-dispositions.json",
+    ),
+)
+def test_current_surface_plan_rejects_unlisted_required_artifact(
+    tmp_path: Path, required_path: str
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    collection = "inputs" if required_path.startswith("inputs/") else "outputs"
+    manifest[collection] = [
+        row for row in manifest[collection] if row["path"] != required_path
+    ]
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="artifact inventory differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_source_relabel_detached_from_governed_plan(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    for row in manifest["specs"]:
+        row["source_key"] = "renamed"
+        row["spec_id"] = f"renamed:{row['surface']}"
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="governed plan"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+@pytest.mark.parametrize("substituted_source", ("FOO", "foo."))
+def test_current_surface_plan_rejects_windows_source_root_collision(
+    tmp_path: Path, substituted_source: str
+) -> None:
+    bundle = _current_plan_bundle(tmp_path, source_keys=("foo", "bar"))
+    manifest = _current_manifest(bundle)
+    for row in manifest["specs"]:
+        if row["source_key"] == "bar":
+            row["source_key"] = substituted_source
+            row["spec_id"] = f"{substituted_source}:{row['surface']}"
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="source_key"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_surface_model_population_drift(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    dynamic = next(row for row in manifest["specs"] if row["surface"] == "DYNAMIC_FLS")
+    relative = str(dynamic["path"])
+    specification = json.loads((bundle / relative).read_text(encoding="utf-8"))
+    specification["models"][0]["series_id"] = "Strategy 1"
+    content = builder.canonical_json_bytes(specification)
+    (bundle / relative).write_bytes(content)
+    dynamic.update(sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content))
+    output = next(row for row in manifest["outputs"] if row["path"] == relative)
+    output.update(dynamic | {"path": relative})
+    output.pop("analysis_lens", None)
+    output.pop("as_of_date", None)
+    output.pop("data_boundary", None)
+    output.pop("model_calculation_boundaries", None)
+    output.pop("model_count", None)
+    output.pop("source_key", None)
+    output.pop("spec_id", None)
+    output.pop("surface", None)
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="governed model identity"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_assignment_for_blocked_source(
+    tmp_path: Path,
+) -> None:
+    def block_assigned_source(plan: dict[str, object]) -> None:
+        strategies = plan["strategies"]
+        assert isinstance(strategies, list)
+        strategy = strategies[0]
+        assert isinstance(strategy, dict)
+        dispositions = strategy["source_dispositions"]
+        assert isinstance(dispositions, dict)
+        cell = dispositions["us-economic"]
+        assert isinstance(cell, dict)
+        cell.update(
+            readiness="REQUIRED_NOT_READY",
+            reason="REQUIRED_NOT_READY_SYNTHETIC_SOURCE",
+        )
+
+    bundle = _current_plan_bundle(
+        tmp_path,
+        source_keys=("us-economic", "us-style"),
+        plan_mutator=block_assigned_source,
+    )
+
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="assignments differ from source disposition authority",
+    ):
+        builder._current_release_plan_specs(bundle, _current_manifest(bundle))
+
+
+def test_current_surface_plan_rejects_missing_assignment_for_ready_source(
+    tmp_path: Path,
+) -> None:
+    def omit_ready_source(plan: dict[str, object]) -> None:
+        strategies = plan["strategies"]
+        assert isinstance(strategies, list)
+        strategy = strategies[0]
+        assert isinstance(strategy, dict)
+        assignments = strategy["assignments"]
+        assert isinstance(assignments, list)
+        strategy["assignments"] = [
+            assignment
+            for assignment in assignments
+            if isinstance(assignment, dict)
+            and assignment.get("source_key") != "us-economic"
+        ]
+
+    bundle = _current_plan_bundle(
+        tmp_path,
+        source_keys=("us-economic", "us-style"),
+        plan_mutator=omit_ready_source,
+    )
+
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="assignments differ from source disposition authority",
+    ):
+        builder._current_release_plan_specs(bundle, _current_manifest(bundle))
+
+
+def test_current_surface_plan_rejects_holdout_policy_substitution(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["policies"]["holdout"]["fraction"] = "0.10"
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="execution policy differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_rehashed_holdout_split_substitution(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    for row in manifest["specs"]:
+        relative = str(row["path"])
+        specification = json.loads((bundle / relative).read_text(encoding="utf-8"))
+        specification["models"][0].update(
+            train_end="2026-07-31",
+            test_start="2026-08-01",
+        )
+        content = builder.canonical_json_bytes(specification)
+        (bundle / relative).write_bytes(content)
+        binding = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
+        row.update(binding)
+        next(
+            output for output in manifest["outputs"] if output["path"] == relative
+        ).update(binding)
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="holdout split differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+@pytest.mark.parametrize(
+    ("source_field", "relative"),
+    (
+        ("factor_source", "inputs/lenses/us-economic-factors.csv"),
+        ("target_source", "inputs/lenses/us-economic-targets.csv"),
+    ),
+)
+def test_current_surface_plan_rejects_rehashed_projected_value_substitution(
+    tmp_path: Path,
+    source_field: str,
+    relative: str,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    path = bundle / relative
+    content = path.read_bytes().replace(b"0.010", b"0.999", 1)
+    path.write_bytes(content)
+    binding = {
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": len(content),
+    }
+    next(item for item in manifest["inputs"] if item["path"] == relative).update(
+        binding
+    )
+    for row in manifest["specs"]:
+        specification_path = bundle / str(row["path"])
+        specification = json.loads(specification_path.read_text(encoding="utf-8"))
+        specification[source_field].update(
+            expected_sha256=binding["sha256"],
+            expected_size_bytes=binding["size_bytes"],
+        )
+        specification_content = builder.canonical_json_bytes(specification)
+        specification_path.write_bytes(specification_content)
+        specification_binding = {
+            "sha256": hashlib.sha256(specification_content).hexdigest(),
+            "size_bytes": len(specification_content),
+        }
+        row.update(specification_binding)
+        next(
+            output for output in manifest["outputs"] if output["path"] == row["path"]
+        ).update(specification_binding)
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="projection differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_factor_staleness_substitution(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    for row in manifest["specs"]:
+        relative = str(row["path"])
+        specification = json.loads((bundle / relative).read_text(encoding="utf-8"))
+        specification["maximum_factor_staleness_days"] = 1
+        content = builder.canonical_json_bytes(specification)
+        (bundle / relative).write_bytes(content)
+        binding = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
+        row.update(binding)
+        next(
+            output for output in manifest["outputs"] if output["path"] == relative
+        ).update(binding)
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="factor staleness differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_factor_return_type_substitution(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    for row in manifest["specs"]:
+        relative = str(row["path"])
+        specification = json.loads((bundle / relative).read_text(encoding="utf-8"))
+        specification["factor_source"]["factors"][0]["return_type"] = "TOTAL_RETURN"
+        content = builder.canonical_json_bytes(specification)
+        (bundle / relative).write_bytes(content)
+        binding = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
+        row.update(binding)
+        next(
+            output for output in manifest["outputs"] if output["path"] == relative
+        ).update(binding)
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="factor definitions differ"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("ridge_candidates", ["NaN"]),
+        ("dynamic.constraint", "BOGUS"),
+        ("dynamic.state_ridge", "-1"),
+        ("dynamic.smoothness_candidates", ["0"]),
+    ),
+)
+def test_current_surface_plan_rejects_non_planner_numeric_policy(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    def substitute_policy(plan: dict[str, object]) -> None:
+        split = plan["split_policy"]
+        assert isinstance(split, dict)
+        if field.startswith("dynamic."):
+            dynamic = split["dynamic"]
+            assert isinstance(dynamic, dict)
+            dynamic[field.removeprefix("dynamic.")] = value
+        else:
+            split[field] = value
+
+    bundle = _current_plan_bundle(tmp_path, plan_mutator=substitute_policy)
+
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="governed current strategy model policy differs",
+    ):
+        builder._current_release_plan_specs(bundle, _current_manifest(bundle))
+
+
+def test_current_surface_plan_admits_leading_incomplete_ordinary_factor_row(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    raw_relative = "inputs/market/us_factors.csv"
+    raw_path = bundle / raw_relative
+    raw_content = raw_path.read_bytes().replace(
+        b"2026-07-25,0.001,0.010\n",
+        b"2026-07-25,,0.010\n",
+        1,
+    )
+    raw_path.write_bytes(raw_content)
+    next(item for item in manifest["inputs"] if item["path"] == raw_relative).update(
+        sha256=hashlib.sha256(raw_content).hexdigest(),
+        size_bytes=len(raw_content),
+    )
+
+    projected_relative = "inputs/lenses/us-economic-factors.csv"
+    projected_path = bundle / projected_relative
+    projected_content = projected_path.read_bytes().replace(
+        b"2026-07-25,0.001,0.010\n",
+        b"",
+        1,
+    )
+    projected_path.write_bytes(projected_content)
+    projected_binding = {
+        "sha256": hashlib.sha256(projected_content).hexdigest(),
+        "size_bytes": len(projected_content),
+    }
+    next(
+        item for item in manifest["inputs"] if item["path"] == projected_relative
+    ).update(projected_binding)
+    for row in manifest["specs"]:
+        relative = str(row["path"])
+        specification = json.loads((bundle / relative).read_text(encoding="utf-8"))
+        specification["factor_source"].update(
+            expected_sha256=projected_binding["sha256"],
+            expected_size_bytes=projected_binding["size_bytes"],
+        )
+        specification["factor_source"]["factors"][0]["effective_start"] = "2026-07-26"
+        content = builder.canonical_json_bytes(specification)
+        (bundle / relative).write_bytes(content)
+        binding = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
+        row.update(binding)
+        next(
+            output for output in manifest["outputs"] if output["path"] == relative
+        ).update(binding)
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    assert len(builder._current_release_plan_specs(bundle, manifest)) == 2
+
+
+def test_current_surface_plan_rejects_governed_model_identity_substitution(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    for row in manifest["specs"]:
+        relative = str(row["path"])
+        specification = json.loads((bundle / relative).read_text(encoding="utf-8"))
+        specification["models"][0]["series_id"] = "Forged Strategy"
+        content = builder.canonical_json_bytes(specification)
+        (bundle / relative).write_bytes(content)
+        binding = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
+        row.update(binding)
+        next(
+            output for output in manifest["outputs"] if output["path"] == relative
+        ).update(binding)
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="governed model"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("constraint", "LONG_ONLY_SUM_TO_ONE"),
+        ("ridge_candidates", ["9"]),
+        ("smoothness_candidates", ["8"]),
+    ),
+)
+def test_current_surface_plan_rejects_dynamic_policy_substitution(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    row = next(item for item in manifest["specs"] if item["surface"] == "DYNAMIC_FLS")
+    relative = str(row["path"])
+    specification = json.loads((bundle / relative).read_text(encoding="utf-8"))
+    specification["models"][0][field] = value
+    content = builder.canonical_json_bytes(specification)
+    (bundle / relative).write_bytes(content)
+    binding = {
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": len(content),
+    }
+    row.update(binding)
+    next(output for output in manifest["outputs"] if output["path"] == relative).update(
+        binding
+    )
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="dynamic model policy"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_empty_age_boundaries(tmp_path: Path) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    for row in manifest["specs"]:
+        row["data_boundary"] = {}
+        row["model_calculation_boundaries"] = {
+            model_id: {} for model_id in row["model_calculation_boundaries"]
+        }
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="data age boundary"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_model_boundary_limiting_input_drift(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    for row in manifest["specs"]:
+        for boundary in row["model_calculation_boundaries"].values():
+            boundary["limiting_inputs"] = ["target:Strategy 0"]
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="model data age boundary differs",
+    ):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_manifest_data_age_boundary_drift(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["data_age"]["spec_calculation_boundaries"] = {}
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="data-age manifest differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_public_capture_data_age_drift(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["data_age"]["public_factor_capture"] = {}
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="data-age manifest differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_assurance_profile_relabel(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["assurance_profile"] = "RELEASE_QC"
+    manifest["release_qc_eligibility"] = "REQUIRES_DOWNSTREAM_RELEASE_QC"
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="assurance policy differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_age_warning_threshold_substitution(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    for row in manifest["specs"]:
+        row["data_boundary"]["warning_after_days"] = 999
+        for boundary in row["model_calculation_boundaries"].values():
+            boundary["warning_after_days"] = 999
+    manifest["data_age"]["spec_calculation_boundaries"] = {
+        str(row["spec_id"]): row["data_boundary"] for row in manifest["specs"]
+    }
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="data age boundary differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_release_eligibility_relabel(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["release_qc_eligibility"] = "REQUIRES_DOWNSTREAM_RELEASE_QC"
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="release eligibility differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("lens", "BOGUS", "source lens differs"),
+        ("input_key", "bogus", "input key differs"),
+        ("freshness_policy_id", "BOGUS", "freshness policy differs"),
+    ),
+)
+def test_current_surface_plan_rejects_non_planner_source_contract(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    def substitute_source(plan: dict[str, object]) -> None:
+        sources = plan["sources"]
+        assert isinstance(sources, dict)
+        source = sources["us-economic"]
+        assert isinstance(source, dict)
+        source[field] = value
+
+    bundle = _current_plan_bundle(tmp_path, plan_mutator=substitute_source)
+
+    with pytest.raises(builder.VerticalBuildError, match=message):
+        builder._current_release_plan_specs(bundle, _current_manifest(bundle))
+
+
+def test_current_surface_plan_rejects_candidate_disposition_drift(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    relative = "candidate-dispositions.json"
+    dispositions = json.loads((bundle / relative).read_text(encoding="utf-8"))
+    dispositions["candidate_dispositions"][0]["disposition"] = "FORGED"
+    content = builder.canonical_json_bytes(dispositions)
+    (bundle / relative).write_bytes(content)
+    next(row for row in manifest["outputs"] if row["path"] == relative).update(
+        sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content)
+    )
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="candidate dispositions"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+@pytest.mark.parametrize("drift", ("sha256", "size_bytes"))
+def test_current_surface_plan_rejects_spec_artifact_drift(
+    tmp_path: Path, drift: str
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    row = manifest["specs"][0]
+    output = next(item for item in manifest["outputs"] if item["path"] == row["path"])
+    value: object = "f" * 64 if drift == "sha256" else int(row[drift]) + 1
+    row[drift] = value
+    output[drift] = value
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="artifact differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_bundle_directory_drift(tmp_path: Path) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    drifted = tmp_path / ("f" * 64)
+    bundle.rename(drifted)
+
+    with pytest.raises(builder.VerticalBuildError, match="bundle directory differs"):
+        builder._current_release_plan_specs(drifted, _current_manifest(drifted))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("analysis_lens", "RETURN_SECTOR"),
+        ("as_of_date", "2026-08-02"),
+        ("evidence_mode", "LIVE_PLUS_BACKTEST"),
+        ("models", []),
+        ("models", [{"estimator": "STATIC_RBSA"}]),
+    ),
+)
+def test_current_surface_plan_rejects_spec_semantic_substitution(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    bundle, manifest = _rewrite_current_spec(
+        bundle,
+        surface="DYNAMIC_FLS",
+        spec_updates={field: value},
+    )
+
+    with pytest.raises(builder.VerticalBuildError, match="lens specification differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_model_count_substitution(tmp_path: Path) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["specs"][0]["model_count"] = 2
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="lens specification differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_evidence_mode_policy_drift(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["policies"]["strategy_evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(
+        builder.VerticalBuildError, match="evidence-mode policy differs"
+    ):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_required_surface_policy_drift(
+    tmp_path: Path,
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["policies"]["model_dimension"]["required_surfaces"] = [
+        "STATIC",
+        "STATIC",
+    ]
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    with pytest.raises(builder.VerticalBuildError, match="required surfaces differ"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("builder_version", "0.18.0"), ("schema_version", 3)),
+)
+def test_current_surface_plan_rejects_unsupported_contract(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest[field] = value
+
+    with pytest.raises(builder.VerticalBuildError, match="contract differs"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
+def test_current_surface_plan_rejects_recipe_bundle_substitution_before_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe_root = tmp_path / "recipe-fixture"
+    recipe_root.mkdir()
+    recipe = _recipe(recipe_root)
+    bundle = _current_plan_bundle(tmp_path)
+
+    def unexpected_tool(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("tool execution preceded recipe-bundle admission")
+
+    monkeypatch.setattr(builder, "_tool", unexpected_tool)
+    with pytest.raises(builder.VerticalBuildError, match="bundle differs from recipe"):
+        builder.build_analytics(recipe, bundle, tmp_path / "analytics")
+
+
+def test_legacy_plan_rejects_recipe_bundle_substitution_before_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe_root = tmp_path / "recipe-fixture"
+    recipe_root.mkdir()
+    recipe = _recipe(recipe_root)
+    bundle = tmp_path / "legacy-substitute"
+    bundle.mkdir()
+    manifest = _legacy_plan_manifest(
+        [{"path": "specs/us-economic.json", "source_key": "us-economic"}]
+    )
+    (bundle / "plan-manifest.json").write_bytes(builder.canonical_json_bytes(manifest))
+
+    def unexpected_tool(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("tool execution preceded recipe-bundle admission")
+
+    monkeypatch.setattr(builder, "_tool", unexpected_tool)
+    with pytest.raises(builder.VerticalBuildError, match="bundle differs from recipe"):
+        builder.build_analytics(recipe, bundle, tmp_path / "analytics")
+
+
+def test_current_surface_plan_rejects_linked_spec(tmp_path: Path) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    row = manifest["specs"][0]
+    spec_path = bundle / str(row["path"])
+    external = tmp_path / "external-spec.json"
+    external.write_bytes(spec_path.read_bytes())
+    spec_path.unlink()
+    try:
+        spec_path.symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(builder.VerticalBuildError, match="resolves through a link"):
+        builder._current_release_plan_specs(bundle, manifest)
+
+
 def test_legacy_release_composer_rejects_current_surface_plan() -> None:
     with pytest.raises(
         builder.VerticalBuildError,
-        match="requires #331 exact plan-bundle integration",
+        match="cannot admit a surface-qualified plan",
     ):
         builder._legacy_release_plan_specs(
             {
@@ -595,7 +2062,7 @@ def test_legacy_release_composer_rejects_duplicate_source_key() -> None:
 def test_legacy_release_composer_rejects_stripped_current_plan() -> None:
     with pytest.raises(
         builder.VerticalBuildError,
-        match="requires #331 exact plan-bundle integration",
+        match="cannot admit a surface-qualified plan",
     ):
         builder._legacy_release_plan_specs(
             {

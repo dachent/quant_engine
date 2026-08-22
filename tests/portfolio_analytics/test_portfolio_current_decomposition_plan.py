@@ -4,6 +4,7 @@ import csv
 from datetime import date, timedelta
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
@@ -58,6 +59,17 @@ def _canonical(value: object) -> bytes:
 def _write_json(path: Path, value: object) -> Path:
     path.write_bytes(_canonical(value))
     return path
+
+
+def _release_builder_module(name: str) -> Any:
+    release_path = REPOSITORY_ROOT / "tools" / "portfolio_release_builder.py"
+    release_spec = importlib.util.spec_from_file_location(name, release_path)
+    if release_spec is None or release_spec.loader is None:
+        raise RuntimeError("unable to load portfolio release builder")
+    release_builder = importlib.util.module_from_spec(release_spec)
+    sys.modules[release_spec.name] = release_builder
+    release_spec.loader.exec_module(release_builder)
+    return release_builder
 
 
 def _definition(path: Path, artifact_id: str) -> dict[str, object]:
@@ -888,6 +900,381 @@ def test_write_is_content_addressed_and_idempotent(tmp_path: Path) -> None:
         planner.write_bundle(output_root=output_root, **kwargs)
 
 
+def test_release_builder_admits_exact_planner_bundle(tmp_path: Path) -> None:
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    written = planner.write_bundle(output_root=tmp_path / "output", **kwargs)
+    destination = Path(written["destination"])
+    manifest = json.loads(
+        (destination / "plan-manifest.json").read_text(encoding="utf-8")
+    )
+    release_path = REPOSITORY_ROOT / "tools" / "portfolio_release_builder.py"
+    release_spec = importlib.util.spec_from_file_location(
+        "portfolio_release_builder_for_current_plan", release_path
+    )
+    if release_spec is None or release_spec.loader is None:
+        raise RuntimeError("unable to load portfolio release builder")
+    release_builder = importlib.util.module_from_spec(release_spec)
+    sys.modules[release_spec.name] = release_builder
+    release_spec.loader.exec_module(release_builder)
+
+    admitted = release_builder._current_release_plan_specs(destination, manifest)
+
+    assert {row["source_key"] for row in admitted} == {"economic", "sector", "style"}
+    assert {row["surface"] for row in admitted} == {"STATIC", "DYNAMIC_FLS"}
+
+
+def test_release_builder_accepts_planner_valid_manifest_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _fixture(tmp_path)
+    public_manifest = json.loads(
+        inputs["public_factor_manifest_path"].read_text(encoding="utf-8")
+    )
+    public_manifest["outputs"].reverse()
+    public_names = {
+        "eu.csv": "z-europe-identical.csv",
+        "industries.csv": "a-industries-identical.csv",
+    }
+    for output in public_manifest["outputs"]:
+        output["path"] = public_names.get(output["path"], output["path"])
+    for index in range(256):
+        public_manifest["outputs"].append(
+            {
+                **public_manifest["outputs"][0],
+                "path": f"unused-identical-output-{index:03d}.csv",
+            }
+        )
+    public_manifest["outputs"].append(
+        {**public_manifest["outputs"][0], "path": "../unbound-identical-output.csv"}
+    )
+    for input_key, filename in (
+        ("europe_factors", "z-europe-identical.csv"),
+        ("us_industries", "a-industries-identical.csv"),
+    ):
+        source_root = tmp_path / f"{input_key}-public-source"
+        source_root.mkdir()
+        renamed_path = source_root / filename
+        shutil.copyfile(inputs["market_paths"][input_key], renamed_path)
+        inputs["market_paths"][input_key] = renamed_path
+    public_manifest.pop("bundle_id")
+    public_manifest["bundle_id"] = hashlib.sha256(
+        _canonical(public_manifest)
+    ).hexdigest()
+    _write_json(inputs["public_factor_manifest_path"], public_manifest)
+    for key, input_key in (
+        ("style_manifest_path", "style_returns"),
+        ("sector_manifest_path", "sector_returns"),
+    ):
+        market_manifest = json.loads(inputs[key].read_text(encoding="utf-8"))
+        output = market_manifest.pop("output")
+        output["bytes"] = output.pop("size_bytes")
+        output["path"] = "returns.csv"
+        market_manifest["outputs"] = [output]
+        if input_key == "style_returns":
+            market_manifest["outputs"].append(
+                {**output, "path": "duplicate-identical-returns.csv"}
+            )
+        _write_json(inputs[key], market_manifest)
+        source_root = tmp_path / f"{input_key}-source"
+        source_root.mkdir()
+        same_name_path = source_root / "returns.csv"
+        shutil.copyfile(inputs["market_paths"][input_key], same_name_path)
+        inputs["market_paths"][input_key] = same_name_path
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    written = planner.write_bundle(output_root=tmp_path / "output", **kwargs)
+    destination = Path(written["destination"])
+    manifest = json.loads(
+        (destination / "plan-manifest.json").read_text(encoding="utf-8")
+    )
+    release_builder = _release_builder_module(
+        "portfolio_release_builder_for_manifest_forms"
+    )
+    original_copyfile = release_builder.shutil.copyfile
+    public_alias_copies = 0
+
+    def _counted_copyfile(source: object, target: object) -> object:
+        nonlocal public_alias_copies
+        target_path = Path(target)
+        if "public" in target_path.parts and any(
+            part.startswith("quant-engine-plan-verifier-") for part in target_path.parts
+        ):
+            public_alias_copies += 1
+        return original_copyfile(source, target)
+
+    monkeypatch.setattr(release_builder.shutil, "copyfile", _counted_copyfile)
+
+    admitted = release_builder._current_release_plan_specs(destination, manifest)
+
+    assert len(admitted) == 6
+    assert public_alias_copies == len(planner.PUBLIC_FACTOR_INPUT_KEYS)
+
+
+def test_release_builder_ignores_unbound_singular_alias_escape_without_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _fixture(tmp_path)
+    escape_path = (tmp_path / "escaped" / "returns.csv").resolve()
+    style_manifest = json.loads(
+        inputs["style_manifest_path"].read_text(encoding="utf-8")
+    )
+    style_manifest["output"]["path"] = str(escape_path)
+    _write_json(inputs["style_manifest_path"], style_manifest)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    written = planner.write_bundle(output_root=tmp_path / "output", **kwargs)
+    destination = Path(written["destination"])
+    manifest = json.loads(
+        (destination / "plan-manifest.json").read_text(encoding="utf-8")
+    )
+    release_builder = _release_builder_module(
+        "portfolio_release_builder_for_windows_alias_escape"
+    )
+    original_copyfile = release_builder.shutil.copyfile
+
+    def _guarded_copyfile(source: object, target: object) -> object:
+        if Path(target).resolve() == escape_path:
+            raise AssertionError("alias copy escaped the verifier temp directory")
+        return original_copyfile(source, target)
+
+    monkeypatch.setattr(release_builder.shutil, "copyfile", _guarded_copyfile)
+
+    admitted = release_builder._current_release_plan_specs(destination, manifest)
+
+    assert len(admitted) == 6
+    assert not escape_path.exists()
+
+
+@pytest.mark.parametrize("location", ("manifest", "policies", "model_dimension"))
+def test_release_builder_rejects_rehashed_unknown_plan_fields(
+    tmp_path: Path, location: str
+) -> None:
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    written = planner.write_bundle(output_root=tmp_path / "output", **kwargs)
+    destination = Path(written["destination"])
+    manifest = json.loads(
+        (destination / "plan-manifest.json").read_text(encoding="utf-8")
+    )
+    target = manifest if location == "manifest" else manifest["policies"]
+    if location == "model_dimension":
+        target = target["model_dimension"]
+    target["unknown"] = "REHASHED_BUT_NOT_EMITTED"
+    manifest.pop("bundle_id")
+    bundle_id = hashlib.sha256(_canonical(manifest)).hexdigest()
+    manifest["bundle_id"] = bundle_id
+    _write_json(destination / "plan-manifest.json", manifest)
+    rebound_destination = destination.with_name(bundle_id)
+    destination.rename(rebound_destination)
+    release_builder = _release_builder_module(
+        f"portfolio_release_builder_for_unknown_{location}"
+    )
+
+    with pytest.raises(
+        release_builder.VerticalBuildError,
+        match="current decomposition plan .* differ",
+    ):
+        release_builder._current_release_plan_specs(rebound_destination, manifest)
+
+
+def test_release_builder_rejects_self_consistent_unverified_history_receipt(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    written = planner.write_bundle(output_root=tmp_path / "output", **kwargs)
+    destination = Path(written["destination"])
+    manifest = json.loads(
+        (destination / "plan-manifest.json").read_text(encoding="utf-8")
+    )
+    release_builder = _release_builder_module(
+        "portfolio_release_builder_for_unverified_history"
+    )
+    frozen_inputs = release_builder._manifest_artifacts(
+        destination, manifest["inputs"], "attribution plan inputs"
+    )
+    generation_path = destination / "inputs/history/generation.json"
+    generation = json.loads(generation_path.read_text(encoding="utf-8"))
+    generation["verification"] = "BOGUS"
+    generation.pop("generation_id")
+    generation_id = hashlib.sha256(_canonical(generation)).hexdigest()
+    generation["generation_id"] = generation_id
+    _write_json(generation_path, generation)
+    generation_content = generation_path.read_bytes()
+    generation_sha256 = hashlib.sha256(generation_content).hexdigest()
+    frozen_inputs["inputs/history/generation.json"] = (
+        generation_sha256,
+        len(generation_content),
+    )
+    manifest["layered_history"] = {
+        **manifest["layered_history"],
+        "generation_id": generation_id,
+        "generation_receipt_sha256": generation_sha256,
+    }
+
+    with pytest.raises(
+        release_builder.VerticalBuildError,
+        match="current decomposition upstream evidence differs",
+    ):
+        release_builder._verify_current_plan_upstream_evidence(
+            destination,
+            frozen_inputs,
+            manifest,
+            evaluation_date=manifest["evaluation_date"],
+            evidence_mode=manifest["layered_history"]["mode"],
+            assurance_profile=manifest["assurance_profile"],
+        )
+
+
+def test_release_builder_rejects_rehashed_layered_return_substitution(
+    tmp_path: Path,
+) -> None:
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    written = planner.write_bundle(output_root=tmp_path / "output", **kwargs)
+    destination = Path(written["destination"])
+    manifest = json.loads(
+        (destination / "plan-manifest.json").read_text(encoding="utf-8")
+    )
+    release_builder = _release_builder_module(
+        "portfolio_release_builder_for_rehashed_history"
+    )
+    frozen_inputs = release_builder._manifest_artifacts(
+        destination, manifest["inputs"], "attribution plan inputs"
+    )
+    history_root = destination / "inputs/history"
+    projection_name = manifest["layered_history"]["projection"]
+    projection_path = history_root / projection_name
+    selected_targets_path = history_root / "selected-targets.csv"
+    selected = next(
+        csv.DictReader(io.StringIO(selected_targets_path.read_text(encoding="utf-8")))
+    )
+    substituted_return = "0.123456789012"
+
+    def _substitute(path: Path) -> None:
+        with path.open(encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            headers = list(reader.fieldnames or ())
+            rows = list(reader)
+        changed = 0
+        for row in rows:
+            if (
+                row["series_id"] == selected["series_id"]
+                and row["date"] == selected["date"]
+            ):
+                row["return"] = substituted_return
+                changed += 1
+        assert changed == 1
+        buffer = io.StringIO(newline="")
+        writer = csv.DictWriter(buffer, fieldnames=headers, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        path.write_bytes(buffer.getvalue().encode())
+
+    generation_path = history_root / "generation.json"
+    generation = json.loads(generation_path.read_text(encoding="utf-8"))
+    for name in (
+        "segments.csv",
+        "live-only.csv",
+        "live-plus-backtest.csv",
+        "returns.csv",
+    ):
+        path = history_root / name
+        _substitute(path)
+        content = path.read_bytes()
+        generation["outputs"][name]["sha256"] = hashlib.sha256(content).hexdigest()
+        generation["outputs"][name]["size_bytes"] = len(content)
+        frozen_inputs[f"inputs/history/{name}"] = (
+            generation["outputs"][name]["sha256"],
+            len(content),
+        )
+    _substitute(selected_targets_path)
+    selected_targets_content = selected_targets_path.read_bytes()
+    frozen_inputs["inputs/history/selected-targets.csv"] = (
+        hashlib.sha256(selected_targets_content).hexdigest(),
+        len(selected_targets_content),
+    )
+    generation.pop("generation_id")
+    generation_id = hashlib.sha256(_canonical(generation)).hexdigest()
+    generation["generation_id"] = generation_id
+    _write_json(generation_path, generation)
+    generation_content = generation_path.read_bytes()
+    generation_sha256 = hashlib.sha256(generation_content).hexdigest()
+    frozen_inputs["inputs/history/generation.json"] = (
+        generation_sha256,
+        len(generation_content),
+    )
+    manifest["layered_history"] = {
+        **manifest["layered_history"],
+        "generation_id": generation_id,
+        "generation_receipt_sha256": generation_sha256,
+        "projection_sha256": hashlib.sha256(projection_path.read_bytes()).hexdigest(),
+        "segments_sha256": hashlib.sha256(
+            (history_root / "segments.csv").read_bytes()
+        ).hexdigest(),
+        "selected_targets_sha256": hashlib.sha256(selected_targets_content).hexdigest(),
+    }
+
+    with pytest.raises(
+        release_builder.VerticalBuildError,
+        match="current decomposition upstream evidence differs",
+    ):
+        release_builder._verify_current_plan_upstream_evidence(
+            destination,
+            frozen_inputs,
+            manifest,
+            evaluation_date=manifest["evaluation_date"],
+            evidence_mode=manifest["layered_history"]["mode"],
+            assurance_profile=manifest["assurance_profile"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "mutation"),
+    (
+        ("inputs/market/us_factors.csv", b"tampered\n"),
+        ("inputs/history/selected-targets.csv", b"tampered\n"),
+    ),
+)
+def test_release_builder_rejects_substituted_upstream_evidence(
+    tmp_path: Path, relative_path: str, mutation: bytes
+) -> None:
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    written = planner.write_bundle(output_root=tmp_path / "output", **kwargs)
+    destination = Path(written["destination"])
+    manifest = json.loads(
+        (destination / "plan-manifest.json").read_text(encoding="utf-8")
+    )
+    release_path = REPOSITORY_ROOT / "tools" / "portfolio_release_builder.py"
+    release_spec = importlib.util.spec_from_file_location(
+        "portfolio_release_builder_for_upstream_mutation", release_path
+    )
+    if release_spec is None or release_spec.loader is None:
+        raise RuntimeError("unable to load portfolio release builder")
+    release_builder = importlib.util.module_from_spec(release_spec)
+    sys.modules[release_spec.name] = release_builder
+    release_spec.loader.exec_module(release_builder)
+    frozen_inputs = release_builder._manifest_artifacts(
+        destination, manifest["inputs"], "attribution plan inputs"
+    )
+
+    path = destination / relative_path
+    path.write_bytes(path.read_bytes() + mutation)
+
+    with pytest.raises(
+        release_builder.VerticalBuildError,
+        match="current decomposition .* differ",
+    ):
+        release_builder._verify_current_plan_upstream_evidence(
+            destination,
+            frozen_inputs,
+            manifest,
+            evaluation_date=manifest["evaluation_date"],
+            evidence_mode=manifest["layered_history"]["mode"],
+            assurance_profile=manifest["assurance_profile"],
+        )
+
+
 def test_layered_history_tampering_and_uncontrolled_contract_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1482,7 +1869,7 @@ def test_available_hybrid_projection_is_selected_without_legacy_override(
     assert economic["series_composition"]["QSI"]["backtest_observations_used"] == 2
     assert manifest["layered_history"]["mode"] == "LIVE_PLUS_BACKTEST"
     assert "inputs/history/live-plus-backtest.csv" in outputs
-    assert "inputs/history/live-only.csv" not in outputs
+    assert "inputs/history/live-only.csv" in outputs
     assert (
         hashlib.sha256(outputs["inputs/history/live-plus-backtest.csv"]).hexdigest()
         == manifest["layered_history"]["projection_sha256"]
@@ -1498,8 +1885,11 @@ def test_available_hybrid_projection_is_selected_without_legacy_override(
     provenance = {item["artifact_id"]: item for item in economic["provenance_sources"]}
     for name in (
         "coverage.json",
+        "excluded.csv",
         "generation.json",
+        "live-only.csv",
         "live-plus-backtest.csv",
+        "returns.csv",
         "segments.csv",
         "selected-targets.csv",
     ):

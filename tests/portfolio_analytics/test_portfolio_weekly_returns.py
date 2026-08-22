@@ -204,6 +204,52 @@ def _plan_fixture(tmp_path: Path) -> Path:
     return bundle
 
 
+def _current_plan_fixture(tmp_path: Path) -> Path:
+    legacy_bundle = _plan_fixture(tmp_path / "legacy-plan")
+    inputs = []
+    for path in sorted((legacy_bundle / "inputs").rglob("*")):
+        if path.is_file():
+            inputs.append(
+                {
+                    "path": path.relative_to(legacy_bundle).as_posix(),
+                    "sha256": _sha(path),
+                    "size_bytes": path.stat().st_size,
+                }
+            )
+    manifest = {
+        "builder": "portfolio-current-decomposition-plan",
+        "builder_version": "0.17.0",
+        "inputs": inputs,
+        "outputs": [],
+        "schema_version": 2,
+    }
+    manifest["bundle_id"] = hashlib.sha256(
+        (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    bundle = tmp_path / manifest["bundle_id"]
+    for source in sorted(path for path in legacy_bundle.rglob("*") if path.is_file()):
+        if source.name == "plan-manifest.json":
+            continue
+        destination = bundle / source.relative_to(legacy_bundle)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+    _write_json(bundle / "plan-manifest.json", manifest)
+    return bundle
+
+
+def _rebind_current_plan(
+    bundle: Path, manifest: dict[str, object]
+) -> tuple[Path, dict[str, object]]:
+    manifest.pop("bundle_id", None)
+    manifest["bundle_id"] = hashlib.sha256(
+        (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    _write_json(bundle / "plan-manifest.json", manifest)
+    destination = bundle.parent / str(manifest["bundle_id"])
+    bundle.rename(destination)
+    return destination, manifest
+
+
 def test_weekly_generation_compounds_and_keeps_evidence_modes_separate(
     tmp_path: Path,
 ) -> None:
@@ -250,6 +296,59 @@ def test_weekly_generation_compounds_and_keeps_evidence_modes_separate(
         output_root,
     )
     assert read_current(output_root).generation_id == published["generation_id"]
+
+
+def test_weekly_generation_accepts_exact_current_plan_bundle(tmp_path: Path) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _current_plan_fixture(tmp_path)
+
+    payload, inputs = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+
+    assert payload["analytics_schema_version"] == 1
+    assert plan_bundle / "plan-manifest.json" in inputs
+    assert len(payload["series"]) > len(STRATEGIES)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("builder", "forged-builder", "builder identity differs"),
+        ("builder_version", "0.18.0", "builder identity differs"),
+    ),
+)
+def test_weekly_rejects_current_plan_builder_substitution(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    bundle = _current_plan_fixture(tmp_path)
+    manifest = json.loads((bundle / "plan-manifest.json").read_text(encoding="utf-8"))
+    manifest[field] = value
+    bundle, _ = _rebind_current_plan(bundle, manifest)
+
+    with pytest.raises(weekly.WeeklyReturnError, match=message):
+        weekly.build_weekly_returns(correlation_root, strategy_returns, bundle)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("size_bytes", 0, "size differs"),
+        ("path", "../escape.csv", "path is invalid"),
+    ),
+)
+def test_weekly_rejects_current_plan_artifact_binding_drift(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    bundle = _current_plan_fixture(tmp_path)
+    manifest = json.loads((bundle / "plan-manifest.json").read_text(encoding="utf-8"))
+    manifest["inputs"][0][field] = value
+    bundle, _ = _rebind_current_plan(bundle, manifest)
+
+    with pytest.raises(weekly.WeeklyReturnError, match=message):
+        weekly.build_weekly_returns(correlation_root, strategy_returns, bundle)
 
 
 def test_weekly_generation_rejects_strategy_source_hash_drift(tmp_path: Path) -> None:
