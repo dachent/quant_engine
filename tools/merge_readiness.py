@@ -6,7 +6,7 @@ branch-protection state are enforced at the merge gate, not in CI (see the
 PR #363/#365 RCCA in issues #328/#329).
 
 Exit codes:
-  0 = READY (mergeStateStatus CLEAN, zero unresolved threads, checks complete)
+  0 = READY (mergeStateStatus CLEAN/HAS_HOOKS, zero unresolved threads)
   1 = NOT READY (prints the named unmet rule)
   2 = usage / API error
 
@@ -29,47 +29,59 @@ def _gh(*args: str) -> str:
     return result.stdout
 
 
+def _unresolved_thread_count(number: int) -> int:
+    """Count unresolved review threads across ALL pages."""
+    owner, name = REPO.split("/")
+    cursor: str | None = None
+    unresolved = 0
+    while True:
+        after = f', after: "{cursor}"' if cursor else ""
+        payload = json.loads(
+            _gh(
+                "api",
+                "graphql",
+                "-f",
+                "query=query($owner:String!,$name:String!,$num:Int!){"
+                " repository(owner:$owner,name:$name){ pullRequest(number:$num){"
+                " reviewThreads(first:100"
+                + after
+                + "){ pageInfo{ hasNextPage endCursor }"
+                " nodes{ isResolved } } } } }",
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"name={name}",
+                "-F",
+                f"num={number}",
+            )
+        )
+        threads = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
+        unresolved += sum(1 for node in threads["nodes"] if not node["isResolved"])
+        if not threads["pageInfo"]["hasNextPage"]:
+            return unresolved
+        cursor = threads["pageInfo"]["endCursor"]
+
+
 def main() -> int:
     args = [item for item in sys.argv[1:] if item != "--require-checks"]
     require_checks = "--require-checks" in sys.argv
     if len(args) != 1 or not args[0].isdigit():
         print(
-            "usage: merge_readiness.py <pr_number> [--require-checks]", file=sys.stderr
+            "usage: merge_readiness.py <pr_number> [--require-checks]",
+            file=sys.stderr,
         )
         return 2
     number = int(args[0])
 
     pr = json.loads(
-        _gh(
-            "pr",
-            "view",
-            str(number),
-            "--json",
-            "state,headRefOid,mergeStateStatus",
-        )
+        _gh("pr", "view", str(number), "--json", "state,headRefOid,mergeStateStatus")
     )
 
     failures: list[str] = []
     if pr.get("state") != "OPEN":
         failures.append(f"state={pr.get('state')} (not OPEN)")
 
-    threads = json.loads(
-        _gh(
-            "api",
-            "graphql",
-            "-f",
-            "query=query($owner:String!,$name:String!,$num:Int!){"
-            " repository(owner:$owner,name:$name){ pullRequest(number:$num){"
-            " reviewThreads(first:100){ nodes{ isResolved } } } } }",
-            "-f",
-            f"owner={REPO.split('/')[0]}",
-            "-f",
-            f"name={REPO.split('/')[1]}",
-            "-F",
-            f"num={number}",
-        )
-    )["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-    unresolved = sum(1 for thread in threads if not thread["isResolved"])
+    unresolved = _unresolved_thread_count(number)
     if unresolved:
         failures.append(f"{unresolved} unresolved review conversation(s)")
 
@@ -90,13 +102,12 @@ def main() -> int:
         if pending:
             failures.append(f"checks not green: {', '.join(pending)}")
 
-    head = pr.get("headRefOid")
     print(
         json.dumps(
             {
                 "ready": not failures,
                 "pr": number,
-                "head": head,
+                "head": pr.get("headRefOid"),
                 "merge_state": state,
                 "unresolved_threads": unresolved,
                 "failures": failures,

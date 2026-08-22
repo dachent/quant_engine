@@ -7,24 +7,23 @@ on:
     types: [submitted, dismissed, edited]
   issue_comment:
     types: [created]
-  check_run:
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR to check (run with --ref <pr-head-sha> so the result attaches to the PR)"
+        required: false
+        type: string
 
 permissions:
   contents: read
   pull-requests: read
+
 concurrency:
-  group: merge-readiness-${{ github.event.pull_request.number || github.run_id }}
+  group: merge-readiness-${{ github.event.pull_request.number || github.event.pull_request.head.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
   readiness:
-    # Skip non-PR contexts (issue_comment/check_run fire on the default branch too).
-    if: >
-      github.event_name == 'pull_request' ||
-      github.event_name == 'pull_request_review' ||
-      github.event.pull_request.number != null ||
-      github.event.check_run.check_suite.pull_requests.size > 0
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -37,10 +36,10 @@ jobs:
       - name: Compute merge readiness
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.check_run.check_suite.pull_requests[0].number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
         run: |
           if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
-            echo "No associated pull request; nothing to check."
+            echo "No pull request context or pr_number input; nothing to check."
             exit 0
           fi
           echo "Computing merge readiness for PR $PR_NUMBER"
