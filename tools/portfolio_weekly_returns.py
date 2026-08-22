@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import sys
 from typing import Any, Final, Iterable, Mapping, Sequence
@@ -391,20 +391,68 @@ def _strategy_rows(
 
 def _manifest_hashes(plan_bundle: Path) -> dict[str, str]:
     manifest = _load_json(plan_bundle / "plan-manifest.json", "planning manifest")
-    if (
-        manifest.get("schema_version") != 1
-        or manifest.get("bundle_id") != plan_bundle.name
-    ):
+    schema_version = manifest.get("schema_version")
+    if manifest.get("bundle_id") != plan_bundle.name:
         raise WeeklyReturnError("planning bundle identity differs")
+    if schema_version == 2:
+        if (
+            manifest.get("builder") != "portfolio-current-decomposition-plan"
+            or manifest.get("builder_version") != "0.17.0"
+        ):
+            raise WeeklyReturnError("current planning builder identity differs")
+        identity = dict(manifest)
+        identity.pop("bundle_id", None)
+        if (
+            hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+            != plan_bundle.name
+        ):
+            raise WeeklyReturnError("current planning bundle hash differs")
+    elif schema_version != 1:
+        raise WeeklyReturnError("planning bundle schema is unsupported")
     rows = _objects(manifest.get("inputs"), "planning inputs") + _objects(
         manifest.get("outputs"), "planning outputs"
     )
-    return {
-        _text(item.get("path"), "planning path"): _text(
-            item.get("sha256"), "planning sha256"
-        )
-        for item in rows
-    }
+    expected: dict[str, str] = {}
+    root = plan_bundle.resolve()
+    for item in rows:
+        relative = _text(item.get("path"), "planning path")
+        portable = PurePosixPath(relative)
+        if (
+            portable.is_absolute()
+            or portable.as_posix() != relative
+            or not portable.parts
+            or any(part in {"", ".", ".."} for part in portable.parts)
+            or "\\" in relative
+            or ":" in relative
+            or relative in expected
+        ):
+            raise WeeklyReturnError(f"planning path is invalid: {relative}")
+        path = plan_bundle.joinpath(*portable.parts)
+        try:
+            path.resolve(strict=True).relative_to(root)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            raise WeeklyReturnError(
+                f"planning artifact escapes bundle: {relative}"
+            ) from exc
+        if path.is_symlink() or not path.is_file():
+            raise WeeklyReturnError(
+                f"planning artifact is missing or linked: {relative}"
+            )
+        expected_sha256 = _text(item.get("sha256"), "planning sha256")
+        actual_sha256, actual_size = hash_file(path)
+        if actual_sha256 != expected_sha256:
+            raise WeeklyReturnError(f"planning input hash differs: {relative}")
+        if schema_version == 2:
+            expected_size = item.get("size_bytes")
+            if (
+                not isinstance(expected_size, int)
+                or isinstance(expected_size, bool)
+                or expected_size < 0
+                or actual_size != expected_size
+            ):
+                raise WeeklyReturnError(f"planning input size differs: {relative}")
+        expected[relative] = expected_sha256
+    return expected
 
 
 def _wide_return_columns(

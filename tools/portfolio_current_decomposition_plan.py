@@ -369,7 +369,11 @@ def _layered_history_targets(
         contract_sources[source_id] = source
     receipt_outputs = _object(manifest.get("outputs"), "layered generation outputs")
     receipt_schemas: dict[str, dict[str, str]] = {}
-    for name in ("coverage.json", projection_name, "segments.csv"):
+    layered_output_contents: dict[str, bytes] = {}
+    for name in sorted(receipt_outputs):
+        portable_name = PurePosixPath(name)
+        if len(portable_name.parts) != 1:
+            raise CurrentPlanError("layered history output name differs")
         output = _object(receipt_outputs.get(name), f"layered output {name}")
         receipt_schemas[name] = {
             "schema_name": _text(output.get("schema_name"), f"{name} schema_name"),
@@ -377,6 +381,7 @@ def _layered_history_targets(
                 output.get("schema_version"), f"{name} schema_version"
             ),
         }
+        layered_output_contents[name] = (generation_root / name).read_bytes()
     projection_headers, projection_rows = _read_csv(
         projection_path, "layered history projection"
     )
@@ -640,9 +645,7 @@ def _layered_history_targets(
         "contents": {
             "financial-mvp-contract.json": contract_content,
             "generation.json": manifest_content,
-            "coverage.json": coverage_content,
-            projection_name: projection_path.read_bytes(),
-            "segments.csv": segments_path.read_bytes(),
+            **layered_output_contents,
             "selected-targets.csv": target_content,
         },
         "identity": {
