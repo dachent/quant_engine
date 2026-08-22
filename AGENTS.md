@@ -109,6 +109,12 @@ A general phase `PROCEED` does not authorize any of the following:
   revoked;
 - deletion of worktree or data-root content, overwriting authoritative data,
   archive/removal of a legacy source, or another action that is hard to recover;
+  except that an agent-created disposable clone or worktree that (a) the agent
+  created itself in a designated workspace root during this project, (b) is
+  clean with zero stashes, and (c) has every local commit reachable from a
+  remote ref, may be deleted under A1.6 without a separate approval — anything
+  failing (a)–(c), including owner-created trees and snapshot-bearing trees,
+  remains under this boundary;
 - live trading, compensating orders, account-setting changes, or expansion from
   read-only/dry-run/PAPER behavior.
 
