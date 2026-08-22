@@ -1486,6 +1486,158 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
     assert lenses["DYNAMIC_STYLE"]["dynamic_available_count"] == 1
 
 
+def _current_surface_lens_inputs(base: Path) -> tuple[Path, Path]:
+    """Schema-2 (0.17) plan bundle + lens generations in the new
+    <root>/<evidence_mode>/<surface>/<source_key> release layout.
+
+    `base` MUST be a short path (see caller): the deepest file lands near the
+    260-char Windows limit once <64-hex generation ids are appended."""
+    lens_root = base / "l" / "decomposition-lenses"
+    assignments = {
+        "europe-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[1]}),
+        "us-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[0]}),
+        "us-equity-style": ("ETF_STYLE", {STRATEGY_NAMES[2]}),
+        "us-industry": ("RETURN_INDUSTRY", {STRATEGY_NAMES[8]}),
+        "us-sector": ("RETURN_SECTOR", {STRATEGY_NAMES[7]}),
+    }
+    for source_key, (analysis_lens, selected_names) in assignments.items():
+        value = _decomposition()
+        value["analysis_lens"] = analysis_lens
+        value["model_selections"] = [
+            row
+            for row in value["model_selections"]
+            if row["series_id"] in selected_names
+        ]
+        value["model_results"] = [
+            row for row in value["model_results"] if row["series_id"] in selected_names
+        ]
+        for surface in ("STATIC", "DYNAMIC_FLS"):
+            _publish_analytics(
+                lens_root / "LIVE_ONLY" / surface / source_key,
+                "decomposition.json",
+                value,
+                f"synthetic-{source_key}-{surface.lower()}",
+            )
+
+    plan_bundle = base / ("a" * 64)
+    plan_path = (
+        plan_bundle
+        / "inputs"
+        / "governance"
+        / "current-strategy-decomposition-plan.json"
+    )
+    dispositions_path = plan_bundle / "candidate-dispositions.json"
+    plan = {
+        "schema_version": 3,
+        "strategies": [
+            {
+                "series_id": name,
+                "source_dispositions": {
+                    source_key: {
+                        "authority": "SYNTHETIC_GOVERNED_PLAN",
+                        "readiness": (
+                            "UNAVAILABLE_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
+                            if index == 7 and source_key == "us-sector"
+                            else "APPLICABLE_SYNTHETIC_GOVERNED_ASSIGNMENT"
+                        ),
+                        "reason": (
+                            "UNAVAILABLE_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
+                            if index == 7 and source_key == "us-sector"
+                            else "OUT_OF_SCOPE_UNDECLARED_LENS"
+                        ),
+                        "requirement": "REQUIRED",
+                    }
+                    for source_key in assignments
+                },
+                "strategy_id": f"strategy-{index}",
+            }
+            for index, name in enumerate(STRATEGY_NAMES)
+        ],
+    }
+    _write_json(plan_path, plan)
+    _write_json(
+        dispositions_path,
+        {"candidate_dispositions": [], "policy": "synthetic", "schema_version": 1},
+    )
+    manifest = {
+        "assurance_profile": "DEVELOPMENT",
+        "builder": "portfolio-current-decomposition-plan",
+        "builder_version": "0.17.0",
+        "bundle_id": plan_bundle.name,
+        "evaluation_date": "2026-08-03",
+        "inputs": [
+            {
+                "path": "inputs/governance/current-strategy-decomposition-plan.json",
+                "sha256": _sha(plan_path),
+            }
+        ],
+        "outputs": [
+            {
+                "path": "candidate-dispositions.json",
+                "sha256": _sha(dispositions_path),
+            }
+        ],
+        "schema_version": 2,
+    }
+    _write_json(plan_bundle / "plan-manifest.json", manifest)
+    return lens_root, plan_bundle
+
+
+def test_panel_consumes_current_surface_lens_generations(
+    inputs: dict[str, Path], tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """P1 regression for PR #363 review: a schema-2 current-surface bundle with
+    generations under LIVE_ONLY/<surface>/<source_key> must build a panel, and a
+    legacy layout must still be rejected as ambiguous rather than silently read."""
+    # Short base: the deepest fixture path sits near the 260-char Windows limit.
+    base = tmp_path_factory.getbasetemp() / "s2lens"
+    lens_root, plan_bundle = _current_surface_lens_inputs(base)
+    result = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        decomposition_lenses_root=lens_root,
+        decomposition_plan_bundle=plan_bundle,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(result["candidate_dir"])
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    lenses = {row["lens_id"]: row for row in data["decomposition_lenses"]["lenses"]}
+    assert set(lenses) >= {
+        "ECONOMIC_FACTOR",
+        "ETF_STYLE",
+        "RETURN_INDUSTRY",
+        "RETURN_SECTOR",
+    }
+    assert all(len(row["series"]) == 9 for row in lenses.values())
+    economic = lenses["ECONOMIC_FACTOR"]
+    us_economic_rows = [
+        row for row in economic["series"] if row["series_id"] == STRATEGY_NAMES[0]
+    ]
+    assert len(us_economic_rows) == 1
+    assert us_economic_rows[0]["status"] == "AVAILABLE"
+
+    # A schema-2 bundle over a legacy FLAT lens tree must be rejected (the
+    # generations are not where the current-plan contract requires them);
+    # legacy bundles with flat trees remain supported (see the separate-lenses
+    # regression above) and must not silently read surface-layout roots.
+    legacy_base = tmp_path_factory.getbasetemp() / "s2legacy"
+    legacy_tree_root, _ = _lens_inputs(legacy_base)
+    with pytest.raises(panel.ControlPanelValidationError, match="LIVE_ONLY"):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            tmp_path / "legacy-output",
+            decomposition_lenses_root=legacy_tree_root,
+            decomposition_plan_bundle=plan_bundle,
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+        )
+
+
 def test_layered_dependence_modes_are_preserved_without_changing_default_authority(
     inputs: dict[str, Path],
     tmp_path: Path,
