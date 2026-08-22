@@ -37,15 +37,20 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import (
+    AdmissionDisposition,
     CashFlow,
+    EvidenceLayer,
     HwmInputsContractError,
     MappingStatus,
     NavObservation,
     ObservedAmount,
+    ProviderAdmissionError,
+    ProviderFactAdmission,
     Transaction,
     decimal_text,
     hwm_policy_exclusions,
     validate_hwm_inputs_envelope,
+    validate_provider_authority,
 )
 
 
@@ -57,6 +62,8 @@ POLICY_VERSION: Final = "PORT-PERF-1"
 CURRENT_STRATEGY_COUNT: Final = 9
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_PROVIDER_LEDGER_CATALOG_SCHEMA_VERSIONS: Final = frozenset({1, 2})
+_SCHWAB_CATALOG_SCHEMA_VERSIONS: Final = frozenset({1, 2})
 _SOURCE_KEYS: Final = {
     "alpaca-events",
     "alpaca-flows",
@@ -475,10 +482,66 @@ def _schwab_generation(
     actual_manifest_hash, manifest_size = hash_file(manifest_path)
     if actual_catalog_hash != catalog_sha256 or actual_manifest_hash != manifest_sha256:
         raise BaselineValidationError("Schwab provider generation hash differs")
+    try:
+        manifest = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
+    except ValueError as exc:
+        raise BaselineValidationError("Schwab provider manifest is invalid") from exc
+    if (
+        manifest.generation_id != generation_id
+        or manifest.verification.value != "VERIFIED"
+    ):
+        raise BaselineValidationError("Schwab provider generation is not verified")
     catalog = _load_json(catalog_path, "Schwab provider catalog")
-    if catalog.get("catalog_schema_version") != 1:
+    catalog_schema_version = catalog.get("catalog_schema_version")
+    if (
+        type(catalog_schema_version) is not int
+        or catalog_schema_version not in _SCHWAB_CATALOG_SCHEMA_VERSIONS
+    ):
         raise BaselineValidationError("Schwab provider catalog schema is unsupported")
+    catalog_artifacts = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == "normalized/schwab-generation.json"
+    ]
+    if (
+        len(catalog_artifacts) != 1
+        or catalog_artifacts[0].sha256 != actual_catalog_hash
+        or catalog_artifacts[0].size_bytes != catalog_size
+        or catalog_artifacts[0].schema_name != "schwab-generation-catalog"
+        or catalog_artifacts[0].schema_version != str(catalog_schema_version)
+    ):
+        raise BaselineValidationError(
+            "Schwab provider catalog manifest binding differs"
+        )
+    if catalog_schema_version == 2:
+        authorized_nav_artifact_ids = {
+            artifact.artifact_id
+            for artifact in manifest.artifacts
+            if artifact.schema_name == "schwab-wch-historical-balance"
+        }
+        for item in _objects(catalog.get("nav_observations"), "Schwab provider NAV"):
+            source_artifact_id = item.get("source_artifact_id")
+            if (
+                not isinstance(source_artifact_id, str)
+                or not source_artifact_id.strip()
+            ):
+                raise BaselineValidationError(
+                    "Schwab provider v2 NAV source artifact is invalid"
+                )
+            if source_artifact_id not in authorized_nav_artifact_ids:
+                raise BaselineValidationError(
+                    "Schwab provider v2 NAV source artifact is unauthorized"
+                )
+            if item.get("value_basis") != "ACCOUNT_VALUE":
+                raise BaselineValidationError(
+                    "Schwab provider v2 NAV value basis differs"
+                )
     provider_as_of = _date(catalog.get("as_of_date"), "Schwab provider as_of_date")
+    if (
+        manifest.as_of_date != provider_as_of
+        or catalog_artifacts[0].as_of_date != provider_as_of
+    ):
+        raise BaselineValidationError("Schwab provider catalog as-of binding differs")
     if provider_as_of > baseline_as_of:
         raise BaselineValidationError(
             "Schwab provider generation is newer than baseline"
@@ -507,7 +570,7 @@ def _schwab_generation(
             size_bytes=catalog_size,
             as_of_date=provider_as_of,
             schema_name="schwab-generation-catalog",
-            schema_version="1",
+            schema_version=str(catalog_schema_version),
         ),
     )
     links = [
@@ -568,9 +631,33 @@ def _provider_ledger(
     ):
         raise BaselineValidationError("provider-ledger generation is not verified")
     catalog = _load_json(catalog_path, "provider-ledger catalog")
-    if catalog.get("catalog_schema_version") != 1:
+    catalog_schema_version = catalog.get("catalog_schema_version")
+    if (
+        type(catalog_schema_version) is not int
+        or catalog_schema_version not in _PROVIDER_LEDGER_CATALOG_SCHEMA_VERSIONS
+    ):
         raise BaselineValidationError("provider-ledger catalog schema is unsupported")
+    catalog_artifacts = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == "normalized/provider-ledger.json"
+    ]
+    if (
+        len(catalog_artifacts) != 1
+        or catalog_artifacts[0].sha256 != actual_catalog_hash
+        or catalog_artifacts[0].size_bytes != catalog_size
+        or catalog_artifacts[0].schema_name != "provider-ledger-catalog"
+        or catalog_artifacts[0].schema_version != str(catalog_schema_version)
+    ):
+        raise BaselineValidationError(
+            "provider-ledger catalog manifest binding differs"
+        )
     provider_as_of = _date(catalog.get("as_of_date"), "provider-ledger as_of_date")
+    if (
+        manifest.as_of_date != provider_as_of
+        or catalog_artifacts[0].as_of_date != provider_as_of
+    ):
+        raise BaselineValidationError("provider-ledger catalog as-of binding differs")
     if provider_as_of > baseline_as_of:
         raise BaselineValidationError("provider-ledger is newer than baseline")
     provider_ids = {
@@ -604,7 +691,7 @@ def _provider_ledger(
             size_bytes=catalog_size,
             as_of_date=provider_as_of,
             schema_name="provider-ledger-catalog",
-            schema_version="1",
+            schema_version=str(catalog_schema_version),
         ),
     )
     links = [
@@ -1374,6 +1461,132 @@ def _schwab_facts(
     )
 
 
+_PROVIDER_ADMISSION_KEYS = {
+    "account_id",
+    "account_reconciliation_sha256",
+    "disposition",
+    "effective_end",
+    "effective_start",
+    "evidence_layer",
+    "fact_type",
+    "pool_id",
+    "provider_id",
+    "strategy_id",
+}
+
+
+def _validated_provider_admissions(
+    catalog: Mapping[str, Any],
+) -> tuple[ProviderFactAdmission, ...]:
+    if catalog.get("catalog_schema_version") != 2:
+        return ()
+    parsed: list[ProviderFactAdmission] = []
+    try:
+        for item in _objects(catalog.get("admissions"), "provider-ledger.admissions"):
+            _strict_keys(item, _PROVIDER_ADMISSION_KEYS, "provider-ledger admission")
+            parsed.append(
+                ProviderFactAdmission(
+                    provider_id=_text(item.get("provider_id"), "admission.provider_id"),
+                    fact_type=_text(item.get("fact_type"), "admission.fact_type"),
+                    evidence_layer=EvidenceLayer(
+                        _text(item.get("evidence_layer"), "admission.evidence_layer")
+                    ),
+                    disposition=AdmissionDisposition(
+                        _text(item.get("disposition"), "admission.disposition")
+                    ),
+                    effective_start=_date(
+                        item.get("effective_start"), "admission.effective_start"
+                    ),
+                    effective_end=_date(
+                        item.get("effective_end"), "admission.effective_end"
+                    ),
+                    account_id=(
+                        None
+                        if item.get("account_id") is None
+                        else _text(item.get("account_id"), "admission.account_id")
+                    ),
+                    pool_id=(
+                        None
+                        if item.get("pool_id") is None
+                        else _text(item.get("pool_id"), "admission.pool_id")
+                    ),
+                    strategy_id=(
+                        None
+                        if item.get("strategy_id") is None
+                        else _text(item.get("strategy_id"), "admission.strategy_id")
+                    ),
+                    account_reconciliation_sha256=(
+                        None
+                        if item.get("account_reconciliation_sha256") is None
+                        else _text(
+                            item.get("account_reconciliation_sha256"),
+                            "admission.account_reconciliation_sha256",
+                        )
+                    ),
+                )
+            )
+        return validate_provider_authority(parsed)
+    except BaselineValidationError:
+        raise
+    except (ProviderAdmissionError, ValueError) as exc:
+        raise BaselineValidationError("provider-ledger admission is invalid") from exc
+
+
+def _admitted_strategy_returns(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = _objects(catalog.get("strategy_returns"), "provider-ledger.strategy_returns")
+    if catalog.get("catalog_schema_version") != 2:
+        return rows
+
+    authoritative: dict[tuple[str, str, str], list[tuple[date, date]]] = defaultdict(
+        list
+    )
+    for admission in _validated_provider_admissions(catalog):
+        if (
+            admission.fact_type == "strategy_returns"
+            and admission.disposition is AdmissionDisposition.AUTHORITATIVE
+            and admission.evidence_layer is EvidenceLayer.ACCOUNT_LIVE
+            and admission.account_id is not None
+            and admission.pool_id is None
+            and admission.strategy_id is not None
+        ):
+            authoritative[
+                (admission.provider_id, admission.strategy_id, admission.account_id)
+            ].append((admission.effective_start, admission.effective_end))
+
+    accepted: list[dict[str, Any]] = []
+    for item in rows:
+        if item.get("evidence_layer") != EvidenceLayer.ACCOUNT_LIVE.value:
+            continue
+        provider_id = _text(item.get("provider_id"), "strategy_returns.provider_id")
+        strategy_id = _text(item.get("strategy_id"), "strategy_returns.strategy_id")
+        day = _date(item.get("date"), "strategy_returns.date")
+        raw_account_ids = item.get("component_account_ids")
+        if not isinstance(raw_account_ids, list) or not raw_account_ids:
+            raise BaselineValidationError(
+                "provider-ledger ACCOUNT_LIVE strategy return lacks component accounts"
+            )
+        account_ids = [
+            _text(account_id, "strategy_returns.component_account_ids")
+            for account_id in raw_account_ids
+        ]
+        if len(account_ids) != len(set(account_ids)):
+            raise BaselineValidationError(
+                "provider-ledger strategy return component accounts are duplicated"
+            )
+
+        def has_authority(account_id: str) -> bool:
+            return any(
+                start <= day <= end
+                for start, end in authoritative.get(
+                    (provider_id, strategy_id, account_id), ()
+                )
+            )
+
+        if all(has_authority(account_id) for account_id in account_ids):
+            accepted.append(item)
+    return accepted
+
+
 def _provider_ledger_facts(
     catalog: Mapping[str, Any],
     accounts: Sequence[Mapping[str, Any]],
@@ -1395,6 +1608,26 @@ def _provider_ledger_facts(
     """Select admitted account facts while retaining legacy-only observations."""
 
     accepted_accounts = {str(item["account_id"]) for item in accounts}
+    authoritative_intervals: dict[tuple[str, str, str], list[tuple[date, date]]] = (
+        defaultdict(list)
+    )
+    if catalog.get("catalog_schema_version") == 2:
+        accepted_admissions = _validated_provider_admissions(catalog)
+        for admission in accepted_admissions:
+            if (
+                admission.disposition is AdmissionDisposition.AUTHORITATIVE
+                and admission.evidence_layer is EvidenceLayer.ACCOUNT_LIVE
+                and admission.account_id is not None
+                and admission.pool_id is None
+                and admission.strategy_id is None
+            ):
+                authoritative_intervals[
+                    (
+                        admission.provider_id,
+                        admission.fact_type,
+                        admission.account_id,
+                    )
+                ].append((admission.effective_start, admission.effective_end))
 
     def admitted(name: str) -> list[dict[str, Any]]:
         accepted: list[dict[str, Any]] = []
@@ -1406,16 +1639,23 @@ def _provider_ledger_facts(
             ):
                 continue
             day_value = item.get("as_of_date") or item.get("event_date")
-            if _date(day_value, f"{name}.date") > baseline_as_of:
+            fact_date = _date(day_value, f"{name}.date")
+            provider_id = _text(item.get("provider_id"), f"{name}.provider_id")
+            if catalog.get("catalog_schema_version") == 2 and not any(
+                start <= fact_date <= end
+                for start, end in authoritative_intervals.get(
+                    (provider_id, name, account_id), []
+                )
+            ):
+                continue
+            if fact_date > baseline_as_of:
                 raise BaselineValidationError(
                     "provider-ledger fact is newer than baseline"
                 )
             record = dict(item)
             record.update(
                 {
-                    "provider": _text(
-                        item.get("provider_id"), f"{name}.provider_id"
-                    ).upper(),
+                    "provider": _text(provider_id, f"{name}.provider_id").upper(),
                     "source_key": "provider-ledger",
                 }
             )
@@ -3249,10 +3489,7 @@ def build_catalog(
             provider_catalog.get("strategy_evidence"),
             "provider-ledger.strategy_evidence",
         )
-        strategy_returns = _objects(
-            provider_catalog.get("strategy_returns"),
-            "provider-ledger.strategy_returns",
-        )
+        strategy_returns = _admitted_strategy_returns(provider_catalog)
         provider_strategy_returns = _objects(
             provider_catalog.get("provider_strategy_returns"),
             "provider-ledger.provider_strategy_returns",

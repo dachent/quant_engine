@@ -443,7 +443,10 @@ def test_refresh_and_tws_snapshot_are_reconciled_without_identifiers(
     second, second_manifest, second_bytes = build_generation(spec_path)
     assert first_bytes == second_bytes
     assert first_manifest.generation_id == second_manifest.generation_id
-    assert first["catalog_schema_version"] == 3
+    assert first["catalog_schema_version"] == 4
+    assert {row["value_basis"] for row in first["nav_observations"]} == {
+        "ACCOUNT_TOTAL"
+    }
     assert first["tws_current_state"]["status"] == "CAPTURED"
     assert first["tws_current_state"]["position_count"] == 1
     assert len(first["tws_current_positions"]) == 1
@@ -466,6 +469,32 @@ def test_refresh_and_tws_snapshot_are_reconciled_without_identifiers(
     assert tws["account_identity_status"] == "PASS"
     assert tws["overlap_account_count"] == 1
     assert "SYNTH-RAW" not in first_bytes.decode("utf-8")
+
+
+def test_activity_flex_schema_is_bound_exclusively_to_flex_roles(
+    tmp_path: Path,
+) -> None:
+    spec_path = _spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    primary = next(
+        item for item in spec["sources"] if item["role"] == "PRIMARY_FLEX_ACTIVITY"
+    )
+    primary["schema_name"] = "synthetic-flex"
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(IbkrGenerationError, match="source schema is invalid for role"):
+        build_generation(spec_path)
+
+    reserved_root = tmp_path / "reserved-schema"
+    reserved_root.mkdir()
+    spec_path = _spec(reserved_root)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    secondary = next(
+        item for item in spec["sources"] if item["role"] == "SECONDARY_RECONCILIATION"
+    )
+    secondary["schema_name"] = "activity-flex"
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(IbkrGenerationError, match="source schema is invalid for role"):
+        build_generation(spec_path)
 
 
 def test_conflicting_flex_refresh_fails_closed(tmp_path: Path) -> None:

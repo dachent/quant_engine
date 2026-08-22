@@ -11,6 +11,7 @@ import sys
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -530,16 +531,24 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
     return spec_path, spec
 
 
-def _spec_with_schwab_provider(tmp_path: Path) -> Path:
+def _spec_with_schwab_provider(
+    tmp_path: Path,
+    *,
+    catalog_schema_version: int = 1,
+    catalog_artifact_as_of_date: date = date(2026, 7, 30),
+    manifest_as_of_date: date = date(2026, 7, 30),
+    v2_nav_provenance: str = "VALID",
+) -> Path:
     spec_path, spec = _spec(tmp_path)
     provider_root = tmp_path / "dataSchwab"
+    valid_nav_artifact_ids = ["wch/nav-0.csv", "wch/nav-1.csv"]
     provider_catalog = {
         "accounts": [
             {"account_id": "account-schwab-a"},
             {"account_id": "account-schwab-b"},
         ],
         "as_of_date": "2026-07-30",
-        "catalog_schema_version": 1,
+        "catalog_schema_version": catalog_schema_version,
         "coverage": {
             "known_gaps": [
                 "one accepted account has no reported non-cash position row"
@@ -593,25 +602,55 @@ def _spec_with_schwab_provider(tmp_path: Path) -> Path:
             }
         ],
     }
+    if catalog_schema_version == 2:
+        for index, row in enumerate(provider_catalog["nav_observations"]):
+            if v2_nav_provenance != "MISSING":
+                row["source_artifact_id"] = (
+                    f"wch/forged-{index}.csv"
+                    if v2_nav_provenance == "FORGED_SOURCE"
+                    else valid_nav_artifact_ids[index]
+                )
+                row["value_basis"] = (
+                    "ACCOUNT_TOTAL"
+                    if v2_nav_provenance == "WRONG_BASIS"
+                    else "ACCOUNT_VALUE"
+                )
     catalog_bytes = canonical_json_bytes(provider_catalog)
     catalog_hash = hashlib.sha256(catalog_bytes).hexdigest()
     artifact = SourceArtifact(
         artifact_id="normalized/schwab-generation.json",
         sha256=catalog_hash,
         size_bytes=len(catalog_bytes),
-        as_of_date=date(2026, 7, 30),
+        as_of_date=catalog_artifact_as_of_date,
         schema_name="schwab-generation-catalog",
-        schema_version="1",
+        schema_version=str(catalog_schema_version),
     )
+    artifacts = [artifact]
+    if catalog_schema_version == 2:
+        artifacts.extend(
+            SourceArtifact(
+                artifact_id=artifact_id,
+                sha256=hashlib.sha256(artifact_id.encode()).hexdigest(),
+                size_bytes=1,
+                as_of_date=date(2026, 7, 30),
+                schema_name=(
+                    "schwab-account-transaction"
+                    if v2_nav_provenance == "WRONG_ROLE"
+                    else "schwab-wch-historical-balance"
+                ),
+                schema_version="provider-export",
+            )
+            for artifact_id in valid_nav_artifact_ids
+        )
     manifest = GenerationManifest.build(
-        as_of_date=date(2026, 7, 30),
+        as_of_date=manifest_as_of_date,
         adapter=AdapterIdentity("synthetic-schwab", "1.0.0"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="synthetic accepted Schwab slice",
             fact_types=("nav", "positions", "transactions"),
         ),
-        artifacts=(artifact,),
+        artifacts=tuple(artifacts),
         verification=VerificationStatus.VERIFIED,
     )
     manifest_path = stage_generation(provider_root, manifest)
@@ -629,6 +668,136 @@ def _spec_with_schwab_provider(tmp_path: Path) -> Path:
     }
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     return spec_path
+
+
+def _provider_ledger_generation(
+    tmp_path: Path,
+    *,
+    catalog_schema_version: int,
+    catalog_artifact_as_of_date: date = date(2026, 7, 30),
+    manifest_catalog_schema_version: int | None = None,
+    manifest_as_of_date: date = date(2026, 7, 30),
+) -> tuple[Path, dict[str, str]]:
+    provider_ids = (
+        "alpaca",
+        "fidelity",
+        "ibkr",
+        "matrixport",
+        "portfolio123",
+        "quantbase",
+        "schwab",
+    )
+    zero_fact_types = (
+        "corporate_actions",
+        "flows",
+        "nav_observations",
+        "positions",
+        "transactions",
+    )
+    catalog = {
+        "admissions": [],
+        "as_of_date": "2026-07-30",
+        "catalog_schema_version": catalog_schema_version,
+        "corporate_actions": [],
+        "fact_counts": [
+            {
+                "fact_type": fact_type,
+                "mapped_count": 0,
+                "record_count": 0,
+                "unmapped_count": 0,
+            }
+            for fact_type in zero_fact_types
+        ],
+        "flows": [],
+        "nav_observations": [],
+        "positions": [],
+        "provider_coverage": [
+            {
+                "coverage": {
+                    "boundary": "synthetic empty provider boundary",
+                    "known_gaps": [],
+                    "observed_end": "2026-07-30",
+                    "observed_start": "2026-07-30",
+                    "status": "PARTIAL",
+                },
+                "provider_id": provider_id,
+            }
+            for provider_id in provider_ids
+        ],
+        "provider_generations": [
+            {
+                "catalog_sha256": hashlib.sha256(
+                    f"{provider_id}-catalog".encode()
+                ).hexdigest(),
+                "generation_as_of_date": "2026-07-30",
+                "generation_id": hashlib.sha256(
+                    f"{provider_id}-generation".encode()
+                ).hexdigest(),
+                "manifest_sha256": hashlib.sha256(
+                    f"{provider_id}-manifest".encode()
+                ).hexdigest(),
+                "provider_id": provider_id,
+                "qualification": "ACCEPTED_PARTIAL",
+            }
+            for provider_id in provider_ids
+        ],
+        "provider_strategy_returns": [],
+        "quality_findings": [],
+        "reconciliation_checks": [
+            {"check_id": f"synthetic-check-{index}", "status": "PASS"}
+            for index in range(3)
+        ],
+        "securities": [],
+        "strategy_evidence": [
+            {"evidence_id": f"synthetic-evidence-{index}"} for index in range(9)
+        ],
+        "strategy_returns": [
+            {
+                "date": "2026-07-30",
+                "return": "0",
+                "strategy_id": "strategy-1",
+            }
+        ],
+        "transactions": [],
+    }
+    if catalog_schema_version == 2:
+        schema = json.loads(
+            (
+                REPOSITORY_ROOT / "schemas/portfolio/provider-ledger.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        Draft202012Validator(schema).validate(catalog)
+    catalog_bytes = canonical_json_bytes(catalog)
+    catalog_hash = hashlib.sha256(catalog_bytes).hexdigest()
+    artifact = SourceArtifact(
+        artifact_id="normalized/provider-ledger.json",
+        sha256=catalog_hash,
+        size_bytes=len(catalog_bytes),
+        as_of_date=catalog_artifact_as_of_date,
+        schema_name="provider-ledger-catalog",
+        schema_version=str(manifest_catalog_schema_version or catalog_schema_version),
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=manifest_as_of_date,
+        adapter=AdapterIdentity("synthetic-provider-ledger", "2.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic accepted provider-ledger slice",
+            fact_types=("nav",),
+        ),
+        artifacts=(artifact,),
+        verification=VerificationStatus.VERIFIED,
+    )
+    root = tmp_path / "provider-ledger"
+    manifest_path = stage_generation(root, manifest)
+    (manifest_path.parent / "provider-ledger.json").write_bytes(catalog_bytes)
+    manifest_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    return root, {
+        "catalog_sha256": catalog_hash,
+        "generation_id": manifest.generation_id,
+        "manifest_sha256": manifest_hash,
+        "root_id": "provider-ledger",
+    }
 
 
 def test_stage_is_deterministic_reconciled_and_coverage_aware(tmp_path: Path) -> None:
@@ -885,6 +1054,567 @@ def test_accepted_schwab_generation_adds_positions_and_transactions(
         "status": "PASS",
         "unmapped_count": 0,
     }
+
+
+def test_accepted_schwab_v2_generation_preserves_catalog_schema_version(
+    tmp_path: Path,
+) -> None:
+    spec_path = _spec_with_schwab_provider(tmp_path, catalog_schema_version=2)
+
+    catalog, _, _ = baseline.build_catalog(spec_path)
+
+    artifact = next(
+        item
+        for item in catalog["source_artifacts"]
+        if item["artifact_id"] == "providers/schwab/schwab-generation.json"
+    )
+    assert artifact["schema_version"] == "2"
+
+
+@pytest.mark.parametrize(
+    ("v2_nav_provenance", "message"),
+    (
+        ("MISSING", "Schwab provider v2 NAV source artifact is invalid"),
+        ("FORGED_SOURCE", "Schwab provider v2 NAV source artifact is unauthorized"),
+        ("WRONG_ROLE", "Schwab provider v2 NAV source artifact is unauthorized"),
+        ("WRONG_BASIS", "Schwab provider v2 NAV value basis differs"),
+    ),
+)
+def test_schwab_v2_generation_rejects_invalid_nav_provenance(
+    tmp_path: Path,
+    v2_nav_provenance: str,
+    message: str,
+) -> None:
+    spec_path = _spec_with_schwab_provider(
+        tmp_path,
+        catalog_schema_version=2,
+        v2_nav_provenance=v2_nav_provenance,
+    )
+
+    with pytest.raises(baseline.BaselineValidationError, match=message):
+        baseline.build_catalog(spec_path)
+
+
+@pytest.mark.parametrize(
+    ("date_field", "drifted_date"),
+    (
+        ("catalog_artifact_as_of_date", date(2026, 7, 29)),
+        ("manifest_as_of_date", date(2026, 7, 31)),
+    ),
+)
+def test_schwab_generation_rejects_catalog_as_of_binding_drift(
+    tmp_path: Path,
+    date_field: str,
+    drifted_date: date,
+) -> None:
+    spec_path = _spec_with_schwab_provider(
+        tmp_path,
+        catalog_schema_version=2,
+        **{date_field: drifted_date},
+    )
+
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="Schwab provider catalog as-of binding differs",
+    ):
+        baseline.build_catalog(spec_path)
+
+
+@pytest.mark.parametrize("catalog_schema_version", (1, 2))
+def test_provider_ledger_consumer_preserves_supported_catalog_schema_version(
+    tmp_path: Path,
+    catalog_schema_version: int,
+) -> None:
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=catalog_schema_version,
+    )
+
+    _, artifacts, links = baseline._provider_ledger(
+        ref,
+        {"provider-ledger": root},
+        date(2026, 7, 30),
+    )
+
+    catalog_artifact = next(
+        item
+        for item in artifacts
+        if item.artifact_id == "providers/provider-ledger/provider-ledger.json"
+    )
+    catalog_link = next(
+        item
+        for item in links
+        if item["artifact_id"] == "providers/provider-ledger/provider-ledger.json"
+    )
+    assert catalog_artifact.schema_version == str(catalog_schema_version)
+    assert catalog_link["schema_version"] == str(catalog_schema_version)
+
+
+def test_portfolio_baseline_spec_v3_consumes_schema_valid_provider_ledger_v2(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _spec(tmp_path)
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+    )
+    spec["roots"]["provider-ledger"] = str(root)
+    spec["schema_version"] = 3
+    spec["provider_ledger"] = ref
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    catalog, _, _ = baseline.build_catalog(spec_path)
+
+    artifact = next(
+        item
+        for item in catalog["source_artifacts"]
+        if item["artifact_id"] == "providers/provider-ledger/provider-ledger.json"
+    )
+    assert artifact["schema_version"] == "2"
+
+
+@pytest.mark.parametrize(
+    ("fact_type", "date_field", "result_index"),
+    (
+        ("nav_observations", "as_of_date", 0),
+        ("flows", "event_date", 1),
+        ("transactions", "event_date", 2),
+        ("positions", "as_of_date", 3),
+    ),
+)
+def test_provider_ledger_v2_consumes_only_effective_authoritative_account_facts(
+    fact_type: str,
+    date_field: str,
+    result_index: int,
+) -> None:
+    accounts = [
+        {"account_id": f"account-{provider_id}"}
+        for provider_id in ("schwab", "alpaca", "ibkr")
+    ]
+    admissions = [
+        {
+            "account_id": f"account-{provider_id}",
+            "account_reconciliation_sha256": hashlib.sha256(
+                provider_id.encode()
+            ).hexdigest(),
+            "disposition": disposition,
+            "effective_end": effective_end,
+            "effective_start": effective_start,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "fact_type": fact_type,
+            "pool_id": None,
+            "provider_id": provider_id,
+            "strategy_id": None,
+        }
+        for provider_id, disposition, effective_start, effective_end in (
+            ("schwab", "AUTHORITATIVE", "2026-07-01", "2026-07-30"),
+            ("alpaca", "REFERENCE_ONLY", "2026-07-01", "2026-07-30"),
+            ("ibkr", "AUTHORITATIVE", "2026-07-02", "2026-07-30"),
+        )
+    ]
+    rows = []
+    for provider_id in ("schwab", "alpaca", "ibkr"):
+        row = {
+            "account_id": f"account-{provider_id}",
+            date_field: "2026-07-01",
+            "mapping_status": "MAPPED",
+            "provider_id": provider_id,
+            "record_id": f"{fact_type}-{provider_id}",
+        }
+        if fact_type == "positions":
+            row["security_id"] = f"security-{provider_id}"
+        rows.append(row)
+    catalog = {
+        "admissions": admissions,
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+    catalog[fact_type] = rows
+
+    result = baseline._provider_ledger_facts(
+        catalog,
+        accounts,
+        [],
+        [],
+        [],
+        [],
+        date(2026, 7, 30),
+    )
+
+    assert [row["record_id"] for row in result[result_index]] == [f"{fact_type}-schwab"]
+
+
+@pytest.mark.parametrize(
+    ("admission_updates", "fact_updates"),
+    (
+        ({"provider_id": "alpaca"}, {}),
+        ({"fact_type": "flows"}, {}),
+        ({"account_id": "account-other"}, {}),
+        ({"strategy_id": "strategy-1"}, {}),
+        ({}, {"provider_id": "alpaca"}),
+        ({}, {"account_id": "account-other"}),
+    ),
+)
+def test_provider_ledger_v2_fact_authority_matches_the_exact_account_scope(
+    admission_updates: dict[str, object],
+    fact_updates: dict[str, object],
+) -> None:
+    admission = {
+        "account_id": "account-schwab",
+        "account_reconciliation_sha256": "a" * 64,
+        "disposition": "AUTHORITATIVE",
+        "effective_end": "2026-07-30",
+        "effective_start": "2026-07-01",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "fact_type": "nav_observations",
+        "pool_id": None,
+        "provider_id": "schwab",
+        "strategy_id": None,
+    }
+    admission.update(admission_updates)
+    fact = {
+        "account_id": "account-schwab",
+        "as_of_date": "2026-07-01",
+        "mapping_status": "MAPPED",
+        "provider_id": "schwab",
+        "record_id": "candidate-nav",
+    }
+    fact.update(fact_updates)
+    catalog = {
+        "admissions": [admission],
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [fact],
+        "positions": [],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+    result = baseline._provider_ledger_facts(
+        catalog,
+        [
+            {"account_id": "account-schwab"},
+            {"account_id": "account-other"},
+        ],
+        [],
+        [],
+        [],
+        [],
+        date(2026, 7, 30),
+    )
+
+    assert result[0] == []
+
+
+@pytest.mark.parametrize("malformation", ("MISSING_NULLABLE_KEY", "UNKNOWN_KEY"))
+def test_provider_ledger_v2_rejects_malformed_admission_shape(
+    malformation: str,
+) -> None:
+    admission = {
+        "account_id": "account-schwab",
+        "account_reconciliation_sha256": "a" * 64,
+        "disposition": "AUTHORITATIVE",
+        "effective_end": "2026-07-30",
+        "effective_start": "2026-07-01",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "fact_type": "nav_observations",
+        "pool_id": None,
+        "provider_id": "schwab",
+        "strategy_id": None,
+    }
+    if malformation == "MISSING_NULLABLE_KEY":
+        admission.pop("pool_id")
+    else:
+        admission["unexpected"] = None
+    catalog = {
+        "admissions": [admission],
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="provider-ledger admission keys differ",
+    ):
+        baseline._provider_ledger_facts(
+            catalog,
+            [{"account_id": "account-schwab"}],
+            [],
+            [],
+            [],
+            [],
+            date(2026, 7, 30),
+        )
+
+
+def _strategy_return_admission(
+    *,
+    account_id: str,
+    disposition: str,
+    provider_id: str,
+    strategy_id: str,
+) -> dict[str, object]:
+    return {
+        "account_id": account_id,
+        "account_reconciliation_sha256": "a" * 64,
+        "disposition": disposition,
+        "effective_end": "2026-07-30",
+        "effective_start": "2026-07-01",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "fact_type": "strategy_returns",
+        "pool_id": None,
+        "provider_id": provider_id,
+        "strategy_id": strategy_id,
+    }
+
+
+def test_provider_ledger_v2_strategy_returns_exclude_reference_only_strategies() -> (
+    None
+):
+    catalog = {
+        "admissions": [
+            _strategy_return_admission(
+                account_id="account-required",
+                disposition="AUTHORITATIVE",
+                provider_id="schwab",
+                strategy_id="strategy-required",
+            ),
+            _strategy_return_admission(
+                account_id="account-reference",
+                disposition="REFERENCE_ONLY",
+                provider_id="alpaca",
+                strategy_id="strategy-reference",
+            ),
+        ],
+        "catalog_schema_version": 2,
+        "strategy_returns": [
+            {
+                "component_account_ids": ["account-required"],
+                "date": "2026-07-15",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "schwab",
+                "strategy_id": "strategy-required",
+            },
+            {
+                "component_account_ids": ["account-reference"],
+                "date": "2026-07-15",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "alpaca",
+                "strategy_id": "strategy-reference",
+            },
+        ],
+    }
+
+    rows = baseline._admitted_strategy_returns(catalog)
+
+    assert [row["strategy_id"] for row in rows] == ["strategy-required"]
+
+
+@pytest.mark.parametrize(
+    ("admission_updates", "return_updates"),
+    (
+        ({"provider_id": "alpaca"}, {}),
+        ({"strategy_id": "strategy-other"}, {}),
+        ({"account_id": "account-other"}, {}),
+        ({}, {"date": "2026-07-31"}),
+        ({}, {"evidence_layer": "PROVIDER_LIVE"}),
+    ),
+)
+def test_provider_ledger_v2_strategy_return_authority_matches_exact_scope(
+    admission_updates: dict[str, object],
+    return_updates: dict[str, object],
+) -> None:
+    admission = _strategy_return_admission(
+        account_id="account-required",
+        disposition="AUTHORITATIVE",
+        provider_id="schwab",
+        strategy_id="strategy-required",
+    )
+    admission.update(admission_updates)
+    strategy_return = {
+        "component_account_ids": ["account-required"],
+        "date": "2026-07-15",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "provider_id": "schwab",
+        "strategy_id": "strategy-required",
+    }
+    strategy_return.update(return_updates)
+
+    rows = baseline._admitted_strategy_returns(
+        {
+            "admissions": [admission],
+            "catalog_schema_version": 2,
+            "strategy_returns": [strategy_return],
+        }
+    )
+
+    assert rows == []
+
+
+def test_provider_ledger_v2_strategy_return_rejects_unbound_multi_provider_scope() -> (
+    None
+):
+    strategy_return = {
+        "component_account_ids": ["account-ibkr", "account-schwab"],
+        "date": "2026-07-15",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "provider_id": "multi-provider",
+        "strategy_id": "strategy-required",
+    }
+    rows = baseline._admitted_strategy_returns(
+        {
+            "admissions": [
+                _strategy_return_admission(
+                    account_id=f"account-{provider_id}",
+                    disposition="AUTHORITATIVE",
+                    provider_id=provider_id,
+                    strategy_id="strategy-required",
+                )
+                for provider_id in ("ibkr", "schwab")
+            ],
+            "catalog_schema_version": 2,
+            "strategy_returns": [strategy_return],
+        }
+    )
+
+    assert rows == []
+
+
+def test_provider_ledger_v2_strategy_return_requires_every_component_account() -> None:
+    strategy_return = {
+        "component_account_ids": ["account-admitted", "account-unbound"],
+        "date": "2026-07-15",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "provider_id": "schwab",
+        "strategy_id": "strategy-required",
+    }
+
+    rows = baseline._admitted_strategy_returns(
+        {
+            "admissions": [
+                _strategy_return_admission(
+                    account_id="account-admitted",
+                    disposition="AUTHORITATIVE",
+                    provider_id="schwab",
+                    strategy_id="strategy-required",
+                )
+            ],
+            "catalog_schema_version": 2,
+            "strategy_returns": [strategy_return],
+        }
+    )
+
+    assert rows == []
+
+
+def test_provider_ledger_v1_preserves_legacy_strategy_returns() -> None:
+    legacy_row = {
+        "date": "2026-07-15",
+        "return": "0.01",
+        "strategy_id": "strategy-legacy",
+    }
+
+    rows = baseline._admitted_strategy_returns(
+        {"catalog_schema_version": 1, "strategy_returns": [legacy_row]}
+    )
+
+    assert rows == [legacy_row]
+
+
+def test_provider_ledger_v1_preserves_legacy_fact_consumption() -> None:
+    catalog = {
+        "catalog_schema_version": 1,
+        "flows": [],
+        "nav_observations": [
+            {
+                "account_id": "account-schwab",
+                "as_of_date": "2026-07-01",
+                "mapping_status": "MAPPED",
+                "provider_id": "schwab",
+                "record_id": "legacy-nav",
+            }
+        ],
+        "positions": [],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+    result = baseline._provider_ledger_facts(
+        catalog,
+        [{"account_id": "account-schwab"}],
+        [],
+        [],
+        [],
+        [],
+        date(2026, 7, 30),
+    )
+
+    assert [row["record_id"] for row in result[0]] == ["legacy-nav"]
+
+
+def test_provider_ledger_consumer_rejects_manifest_schema_version_drift(
+    tmp_path: Path,
+) -> None:
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+        manifest_catalog_schema_version=1,
+    )
+
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="provider-ledger catalog manifest binding differs",
+    ):
+        baseline._provider_ledger(
+            ref,
+            {"provider-ledger": root},
+            date(2026, 7, 30),
+        )
+
+
+@pytest.mark.parametrize(
+    ("date_field", "drifted_date"),
+    (
+        ("catalog_artifact_as_of_date", date(2026, 7, 29)),
+        ("manifest_as_of_date", date(2026, 7, 31)),
+    ),
+)
+def test_provider_ledger_consumer_rejects_catalog_as_of_binding_drift(
+    tmp_path: Path,
+    date_field: str,
+    drifted_date: date,
+) -> None:
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+        **{date_field: drifted_date},
+    )
+
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="provider-ledger catalog as-of binding differs",
+    ):
+        baseline._provider_ledger(
+            ref,
+            {"provider-ledger": root},
+            date(2026, 7, 30),
+        )
 
 
 def test_strategy_for_date_is_effective_dated_and_fails_on_overlap() -> None:
