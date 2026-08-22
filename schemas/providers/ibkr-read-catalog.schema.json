@@ -24,7 +24,7 @@
     "tws_current_state"
   ],
   "properties": {
-    "catalog_schema_version": {"const": 3},
+    "catalog_schema_version": {"const": 4},
     "provider_id": {"const": "ibkr"},
     "as_of_date": {"type": "string", "format": "date"},
     "accounts": {"type": "array", "items": {"type": "object"}},
@@ -33,7 +33,17 @@
     "fact_coverage": {"type": "array", "items": {"type": "object"}},
     "flows": {"type": "array", "items": {"type": "object"}},
     "fx_observations": {"type": "array", "items": {"type": "object"}},
-    "nav_observations": {"type": "array", "items": {"type": "object"}},
+    "nav_observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_artifact_id", "value_basis"],
+        "properties": {
+          "source_artifact_id": {"type": "string", "minLength": 1},
+          "value_basis": {"const": "ACCOUNT_TOTAL"}
+        }
+      }
+    },
     "positions": {"type": "array", "items": {"type": "object"}},
     "reconciliation_checks": {"type": "array", "items": {"type": "object"}},
     "securities": {"type": "array", "items": {"type": "object"}},

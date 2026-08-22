@@ -59,16 +59,16 @@ from quant_engine.portfolio_ledger import (
 SCHEMA_VERSION: Final = 2
 CATALOG_SCHEMA_VERSION: Final = 2
 ADMIT_OR_DECLARE_SCHEMA_VERSION: Final = 1
-ADAPTER_VERSION: Final = "2"
+ADAPTER_VERSION: Final = "3"
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 _PROVIDER_CATALOGS: Final = {
     "alpaca": ("alpaca-generation.json", frozenset({1})),
     "fidelity": ("fidelity-generation.json", frozenset({1})),
-    "ibkr": ("ibkr-catalog.json", frozenset({3})),
+    "ibkr": ("ibkr-catalog.json", frozenset({3, 4})),
     "matrixport": ("catalog.json", frozenset({1, 2})),
     "portfolio123": ("portfolio123-generation.json", frozenset({1})),
     "quantbase": ("quantbase-generation.json", frozenset({1})),
-    "schwab": ("schwab-generation.json", frozenset({1})),
+    "schwab": ("schwab-generation.json", frozenset({1, 2})),
 }
 _ACCOUNT_FACTS: Final = {
     "alpaca": ("nav_observations", "positions", "transactions"),
@@ -160,6 +160,18 @@ _SCHWAB_FLOW_KINDS: Final = frozenset(
     }
 )
 _DATE_FIELDS: Final = ("as_of_date", "event_date", "effective_date")
+_NAV_VALUE_BASIS_BY_PROVIDER: Final = {
+    "ibkr": "ACCOUNT_TOTAL",
+    "matrixport": "ACCOUNT_TOTAL",
+    "schwab": "ACCOUNT_VALUE",
+}
+_NAV_SOURCE_SCHEMA_NAMES_BY_PROVIDER: Final = {
+    "ibkr": frozenset({"activity-flex"}),
+    "schwab": frozenset({"schwab-wch-historical-balance"}),
+}
+_NAV_SOURCE_ARTIFACT_IDS_BY_PROVIDER: Final = {
+    "matrixport": frozenset({"csv/daily_portfolio_totals.csv"}),
+}
 
 
 class ProviderLedgerError(ValueError):
@@ -1200,7 +1212,6 @@ def _project_account_facts(
                 "mapping_status": mapping_status,
                 "provider_id": provider_id,
                 "record_id": f"{provider_id}:{source_id}",
-                "source_artifact_id": row.get("source_artifact_id"),
                 "source_record_id": source_id,
                 "strategy_id": strategy_id,
             }
@@ -1215,6 +1226,8 @@ def _project_account_facts(
                 "price",
                 "quantity",
                 "security_id",
+                "source_artifact_id",
+                "value_basis",
             ):
                 if field in row:
                     record[field] = row[field]
@@ -1288,6 +1301,58 @@ _CASH_TRANSACTION_KINDS: Final = frozenset(
 def _is_cash_activity(row: Mapping[str, Any]) -> bool:
     kind = str(row.get("kind") or "").strip().upper()
     return kind in _CASH_TRANSACTION_KINDS or kind.startswith("CASH_ACTIVITY:")
+
+
+def _validate_nav_observation_value_bases(
+    nav_observations: Sequence[Mapping[str, Any]],
+    authoritative_provider_ids: set[str],
+    provider_artifact_ids: Mapping[str, set[str]],
+    provider_nav_source_artifact_ids: Mapping[str, set[str]],
+) -> None:
+    """Require an exact basis and manifest-bound source on authoritative NAV."""
+
+    for row in nav_observations:
+        provider_id = str(row.get("provider_id") or "")
+        if provider_id not in authoritative_provider_ids:
+            continue
+        expected = _NAV_VALUE_BASIS_BY_PROVIDER.get(provider_id)
+        if expected is None:
+            raise ProviderLedgerError(
+                "NAV_OBSERVATION_VALUE_BASIS_UNPROVEN: "
+                f"{provider_id} has no source-proven controlled basis"
+            )
+        actual = row.get("value_basis")
+        if not isinstance(actual, str) or not actual.strip():
+            raise ProviderLedgerError(
+                "NAV_OBSERVATION_VALUE_BASIS_MISSING: "
+                f"{provider_id} row {row.get('record_id')} lacks value_basis"
+            )
+        if actual != expected:
+            raise ProviderLedgerError(
+                "NAV_OBSERVATION_VALUE_BASIS_INVALID: "
+                f"{provider_id} row {row.get('record_id')} declares {actual!r}; "
+                f"expected {expected!r}"
+            )
+        source_artifact_id = row.get("source_artifact_id")
+        if not isinstance(source_artifact_id, str) or not source_artifact_id.strip():
+            raise ProviderLedgerError(
+                "NAV_OBSERVATION_SOURCE_ARTIFACT_MISSING: "
+                f"{provider_id} row {row.get('record_id')} lacks source_artifact_id"
+            )
+        if source_artifact_id not in provider_artifact_ids.get(provider_id, set()):
+            raise ProviderLedgerError(
+                "NAV_OBSERVATION_SOURCE_ARTIFACT_UNKNOWN: "
+                f"{provider_id} row {row.get('record_id')} references an artifact "
+                "outside its verified generation manifest"
+            )
+        if source_artifact_id not in provider_nav_source_artifact_ids.get(
+            provider_id, set()
+        ):
+            raise ProviderLedgerError(
+                "NAV_OBSERVATION_SOURCE_ARTIFACT_UNAUTHORIZED: "
+                f"{provider_id} row {row.get('record_id')} references a manifest "
+                "artifact that is not an authorized NAV source"
+            )
 
 
 def _validate_nav_observation_moves(
@@ -1558,6 +1623,7 @@ def _observed_bounds(rows: Sequence[Mapping[str, Any]]) -> tuple[date, date]:
 def _broker_strategy_returns(
     nav_rows: Sequence[Mapping[str, Any]],
     flow_rows: Sequence[Mapping[str, Any]],
+    authoritative_provider_ids: set[str],
 ) -> list[dict[str, Any]]:
     """Create flow-adjusted account-live returns from admitted broker NAV.
 
@@ -1571,6 +1637,8 @@ def _broker_strategy_returns(
         if row.get("mapping_status") != "MAPPED":
             continue
         provider_id = str(row["provider_id"])
+        if provider_id not in authoritative_provider_ids:
+            continue
         account_id = str(row["account_id"])
         day = str(row.get("event_date") or "")
         if not day:
@@ -1599,8 +1667,12 @@ def _broker_strategy_returns(
 
     by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in nav_rows:
-        if row.get("mapping_status") == "MAPPED":
-            by_account[(str(row["provider_id"]), str(row["account_id"]))].append(row)
+        if row.get("mapping_status") != "MAPPED":
+            continue
+        provider_id = str(row["provider_id"])
+        if provider_id not in authoritative_provider_ids:
+            continue
+        by_account[(provider_id, str(row["account_id"]))].append(row)
 
     contributions: dict[
         tuple[str, str], list[tuple[Decimal, Decimal, str, str, str]]
@@ -2888,13 +2960,42 @@ def build_catalog(
         )
         for item in _objects(provenance.get("strategies"), "strategies")
     }
+    authoritative_provider_ids = {
+        provider_id
+        for provider_id, source_id in _PROVIDER_SOURCE_SEGMENTS.items()
+        if _object(authority["sources"][source_id], source_id).get(
+            "product_requirement"
+        )
+        == "REQUIRED"
+    }
+    _validate_nav_observation_value_bases(
+        combined.get("nav_observations", []),
+        authoritative_provider_ids,
+        {
+            provider_id: {artifact.artifact_id for artifact in manifest.artifacts}
+            for provider_id, manifest in manifests.items()
+        },
+        {
+            provider_id: {
+                artifact.artifact_id
+                for artifact in manifest.artifacts
+                if artifact.schema_name
+                in _NAV_SOURCE_SCHEMA_NAMES_BY_PROVIDER.get(provider_id, frozenset())
+                or artifact.artifact_id
+                in _NAV_SOURCE_ARTIFACT_IDS_BY_PROVIDER.get(provider_id, frozenset())
+            }
+            for provider_id, manifest in manifests.items()
+        },
+    )
     _validate_nav_observation_moves(
         combined.get("nav_observations", []),
         combined.get("flows", []),
         combined.get("transactions", []),
     )
     broker_returns = _broker_strategy_returns(
-        combined.get("nav_observations", []), combined.get("flows", [])
+        combined.get("nav_observations", []),
+        combined.get("flows", []),
+        authoritative_provider_ids,
     )
     strategy_returns = _merge_account_returns(
         source_strategy_returns, broker_returns, strategy_names
@@ -2914,14 +3015,6 @@ def build_catalog(
         {item.provider_id: item for item in identities},
         {provider_id: item.as_of_date for provider_id, item in manifests.items()},
     )
-    authoritative_provider_ids = {
-        provider_id
-        for provider_id, source_id in _PROVIDER_SOURCE_SEGMENTS.items()
-        if _object(authority["sources"][source_id], source_id).get(
-            "product_requirement"
-        )
-        == "REQUIRED"
-    }
     authoritative_strategy_ids = {
         str(row.get("strategy_id"))
         for row in _objects(authority["contract"].get("strategies"), "strategies")

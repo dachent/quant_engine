@@ -1513,6 +1513,28 @@ def _tt_actual_holdings_return(
     )
 
 
+def _authoritative_nav_provider_ids(ledger: Mapping[str, Any]) -> set[str]:
+    raw = ledger.get("admissions")
+    if not isinstance(raw, list):
+        raise ReturnAttributionError("provider-ledger admissions are unavailable")
+    result: set[str] = set()
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise ReturnAttributionError("provider-ledger admission is invalid")
+        if (
+            item.get("fact_type") != "nav_observations"
+            or item.get("disposition") != "AUTHORITATIVE"
+        ):
+            continue
+        provider_id = str(item.get("provider_id") or "").strip()
+        if not provider_id:
+            raise ReturnAttributionError(
+                "authoritative NAV admission lacks provider identity"
+            )
+        result.add(provider_id)
+    return result
+
+
 def tt_attribution(
     *,
     workbook: Path,
@@ -1534,7 +1556,9 @@ def tt_attribution(
     broker_rows = [
         row
         for row in provider_ledger._broker_strategy_returns(
-            ledger.get("nav_observations", []), ledger.get("flows", [])
+            ledger.get("nav_observations", []),
+            ledger.get("flows", []),
+            _authoritative_nav_provider_ids(ledger),
         )
         if row.get("strategy_id") == "tt-portfolio"
     ]

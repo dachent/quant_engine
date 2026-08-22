@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import date
 import importlib.util
+import json
 from pathlib import Path
 import sys
 from typing import Any, Mapping
 
+from jsonschema import Draft202012Validator
 import pytest
 
 from quant_engine.core import (
@@ -69,7 +71,7 @@ def test_broker_returns_are_flow_adjusted_and_capital_weighted() -> None:
         }
     ]
 
-    rows = ledger._broker_strategy_returns(nav, flows)
+    rows = ledger._broker_strategy_returns(nav, flows, {"schwab"})
 
     assert len(rows) == 1
     assert rows[0]["return"] == "0.1"
@@ -78,6 +80,37 @@ def test_broker_returns_are_flow_adjusted_and_capital_weighted() -> None:
     assert rows[0]["beginning_capital"] == "400"
     assert len(rows[0]["account_reconciliation_sha256"]) == 64
     assert rows[0]["flow_timing"] == "DATE_ONLY_END_OF_DAY"
+
+
+def test_broker_returns_exclude_non_authoritative_provider_inputs() -> None:
+    nav = [
+        _nav("required", "2026-01-01", "100", "required-1"),
+        _nav("required", "2026-01-02", "110", "required-2"),
+        {
+            **_nav("excluded", "2026-01-01", "100", "excluded-1"),
+            "provider_id": "alpaca",
+        },
+        {
+            **_nav("excluded", "2026-01-02", "200", "excluded-2"),
+            "provider_id": "alpaca",
+        },
+    ]
+    flows = [
+        {
+            "account_id": "excluded",
+            "amount": "",
+            "event_date": "2026-01-02",
+            "mapping_status": "MAPPED",
+            "provider_id": "alpaca",
+        }
+    ]
+
+    rows = ledger._broker_strategy_returns(nav, flows, {"schwab"})
+
+    assert len(rows) == 1
+    assert rows[0]["return"] == "0.1"
+    assert rows[0]["provider_id"] == "schwab"
+    assert rows[0]["component_account_ids"] == ["required"]
 
 
 def test_broker_returns_fail_closed_on_blank_flow_amount() -> None:
@@ -98,7 +131,7 @@ def test_broker_returns_fail_closed_on_blank_flow_amount() -> None:
     ]
 
     with pytest.raises(ledger.ProviderLedgerError, match="flow amount is missing"):
-        ledger._broker_strategy_returns(nav, flows)
+        ledger._broker_strategy_returns(nav, flows, {"schwab"})
 
 
 def test_account_rollforward_appends_only_dates_newer_than_accepted_history() -> None:
@@ -323,6 +356,250 @@ def test_declared_provider_fact_collection_cannot_fall_back_to_empty() -> None:
             set(),
             {},
         )
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "value_basis"),
+    (("ibkr", "ACCOUNT_TOTAL"), ("schwab", "ACCOUNT_VALUE")),
+)
+def test_projected_provider_nav_preserves_source_proven_value_basis(
+    provider_id: str, value_basis: str
+) -> None:
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS[provider_id]}
+    catalog["nav_observations"] = [
+        {
+            "account_id": f"account-{provider_id}",
+            "as_of_date": "2026-01-01",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+            "record_id": "nav-1",
+            "source_artifact_id": "source/nav-1",
+            "value_basis": value_basis,
+        }
+    ]
+
+    projected, _ = ledger._project_account_facts(
+        provider_id,
+        "a" * 64,
+        catalog,
+        {f"account-{provider_id}"},
+        {"strategy-1"},
+        {
+            f"account-{provider_id}": [
+                {
+                    "effective_start": "2026-01-01",
+                    "effective_end": None,
+                    "strategy_id": "strategy-1",
+                }
+            ]
+        },
+    )
+
+    assert projected["nav_observations"][0]["value_basis"] == value_basis
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "value_basis", "wrong_basis"),
+    (
+        ("ibkr", "ACCOUNT_TOTAL", "ACCOUNT_VALUE"),
+        ("schwab", "ACCOUNT_VALUE", "ACCOUNT_TOTAL"),
+    ),
+)
+def test_reference_only_legacy_nav_remains_schema_valid_without_provenance(
+    provider_id: str,
+    value_basis: str,
+    wrong_basis: str,
+) -> None:
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS[provider_id]}
+    catalog["nav_observations"] = [
+        {
+            "account_id": f"account-{provider_id}",
+            "as_of_date": "2026-01-01",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+            "record_id": "legacy-nav-1",
+        }
+    ]
+
+    projected, _ = ledger._project_account_facts(
+        provider_id,
+        "a" * 64,
+        catalog,
+        {f"account-{provider_id}"},
+        {"strategy-1"},
+        {
+            f"account-{provider_id}": [
+                {
+                    "effective_start": "2026-01-01",
+                    "effective_end": None,
+                    "strategy_id": "strategy-1",
+                }
+            ]
+        },
+    )
+    row = projected["nav_observations"][0]
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/provider-ledger.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )["properties"]["nav_observations"]["items"]
+
+    assert "source_artifact_id" not in row
+    assert "value_basis" not in row
+    validator = Draft202012Validator(schema)
+    validator.validate(row)
+    ledger._validate_nav_observation_value_bases([row], set(), {}, {})
+    admissions = ledger._admissions(
+        {"nav_observations": [row]},
+        [],
+        authoritative_provider_ids=set(),
+        authoritative_strategy_ids=set(),
+    )
+
+    assert len(admissions) == 1
+    assert admissions[0].disposition.value == "REFERENCE_ONLY"
+    assert any(
+        error.validator == "required"
+        for error in validator.iter_errors({**row, "value_basis": value_basis})
+    )
+    assert any(
+        error.validator == "const"
+        for error in validator.iter_errors(
+            {
+                **row,
+                "source_artifact_id": "source/nav-1",
+                "value_basis": wrong_basis,
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("row", "message"),
+    (
+        (
+            {"provider_id": "ibkr", "record_id": "ibkr:missing"},
+            "NAV_OBSERVATION_VALUE_BASIS_MISSING",
+        ),
+        (
+            {
+                "provider_id": "schwab",
+                "record_id": "schwab:unknown",
+                "value_basis": "ACCOUNT_TOTAL",
+            },
+            "NAV_OBSERVATION_VALUE_BASIS_INVALID",
+        ),
+        (
+            {"provider_id": "quantbase", "record_id": "quantbase:unproven"},
+            "NAV_OBSERVATION_VALUE_BASIS_UNPROVEN",
+        ),
+    ),
+)
+def test_required_provider_nav_rejects_missing_unknown_or_unproven_basis(
+    row: dict[str, str], message: str
+) -> None:
+    with pytest.raises(ledger.ProviderLedgerError, match=message):
+        ledger._validate_nav_observation_value_bases(
+            [row],
+            {str(row["provider_id"])},
+            {str(row["provider_id"]): {"source/nav-1"}},
+            {str(row["provider_id"]): {"source/nav-1"}},
+        )
+
+
+@pytest.mark.parametrize(
+    ("row", "message"),
+    (
+        (
+            {
+                "provider_id": "ibkr",
+                "record_id": "ibkr:missing-source",
+                "value_basis": "ACCOUNT_TOTAL",
+            },
+            "NAV_OBSERVATION_SOURCE_ARTIFACT_MISSING",
+        ),
+        (
+            {
+                "provider_id": "schwab",
+                "record_id": "schwab:unknown-source",
+                "source_artifact_id": "source/forged",
+                "value_basis": "ACCOUNT_VALUE",
+            },
+            "NAV_OBSERVATION_SOURCE_ARTIFACT_UNKNOWN",
+        ),
+        (
+            {
+                "provider_id": "schwab",
+                "record_id": "schwab:wrong-source-role",
+                "source_artifact_id": "source/transaction",
+                "value_basis": "ACCOUNT_VALUE",
+            },
+            "NAV_OBSERVATION_SOURCE_ARTIFACT_UNAUTHORIZED",
+        ),
+    ),
+)
+def test_required_provider_nav_rejects_missing_or_unknown_source_artifact(
+    row: dict[str, str], message: str
+) -> None:
+    with pytest.raises(ledger.ProviderLedgerError, match=message):
+        ledger._validate_nav_observation_value_bases(
+            [row],
+            {str(row["provider_id"])},
+            {
+                str(row["provider_id"]): {
+                    "source/nav-1",
+                    "source/transaction",
+                }
+            },
+            {str(row["provider_id"]): {"source/nav-1"}},
+        )
+
+
+def test_excluded_provider_nav_does_not_require_authoritative_basis() -> None:
+    ledger._validate_nav_observation_value_bases(
+        [{"provider_id": "alpaca", "record_id": "alpaca:reference-only"}],
+        {"ibkr", "matrixport", "quantbase", "schwab"},
+        {},
+        {},
+    )
+
+
+def test_provider_ledger_schema_requires_exact_known_provider_nav_basis() -> None:
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/provider-ledger.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    item_schema = schema["properties"]["nav_observations"]["items"]
+    assert item_schema["required"] == ["provider_id"]
+    controlled = {
+        rule["if"]["properties"]["provider_id"]["const"]: {
+            "if_required": rule["if"]["required"],
+            "then": rule["then"],
+        }
+        for rule in item_schema["allOf"]
+    }
+    assert controlled == {
+        "ibkr": {
+            "if_required": ["value_basis"],
+            "then": {
+                "required": ["source_artifact_id"],
+                "properties": {"value_basis": {"const": "ACCOUNT_TOTAL"}},
+            },
+        },
+        "matrixport": {
+            "if_required": ["value_basis"],
+            "then": {
+                "required": ["source_artifact_id"],
+                "properties": {"value_basis": {"const": "ACCOUNT_TOTAL"}},
+            },
+        },
+        "schwab": {
+            "if_required": ["value_basis"],
+            "then": {
+                "required": ["source_artifact_id"],
+                "properties": {"value_basis": {"const": "ACCOUNT_VALUE"}},
+            },
+        },
+    }
 
 
 def test_account_and_provider_lanes_keep_independent_provider_identity() -> None:
@@ -1064,6 +1341,7 @@ def test_quantbase_volatis_dashboard_admitted_as_nav_observations(
     )
     assert rows[0]["strategy_id"] == "volatis-strategy"
     assert rows[0]["mapping_status"] == "MAPPED"
+    assert "value_basis" not in rows[0]
     assert rows[1]["as_of_date"] == "2026-08-14"
 
 
@@ -1569,13 +1847,13 @@ def test_broker_returns_skip_internal_transfers_but_raise_on_external_unavailabl
             "mapping_status": "MAPPED",
         }
     ]
-    rows = ledger._broker_strategy_returns(nav, internal)
+    rows = ledger._broker_strategy_returns(nav, internal, {"ibkr"})
     assert len(rows) == 1  # 1% return, no flow adjustment, no raise
     external = [dict(internal[0], flow_type="DEPOSIT_OR_WITHDRAWAL")]
     with pytest.raises(
         ledger.ProviderLedgerError, match="mapped flow amount is unavailable"
     ):
-        ledger._broker_strategy_returns(nav, external)
+        ledger._broker_strategy_returns(nav, external, {"ibkr"})
 
 
 def test_nav_move_guard_ignores_trade_notionals() -> None:
@@ -1647,7 +1925,7 @@ def test_internal_transfer_with_available_amount_is_counted() -> None:
             "mapping_status": "MAPPED",
         }
     ]
-    rows = ledger._broker_strategy_returns(nav, transfer)
+    rows = ledger._broker_strategy_returns(nav, transfer, {"ibkr"})
     assert len(rows) == 1
     # (200 - 100) / 100 - 1 = 0 — the doubling is flow, not performance.
     assert ledger._observed_decimal(rows[0]["return"], "return") == 0

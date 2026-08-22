@@ -36,8 +36,8 @@ from quant_engine.portfolio_ledger import (
 
 SPEC_SCHEMA_VERSION = 2
 SUPPORTED_SPEC_SCHEMA_VERSIONS = frozenset({1, 2})
-CATALOG_SCHEMA_VERSION = 1
-ADAPTER_VERSION = "0.3.0"
+CATALOG_SCHEMA_VERSION = 2
+ADAPTER_VERSION = "0.4.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _ROLES = {
@@ -51,6 +51,7 @@ _ROLES = {
     "WORKBOOK_REFERENCE",
 }
 _AGGREGATE_ROLES = frozenset({"MANUAL_NAV_CSV_ALL", "MANUAL_TRANSACTION_JSON_ALL"})
+_WCH_NAV_SCHEMA_NAME = "schwab-wch-historical-balance"
 
 
 class SchwabGenerationError(ValueError):
@@ -298,6 +299,9 @@ def _sources(
         source_as_of = _date(record["as_of_date"], "source.as_of_date")
         if source_as_of > generation_as_of:
             raise SchwabGenerationError("source is newer than generation")
+        schema_name = _text(record["schema_name"], "schema_name")
+        if (role == "WCH_NAV_CSV") != (schema_name == _WCH_NAV_SCHEMA_NAME):
+            raise SchwabGenerationError("source schema is invalid for role")
         account_value = record["account_id"]
         account_id = (
             None if account_value is None else _text(account_value, "account_id")
@@ -316,7 +320,7 @@ def _sources(
                 sha256=actual_hash,
                 size_bytes=actual_size,
                 as_of_date=source_as_of,
-                schema_name=_text(record["schema_name"], "schema_name"),
+                schema_name=schema_name,
                 schema_version=_text(record["schema_version"], "schema_version"),
             )
         )
@@ -399,6 +403,23 @@ def _sources(
     if len({frozenset(accounts) for accounts in account_scoped_roles.values()}) != 1:
         raise SchwabGenerationError("account-scoped role coverage differs")
     return grouped, tuple(sorted(artifacts, key=lambda item: item.artifact_id))
+
+
+def _account_source_artifact_ids(value: object, role: str) -> dict[str, str]:
+    """Index one account-scoped source role by its verified artifact identity."""
+
+    result: dict[str, str] = {}
+    for record in _objects(value, "sources"):
+        if record.get("role") != role:
+            continue
+        account_id = _text(record.get("account_id"), f"{role}.account_id")
+        artifact_id = _relative(record.get("artifact_id"), f"{role}.artifact_id")
+        if account_id in result:
+            raise SchwabGenerationError(
+                f"{role} has more than one source artifact for an account"
+            )
+        result[account_id] = artifact_id
+    return result
 
 
 def _json(path: Path) -> object:
@@ -489,6 +510,9 @@ def _current_snapshot(
     source_as_of = _date(source["as_of_date"], "current_snapshot.as_of_date")
     if source_as_of != generation_as_of:
         raise SchwabGenerationError("current snapshot date differs from generation")
+    schema_name = _text(source["schema_name"], "current_snapshot.schema_name")
+    if schema_name == _WCH_NAV_SCHEMA_NAME:
+        raise SchwabGenerationError("source schema is invalid for role")
 
     document = _object(_json(path), "current snapshot")
     snapshot_version = _integer(
@@ -638,7 +662,7 @@ def _current_snapshot(
         sha256=actual_hash,
         size_bytes=actual_size,
         as_of_date=source_as_of,
-        schema_name=_text(source["schema_name"], "current_snapshot.schema_name"),
+        schema_name=schema_name,
         schema_version=_text(
             source["schema_version"], "current_snapshot.schema_version"
         ),
@@ -1049,7 +1073,9 @@ def _nav_rows(path: Path, *, manual: bool) -> dict[date, Decimal]:
 
 
 def _nav(
-    wch: Sequence[tuple[str | None, Path]], manual: Sequence[tuple[str | None, Path]]
+    wch: Sequence[tuple[str | None, Path]],
+    manual: Sequence[tuple[str | None, Path]],
+    source_artifact_ids: Mapping[str, str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     manual_by_account = {
         account_id: _nav_rows(path, manual=True)
@@ -1088,6 +1114,7 @@ def _nav(
             identity = {
                 "account_id": account_id,
                 "as_of_date": observed_date.isoformat(),
+                "value_basis": "ACCOUNT_VALUE",
             }
             payload = NavObservation(
                 record_id=_record_id("nav", identity),
@@ -1096,6 +1123,10 @@ def _nav(
                 nav=ObservedAmount.available(amount, "USD"),
             ).to_dict()
             payload["evidence_class"] = "WCH_HISTORICAL"
+            payload["source_artifact_id"] = _text(
+                source_artifact_ids.get(account_id), "WCH_NAV_CSV.artifact_id"
+            )
+            payload["value_basis"] = "ACCOUNT_VALUE"
             normalized.append(payload)
     normalized.sort(key=lambda item: (str(item["account_id"]), str(item["as_of_date"])))
     findings.sort(key=lambda item: str(item["account_id"]))
@@ -1107,6 +1138,7 @@ def _nav_all(
     manual_path: Path,
     *,
     suffix_to_internal: Mapping[str, str],
+    source_artifact_ids: Mapping[str, str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Reconcile an all-accounts manual balances CSV against per-account WCH NAV.
 
@@ -1218,6 +1250,7 @@ def _nav_all(
             identity = {
                 "account_id": account_id,
                 "as_of_date": obs_date.isoformat(),
+                "value_basis": "ACCOUNT_VALUE",
             }
             payload = NavObservation(
                 record_id=_record_id("nav", identity),
@@ -1226,6 +1259,10 @@ def _nav_all(
                 nav=ObservedAmount.available(amount, "USD"),
             ).to_dict()
             payload["evidence_class"] = "WCH_HISTORICAL"
+            payload["source_artifact_id"] = _text(
+                source_artifact_ids.get(account_id), "WCH_NAV_CSV.artifact_id"
+            )
+            payload["value_basis"] = "ACCOUNT_VALUE"
             normalized.append(payload)
 
     per_account_findings.sort(key=lambda item: str(item["account_id"]))
@@ -1372,6 +1409,9 @@ def build_generation(
     if tuple(sorted(suffix_to_internal)) != suffixes:
         raise SchwabGenerationError("crosswalk suffix derivation differs")
     sources, artifacts = _sources(spec["sources"], roots, generation_as_of)
+    nav_source_artifact_ids = _account_source_artifact_ids(
+        spec["sources"], "WCH_NAV_CSV"
+    )
     txn_partial_gap: dict[str, object] | None = None
     expected_export_record_count: int | None = None
     if sources.get("MANUAL_TRANSACTION_JSON_ALL"):
@@ -1408,10 +1448,13 @@ def build_generation(
             sources["WCH_NAV_CSV"],
             sources["MANUAL_NAV_CSV_ALL"][0][1],
             suffix_to_internal=suffix_to_internal,
+            source_artifact_ids=nav_source_artifact_ids,
         )
     else:
         nav, nav_reconciliation = _nav(
-            sources["WCH_NAV_CSV"], sources["MANUAL_NAV_CSV"]
+            sources["WCH_NAV_CSV"],
+            sources["MANUAL_NAV_CSV"],
+            nav_source_artifact_ids,
         )
     manual_positions, manual_position_as_of, unavailable_position_quantity = _positions(
         sources["MANUAL_POSITION_CSV"][0][1], suffix_to_internal

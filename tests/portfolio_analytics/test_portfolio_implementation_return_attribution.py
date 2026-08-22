@@ -77,6 +77,30 @@ def test_scale_at_uses_latest_effective_date_not_insertion_order() -> None:
     assert attribution._scale_at(schedules, "MODEL", date(2026, 4, 1)) == 0.02
 
 
+def test_authoritative_nav_providers_come_only_from_authoritative_admissions() -> None:
+    ledger = {
+        "admissions": [
+            {
+                "disposition": "REFERENCE_ONLY",
+                "fact_type": "nav_observations",
+                "provider_id": "alpaca",
+            },
+            {
+                "disposition": "AUTHORITATIVE",
+                "fact_type": "nav_observations",
+                "provider_id": "schwab",
+            },
+            {
+                "disposition": "AUTHORITATIVE",
+                "fact_type": "positions",
+                "provider_id": "ibkr",
+            },
+        ]
+    }
+
+    assert attribution._authoritative_nav_provider_ids(ledger) == {"schwab"}
+
+
 def test_grizzly_transaction_ledger_keeps_costs_and_income_separate() -> None:
     rows = [
         {

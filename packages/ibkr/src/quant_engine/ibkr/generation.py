@@ -47,8 +47,8 @@ from quant_engine.portfolio_ledger import (
 
 
 SPEC_SCHEMA_VERSION = 3
-CATALOG_SCHEMA_VERSION = 3
-ADAPTER_VERSION = "0.3.0"
+CATALOG_SCHEMA_VERSION = 4
+ADAPTER_VERSION = "0.4.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SOURCE_ROLES = {
@@ -60,6 +60,8 @@ _SOURCE_ROLES = {
     "BINARY_REFERENCE",
     "TWS_CURRENT_SNAPSHOT",
 }
+_ACTIVITY_FLEX_SCHEMA_NAME = "activity-flex"
+_ACTIVITY_FLEX_ROLES = frozenset({"PRIMARY_FLEX_ACTIVITY", "REFRESH_FLEX_ACTIVITY"})
 _EXTERNAL_FLOW_TYPES = {"Deposits/Withdrawals"}
 
 
@@ -288,13 +290,18 @@ def _sources(
         source_as_of = _date(item["as_of_date"], "source.as_of_date")
         if source_as_of > generation_as_of:
             raise IbkrGenerationError("source is newer than generation")
+        schema_name = _text(item["schema_name"], "source.schema_name")
+        if (role in _ACTIVITY_FLEX_ROLES) != (
+            schema_name == _ACTIVITY_FLEX_SCHEMA_NAME
+        ):
+            raise IbkrGenerationError("source schema is invalid for role")
         artifacts.append(
             SourceArtifact(
                 artifact_id=artifact_id,
                 sha256=actual_hash,
                 size_bytes=actual_size,
                 as_of_date=source_as_of,
-                schema_name=_text(item["schema_name"], "source.schema_name"),
+                schema_name=schema_name,
                 schema_version=_text(item["schema_version"], "source.schema_version"),
             )
         )
@@ -631,6 +638,7 @@ def _normalize(
                 "value": decimal_text(statement.nav),
             },
             "source_artifact_id": statement.artifact_id,
+            "value_basis": "ACCOUNT_TOTAL",
         }
         nav.append({"record_id": _record_id("nav", nav_payload), **nav_payload})
         for position in statement.positions:

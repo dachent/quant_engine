@@ -160,7 +160,7 @@ def _spec(tmp_path: Path) -> Path:
                 artifact_id=f"wch/nav-{index}.csv",
                 role="WCH_NAV_CSV",
                 account_id=account_id,
-                schema_name="synthetic-wch-nav",
+                schema_name="schwab-wch-historical-balance",
             )
         )
         manual_nav = source_root / f"manual-nav-{index}.csv"
@@ -351,12 +351,47 @@ def test_build_is_deterministic_partial_and_reconciled(tmp_path: Path) -> None:
     assert len(first["accounts"]) == 8
     assert len(first["transactions"]) == 8
     assert len(first["nav_observations"]) == 16
+    assert first["catalog_schema_version"] == 2
+    assert {item["value_basis"] for item in first["nav_observations"]} == {
+        "ACCOUNT_VALUE"
+    }
+    assert {item["source_artifact_id"] for item in first["nav_observations"]} == {
+        f"wch/nav-{index}.csv" for index in range(8)
+    }
     assert len(first["positions"]) == 8
     assert first["position_quantity_unavailable_count"] == 0
     assert {item["status"] for item in first["reconciliation"]} == {
         "PASS_EXACT",
         "PASS_WITH_LATER_MANUAL_DATE",
     }
+
+
+def test_wch_nav_schema_is_bound_exclusively_to_its_source_role(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    nav = next(item for item in document["sources"] if item["role"] == "WCH_NAV_CSV")
+    nav["schema_name"] = "synthetic-wch-nav"
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(
+        SchwabGenerationError, match="source schema is invalid for role"
+    ):
+        build_generation(spec)
+
+    reserved_root = tmp_path / "reserved-schema"
+    reserved_root.mkdir()
+    spec = _spec(reserved_root)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    transaction = next(
+        item for item in document["sources"] if item["role"] == "WCH_TRANSACTION_JSON"
+    )
+    transaction["schema_name"] = "schwab-wch-historical-balance"
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(
+        SchwabGenerationError, match="source schema is invalid for role"
+    ):
+        build_generation(spec)
 
 
 def test_stage_is_immutable_and_does_not_publish(tmp_path: Path) -> None:
@@ -396,6 +431,17 @@ def test_current_snapshot_supersedes_manual_current_reference(tmp_path: Path) ->
     )
     assert current_reference["status"] == "PASS_EXACT"
     assert "current_balances" in manifest.coverage.fact_types
+
+
+def test_current_snapshot_cannot_claim_wch_nav_schema(tmp_path: Path) -> None:
+    spec = _spec_with_current(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    document["current_snapshot"]["schema_name"] = "schwab-wch-historical-balance"
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(
+        SchwabGenerationError, match="source schema is invalid for role"
+    ):
+        build_generation(spec)
 
 
 def test_complete_current_candidate_publishes_only_exact_rebuild(
@@ -634,7 +680,7 @@ def _spec_aggregate(tmp_path: Path) -> Path:
                 artifact_id=f"wch/nav-{index}.csv",
                 role="WCH_NAV_CSV",
                 account_id=account_id,
-                schema_name="synthetic-wch-nav",
+                schema_name="schwab-wch-historical-balance",
             )
         )
         nav_date_rows.append((date_a, val_a, 0))
@@ -1031,7 +1077,7 @@ def test_aggregate_transactions_window_edge(tmp_path: Path) -> None:
                 artifact_id=f"wch/nav-{index}.csv",
                 role="WCH_NAV_CSV",
                 account_id=account_id,
-                schema_name="synthetic-wch-nav",
+                schema_name="schwab-wch-historical-balance",
             )
         )
 
@@ -1201,6 +1247,10 @@ def test_aggregate_nav_pass(tmp_path: Path) -> None:
     catalog, manifest, _ = build_generation(spec)
     # 8 accounts × 2 NAV entries each
     assert len(catalog["nav_observations"]) == 16
+    assert {item["value_basis"] for item in catalog["nav_observations"]} == {
+        "ACCOUNT_VALUE"
+    }
+    assert all(item["source_artifact_id"] for item in catalog["nav_observations"])
     nav_recon = [
         item for item in catalog["reconciliation"] if item["fact_type"] == "NAV"
     ]
@@ -1379,7 +1429,7 @@ def test_per_account_07_31_catalog_digest(tmp_path: Path) -> None:
     assert len(catalog["transactions"]) == 8
     # Golden digest — must match exactly as long as the per-account code path
     # is unchanged from the reference build.
-    GOLDEN = "6f8d8501b557d97dead19362f5edb76f500ef05488014fd7956fa17afa744332"
+    GOLDEN = "fd7a6e9cd67ac138c4d3fe4175fa24c08b2e87865ef75b389072c56bf31fdde4"
     assert actual_digest == GOLDEN, (
         f"per-account catalog digest changed: {actual_digest} != {GOLDEN}"
     )
