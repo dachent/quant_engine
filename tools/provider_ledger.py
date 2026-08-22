@@ -401,6 +401,56 @@ def _mapped_strategy_for_account(
     )
 
 
+def _matrixport_daily_component_total(
+    manifest: GenerationManifest,
+    run_root: Path,
+    boundary_date: date,
+) -> Decimal:
+    """Sum the hash-bound per-product components for one account-total date."""
+    artifact_id = "csv/daily_holdings.csv"
+    artifact = _find_manifest_artifact(
+        manifest, artifact_id, "matrixport daily holdings"
+    )
+    path = _exact_file(run_root, Path(artifact_id), "matrixport daily holdings")
+    rows = _verified_csv_rows(
+        path,
+        artifact.sha256,
+        {"product_id", "share", "utc_date", "value_usd_strict_component"},
+        "matrixport daily holdings",
+    )
+    total = Decimal()
+    observed = False
+    for row in rows:
+        if _day(row.get("utc_date"), "matrixport daily holdings utc_date") != (
+            boundary_date
+        ):
+            continue
+        share = _observed_decimal(row.get("share"), "matrixport daily holdings share")
+        if share is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_COMPONENT_INVALID: active share is absent"
+            )
+        if share == 0:
+            continue
+        value = _observed_decimal(
+            row.get("value_usd_strict_component"),
+            "matrixport daily holdings strict component",
+        )
+        if value is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_COMPONENT_UNAVAILABLE: active holding lacks "
+                "a strict USD component"
+            )
+        total += value
+        observed = True
+    if not observed:
+        raise ProviderLedgerError(
+            "MATRIXPORT_ACCOUNT_COMPONENTS_UNAVAILABLE: no active daily holdings "
+            "exist at the account-total boundary"
+        )
+    return total
+
+
 def _matrixport_nav_observations(
     generation_id: str,
     manifest: GenerationManifest,
@@ -413,19 +463,25 @@ def _matrixport_nav_observations(
     """Admit Matrixport daily portfolio totals as account NAV observations."""
     account_id = _CSV_FACT_ACCOUNT["matrixport"]
     source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
+    run_root = root / "output" / source_run_id
     artifact_id = "csv/daily_portfolio_totals.csv"
     artifact = _find_manifest_artifact(
         manifest, artifact_id, "matrixport daily portfolio totals"
     )
     path = _exact_file(
-        root / "output" / source_run_id,
+        run_root,
         Path(artifact_id),
         "matrixport daily portfolio totals",
     )
     rows = _verified_csv_rows(
         path,
         artifact.sha256,
-        {"utc_date", "portfolio_value_usd_observed", "strict_complete"},
+        {
+            "portfolio_value_usd_observed",
+            "portfolio_value_usd_strict",
+            "strict_complete",
+            "utc_date",
+        },
         "matrixport daily portfolio totals",
     )
     observations: list[dict[str, Any]] = []
@@ -439,9 +495,17 @@ def _matrixport_nav_observations(
             row.get("portfolio_value_usd_observed"),
             "matrixport portfolio_value_usd_observed",
         )
-        if value is None or value <= 0:
-            # A blank cell is an absent observation; a non-positive total is
-            # not a plausible portfolio NAV — never admit either.
+        strict_value = _observed_decimal(
+            row.get("portfolio_value_usd_strict"),
+            "matrixport portfolio_value_usd_strict",
+        )
+        if value is None or strict_value is None or value != strict_value:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_TOTAL_STRICT_MISMATCH: a strict-complete row "
+                "has absent or inconsistent observed and strict totals"
+            )
+        if value <= 0:
+            # A non-positive total is not a plausible portfolio NAV.
             continue
         day = _day(row["utc_date"], "matrixport portfolio utc_date")
         strategy_id, mapping_status = _mapped_strategy_for_account(
@@ -470,8 +534,47 @@ def _matrixport_nav_observations(
                 "source_artifact_id": artifact_id,
                 "source_record_id": source_id,
                 "strategy_id": strategy_id,
+                "value_basis": "ACCOUNT_TOTAL",
             }
         )
+    if observations:
+        observation_dates: set[str] = set()
+        for observation in observations:
+            observation_date = str(observation["as_of_date"])
+            if observation_date in observation_dates:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_ACCOUNT_TOTAL_DUPLICATE_DATE: more than one "
+                    "strict account total exists for a date"
+                )
+            observation_dates.add(observation_date)
+        snapshot_date = _day(
+            catalog.get("observed_boundary_date"),
+            "matrixport observed_boundary_date",
+        )
+        latest = max(observations, key=lambda item: str(item["as_of_date"]))
+        if latest["as_of_date"] != snapshot_date.isoformat():
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_SNAPSHOT_DATE_MISMATCH: latest strict "
+                "account total is not aligned with the daily-holdings boundary"
+            )
+        component_total = _matrixport_daily_component_total(
+            manifest, run_root, snapshot_date
+        )
+        latest_total = _observed_decimal(
+            latest["nav"], "matrixport latest account total"
+        )
+        if latest_total is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_TOTAL_UNAVAILABLE: latest total is absent"
+            )
+        # This is the producer's exact roll-up identity, not a return or jump
+        # cap: a strict account total is the sum of the same-date active
+        # holdings' strict USD components.
+        if latest_total != component_total:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_TOTAL_BASIS_MISMATCH: latest account total "
+                "does not equal its hash-bound daily holding components"
+            )
     return observations
 
 
