@@ -567,11 +567,93 @@ def test_matrixport_product_quota_scale_cannot_be_admitted_as_account_nav(
         totals_path,
         holding_usd_values=("50000",),
     )
-    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-14",
+        "source_run_id": run_id,
+    }
 
     with pytest.raises(
         ledger.ProviderLedgerError,
         match="MATRIXPORT_ACCOUNT_TOTAL_BASIS_MISMATCH",
+    ):
+        ledger._matrixport_nav_observations(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            {},
+        )
+
+
+def test_matrixport_stale_total_is_not_compared_to_current_holdings(
+    tmp_path: Path,
+) -> None:
+    """A current holdings snapshot cannot disposition an older account total;
+    legitimate funding between the two dates must not become a basis finding."""
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-13,50000,50000,true\n"
+        "2026-08-14,200000,,false\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        holding_usd_values=("200000",),
+    )
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-14",
+        "source_run_id": run_id,
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_ACCOUNT_SNAPSHOT_DATE_MISMATCH",
+    ):
+        ledger._matrixport_nav_observations(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            {},
+        )
+
+
+def test_matrixport_duplicate_total_date_fails_closed(tmp_path: Path) -> None:
+    """Two accepted values for one account/date are ambiguous; a matching
+    first row must not hide a quota-scale duplicate from reconciliation."""
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-14,50000,50000,true\n"
+        "2026-08-14,2000000000,2000000000,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        holding_usd_values=("50000",),
+    )
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-14",
+        "source_run_id": run_id,
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_ACCOUNT_TOTAL_DUPLICATE_DATE",
     ):
         ledger._matrixport_nav_observations(
             "gen-1",
@@ -600,9 +682,13 @@ def test_matrixport_daily_portfolio_totals_admitted_as_nav_observations(
     )
     manifest = _make_matrixport_manifest(
         csv_path,
-        holding_usd_values=("48663.88457193982560558809181",),
+        holding_usd_values=("20000", "28663.88457193982560558809181"),
     )
-    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-14",
+        "source_run_id": run_id,
+    }
     accounts = {"account-d2e5821e608e25f1"}
     strategies = {"robuxio-crypto"}
     assignments = {
@@ -659,7 +745,11 @@ def test_matrixport_blank_nav_day_is_skipped_not_fatal(tmp_path: Path) -> None:
         csv_path,
         holding_usd_values=("49520.75",),
     )
-    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-01-28",
+        "source_run_id": run_id,
+    }
     assignments = {
         "account-d2e5821e608e25f1": [
             {
@@ -701,7 +791,11 @@ def test_matrixport_csv_hash_tamper_fails_closed(tmp_path: Path) -> None:
     )
     for artifact in manifest.artifacts:
         artifact.__dict__["sha256"] = "0" * 64  # tamper
-    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-13",
+        "source_run_id": run_id,
+    }
 
     with pytest.raises(ledger.ProviderLedgerError, match="hash differs"):
         ledger._matrixport_nav_observations(
@@ -713,6 +807,99 @@ def test_matrixport_csv_hash_tamper_fails_closed(tmp_path: Path) -> None:
             {"robuxio-crypto"},
             {},
         )
+
+
+def test_matrixport_holdings_hash_tamper_fails_closed(tmp_path: Path) -> None:
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-13,50000,50000,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        holding_usd_values=("50000",),
+    )
+    holdings_artifact = next(
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == "csv/holdings.csv"
+    )
+    holdings_artifact.__dict__["sha256"] = "0" * 64
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-13",
+        "source_run_id": run_id,
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="matrixport account holdings hash differs",
+    ):
+        ledger._matrixport_nav_observations(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    ("holdings_total", "expect_mismatch"),
+    (
+        ("25000", False),
+        ("100000", False),
+        ("24999.99", True),
+        ("100000.01", True),
+    ),
+)
+def test_matrixport_account_snapshot_scale_boundaries(
+    tmp_path: Path,
+    holdings_total: str,
+    expect_mismatch: bool,
+) -> None:
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-13,50000,50000,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        holding_usd_values=(holdings_total,),
+    )
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-13",
+        "source_run_id": run_id,
+    }
+    arguments = (
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        {},
+    )
+
+    if expect_mismatch:
+        with pytest.raises(
+            ledger.ProviderLedgerError,
+            match="MATRIXPORT_ACCOUNT_TOTAL_BASIS_MISMATCH",
+        ):
+            ledger._matrixport_nav_observations(*arguments)
+    else:
+        assert len(ledger._matrixport_nav_observations(*arguments)) == 1
 
 
 def test_quantbase_volatis_dashboard_admitted_as_nav_observations(
@@ -882,7 +1069,11 @@ def test_matrixport_incomplete_totals_never_admitted(tmp_path: Path) -> None:
         csv_path,
         holding_usd_values=("48663.88",),
     )
-    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-13",
+        "source_run_id": run_id,
+    }
     assignments = {
         "account-d2e5821e608e25f1": [
             {
@@ -922,7 +1113,11 @@ def test_matrixport_source_run_id_traversal_rejected(tmp_path: Path) -> None:
         csv_path,
         holding_usd_values=("48663.88",),
     )
-    catalog = {"catalog_schema_version": 2, "source_run_id": "../escape"}
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-13",
+        "source_run_id": "../escape",
+    }
 
     with pytest.raises(ledger.ProviderLedgerError, match="not a safe run identifier"):
         ledger._matrixport_nav_observations(
@@ -990,7 +1185,11 @@ def test_matrixport_non_positive_totals_never_admitted(tmp_path: Path) -> None:
         csv_path,
         holding_usd_values=("48663.88",),
     )
-    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-13",
+        "source_run_id": run_id,
+    }
     assignments = {
         "account-d2e5821e608e25f1": [
             {

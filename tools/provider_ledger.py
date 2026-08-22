@@ -512,8 +512,26 @@ def _matrixport_nav_observations(
             }
         )
     if observations:
-        snapshot_total = _matrixport_account_snapshot_usd(manifest, run_root)
+        observation_dates: set[str] = set()
+        for observation in observations:
+            observation_date = str(observation["as_of_date"])
+            if observation_date in observation_dates:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_ACCOUNT_TOTAL_DUPLICATE_DATE: more than one "
+                    "strict account total exists for a date"
+                )
+            observation_dates.add(observation_date)
+        snapshot_date = _day(
+            catalog.get("observed_boundary_date"),
+            "matrixport observed_boundary_date",
+        )
         latest = max(observations, key=lambda item: str(item["as_of_date"]))
+        if latest["as_of_date"] != snapshot_date.isoformat():
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_SNAPSHOT_DATE_MISMATCH: latest strict "
+                "account total is not aligned with the holdings snapshot"
+            )
+        snapshot_total = _matrixport_account_snapshot_usd(manifest, run_root)
         latest_total = _observed_decimal(
             latest["nav"], "matrixport latest account total"
         )
