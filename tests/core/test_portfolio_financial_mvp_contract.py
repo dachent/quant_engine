@@ -198,7 +198,7 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
     assert contract_tool.contract_digest(contract) == (
-        "519d955eddbf88415cfd49a3746aa3cab432e092ac8f1de89ae1bde38d49f2f7"
+        "5cef32713e26ad847bc6feec3f2b447a7bcc9ad0b8437f0d9e86ab608418fb61"
     )
 
 
