@@ -213,8 +213,10 @@ def derive_governed_calendar_authority(
                     )
                     cursor += timedelta(days=1)
                 evidence_parts.append(f"{prior_key}..{next_key}:{carry}")
+            observed_binding = "|".join(day.isoformat() for day in observed)
+            gap_binding = ";".join(evidence_parts)
             evidence = hashlib.sha256(
-                ("\n".join(evidence_parts) or "NO_GAPS").encode("utf-8")
+                "\n".join([observed_binding, f"GAPS:{gap_binding}"]).encode("utf-8")
             ).hexdigest()
 
         source_calendars.append(

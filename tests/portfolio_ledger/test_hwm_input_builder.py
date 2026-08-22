@@ -88,8 +88,10 @@ def test_membership_and_bracket_capital_derive_component_periods() -> None:
         capital_observations=[
             _capital_obs("grizzlybears-vtma", "2026-01-02", "1000"),
             _capital_obs("grizzlybears-vtma", "2026-01-05", "1100"),
+            _capital_obs("grizzlybears-vtma", "2026-01-06", "990"),
             _capital_obs("robuxio-crypto", "2026-01-02", "500"),
             _capital_obs("robuxio-crypto", "2026-01-05", "450"),
+            _capital_obs("robuxio-crypto", "2026-01-06", "455"),
         ],
         return_observations=[
             _return_obs("grizzlybears-vtma", "2026-01-03", "2026-01-04", "0.04"),
@@ -193,3 +195,68 @@ def test_generation_identity_is_canonical_self_hash() -> None:
     unhashed = dict(result)
     unhashed.pop("generation_evidence_sha256")
     assert _sha(unhashed) == declared
+
+
+def test_trailing_capital_anchor_required_for_every_period() -> None:
+    with pytest.raises(HwmInputBuilderError, match="closing"):
+        build_governed_hwm_inputs(
+            members=[_member("grizzlybears-vtma", "2026-01-02")],
+            capital_observations=[
+                _capital_obs("grizzlybears-vtma", "2026-01-02", "1000"),
+            ],
+            return_observations=[
+                _return_obs("grizzlybears-vtma", "2026-01-03", "2026-01-04", "0.01")
+            ],
+            calendar_authority_sha256=CALENDAR_SHA,
+            hwm_policy_sha256=POLICY_SHA,
+        )
+
+
+def test_non_account_live_net_basis_rejected() -> None:
+    members_rows = [_member("grizzlybears-vtma", "2026-01-02")]
+    caps = [
+        _capital_obs("grizzlybears-vtma", "2026-01-02", "1000"),
+        _capital_obs("grizzlybears-vtma", "2026-01-07", "1100"),
+    ]
+    rets = [_return_obs("grizzlybears-vtma", "2026-01-03", "2026-01-04", "0.01")]
+    rets[0]["return_basis"] = "BACKTEST_SIMULATED"
+    with pytest.raises(HwmInputBuilderError, match="ACCOUNT_LIVE_NET"):
+        build_governed_hwm_inputs(
+            members=members_rows,
+            capital_observations=caps,
+            return_observations=rets,
+            calendar_authority_sha256=CALENDAR_SHA,
+            hwm_policy_sha256=POLICY_SHA,
+        )
+
+
+def test_multi_day_interval_rejected() -> None:
+    with pytest.raises(HwmInputBuilderError, match="one-day"):
+        build_governed_hwm_inputs(
+            members=[_member("grizzlybears-vtma", "2026-01-02")],
+            capital_observations=[
+                _capital_obs("grizzlybears-vtma", "2026-01-02", "1000"),
+                _capital_obs("grizzlybears-vtma", "2026-01-08", "1100"),
+            ],
+            return_observations=[
+                _return_obs("grizzlybears-vtma", "2026-01-03", "2026-01-06", "0.01")
+            ],
+            calendar_authority_sha256=CALENDAR_SHA,
+            hwm_policy_sha256=POLICY_SHA,
+        )
+
+
+def test_return_row_outside_perimeter_rejected() -> None:
+    with pytest.raises(HwmInputBuilderError, match="perimeter"):
+        build_governed_hwm_inputs(
+            members=[_member("grizzlybears-vtma", "2026-01-02")],
+            capital_observations=[
+                _capital_obs("grizzlybears-vtma", "2026-01-02", "1000"),
+                _capital_obs("grizzlybears-vtma", "2026-01-07", "1100"),
+            ],
+            return_observations=[
+                _return_obs("grizzlybear-vtma-typo", "2026-01-03", "2026-01-04", "0.01")
+            ],
+            calendar_authority_sha256=CALENDAR_SHA,
+            hwm_policy_sha256=POLICY_SHA,
+        )

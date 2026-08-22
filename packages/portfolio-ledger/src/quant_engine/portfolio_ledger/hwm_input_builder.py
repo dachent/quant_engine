@@ -132,6 +132,26 @@ def build_governed_hwm_inputs(
     for rows in capital_by_strategy.values():
         rows.sort(key=lambda item: item[0])
 
+    required_basis = "ACCOUNT_LIVE_NET"
+    for obs in return_observations:
+        strategy_id = _text(obs.get("strategy_id"), "return strategy_id")
+        if strategy_id not in member_rows:
+            raise HwmInputBuilderError(
+                f"builder return observation outside perimeter: {strategy_id}"
+            )
+        interval_start = _date(obs.get("interval_start"), "interval_start")
+        interval_end = _date(obs.get("interval_end"), "interval_end")
+        if (interval_end - interval_start).days != 1:
+            raise HwmInputBuilderError(
+                f"builder requires exact one-day accepted intervals for {strategy_id}"
+            )
+        basis = obs.get("return_basis")
+        if basis != required_basis:
+            raise HwmInputBuilderError(
+                f"builder requires {required_basis} returns, got {basis!r} "
+                f"for {strategy_id}"
+            )
+
     generation: Row = {
         "schema_version": 1,
         "builder": BUILDER_ID,
@@ -176,6 +196,12 @@ def build_governed_hwm_inputs(
                     f"builder return lacks an opening bracket anchor for "
                     f"{strategy_id} before {interval_start.isoformat()} "
                     "(terminal-only backcast is rejected)"
+                )
+            if anchor_index + 1 >= len(anchors):
+                raise HwmInputBuilderError(
+                    f"builder requires an independently observed closing "
+                    f"bracket anchor after {interval_end.isoformat()} for "
+                    f"{strategy_id}"
                 )
             net_return = _decimal_text(obs.get("net_return"), "net_return")
             basis = _text(obs.get("return_basis"), "return_basis")

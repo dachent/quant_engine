@@ -127,6 +127,35 @@ def test_root_hash_matches_external_acceptance_identity() -> None:
     assert hashlib.sha256(_canon(unhashed)).hexdigest() == declared
 
 
+def test_distinct_declared_session_histories_bind_distinct_identities() -> None:
+    kwargs = dict(
+        calendar_policy_id="GOV-CAL-001",
+        owner_decision_evidence="owner acceptance pending",
+        hwm_policy_sha256=POLICY_SHA256,
+    )
+    short = derive_governed_calendar_authority(
+        strategy_calendars=[
+            _declared_session("p123-eu", ["2026-01-01", "2026-01-02"], {})
+        ],
+        **kwargs,
+    )
+    long = derive_governed_calendar_authority(
+        strategy_calendars=[
+            _declared_session(
+                "p123-eu",
+                ["2026-01-01", "2026-01-02", "2026-01-03"],
+                {},
+            )
+        ],
+        **kwargs,
+    )
+    assert (
+        short["source_calendars"][0]["calendar_evidence_sha256"]
+        != long["source_calendars"][0]["calendar_evidence_sha256"]
+    )
+    assert short["authority_evidence_sha256"] != long["authority_evidence_sha256"]
+
+
 def test_gap_with_drifting_capital_fails_closed() -> None:
     with pytest.raises(GovernedHwmAuthorityError, match="reconcile"):
         derive_governed_calendar_authority(
