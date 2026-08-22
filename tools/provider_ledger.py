@@ -499,16 +499,13 @@ def _matrixport_nav_observations(
             row.get("portfolio_value_usd_strict"),
             "matrixport portfolio_value_usd_strict",
         )
-        if value is None and strict_value is None:
-            continue
         if value is None or strict_value is None or value != strict_value:
             raise ProviderLedgerError(
                 "MATRIXPORT_ACCOUNT_TOTAL_STRICT_MISMATCH: a strict-complete row "
-                "has inconsistent observed and strict totals"
+                "has absent or inconsistent observed and strict totals"
             )
         if value <= 0:
-            # A blank cell is an absent observation; a non-positive total is
-            # not a plausible portfolio NAV — never admit either.
+            # A non-positive total is not a plausible portfolio NAV.
             continue
         day = _day(row["utc_date"], "matrixport portfolio utc_date")
         strategy_id, mapping_status = _mapped_strategy_for_account(

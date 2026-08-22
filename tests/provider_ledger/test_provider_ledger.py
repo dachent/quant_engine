@@ -773,9 +773,8 @@ def test_matrixport_daily_portfolio_totals_admitted_as_nav_observations(
     assert rows[1]["as_of_date"] == "2026-08-14"
 
 
-def test_matrixport_blank_nav_day_is_skipped_not_fatal(tmp_path: Path) -> None:
-    """Blank value cells (the owner-accepted provider-missing NAV days) are
-    absent observations, never parse errors."""
+def test_matrixport_strict_complete_blank_total_fails_closed(tmp_path: Path) -> None:
+    """A row cannot claim strict completeness while omitting both totals."""
     run_id = "20260816T141010.494Z"
     output_root = tmp_path / "output" / run_id
     (output_root / "csv").mkdir(parents=True)
@@ -807,17 +806,19 @@ def test_matrixport_blank_nav_day_is_skipped_not_fatal(tmp_path: Path) -> None:
         ]
     }
 
-    rows = ledger._matrixport_nav_observations(
-        "gen-1",
-        manifest,
-        catalog,
-        tmp_path,
-        {"account-d2e5821e608e25f1"},
-        {"robuxio-crypto"},
-        assignments,
-    )
-
-    assert [row["as_of_date"] for row in rows] == ["2026-01-26", "2026-01-28"]
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_ACCOUNT_TOTAL_STRICT_MISMATCH",
+    ):
+        ledger._matrixport_nav_observations(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            assignments,
+        )
 
 
 def test_matrixport_csv_hash_tamper_fails_closed(tmp_path: Path) -> None:
@@ -897,6 +898,60 @@ def test_matrixport_daily_holdings_hash_tamper_fails_closed(tmp_path: Path) -> N
             {"robuxio-crypto"},
             {},
         )
+
+
+def test_matrixport_component_rollup_uses_only_active_boundary_rows(
+    tmp_path: Path,
+) -> None:
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-08-13,50000,50000,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        component_date="2026-08-13",
+        component_usd_values=("50000",),
+    )
+    daily_holdings_path = output_root / "csv/daily_holdings.csv"
+    daily_holdings_path.write_text(
+        "utc_date,product_id,share,value_usd_strict_component\n"
+        "2026-08-12,OFF_BOUNDARY,1,999999\n"
+        "2026-08-13,ZERO_SHARE,0,999999\n"
+        "2026-08-13,LONG,1,55000\n"
+        "2026-08-13,SHORT,-1,-5000\n",
+        encoding="utf-8-sig",
+    )
+    digest, size = hash_file(daily_holdings_path)
+    daily_holdings_artifact = next(
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == "csv/daily_holdings.csv"
+    )
+    daily_holdings_artifact.__dict__["sha256"] = digest
+    daily_holdings_artifact.__dict__["size_bytes"] = size
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-13",
+        "source_run_id": run_id,
+    }
+
+    rows = ledger._matrixport_nav_observations(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        {},
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["nav"]["value"] == "50000"
 
 
 @pytest.mark.parametrize(
