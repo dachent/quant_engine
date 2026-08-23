@@ -4159,6 +4159,10 @@ def verify_candidate(
         correlation_root,
         hwm_portable_generation_bytes,
         hwm_portable_calendar_bytes,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:

@@ -577,6 +577,7 @@ def compute_governed_as_held_composite_hwm(
             "policy_semantic_digest": policy_semantic_digest,
             "calendar_sha256": calendar_sha256,
             "input_generation_sha256": declared_generation_hash,
+            "upstream_receipt_sha256": receipt_sha256,
             "input_authority_class": _GOVERNED_INPUT_AUTHORITY,
             "input_sha256": _canonical_sha256(
                 _json_safe(
@@ -684,4 +685,26 @@ def verify_governed_hwm_result(
         )
     if recomputed.get("receipt_sha256") != result_receipt.get("receipt_sha256"):
         raise HwmCoverageError("governed HWM result identity differs")
+    # P1-B: the presented grid is only trusted when it agrees with the
+    # hash-verified generation's own coverage: the earliest period start
+    # anchors the grid and the last interval ends at complete_through, so a
+    # truncated or shifted suffix cannot pass while periods remain.
+    presented_intervals = result_receipt["input_evidence"]["accepted_intervals"]
+    if not presented_intervals:
+        raise HwmCoverageError("presented accepted interval grid is empty")
+    period_starts = [
+        _canonical_date(row["interval_start"], "generation period start")
+        for row in generation["component_periods"]
+    ]
+    period_ends = [
+        _canonical_date(row["interval_end"], "generation period end")
+        for row in generation["component_periods"]
+    ]
+    if (
+        presented_intervals[0]["interval_start"] != min(period_starts).isoformat()
+        or presented_intervals[-1]["interval_end"] != max(period_ends).isoformat()
+    ):
+        raise HwmCoverageError(
+            "presented accepted interval grid differs from generation coverage"
+        )
     return recomputed

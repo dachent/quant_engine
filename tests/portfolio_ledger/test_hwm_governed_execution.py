@@ -27,6 +27,7 @@ from quant_engine.portfolio_ledger.hwm import (
 )
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     compute_governed_as_held_composite_hwm,
+    verify_governed_hwm_result,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -448,6 +449,44 @@ def test_verify_governed_hwm_result_accepts_and_rejects(tmp_path):
     with pytest.raises(HwmCoverageError, match="diverges from recomputation"):
         verify_governed_hwm_result(
             forged,
+            input_generation_bytes=json.dumps(
+                fx["generation"], sort_keys=True
+            ).encode(),
+            calendar_bytes=fx["calendar_authority_bytes"],
+            input_receipt_bytes=fx["input_receipt_bytes"],
+            policy_bytes=fx["policy_bytes"],
+            product_contract_bytes=fx["product_contract_bytes"],
+            performance_policy_bytes=fx["performance_policy_bytes"],
+            legacy_policy_bytes=fx["legacy_policy_bytes"],
+        )
+
+
+def test_verifier_rejects_truncated_presented_grid(tmp_path):
+    """P1-B: dropping a grid suffix (with recomputed hash) fails because the
+    presented grid must agree with the generation's period coverage."""
+    fx = _fixture(tmp_path)
+    result = _run(fx)
+    truncated = json.loads(json.dumps(result, default=str))
+    truncated["input_evidence"]["accepted_intervals"] = truncated["input_evidence"][
+        "accepted_intervals"
+    ][2:]
+    canonical = json.dumps(
+        {k: v for k, v in truncated.items() if k != "receipt_sha256"},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    from quant_engine.portfolio_ledger.hwm import _json_safe
+
+    normalized = _json_safe(truncated)
+    canonical = json.dumps(
+        {k: v for k, v in normalized.items() if k != "receipt_sha256"},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    truncated["receipt_sha256"] = hashlib.sha256(canonical).hexdigest()
+    with pytest.raises(HwmCoverageError):
+        verify_governed_hwm_result(
+            truncated,
             input_generation_bytes=json.dumps(
                 fx["generation"], sort_keys=True
             ).encode(),
