@@ -289,7 +289,13 @@ def test_derived_candidate_fails_closed_while_policy_not_ready() -> None:
         / "contracts"
         / "portfolio-hwm-policy-v4.json"
     )
-    real_bytes = repo_policy_path.read_bytes()
+    # The production seam is now READY per the owner ruling (#324 comment
+    # 5383730751), so this test derives a self-contained REQUIRED_NOT_READY
+    # policy from the committed bytes to exercise the fail-closed path.
+    policy = json.loads(repo_policy_path.read_text(encoding="utf-8"))
+    policy["calendar_policy"]["release_authority_status"] = "REQUIRED_NOT_READY"
+    policy["calendar_policy"]["accepted_governed_calendar_policy_ids"] = []
+    real_bytes = json.dumps(policy, indent=2, sort_keys=True).encode()
     real_sha = hashlib.sha256(real_bytes).hexdigest()
     bound = dict(candidate)
     bound["hwm_policy_sha256"] = real_sha
