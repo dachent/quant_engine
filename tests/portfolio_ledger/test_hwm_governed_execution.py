@@ -101,6 +101,10 @@ def _period(sid, start, end, ret, cap):
         "net_return": ret,
         "return_basis": "ACCOUNT_LIVE_NET",
         "return_evidence_sha256": _sha(f"{sid}:{start}:{end}:{ret}"),
+        "membership_evidence_sha256": _sha(f"m-{sid}"),
+        "policy_binding_sha256": "0" * 64,
+        "calendar_sha256": "0" * 64,
+        "source_generation_sha256": "",
     }
 
 
@@ -165,18 +169,19 @@ def _fixture(tmp_path, ready=True):
         _period("a-daily", "2026-01-04", "2026-01-05", "-0.01", "62.424"),
         _period("a-daily", "2026-01-05", "2026-01-06", "0.03", "61.79976"),
         _period("a-daily", "2026-01-06", "2026-01-07", "0.005", "63.653748"),
-        # B: Friday row, Monday bound-span row, Tue/Wed rows; Sat/Sun are
-        # interior days of the accepted interval -> kernel derives zeros.
+        # B: Friday one-day row, then the REAL embedded-span shape: the
+        # Mon row spans Fri->Mon (declared accepted interval), then one-day
+        # rows resume; Sat/Sun interior days -> kernel-derived zeros.
         _period("b-session", "2026-01-02", "2026-01-03", "0.005", "40"),
-        _period("b-session", "2026-01-05", "2026-01-06", "0.04", "40.2"),
-        _period("b-session", "2026-01-06", "2026-01-07", "0.01", "41.808"),
+        _period("b-session", "2026-01-02", "2026-01-05", "0.04", "40.2"),
+        _period("b-session", "2026-01-05", "2026-01-06", "0.002", "41.808"),
+        _period("b-session", "2026-01-06", "2026-01-07", "0.01", "41.891616"),
     ]
     gen = _generation(
         periods,
         policy_binding=hashlib.sha256(policy_bytes).hexdigest(),
-        calendar_binding=hashlib.sha256(
-            json.dumps(cal, sort_keys=True).encode()
-        ).hexdigest(),
+        # Semantic identity: the authority document's internal self-hash.
+        calendar_binding=cal["authority_evidence_sha256"],
     )
     return {
         "accepted_intervals": [
@@ -229,17 +234,18 @@ def test_governed_entry_computes_hand_worked_composite(tmp_path):
     first = result["periods"][0]
     assert first["composite_return"] == Decimal("0.008")
     # Weekend interior days: B inside accepted span -> kernel-derived 0;
-    # A keeps trading (Sat .02, Sun -.01).
+    # A keeps trading (Sat .02). The span's economics land on the grid
+    # interval ENDING at the binding day (Sun->Mon carries the 0.04).
     sat = result["periods"][1]
     b_sat = [c for c in sat["components"] if c["strategy_id"] == "b-session"]
     assert b_sat[0]["period_return"] == Decimal("0")
-    sun = result["periods"][2]
-    b_sun = [c for c in sun["components"] if c["strategy_id"] == "b-session"]
-    assert b_sun[0]["period_return"] == Decimal("0")
-    # Monday: B carries the bound 0.04.
+    sun_to_mon = result["periods"][2]
+    b_sm = [c for c in sun_to_mon["components"] if c["strategy_id"] == "b-session"]
+    assert b_sm[0]["period_return"] == Decimal("0.04")
+    # One-day rows resume after the binding day (Mon->Tue .002).
     mon = result["periods"][3]
     b_mon = [c for c in mon["components"] if c["strategy_id"] == "b-session"]
-    assert b_mon[0]["period_return"] == Decimal("0.04")
+    assert b_mon[0]["period_return"] == Decimal("0.002")
 
 
 def test_governed_entry_requires_ready_seam(tmp_path):
@@ -302,11 +308,9 @@ def test_governed_entry_fails_on_uncovered_member_interval(tmp_path):
     gen = _generation(
         fx["component_periods"],
         policy_binding=hashlib.sha256(fx["policy_bytes"]).hexdigest(),
-        calendar_binding=hashlib.sha256(
-            json.dumps(
-                json.loads(fx["calendar_authority_bytes"]), sort_keys=True
-            ).encode()
-        ).hexdigest(),
+        calendar_binding=json.loads(fx["calendar_authority_bytes"])[
+            "authority_evidence_sha256"
+        ],
     )
     with pytest.raises(HwmCoverageError, match="coverage"):
         compute_governed_as_held_composite_hwm(

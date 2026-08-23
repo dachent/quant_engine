@@ -58,6 +58,11 @@ _PERIOD_KEYS: Final = {
     "net_return",
     "return_basis",
     "return_evidence_sha256",
+    # Builder-stamped per-row provenance.
+    "membership_evidence_sha256",
+    "policy_binding_sha256",
+    "calendar_sha256",
+    "source_generation_sha256",
 }
 
 
@@ -199,7 +204,14 @@ def compute_governed_as_held_composite_hwm(
         raise HwmCoverageError("HWM input generation identity differs")
     if _sha256(generation["policy_binding_sha256"], "gen policy") != policy_sha256:
         raise HwmCoverageError("generation policy binding differs")
-    if _sha256(generation["calendar_sha256"], "gen calendar") != calendar_sha256:
+    # Identity convention: the generation binds the authority's SEMANTIC
+    # identity (its internal authority_evidence_sha256 over canonical
+    # content, re-verified above by the #356 seam). Byte-level artifact
+    # hashing is recorded separately in the receipt provenance.
+    if (
+        _sha256(generation["calendar_sha256"], "gen calendar")
+        != calendar_authority["authority_evidence_sha256"]
+    ):
         raise HwmCoverageError("generation calendar binding differs")
 
     evidence_values = generation["evidence_sha256s"]
@@ -312,8 +324,6 @@ def compute_governed_as_held_composite_hwm(
             raise HwmCoverageError(f"component period outside perimeter: {strategy_id}")
         start = _canonical_date(original["interval_start"], "period start")
         end = _canonical_date(original["interval_end"], "period end")
-        if (end - start).days != 1:
-            raise HwmCoverageError("governed period must be exactly one day")
         capital = Decimal(_text(original["beginning_capital_usd"], "beginning capital"))
         if capital <= 0:
             raise HwmCoverageError("governed beginning capital must be positive")
@@ -326,7 +336,29 @@ def compute_governed_as_held_composite_hwm(
         if basis != _GOVERNED_RETURN_BASIS:
             raise HwmCoverageError("governed return basis differs")
         _sha256(original["return_evidence_sha256"], "return evidence")
-        periods_by_key[(strategy_id, start.isoformat(), end.isoformat())] = original
+        span_days = (end - start).days
+        if span_days < 1:
+            raise HwmCoverageError("governed period is empty or reversed")
+        if span_days > 1:
+            # Multi-day rows are admitted ONLY as authority-declared
+            # accepted intervals, and their economics must equal the
+            # authority's bound return value exactly.
+            key = (start.isoformat(), end.isoformat())
+            declared_value = bindings.get(strategy_id, {}).get(key)
+            if declared_value is None:
+                raise HwmCoverageError(
+                    f"governed period must be exactly one day unless declared "
+                    f"accepted interval: {strategy_id} {key[0]}..{key[1]}"
+                )
+            if net_return != Decimal(declared_value):
+                raise HwmCoverageError(
+                    f"governed multi-day return differs from accepted binding: "
+                    f"{strategy_id} {key[0]}..{key[1]}"
+                )
+        # Keyed by INTERVAL END (the observation/binding day): one-day
+        # rows end at start+1d; declared multi-day spans end at their
+        # binding day. Builder output guarantees one row per end day.
+        periods_by_key[(strategy_id, end.isoformat())] = original
 
     # --- Coverage: every active member x interval covered or dispositioned. ---
     calculated_periods: list[Row] = []
@@ -334,7 +366,7 @@ def compute_governed_as_held_composite_hwm(
 
     def resolve_period(sid: str, iv: Mapping[str, Any]) -> Row:
         """Observed row, or authority-derived zero, else fail closed."""
-        direct = periods_by_key.get((sid, iv["interval_start"], iv["interval_end"]))
+        direct = periods_by_key.get((sid, iv["interval_end"]))
         if direct is not None:
             capital = Decimal(
                 _text(direct["beginning_capital_usd"], "beginning capital")
@@ -343,9 +375,10 @@ def compute_governed_as_held_composite_hwm(
             evidence = _sha256(direct["return_evidence_sha256"], "return evidence")
             source = "OBSERVED"
         elif (
-            iv["start_date"].isoformat() in interior_zero_days.get(sid, set())
-            or iv["start_date"].isoformat() in closure_days.get(sid, set())
+            iv["end_date"].isoformat() in interior_zero_days.get(sid, set())
+            or iv["start_date"].isoformat() in interior_zero_days.get(sid, set())
             or iv["end_date"].isoformat() in closure_days.get(sid, set())
+            or iv["start_date"].isoformat() in closure_days.get(sid, set())
         ):
             # Interior day of an accepted interval or a carry-closure day:
             # the authority disposition supplies period return zero; weight
