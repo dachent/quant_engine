@@ -4869,7 +4869,7 @@ def _panel_data(
             hwm_governed_calendar_bytes or b"",
             hwm_governed_receipt_bytes or b"",
         )
-        if hwm_governed_result is not None
+        if hwm_governed_result is not None and hwm_governed_generation_bytes is not None
         else None
     )
     report_governed_hwm_proof = report.get("hwm_governed_proof")
@@ -6837,6 +6837,9 @@ def publish_panel(
     replication_root: Path | None = None,
     candidate_driver_map_path: Path | None = None,
     baseline_root: Path | None = None,
+    hwm_portable_receipt: Mapping[str, Any] | None = None,
+    hwm_portable_generation_bytes: bytes | None = None,
+    hwm_portable_calendar_bytes: bytes | None = None,
     hwm_governed_result: Mapping[str, Any] | None = None,
     hwm_governed_generation_bytes: bytes | None = None,
     hwm_governed_calendar_bytes: bytes | None = None,
@@ -6857,6 +6860,9 @@ def publish_panel(
         replication_root,
         candidate_driver_map_path,
         baseline_root,
+        hwm_portable_receipt,
+        hwm_portable_generation_bytes,
+        hwm_portable_calendar_bytes,
         hwm_governed_result,
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
@@ -6880,10 +6886,13 @@ def publish_panel(
         replication_root,
         candidate_driver_map_path,
         baseline_root,
-        hwm_governed_result or {},
-        hwm_governed_generation_bytes or b"",
-        hwm_governed_calendar_bytes or b"",
-        hwm_governed_receipt_bytes or b"",
+        hwm_portable_receipt,
+        hwm_portable_generation_bytes,
+        hwm_portable_calendar_bytes,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
     )
     (
         report_path,
@@ -7150,6 +7159,27 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--candidate-dir", type=Path, required=True)
         if name == "publish":
             command.add_argument("--qa-dir", type=Path, required=True)
+            # Governed HWM bundle: result JSON + the three evidence artifacts.
+            command.add_argument(
+                "--hwm-governed-result",
+                type=Path,
+                help="Governed PORT-HWM-4 result JSON (verified before use)",
+            )
+            command.add_argument(
+                "--hwm-governed-generation",
+                type=Path,
+                help="Governed input generation JSON (hash-verified by kernel)",
+            )
+            command.add_argument(
+                "--hwm-governed-calendar",
+                type=Path,
+                help="Accepted governed calendar authority JSON",
+            )
+            command.add_argument(
+                "--hwm-governed-receipt",
+                type=Path,
+                help="Provider admit-or-declare receipt JSON (independent anchor)",
+            )
     qa = commands.add_parser("qa")
     qa.add_argument("--candidate-dir", type=Path, required=True)
     qa.add_argument("--qa-dir", type=Path, required=True)
@@ -7158,6 +7188,13 @@ def _parser() -> argparse.ArgumentParser:
     launcher_qa.add_argument("--qa-dir", type=Path, required=True)
     launcher_qa.add_argument("--expected-generation-id", required=True)
     return parser
+
+
+def _load_optional_json_arg(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    parsed = json.loads(path.read_text(encoding="utf-8"))
+    return parsed if isinstance(parsed, dict) else None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -7221,6 +7258,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.replication_root,
                 args.candidate_driver_map,
                 args.baseline_root,
+                hwm_portable_receipt=_load_optional_json_arg(
+                    getattr(args, "hwm_portable_receipt", None)
+                ),
+                hwm_governed_result=_load_optional_json_arg(
+                    getattr(args, "hwm_governed_result", None)
+                ),
+                hwm_governed_generation_bytes=(
+                    Path(args.hwm_governed_generation).read_bytes()
+                    if getattr(args, "hwm_governed_generation", None)
+                    else None
+                ),
+                hwm_governed_calendar_bytes=(
+                    Path(args.hwm_governed_calendar).read_bytes()
+                    if getattr(args, "hwm_governed_calendar", None)
+                    else None
+                ),
+                hwm_governed_receipt_bytes=(
+                    Path(args.hwm_governed_receipt).read_bytes()
+                    if getattr(args, "hwm_governed_receipt", None)
+                    else None
+                ),
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)
