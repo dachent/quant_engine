@@ -314,7 +314,10 @@ def compute_governed_as_held_composite_hwm(
         return {sid for sid, m in membership_by_strategy.items() if m["start"] <= start}
 
     # --- Component periods. ---
-    periods_by_key: dict[tuple[str, str, str], Mapping[str, Any]] = {}
+    # Keyed by (strategy_id, interval_end ISO date): one-day rows end at
+    # start+1d; declared multi-day accepted intervals end at their binding
+    # day. One row per end day is guaranteed by builder output.
+    periods_by_key: dict[tuple[str, str], Mapping[str, Any]] = {}
     for original in component_periods:
         if not isinstance(original, Mapping):
             raise HwmCoverageError("component period must be an object")
