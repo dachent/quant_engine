@@ -201,7 +201,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # to the enriched value-basis candidate (#368): NAV rows gained value_basis /
     # source_artifact_id per the fail-closed #359/#361 contract.
     assert contract_tool.contract_digest(contract) == (
-        "751b4eb0e43149296c1379e5134ba6819d5e0bccd2b5aa832924175730bd8c13"
+        "41367349fdc454cb064a4c2f0ad23bbc890e0f638e57ccce565f2c036bc85a38"
     )
 
 
