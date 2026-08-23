@@ -448,7 +448,9 @@ def test_verify_governed_hwm_result_accepts_and_rejects(tmp_path):
     with pytest.raises(HwmCoverageError, match="diverges from recomputation"):
         verify_governed_hwm_result(
             forged,
-            input_generation_bytes=json.dumps(fx["generation"], sort_keys=True).encode(),
+            input_generation_bytes=json.dumps(
+                fx["generation"], sort_keys=True
+            ).encode(),
             calendar_bytes=fx["calendar_authority_bytes"],
             input_receipt_bytes=fx["input_receipt_bytes"],
             policy_bytes=fx["policy_bytes"],
