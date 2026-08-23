@@ -74,15 +74,13 @@ def _receipt_bytes():
     )
     return json.dumps(
         {
+            # Mirrors the real admit-or-declare receipt's identity fields.
             "admission_gate_status": "PASS",
             "contract_raw_sha256": hashlib.sha256(PRODUCT_CONTRACT_BYTES).hexdigest(),
             # Reuse the repo's own canonicalization, never a hand-rolled one.
             "contract_semantic_sha256": hashlib.sha256(
                 _canonical_json_bytes(json.loads(PRODUCT_CONTRACT_BYTES))
             ).hexdigest(),
-            "policy_pinned_semantic_digest": policy["product_authority"][
-                "semantic_digest"
-            ],
         },
         sort_keys=True,
     ).encode()

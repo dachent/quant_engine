@@ -140,20 +140,19 @@ def compute_governed_as_held_composite_hwm(
     policy_sha256 = hashlib.sha256(policy_bytes).hexdigest()
     policy_semantic_digest = _canonical_sha256(policy)
 
-    # P1-1: independent upstream anchor. The generation must embed the
-    # SHA-256 of an admission receipt whose content independently ties the
-    # product contract bytes to the policy's pinned semantic digest.
+    # P1-1: independent upstream anchor. The admission receipt must be PASS
+    # and must tie the product contract bytes to the policy's pinned
+    # semantic digest; extra provenance content is permitted.
     receipt = _json_mapping_from_bytes(input_receipt_bytes, "input_receipt_bytes")
-    _strict_keys(
-        receipt,
-        {
-            "admission_gate_status",
-            "contract_raw_sha256",
-            "contract_semantic_sha256",
-            "policy_pinned_semantic_digest",
-        },
-        "upstream admission receipt",
-    )
+    for required_key in (
+        "admission_gate_status",
+        "contract_raw_sha256",
+        "contract_semantic_sha256",
+    ):
+        if required_key not in receipt:
+            raise HwmCoverageError(
+                f"upstream admission receipt key differs: missing {required_key}"
+            )
     if _text(receipt["admission_gate_status"], "receipt gate") != "PASS":
         raise HwmCoverageError("upstream admission receipt is not PASS")
     product_authority = _mapping(
@@ -166,10 +165,6 @@ def compute_governed_as_held_composite_hwm(
         raise HwmCoverageError("upstream admission receipt contract differs")
     if receipt["contract_semantic_sha256"] != product_authority["semantic_digest"]:
         raise HwmCoverageError("upstream admission receipt semantics differ")
-    # The receipt must pin the same semantic digest the policy pins: this is
-    # the independent triangle contract <-> receipt <-> policy.
-    if receipt["policy_pinned_semantic_digest"] != product_authority["semantic_digest"]:
-        raise HwmCoverageError("upstream admission receipt policy pin differs")
     receipt_sha256 = hashlib.sha256(input_receipt_bytes).hexdigest()
 
     # --- Accepted calendar authority via the #356 seam. ---
@@ -568,45 +563,49 @@ def compute_governed_as_held_composite_hwm(
                 }
             )
         current_drawdown = index_value / running_hwm - Decimal("1")
+        # P1-5 tail: even the sign flip must happen inside the guarded
+        # context — a hostile ambient context otherwise rounds the loss
+        # magnitude before it reaches the receipt hash.
+        governor_drawdown_loss = -maximum_drawdown
 
-    warning = age_days > maximum_age_days
-    result: Row = {
-        "schema_version": 1,
-        "status": _GOVERNED_PROOF_STATUS,
-        "policy_id": AS_HELD_HWM_POLICY_ID,
-        "policy_sha256": policy_sha256,
-        "policy_semantic_digest": policy_semantic_digest,
-        "calendar_sha256": calendar_sha256,
-        "input_generation_sha256": declared_generation_hash,
-        "input_authority_class": _GOVERNED_INPUT_AUTHORITY,
-        "input_sha256": _canonical_sha256(
-            _json_safe(
-                {
-                    "policy_sha256": policy_sha256,
-                    "calendar_sha256": calendar_sha256,
-                    "generation_sha256": declared_generation_hash,
-                    "intervals": normalized_intervals,
-                    "memberships": normalized_memberships,
-                    "periods": calculated_periods,
-                }
-            )
-        ),
-        "return_basis": _GOVERNED_RETURN_BASIS,
-        "assurance_profile": assurance_profile,
-        "evaluated_on": evaluation_date.isoformat(),
-        "complete_through": complete_date.isoformat(),
-        "calculation_age_days": age_days,
-        "maximum_age_days": maximum_age_days,
-        "age_status": "COMPLETE_DATA_AGE_WARNING" if warning else "CURRENT",
-        "warnings": ["HWM_COMPLETE_DATA_AGE"] if warning else [],
-        "index_base": Decimal("100"),
-        "current_index": index_value,
-        "current_hwm": running_hwm,
-        "current_drawdown": current_drawdown,
-        "maximum_drawdown": maximum_drawdown,
-        "governor_drawdown_loss": -maximum_drawdown,
-        "index_path": index_path,
-        "periods": calculated_periods,
-    }
+        warning = age_days > maximum_age_days
+        result: Row = {
+            "schema_version": 1,
+            "status": _GOVERNED_PROOF_STATUS,
+            "policy_id": AS_HELD_HWM_POLICY_ID,
+            "policy_sha256": policy_sha256,
+            "policy_semantic_digest": policy_semantic_digest,
+            "calendar_sha256": calendar_sha256,
+            "input_generation_sha256": declared_generation_hash,
+            "input_authority_class": _GOVERNED_INPUT_AUTHORITY,
+            "input_sha256": _canonical_sha256(
+                _json_safe(
+                    {
+                        "policy_sha256": policy_sha256,
+                        "calendar_sha256": calendar_sha256,
+                        "generation_sha256": declared_generation_hash,
+                        "intervals": normalized_intervals,
+                        "memberships": normalized_memberships,
+                        "periods": calculated_periods,
+                    }
+                )
+            ),
+            "return_basis": _GOVERNED_RETURN_BASIS,
+            "assurance_profile": assurance_profile,
+            "evaluated_on": evaluation_date.isoformat(),
+            "complete_through": complete_date.isoformat(),
+            "calculation_age_days": age_days,
+            "maximum_age_days": maximum_age_days,
+            "age_status": "COMPLETE_DATA_AGE_WARNING" if warning else "CURRENT",
+            "warnings": ["HWM_COMPLETE_DATA_AGE"] if warning else [],
+            "index_base": Decimal("100"),
+            "current_index": index_value,
+            "current_hwm": running_hwm,
+            "current_drawdown": current_drawdown,
+            "maximum_drawdown": maximum_drawdown,
+            "governor_drawdown_loss": governor_drawdown_loss,
+            "index_path": index_path,
+            "periods": calculated_periods,
+        }
     result["receipt_sha256"] = _canonical_sha256(_json_safe(result))
     return result
