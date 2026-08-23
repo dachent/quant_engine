@@ -49,6 +49,9 @@ from quant_engine.portfolio_ledger import (
     validate_hwm_inputs_envelope,
     validate_as_held_hwm_receipt_generation_binding,
 )
+from quant_engine.portfolio_ledger.hwm_governed_execution import (
+    verify_governed_hwm_result,
+)
 
 
 REPORT_SCHEMA_VERSION: Final = 1
@@ -2709,6 +2712,96 @@ def _report_portable_hwm_proof(
     }
 
 
+def _report_governed_hwm_proof(
+    result_receipt: Mapping[str, Any],
+    input_generation_bytes: bytes,
+    calendar_bytes: bytes,
+    input_receipt_bytes: bytes,
+) -> dict[str, Any]:
+    """Verify a governed PORT-HWM-4 result and project it into report data.
+
+    Mirrors ``_report_portable_hwm_proof`` for the ACCEPTED_GOVERNED
+    authority class (#324/#370): verification is delegated to the kernel's
+    own ``verify_governed_hwm_result`` — no reimplementation here.
+    """
+
+    try:
+        accepted = verify_governed_hwm_result(
+            result_receipt,
+            input_generation_bytes,
+            calendar_bytes=calendar_bytes,
+            input_receipt_bytes=input_receipt_bytes,
+            policy_bytes=_PORTABLE_HWM_POLICY.read_bytes(),
+            product_contract_bytes=_PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes(),
+            performance_policy_bytes=_PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes(),
+            legacy_policy_bytes=HWM_POLICY.read_bytes(),
+        )
+    except HwmCoverageError as exc:
+        raise ReportValidationError(f"governed HWM result is invalid: {exc}") from exc
+    return {
+        "schema_version": 1,
+        "status": accepted["status"],
+        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "assurance_profile": accepted["assurance_profile"],
+        "policy_id": accepted["policy_id"],
+        "policy_sha256": accepted["policy_sha256"],
+        "calendar_sha256": accepted["calendar_sha256"],
+        "input_generation_sha256": accepted["input_generation_sha256"],
+        "upstream_receipt_sha256": accepted["upstream_receipt_sha256"],
+        "receipt_sha256": accepted["receipt_sha256"],
+        "input_authority_class": accepted["input_authority_class"],
+        "return_basis": accepted["return_basis"],
+        "evaluated_on": accepted["evaluated_on"],
+        "complete_through": accepted["complete_through"],
+        "calculation_age_days": accepted["calculation_age_days"],
+        "maximum_age_days": accepted["maximum_age_days"],
+        "age_status": accepted["age_status"],
+        "warnings": accepted["warnings"],
+        "current_index": accepted["current_index"],
+        "current_hwm": accepted["current_hwm"],
+        "current_drawdown": accepted["current_drawdown"],
+        "maximum_drawdown": accepted["maximum_drawdown"],
+        "index_path": accepted["index_path"],
+    }
+
+
+def _governed_hwm_summary_rows(proof: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Governed HWM summary rows for the portfolio summary table."""
+
+    return [
+        {
+            "metric": "PORT-HWM-4 governed status",
+            "status": "GOVERNED_REAL_DATA",
+            "unit": "status",
+            "value": proof["age_status"],
+        },
+        {
+            "metric": "PORT-HWM-4 governed index",
+            "status": "GOVERNED_REAL_DATA",
+            "unit": "index",
+            "value": proof["current_index"],
+        },
+        {
+            "metric": "PORT-HWM-4 governed HWM",
+            "status": "GOVERNED_REAL_DATA",
+            "unit": "index",
+            "value": proof["current_hwm"],
+        },
+        {
+            "metric": "PORT-HWM-4 governed current drawdown",
+            "status": "GOVERNED_REAL_DATA",
+            "unit": "ratio",
+            "value": proof["current_drawdown"],
+        },
+        {
+            "metric": "PORT-HWM-4 governed maximum drawdown",
+            "status": "GOVERNED_REAL_DATA",
+            "unit": "ratio",
+            "value": proof["maximum_drawdown"],
+        },
+    ]
+
+
 def _portable_hwm_summary_rows(proof: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
         {
@@ -2866,6 +2959,10 @@ def build_report_data(
     correlation_root: Path | None = None,
     hwm_portable_generation_bytes: bytes | None = None,
     hwm_portable_calendar_bytes: bytes | None = None,
+    hwm_governed_result: Mapping[str, Any] | None = None,
+    hwm_governed_generation_bytes: bytes | None = None,
+    hwm_governed_calendar_bytes: bytes | None = None,
+    hwm_governed_receipt_bytes: bytes | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -2984,6 +3081,28 @@ def build_report_data(
         if hwm_portable_receipt is not None
         else None
     )
+    # Governed HWM lane (#324/#370): the four governed artifacts form one
+    # all-or-nothing bundle, exactly like the portable lane above.
+    governed_bundle_presence = {
+        hwm_governed_result is not None,
+        hwm_governed_generation_bytes is not None,
+        hwm_governed_calendar_bytes is not None,
+        hwm_governed_receipt_bytes is not None,
+    }
+    if len(governed_bundle_presence) != 1:
+        raise ReportValidationError(
+            "governed HWM result, generation, calendar, and receipt bytes must be supplied together"
+        )
+    governed_hwm_proof = (
+        _report_governed_hwm_proof(
+            hwm_governed_result,
+            hwm_governed_generation_bytes,
+            hwm_governed_calendar_bytes,
+            hwm_governed_receipt_bytes,
+        )
+        if hwm_governed_result is not None
+        else None
+    )
     hwm_numerical = _hwm_numerical_from_envelope(catalog)
     hwm_summary: dict[str, Any]
     hwm_provenance: list[dict[str, Any]] = []
@@ -3080,6 +3199,11 @@ def build_report_data(
             *(
                 _portable_hwm_summary_rows(portable_hwm_proof)
                 if portable_hwm_proof is not None
+                else []
+            ),
+            *(
+                _governed_hwm_summary_rows(governed_hwm_proof)
+                if governed_hwm_proof is not None
                 else []
             ),
         ],
@@ -3213,6 +3337,8 @@ def build_report_data(
     report["hwm_summary"] = hwm_summary
     if portable_hwm_proof is not None:
         report["hwm_portable_proof"] = portable_hwm_proof
+    if governed_hwm_proof is not None:
+        report["hwm_governed_proof"] = governed_hwm_proof
     if catalog.get("hwm_inputs") is not None:
         report["hwm_inputs"] = catalog["hwm_inputs"]
     if attribution_catalog is not None and attribution_ref is not None:
@@ -3616,6 +3742,10 @@ def build_candidate(
     correlation_root: Path | None = None,
     hwm_portable_generation_bytes: bytes | None = None,
     hwm_portable_calendar_bytes: bytes | None = None,
+    hwm_governed_result: Mapping[str, Any] | None = None,
+    hwm_governed_generation_bytes: bytes | None = None,
+    hwm_governed_calendar_bytes: bytes | None = None,
+    hwm_governed_receipt_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -3629,6 +3759,10 @@ def build_candidate(
         correlation_root,
         hwm_portable_generation_bytes,
         hwm_portable_calendar_bytes,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -4008,6 +4142,10 @@ def verify_candidate(
     correlation_root: Path | None = None,
     hwm_portable_generation_bytes: bytes | None = None,
     hwm_portable_calendar_bytes: bytes | None = None,
+    hwm_governed_result: Mapping[str, Any] | None = None,
+    hwm_governed_generation_bytes: bytes | None = None,
+    hwm_governed_calendar_bytes: bytes | None = None,
+    hwm_governed_receipt_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,

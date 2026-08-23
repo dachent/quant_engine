@@ -420,3 +420,39 @@ def test_governed_entry_is_decimal_context_independent(tmp_path):
     finally:
         getcontext().prec = original_prec
     assert perturbed["receipt_sha256"] == baseline["receipt_sha256"]
+
+
+def test_verify_governed_hwm_result_accepts_and_rejects(tmp_path):
+    """Report/panel parity: verifier recomputes and binds the receipt."""
+    from quant_engine.portfolio_ledger.hwm_governed_execution import (
+        verify_governed_hwm_result,
+    )
+
+    fx = _fixture(tmp_path)
+    result = _run(fx)
+    # Honest verification succeeds and returns the recomputed result.
+    verified = verify_governed_hwm_result(
+        json.loads(json.dumps(result, default=str)),
+        input_generation_bytes=json.dumps(fx["generation"], sort_keys=True).encode(),
+        calendar_bytes=fx["calendar_authority_bytes"],
+        input_receipt_bytes=fx["input_receipt_bytes"],
+        policy_bytes=fx["policy_bytes"],
+        product_contract_bytes=fx["product_contract_bytes"],
+        performance_policy_bytes=fx["performance_policy_bytes"],
+        legacy_policy_bytes=fx["legacy_policy_bytes"],
+    )
+    assert verified["receipt_sha256"] == result["receipt_sha256"]
+    # Any tampering with the presented receipt fails field-for-field binding.
+    forged = json.loads(json.dumps(result, default=str))
+    forged["current_index"] = "999"
+    with pytest.raises(HwmCoverageError, match="diverges from recomputation"):
+        verify_governed_hwm_result(
+            forged,
+            input_generation_bytes=json.dumps(fx["generation"], sort_keys=True).encode(),
+            calendar_bytes=fx["calendar_authority_bytes"],
+            input_receipt_bytes=fx["input_receipt_bytes"],
+            policy_bytes=fx["policy_bytes"],
+            product_contract_bytes=fx["product_contract_bytes"],
+            performance_policy_bytes=fx["performance_policy_bytes"],
+            legacy_policy_bytes=fx["legacy_policy_bytes"],
+        )
