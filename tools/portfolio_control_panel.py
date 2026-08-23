@@ -6837,6 +6837,10 @@ def publish_panel(
     replication_root: Path | None = None,
     candidate_driver_map_path: Path | None = None,
     baseline_root: Path | None = None,
+    hwm_governed_result: Mapping[str, Any] | None = None,
+    hwm_governed_generation_bytes: bytes | None = None,
+    hwm_governed_calendar_bytes: bytes | None = None,
+    hwm_governed_receipt_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         report_root,
@@ -6853,6 +6857,10 @@ def publish_panel(
         replication_root,
         candidate_driver_map_path,
         baseline_root,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
     )
     qa = validate_qa(candidate_dir, qa_dir)
     _write_exact(
@@ -6872,6 +6880,10 @@ def publish_panel(
         replication_root,
         candidate_driver_map_path,
         baseline_root,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
     )
     (
         report_path,
