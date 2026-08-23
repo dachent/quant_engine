@@ -4865,9 +4865,9 @@ def _panel_data(
     governed_hwm_proof = (
         _panel_governed_hwm_proof(
             hwm_governed_result,
-            hwm_governed_generation_bytes,
-            hwm_governed_calendar_bytes,
-            hwm_governed_receipt_bytes,
+            hwm_governed_generation_bytes or b"",
+            hwm_governed_calendar_bytes or b"",
+            hwm_governed_receipt_bytes or b"",
         )
         if hwm_governed_result is not None
         else None
@@ -6880,10 +6880,10 @@ def publish_panel(
         replication_root,
         candidate_driver_map_path,
         baseline_root,
-        hwm_governed_result,
-        hwm_governed_generation_bytes,
-        hwm_governed_calendar_bytes,
-        hwm_governed_receipt_bytes,
+        hwm_governed_result or {},
+        hwm_governed_generation_bytes or b"",
+        hwm_governed_calendar_bytes or b"",
+        hwm_governed_receipt_bytes or b"",
     )
     (
         report_path,
