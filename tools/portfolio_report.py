@@ -3096,9 +3096,9 @@ def build_report_data(
     governed_hwm_proof = (
         _report_governed_hwm_proof(
             hwm_governed_result,
-            hwm_governed_generation_bytes,
-            hwm_governed_calendar_bytes,
-            hwm_governed_receipt_bytes,
+            hwm_governed_generation_bytes or b"",
+            hwm_governed_calendar_bytes or b"",
+            hwm_governed_receipt_bytes or b"",
         )
         if hwm_governed_result is not None
         else None
