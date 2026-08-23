@@ -64,14 +64,9 @@ def _receipt_bytes():
     """Kernel-visible admission anchor tying contract bytes to policy pins.
 
     The full provider-ledger admit-or-declare receipt carries far more
-    content; the kernel binds the three identity fields that make the
+    content; the kernel binds the identity fields that make the
     contract<->receipt<->policy triangle verifiable without staging access.
     """
-    policy = json.loads(
-        (REPO / "contracts" / "portfolio-hwm-policy-v4.json").read_text(
-            encoding="utf-8"
-        )
-    )
     return json.dumps(
         {
             # Mirrors the real admit-or-declare receipt's identity fields.
