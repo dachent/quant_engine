@@ -197,8 +197,11 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
+    # Digest advanced from 5cef3271... when ibkr-account-generation was rebound
+    # to the enriched value-basis candidate (#368): NAV rows gained value_basis /
+    # source_artifact_id per the fail-closed #359/#361 contract.
     assert contract_tool.contract_digest(contract) == (
-        "5cef32713e26ad847bc6feec3f2b447a7bcc9ad0b8437f0d9e86ab608418fb61"
+        "751b4eb0e43149296c1379e5134ba6819d5e0bccd2b5aa832924175730bd8c13"
     )
 
 
