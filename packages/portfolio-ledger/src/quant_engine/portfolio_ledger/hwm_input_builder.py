@@ -78,29 +78,79 @@ def _decimal_text(value: object, field: str) -> str:
 
 
 def _declared_intervals(
-    accepted_intervals: Mapping[str, Sequence[Mapping[str, Any]]] | None,
-) -> dict[str, set[tuple[str, str, str]]]:
-    """Shape-check declared accepted intervals into a per-strategy lookup."""
-    if not accepted_intervals:
+    calendar_authority: Mapping[str, Any] | None,
+) -> dict[str, dict[tuple[str, str], str]]:
+    """Verify the authority document and index its accepted intervals.
+
+    The authority's self-hash is re-derived over its content and must equal
+    ``authority_evidence_sha256``; the caller separately binds this document
+    via ``calendar_authority_sha256``. Interval rows are trusted only after
+    both checks.
+    """
+    if not calendar_authority:
         return {}
-    declared: dict[str, set[tuple[str, str, str]]] = {}
-    for strategy_id, entries in accepted_intervals.items():
-        sid = _text(strategy_id, "accepted interval strategy_id")
-        keys: set[tuple[str, str, str]] = set()
-        for entry in entries:
-            if not isinstance(entry, Mapping):
-                raise HwmInputBuilderError("accepted interval entry shape differs")
-            prior = _date(entry.get("prior_observation_date"), "interval prior date")
-            following = _date(entry.get("next_observation_date"), "interval next date")
-            if prior >= following:
-                raise HwmInputBuilderError("interval brackets are unordered")
-            binding = _date(entry.get("binding_return_date"), "binding return date")
-            if binding != following:
-                raise HwmInputBuilderError(
-                    "accepted interval must bind the next observed return row"
-                )
-            keys.add((sid, prior.isoformat(), following.isoformat()))
-        declared[sid] = keys
+    required = {
+        "calendar_policy_id",
+        "source_calendars",
+        "closed_source_dates",
+        "accepted_source_intervals",
+        "authority_evidence_sha256",
+    }
+    if not isinstance(calendar_authority, Mapping) or not required.issubset(
+        set(calendar_authority)
+    ):
+        raise HwmInputBuilderError("calendar authority shape differs")
+    declared_hash = _sha_field(
+        calendar_authority.get("authority_evidence_sha256"),
+        "authority_evidence_sha256",
+    )
+    unhashed = {
+        key: value
+        for key, value in calendar_authority.items()
+        if key != "authority_evidence_sha256"
+    }
+    canonical = json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode()
+    if hashlib.sha256(canonical).hexdigest() != declared_hash:
+        raise HwmInputBuilderError("calendar authority identity differs")
+
+    sources = {
+        str(row.get("strategy_id")): row
+        for row in calendar_authority.get("source_calendars", [])
+        if isinstance(row, Mapping)
+    }
+    declared: dict[str, dict[tuple[str, str], str]] = {}
+    for raw in calendar_authority.get("accepted_source_intervals", []):
+        if not isinstance(raw, Mapping):
+            raise HwmInputBuilderError("accepted interval row shape differs")
+        sid = _text(raw.get("strategy_id"), "interval strategy_id")
+        source = sources.get(sid)
+        if source is None or source.get("calendar_kind") != "DECLARED_SESSION":
+            raise HwmInputBuilderError(
+                f"accepted interval for non-session source {sid}"
+            )
+        prior = _date(raw.get("prior_observation_date"), "interval prior date")
+        following = _date(raw.get("next_observation_date"), "interval next date")
+        binding = _date(raw.get("binding_return_date"), "binding return date")
+        if prior >= following or binding != following:
+            raise HwmInputBuilderError("accepted interval brackets/binding differ")
+        value = _decimal_text(raw.get("binding_return_value"), "binding_return_value")
+        expected = hashlib.sha256(
+            "\n".join(
+                [
+                    sid,
+                    str(source.get("calendar_id")),
+                    prior.isoformat(),
+                    following.isoformat(),
+                    value,
+                ]
+            ).encode()
+        ).hexdigest()
+        evidence = _sha_field(
+            raw.get("interval_evidence_sha256"), "interval_evidence_sha256"
+        )
+        if evidence != expected:
+            raise HwmInputBuilderError("interval evidence hash differs")
+        declared.setdefault(sid, {})[(prior.isoformat(), following.isoformat())] = value
     return declared
 
 
@@ -114,18 +164,28 @@ def build_governed_hwm_inputs(
     return_observations: Sequence[Mapping[str, Any]],
     calendar_authority_sha256: str,
     hwm_policy_sha256: str,
-    accepted_intervals: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    calendar_authority: Mapping[str, Any] | None = None,
 ) -> Row:
     """Derive one governed input generation from observed evidence.
 
-    ``accepted_intervals`` maps strategy_id to its declared multi-day accepted
-    intervals (from the externally accepted calendar authority); multi-day
-    return rows outside the declared set fail closed.
+    ``calendar_authority`` is the accepted calendar authority document itself
+    (self-hash re-verified here and bound to ``calendar_authority_sha256``).
+    Multi-day return rows outside its declared intervals fail closed; a row's
+    ``net_return`` must equal the authority's bound value exactly.
     """
 
     calendar_sha = _sha_field(calendar_authority_sha256, "calendar_authority_sha256")
     policy_sha = _sha_field(hwm_policy_sha256, "hwm_policy_sha256")
-    declared_intervals = _declared_intervals(accepted_intervals)
+    declared_intervals = _declared_intervals(calendar_authority)
+    if declared_intervals and calendar_authority is not None:
+        declared_doc_hash = _sha_field(
+            calendar_authority.get("authority_evidence_sha256"),
+            "authority_evidence_sha256",
+        )
+        if declared_doc_hash != calendar_sha:
+            raise HwmInputBuilderError(
+                "calendar authority hash differs from the binding parameter"
+            )
 
     member_rows: dict[str, Row] = {}
     for entry in members:
@@ -176,12 +236,8 @@ def build_governed_hwm_inputs(
         interval_start = _date(obs.get("interval_start"), "interval_start")
         interval_end = _date(obs.get("interval_end"), "interval_end")
         if (interval_end - interval_start).days != 1:
-            key = (
-                strategy_id,
-                interval_start.isoformat(),
-                interval_end.isoformat(),
-            )
-            if key not in declared_intervals.get(strategy_id, set()):
+            key = (interval_start.isoformat(), interval_end.isoformat())
+            if key not in declared_intervals.get(strategy_id, {}):
                 raise HwmInputBuilderError(
                     f"builder requires exact one-day accepted intervals for {strategy_id}"
                 )
@@ -227,18 +283,17 @@ def build_governed_hwm_inputs(
                     f"builder return interval is empty for {strategy_id}"
                 )
             if (interval_end - interval_start).days != 1:
-                key = (
-                    strategy_id,
-                    interval_start.isoformat(),
-                    interval_end.isoformat(),
-                )
-                if key not in declared_intervals.get(strategy_id, set()):
+                key = (interval_start.isoformat(), interval_end.isoformat())
+                bound_value = declared_intervals.get(strategy_id, {}).get(key)
+                if bound_value is None:
                     raise HwmInputBuilderError(
                         f"builder requires exact one-day accepted intervals for "
                         f"{strategy_id}; multi-day row "
                         f"{interval_start.isoformat()}..{interval_end.isoformat()} "
                         "is not a declared accepted interval"
                     )
+            else:
+                bound_value = None
             while (
                 anchor_index + 1 < len(anchors)
                 and anchors[anchor_index + 1][0] <= interval_start
@@ -257,6 +312,12 @@ def build_governed_hwm_inputs(
                     f"{strategy_id}"
                 )
             net_return = _decimal_text(obs.get("net_return"), "net_return")
+            if bound_value is not None and net_return != bound_value:
+                raise HwmInputBuilderError(
+                    f"builder net_return differs from the accepted interval "
+                    f"binding for {strategy_id} "
+                    f"{interval_start.isoformat()}..{interval_end.isoformat()}"
+                )
             basis = _text(obs.get("return_basis"), "return_basis")
             source_sha = _sha_field(
                 obs.get("source_artifact_sha256"), "return source artifact"

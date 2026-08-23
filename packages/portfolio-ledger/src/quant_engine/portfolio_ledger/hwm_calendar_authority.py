@@ -72,7 +72,12 @@ def _declared_accepted_intervals(
         binding_date = _date(
             item["binding_return_date"], "binding_return_date"
         ).isoformat()
-        declared[(prior_key, next_key)] = (
+        key = (prior_key, next_key)
+        if key in declared:
+            raise GovernedHwmAuthorityError(
+                "accepted interval declaration is duplicated"
+            )
+        declared[key] = (
             binding_date,
             _decimal_text(item["binding_return_value"], "binding_return_value"),
         )

@@ -50,6 +50,46 @@ def _base_entry(sid="s-a", dates=("2026-01-02", "2026-01-05"), capital=None):
     }
 
 
+def _authority_doc(entries):
+    """Minimal accepted-intervals authority doc with a correct self-hash."""
+    doc = {
+        "calendar_policy_id": "TEST-MIXED-1",
+        "source_calendars": [
+            {
+                "strategy_id": sid,
+                "calendar_id": f"{sid}:OBSERVED:2026-01-02",
+                "calendar_kind": "DECLARED_SESSION",
+            }
+            for sid, _ in entries
+        ],
+        "closed_source_dates": [],
+        "accepted_source_intervals": [
+            {
+                "strategy_id": sid,
+                "calendar_id": f"{sid}:OBSERVED:2026-01-02",
+                "prior_observation_date": prior,
+                "next_observation_date": nxt,
+                "binding_return_date": nxt,
+                "binding_return_value": value,
+                "interval_evidence_sha256": hashlib.sha256(
+                    "\n".join(
+                        [sid, f"{sid}:OBSERVED:2026-01-02", prior, nxt, value]
+                    ).encode()
+                ).hexdigest(),
+                "treatment": "ACCEPTED_MULTI_DAY_RETURN_BINDING",
+            }
+            for sid, (prior, nxt, value) in entries
+        ],
+    }
+    canonical = json.dumps(
+        {k: v for k, v in doc.items() if k != "authority_evidence_sha256"},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    doc["authority_evidence_sha256"] = hashlib.sha256(canonical).hexdigest()
+    return doc
+
+
 def test_accepted_interval_gap_is_derived_and_binds_next_day_return():
     """Gap with embedded economics derives as an accepted interval, not closure."""
     entry = _base_entry(
@@ -164,24 +204,95 @@ def test_builder_admits_declared_multi_day_interval_row():
             "source_artifact_sha256": _sha("ret-row"),
         }
     ]
+    authority_doc = _authority_doc([("s-mixed", ("2026-01-02", "2026-01-05", "0.03"))])
     gen = build_governed_hwm_inputs(
         members=members,
         capital_observations=capital,
         return_observations=rets,
-        calendar_authority_sha256=_sha("cal"),
+        calendar_authority_sha256=authority_doc["authority_evidence_sha256"],
         hwm_policy_sha256=_sha("policy"),
-        accepted_intervals={
-            "s-mixed": [
-                {
-                    "prior_observation_date": "2026-01-02",
-                    "next_observation_date": "2026-01-05",
-                    "binding_return_date": "2026-01-05",
-                }
-            ],
-        },
+        calendar_authority=authority_doc,
     )
     periods = [p for p in gen["component_periods"] if p["strategy_id"] == "s-mixed"]
     assert periods[0]["interval_end"] == "2026-01-05"
+
+
+def test_builder_rejects_forged_return_value_despite_genuine_authority_hash():
+    """P1: a legitimate authority hash cannot launder an altered return."""
+    from quant_engine.portfolio_ledger.hwm_input_builder import (
+        build_governed_hwm_inputs,
+    )
+
+    members = [
+        {
+            "strategy_id": "s-mixed",
+            "effective_start": "2026-01-01",
+            "evidence_ref": "packet",
+        }
+    ]
+    capital = [
+        {"strategy_id": "s-mixed", "date": "2026-01-02", "closing_capital_usd": "100"},
+        {"strategy_id": "s-mixed", "date": "2026-01-06", "closing_capital_usd": "104"},
+    ]
+    # Authority binds 0.03; the input row claims 0.30.
+    rets = [
+        {
+            "strategy_id": "s-mixed",
+            "interval_start": "2026-01-02",
+            "interval_end": "2026-01-05",
+            "return_basis": "ACCOUNT_LIVE_NET",
+            "net_return": "0.30",
+            "source_artifact_sha256": _sha("ret-row"),
+        }
+    ]
+    authority_doc = _authority_doc([("s-mixed", ("2026-01-02", "2026-01-05", "0.03"))])
+    with pytest.raises(Exception, match="binding"):
+        build_governed_hwm_inputs(
+            members=members,
+            capital_observations=capital,
+            return_observations=rets,
+            calendar_authority_sha256=authority_doc["authority_evidence_sha256"],
+            hwm_policy_sha256=_sha("policy"),
+            calendar_authority=authority_doc,
+        )
+
+
+def test_builder_binds_document_to_calendar_authority_sha256():
+    """A different document than the bound hash must fail closed."""
+    from quant_engine.portfolio_ledger.hwm_input_builder import (
+        build_governed_hwm_inputs,
+    )
+
+    members = [
+        {
+            "strategy_id": "s-mixed",
+            "effective_start": "2026-01-01",
+            "evidence_ref": "packet",
+        }
+    ]
+    capital = [
+        {"strategy_id": "s-mixed", "date": "2026-01-02", "closing_capital_usd": "100"}
+    ]
+    rets = [
+        {
+            "strategy_id": "s-mixed",
+            "interval_start": "2026-01-02",
+            "interval_end": "2026-01-05",
+            "return_basis": "ACCOUNT_LIVE_NET",
+            "net_return": "0.03",
+            "source_artifact_sha256": _sha("ret-row"),
+        }
+    ]
+    authority_doc = _authority_doc([("s-mixed", ("2026-01-02", "2026-01-05", "0.03"))])
+    with pytest.raises(Exception, match="binding parameter"):
+        build_governed_hwm_inputs(
+            members=members,
+            capital_observations=capital,
+            return_observations=rets,
+            calendar_authority_sha256=_sha("some-other-authority"),
+            hwm_policy_sha256=_sha("policy"),
+            calendar_authority=authority_doc,
+        )
 
 
 def test_builder_rejects_undeclared_multi_day_interval_row():
