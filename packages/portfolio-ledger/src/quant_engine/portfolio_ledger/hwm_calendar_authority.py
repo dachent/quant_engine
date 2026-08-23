@@ -29,6 +29,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
 from quant_engine.portfolio_ledger.hwm_governed import (
+    ACCEPTED_MULTI_DAY_RETURN_TREATMENT,
     CLOSED_SOURCE_REASON,
     CLOSED_SOURCE_TREATMENT,
     GOVERNED_HWM_CALENDAR_AUTHORITY_CLASS,
@@ -40,6 +41,42 @@ from quant_engine.portfolio_ledger.hwm_governed import (
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 
 Row = dict[str, Any]
+
+_ACCEPTED_INTERVAL_FIELDS: Final = (
+    "prior_observation_date",
+    "next_observation_date",
+    "binding_return_date",
+    "binding_return_value",
+)
+
+
+def _declared_accepted_intervals(
+    entry: Mapping[str, Any],
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """Parse and shape-check one source's declared accepted intervals."""
+    raw = entry.get("accepted_intervals")
+    if raw is None:
+        return {}
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise GovernedHwmAuthorityError(
+            "accepted_intervals must be an array when present"
+        )
+    declared: dict[tuple[str, str], tuple[str, str]] = {}
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) != set(_ACCEPTED_INTERVAL_FIELDS):
+            raise GovernedHwmAuthorityError("accepted interval row shape differs")
+        prior_key = _date(item["prior_observation_date"], "interval prior").isoformat()
+        next_key = _date(item["next_observation_date"], "interval next").isoformat()
+        if prior_key >= next_key:
+            raise GovernedHwmAuthorityError("accepted interval brackets are unordered")
+        binding_date = _date(
+            item["binding_return_date"], "binding_return_date"
+        ).isoformat()
+        declared[(prior_key, next_key)] = (
+            binding_date,
+            _decimal_text(item["binding_return_value"], "binding_return_value"),
+        )
+    return declared
 
 
 def _canon(value: Mapping[str, Any]) -> bytes:
@@ -118,6 +155,7 @@ def derive_governed_calendar_authority(
 
     source_calendars: list[Row] = []
     closed_source_dates: list[Row] = []
+    accepted_source_intervals: list[Row] = []
     seen_strategies: set[str] = set()
 
     for entry in strategy_calendars:
@@ -163,6 +201,7 @@ def derive_governed_calendar_authority(
                 "\n".join(day.isoformat() for day in observed).encode("utf-8")
             ).hexdigest()
         else:
+            declared_intervals = _declared_accepted_intervals(entry)
             evidence_parts: list[str] = []
             for prior, following in zip(observed, observed[1:]):
                 gap_days = max((following - prior).days - 1, 0)
@@ -170,49 +209,86 @@ def derive_governed_calendar_authority(
                     continue
                 prior_key = prior.isoformat()
                 next_key = following.isoformat()
-                if prior not in capital_by_day or following not in capital_by_day:
-                    raise GovernedHwmAuthorityError(
-                        f"declared gap lacks bracket capital for {strategy_id}"
-                    )
-                prior_capital = Decimal(capital_by_day[prior])
-                next_capital = Decimal(capital_by_day[following])
-                if prior_capital <= 0 or next_capital <= 0:
-                    raise GovernedHwmAuthorityError(
-                        f"closure capital must be positive for {strategy_id}"
-                    )
-                if prior_capital != next_capital:
-                    raise GovernedHwmAuthorityError(
-                        f"closure capital does not reconcile for {strategy_id}"
-                    )
-                carry = capital_by_day[prior]
-                cursor = prior + timedelta(days=1)
-                while cursor < following:
-                    closed_source_dates.append(
+                interval_key = (prior_key, next_key)
+                if interval_key in declared_intervals:
+                    binding_date, binding_value = declared_intervals[interval_key]
+                    if binding_date != next_key:
+                        raise GovernedHwmAuthorityError(
+                            f"accepted interval must bind the next observed "
+                            f"return row for {strategy_id}"
+                        )
+                    Decimal(binding_value)
+                    accepted_source_intervals.append(
                         {
                             "calendar_id": calendar_id,
-                            "closure_evidence_sha256": hashlib.sha256(
+                            "binding_return_date": binding_date,
+                            "binding_return_value": _decimal_text(
+                                binding_value, "binding_return_value"
+                            ),
+                            "interval_evidence_sha256": hashlib.sha256(
                                 "\n".join(
                                     [
                                         strategy_id,
                                         calendar_id,
                                         prior_key,
                                         next_key,
-                                        carry,
+                                        _decimal_text(
+                                            binding_value, "binding_return_value"
+                                        ),
                                     ]
                                 ).encode("utf-8")
                             ).hexdigest(),
-                            "closure_reason": CLOSED_SOURCE_REASON,
-                            "date": cursor.isoformat(),
-                            "next_beginning_capital_usd": carry,
                             "next_observation_date": next_key,
-                            "prior_ending_capital_usd": carry,
                             "prior_observation_date": prior_key,
                             "strategy_id": strategy_id,
-                            "treatment": CLOSED_SOURCE_TREATMENT,
+                            "treatment": ACCEPTED_MULTI_DAY_RETURN_TREATMENT,
                         }
                     )
-                    cursor += timedelta(days=1)
-                evidence_parts.append(f"{prior_key}..{next_key}:{carry}")
+                    evidence_parts.append(f"{prior_key}..{next_key}:{binding_value}")
+                else:
+                    if prior not in capital_by_day or following not in capital_by_day:
+                        raise GovernedHwmAuthorityError(
+                            f"declared gap lacks bracket capital for {strategy_id}"
+                        )
+                    prior_capital = Decimal(capital_by_day[prior])
+                    next_capital = Decimal(capital_by_day[following])
+                    if prior_capital <= 0 or next_capital <= 0:
+                        raise GovernedHwmAuthorityError(
+                            f"closure capital must be positive for {strategy_id}"
+                        )
+                    if prior_capital != next_capital:
+                        raise GovernedHwmAuthorityError(
+                            f"closure capital does not reconcile for {strategy_id}"
+                        )
+                    carry = capital_by_day[prior]
+                    cursor = prior + timedelta(days=1)
+                    while cursor < following:
+                        closed_source_dates.append(
+                            {
+                                "calendar_id": calendar_id,
+                                "closure_evidence_sha256": hashlib.sha256(
+                                    "\n".join(
+                                        [
+                                            strategy_id,
+                                            calendar_id,
+                                            prior_key,
+                                            next_key,
+                                            carry,
+                                        ]
+                                    ).encode("utf-8")
+                                ).hexdigest(),
+                                "closure_reason": CLOSED_SOURCE_REASON,
+                                "date": cursor.isoformat(),
+                                "next_beginning_capital_usd": carry,
+                                "next_observation_date": next_key,
+                                "prior_ending_capital_usd": carry,
+                                "prior_observation_date": prior_key,
+                                "strategy_id": strategy_id,
+                                "treatment": CLOSED_SOURCE_TREATMENT,
+                            }
+                        )
+                        cursor += timedelta(days=1)
+                    evidence_parts.append(f"{prior_key}..{next_key}:{carry}")
             observed_binding = "|".join(day.isoformat() for day in observed)
             gap_binding = ";".join(evidence_parts)
             evidence = hashlib.sha256(
@@ -229,6 +305,9 @@ def derive_governed_calendar_authority(
         )
 
     closed_source_dates.sort(key=lambda row: (row["strategy_id"], row["date"]))
+    accepted_source_intervals.sort(
+        key=lambda row: (row["strategy_id"], row["prior_observation_date"])
+    )
     candidate: Row = {
         "schema_version": GOVERNED_HWM_CALENDAR_SCHEMA_VERSION,
         "authority_class": GOVERNED_HWM_CALENDAR_AUTHORITY_CLASS,
@@ -238,6 +317,7 @@ def derive_governed_calendar_authority(
         "hwm_policy_sha256": policy_sha,
         "source_calendars": source_calendars,
         "closed_source_dates": closed_source_dates,
+        "accepted_source_intervals": accepted_source_intervals,
     }
     candidate["authority_evidence_sha256"] = hashlib.sha256(
         _canon(candidate)

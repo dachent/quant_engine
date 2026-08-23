@@ -77,6 +77,33 @@ def _decimal_text(value: object, field: str) -> str:
     return value.strip()
 
 
+def _declared_intervals(
+    accepted_intervals: Mapping[str, Sequence[Mapping[str, Any]]] | None,
+) -> dict[str, set[tuple[str, str, str]]]:
+    """Shape-check declared accepted intervals into a per-strategy lookup."""
+    if not accepted_intervals:
+        return {}
+    declared: dict[str, set[tuple[str, str, str]]] = {}
+    for strategy_id, entries in accepted_intervals.items():
+        sid = _text(strategy_id, "accepted interval strategy_id")
+        keys: set[tuple[str, str, str]] = set()
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                raise HwmInputBuilderError("accepted interval entry shape differs")
+            prior = _date(entry.get("prior_observation_date"), "interval prior date")
+            following = _date(entry.get("next_observation_date"), "interval next date")
+            if prior >= following:
+                raise HwmInputBuilderError("interval brackets are unordered")
+            binding = _date(entry.get("binding_return_date"), "binding return date")
+            if binding != following:
+                raise HwmInputBuilderError(
+                    "accepted interval must bind the next observed return row"
+                )
+            keys.add((sid, prior.isoformat(), following.isoformat()))
+        declared[sid] = keys
+    return declared
+
+
 BUILDER_ID: Final = "portfolio-hwm-inputs-governed"
 
 
@@ -87,11 +114,18 @@ def build_governed_hwm_inputs(
     return_observations: Sequence[Mapping[str, Any]],
     calendar_authority_sha256: str,
     hwm_policy_sha256: str,
+    accepted_intervals: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> Row:
-    """Derive one governed input generation from observed evidence."""
+    """Derive one governed input generation from observed evidence.
+
+    ``accepted_intervals`` maps strategy_id to its declared multi-day accepted
+    intervals (from the externally accepted calendar authority); multi-day
+    return rows outside the declared set fail closed.
+    """
 
     calendar_sha = _sha_field(calendar_authority_sha256, "calendar_authority_sha256")
     policy_sha = _sha_field(hwm_policy_sha256, "hwm_policy_sha256")
+    declared_intervals = _declared_intervals(accepted_intervals)
 
     member_rows: dict[str, Row] = {}
     for entry in members:
@@ -142,9 +176,15 @@ def build_governed_hwm_inputs(
         interval_start = _date(obs.get("interval_start"), "interval_start")
         interval_end = _date(obs.get("interval_end"), "interval_end")
         if (interval_end - interval_start).days != 1:
-            raise HwmInputBuilderError(
-                f"builder requires exact one-day accepted intervals for {strategy_id}"
+            key = (
+                strategy_id,
+                interval_start.isoformat(),
+                interval_end.isoformat(),
             )
+            if key not in declared_intervals.get(strategy_id, set()):
+                raise HwmInputBuilderError(
+                    f"builder requires exact one-day accepted intervals for {strategy_id}"
+                )
         basis = obs.get("return_basis")
         if basis != required_basis:
             raise HwmInputBuilderError(
@@ -186,6 +226,19 @@ def build_governed_hwm_inputs(
                 raise HwmInputBuilderError(
                     f"builder return interval is empty for {strategy_id}"
                 )
+            if (interval_end - interval_start).days != 1:
+                key = (
+                    strategy_id,
+                    interval_start.isoformat(),
+                    interval_end.isoformat(),
+                )
+                if key not in declared_intervals.get(strategy_id, set()):
+                    raise HwmInputBuilderError(
+                        f"builder requires exact one-day accepted intervals for "
+                        f"{strategy_id}; multi-day row "
+                        f"{interval_start.isoformat()}..{interval_end.isoformat()} "
+                        "is not a declared accepted interval"
+                    )
             while (
                 anchor_index + 1 < len(anchors)
                 and anchors[anchor_index + 1][0] <= interval_start

@@ -30,6 +30,7 @@ GOVERNED_HWM_CALENDAR_AUTHORITY_CLASS: Final = "ACCEPTED_GOVERNED"
 GOVERNED_HWM_PORTFOLIO_CALENDAR: Final = "ALWAYS_ON"
 CLOSED_SOURCE_REASON: Final = "DECLARED_SOURCE_CLOSED_SESSION"
 CLOSED_SOURCE_TREATMENT: Final = "CARRY_CAPITAL_NO_SOURCE_OBSERVATION"
+ACCEPTED_MULTI_DAY_RETURN_TREATMENT: Final = "ACCEPTED_MULTI_DAY_RETURN_BINDING"
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 
 Row = Mapping[str, Any]
@@ -288,6 +289,7 @@ def validate_governed_hwm_calendar_authority(
         "hwm_policy_sha256",
         "source_calendars",
         "closed_source_dates",
+        "accepted_source_intervals",
         "authority_evidence_sha256",
     }
     if set(authority) != required:
@@ -324,6 +326,79 @@ def validate_governed_hwm_calendar_authority(
 
     _text(authority.get("owner_decision_evidence"), "owner decision evidence")
     _closure_index(authority)
+    _accepted_interval_index(authority, _source_calendars(authority))
+
+
+def _accepted_interval_index(
+    authority: Row,
+    sources: dict[str, Row],
+) -> dict[tuple[str, str, str], Row]:
+    """Index and fail-closed-verify accepted multi-day interval declarations."""
+    rows = _objects(
+        authority.get("accepted_source_intervals"),
+        "accepted_source_intervals",
+    )
+    intervals: dict[tuple[str, str, str], Row] = {}
+    for row in rows:
+        required = {
+            "strategy_id",
+            "calendar_id",
+            "prior_observation_date",
+            "next_observation_date",
+            "binding_return_date",
+            "binding_return_value",
+            "interval_evidence_sha256",
+            "treatment",
+        }
+        if set(row) != required:
+            raise GovernedHwmAuthorityError("accepted source interval shape differs")
+
+        strategy_id = _text(row.get("strategy_id"), "interval strategy_id")
+        source = sources.get(strategy_id)
+        if source is None:
+            raise GovernedHwmAuthorityError(
+                "accepted interval strategy lacks source calendar"
+            )
+        if source["calendar_kind"] != "DECLARED_SESSION":
+            raise GovernedHwmAuthorityError(
+                "accepted interval requires a DECLARED_SESSION source"
+            )
+        if row.get("calendar_id") != source["calendar_id"]:
+            raise GovernedHwmAuthorityError("interval calendar identity differs")
+        if row.get("treatment") != ACCEPTED_MULTI_DAY_RETURN_TREATMENT:
+            raise GovernedHwmAuthorityError("interval treatment differs")
+
+        prior = _date(row.get("prior_observation_date"), "interval prior date")
+        following = _date(row.get("next_observation_date"), "interval next date")
+        binding_date = _date(row.get("binding_return_date"), "binding return date")
+        if not prior < following:
+            raise GovernedHwmAuthorityError("interval brackets are unordered")
+        if binding_date != following:
+            raise GovernedHwmAuthorityError(
+                "accepted interval must bind the next observed return row"
+            )
+        value = _decimal(row.get("binding_return_value"), "binding return value")
+
+        evidence = _sha256(row.get("interval_evidence_sha256"), "interval evidence")
+        expected_evidence = hashlib.sha256(
+            "\n".join(
+                [
+                    strategy_id,
+                    str(row.get("calendar_id")),
+                    prior.isoformat(),
+                    following.isoformat(),
+                    str(row.get("binding_return_value")),
+                ]
+            ).encode("utf-8")
+        ).hexdigest()
+        if evidence != expected_evidence:
+            raise GovernedHwmAuthorityError("interval evidence hash differs")
+
+        key = (strategy_id, prior.isoformat(), following.isoformat())
+        if key in intervals:
+            raise GovernedHwmAuthorityError("accepted source interval is duplicated")
+        intervals[key] = {**row, "_value": value}
+    return intervals
 
 
 def governed_closed_source_return(

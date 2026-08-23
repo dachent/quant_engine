@@ -67,6 +67,9 @@ def _authority(*, hwm_policy_sha256: str) -> dict[str, object]:
             }
         ],
         "closed_source_dates": [closure],
+        # accepted_source_intervals added by the multi-day interval contract
+        # (owner ruling #324 comment 5383730751); none declared in this fixture.
+        "accepted_source_intervals": [],
     }
     authority["authority_evidence_sha256"] = _hash(authority)
     return authority
