@@ -163,6 +163,7 @@ _DATE_FIELDS: Final = ("as_of_date", "event_date", "effective_date")
 _NAV_VALUE_BASIS_BY_PROVIDER: Final = {
     "ibkr": "ACCOUNT_TOTAL",
     "matrixport": "ACCOUNT_TOTAL",
+    "quantbase": "ACCOUNT_TOTAL",
     "schwab": "ACCOUNT_VALUE",
 }
 _NAV_SOURCE_SCHEMA_NAMES_BY_PROVIDER: Final = {
@@ -171,6 +172,7 @@ _NAV_SOURCE_SCHEMA_NAMES_BY_PROVIDER: Final = {
 }
 _NAV_SOURCE_ARTIFACT_IDS_BY_PROVIDER: Final = {
     "matrixport": frozenset({"csv/daily_portfolio_totals.csv"}),
+    "quantbase": frozenset({"source/csv/dashboard_Volatis_Strategy_pricehistory.csv"}),
 }
 
 
@@ -647,6 +649,10 @@ def _quantbase_nav_observations(
                 "source_artifact_id": artifact_id,
                 "source_record_id": source_id,
                 "strategy_id": strategy_id,
+                # The Volatis dashboard value is the strict account total for
+                # the mapped account: declare the basis so authoritative-NAV
+                # admission can verify it (#359/#361 contract class).
+                "value_basis": "ACCOUNT_TOTAL",
             }
         )
     return observations

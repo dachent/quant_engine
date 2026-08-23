@@ -488,7 +488,7 @@ def test_reference_only_legacy_nav_remains_schema_valid_without_provenance(
             "NAV_OBSERVATION_VALUE_BASIS_INVALID",
         ),
         (
-            {"provider_id": "quantbase", "record_id": "quantbase:unproven"},
+            {"provider_id": "alpaca", "record_id": "alpaca:unproven"},
             "NAV_OBSERVATION_VALUE_BASIS_UNPROVEN",
         ),
     ),
@@ -865,6 +865,47 @@ def test_matrixport_strict_total_does_not_require_optional_current_snapshot(
 
     assert len(rows) == 1
     assert rows[0]["value_basis"] == "ACCOUNT_TOTAL"
+
+
+def test_quantbase_dashboard_nav_declares_account_total_basis(
+    tmp_path: Path,
+) -> None:
+    """Volatis dashboard NAV is an authoritative account total and must carry
+    the same source-proven basis contract as Matrixport (#359/#361 class)."""
+
+    run_id = "20260816T141010.494Z"
+    artifacts_root = tmp_path / "output" / "source-runs" / run_id / "artifacts" / "csv"
+    artifacts_root.mkdir(parents=True)
+    pricehistory = artifacts_root / "dashboard_Volatis_Strategy_pricehistory.csv"
+    pricehistory.write_text(
+        "time,value\n08/13/2026,50000\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_manifest(
+        pricehistory,
+        "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+    )
+    catalog = {
+        "catalog_schema_version": 1,
+        "legacy_lineage": {"run_id": run_id},
+    }
+
+    rows = ledger._quantbase_nav_observations(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path / "output",
+        {ledger._CSV_FACT_ACCOUNT["quantbase"]},
+        {"volatis-strategy"},
+        {},
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["value_basis"] == "ACCOUNT_TOTAL"
+    assert (
+        rows[0]["source_artifact_id"]
+        == "source/csv/dashboard_Volatis_Strategy_pricehistory.csv"
+    )
 
 
 def test_matrixport_product_quota_scale_cannot_be_admitted_as_account_nav(
@@ -1341,7 +1382,9 @@ def test_quantbase_volatis_dashboard_admitted_as_nav_observations(
     )
     assert rows[0]["strategy_id"] == "volatis-strategy"
     assert rows[0]["mapping_status"] == "MAPPED"
-    assert "value_basis" not in rows[0]
+    # The Volatis dashboard total is an authoritative account NAV: it must
+    # declare its basis under the #359/#361 value-basis contract.
+    assert rows[0]["value_basis"] == "ACCOUNT_TOTAL"
     assert rows[1]["as_of_date"] == "2026-08-14"
 
 
