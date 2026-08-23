@@ -44,6 +44,9 @@ from quant_engine.portfolio_ledger import (
     validate_hwm_inputs_envelope,
     validate_as_held_hwm_receipt_generation_binding,
 )
+from quant_engine.portfolio_ledger.hwm_governed_execution import (
+    verify_governed_hwm_result,
+)
 
 
 PANEL_SCHEMA_VERSION: Final = 18
@@ -1560,6 +1563,68 @@ def _panel_portable_hwm_proof(
         "current_drawdown": accepted["current_drawdown"],
         "maximum_drawdown": accepted["maximum_drawdown"],
         "index_path": accepted["index_path"],
+    }
+
+
+def _panel_governed_hwm_proof(
+    result_receipt: Mapping[str, Any],
+    input_generation_bytes: bytes,
+    calendar_bytes: bytes,
+    input_receipt_bytes: bytes,
+) -> dict[str, Any]:
+    """Independently verify + project a governed result for panel reconciliation.
+
+    Delegates to the kernel's own verifier — the panel never reimplements
+    governed arithmetic (same discipline as ``_panel_portable_hwm_proof``).
+    """
+    try:
+        accepted = verify_governed_hwm_result(
+            result_receipt,
+            input_generation_bytes,
+            calendar_bytes=calendar_bytes,
+            input_receipt_bytes=input_receipt_bytes,
+            policy_bytes=_PORTABLE_HWM_POLICY.read_bytes(),
+            product_contract_bytes=_PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes(),
+            performance_policy_bytes=_PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes(),
+            legacy_policy_bytes=HWM_POLICY.read_bytes(),
+        )
+    except HwmCoverageError as exc:
+        raise ControlPanelValidationError(
+            f"governed HWM result is invalid: {exc}"
+        ) from exc
+    return {
+        "schema_version": 1,
+        "status": accepted["status"],
+        "financial_acceptance": "PENDING_OWNER_ACCEPTANCE",
+        "assurance_profile": accepted["assurance_profile"],
+        "policy_id": accepted["policy_id"],
+        "policy_sha256": accepted["policy_sha256"],
+        "calendar_sha256": accepted["calendar_sha256"],
+        "input_generation_sha256": accepted["input_generation_sha256"],
+        "upstream_receipt_sha256": accepted["upstream_receipt_sha256"],
+        "receipt_sha256": accepted["receipt_sha256"],
+        "input_authority_class": accepted["input_authority_class"],
+        "return_basis": accepted["return_basis"],
+        "evaluated_on": accepted["evaluated_on"],
+        "complete_through": accepted["complete_through"],
+        "calculation_age_days": accepted["calculation_age_days"],
+        "maximum_age_days": accepted["maximum_age_days"],
+        "age_status": accepted["age_status"],
+        "warnings": accepted["warnings"],
+        # Canonical decimal TEXT so the panel's JSON serialization round-trips.
+        "current_index": decimal_text(accepted["current_index"]),
+        "current_hwm": decimal_text(accepted["current_hwm"]),
+        "current_drawdown": decimal_text(accepted["current_drawdown"]),
+        "maximum_drawdown": decimal_text(accepted["maximum_drawdown"]),
+        "index_path": [
+            {
+                "as_of": row["as_of"],
+                "index": decimal_text(row["index"]),
+                "hwm": decimal_text(row["hwm"]),
+                "drawdown": decimal_text(row["drawdown"]),
+            }
+            for row in accepted["index_path"]
+        ],
     }
 
 
@@ -4290,6 +4355,10 @@ def _panel_data(
     hwm_portable_receipt: Mapping[str, Any] | None = None,
     hwm_portable_generation_bytes: bytes | None = None,
     hwm_portable_calendar_bytes: bytes | None = None,
+    hwm_governed_result: Mapping[str, Any] | None = None,
+    hwm_governed_generation_bytes: bytes | None = None,
+    hwm_governed_calendar_bytes: bytes | None = None,
+    hwm_governed_receipt_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -4781,6 +4850,45 @@ def _panel_data(
             raise ControlPanelValidationError(
                 "portable HWM proof differs from the accepted portfolio report"
             )
+    # Governed HWM lane (#324/#370): same all-or-nothing bundle + independent
+    # verification + reconciliation against the accepted report.
+    governed_bundle_presence = {
+        hwm_governed_result is not None,
+        hwm_governed_generation_bytes is not None,
+        hwm_governed_calendar_bytes is not None,
+        hwm_governed_receipt_bytes is not None,
+    }
+    if len(governed_bundle_presence) != 1:
+        raise ControlPanelValidationError(
+            "governed HWM result, generation, calendar, and receipt bytes must be supplied together"
+        )
+    governed_hwm_proof = (
+        _panel_governed_hwm_proof(
+            hwm_governed_result,
+            hwm_governed_generation_bytes or b"",
+            hwm_governed_calendar_bytes or b"",
+            hwm_governed_receipt_bytes or b"",
+        )
+        if hwm_governed_result is not None and hwm_governed_generation_bytes is not None
+        else None
+    )
+    report_governed_hwm_proof = report.get("hwm_governed_proof")
+    if report_governed_hwm_proof is not None and governed_hwm_proof is None:
+        raise ControlPanelValidationError(
+            "governed HWM authority is not supplied independently"
+        )
+    if governed_hwm_proof is not None:
+        if report_governed_hwm_proof is None:
+            raise ControlPanelValidationError(
+                "accepted portfolio report lacks the governed HWM proof"
+            )
+        if (
+            _object(report_governed_hwm_proof, "report.hwm_governed_proof")
+            != governed_hwm_proof
+        ):
+            raise ControlPanelValidationError(
+                "governed HWM proof differs from the accepted portfolio report"
+            )
     hwm_numerical = _compute_panel_numerical_hwm(baseline_catalog)
     hwm_summary = {**hwm_summary, **hwm_numerical}
     report_hwm = report.get("hwm_summary")
@@ -5270,6 +5378,8 @@ def _panel_data(
     }
     if portable_hwm_proof is not None:
         panel_data["hwm_portable_proof"] = portable_hwm_proof
+    if governed_hwm_proof is not None:
+        panel_data["hwm_governed_proof"] = governed_hwm_proof
     return panel_data
 
 
@@ -5290,6 +5400,10 @@ def _rendered_files(
     hwm_portable_receipt: Mapping[str, Any] | None = None,
     hwm_portable_generation_bytes: bytes | None = None,
     hwm_portable_calendar_bytes: bytes | None = None,
+    hwm_governed_result: Mapping[str, Any] | None = None,
+    hwm_governed_generation_bytes: bytes | None = None,
+    hwm_governed_calendar_bytes: bytes | None = None,
+    hwm_governed_receipt_bytes: bytes | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -5396,6 +5510,10 @@ def _rendered_files(
         hwm_portable_receipt,
         hwm_portable_generation_bytes,
         hwm_portable_calendar_bytes,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -5479,6 +5597,10 @@ def build_candidate(
     hwm_portable_receipt: Mapping[str, Any] | None = None,
     hwm_portable_generation_bytes: bytes | None = None,
     hwm_portable_calendar_bytes: bytes | None = None,
+    hwm_governed_result: Mapping[str, Any] | None = None,
+    hwm_governed_generation_bytes: bytes | None = None,
+    hwm_governed_calendar_bytes: bytes | None = None,
+    hwm_governed_receipt_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -5497,6 +5619,10 @@ def build_candidate(
         hwm_portable_receipt,
         hwm_portable_generation_bytes,
         hwm_portable_calendar_bytes,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -5576,6 +5702,10 @@ def verify_candidate(
     hwm_portable_receipt: Mapping[str, Any] | None = None,
     hwm_portable_generation_bytes: bytes | None = None,
     hwm_portable_calendar_bytes: bytes | None = None,
+    hwm_governed_result: Mapping[str, Any] | None = None,
+    hwm_governed_generation_bytes: bytes | None = None,
+    hwm_governed_calendar_bytes: bytes | None = None,
+    hwm_governed_receipt_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -5594,6 +5724,10 @@ def verify_candidate(
         hwm_portable_receipt,
         hwm_portable_generation_bytes,
         hwm_portable_calendar_bytes,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -6703,6 +6837,13 @@ def publish_panel(
     replication_root: Path | None = None,
     candidate_driver_map_path: Path | None = None,
     baseline_root: Path | None = None,
+    hwm_portable_receipt: Mapping[str, Any] | None = None,
+    hwm_portable_generation_bytes: bytes | None = None,
+    hwm_portable_calendar_bytes: bytes | None = None,
+    hwm_governed_result: Mapping[str, Any] | None = None,
+    hwm_governed_generation_bytes: bytes | None = None,
+    hwm_governed_calendar_bytes: bytes | None = None,
+    hwm_governed_receipt_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         report_root,
@@ -6719,6 +6860,13 @@ def publish_panel(
         replication_root,
         candidate_driver_map_path,
         baseline_root,
+        hwm_portable_receipt,
+        hwm_portable_generation_bytes,
+        hwm_portable_calendar_bytes,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
     )
     qa = validate_qa(candidate_dir, qa_dir)
     _write_exact(
@@ -6738,6 +6886,13 @@ def publish_panel(
         replication_root,
         candidate_driver_map_path,
         baseline_root,
+        hwm_portable_receipt,
+        hwm_portable_generation_bytes,
+        hwm_portable_calendar_bytes,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
     )
     (
         report_path,
@@ -7004,6 +7159,27 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--candidate-dir", type=Path, required=True)
         if name == "publish":
             command.add_argument("--qa-dir", type=Path, required=True)
+            # Governed HWM bundle: result JSON + the three evidence artifacts.
+            command.add_argument(
+                "--hwm-governed-result",
+                type=Path,
+                help="Governed PORT-HWM-4 result JSON (verified before use)",
+            )
+            command.add_argument(
+                "--hwm-governed-generation",
+                type=Path,
+                help="Governed input generation JSON (hash-verified by kernel)",
+            )
+            command.add_argument(
+                "--hwm-governed-calendar",
+                type=Path,
+                help="Accepted governed calendar authority JSON",
+            )
+            command.add_argument(
+                "--hwm-governed-receipt",
+                type=Path,
+                help="Provider admit-or-declare receipt JSON (independent anchor)",
+            )
     qa = commands.add_parser("qa")
     qa.add_argument("--candidate-dir", type=Path, required=True)
     qa.add_argument("--qa-dir", type=Path, required=True)
@@ -7012,6 +7188,13 @@ def _parser() -> argparse.ArgumentParser:
     launcher_qa.add_argument("--qa-dir", type=Path, required=True)
     launcher_qa.add_argument("--expected-generation-id", required=True)
     return parser
+
+
+def _load_optional_json_arg(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    parsed = json.loads(path.read_text(encoding="utf-8"))
+    return parsed if isinstance(parsed, dict) else None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -7075,6 +7258,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.replication_root,
                 args.candidate_driver_map,
                 args.baseline_root,
+                hwm_portable_receipt=_load_optional_json_arg(
+                    getattr(args, "hwm_portable_receipt", None)
+                ),
+                hwm_governed_result=_load_optional_json_arg(
+                    getattr(args, "hwm_governed_result", None)
+                ),
+                hwm_governed_generation_bytes=(
+                    Path(args.hwm_governed_generation).read_bytes()
+                    if getattr(args, "hwm_governed_generation", None)
+                    else None
+                ),
+                hwm_governed_calendar_bytes=(
+                    Path(args.hwm_governed_calendar).read_bytes()
+                    if getattr(args, "hwm_governed_calendar", None)
+                    else None
+                ),
+                hwm_governed_receipt_bytes=(
+                    Path(args.hwm_governed_receipt).read_bytes()
+                    if getattr(args, "hwm_governed_receipt", None)
+                    else None
+                ),
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)

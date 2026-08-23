@@ -48,8 +48,12 @@ def _canonical(value) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-def _policy_bytes(ready=True):
-    """Real policy template with only the governed calendar seam flipped."""
+def _policy_bytes(ready=True, mode="flipped"):
+    """Real policy template; 'flipped' swaps the seam to the TEST id,
+    'committed' returns the production file BYTES exactly as committed
+    (identity checks hash these bytes, not a re-serialization)."""
+    if ready and mode == "committed":
+        return (REPO / "contracts" / "portfolio-hwm-policy-v4.json").read_bytes()
     policy = json.loads(
         (REPO / "contracts" / "portfolio-hwm-policy-v4.json").read_text(
             encoding="utf-8"
@@ -82,12 +86,12 @@ def _receipt_bytes():
     ).encode()
 
 
-def _authority_doc():
+def _authority_doc(policy_id="GOV-CAL-TEST"):
     """Two sources: A always-on; B session source with one accepted weekend."""
     doc = {
         "schema_version": 2,
         "authority_class": "ACCEPTED_GOVERNED",
-        "calendar_policy_id": "GOV-CAL-TEST",
+        "calendar_policy_id": policy_id,
         "portfolio_calendar": "ALWAYS_ON",
         "owner_decision_evidence": "owner-comment",
         "hwm_policy_sha256": "0" * 64,
@@ -197,9 +201,20 @@ DAYS = [
 ]
 
 
-def _fixture(tmp_path, ready=True):
-    policy_bytes = _policy_bytes(ready=ready)
-    cal = _authority_doc()
+def _fixture(tmp_path, ready=True, mode="flipped"):
+    policy_bytes = _policy_bytes(ready=ready, mode=mode)
+    if mode == "committed":
+        committed_policy = json.loads(
+            (REPO / "contracts" / "portfolio-hwm-policy-v4.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        accepted_ids = committed_policy["calendar_policy"][
+            "accepted_governed_calendar_policy_ids"
+        ]
+        cal = _authority_doc(policy_id=accepted_ids[0])
+    else:
+        cal = _authority_doc()
     # Bind policy sha into the doc like the real derivation does.
     cal["hwm_policy_sha256"] = hashlib.sha256(policy_bytes).hexdigest()
     canonical = json.dumps(
