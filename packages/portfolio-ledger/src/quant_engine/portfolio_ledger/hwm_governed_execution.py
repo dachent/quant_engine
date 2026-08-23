@@ -577,6 +577,7 @@ def compute_governed_as_held_composite_hwm(
             "policy_semantic_digest": policy_semantic_digest,
             "calendar_sha256": calendar_sha256,
             "input_generation_sha256": declared_generation_hash,
+            "upstream_receipt_sha256": receipt_sha256,
             "input_authority_class": _GOVERNED_INPUT_AUTHORITY,
             "input_sha256": _canonical_sha256(
                 _json_safe(
@@ -606,6 +607,104 @@ def compute_governed_as_held_composite_hwm(
             "governor_drawdown_loss": governor_drawdown_loss,
             "index_path": index_path,
             "periods": calculated_periods,
+            # Self-contained evidence envelope for independent verification:
+            # the grid is reproduced here; memberships/periods recompute
+            # from the hash-verified generation document.
+            "input_evidence": {
+                "accepted_intervals": normalized_intervals,
+                "memberships": normalized_memberships,
+            },
+            "calendar_accepted_sha256": _sha256(
+                calendar_accepted_sha256, "calendar_accepted_sha256"
+            ),
         }
     result["receipt_sha256"] = _canonical_sha256(_json_safe(result))
     return result
+
+
+def verify_governed_hwm_result(
+    result_receipt: Mapping[str, Any],
+    input_generation_bytes: bytes,
+    *,
+    calendar_bytes: bytes,
+    input_receipt_bytes: bytes,
+    policy_bytes: bytes,
+    product_contract_bytes: bytes,
+    performance_policy_bytes: bytes,
+    legacy_policy_bytes: bytes,
+) -> dict[str, Any]:
+    """Independently verify a governed HWM result against its evidence.
+
+    Recomputes the governed calculation from the hash-verified generation
+    document, the calendar authority, the admission receipt, and the policy
+    bytes, then requires the recomputed receipt identity to equal the
+    presented one. Returns the recomputed result on success; raises
+    ``HwmCoverageError`` on any divergence.
+    """
+    generation = _json_mapping_from_bytes(
+        input_generation_bytes, "input_generation_bytes"
+    )
+    # Verification contract: recompute from evidence and require the
+    # presented numbers to equal the recomputation field-for-field (after
+    # _json_safe normalization, since Decimal text forms may differ while
+    # values agree). Any divergence — including an altered number or a
+    # mismatched receipt hash — fails closed.
+    normalized_presented = _json_safe(
+        json.loads(json.dumps(result_receipt, default=str))
+    )
+    recomputed = compute_governed_as_held_composite_hwm(
+        result_receipt["input_evidence"]["accepted_intervals"],
+        generation["memberships"],
+        generation["component_periods"],
+        policy_bytes=policy_bytes,
+        product_contract_bytes=product_contract_bytes,
+        performance_policy_bytes=performance_policy_bytes,
+        legacy_policy_bytes=legacy_policy_bytes,
+        calendar_authority_bytes=calendar_bytes,
+        input_generation_bytes=input_generation_bytes,
+        input_receipt_bytes=input_receipt_bytes,
+        calendar_accepted_sha256=result_receipt["calendar_accepted_sha256"],
+        evaluated_on=result_receipt["evaluated_on"],
+        complete_through=result_receipt["complete_through"],
+        maximum_age_days=result_receipt["maximum_age_days"],
+        assurance_profile=result_receipt["assurance_profile"],
+    )
+    normalized_recomputed = _json_safe(json.loads(json.dumps(recomputed, default=str)))
+    # Field-for-field equality between presented and recomputed documents
+    # (excluding the receipt hash, which is bound separately below).
+    differing = sorted(
+        key
+        for key in set(normalized_presented) | set(normalized_recomputed)
+        if key != "receipt_sha256"
+        and json.dumps(normalized_presented.get(key), sort_keys=True)
+        != json.dumps(normalized_recomputed.get(key), sort_keys=True)
+    )
+    if differing:
+        raise HwmCoverageError(
+            f"presented governed result diverges from recomputation: {differing}"
+        )
+    if recomputed.get("receipt_sha256") != result_receipt.get("receipt_sha256"):
+        raise HwmCoverageError("governed HWM result identity differs")
+    # P1-B: the presented grid is only trusted when it agrees with the
+    # hash-verified generation's own coverage: the earliest period start
+    # anchors the grid and the last interval ends at complete_through, so a
+    # truncated or shifted suffix cannot pass while periods remain.
+    presented_intervals = result_receipt["input_evidence"]["accepted_intervals"]
+    if not presented_intervals:
+        raise HwmCoverageError("presented accepted interval grid is empty")
+    period_starts = [
+        _canonical_date(row["interval_start"], "generation period start")
+        for row in generation["component_periods"]
+    ]
+    period_ends = [
+        _canonical_date(row["interval_end"], "generation period end")
+        for row in generation["component_periods"]
+    ]
+    if (
+        presented_intervals[0]["interval_start"] != min(period_starts).isoformat()
+        or presented_intervals[-1]["interval_end"] != max(period_ends).isoformat()
+    ):
+        raise HwmCoverageError(
+            "presented accepted interval grid differs from generation coverage"
+        )
+    return recomputed
