@@ -5,6 +5,7 @@ from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
 import importlib.util
 import json
+import tempfile
 from pathlib import Path
 import runpy
 import sys
@@ -4971,3 +4972,75 @@ def test_canonical_series_dependence_beyond_evidence_fails() -> None:
         panel._canonical_strategy_series_contracts(
             evidence, names, factor, dependence, weekly
         )
+
+
+def _governed_hwm_bundle() -> tuple[dict[str, Any], bytes, bytes, bytes]:
+    """A real governed result + its three evidence artifacts.
+
+    Uses mode='committed' so the bundle verifies against the production
+    policy bytes the panel reads — exactly like the real derivation.
+    """
+    import json as _json
+    import sys as _sys
+
+    repo_tests = REPOSITORY_ROOT / "tests" / "portfolio_ledger"
+    if str(repo_tests) not in _sys.path:
+        _sys.path.insert(0, str(repo_tests))
+    from test_hwm_governed_execution import (  # noqa: E402
+        _fixture as _governed_fixture,
+        _run as _governed_run,
+    )
+
+    fx = _governed_fixture(Path(tempfile.mkdtemp()), mode="committed")
+    result = _governed_run(fx)
+    return (
+        json.loads(_json.dumps(result, default=str)),
+        _json.dumps(fx["generation"], sort_keys=True).encode(),
+        fx["calendar_authority_bytes"],
+        fx["input_receipt_bytes"],
+    )
+
+
+def test_panel_reconciles_governed_proof(
+    inputs: dict[str, Any], tmp_path: Path
+) -> None:
+    report, _catalog = _envelope_report(inputs, tmp_path)
+    result, generation_bytes, calendar_bytes, receipt_bytes = _governed_hwm_bundle()
+    proof = panel._panel_governed_hwm_proof(
+        result, generation_bytes, calendar_bytes, receipt_bytes
+    )
+    report["hwm_governed_proof"] = proof
+    _republish_report(inputs["report"], tmp_path, report)
+
+    candidate = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        hwm_governed_result=result,
+        hwm_governed_generation_bytes=generation_bytes,
+        hwm_governed_calendar_bytes=calendar_bytes,
+        hwm_governed_receipt_bytes=receipt_bytes,
+    )
+    data = _candidate_data(candidate)
+
+    assert data["hwm_governed_proof"] == proof
+    assert data["hwm_governed_proof"]["status"] == "AVAILABLE"
+    assert data["hwm_governed_proof"]["input_authority_class"] == "ACCEPTED_GOVERNED"
+    assert data["advisory"]["hwm_index"] != proof["current_index"]
+    # Candidate verification reproduces the governed bundle end-to-end.
+    assert (
+        panel.verify_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            Path(candidate["candidate_dir"]),
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            hwm_governed_result=result,
+            hwm_governed_generation_bytes=generation_bytes,
+            hwm_governed_calendar_bytes=calendar_bytes,
+            hwm_governed_receipt_bytes=receipt_bytes,
+        )["all_passed"]
+        is True
+    )

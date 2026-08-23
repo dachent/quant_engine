@@ -2757,11 +2757,19 @@ def _report_governed_hwm_proof(
         "maximum_age_days": accepted["maximum_age_days"],
         "age_status": accepted["age_status"],
         "warnings": accepted["warnings"],
-        "current_index": accepted["current_index"],
-        "current_hwm": accepted["current_hwm"],
-        "current_drawdown": accepted["current_drawdown"],
-        "maximum_drawdown": accepted["maximum_drawdown"],
-        "index_path": accepted["index_path"],
+        "current_index": decimal_text(accepted["current_index"]),
+        "current_hwm": decimal_text(accepted["current_hwm"]),
+        "current_drawdown": decimal_text(accepted["current_drawdown"]),
+        "maximum_drawdown": decimal_text(accepted["maximum_drawdown"]),
+        "index_path": [
+            {
+                "as_of": row["as_of"],
+                "index": decimal_text(row["index"]),
+                "hwm": decimal_text(row["hwm"]),
+                "drawdown": decimal_text(row["drawdown"]),
+            }
+            for row in accepted["index_path"]
+        ],
     }
 
 
