@@ -97,6 +97,10 @@ def _authority(*, policy: dict[str, Any] | None = None) -> dict[str, Any]:
             },
         ],
         "closed_source_dates": [_closure("2026-08-08"), _closure("2026-08-09")],
+        # accepted_source_intervals added by the multi-day interval contract
+        # (owner ruling #324 comment 5383730751): the authority schema now
+        # requires the field, defaulting to no declared intervals here.
+        "accepted_source_intervals": [],
     }
     value["authority_evidence_sha256"] = _hash(value)
     return value

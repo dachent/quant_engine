@@ -59,8 +59,8 @@
     "authority": "HASH_BOUND_ACCEPTED_INTERVAL_SEQUENCE",
     "interval_rule": "EXACT_CONTIGUOUS_ONE_DAY_ACCEPTED_INTERVALS",
     "missing_interval": "FAIL_NO_ZERO_FILL_OR_HOLIDAY_INFERENCE",
-    "release_authority_status": "REQUIRED_NOT_READY",
-    "accepted_governed_calendar_policy_ids": [],
+    "release_authority_status": "READY",
+    "accepted_governed_calendar_policy_ids": ["GOVERNED-MIXED-CALENDAR-2026-08-22"],
     "portable_synthetic_policy_id": "SYNTHETIC_DAILY_COMMON_CALENDAR"
   },
   "input_authority_policy": {
