@@ -39,6 +39,7 @@ from quant_engine.portfolio_ledger.hwm import (
     _sha256,
     _strict_keys,
     _text,
+    _validate_policy_authority_bytes,
     validate_as_held_hwm_policy,
 )
 from quant_engine.portfolio_ledger.hwm_governed import (
@@ -110,6 +111,7 @@ def compute_governed_as_held_composite_hwm(
     legacy_policy_bytes: bytes,
     calendar_authority_bytes: bytes,
     input_generation_bytes: bytes,
+    input_receipt_bytes: bytes,
     calendar_accepted_sha256: str,
     evaluated_on: str,
     complete_through: str,
@@ -127,8 +129,48 @@ def compute_governed_as_held_composite_hwm(
 
     policy = _json_mapping_from_bytes(policy_bytes, "policy_bytes")
     validate_as_held_hwm_policy(policy)
+    # P1-3: the policy's referenced authority artifacts are validated on
+    # every governed execution — placeholder bytes fail closed here.
+    _validate_policy_authority_bytes(
+        policy,
+        product_contract_bytes=product_contract_bytes,
+        performance_policy_bytes=performance_policy_bytes,
+        legacy_policy_bytes=legacy_policy_bytes,
+    )
     policy_sha256 = hashlib.sha256(policy_bytes).hexdigest()
     policy_semantic_digest = _canonical_sha256(policy)
+
+    # P1-1: independent upstream anchor. The generation must embed the
+    # SHA-256 of an admission receipt whose content independently ties the
+    # product contract bytes to the policy's pinned semantic digest.
+    receipt = _json_mapping_from_bytes(input_receipt_bytes, "input_receipt_bytes")
+    _strict_keys(
+        receipt,
+        {
+            "admission_gate_status",
+            "contract_raw_sha256",
+            "contract_semantic_sha256",
+            "policy_pinned_semantic_digest",
+        },
+        "upstream admission receipt",
+    )
+    if _text(receipt["admission_gate_status"], "receipt gate") != "PASS":
+        raise HwmCoverageError("upstream admission receipt is not PASS")
+    product_authority = _mapping(
+        policy["product_authority"], "policy.product_authority"
+    )
+    if (
+        hashlib.sha256(product_contract_bytes).hexdigest()
+        != receipt["contract_raw_sha256"]
+    ):
+        raise HwmCoverageError("upstream admission receipt contract differs")
+    if receipt["contract_semantic_sha256"] != product_authority["semantic_digest"]:
+        raise HwmCoverageError("upstream admission receipt semantics differ")
+    # The receipt must pin the same semantic digest the policy pins: this is
+    # the independent triangle contract <-> receipt <-> policy.
+    if receipt["policy_pinned_semantic_digest"] != product_authority["semantic_digest"]:
+        raise HwmCoverageError("upstream admission receipt policy pin differs")
+    receipt_sha256 = hashlib.sha256(input_receipt_bytes).hexdigest()
 
     # --- Accepted calendar authority via the #356 seam. ---
     calendar_authority = _json_mapping_from_bytes(
@@ -178,6 +220,7 @@ def compute_governed_as_held_composite_hwm(
             "component_periods",
             "policy_binding_sha256",
             "calendar_sha256",
+            "upstream_receipt_sha256",
             "evidence_sha256s",
             "generation_evidence_sha256",
         },
@@ -204,6 +247,10 @@ def compute_governed_as_held_composite_hwm(
         raise HwmCoverageError("HWM input generation identity differs")
     if _sha256(generation["policy_binding_sha256"], "gen policy") != policy_sha256:
         raise HwmCoverageError("generation policy binding differs")
+    # P1-1: independent upstream anchor — the generation must embed the
+    # receipt hash verified above, not merely a self-consistent document.
+    if _sha256(generation["upstream_receipt_sha256"], "gen receipt") != receipt_sha256:
+        raise HwmCoverageError("generation upstream receipt binding differs")
     # Identity convention: the generation binds the authority's SEMANTIC
     # identity (its internal authority_evidence_sha256 over canonical
     # content, re-verified above by the #356 seam). Byte-level artifact
@@ -255,6 +302,14 @@ def compute_governed_as_held_composite_hwm(
         if previous_end is not None and start != previous_end:
             raise HwmCoverageError("accepted intervals are not contiguous")
         evidence = _sha256(original["interval_evidence_sha256"], "interval evidence")
+        # P1-4: interval identity is bound to the accepted calendar
+        # authority root — evidence must equal H(start|end|root).
+        expected_evidence = hashlib.sha256(
+            f"{start.isoformat()}|{end.isoformat()}|"
+            f"{calendar_authority['authority_evidence_sha256']}".encode()
+        ).hexdigest()
+        if evidence != expected_evidence:
+            raise HwmCoverageError("accepted interval calendar identity differs")
         normalized_intervals.append(
             {
                 "interval_id": interval_id,
@@ -276,11 +331,15 @@ def compute_governed_as_held_composite_hwm(
             "complete_through differs from the accepted interval boundary"
         )
 
-    # --- Memberships. ---
+    # --- Memberships (P1-2: consumed from the HASH-VERIFIED generation
+    # payload; the caller sequence must mirror it exactly). ---
+    generation_memberships = generation["memberships"]
+    if len(memberships) != len(generation_memberships):
+        raise HwmCoverageError("membership coverage differs from generation")
     membership_by_strategy: dict[str, dict[str, Any]] = {}
     normalized_memberships: list[Row] = []
     membership_hashes: list[str] = []
-    for entry in memberships:
+    for entry in generation_memberships:
         if not isinstance(entry, Mapping):
             raise HwmCoverageError("membership must be an object")
         _strict_keys(
@@ -309,16 +368,26 @@ def compute_governed_as_held_composite_hwm(
     for value in membership_hashes:
         if value not in registry:
             raise HwmCoverageError("membership evidence is not admitted")
+    # P1-4: the grid must be anchored at the earliest effective membership
+    # start so a truncated grid cannot silently restart the base-100 series.
+    if normalized_intervals[0]["interval_start"] != min(
+        m["effective_start"] for m in normalized_memberships
+    ):
+        raise HwmCoverageError("accepted interval grid is not member-anchored")
 
     def active_members(start: date) -> set[str]:
         return {sid for sid, m in membership_by_strategy.items() if m["start"] <= start}
 
-    # --- Component periods. ---
+    # --- Component periods (P1-2: consumed from the HASH-VERIFIED
+    # generation payload, not the parallel caller sequences). ---
     # Keyed by (strategy_id, interval_end ISO date): one-day rows end at
     # start+1d; declared multi-day accepted intervals end at their binding
     # day. One row per end day is guaranteed by builder output.
+    generation_periods = generation["component_periods"]
+    if len(component_periods) != len(generation_periods):
+        raise HwmCoverageError("component period coverage differs from generation")
     periods_by_key: dict[tuple[str, str], Mapping[str, Any]] = {}
-    for original in component_periods:
+    for original in generation_periods:
         if not isinstance(original, Mapping):
             raise HwmCoverageError("component period must be an object")
         _strict_keys(original, _PERIOD_KEYS, "component period")
@@ -364,8 +433,6 @@ def compute_governed_as_held_composite_hwm(
         periods_by_key[(strategy_id, end.isoformat())] = original
 
     # --- Coverage: every active member x interval covered or dispositioned. ---
-    calculated_periods: list[Row] = []
-    index_path: list[Row] = []
 
     def resolve_period(sid: str, iv: Mapping[str, Any]) -> Row:
         """Observed row, or authority-derived zero, else fail closed."""
@@ -416,59 +483,64 @@ def compute_governed_as_held_composite_hwm(
         interval_by_id.values(), key=lambda item: item["start_date"]
     )
     last_capital: dict[str, Decimal] = {}
-    for iv in ordered_intervals:
-        members = sorted(active_members(iv["start_date"]))
-        if not members:
-            raise HwmCoverageError("accepted interval has no effective members")
-        components: list[Row] = []
-        total_capital = Decimal("0")
-        weighted_sum = Decimal("0")
-        for sid in members:
-            resolved = resolve_period(sid, iv)
-            if resolved["source"] == "OBSERVED":
-                capital = resolved["beginning_capital_usd"]
-            else:
-                carried = last_capital.get(sid)
-                capital = (
-                    carried
-                    if carried is not None
-                    else resolved["beginning_capital_usd"]
-                )
-            components.append({**resolved, "weight_capital": capital})
-            total_capital += capital
-            weighted_sum += capital * resolved["period_return_decimal"]
-        if total_capital <= 0:
-            raise HwmCoverageError("interval beginning capital must be positive")
-        composite_return = weighted_sum / total_capital
-        component_rows = [
-            {
-                "strategy_id": c["strategy_id"],
-                "beginning_capital_usd": c["weight_capital"],
-                "weight": c["weight_capital"] / total_capital,
-                "period_return": c["period_return_decimal"],
-                "source": c["source"],
-                "return_evidence_sha256": c["return_evidence_sha256"],
-            }
-            for c in components
-        ]
-        calculated_periods.append(
-            {
-                "interval_id": iv["interval_id"],
-                "interval_start": iv["interval_start"],
-                "interval_end": iv["interval_end"],
-                "total_beginning_capital_usd": total_capital,
-                "composite_return": composite_return,
-                "components": component_rows,
-            }
-        )
-        for c in components:
-            last_capital[c["strategy_id"]] = c["weight_capital"] * (
-                Decimal("1") + c["period_return_decimal"]
-            )
-
+    calculated_periods: list[Row] = []
+    index_path: list[Row] = []
+    # P1-5: the ENTIRE arithmetic pipeline — coverage resolution, weighting,
+    # rollforward, and index linking — runs inside one explicit prec-34
+    # HALF_EVEN context so a caller's ambient context cannot perturb results.
     with localcontext() as ctx:
         ctx.prec = 34
         ctx.rounding = ROUND_HALF_EVEN
+        for iv in ordered_intervals:
+            members = sorted(active_members(iv["start_date"]))
+            if not members:
+                raise HwmCoverageError("accepted interval has no effective members")
+            components: list[Row] = []
+            total_capital = Decimal("0")
+            weighted_sum = Decimal("0")
+            for sid in members:
+                resolved = resolve_period(sid, iv)
+                if resolved["source"] == "OBSERVED":
+                    capital = resolved["beginning_capital_usd"]
+                else:
+                    carried = last_capital.get(sid)
+                    capital = (
+                        carried
+                        if carried is not None
+                        else resolved["beginning_capital_usd"]
+                    )
+                components.append({**resolved, "weight_capital": capital})
+                total_capital += capital
+                weighted_sum += capital * resolved["period_return_decimal"]
+            if total_capital <= 0:
+                raise HwmCoverageError("interval beginning capital must be positive")
+            composite_return = weighted_sum / total_capital
+            component_rows = [
+                {
+                    "strategy_id": c["strategy_id"],
+                    "beginning_capital_usd": c["weight_capital"],
+                    "weight": c["weight_capital"] / total_capital,
+                    "period_return": c["period_return_decimal"],
+                    "source": c["source"],
+                    "return_evidence_sha256": c["return_evidence_sha256"],
+                }
+                for c in components
+            ]
+            calculated_periods.append(
+                {
+                    "interval_id": iv["interval_id"],
+                    "interval_start": iv["interval_start"],
+                    "interval_end": iv["interval_end"],
+                    "total_beginning_capital_usd": total_capital,
+                    "composite_return": composite_return,
+                    "components": component_rows,
+                }
+            )
+            for c in components:
+                last_capital[c["strategy_id"]] = c["weight_capital"] * (
+                    Decimal("1") + c["period_return_decimal"]
+                )
+
         index_value = Decimal("100")
         running_hwm = index_value
         maximum_drawdown = Decimal("0")

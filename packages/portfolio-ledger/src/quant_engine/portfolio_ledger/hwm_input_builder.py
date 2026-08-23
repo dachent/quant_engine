@@ -165,6 +165,7 @@ def build_governed_hwm_inputs(
     calendar_authority_sha256: str,
     hwm_policy_sha256: str,
     calendar_authority: Mapping[str, Any] | None = None,
+    upstream_receipt_sha256: str | None = None,
 ) -> Row:
     """Derive one governed input generation from observed evidence.
 
@@ -172,6 +173,8 @@ def build_governed_hwm_inputs(
     (self-hash re-verified here and bound to ``calendar_authority_sha256``).
     Multi-day return rows outside its declared intervals fail closed; a row's
     ``net_return`` must equal the authority's bound value exactly.
+    ``upstream_receipt_sha256``, when supplied, is embedded as an independent
+    upstream admission anchor consumed by kernel execution.
     """
 
     calendar_sha = _sha_field(calendar_authority_sha256, "calendar_authority_sha256")
@@ -257,6 +260,11 @@ def build_governed_hwm_inputs(
         "component_periods": [],
         "policy_binding_sha256": policy_sha,
         "calendar_sha256": calendar_sha,
+        "upstream_receipt_sha256": (
+            None
+            if upstream_receipt_sha256 is None
+            else _sha_field(upstream_receipt_sha256, "upstream_receipt_sha256")
+        ),
     }
 
     for strategy_id in sorted(member_rows):
