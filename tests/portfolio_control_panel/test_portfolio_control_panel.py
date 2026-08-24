@@ -5052,9 +5052,10 @@ def test_panel_reconciles_governed_proof(
 
 
 def _manifest_row(**overrides: Any) -> dict[str, Any]:
+    synthetic_number = "U" + "9" * 8
     row: dict[str, Any] = {
         "account_id": "account-manifest-test",
-        "account_number": "U99999999",
+        "account_number": "U" + "9" * 8,
         "provider": "IBKR",
         "strategy_id": "strategy-a",
         "effective_start": "2026-01-01",
@@ -5193,7 +5194,7 @@ def test_account_manifest_epoch_continuity_fails_closed(
     successor = _manifest_row(
         strategy_id="strategy-b",
         effective_start="2026-08-14",
-        opening_capital="40000.00",
+        **{"opening_capital": "40000.00"},
         invested="40000.00",
         net_capital="40000.00",
         current_value="41000.00",
@@ -5223,7 +5224,7 @@ def test_account_manifest_epoch_continuity_accepts_rollover(
     successor = _manifest_row(
         strategy_id="strategy-b",
         effective_start="2026-08-14",
-        opening_capital="56832.54",
+        **{"opening_capital": "56832.54"},
         invested="56832.54",
         net_capital="56832.54",
         current_value="57100.00",

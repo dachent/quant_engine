@@ -53,15 +53,11 @@ from typing import Any
 
 getcontext().prec = 40
 
-# Real broker account numbers, proven 2026-08-23 by exact daily-equity-series
-# equality (132/168/65/137 matching days) against Flex AllAccounts XML.
-# Schwab numbers are resolved dynamically from playwright_csv balance files.
-IBKR_ACCOUNT_NUMBERS: dict[str, str] = {
-    "account-d69701da9143c430": "U22509054",
-    "account-2020b6f94f85114f": "U21991024",
-    "account-1b44c987969b9e47": "U22596907",
-    "account-2d0a996cf7ab4876": "U22540179",
-}
+# Real broker account numbers are DEPLOYMENT-LOCAL data (repository data-
+# boundary policy): IBKR numbers are supplied via --ibkr-numbers-json and
+# were proven 2026-08-23 by exact daily-equity-series equality against Flex
+# AllAccounts XML. Schwab numbers resolve dynamically from playwright_csv
+# balance files. No real number may appear in this repository.
 
 MIN_FUNDED_NAV = Decimal("100")
 MIN_SCHWAB_MATCH_SCORE = 50
@@ -117,6 +113,14 @@ def load_baseline(baseline_root: Path) -> dict[str, Any]:
         if not isinstance(payload.get(section), list):
             raise ManifestError(f"baseline missing list section '{section}'")
     return payload
+
+
+def load_ibkr_numbers(path: Path | None) -> dict[str, str]:
+    """Deployment-local governed-account-id -> real IBKR number mapping."""
+    if path is None:
+        return {}
+    payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return {str(k): str(v) for k, v in payload.items()}
 
 
 def load_flow_classes(path: Path) -> list[dict[str, Any]]:
@@ -497,6 +501,7 @@ def assemble_manifest(
     accounts_index: dict[str, dict[str, Any]],
     buckets: dict[str, dict[str, dict[str, Decimal]]],
     schwab_numbers: dict[str, str],
+    ibkr_numbers: dict[str, str],
     ledger_packet_id: str,
 ) -> dict[str, Any]:
     chains: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -508,7 +513,7 @@ def assemble_manifest(
     rows: list[dict[str, Any]] = []
     for aid, chain in sorted(chains.items()):
         provider = accounts_index.get(aid, {}).get("provider", "")
-        number = schwab_numbers.get(aid) or IBKR_ACCOUNT_NUMBERS.get(aid) or ""
+        display_num = schwab_numbers.get(aid) or ibkr_numbers.get(aid) or ""
         prev_closing: Decimal | None = None
         for assignment in chain:
             strategy_id = assignment.get("strategy_id")
@@ -531,22 +536,20 @@ def assemble_manifest(
                 w1,
             )
             if stats is None:
-                rows.append(
-                    {
-                        "account_number": number,
-                        "provider": provider,
-                        "strategy_id": strategy_id,
-                        "effective_start": w0,
-                        "effective_end": w1,
-                        "status": "NO_FUNDED_NAV",
-                    }
-                )
+                stub: dict[str, Any] = {
+                    "provider": provider,
+                    "strategy_id": strategy_id,
+                    "effective_start": w0,
+                    "effective_end": w1,
+                    "status": "NO_FUNDED_NAV",
+                }
+                stub["account_id"] = aid
+                stub["account_number"] = display_num
+                rows.append(stub)
                 prev_closing = None
                 continue
             stats.update(
                 {
-                    "account_id": aid,
-                    "account_number": number,
                     "provider": provider,
                     "strategy_id": strategy_id,
                     "effective_start": w0,
@@ -554,6 +557,8 @@ def assemble_manifest(
                     "status": "OK",
                 }
             )
+            stats["account_id"] = aid
+            stats["account_number"] = display_num
             rows.append(stats)
             prev_closing = None if stats["withdrawn"] > 0 else stats["current_value"]
 
@@ -626,6 +631,12 @@ def main(argv: list[str] | None = None) -> int:
         help="playwright_csv dir with historical_balances_<number>_*.csv files",
     )
     parser.add_argument(
+        "--ibkr-numbers-json",
+        type=Path,
+        default=None,
+        help="deployment-local mapping of governed account ids to IBKR numbers",
+    )
+    parser.add_argument(
         "--flow-classes-json",
         type=Path,
         required=True,
@@ -655,6 +666,7 @@ def main(argv: list[str] | None = None) -> int:
         accounts_index,
         buckets,
         schwab_numbers,
+        load_ibkr_numbers(args.ibkr_numbers_json),
         ledger_packet_id=args.ledger_json.parent.name,
     )
     manifest["reconciliation_disclosure"] = reconciliation_notes
