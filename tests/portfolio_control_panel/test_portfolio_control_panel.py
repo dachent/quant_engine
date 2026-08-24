@@ -5052,7 +5052,6 @@ def test_panel_reconciles_governed_proof(
 
 
 def _manifest_row(**overrides: Any) -> dict[str, Any]:
-    synthetic_number = "U" + "9" * 8
     row: dict[str, Any] = {
         "account_id": "account-manifest-test",
         "account_number": "U" + "9" * 8,
@@ -5105,9 +5104,7 @@ def _write_manifest(path: Path, rows: list[dict[str, Any]]) -> Path:
 def test_account_manifest_flows_through_build_and_verify(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
-    manifest_path = _write_manifest(
-        tmp_path / "manifest.json", [_manifest_row()]
-    )
+    manifest_path = _write_manifest(tmp_path / "manifest.json", [_manifest_row()])
     built_with = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
@@ -5118,9 +5115,7 @@ def test_account_manifest_flows_through_build_and_verify(
     )
     data = _candidate_data(built_with)
     assert data["account_manifest"]["rows"][0]["gain"] == "6832.54"
-    assert (
-        data["meta"]["account_manifest_sha256"] == panel._hash(manifest_path)
-    )
+    assert data["meta"]["account_manifest_sha256"] == panel._hash(manifest_path)
     # Determinism: identical artifact -> identical panel id.
     again = panel.build_candidate(
         inputs["report"],
@@ -5147,7 +5142,7 @@ def test_account_manifest_flows_through_build_and_verify(
 
     # Renderer consumes the embedded manifest.
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
-    assert 'data.account_manifest' in renderer
+    assert "data.account_manifest" in renderer
     assert "renderAccountManifest" in renderer
 
 
@@ -5170,9 +5165,7 @@ def test_account_manifest_money_identity_fails_closed(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     broken_row = _manifest_row(gain="999.99")
-    manifest_path = _write_manifest(
-        tmp_path / "broken-manifest.json", [broken_row]
-    )
+    manifest_path = _write_manifest(tmp_path / "broken-manifest.json", [broken_row])
     with pytest.raises(
         panel.ControlPanelValidationError,
         match="money identity differs",
@@ -5243,3 +5236,120 @@ def test_account_manifest_epoch_continuity_accepts_rollover(
     )
     data = _candidate_data(built)
     assert len(data["account_manifest"]["rows"]) == 2
+
+
+def _produce_manifest(target_dir: Path, closing: str) -> Path:
+    """Run the real producer CLI over synthetic governed inputs."""
+    import subprocess
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    ledger_path = target_dir / "ledger.json"
+    _write_json(
+        ledger_path,
+        {
+            "nav_observations": [
+                {
+                    "account_id": "account-seam",
+                    "as_of_date": day,
+                    "nav": {"status": "AVAILABLE", "value": value},
+                }
+                for day, value in (
+                    ("2026-01-02", "50000"),
+                    ("2026-03-01", "50500"),
+                    ("2026-06-01", "51000"),
+                    ("2026-08-13", closing),
+                )
+            ],
+            "flows": [],
+        },
+    )
+    baseline_root = target_dir / "baseline"
+    generation_dir = baseline_root / "generations" / "seam-generation"
+    generation_dir.mkdir(parents=True)
+    (baseline_root / "CURRENT.json").write_text(
+        '{"generation_id": "seam-generation"}', encoding="utf-8"
+    )
+    _write_json(
+        generation_dir / "portfolio-baseline.json",
+        {
+            "accounts": [{"account_id": "account-seam", "provider": "SCHWAB"}],
+            "assignments": [
+                {
+                    "account_id": "account-seam",
+                    "strategy_id": "strategy-a",
+                    "effective_start": "2026-01-01",
+                    "effective_end": None,
+                }
+            ],
+        },
+    )
+    flows_path = target_dir / "flow-classes.json"
+    _write_json(flows_path, {"events": []})
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(REPOSITORY_ROOT / "tools" / "account_strategy_manifest.py"),
+            "--ledger-json",
+            str(ledger_path),
+            "--baseline-root",
+            str(baseline_root),
+            "--flow-classes-json",
+            str(flows_path),
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    manifest_path = target_dir / "produced-manifest.json"
+    manifest_path.write_text(proc.stdout, encoding="utf-8")
+    return manifest_path
+
+
+def test_account_manifest_producer_to_publish_seam(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """Reviewer P1: the producer's OWN CLI output must survive build ->
+    verify -> publish, and distinct manifests must yield distinct panels."""
+    manifest_path = _produce_manifest(tmp_path / "primary", "56832.54")
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        account_manifest_path=manifest_path,
+    )
+    candidate = Path(built["candidate_dir"])
+    row = _candidate_data(built)["account_manifest"]["rows"][0]
+    assert row["status"] == "OK"
+    assert Decimal(row["invested"]) == Decimal("50000")
+    assert Decimal(row["current_value"]) == Decimal("56832.54")
+    assert Decimal(row["gain"]) == Decimal("56832.54") - Decimal("50000")
+
+    qa = _qa(candidate, tmp_path / "qa-primary")
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        account_manifest_path=manifest_path,
+    )
+    assert published["publication_state"] == "PUBLISHED"
+
+    # Distinct manifest bytes must produce a distinct panel id.
+    other = _produce_manifest(tmp_path / "alternate", "57999.99")
+    rebuilt = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        account_manifest_path=other,
+    )
+    assert rebuilt["panel_id"] != built["panel_id"]

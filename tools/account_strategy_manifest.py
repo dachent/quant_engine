@@ -394,6 +394,28 @@ def analyze_epoch(
     ext_by_day = {d: v for d, v in ext_by_day.items() if _in_window(d, w0, w1)}
     int_in_by_day = {d: v for d, v in int_in_by_day.items() if _in_window(d, w0, w1)}
     int_out_by_day = {d: v for d, v in int_out_by_day.items() if _in_window(d, w0, w1)}
+    closing_nav_date = days[-1]
+    late_sources = [
+        (label, d, v)
+        for label, source_days in (
+            ("external", ext_by_day),
+            ("internal_in", int_in_by_day),
+            ("internal_out", int_out_by_day),
+        )
+        for d, v in source_days.items()
+        if d > closing_nav_date
+    ]
+    if late_sources:
+        # Fail-closed (reviewer P1): a flow after the last funded NAV would
+        # corrupt the money identity while being absent from Current. The
+        # epoch stays unavailable until a covering NAV observation exists.
+        return {
+            "unavailable_reason": "FLOWS_AFTER_CLOSING_NAV",
+            "late_flows": [
+                {"class": label, "date": day, "value": str(value)}
+                for label, day, value in late_sources
+            ],
+        }
 
     opening = prev_closing if prev_closing is not None else window_navs[first_funded]
     # Flows ON the first funded day ARE the funding event reflected in the
@@ -401,7 +423,10 @@ def analyze_epoch(
     dep = sum(
         (v for d, v in ext_by_day.items() if v > 0 and d != first_funded), Decimal(0)
     )
-    wd = sum((-v for d, v in ext_by_day.items() if v < 0), Decimal(0))
+    wd = sum(
+        (-v for d, v in ext_by_day.items() if v < 0 and d != first_funded),
+        Decimal(0),
+    )
     int_in = sum((v for d, v in int_in_by_day.items() if d != first_funded), Decimal(0))
     int_out = sum(
         (v for d, v in int_out_by_day.items() if d != first_funded), Decimal(0)
@@ -414,18 +439,27 @@ def analyze_epoch(
     gain = current - net_capital
 
     net_flow_by_day: dict[str, Decimal] = {}
-    for src, sign in ((ext_by_day, 1), (int_in_by_day, 1), (int_out_by_day, -1)):
-        for d, v in src.items():
+    for source, sign in ((ext_by_day, 1), (int_in_by_day, 1), (int_out_by_day, -1)):
+        for d, v in source.items():
             net_flow_by_day[d] = net_flow_by_day.get(d, Decimal(0)) + sign * v
+
+    def _segment_flow(start_exclusive: str, end_inclusive: str) -> Decimal:
+        # Every intervening flow date counts, including dates that carry no
+        # NAV observation of their own (reviewer P1).
+        return sum(
+            (
+                value
+                for day, value in net_flow_by_day.items()
+                if start_exclusive < day <= end_inclusive
+            ),
+            Decimal(0),
+        )
 
     # TWR: Modified-Dietz linked between consecutive observations.
     index = Decimal(100)
     for prev_d, cur_d in zip(days, days[1:]):
         v0, v1 = window_navs[prev_d], window_navs[cur_d]
-        flow = sum(
-            (net_flow_by_day.get(d, Decimal(0)) for d in days if prev_d < d <= cur_d),
-            Decimal(0),
-        )
+        flow = _segment_flow(prev_d, cur_d)
         if v0 > 0:
             index *= Decimal(1) + (v1 - v0 - flow) / v0
     twr = index / Decimal(100) - Decimal(1)
@@ -440,7 +474,8 @@ def analyze_epoch(
     for d in days:
         value = window_navs[d]
         if prev_value is not None and prev_value > 0:
-            r = (value - prev_value - net_flow_by_day.get(d, Decimal(0))) / prev_value
+            segment_start = days[days.index(d) - 1]
+            r = (value - prev_value - _segment_flow(segment_start, d)) / prev_value
             daily_index *= Decimal(1) + r
             hwm = max(hwm, daily_index)
             max_dd = min(max_dd, daily_index / hwm - Decimal(1))
@@ -448,19 +483,16 @@ def analyze_epoch(
 
     span_days = (date.fromisoformat(days[-1]) - date.fromisoformat(days[0])).days
     years = Decimal(span_days) / Decimal(365)
-    mwr_raw = gain / net_capital if net_capital != 0 else None
-    if mwr_raw is None:
-        mwr = annualized = None
+    # Contract semantics: MWR is ALWAYS Gain / Net capital; annualization
+    # lives only in annualized_mwr. Overwriting MWR with its annualized
+    # form corrupted every epoch >= 1 year (reviewer P1).
+    mwr = gain / net_capital if net_capital != 0 else None
+    if mwr is None:
+        annualized = None
+    elif years >= Decimal(1):
+        annualized = (Decimal(1) + mwr) ** (Decimal(1) / years) - Decimal(1)
     else:
-        if years >= Decimal(1):
-            mwr = (Decimal(1) + mwr_raw) ** (Decimal(1) / years) - Decimal(1)
-        else:
-            mwr = mwr_raw
-        annualized = (
-            (Decimal(1) + mwr_raw) ** (Decimal(1) / years) - Decimal(1)
-            if years >= Decimal(1)
-            else mwr_raw * Decimal(365) / Decimal(max(span_days, 1))
-        )
+        annualized = mwr * Decimal(365) / Decimal(max(span_days, 1))
 
     closing_cashflows: list[tuple[date, Decimal]] = [
         (date.fromisoformat(days[0]), -opening)
@@ -535,6 +567,20 @@ def assemble_manifest(
                 w0,
                 w1,
             )
+            if stats is not None and stats.get("unavailable_reason"):
+                blocked: dict[str, Any] = {
+                    "provider": provider,
+                    "strategy_id": strategy_id,
+                    "effective_start": w0,
+                    "effective_end": w1,
+                    "status": stats["unavailable_reason"],
+                    "late_flows": stats.get("late_flows", []),
+                }
+                blocked["account_id"] = aid
+                blocked["account_number"] = display_num
+                rows.append(blocked)
+                prev_closing = None
+                continue
             if stats is None:
                 stub: dict[str, Any] = {
                     "provider": provider,

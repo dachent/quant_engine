@@ -5414,7 +5414,7 @@ def _account_manifest(
     seen_open_epochs: dict[str, dict[str, Any]] = {}
     for row in rows:
         strategy_id = _text(row.get("strategy_id"), "manifest row.strategy_id")
-        number = str(row.get("account_number", ""))
+        account_key = str(row.get("account_id", ""))
         if row.get("status") != "OK":
             continue
         invested = Decimal(
@@ -5438,21 +5438,20 @@ def _account_manifest(
             raise ControlPanelValidationError(
                 f"account manifest money identity differs for {strategy_id}"
             )
-        prior = seen_open_epochs.get(number)
+        prior = seen_open_epochs.get(account_key)
         if (
             prior is not None
             and Decimal(prior["withdrawn"]) == 0
-            and Decimal(row["opening_capital"])
-            != Decimal(prior["current_value"])
+            and Decimal(row["opening_capital"]) != Decimal(prior["current_value"])
         ):
             raise ControlPanelValidationError(
                 "account manifest epoch continuity differs for "
-                f"{number}: {prior['strategy_id']} -> {strategy_id}"
+                f"{account_key}: {prior['strategy_id']} -> {strategy_id}"
             )
         if Decimal(withdrawn) == 0:
-            seen_open_epochs[number] = row
+            seen_open_epochs[account_key] = row
         else:
-            seen_open_epochs.pop(number, None)
+            seen_open_epochs.pop(account_key, None)
     as_of_bound = value.get("ledger_packet")
     if not isinstance(as_of_bound, str) or not as_of_bound:
         raise ControlPanelValidationError("account manifest lacks ledger_packet")
@@ -6986,6 +6985,7 @@ def publish_panel(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        account_manifest_path=account_manifest_path,
     )
     (
         report_path,
@@ -7015,6 +7015,19 @@ def publish_panel(
     )
     publication_as_of = max(portfolio_as_of, freshness_as_of)
     artifacts: list[SourceArtifact] = [
+        *(
+            [
+                SourceArtifact.from_path(
+                    account_manifest_path,
+                    artifact_id="input/account-strategy-manifest.json",
+                    as_of_date=publication_as_of,
+                    schema_name="account-strategy-manifest",
+                    schema_version="1",
+                )
+            ]
+            if account_manifest_path is not None
+            else []
+        ),
         SourceArtifact.from_path(
             report_path,
             artifact_id="input/portfolio-report-data.json",
