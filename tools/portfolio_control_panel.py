@@ -4359,6 +4359,8 @@ def _panel_data(
     hwm_governed_generation_bytes: bytes | None = None,
     hwm_governed_calendar_bytes: bytes | None = None,
     hwm_governed_receipt_bytes: bytes | None = None,
+    account_manifest: Mapping[str, Any] | None = None,
+    account_manifest_identity: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -5285,6 +5287,9 @@ def _panel_data(
         "candidate_driver_map": (
             dict(candidate_driver_map) if candidate_driver_map is not None else None
         ),
+        "account_manifest": (
+            dict(account_manifest) if account_manifest is not None else None
+        ),
         "capital": {
             "reserve": _summary_value(summary, "Reserve"),
             "systematic": _summary_value(summary, "Systematic capital"),
@@ -5327,6 +5332,11 @@ def _panel_data(
             "candidate_driver_map_sha256": (
                 candidate_driver_map_identity["sha256"]
                 if candidate_driver_map_identity is not None
+                else None
+            ),
+            "account_manifest_sha256": (
+                account_manifest_identity["sha256"]
+                if account_manifest_identity is not None
                 else None
             ),
             "decomposition_generation_id": decomposition_identity["generation_id"],
@@ -5383,6 +5393,76 @@ def _panel_data(
     return panel_data
 
 
+def _account_manifest(
+    path: Path | None,
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    """Load and validate the account x strategy epoch manifest artifact.
+
+    Fail-closed: schema, row status, the per-row money identity
+    (Gain = Current - Net capital), and the epoch continuity rule
+    (successor opening == predecessor closing while capital stayed in the
+    account) are all re-verified here; any violation blocks publication.
+    """
+    if path is None:
+        return None, None
+    value = _load_json(path, "account manifest")
+    if value.get("schema_version") != 1:
+        raise ControlPanelValidationError("account manifest schema is unsupported")
+    if value.get("artifact") != "account-strategy-manifest":
+        raise ControlPanelValidationError("account manifest artifact id differs")
+    rows = _objects(value.get("rows"), "account manifest rows")
+    seen_open_epochs: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        strategy_id = _text(row.get("strategy_id"), "manifest row.strategy_id")
+        account_key = str(row.get("account_id", ""))
+        if row.get("status") != "OK":
+            continue
+        invested = Decimal(
+            _text(row.get("invested"), f"manifest[{strategy_id}].invested")
+        )
+        withdrawn = Decimal(
+            _text(row.get("withdrawn"), f"manifest[{strategy_id}].withdrawn")
+        )
+        net_capital = Decimal(
+            _text(row.get("net_capital"), f"manifest[{strategy_id}].net_capital")
+        )
+        current_value = Decimal(
+            _text(row.get("current_value"), f"manifest[{strategy_id}].current_value")
+        )
+        gain = Decimal(_text(row.get("gain"), f"manifest[{strategy_id}].gain"))
+        if net_capital != invested - withdrawn:
+            raise ControlPanelValidationError(
+                f"account manifest net-capital identity differs for {strategy_id}"
+            )
+        if abs(gain - (current_value - net_capital)) > Decimal("0.005"):
+            raise ControlPanelValidationError(
+                f"account manifest money identity differs for {strategy_id}"
+            )
+        prior = seen_open_epochs.get(account_key)
+        if (
+            prior is not None
+            and Decimal(prior["withdrawn"]) == 0
+            and Decimal(row["opening_capital"]) != Decimal(prior["current_value"])
+        ):
+            raise ControlPanelValidationError(
+                "account manifest epoch continuity differs for "
+                f"{account_key}: {prior['strategy_id']} -> {strategy_id}"
+            )
+        if Decimal(withdrawn) == 0:
+            seen_open_epochs[account_key] = row
+        else:
+            seen_open_epochs.pop(account_key, None)
+    as_of_bound = value.get("ledger_packet")
+    if not isinstance(as_of_bound, str) or not as_of_bound:
+        raise ControlPanelValidationError("account manifest lacks ledger_packet")
+    disclosure = value.get("reconciliation_disclosure")
+    if disclosure is not None and not isinstance(disclosure, list):
+        raise ControlPanelValidationError(
+            "account manifest reconciliation_disclosure must be a list"
+        )
+    return value, {"sha256": _hash(path)}
+
+
 def _rendered_files(
     report_root: Path,
     legacy_panel: Path,
@@ -5404,6 +5484,7 @@ def _rendered_files(
     hwm_governed_generation_bytes: bytes | None = None,
     hwm_governed_calendar_bytes: bytes | None = None,
     hwm_governed_receipt_bytes: bytes | None = None,
+    account_manifest_path: Path | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -5488,6 +5569,9 @@ def _rendered_files(
     candidate_driver_map, candidate_driver_map_identity = _candidate_driver_map(
         candidate_driver_map_path
     )
+    account_manifest, account_manifest_identity = _account_manifest(
+        account_manifest_path
+    )
     legacy, source = _source_inputs(legacy_panel)
     data = _panel_data(
         report,
@@ -5514,6 +5598,8 @@ def _rendered_files(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        account_manifest=account_manifest,
+        account_manifest_identity=account_manifest_identity,
     )
     data_bytes = canonical_json_bytes(data)
     files = {
@@ -5601,6 +5687,7 @@ def build_candidate(
     hwm_governed_generation_bytes: bytes | None = None,
     hwm_governed_calendar_bytes: bytes | None = None,
     hwm_governed_receipt_bytes: bytes | None = None,
+    account_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -5623,6 +5710,7 @@ def build_candidate(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        account_manifest_path=account_manifest_path,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -5706,6 +5794,7 @@ def verify_candidate(
     hwm_governed_generation_bytes: bytes | None = None,
     hwm_governed_calendar_bytes: bytes | None = None,
     hwm_governed_receipt_bytes: bytes | None = None,
+    account_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -5728,6 +5817,7 @@ def verify_candidate(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        account_manifest_path=account_manifest_path,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -6844,6 +6934,7 @@ def publish_panel(
     hwm_governed_generation_bytes: bytes | None = None,
     hwm_governed_calendar_bytes: bytes | None = None,
     hwm_governed_receipt_bytes: bytes | None = None,
+    account_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
         report_root,
@@ -6867,6 +6958,7 @@ def publish_panel(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        account_manifest_path=account_manifest_path,
     )
     qa = validate_qa(candidate_dir, qa_dir)
     _write_exact(
@@ -6893,6 +6985,7 @@ def publish_panel(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        account_manifest_path=account_manifest_path,
     )
     (
         report_path,
@@ -6922,6 +7015,19 @@ def publish_panel(
     )
     publication_as_of = max(portfolio_as_of, freshness_as_of)
     artifacts: list[SourceArtifact] = [
+        *(
+            [
+                SourceArtifact.from_path(
+                    account_manifest_path,
+                    artifact_id="input/account-strategy-manifest.json",
+                    as_of_date=publication_as_of,
+                    schema_name="account-strategy-manifest",
+                    schema_version="1",
+                )
+            ]
+            if account_manifest_path is not None
+            else []
+        ),
         SourceArtifact.from_path(
             report_path,
             artifact_id="input/portfolio-report-data.json",
@@ -7143,6 +7249,14 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--weekly-returns-root", type=Path)
         command.add_argument("--replication-root", type=Path)
         command.add_argument("--candidate-driver-map", type=Path)
+        command.add_argument(
+            "--account-manifest",
+            type=Path,
+            help=(
+                "Account x strategy epoch manifest JSON "
+                "(validated: schema, money identity, epoch continuity)"
+            ),
+        )
         command.add_argument("--strategy-evidence", type=Path)
         command.add_argument("--freshness-health", type=Path, required=True)
         command.add_argument(
@@ -7216,6 +7330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.replication_root,
                 args.candidate_driver_map,
                 args.baseline_root,
+                account_manifest_path=args.account_manifest,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -7233,6 +7348,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.replication_root,
                 args.candidate_driver_map,
                 args.baseline_root,
+                account_manifest_path=args.account_manifest,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -7258,6 +7374,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.replication_root,
                 args.candidate_driver_map,
                 args.baseline_root,
+                account_manifest_path=args.account_manifest,
                 hwm_portable_receipt=_load_optional_json_arg(
                     getattr(args, "hwm_portable_receipt", None)
                 ),

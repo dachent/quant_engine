@@ -368,6 +368,44 @@
     $("#historical-gap-badge").textContent = `${historicalGaps.length} unresolved intervals`;
     const historicalRows = historicalGaps.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td><code>${safe(row.assignment_id)}</code></td><td>${safe(row.effective_start || "Open/unknown")}<span class="cell-secondary">${safe(row.effective_end || "Open/unknown")}</span></td><td>${statusText(row.twr_status)}</td><td>${safe(row.strategy_mapping_disposition === "HISTORICAL_POOL_ONLY" ? "Systematic-pool interval requires historical strategy adjudication" : "Assignment requires adjudication")}</td></tr>`);
     $("#historical-gap-table").innerHTML = tableMarkup([["Account"], ["Assignment"], ["Effective interval"], ["Historical attribution"], ["Required disposition"]], historicalRows.length ? historicalRows : [emptyRow(5, "No unresolved historical assignment intervals")]);
+    renderAccountManifest();
+  }
+
+  const moneyExact2 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const manifestMoney = (value) => number(value) == null ? "—" : moneyExact2.format(Number(value));
+  const manifestPct = (value) => number(value) == null ? "—" : `${(Number(value) * 100).toFixed(2)}%`;
+
+  function renderAccountManifest() {
+    const manifest = data.account_manifest;
+    const legend = $("#account-manifest-legend");
+    if (!manifest || !Array.isArray(manifest.rows)) {
+      $("#account-manifest-table").innerHTML = tableMarkup([["Epoch manifest unavailable"]], [emptyRow(1, "No account-manifest evidence was supplied to this build")]);
+      legend.innerHTML = "No epoch-manifest artifact was bound to this panel build; nothing is inferred.";
+      return;
+    }
+    const rows = manifest.rows.map((row) => {
+      const label = row.account_number ? safe(row.account_number) : "<span class=\"cell-secondary\">unnumbered</span>";
+      if (row.status !== "OK") {
+        return `<tr><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.effective_start)}</td><td><span class="cell-secondary">${safe(row.effective_end || "open")}</span></td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td>no NAV</td></tr>`;
+      }
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric">${manifestMoney(row.invested)}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${Number(row.net_capital) < 0 ? "is-negative" : ""}">${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}</td><td class="numeric ${Number(row.gain) < 0 ? "is-negative" : ""}">${manifestMoney(row.gain)}</td><td class="numeric">${manifestPct(row.mwr)}</td><td class="numeric">${manifestPct(row.annualized_mwr)}</td><td class="numeric">${manifestPct(row.twr)}</td><td class="numeric">${decimal(row.hwm_index, 2)}</td><td class="numeric ${Number(row.max_drawdown) < 0 ? "is-negative" : ""}">${manifestPct(row.max_drawdown)}</td></tr>`;
+    });
+    $("#account-manifest-table").innerHTML = tableMarkup([
+      ["Account"], ["Strategy"], ["Observed interval"],
+      ["Invested", "numeric"], ["Withdrawn", "numeric"], ["Net capital", "numeric"],
+      ["Current", "numeric"], ["Gain", "numeric"],
+      ["MWR", "numeric"], ["Ann. MWR", "numeric"], ["TWR", "numeric"],
+      ["HWM", "numeric"], ["Max DD", "numeric"],
+    ], rows);
+    legend.innerHTML = `<strong>Definitions.</strong> Invested = opening capital + deposits + internal-in after start (flows on the first funded day ARE the opening). Withdrawn = external withdrawals + internal-out. Net capital = Invested − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital (exact). MWR = Gain ÷ Net capital, annualized as (1+MWR)^(365/days) − 1 from day 366. TWR = flow-adjusted linked daily index. HWM / Max DD = running peak and worst drawdown of that daily index.`;
+    const disclosure = $("#account-manifest-disclosure");
+    const notes = Array.isArray(manifest.reconciliation_disclosure) ? manifest.reconciliation_disclosure : [];
+    if (notes.length) {
+      disclosure.hidden = false;
+      $("#account-manifest-disclosure-list").innerHTML = notes.map((note) => `<li>${safe(note)}</li>`).join("");
+    } else {
+      disclosure.hidden = true;
+    }
   }
 
   function renderSignals() {
