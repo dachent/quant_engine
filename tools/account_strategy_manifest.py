@@ -89,7 +89,7 @@ class InputSnapshot:
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
-_MANIFEST_SCHEMA_VERSION = 3
+_MANIFEST_SCHEMA_VERSION = 4
 _FLOW_CLASSES_SCHEMA_VERSION = 3
 _FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION = 1
 _CENT = Decimal("0.01")
@@ -1253,7 +1253,13 @@ def analyze_epoch(
                     "date": day,
                     "value": _fixed_decimal(value),
                 }
-                for label, day, value in late_sources
+                for label, day, value in sorted(
+                    late_sources, key=lambda item: (item[1], item[0], item[2])
+                )
+            ],
+            "capital_flow_trace": capital_flow_trace,
+            "nav_observation_trace": [
+                {"date": day, "nav": window_navs[day]} for day in days
             ],
         }
 
@@ -1560,8 +1566,13 @@ def assemble_manifest(
                     **base,
                     "status": stats["unavailable_status"],
                 }
-                if "late_flows" in stats:
-                    unavailable_row["late_flows"] = stats["late_flows"]
+                for evidence_field in (
+                    "late_flows",
+                    "capital_flow_trace",
+                    "nav_observation_trace",
+                ):
+                    if evidence_field in stats:
+                        unavailable_row[evidence_field] = stats[evidence_field]
                 if "blocking_reason" in stats:
                     unavailable_row["blocking_reason"] = stats["blocking_reason"]
                 rows.append(unavailable_row)
@@ -1727,16 +1738,133 @@ def _validate_manifest_semantics(manifest: Mapping[str, Any]) -> None:
         if epoch_key in seen_epochs:
             raise ManifestError(f"duplicate manifest epoch {epoch_key}")
         seen_epochs.add(epoch_key)
+        status = row.get("status")
         late_flows = row.get("late_flows")
-        if isinstance(late_flows, list):
-            for late_index, late in enumerate(late_flows):
-                if isinstance(late, Mapping):
-                    _manifest_decimal(
-                        late.get("value"),
-                        f"row[{index}].late_flows[{late_index}].value",
-                        money=True,
+        if status == "FLOWS_AFTER_CLOSING_NAV":
+            nav_trace = row.get("nav_observation_trace")
+            if not isinstance(nav_trace, list) or len(nav_trace) < 3:
+                raise ManifestError(f"row {index} late-flow NAV evidence is invalid")
+            nav_dates: list[str] = []
+            for nav_index, nav_entry in enumerate(nav_trace):
+                if not isinstance(nav_entry, Mapping):
+                    raise ManifestError(
+                        f"row {index} late-flow NAV evidence is invalid"
                     )
-        if row.get("status") != "OK":
+                nav_date = _iso_date(
+                    nav_entry.get("date"),
+                    f"row[{index}].nav_observation_trace[{nav_index}].date",
+                )
+                if not _in_window(nav_date, effective_start, effective_end):
+                    raise ManifestError(
+                        f"row {index} late-flow NAV date is outside epoch"
+                    )
+                _manifest_decimal(
+                    nav_entry.get("nav"),
+                    f"row[{index}].nav_observation_trace[{nav_index}].nav",
+                    money=True,
+                )
+                if nav_dates and nav_date <= nav_dates[-1]:
+                    raise ManifestError(
+                        f"row {index} late-flow NAV evidence is not ordered"
+                    )
+                nav_dates.append(nav_date)
+
+            capital_flow_trace = row.get("capital_flow_trace")
+            if not isinstance(capital_flow_trace, list):
+                raise ManifestError(
+                    f"row {index} late-flow capital evidence is invalid"
+                )
+            expected_late_flows: list[dict[str, str]] = []
+            late_seen_capital_flows: set[tuple[str, str]] = set()
+            previous_flow_key: tuple[str, str] | None = None
+            closing_nav_date = nav_dates[-1]
+            late_flow_projection = {
+                "EXTERNAL_IN": ("external", Decimal(1)),
+                "EXTERNAL_OUT": ("external", Decimal(-1)),
+                "INTERNAL_IN": ("internal_in", Decimal(1)),
+                "INTERNAL_OUT": ("internal_out", Decimal(-1)),
+            }
+            for flow_index, flow in enumerate(capital_flow_trace):
+                if not isinstance(flow, Mapping):
+                    raise ManifestError(
+                        f"row {index} late-flow capital evidence is invalid"
+                    )
+                flow_class = flow.get("class")
+                if flow_class not in late_flow_projection:
+                    raise ManifestError(
+                        f"row {index} late-flow capital class is invalid"
+                    )
+                flow_date = _iso_date(
+                    flow.get("date"),
+                    f"row[{index}].capital_flow_trace[{flow_index}].date",
+                )
+                if not _in_window(flow_date, effective_start, effective_end):
+                    raise ManifestError(
+                        f"row {index} late-flow capital date is outside epoch"
+                    )
+                amount = _manifest_decimal(
+                    flow.get("amount"),
+                    f"row[{index}].capital_flow_trace[{flow_index}].amount",
+                    money=True,
+                )
+                flow_key = (flow_date, str(flow_class))
+                identity_key = (str(flow_class), flow_date)
+                if (
+                    amount <= 0
+                    or identity_key in late_seen_capital_flows
+                    or (previous_flow_key is not None and flow_key <= previous_flow_key)
+                ):
+                    raise ManifestError(
+                        f"row {index} late-flow capital evidence is invalid"
+                    )
+                late_seen_capital_flows.add(identity_key)
+                previous_flow_key = flow_key
+                if flow_date > closing_nav_date:
+                    label, late_sign = late_flow_projection[str(flow_class)]
+                    expected_late_flows.append(
+                        {
+                            "class": label,
+                            "date": flow_date,
+                            "value": _fixed_decimal(late_sign * amount),
+                        }
+                    )
+            expected_late_flows.sort(
+                key=lambda entry: (
+                    entry["date"],
+                    entry["class"],
+                    Decimal(entry["value"]),
+                )
+            )
+
+            actual_late_flows: list[dict[str, str]] = []
+            if isinstance(late_flows, list):
+                for late_index, late in enumerate(late_flows):
+                    if not isinstance(late, Mapping):
+                        raise ManifestError(
+                            f"row {index} late-flow evidence is invalid"
+                        )
+                    actual_late_flows.append(
+                        {
+                            "class": str(late.get("class")),
+                            "date": _iso_date(
+                                late.get("date"),
+                                f"row[{index}].late_flows[{late_index}].date",
+                            ),
+                            "value": _fixed_decimal(
+                                _manifest_decimal(
+                                    late.get("value"),
+                                    f"row[{index}].late_flows[{late_index}].value",
+                                    money=True,
+                                )
+                            ),
+                        }
+                    )
+            if not expected_late_flows or actual_late_flows != expected_late_flows:
+                raise ManifestError(
+                    f"row {index} late-flow evidence differs from traces"
+                )
+            continue
+        if status != "OK":
             continue
 
         start = _iso_date(row.get("start"), f"row[{index}].start")

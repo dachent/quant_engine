@@ -34,6 +34,14 @@ class VerticalBuildError(ValueError):
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_ROOT = REPOSITORY_ROOT / "tools"
+ACCOUNT_STRATEGY_CLASSIFICATION_POLICY = (
+    REPOSITORY_ROOT
+    / "contracts"
+    / "account-strategy-flow-classification-policy-v1.json"
+)
+ACCOUNT_STRATEGY_PANEL_TEMPLATE_ROOT = (
+    REPOSITORY_ROOT / "apps" / "portfolio-control-panel"
+)
 XLSX_SKILL_ROOT = Path(r"C:\Users\BorisVaisman\.codex\skills\xlsx-win")
 XLSX_RUNTIME = Path(r"C:\Tools\xlsx-win\.venv\Scripts\python.exe")
 XLSX_CLI = XLSX_SKILL_ROOT / "control_plane" / "cli.py"
@@ -326,7 +334,7 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
 def _recipe(path: Path) -> dict[str, Any]:
     recipe = _load(path, "vertical-build recipe")
     schema_version = recipe.get("schema_version")
-    if schema_version not in {6, 7}:
+    if schema_version not in {6, 7, 8}:
         raise VerticalBuildError("vertical-build recipe schema is unsupported")
     required = {
         "as_of_date",
@@ -345,6 +353,15 @@ def _recipe(path: Path) -> dict[str, Any]:
     required.add(
         "provider_ledger_spec" if schema_version == 6 else "provider_ledger_generation"
     )
+    if schema_version == 8:
+        required.update(
+            {
+                "account_strategy_ledger",
+                "account_strategy_ledger_identity",
+                "account_strategy_classified_flows",
+                "account_strategy_admission_policy",
+            }
+        )
     if set(recipe) != required:
         raise VerticalBuildError("vertical-build recipe keys differ")
     date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
@@ -396,7 +413,7 @@ def _recipe(path: Path) -> dict[str, Any]:
             "inventory_sha256": definition["inventory_sha256"],
         }:
             raise VerticalBuildError(f"{key} inventory differs")
-    if schema_version == 7:
+    if schema_version in {7, 8}:
         definition = recipe["provider_ledger_generation"]
         if not isinstance(definition, dict) or set(definition) != {
             "file_count",
@@ -412,6 +429,30 @@ def _recipe(path: Path) -> dict[str, Any]:
         }:
             raise VerticalBuildError("provider_ledger_generation inventory differs")
         _validated_reusable_provider_ledger(generation)
+    if schema_version == 8:
+        for key in (
+            "account_strategy_ledger",
+            "account_strategy_ledger_identity",
+            "account_strategy_classified_flows",
+            "account_strategy_admission_policy",
+        ):
+            definition = recipe[key]
+            if not isinstance(definition, dict) or set(definition) != {
+                "path",
+                "sha256",
+                "size_bytes",
+            }:
+                raise VerticalBuildError(f"{key} definition differs")
+            artifact = _path(definition["path"], f"{key}.path")
+            sha256, size = _sha(artifact)
+            if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+                raise VerticalBuildError(f"{key} identity differs")
+        for path, label in (
+            (ACCOUNT_STRATEGY_CLASSIFICATION_POLICY, "classification policy"),
+            (ACCOUNT_STRATEGY_PANEL_TEMPLATE_ROOT, "panel templates"),
+        ):
+            if path.is_symlink() or not path.exists():
+                raise VerticalBuildError(f"repository-governed {label} is unavailable")
     _history_contract_path(recipe)
     return recipe
 
@@ -441,12 +482,35 @@ def create_recipe(
     pipeline_id: str,
     release_commit: str,
     output: Path,
+    account_strategy_ledger: Path | None = None,
+    account_strategy_ledger_identity: Path | None = None,
+    account_strategy_classified_flows: Path | None = None,
+    account_strategy_admission_policy: Path | None = None,
 ) -> dict[str, Any]:
     date.fromisoformat(as_of_date)
     if len(release_commit) != 40:
         raise VerticalBuildError("release commit differs")
     if (provider_ledger_spec is None) == (provider_ledger_generation is None):
         raise VerticalBuildError("exactly one provider-ledger source must be supplied")
+    financial_sources = {
+        "account_strategy_ledger": account_strategy_ledger,
+        "account_strategy_ledger_identity": account_strategy_ledger_identity,
+        "account_strategy_classified_flows": account_strategy_classified_flows,
+        "account_strategy_admission_policy": account_strategy_admission_policy,
+    }
+    supplied_financial_sources = [
+        value for value in financial_sources.values() if value is not None
+    ]
+    if supplied_financial_sources and len(supplied_financial_sources) != len(
+        financial_sources
+    ):
+        raise VerticalBuildError(
+            "all four account-strategy financial sources must be supplied together"
+        )
+    if supplied_financial_sources and provider_ledger_generation is None:
+        raise VerticalBuildError(
+            "financial epoch-manifest recipes require a reusable provider-ledger generation"
+        )
     payload: dict[str, Any] = {
         "as_of_date": as_of_date,
         "base_factor_file": _file_definition(base_factor_file.resolve()),
@@ -490,6 +554,15 @@ def create_recipe(
             **_directory_inventory(generation),
         }
         payload["schema_version"] = 7
+    if supplied_financial_sources:
+        payload.update(
+            {
+                key: _file_definition(value.resolve())
+                for key, value in financial_sources.items()
+                if value is not None
+            }
+        )
+        payload["schema_version"] = 8
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
     return {"pipeline_id": pipeline_id, "recipe": str(output)}
@@ -592,7 +665,7 @@ def _accepted_xlsx_evidence(candidate: Path) -> bool:
     )
 
 
-def _accepted_workbook_validation(path: Path) -> dict[str, Any] | None:
+def _accepted_workbook_validation(path: Path, candidate: Path) -> dict[str, Any] | None:
     if path.is_symlink() or not path.is_file():
         return None
     result = _load(path, "workbook validation")
@@ -607,6 +680,33 @@ def _accepted_workbook_validation(path: Path) -> dict[str, Any] | None:
         )
     ):
         return None
+    binding_path = candidate / "workbook-evidence-binding.json"
+    if binding_path.is_symlink() or not binding_path.is_file():
+        return None
+    binding = _load(binding_path, "workbook evidence binding")
+    if (
+        binding.get("binding_schema_version") != 1
+        or binding.get("validation_all_passed") is not True
+    ):
+        return None
+    evidence_paths = {
+        "workbook": candidate / "excel" / "portfolio-report.xlsx",
+        "xlsx_result": candidate / "xlsx-result.json",
+        "validation_result": path,
+        "workbook_contract": candidate / "workbook-contract.json",
+        "xlsx_job": candidate / "xlsx-job.json",
+        "workbook_canonicalization": candidate / "workbook-canonicalization.json",
+        "xlsx_result_canonicalization": candidate / "xlsx-result-canonicalization.json",
+    }
+    for name, evidence_path in evidence_paths.items():
+        if evidence_path.is_symlink() or not evidence_path.is_file():
+            return None
+        sha256, size = _sha(evidence_path)
+        if (
+            binding.get(f"{name}_sha256") != sha256
+            or binding.get(f"{name}_size_bytes") != size
+        ):
+            return None
     return result
 
 
@@ -3501,7 +3601,7 @@ def build_workbook(
         str(candidate / "workbook-canonicalization.json"),
     )
     validation_path = candidate / "workbook-validation.json"
-    validation = _accepted_workbook_validation(validation_path)
+    validation = _accepted_workbook_validation(validation_path, candidate)
     if validation is None:
         validation = _run(
             (
@@ -3514,6 +3614,21 @@ def build_workbook(
             timeout=180,
         )
         _write_exact(validation_path, canonical_json_bytes(validation))
+    binding_path = candidate / "workbook-evidence-binding.json"
+    workbook_evidence_binding = _tool(
+        "portfolio_report.py",
+        "bind-workbook-evidence",
+        "--candidate-dir",
+        str(candidate),
+        "--excel-workbook",
+        str(excel_workbook),
+        "--xlsx-result",
+        str(result_path),
+        "--validation-result",
+        str(validation_path),
+        "--evidence",
+        str(binding_path),
+    )
     _tool(
         "portfolio_report.py",
         "verify",
@@ -3556,6 +3671,8 @@ def build_workbook(
         str(result_path),
         "--validation-result",
         str(validation_path),
+        "--workbook-evidence-binding",
+        str(binding_path),
         "--output-root",
         str(output_root),
         "--freshness-health",
@@ -3580,6 +3697,7 @@ def build_workbook(
         "candidate_dir": str(candidate),
         "root": str(output_root),
         "workbook_canonicalization": canonicalization,
+        "workbook_evidence_binding": workbook_evidence_binding,
         "xlsx_result_canonicalization": result_canonicalization,
     }
 
@@ -3620,6 +3738,123 @@ def build_report(
     )
 
 
+def _financial_epoch_inputs(recipe: Mapping[str, Any]) -> dict[str, Path] | None:
+    """Return the four independently bound inputs for a schema-8 release.
+
+    Classification policy and UI templates deliberately do not appear here:
+    they are repository-owned authorities, never recipe-controlled paths.
+    """
+    if recipe["schema_version"] != 8:
+        return None
+    return {
+        "ledger": _path(
+            recipe["account_strategy_ledger"]["path"],
+            "account strategy ledger",
+        ),
+        "ledger_identity": _path(
+            recipe["account_strategy_ledger_identity"]["path"],
+            "account strategy ledger identity",
+        ),
+        "classified_flows": _path(
+            recipe["account_strategy_classified_flows"]["path"],
+            "account strategy classified flows",
+        ),
+        "admission_policy": _path(
+            recipe["account_strategy_admission_policy"]["path"],
+            "account strategy admission policy",
+        ),
+    }
+
+
+def _report_baseline_generation_id(report_root: Path) -> str:
+    """Derive the exact baseline generation bound by the published report."""
+    _report_id, report_generation = _published_generation(report_root)
+    report = _load(
+        report_generation / "portfolio-report-data.json",
+        "published portfolio report data",
+    )
+    baseline = report.get("baseline")
+    if not isinstance(baseline, dict):
+        raise VerticalBuildError("published portfolio report baseline is invalid")
+    return _generation_id(
+        baseline.get("generation_id"),
+        "published portfolio report baseline generation_id",
+    )
+
+
+def _stage_account_strategy_manifest(
+    recipe: Mapping[str, Any],
+    report_root: Path,
+    baseline_root: Path,
+    output_root: Path,
+) -> Path | None:
+    """Build one manifest from the exact report-bound baseline generation."""
+    financial_inputs = _financial_epoch_inputs(recipe)
+    if financial_inputs is None:
+        return None
+    report_baseline_id = _report_baseline_generation_id(report_root)
+    baseline_generation_id, _baseline_generation = _published_generation(baseline_root)
+    if baseline_generation_id != report_baseline_id:
+        raise VerticalBuildError(
+            "report baseline generation differs from release baseline authority"
+        )
+    manifest = _tool(
+        "account_strategy_manifest.py",
+        "--ledger-json",
+        str(financial_inputs["ledger"]),
+        "--ledger-identity-json",
+        str(financial_inputs["ledger_identity"]),
+        "--baseline-root",
+        str(baseline_root),
+        "--baseline-generation-id",
+        report_baseline_id,
+        "--flow-classes-json",
+        str(financial_inputs["classified_flows"]),
+        "--classification-policy-json",
+        str(ACCOUNT_STRATEGY_CLASSIFICATION_POLICY),
+        "--admission-policy-json",
+        str(financial_inputs["admission_policy"]),
+        "--format",
+        "json",
+    )
+    if manifest.get("schema_version") != 4:
+        raise VerticalBuildError("account-strategy manifest schema differs")
+    staged = output_root / "account-strategy-manifest.json"
+    _write_exact(staged, canonical_json_bytes(manifest))
+    return staged
+
+
+def _panel_financial_arguments(
+    recipe: Mapping[str, Any],
+    baseline_root: Path,
+    account_strategy_manifest: Path | None,
+) -> tuple[str, ...]:
+    financial_inputs = _financial_epoch_inputs(recipe)
+    if financial_inputs is None:
+        return ()
+    if account_strategy_manifest is None:
+        raise VerticalBuildError("financial panel requires a staged account manifest")
+    return (
+        "--template-root",
+        str(ACCOUNT_STRATEGY_PANEL_TEMPLATE_ROOT),
+        "--financial-mode",
+        "--account-manifest",
+        str(account_strategy_manifest),
+        "--manifest-ledger",
+        str(financial_inputs["ledger"]),
+        "--manifest-ledger-identity",
+        str(financial_inputs["ledger_identity"]),
+        "--manifest-baseline-root",
+        str(baseline_root),
+        "--manifest-classified-flows",
+        str(financial_inputs["classified_flows"]),
+        "--manifest-classification-policy",
+        str(ACCOUNT_STRATEGY_CLASSIFICATION_POLICY),
+        "--manifest-admission-policy",
+        str(financial_inputs["admission_policy"]),
+    )
+
+
 def build_panel_candidate(
     recipe_path: Path,
     report_root: Path,
@@ -3631,6 +3866,17 @@ def build_panel_candidate(
 ) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     legacy_panel = _path(recipe["legacy_panel"]["path"], "legacy panel")
+    account_strategy_manifest = _stage_account_strategy_manifest(
+        recipe,
+        report_root,
+        baseline_root,
+        output_root,
+    )
+    financial_arguments = _panel_financial_arguments(
+        recipe,
+        baseline_root,
+        account_strategy_manifest,
+    )
     result = _tool(
         "portfolio_control_panel.py",
         "build",
@@ -3653,6 +3899,7 @@ def build_panel_candidate(
         _text(analytics.get("correlation_root"), "correlation_root"),
         "--weekly-returns-root",
         _text(analytics.get("weekly_root"), "weekly_root"),
+        *financial_arguments,
         "--freshness-health",
         str(freshness_health),
         "--output-root",
@@ -3682,13 +3929,34 @@ def build_panel_candidate(
         _text(analytics.get("correlation_root"), "correlation_root"),
         "--weekly-returns-root",
         _text(analytics.get("weekly_root"), "weekly_root"),
+        *financial_arguments,
         "--freshness-health",
         str(freshness_health),
         "--candidate-dir",
         str(candidate),
         timeout=7200,
     )
-    return {**result, "candidate_dir": str(candidate), "root": str(output_root)}
+    account_manifest_identity = (
+        _file_definition(account_strategy_manifest)
+        if account_strategy_manifest is not None
+        else None
+    )
+    return {
+        **result,
+        **(
+            {
+                "account_strategy_manifest": str(account_strategy_manifest),
+                "account_strategy_manifest_sha256": account_manifest_identity["sha256"],
+                "account_strategy_manifest_size_bytes": account_manifest_identity[
+                    "size_bytes"
+                ],
+            }
+            if account_manifest_identity is not None
+            else {}
+        ),
+        "candidate_dir": str(candidate),
+        "root": str(output_root),
+    }
 
 
 def publish_panel(
@@ -3701,9 +3969,36 @@ def publish_panel(
     candidate: Path,
     qa_dir: Path,
     output_root: Path,
+    *,
+    account_strategy_manifest: Path | None = None,
+    expected_account_strategy_manifest_sha256: str | None = None,
+    expected_account_strategy_manifest_size_bytes: int | None = None,
 ) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     legacy_panel = _path(recipe["legacy_panel"]["path"], "legacy panel")
+    if recipe["schema_version"] == 8 and account_strategy_manifest is None:
+        account_strategy_manifest = _stage_account_strategy_manifest(
+            recipe,
+            report_root,
+            baseline_root,
+            output_root,
+        )
+    financial_arguments = _panel_financial_arguments(
+        recipe,
+        baseline_root,
+        account_strategy_manifest,
+    )
+    if account_strategy_manifest is not None:
+        actual_sha256, actual_size_bytes = _sha(account_strategy_manifest)
+        if (
+            expected_account_strategy_manifest_sha256 is None
+            or expected_account_strategy_manifest_size_bytes is None
+            or actual_sha256 != expected_account_strategy_manifest_sha256
+            or actual_size_bytes != expected_account_strategy_manifest_size_bytes
+        ):
+            raise VerticalBuildError(
+                "staged account-strategy manifest identity differs"
+            )
     result = _tool(
         "portfolio_control_panel.py",
         "publish",
@@ -3726,6 +4021,7 @@ def publish_panel(
         _text(analytics.get("correlation_root"), "correlation_root"),
         "--weekly-returns-root",
         _text(analytics.get("weekly_root"), "weekly_root"),
+        *financial_arguments,
         "--freshness-health",
         str(freshness_health),
         "--candidate-dir",
@@ -3736,7 +4032,20 @@ def publish_panel(
         str(output_root),
         timeout=7200,
     )
-    return {**result, "candidate_dir": str(candidate), "root": str(output_root)}
+    return {
+        **result,
+        **(
+            {
+                "account_strategy_manifest": str(account_strategy_manifest),
+                "account_strategy_manifest_sha256": actual_sha256,
+                "account_strategy_manifest_size_bytes": actual_size_bytes,
+            }
+            if account_strategy_manifest is not None
+            else {}
+        ),
+        "candidate_dir": str(candidate),
+        "root": str(output_root),
+    }
 
 
 def _stage_path(output_root: Path, role: str) -> Path:
@@ -3751,17 +4060,60 @@ def _record_stage(output_root: Path, role: str, result: Mapping[str, Any]) -> No
     _write_exact(_stage_path(output_root, role), canonical_json_bytes(dict(result)))
 
 
+def _validate_stage_financial_arguments(
+    recipe: Mapping[str, Any],
+    *,
+    manifest_ledger: Path | None,
+    manifest_ledger_identity: Path | None,
+    manifest_classified_flows: Path | None,
+    manifest_admission_policy: Path | None,
+) -> None:
+    supplied = {
+        "ledger": manifest_ledger,
+        "ledger_identity": manifest_ledger_identity,
+        "classified_flows": manifest_classified_flows,
+        "admission_policy": manifest_admission_policy,
+    }
+    expected = _financial_epoch_inputs(recipe)
+    if expected is None:
+        if any(path is not None for path in supplied.values()):
+            raise VerticalBuildError(
+                "non-financial stage cannot receive epoch-manifest inputs"
+            )
+        return
+    if any(path is None for path in supplied.values()):
+        raise VerticalBuildError(
+            "financial stage requires all four epoch-manifest inputs"
+        )
+    for key, expected_path in expected.items():
+        observed = supplied[key]
+        assert observed is not None
+        if observed.resolve(strict=True) != expected_path.resolve(strict=True):
+            raise VerticalBuildError(f"financial stage {key} authority differs")
+
+
 def build_stage(
     recipe_path: Path,
     output_root: Path,
     role: str,
     *,
     qa_dir: Path | None = None,
+    manifest_ledger: Path | None = None,
+    manifest_ledger_identity: Path | None = None,
+    manifest_classified_flows: Path | None = None,
+    manifest_admission_policy: Path | None = None,
 ) -> dict[str, Any]:
     """Build exactly one source-to-panel stage from its predecessor outputs."""
 
     stages = output_root / "stages"
     recipe = _recipe(recipe_path)
+    _validate_stage_financial_arguments(
+        recipe,
+        manifest_ledger=manifest_ledger,
+        manifest_ledger_identity=manifest_ledger_identity,
+        manifest_classified_flows=manifest_classified_flows,
+        manifest_admission_policy=manifest_admission_policy,
+    )
     history_contract = _history_contract_path(recipe)
     implementation_reconciliation = _path(
         recipe["implementation_reconciliation"]["path"],
@@ -3842,6 +4194,7 @@ def build_stage(
         if role == "panel-candidate":
             result = panel
         elif qa_dir is not None:
+            staged_manifest = panel.get("account_strategy_manifest")
             result = publish_panel(
                 recipe_path,
                 stages / "report",
@@ -3852,6 +4205,27 @@ def build_stage(
                 _path(panel.get("candidate_dir"), "panel candidate"),
                 qa_dir,
                 stages / "panel",
+                account_strategy_manifest=(
+                    _path(staged_manifest, "staged account strategy manifest")
+                    if staged_manifest is not None
+                    else None
+                ),
+                expected_account_strategy_manifest_sha256=(
+                    _text(
+                        panel.get("account_strategy_manifest_sha256"),
+                        "staged account strategy manifest sha256",
+                    )
+                    if staged_manifest is not None
+                    else None
+                ),
+                expected_account_strategy_manifest_size_bytes=(
+                    panel.get("account_strategy_manifest_size_bytes")
+                    if staged_manifest is not None
+                    and isinstance(
+                        panel.get("account_strategy_manifest_size_bytes"), int
+                    )
+                    else None
+                ),
             )
         else:
             raise VerticalBuildError("panel publication requires browser QA")
@@ -3862,20 +4236,40 @@ def build_stage(
 
 
 def build_all(recipe_path: Path, output_root: Path) -> dict[str, Any]:
-    ledger = build_stage(recipe_path, output_root, "ledger")
-    baseline = build_stage(recipe_path, output_root, "baseline")
-    attribution = build_stage(recipe_path, output_root, "attribution")
-    analytics = build_stage(recipe_path, output_root, "analytics")
-    report_candidate = build_stage(recipe_path, output_root, "report")
-    report = build_stage(recipe_path, output_root, "workbook")
-    panel = build_stage(recipe_path, output_root, "panel-candidate")
+    recipe = _recipe(recipe_path)
+    inputs = _financial_epoch_inputs(recipe)
+    financial_arguments: dict[str, Path] = (
+        {
+            "manifest_ledger": inputs["ledger"],
+            "manifest_ledger_identity": inputs["ledger_identity"],
+            "manifest_classified_flows": inputs["classified_flows"],
+            "manifest_admission_policy": inputs["admission_policy"],
+        }
+        if inputs is not None
+        else {}
+    )
+    ledger = build_stage(recipe_path, output_root, "ledger", **financial_arguments)
+    baseline = build_stage(recipe_path, output_root, "baseline", **financial_arguments)
+    attribution = build_stage(
+        recipe_path, output_root, "attribution", **financial_arguments
+    )
+    analytics = build_stage(
+        recipe_path, output_root, "analytics", **financial_arguments
+    )
+    report_candidate = build_stage(
+        recipe_path, output_root, "report", **financial_arguments
+    )
+    report = build_stage(recipe_path, output_root, "workbook", **financial_arguments)
+    panel = build_stage(
+        recipe_path, output_root, "panel-candidate", **financial_arguments
+    )
     result = {
         "analytics": analytics,
         "attribution": attribution,
         "baseline": baseline,
         "ledger": ledger,
         "panel": panel,
-        "release_commit": _recipe(recipe_path)["release_commit"],
+        "release_commit": recipe["release_commit"],
         "report": report,
         "report_candidate": report_candidate,
         "schema_version": 1,
@@ -3909,6 +4303,10 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--as-of-date", required=True)
     recipe.add_argument("--pipeline-id", required=True)
     recipe.add_argument("--release-commit", required=True)
+    recipe.add_argument("--account-strategy-ledger", type=Path)
+    recipe.add_argument("--account-strategy-ledger-identity", type=Path)
+    recipe.add_argument("--account-strategy-classified-flows", type=Path)
+    recipe.add_argument("--account-strategy-admission-policy", type=Path)
     recipe.add_argument("--output", type=Path, required=True)
     stage = commands.add_parser("stage")
     stage.add_argument("--recipe", type=Path, required=True)
@@ -3928,6 +4326,10 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
     stage.add_argument("--qa-dir", type=Path)
+    stage.add_argument("--manifest-ledger", type=Path)
+    stage.add_argument("--manifest-ledger-identity", type=Path)
+    stage.add_argument("--manifest-classified-flows", type=Path)
+    stage.add_argument("--manifest-admission-policy", type=Path)
     return parser
 
 
@@ -3956,6 +4358,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pipeline_id=args.pipeline_id,
                 release_commit=args.release_commit,
                 output=args.output,
+                account_strategy_ledger=args.account_strategy_ledger,
+                account_strategy_ledger_identity=args.account_strategy_ledger_identity,
+                account_strategy_classified_flows=args.account_strategy_classified_flows,
+                account_strategy_admission_policy=args.account_strategy_admission_policy,
             )
         else:
             result = build_stage(
@@ -3963,6 +4369,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output_root,
                 args.role,
                 qa_dir=args.qa_dir,
+                manifest_ledger=args.manifest_ledger,
+                manifest_ledger_identity=args.manifest_ledger_identity,
+                manifest_classified_flows=args.manifest_classified_flows,
+                manifest_admission_policy=args.manifest_admission_policy,
             )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"portfolio-release-builder: FAIL: {exc}", file=sys.stderr)

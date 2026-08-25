@@ -364,6 +364,68 @@ def test_create_recipe_can_bind_verified_immutable_provider_ledger(
     assert accepted["provider_ledger_generation"]["path"] == str(generation)
 
 
+def test_create_recipe_schema8_binds_exact_financial_epoch_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schema 8 admits precisely the four selected financial inputs.
+
+    The policy and template authorities are repository-owned implementation
+    constants, so a recipe must not be able to substitute either one.
+    """
+    source_recipe = _recipe(tmp_path)
+    payload = json.loads(source_recipe.read_text(encoding="utf-8"))
+    generation = _provider_ledger_generation(tmp_path)
+    financial_inputs = {
+        "account_strategy_ledger": tmp_path / "account-ledger.json",
+        "account_strategy_ledger_identity": tmp_path / "account-ledger-id.json",
+        "account_strategy_classified_flows": tmp_path / "classified-flows.json",
+        "account_strategy_admission_policy": tmp_path / "admission-policy.json",
+    }
+    for path in financial_inputs.values():
+        path.write_text("{}", encoding="utf-8")
+    output = tmp_path / "financial-recipe.json"
+    monkeypatch.setattr(
+        builder,
+        "_history_contract_path",
+        lambda recipe: (
+            Path(recipe["correlation_source_root"]["path"]) / "dependence-source.json"
+        ),
+    )
+
+    builder.create_recipe(
+        provider_ledger_spec=None,
+        provider_ledger_generation=generation,
+        baseline_spec=Path(payload["baseline_spec"]["path"]),
+        base_factor_file=Path(payload["base_factor_file"]["path"]),
+        implementation_reconciliation=Path(
+            payload["implementation_reconciliation"]["path"]
+        ),
+        implementation_return_attribution=Path(
+            payload["implementation_return_attribution"]["path"]
+        ),
+        strategy_attribution_root=Path(payload["strategy_attribution_root"]["path"]),
+        decomposition_plan_bundle=Path(payload["decomposition_plan_bundle"]["path"]),
+        correlation_source_root=Path(payload["correlation_source_root"]["path"]),
+        legacy_panel=Path(payload["legacy_panel"]["path"]),
+        as_of_date="2026-08-03",
+        pipeline_id="synthetic-financial-vertical",
+        release_commit="a" * 40,
+        output=output,
+        **financial_inputs,
+    )
+
+    accepted = builder._recipe(output)
+
+    assert accepted["schema_version"] == 8
+    assert set(accepted) - set(payload) == {
+        *financial_inputs,
+        "provider_ledger_generation",
+    }
+    for key, path in financial_inputs.items():
+        assert accepted[key] == _file_definition(path)
+
+
 def test_current_schema_rejects_legacy_dependence_source(tmp_path: Path) -> None:
     recipe_path = _recipe(tmp_path)
     recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
@@ -485,7 +547,9 @@ def test_successful_xlsx_evidence_is_resumable_and_identity_bound(
 
 
 def test_workbook_validation_resume_requires_all_invariants(tmp_path: Path) -> None:
-    path = tmp_path / "validation.json"
+    candidate = tmp_path / "candidate"
+    (candidate / "excel").mkdir(parents=True)
+    path = candidate / "workbook-validation.json"
     path.write_text(
         json.dumps(
             {
@@ -495,8 +559,36 @@ def test_workbook_validation_resume_requires_all_invariants(tmp_path: Path) -> N
         ),
         encoding="utf-8",
     )
+    evidence_paths = {
+        "workbook": candidate / "excel" / "portfolio-report.xlsx",
+        "xlsx_result": candidate / "xlsx-result.json",
+        "validation_result": path,
+        "workbook_contract": candidate / "workbook-contract.json",
+        "xlsx_job": candidate / "xlsx-job.json",
+        "workbook_canonicalization": candidate / "workbook-canonicalization.json",
+        "xlsx_result_canonicalization": candidate / "xlsx-result-canonicalization.json",
+    }
+    for name, evidence_path in evidence_paths.items():
+        if name != "validation_result":
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_bytes(f"synthetic {name}".encode())
+    binding: dict[str, object] = {
+        "binding_schema_version": 1,
+        "validation_all_passed": True,
+    }
+    for name, evidence_path in evidence_paths.items():
+        digest, size = builder._sha(evidence_path)
+        binding[f"{name}_sha256"] = digest
+        binding[f"{name}_size_bytes"] = size
+    (candidate / "workbook-evidence-binding.json").write_text(
+        json.dumps(binding), encoding="utf-8"
+    )
 
-    assert builder._accepted_workbook_validation(path) is not None
+    assert builder._accepted_workbook_validation(path, candidate) is not None
+
+    evidence_paths["workbook"].write_bytes(b"drifted workbook")
+    assert builder._accepted_workbook_validation(path, candidate) is None
+    evidence_paths["workbook"].write_bytes(b"synthetic workbook")
 
     path.write_text(
         json.dumps(
@@ -507,7 +599,7 @@ def test_workbook_validation_resume_requires_all_invariants(tmp_path: Path) -> N
         ),
         encoding="utf-8",
     )
-    assert builder._accepted_workbook_validation(path) is None
+    assert builder._accepted_workbook_validation(path, candidate) is None
 
 
 def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
@@ -2138,3 +2230,169 @@ def test_panel_invocations_carry_baseline_root(
         assert call[0] == "portfolio_control_panel.py"
         assert "--baseline-root" in call
         assert call[call.index("--baseline-root") + 1] == str(baseline_root)
+
+
+def test_schema8_stages_one_manifest_and_uses_it_for_every_panel_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Financial panel build/verify/publish share one exact staged manifest."""
+    recipe = _recipe(tmp_path)
+    payload = json.loads(recipe.read_text(encoding="utf-8"))
+    generation = _provider_ledger_generation(tmp_path)
+    payload.pop("provider_ledger_spec")
+    payload["provider_ledger_generation"] = {
+        "path": str(generation),
+        **builder._directory_inventory(generation),
+    }
+    financial_paths = {
+        "account_strategy_ledger": tmp_path / "account-ledger.json",
+        "account_strategy_ledger_identity": tmp_path / "account-ledger-id.json",
+        "account_strategy_classified_flows": tmp_path / "classified-flows.json",
+        "account_strategy_admission_policy": tmp_path / "admission-policy.json",
+    }
+    for key, path in financial_paths.items():
+        path.write_text("{}", encoding="utf-8")
+        payload[key] = _file_definition(path)
+    payload["schema_version"] = 8
+    recipe.write_bytes(canonical_json_bytes(payload))
+    monkeypatch.setattr(
+        builder,
+        "_history_contract_path",
+        lambda recipe: (
+            Path(recipe["correlation_source_root"]["path"]) / "dependence-source.json"
+        ),
+    )
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        if args[0] == "account_strategy_manifest.py":
+            return {"schema_version": 4}
+        return {"candidate_dir": str(tmp_path / "candidate")}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    monkeypatch.setattr(
+        builder,
+        "_report_baseline_generation_id",
+        lambda _root: "b" * 64,
+    )
+    monkeypatch.setattr(
+        builder,
+        "_published_generation",
+        lambda root: ("b" * 64, root / "generations" / ("b" * 64)),
+    )
+    analytics = {
+        "decomposition_root": str(tmp_path / "decomposition"),
+        "decomposition_lenses_root": str(tmp_path / "lenses"),
+        "correlation_root": str(tmp_path / "correlation"),
+        "weekly_root": str(tmp_path / "weekly"),
+    }
+    baseline_root = tmp_path / "stages" / "baseline"
+    report_root = tmp_path / "stages" / "report"
+    panel_root = tmp_path / "stages" / "panel"
+
+    candidate = builder.build_panel_candidate(
+        recipe,
+        report_root,
+        baseline_root,
+        tmp_path / "bundle",
+        analytics,
+        tmp_path / "freshness.json",
+        panel_root,
+    )
+    staged_manifest = Path(str(candidate["account_strategy_manifest"]))
+    assert "account_strategy_manifest_sha256" in candidate
+    assert "account_strategy_manifest_size_bytes" in candidate
+    staged_bytes = staged_manifest.read_bytes()
+    staged_manifest.write_bytes(staged_bytes + b" ")
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="staged account-strategy manifest identity differs",
+    ):
+        builder.publish_panel(
+            recipe,
+            report_root,
+            baseline_root,
+            tmp_path / "bundle",
+            analytics,
+            tmp_path / "freshness.json",
+            tmp_path / "candidate",
+            tmp_path / "qa",
+            panel_root,
+            account_strategy_manifest=staged_manifest,
+            expected_account_strategy_manifest_sha256=str(
+                candidate["account_strategy_manifest_sha256"]
+            ),
+            expected_account_strategy_manifest_size_bytes=int(
+                candidate["account_strategy_manifest_size_bytes"]
+            ),
+        )
+    staged_manifest.write_bytes(staged_bytes)
+    builder.publish_panel(
+        recipe,
+        report_root,
+        baseline_root,
+        tmp_path / "bundle",
+        analytics,
+        tmp_path / "freshness.json",
+        tmp_path / "candidate",
+        tmp_path / "qa",
+        panel_root,
+        account_strategy_manifest=staged_manifest,
+        expected_account_strategy_manifest_sha256=str(
+            candidate["account_strategy_manifest_sha256"]
+        ),
+        expected_account_strategy_manifest_size_bytes=int(
+            candidate["account_strategy_manifest_size_bytes"]
+        ),
+    )
+
+    assert [call[0] for call in calls] == [
+        "account_strategy_manifest.py",
+        "portfolio_control_panel.py",
+        "portfolio_control_panel.py",
+        "portfolio_control_panel.py",
+    ]
+    assert [call[1] for call in calls[1:]] == ["build", "verify", "publish"]
+    for call in calls[1:]:
+        assert "--financial-mode" in call
+        assert call[call.index("--account-manifest") + 1] == str(staged_manifest)
+        assert call[call.index("--manifest-ledger") + 1] == str(
+            financial_paths["account_strategy_ledger"]
+        )
+        assert call[call.index("--manifest-ledger-identity") + 1] == str(
+            financial_paths["account_strategy_ledger_identity"]
+        )
+        assert call[call.index("--manifest-classified-flows") + 1] == str(
+            financial_paths["account_strategy_classified_flows"]
+        )
+        assert call[call.index("--manifest-admission-policy") + 1] == str(
+            financial_paths["account_strategy_admission_policy"]
+        )
+        assert call[call.index("--manifest-classification-policy") + 1] == str(
+            builder.ACCOUNT_STRATEGY_CLASSIFICATION_POLICY
+        )
+        assert call[call.index("--template-root") + 1] == str(
+            builder.ACCOUNT_STRATEGY_PANEL_TEMPLATE_ROOT
+        )
+
+    parsed = builder._recipe(recipe)
+    builder._validate_stage_financial_arguments(
+        parsed,
+        manifest_ledger=financial_paths["account_strategy_ledger"],
+        manifest_ledger_identity=financial_paths["account_strategy_ledger_identity"],
+        manifest_classified_flows=financial_paths["account_strategy_classified_flows"],
+        manifest_admission_policy=financial_paths["account_strategy_admission_policy"],
+    )
+    with pytest.raises(builder.VerticalBuildError, match="requires all four"):
+        builder._validate_stage_financial_arguments(
+            parsed,
+            manifest_ledger=financial_paths["account_strategy_ledger"],
+            manifest_ledger_identity=None,
+            manifest_classified_flows=financial_paths[
+                "account_strategy_classified_flows"
+            ],
+            manifest_admission_policy=financial_paths[
+                "account_strategy_admission_policy"
+            ],
+        )

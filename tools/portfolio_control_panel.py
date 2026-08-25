@@ -75,7 +75,7 @@ ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
 ).resolve()
 
 
-PANEL_SCHEMA_VERSION: Final = 20
+PANEL_SCHEMA_VERSION: Final = 21
 BUILDER_VERSION: Final = "2.11.0"
 MANIFEST_AUTHORITY_FINANCIAL: Final = "INDEPENDENT_EXACT_REBUILD"
 MANIFEST_AUTHORITY_INTERNAL: Final = "INTERNAL_VALIDATION_ONLY_NON_RELEASEABLE"
@@ -8210,7 +8210,7 @@ def publish_panel(
                     artifact_id="input/account-strategy-manifest.json",
                     as_of_date=publication_as_of,
                     schema_name="account-strategy-manifest",
-                    schema_version="3",
+                    schema_version="4",
                     sha256=_text(
                         data["meta"]["account_manifest_sha256"],
                         "account manifest snapshot hash",
@@ -8497,7 +8497,7 @@ def _parser() -> argparse.ArgumentParser:
             "--financial-mode",
             action="store_true",
             help=(
-                "Require a v3 epoch manifest and independently selected "
+                "Require a v4 epoch manifest and independently selected "
                 "producer inputs; intended for financial release wiring."
             ),
         )

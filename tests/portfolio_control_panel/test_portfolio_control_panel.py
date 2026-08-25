@@ -3103,7 +3103,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 20" in renderer
+    assert "data.panel_schema_version !== 21" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -3348,13 +3348,13 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     assert schema["properties"]["panel_schema_version"]["const"] == (
         panel.PANEL_SCHEMA_VERSION
     )
-    manifest_schema = schema["$defs"]["account_manifest_v3"]
+    manifest_schema = schema["$defs"]["account_manifest_v4"]
     strict_manifest_schema = json.loads(
         panel.ACCOUNT_MANIFEST_SCHEMA.read_text(encoding="utf-8")
     )
     assert manifest_schema == {"$ref": strict_manifest_schema["$id"]}
     assert strict_manifest_schema["additionalProperties"] is False
-    assert strict_manifest_schema["properties"]["schema_version"] == {"const": 3}
+    assert strict_manifest_schema["properties"]["schema_version"] == {"const": 4}
     assert "authority_readiness" in strict_manifest_schema["required"]
     assert "authority_status" not in strict_manifest_schema["required"]
     assert strict_manifest_schema["properties"]["authority_readiness"]["properties"][
@@ -5395,7 +5395,7 @@ def test_account_manifest_flows_through_build_and_verify(
     assert "renderAccountManifest" in renderer
 
 
-def test_panel_formal_schema_embeds_strict_manifest_v3_contract(
+def test_panel_formal_schema_embeds_strict_manifest_v4_contract(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
@@ -6309,7 +6309,7 @@ def _produce_manifest(
     accepted_baseline_root: Path | None = None,
     accounting_currency: str = "USD",
 ) -> tuple[Path, dict[str, Path]]:
-    """Build a real v3 manifest and retain its independently selected inputs."""
+    """Build a real v4 manifest and retain its independently selected inputs."""
     target_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = target_dir / "ledger.json"
     ledger = {

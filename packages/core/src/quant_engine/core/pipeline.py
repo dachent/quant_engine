@@ -16,7 +16,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Final, Mapping, Self, cast
+import threading
+from typing import Any, BinaryIO, Callable, Final, Mapping, Self, cast
 
 from quant_engine.core.authority import FreshnessPolicy
 from quant_engine.core.contracts import (
@@ -50,6 +51,13 @@ _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PORTFOLIO_CONTRACT_GATE: Final = "portfolio-orchestration-contract"
 _FINANCIAL_MVP_PRODUCT_GATE: Final = "financial-mvp-product-conformance"
 _FINANCIAL_MVP_HWM_INPUT_AUTHORITY_GATE: Final = "financial-mvp-hwm-input-authority"
+_FINANCIAL_EPOCH_MANIFEST_GATE: Final = "financial-epoch-manifest-input-authority"
+_FINANCIAL_EPOCH_MANIFEST_INPUTS: Final = {
+    "account_strategy_admission_policy",
+    "account_strategy_classified_flows",
+    "account_strategy_ledger",
+    "account_strategy_ledger_identity",
+}
 _FINANCIAL_MVP_AUTHORITY_GATES: Final = {
     "contract": "financial-mvp-contract-authority",
     "provider_catalog": "financial-mvp-provider-catalog-authority",
@@ -62,6 +70,7 @@ _REDERIVE_REGISTRY_GATE: Final = "portfolio-rederive-receipt-registry"
 _PORTFOLIO_PRODUCTION_REBIND_GATE: Final = "port-underwrite-production-rebind"
 _POST_BUILD_SEMANTIC_GATE: Final = "post-build-semantic"
 _PREDECESSOR_REPAIR_GATE: Final = "predecessor-authority-repair"
+_COMMAND_OUTPUT_CAPTURE_LIMIT_BYTES: Final = 64 * 1024
 _PORTFOLIO_PROFILE: Final = "PORTFOLIO_SOURCE_TO_PANEL_V1"
 _PORTFOLIO_STAGE_ORDER: Final = (
     "ledger",
@@ -1115,6 +1124,42 @@ def _gate_json(spec: PipelineSpec, gate_id: str) -> tuple[dict[str, Any], bytes]
     return value, content
 
 
+def _financial_epoch_manifest_authority(
+    spec: PipelineSpec,
+) -> dict[str, object] | None:
+    matches = [
+        gate for gate in spec.gates if gate.gate_id == _FINANCIAL_EPOCH_MANIFEST_GATE
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise PipelineValidationError("financial epoch manifest gate is ambiguous")
+    payload, _ = _gate_json(spec, _FINANCIAL_EPOCH_MANIFEST_GATE)
+    _strict(
+        payload,
+        {"inputs", "post_build_proof_sha256", "schema_version"},
+        "financial epoch manifest gate",
+    )
+    inputs = _object(payload["inputs"], "financial epoch manifest inputs")
+    _strict(
+        inputs,
+        _FINANCIAL_EPOCH_MANIFEST_INPUTS,
+        "financial epoch manifest inputs",
+    )
+    for name in sorted(_FINANCIAL_EPOCH_MANIFEST_INPUTS):
+        _file_definition_value(inputs[name], f"financial epoch manifest {name}")
+    if payload["schema_version"] != 2:
+        raise PipelineValidationError("financial epoch manifest gate is unsupported")
+    return {
+        "inputs": dict(inputs),
+        "inputs_sha256": hashlib.sha256(canonical_json_bytes(inputs)).hexdigest(),
+        "proof_sha256": _hash(
+            payload["post_build_proof_sha256"],
+            "financial epoch manifest proof sha256",
+        ),
+    }
+
+
 def _provider_admission_validator() -> Callable[..., None]:
     """Load the exact repository #303 validator without trusting module cache state."""
 
@@ -1262,23 +1307,28 @@ def _validate_financial_mvp_production_binding(
     if not matches:
         return
     contract, _ = _gate_json(spec, _PORTFOLIO_PRODUCTION_REBIND_GATE)
-    _strict(
-        contract,
-        {
-            "code_commit",
-            "generation_ids",
-            "orchestration_contract_sha256",
-            "pipeline_id",
-            "prepared_release_commit",
-            "production_roots",
-            "production_semantic_gate_sha256",
-            "product_authority_sha256",
-            "schema_version",
-            "semantic_gate_sha256",
-            "source_generations",
-        },
-        "portfolio production rebind contract",
-    )
+    contract_schema_version = contract.get("schema_version")
+    expected_keys = {
+        "code_commit",
+        "generation_ids",
+        "orchestration_contract_sha256",
+        "pipeline_id",
+        "prepared_release_commit",
+        "production_roots",
+        "production_semantic_gate_sha256",
+        "product_authority_sha256",
+        "schema_version",
+        "semantic_gate_sha256",
+        "source_generations",
+    }
+    if contract_schema_version == 3:
+        expected_keys.update(
+            {
+                "financial_epoch_manifest_inputs_sha256",
+                "financial_epoch_manifest_proof_sha256",
+            }
+        )
+    _strict(contract, expected_keys, "portfolio production rebind contract")
     generation_ids = _object(
         contract["generation_ids"], "production generation identities"
     )
@@ -1288,6 +1338,22 @@ def _validate_financial_mvp_production_binding(
     )
     product_gate = _single_gate(spec, _FINANCIAL_MVP_PRODUCT_GATE)
     semantic_gate = _single_gate(spec, _POST_BUILD_SEMANTIC_GATE)
+    epoch_authority = _financial_epoch_manifest_authority(spec)
+    expected_contract_schema_version = 3 if epoch_authority is not None else 2
+    epoch_identity_differs = False
+    if contract_schema_version == 3:
+        epoch_identity_differs = epoch_authority is None or (
+            _hash(
+                contract["financial_epoch_manifest_inputs_sha256"],
+                "production financial epoch manifest inputs sha256",
+            )
+            != epoch_authority["inputs_sha256"]
+            or _hash(
+                contract["financial_epoch_manifest_proof_sha256"],
+                "production financial epoch manifest proof sha256",
+            )
+            != epoch_authority["proof_sha256"]
+        )
     release_sources = {
         node.root_id: node.source_dir
         for node in spec.nodes
@@ -1296,7 +1362,8 @@ def _validate_financial_mvp_production_binding(
         and node.source_dir is not None
     }
     if (
-        contract["schema_version"] != 2
+        contract_schema_version != expected_contract_schema_version
+        or epoch_identity_differs
         or contract["code_commit"] != spec.code_commit
         or contract["prepared_release_commit"] != spec.code_commit
         or contract["pipeline_id"] + "-production" != spec.pipeline_id
@@ -2019,13 +2086,20 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
         "source_acquisitions",
         "stages",
     }
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         expected_keys.add("product_authority")
+    if schema_version == 3:
+        expected_keys.update(
+            {
+                "financial_epoch_manifest_inputs",
+                "financial_epoch_manifest_proof_sha256",
+            }
+        )
     _strict(raw, expected_keys, "portfolio orchestration contract")
-    if schema_version not in {1, 2} or raw["profile"] != _PORTFOLIO_PROFILE:
+    if schema_version not in {1, 2, 3} or raw["profile"] != _PORTFOLIO_PROFILE:
         raise PipelineValidationError("portfolio orchestration profile is unsupported")
     product_authority = _financial_mvp_product_authority(spec)
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         if product_authority is None or canonical_json_bytes(
             raw["product_authority"]
         ) != canonical_json_bytes(product_authority["raw"]):
@@ -2035,6 +2109,26 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
     elif product_authority is not None:
         raise PipelineValidationError(
             "financial MVP product gate requires portfolio contract schema 2"
+        )
+    epoch_authority = _financial_epoch_manifest_authority(spec)
+    if schema_version == 3:
+        if epoch_authority is None or (
+            canonical_json_bytes(raw["financial_epoch_manifest_inputs"])
+            != canonical_json_bytes(
+                cast(Mapping[str, Any], epoch_authority["inputs"])
+            )
+            or _hash(
+                raw["financial_epoch_manifest_proof_sha256"],
+                "portfolio financial epoch manifest proof sha256",
+            )
+            != epoch_authority["proof_sha256"]
+        ):
+            raise PipelineValidationError(
+                "portfolio financial epoch manifest authority differs"
+            )
+    elif epoch_authority is not None:
+        raise PipelineValidationError(
+            "financial epoch manifest gate requires portfolio contract schema 3"
         )
     release_commit = str(raw["release_commit"])
     if _COMMIT.fullmatch(release_commit) is None:
@@ -2522,30 +2616,78 @@ def _verify_post_build_semantic_gate(spec: PipelineSpec, path: Path) -> None:
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PipelineValidationError("post-build semantic gate is unreadable") from exc
-    _strict(
-        payload,
-        {
-            "as_of_date",
-            "checks",
-            "release_commit",
-            "release_generations",
-            "schema_version",
-            "unwaived_blocking_exceptions",
-            "verdict",
-        },
-        "post-build semantic gate",
-    )
+    epoch_gates = [
+        gate for gate in spec.gates if gate.gate_id == _FINANCIAL_EPOCH_MANIFEST_GATE
+    ]
+    if len(epoch_gates) > 1:
+        raise PipelineValidationError("financial epoch manifest gate is ambiguous")
+    expected_payload_keys = {
+        "as_of_date",
+        "checks",
+        "release_commit",
+        "release_generations",
+        "schema_version",
+        "unwaived_blocking_exceptions",
+        "verdict",
+    }
+    if epoch_gates:
+        expected_payload_keys.update(
+            {
+                "financial_epoch_manifest_inputs_sha256",
+                "financial_epoch_manifest_proof_sha256",
+            }
+        )
+    _strict(payload, expected_payload_keys, "post-build semantic gate")
     checks = _object(payload["checks"], "post-build semantic checks")
     product_authority = _financial_mvp_product_authority(spec)
     expected_checks = set(_POST_BUILD_CHECKS)
     if product_authority is not None:
         expected_checks.add("product_conformance")
+    if epoch_gates:
+        expected_checks.add("epoch_manifest_input_authority")
+        epoch_gate = epoch_gates[0]
+        try:
+            epoch_payload = _object(
+                json.loads(epoch_gate.path.read_text(encoding="utf-8")),
+                "financial epoch manifest gate",
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PipelineValidationError(
+                "financial epoch manifest gate is unreadable"
+            ) from exc
+        _strict(
+            epoch_payload,
+            {"inputs", "post_build_proof_sha256", "schema_version"},
+            "financial epoch manifest gate",
+        )
+        inputs = _object(epoch_payload["inputs"], "financial epoch manifest inputs")
+        _strict(
+            inputs,
+            _FINANCIAL_EPOCH_MANIFEST_INPUTS,
+            "financial epoch manifest inputs",
+        )
+        for name in sorted(_FINANCIAL_EPOCH_MANIFEST_INPUTS):
+            _file_definition_value(inputs[name], f"financial epoch manifest {name}")
+        input_sha256 = hashlib.sha256(canonical_json_bytes(inputs)).hexdigest()
+        proof_sha256 = _hash(
+            epoch_payload["post_build_proof_sha256"],
+            "financial epoch manifest proof sha256",
+        )
+        if (
+            epoch_payload["schema_version"] != 2
+            or payload["financial_epoch_manifest_inputs_sha256"] != input_sha256
+            or payload["financial_epoch_manifest_proof_sha256"] != proof_sha256
+        ):
+            raise PipelineValidationError(
+                "financial epoch manifest semantic identities differ"
+            )
     if set(checks) != expected_checks or any(
         value != "PASS" for value in checks.values()
     ):
         raise PipelineValidationError("post-build semantic checks did not pass")
     if (
-        payload["schema_version"] != (2 if product_authority is not None else 1)
+        payload["schema_version"]
+        != (3 if epoch_gates else 2 if product_authority is not None else 1)
         or payload["verdict"] != "PASS"
         or payload["unwaived_blocking_exceptions"] != 0
         or payload["as_of_date"] != spec.as_of_date.isoformat()
@@ -2821,18 +2963,115 @@ def _verify_generation(
     return manifest_hash
 
 
-CommandRunner = Callable[[CommandNode], tuple[int, bytes, bytes]]
+@dataclass(frozen=True)
+class _CapturedStream:
+    sha256: str
+    size_bytes: int
+    captured_bytes: int
+    truncated: bool
 
 
-def _default_command_runner(node: CommandNode) -> tuple[int, bytes, bytes]:
-    completed = subprocess.run(
+@dataclass(frozen=True)
+class _CommandRun:
+    return_code: int
+    stdout: _CapturedStream
+    stderr: _CapturedStream
+
+
+CommandRunnerResult = tuple[int, bytes, bytes] | _CommandRun
+CommandRunner = Callable[[CommandNode], CommandRunnerResult]
+
+
+def _capture_bytes(value: bytes) -> _CapturedStream:
+    size = len(value)
+    return _CapturedStream(
+        sha256=hashlib.sha256(value).hexdigest(),
+        size_bytes=size,
+        captured_bytes=min(size, _COMMAND_OUTPUT_CAPTURE_LIMIT_BYTES),
+        truncated=size > _COMMAND_OUTPUT_CAPTURE_LIMIT_BYTES,
+    )
+
+
+def _capture_stream(stream: BinaryIO) -> _CapturedStream:
+    digest = hashlib.sha256()
+    size = 0
+    for block in iter(lambda: stream.read(64 * 1024), b""):
+        digest.update(block)
+        size += len(block)
+    return _CapturedStream(
+        sha256=digest.hexdigest(),
+        size_bytes=size,
+        captured_bytes=min(size, _COMMAND_OUTPUT_CAPTURE_LIMIT_BYTES),
+        truncated=size > _COMMAND_OUTPUT_CAPTURE_LIMIT_BYTES,
+    )
+
+
+def _normalize_command_run(result: CommandRunnerResult) -> _CommandRun:
+    if isinstance(result, _CommandRun):
+        return result
+    return_code, stdout, stderr = result
+    return _CommandRun(
+        return_code=return_code,
+        stdout=_capture_bytes(stdout),
+        stderr=_capture_bytes(stderr),
+    )
+
+
+def _stream_evidence(run: _CommandRun) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for name, stream in (("stdout", run.stdout), ("stderr", run.stderr)):
+        result.update(
+            {
+                f"{name}_captured_bytes": stream.captured_bytes,
+                f"{name}_sha256": stream.sha256,
+                f"{name}_size_bytes": stream.size_bytes,
+                f"{name}_truncated": stream.truncated,
+            }
+        )
+    return result
+
+
+def _default_command_runner(node: CommandNode) -> _CommandRun:
+    process = subprocess.Popen(
         node.argv,
         cwd=node.cwd,
-        check=False,
-        capture_output=True,
-        timeout=node.timeout_seconds,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    return completed.returncode, completed.stdout, completed.stderr
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        process.wait()
+        raise PipelineExecutionError("command output pipes are unavailable")
+    captured: dict[str, _CapturedStream] = {}
+    failures: list[BaseException] = []
+
+    def drain(name: str, stream: BinaryIO) -> None:
+        try:
+            captured[name] = _capture_stream(stream)
+        except BaseException as exc:
+            failures.append(exc)
+
+    stdout_thread = threading.Thread(
+        target=drain, args=("stdout", process.stdout), daemon=True
+    )
+    stderr_thread = threading.Thread(
+        target=drain, args=("stderr", process.stderr), daemon=True
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        return_code = process.wait(timeout=node.timeout_seconds)
+    except BaseException:
+        process.kill()
+        process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        raise
+    stdout_thread.join()
+    stderr_thread.join()
+    if failures:
+        raise PipelineExecutionError("command output capture failed") from failures[0]
+    return _CommandRun(return_code, captured["stdout"], captured["stderr"])
 
 
 def _execute_node(
@@ -2898,8 +3137,39 @@ def _execute_node(
     while attempts < allowed_attempts:
         attempts += 1
         pre_io = _io_evidence(node)
+        in_flight = node.effect is CommandEffect.READ_ONLY_EXTERNAL
+        if in_flight:
+            prior_attempts.append(
+                {
+                    "attempt": attempts,
+                    "exception_type": None,
+                    "outcome": "IN_FLIGHT",
+                    "post_io": None,
+                    "pre_io": pre_io,
+                    "return_code": None,
+                    "stderr_captured_bytes": None,
+                    "stderr_sha256": None,
+                    "stderr_size_bytes": None,
+                    "stderr_truncated": None,
+                    "stdout_captured_bytes": None,
+                    "stdout_sha256": None,
+                    "stdout_size_bytes": None,
+                    "stdout_truncated": None,
+                }
+            )
+            _write_receipt(
+                spec,
+                node,
+                ReceiptState.UNKNOWN,
+                attempts,
+                None,
+                {
+                    **_command_evidence_base(node),
+                    "attempts": prior_attempts,
+                },
+            )
         try:
-            return_code, stdout, stderr = command_runner(node)
+            run = _normalize_command_run(command_runner(node))
         except Exception as exc:
             attempt_evidence = {
                 "attempt": attempts,
@@ -2910,10 +3180,19 @@ def _execute_node(
                 "post_io": _io_evidence(node),
                 "pre_io": pre_io,
                 "return_code": None,
+                "stderr_captured_bytes": None,
                 "stderr_sha256": None,
+                "stderr_size_bytes": None,
+                "stderr_truncated": None,
+                "stdout_captured_bytes": None,
                 "stdout_sha256": None,
+                "stdout_size_bytes": None,
+                "stdout_truncated": None,
             }
-            prior_attempts.append(attempt_evidence)
+            if in_flight:
+                prior_attempts[-1] = attempt_evidence
+            else:
+                prior_attempts.append(attempt_evidence)
             command_evidence = {
                 **_command_evidence_base(node),
                 "attempts": prior_attempts,
@@ -2939,28 +3218,30 @@ def _execute_node(
         detail = hashlib.sha256(
             canonical_json_bytes(
                 {
-                    "return_code": return_code,
-                    "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
-                    "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+                    "return_code": run.return_code,
+                    "stderr_sha256": run.stderr.sha256,
+                    "stdout_sha256": run.stdout.sha256,
                 }
             )
         ).hexdigest()
         attempt_evidence = {
             "attempt": attempts,
             "exception_type": None,
-            "outcome": "COMPLETED" if return_code == 0 else "FAILED",
+            "outcome": "COMPLETED" if run.return_code == 0 else "FAILED",
             "post_io": _io_evidence(node),
             "pre_io": pre_io,
-            "return_code": return_code,
-            "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
-            "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+            "return_code": run.return_code,
+            **_stream_evidence(run),
         }
-        prior_attempts.append(attempt_evidence)
+        if in_flight:
+            prior_attempts[-1] = attempt_evidence
+        else:
+            prior_attempts.append(attempt_evidence)
         command_evidence = {
             **_command_evidence_base(node),
             "attempts": prior_attempts,
         }
-        if return_code == 0:
+        if run.return_code == 0:
             return _write_receipt(
                 spec,
                 node,
@@ -2987,7 +3268,7 @@ def _execute_node(
                 f"{node.node_id} external-read outcome is unknown"
             )
         raise PipelineExecutionError(
-            f"{node.node_id} command exited with {return_code}"
+            f"{node.node_id} command exited with {run.return_code}"
         )
     raise AssertionError("bounded command loop did not terminate")
 

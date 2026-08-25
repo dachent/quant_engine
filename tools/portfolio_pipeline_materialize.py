@@ -69,6 +69,30 @@ PRODUCT_AUTHORITY_GATE_IDS = {
     "provider_catalog": "financial-mvp-provider-catalog-authority",
     "provider_receipt": "financial-mvp-provider-admission-authority",
 }
+EPOCH_MANIFEST_INPUTS = {
+    "account_strategy_ledger": "--manifest-ledger",
+    "account_strategy_ledger_identity": "--manifest-ledger-identity",
+    "account_strategy_classified_flows": "--manifest-classified-flows",
+    "account_strategy_admission_policy": "--manifest-admission-policy",
+}
+SCHEMA_8_VERTICAL_RECIPE_KEYS = frozenset(
+    {
+        "as_of_date",
+        "base_factor_file",
+        "baseline_spec",
+        "correlation_source_root",
+        "decomposition_plan_bundle",
+        "implementation_reconciliation",
+        "implementation_return_attribution",
+        "legacy_panel",
+        "pipeline_id",
+        "provider_ledger_generation",
+        "release_commit",
+        "schema_version",
+        "strategy_attribution_root",
+        *EPOCH_MANIFEST_INPUTS,
+    }
+)
 RELEASE_ROLES = ("ledger", "baseline", "report", "panel")
 ROOT_IDS = {
     "ledger": "provider-ledger",
@@ -161,6 +185,14 @@ CURRENT_STRATEGY_REGISTRY = (
     REPOSITORY_ROOT / "docs" / "analytics" / "current-strategy-decomposition-plan.json"
 )
 FINANCIAL_MVP_TOOL = REPOSITORY_ROOT / "tools" / "portfolio_financial_mvp_contract.py"
+ACCOUNT_STRATEGY_MANIFEST_TOOL = (
+    REPOSITORY_ROOT / "tools" / "account_strategy_manifest.py"
+)
+ACCOUNT_STRATEGY_CLASSIFICATION_POLICY = (
+    REPOSITORY_ROOT
+    / "contracts"
+    / "account-strategy-flow-classification-policy-v1.json"
+)
 HYBRID_PANEL_ROOT_IDS = {
     "dynamic-style": "hybrid-dynamic-style",
     "europe-economic": "hybrid-europe-economic",
@@ -424,6 +456,59 @@ def _validate_file_definition(value: object, label: str) -> Path:
     return path
 
 
+def _financial_epoch_manifest_inputs(
+    vertical: Mapping[str, Any],
+) -> dict[str, dict[str, object]] | None:
+    """Return the immutable four-file manifest authority for schema-8 recipes.
+
+    Schema 8 is deliberately an additive, fail-closed extension of schema 7:
+    the builder is allowed no caller-selected financial input beyond these four
+    file identities.  The returned definitions are freshly derived from the
+    files, not copied from a mutable recipe object.
+    """
+
+    if vertical.get("schema_version") != 8:
+        return None
+    if set(vertical) != SCHEMA_8_VERTICAL_RECIPE_KEYS:
+        raise MaterializationError("financial epoch manifest schema-8 inputs differ")
+    definitions: dict[str, dict[str, object]] = {}
+    for key in EPOCH_MANIFEST_INPUTS:
+        path = _validate_file_definition(
+            vertical.get(key), f"financial epoch manifest {key}"
+        )
+        definitions[key] = _file_definition(path)
+    return definitions
+
+
+def _financial_epoch_manifest_gate_rows(
+    definitions: Mapping[str, Mapping[str, object]] | None,
+    proof: Mapping[str, Any] | None,
+    gate_path: Path,
+) -> list[dict[str, object]]:
+    if definitions is None:
+        return []
+    if proof is None:
+        raise MaterializationError("financial epoch manifest proof is required")
+    payload = {
+        "inputs": {
+            key: _canonical_clone(definitions[key]) for key in EPOCH_MANIFEST_INPUTS
+        },
+        "post_build_proof_sha256": hashlib.sha256(
+            canonical_json_bytes(proof)
+        ).hexdigest(),
+        "schema_version": 2,
+    }
+    content = canonical_json_bytes(payload)
+    _write_exact(gate_path, content)
+    return [
+        {
+            "gate_id": "financial-epoch-manifest-input-authority",
+            "path": str(gate_path),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    ]
+
+
 def _validate_directory_definition(value: object, label: str) -> Path:
     if not isinstance(value, dict) or set(value) != {
         "file_count",
@@ -491,6 +576,36 @@ def _financial_mvp_module() -> Any:
         or Path(module_file).resolve() != FINANCIAL_MVP_TOOL.resolve()
     ):
         raise MaterializationError("financial MVP contract validator origin differs")
+    return module
+
+
+def _account_strategy_manifest_module() -> Any:
+    """Load the repository epoch producer used for an independent rebuild."""
+
+    module_name = "_account_strategy_manifest_for_pipeline_proof"
+    spec = importlib.util.spec_from_file_location(
+        module_name, ACCOUNT_STRATEGY_MANIFEST_TOOL
+    )
+    if spec is None or spec.loader is None:
+        raise MaterializationError("account-strategy manifest producer is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterializationError("account-strategy manifest producer failed") from exc
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+    module_file = getattr(module, "__file__", None)
+    if (
+        module_file is None
+        or Path(module_file).resolve() != ACCOUNT_STRATEGY_MANIFEST_TOOL.resolve()
+    ):
+        raise MaterializationError("account-strategy manifest producer origin differs")
     return module
 
 
@@ -1050,9 +1165,9 @@ def _derive_product_authority(
     rederive_registry_path: Path | None = None,
 ) -> dict[str, Any]:
     vertical = _load(vertical_path, "vertical recipe")
-    if vertical.get("schema_version") != 7:
+    if vertical.get("schema_version") not in {7, 8}:
         raise MaterializationError(
-            "financial MVP composition requires vertical recipe schema 7"
+            "financial MVP composition requires vertical recipe schema 7 or 8"
         )
     contract_path = contract_path.resolve()
     source_matrix_path = source_matrix_path.resolve()
@@ -1314,7 +1429,7 @@ def _recipe(path: Path) -> dict[str, Any]:
     schema_version = recipe.get("schema_version")
     if schema_version == 3:
         required.add("product_authority")
-    if schema_version not in {2, 3} or set(recipe) != required:
+    if schema_version not in {2, 3}:
         raise MaterializationError("portfolio pipeline recipe differs")
     _text(recipe["as_of_date"], "as_of_date")
     _text(recipe["pipeline_id"], "pipeline_id")
@@ -1327,11 +1442,34 @@ def _recipe(path: Path) -> dict[str, Any]:
     )
     vertical = _load(vertical_path, "vertical recipe")
     if (
-        vertical.get("schema_version") not in {6, 7}
+        vertical.get("schema_version") not in {6, 7, 8}
         or vertical.get("release_commit") != recipe["release_commit"]
         or vertical.get("as_of_date") != recipe["as_of_date"]
     ):
         raise MaterializationError("vertical recipe release identity differs")
+    manifest_inputs = _financial_epoch_manifest_inputs(vertical)
+    if manifest_inputs is None:
+        required.discard("financial_epoch_manifest_inputs")
+        required.discard("financial_epoch_manifest_proof")
+    else:
+        required.add("financial_epoch_manifest_inputs")
+        required.add("financial_epoch_manifest_proof")
+    if set(recipe) != required:
+        raise MaterializationError("portfolio pipeline recipe differs")
+    if manifest_inputs is not None and canonical_json_bytes(
+        recipe["financial_epoch_manifest_inputs"]
+    ) != canonical_json_bytes(manifest_inputs):
+        raise MaterializationError("financial epoch manifest inputs are stale")
+    if manifest_inputs is not None:
+        proof = recipe.get("financial_epoch_manifest_proof")
+        if (
+            not isinstance(proof, dict)
+            or proof.get("schema_version") != 1
+            or proof.get("status") != "PASS"
+            or proof.get("financial_epoch_manifest_inputs_sha256")
+            != hashlib.sha256(canonical_json_bytes(manifest_inputs)).hexdigest()
+        ):
+            raise MaterializationError("financial epoch manifest proof differs")
     _validate_directory_definition(recipe["qa_dir"], "panel QA")
     expected = recipe["expected_generations"]
     if not isinstance(expected, dict) or set(expected) != set(RELEASE_ROLES):
@@ -1392,7 +1530,7 @@ def _recipe(path: Path) -> dict[str, Any]:
 def _vertical_source_paths(vertical_path: Path) -> list[Path]:
     vertical = _load(vertical_path, "vertical recipe")
     schema_version = vertical.get("schema_version")
-    if schema_version not in {6, 7}:
+    if schema_version not in {6, 7, 8}:
         raise MaterializationError("vertical recipe schema differs")
     paths = [vertical_path]
     for key in (
@@ -1415,6 +1553,12 @@ def _vertical_source_paths(vertical_path: Path) -> list[Path]:
     paths.append(
         _absolute(provider.get("path"), f"vertical recipe {provider_key}.path")
     )
+    manifest_inputs = _financial_epoch_manifest_inputs(vertical)
+    if manifest_inputs is not None:
+        paths.extend(
+            _absolute(manifest_inputs[key]["path"], f"financial epoch manifest {key}")
+            for key in EPOCH_MANIFEST_INPUTS
+        )
     for key in (
         "strategy_attribution_root",
         "decomposition_plan_bundle",
@@ -1434,6 +1578,246 @@ def _generation_dir(output_root: Path, recipe: Mapping[str, Any], role: str) -> 
     )
 
 
+def _epoch_generation_artifact(manifest: GenerationManifest, artifact_id: str) -> Any:
+    matches = [item for item in manifest.artifacts if item.artifact_id == artifact_id]
+    if len(matches) != 1:
+        raise MaterializationError(
+            f"epoch-manifest panel generation artifact differs: {artifact_id}"
+        )
+    return matches[0]
+
+
+def _epoch_json_snapshot(path: Path, label: str) -> tuple[bytes, dict[str, Any]]:
+    if path.is_symlink() or not path.is_file():
+        raise MaterializationError(f"{label} is missing or linked")
+    try:
+        content = path.read_bytes()
+        value = json.loads(content.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MaterializationError(f"{label} is unreadable") from exc
+    if not isinstance(value, dict):
+        raise MaterializationError(f"{label} root differs")
+    return content, value
+
+
+def _financial_epoch_manifest_proof(
+    recipe: Mapping[str, Any], output_root: Path
+) -> dict[str, Any] | None:
+    """Independently prove the emitted schema-8 producer -> panel seam.
+
+    Recipe definitions are only selectors.  PASS evidence comes from reopening
+    the exact emitted panel generation, checking its GenerationManifest, and
+    rebuilding the complete account-strategy manifest from the four selected
+    inputs plus the exact emitted baseline generation and repository policy.
+    The rebuilt object must equal both the staged producer artifact and the
+    manifest embedded in dashboard data, so every row, status, value, and
+    source identity participates in the proof digest.
+    """
+
+    definitions = recipe.get("financial_epoch_manifest_inputs")
+    if definitions is None:
+        return None
+    if not isinstance(definitions, dict) or set(definitions) != set(
+        EPOCH_MANIFEST_INPUTS
+    ):
+        raise MaterializationError("financial epoch manifest definitions differ")
+
+    expected_panel = _generation_expectation(
+        recipe["expected_generations"]["panel"], "panel"
+    )
+    panel_generation = _generation_dir(output_root, recipe, "panel")
+    manifest_path = panel_generation / "generation.json"
+    manifest_bytes, _manifest_payload = _epoch_json_snapshot(
+        manifest_path, "epoch-manifest panel generation manifest"
+    )
+    try:
+        generation_manifest = GenerationManifest.from_json_bytes(manifest_bytes)
+    except (ValueError, RuntimeError) as exc:
+        raise MaterializationError(
+            "epoch-manifest panel generation manifest is invalid"
+        ) from exc
+    if (
+        generation_manifest.generation_id != expected_panel["generation_id"]
+        or generation_manifest.verification is not VerificationStatus.VERIFIED
+        or generation_manifest.coverage.status
+        is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+        or hashlib.sha256(manifest_bytes).hexdigest()
+        != expected_panel["manifest_sha256"]
+    ):
+        raise MaterializationError("epoch-manifest panel generation authority differs")
+
+    staged_path = output_root / "stages" / "panel" / "account-strategy-manifest.json"
+    staged_bytes, staged_manifest = _epoch_json_snapshot(
+        staged_path, "staged account-strategy manifest"
+    )
+    dashboard_path = panel_generation / "data" / "dashboard_data.json"
+    dashboard_bytes, dashboard = _epoch_json_snapshot(
+        dashboard_path, "epoch-manifest panel data"
+    )
+    candidate_path = panel_generation / "candidate.json"
+    candidate_bytes, candidate = _epoch_json_snapshot(
+        candidate_path, "epoch-manifest panel candidate"
+    )
+
+    account_artifact = _epoch_generation_artifact(
+        generation_manifest, "input/account-strategy-manifest.json"
+    )
+    dashboard_artifact = _epoch_generation_artifact(
+        generation_manifest, "panel/data/dashboard_data.json"
+    )
+    candidate_artifact = _epoch_generation_artifact(
+        generation_manifest, "panel/candidate.json"
+    )
+    if (
+        account_artifact.schema_name != "account-strategy-manifest"
+        or account_artifact.schema_version != "4"
+        or (account_artifact.sha256, account_artifact.size_bytes)
+        != (hashlib.sha256(staged_bytes).hexdigest(), len(staged_bytes))
+        or (dashboard_artifact.sha256, dashboard_artifact.size_bytes)
+        != (hashlib.sha256(dashboard_bytes).hexdigest(), len(dashboard_bytes))
+        or (candidate_artifact.sha256, candidate_artifact.size_bytes)
+        != (hashlib.sha256(candidate_bytes).hexdigest(), len(candidate_bytes))
+    ):
+        raise MaterializationError("epoch-manifest panel artifact binding differs")
+
+    bound_artifact_ids = {
+        "account_strategy_ledger": "input-bound/manifest_ledger",
+        "account_strategy_ledger_identity": "input-bound/manifest_ledger_identity",
+        "account_strategy_classified_flows": ("input-bound/manifest_classified_flows"),
+        "account_strategy_admission_policy": ("input-bound/manifest_admission_policy"),
+    }
+    bound_inputs: dict[str, dict[str, object]] = {}
+    selected_paths: dict[str, Path] = {}
+    for key, artifact_id in bound_artifact_ids.items():
+        definition = definitions.get(key)
+        if not isinstance(definition, dict):
+            raise MaterializationError(
+                f"financial epoch manifest proof {key} definition differs"
+            )
+        path = _validate_file_definition(
+            definition, f"financial epoch manifest proof {key}"
+        )
+        selected_paths[key] = path
+        artifact = _epoch_generation_artifact(generation_manifest, artifact_id)
+        expected_identity = {
+            "sha256": definition["sha256"],
+            "size_bytes": definition["size_bytes"],
+        }
+        actual_identity = {
+            "sha256": artifact.sha256,
+            "size_bytes": artifact.size_bytes,
+        }
+        if actual_identity != expected_identity:
+            raise MaterializationError(
+                f"epoch-manifest panel source binding differs: {key}"
+            )
+        bound_inputs[key] = actual_identity
+
+    baseline_generation_id = _text(
+        recipe["expected_generations"]["baseline"]["generation_id"],
+        "epoch-manifest baseline generation_id",
+    )
+    producer = _account_strategy_manifest_module()
+    try:
+        rebuilt = producer.build_manifest_candidate(
+            ledger_path=selected_paths["account_strategy_ledger"],
+            ledger_identity_path=selected_paths["account_strategy_ledger_identity"],
+            baseline_root=output_root / "stages" / "baseline",
+            baseline_generation_id=baseline_generation_id,
+            classified_flows_path=selected_paths["account_strategy_classified_flows"],
+            classification_policy_path=ACCOUNT_STRATEGY_CLASSIFICATION_POLICY,
+            admission_policy_path=selected_paths["account_strategy_admission_policy"],
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise MaterializationError(
+            "independent post-build epoch-manifest rebuild failed"
+        ) from exc
+    rebuilt_bytes = canonical_json_bytes(rebuilt)
+    if staged_bytes != rebuilt_bytes:
+        raise MaterializationError(
+            "staged account-strategy manifest differs from independent rebuild"
+        )
+    panel_manifest = dashboard.get("account_manifest")
+    if not isinstance(panel_manifest, dict):
+        raise MaterializationError("panel account-strategy manifest shape differs")
+    if canonical_json_bytes(panel_manifest) != rebuilt_bytes:
+        raise MaterializationError(
+            "panel account-strategy manifest differs from independent rebuild"
+        )
+
+    meta = dashboard.get("meta")
+    if not isinstance(meta, dict):
+        raise MaterializationError("epoch-manifest panel metadata differs")
+    expected_verification = {
+        "method": "EXACT_REBUILD_REPORT_BASELINE_CANONICAL_POLICY_AND_TEMPLATE_BOUND",
+        "producer_readiness": rebuilt.get("authority_readiness"),
+        "publication_readiness": "READY",
+        "status": "PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED",
+    }
+    authority_profile = meta.get("account_manifest_authority_profile")
+    verification = meta.get("account_manifest_verification")
+    if (
+        authority_profile != "INDEPENDENT_EXACT_REBUILD"
+        or verification != expected_verification
+        or meta.get("account_manifest_sha256")
+        != hashlib.sha256(staged_bytes).hexdigest()
+        or meta.get("account_manifest_size_bytes") != len(staged_bytes)
+        or candidate.get("account_manifest_authority_profile") != authority_profile
+        or candidate.get("account_manifest_verification") != verification
+    ):
+        raise MaterializationError("epoch-manifest panel authority profile differs")
+    artifact_sha256 = candidate.get("artifact_sha256")
+    if not isinstance(artifact_sha256, dict) or (
+        artifact_sha256.get("data/dashboard_data.json")
+        != hashlib.sha256(dashboard_bytes).hexdigest()
+    ):
+        raise MaterializationError("epoch-manifest panel candidate binding differs")
+
+    authority_readiness = rebuilt.get("authority_readiness")
+    source_identities = rebuilt.get("source_identities")
+    rows = rebuilt.get("rows")
+    if (
+        not isinstance(authority_readiness, dict)
+        or not isinstance(source_identities, dict)
+        or not isinstance(rows, list)
+    ):
+        raise MaterializationError("independent epoch-manifest proof shape differs")
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise MaterializationError("independent epoch-manifest row differs")
+        status = _text(row.get("status"), "epoch-manifest row status")
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    inputs_sha256 = hashlib.sha256(canonical_json_bytes(definitions)).hexdigest()
+    proof = {
+        "account_manifest_sha256": hashlib.sha256(staged_bytes).hexdigest(),
+        "authority_profile": authority_profile,
+        "authority_readiness_sha256": hashlib.sha256(
+            canonical_json_bytes(authority_readiness)
+        ).hexdigest(),
+        "bound_inputs_sha256": hashlib.sha256(
+            canonical_json_bytes(bound_inputs)
+        ).hexdigest(),
+        "candidate_sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+        "dashboard_data_sha256": hashlib.sha256(dashboard_bytes).hexdigest(),
+        "epoch_row_count": len(rows),
+        "epoch_rows_sha256": hashlib.sha256(
+            canonical_json_bytes({"rows": rows})
+        ).hexdigest(),
+        "epoch_status_counts": dict(sorted(status_counts.items())),
+        "financial_epoch_manifest_inputs_sha256": inputs_sha256,
+        "panel_generation_id": generation_manifest.generation_id,
+        "panel_generation_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "schema_version": 1,
+        "source_identities_sha256": hashlib.sha256(
+            canonical_json_bytes(source_identities)
+        ).hexdigest(),
+        "status": "PASS",
+    }
+    return proof
+
+
 def create_recipe(
     vertical_recipe: Path,
     proof_root: Path,
@@ -1446,7 +1830,7 @@ def create_recipe(
     rederive_receipt_registry: Path | None = None,
 ) -> dict[str, Any]:
     vertical = _load(vertical_recipe.resolve(), "vertical recipe")
-    if vertical.get("schema_version") not in {6, 7}:
+    if vertical.get("schema_version") not in {6, 7, 8}:
         raise MaterializationError("vertical recipe schema differs")
     expected: dict[str, object] = {}
     for role in RELEASE_ROLES:
@@ -1481,6 +1865,13 @@ def create_recipe(
         "schema_version": 3,
         "vertical_recipe": _file_definition(vertical_recipe.resolve()),
     }
+    manifest_inputs = _financial_epoch_manifest_inputs(vertical)
+    if manifest_inputs is not None:
+        payload["financial_epoch_manifest_inputs"] = manifest_inputs
+        proof = _financial_epoch_manifest_proof(payload, proof_root)
+        if proof is None:  # pragma: no cover - guarded by manifest_inputs
+            raise MaterializationError("financial epoch manifest proof is unavailable")
+        payload["financial_epoch_manifest_proof"] = proof
     if financial_mvp_contract is None or financial_mvp_source_matrix is None:
         raise MaterializationError(
             "current pipeline recipe requires financial MVP contract and source matrix"
@@ -1552,21 +1943,28 @@ def _source_payload(recipe: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def acquire(recipe_path: Path, output_dir: Path) -> dict[str, Any]:
-    payload = _source_payload(_recipe(recipe_path))
-    _write_exact(output_dir / "source-run.json", canonical_json_bytes(payload))
-    return {"source_artifacts": len(payload["artifacts"]), "state": "CAPTURED_LOCAL"}
-
-
-def authority(recipe_path: Path, source_run: Path, output_dir: Path) -> dict[str, Any]:
-    recipe = _recipe(recipe_path)
-    source = _load(source_run, "source run")
-    expected = _source_payload(recipe)
-    if canonical_json_bytes(source) != canonical_json_bytes(expected):
-        raise MaterializationError("source run differs from the accepted recipe")
-    payload = {
+def _authority_payload(
+    recipe: Mapping[str, Any], source: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
         "as_of_date": recipe["as_of_date"],
         "authority_policy": "IMMUTABLE_VERTICAL_RECIPE",
+        "financial_epoch_manifest_inputs_sha256": (
+            hashlib.sha256(
+                canonical_json_bytes(recipe["financial_epoch_manifest_inputs"])
+            ).hexdigest()
+            if recipe.get("financial_epoch_manifest_inputs") is not None
+            else None
+        ),
+        **(
+            {
+                "financial_epoch_manifest_proof_sha256": hashlib.sha256(
+                    canonical_json_bytes(recipe["financial_epoch_manifest_proof"])
+                ).hexdigest()
+            }
+            if recipe.get("financial_epoch_manifest_proof") is not None
+            else {}
+        ),
         "release_commit": recipe["release_commit"],
         "product_conformance_sha256": (
             hashlib.sha256(
@@ -1579,6 +1977,21 @@ def authority(recipe_path: Path, source_run: Path, output_dir: Path) -> dict[str
         "source_run_sha256": hashlib.sha256(canonical_json_bytes(source)).hexdigest(),
         "vertical_recipe_sha256": recipe["vertical_recipe"]["sha256"],
     }
+
+
+def acquire(recipe_path: Path, output_dir: Path) -> dict[str, Any]:
+    payload = _source_payload(_recipe(recipe_path))
+    _write_exact(output_dir / "source-run.json", canonical_json_bytes(payload))
+    return {"source_artifacts": len(payload["artifacts"]), "state": "CAPTURED_LOCAL"}
+
+
+def authority(recipe_path: Path, source_run: Path, output_dir: Path) -> dict[str, Any]:
+    recipe = _recipe(recipe_path)
+    source = _load(source_run, "source run")
+    expected = _source_payload(recipe)
+    if canonical_json_bytes(source) != canonical_json_bytes(expected):
+        raise MaterializationError("source run differs from the accepted recipe")
+    payload = _authority_payload(recipe, source)
     _write_exact(output_dir / "authority-snapshot.json", canonical_json_bytes(payload))
     return {"state": "AUTHORITY_SNAPSHOT_CREATED"}
 
@@ -1634,6 +2047,8 @@ def _freshness_key(row: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
 def _semantic_gate_payload(
     recipe: Mapping[str, Any],
     release_generations: Mapping[str, str] | None = None,
+    *,
+    epoch_manifest_proof: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     checks = {
         "analytics_report_panel_equality": "PASS",
@@ -1645,9 +2060,38 @@ def _semantic_gate_payload(
     }
     if recipe.get("schema_version") == 3:
         checks["product_conformance"] = "PASS"
+    manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
+    if manifest_inputs is not None:
+        if epoch_manifest_proof is None:
+            raise MaterializationError(
+                "post-build epoch-manifest proof is required for semantic PASS"
+            )
+        accepted_proof = recipe.get("financial_epoch_manifest_proof")
+        if not isinstance(accepted_proof, dict):
+            raise MaterializationError("accepted epoch-manifest proof differs")
+        if canonical_json_bytes(epoch_manifest_proof) != canonical_json_bytes(
+            accepted_proof
+        ):
+            raise MaterializationError("post-build epoch-manifest proof differs")
+        checks["epoch_manifest_input_authority"] = "PASS"
+    proof_sha256 = (
+        hashlib.sha256(canonical_json_bytes(epoch_manifest_proof)).hexdigest()
+        if epoch_manifest_proof is not None
+        else None
+    )
     return {
         "as_of_date": recipe["as_of_date"],
         "checks": checks,
+        "financial_epoch_manifest_inputs_sha256": (
+            hashlib.sha256(canonical_json_bytes(manifest_inputs)).hexdigest()
+            if manifest_inputs is not None
+            else None
+        ),
+        **(
+            {"financial_epoch_manifest_proof_sha256": proof_sha256}
+            if manifest_inputs is not None
+            else {}
+        ),
         "release_commit": recipe["release_commit"],
         "release_generations": (
             dict(release_generations)
@@ -1657,7 +2101,13 @@ def _semantic_gate_payload(
                 for role in RELEASE_ROLES
             }
         ),
-        "schema_version": 2 if recipe.get("schema_version") == 3 else 1,
+        "schema_version": (
+            3
+            if manifest_inputs is not None
+            else 2
+            if recipe.get("schema_version") == 3
+            else 1
+        ),
         "unwaived_blocking_exceptions": 0,
         "verdict": "PASS",
     }
@@ -1676,6 +2126,24 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
             True,
             readiness=conformance["readiness"],
             sha256=hashlib.sha256(canonical_json_bytes(conformance)).hexdigest(),
+        )
+    manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
+    epoch_manifest_proof: dict[str, Any] | None = None
+    if manifest_inputs is not None:
+        epoch_manifest_proof = _financial_epoch_manifest_proof(recipe, output_root)
+        if epoch_manifest_proof is None:  # pragma: no cover - guarded above
+            raise MaterializationError("post-build epoch-manifest proof is unavailable")
+        if canonical_json_bytes(epoch_manifest_proof) != canonical_json_bytes(
+            recipe["financial_epoch_manifest_proof"]
+        ):
+            raise MaterializationError("post-build epoch-manifest proof differs")
+        _result(
+            checks,
+            "epoch_manifest_input_authority",
+            True,
+            proof_sha256=hashlib.sha256(
+                canonical_json_bytes(epoch_manifest_proof)
+            ).hexdigest(),
         )
 
     generation_rows: dict[str, dict[str, Any]] = {}
@@ -1998,7 +2466,12 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
         raise MaterializationError(
             f"semantic reconciliation failed: {', '.join(failed)}"
         )
-    _write_exact(output_path, canonical_json_bytes(_semantic_gate_payload(recipe)))
+    _write_exact(
+        output_path,
+        canonical_json_bytes(
+            _semantic_gate_payload(recipe, epoch_manifest_proof=epoch_manifest_proof)
+        ),
+    )
     return {"details": str(details_path), "state": "PASS"}
 
 
@@ -2093,6 +2566,17 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
     vertical_path = _absolute(recipe["vertical_recipe"]["path"], "vertical recipe")
     qa_dir = _absolute(recipe["qa_dir"]["path"], "panel QA")
     source_paths = _vertical_source_paths(vertical_path)
+    manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
+    manifest_input_paths: dict[str, Path] = {}
+    if manifest_inputs is not None:
+        if not isinstance(manifest_inputs, dict):
+            raise MaterializationError("financial epoch manifest inputs differ")
+        manifest_input_paths = {
+            key: _absolute(
+                manifest_inputs[key]["path"], f"financial epoch manifest {key}"
+            )
+            for key in EPOCH_MANIFEST_INPUTS
+        }
     product_authority = recipe["product_authority"]
     for key in ("contract", "source_matrix"):
         definition = product_authority[key]
@@ -2151,25 +2635,7 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
         )
     )
     source_payload = _source_payload(recipe)
-    authority_bytes = canonical_json_bytes(
-        {
-            "as_of_date": recipe["as_of_date"],
-            "authority_policy": "IMMUTABLE_VERTICAL_RECIPE",
-            "product_conformance_sha256": (
-                hashlib.sha256(
-                    canonical_json_bytes(recipe["product_authority"]["conformance"])
-                ).hexdigest()
-                if recipe.get("schema_version") == 3
-                else None
-            ),
-            "release_commit": recipe["release_commit"],
-            "schema_version": recipe["schema_version"],
-            "source_run_sha256": hashlib.sha256(
-                canonical_json_bytes(source_payload)
-            ).hexdigest(),
-            "vertical_recipe_sha256": recipe["vertical_recipe"]["sha256"],
-        }
-    )
+    authority_bytes = canonical_json_bytes(_authority_payload(recipe, source_payload))
     nodes.append(
         {
             "depends_on": ["build-authority-snapshot"],
@@ -2241,6 +2707,9 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
             "--role",
             role,
         ]
+        for key, flag in EPOCH_MANIFEST_INPUTS.items():
+            if key in manifest_input_paths:
+                args.extend((flag, str(manifest_input_paths[key])))
         if role == "panel":
             args.extend(("--qa-dir", str(qa_dir)))
         reads = [*previous_outputs, *source_paths]
@@ -2328,6 +2797,7 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
                 "node_id": node["node_id"],
             }
         )
+    manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
     contract = {
         "authority_snapshot": {
             "artifact_node": "authority-snapshot",
@@ -2344,7 +2814,13 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
             "lock_sha256": _sha(lock)[0],
             "repo_root": str(repo),
         },
-        "schema_version": 2 if recipe.get("schema_version") == 3 else 1,
+        "schema_version": (
+            3
+            if manifest_inputs is not None
+            else 2
+            if recipe.get("schema_version") == 3
+            else 1
+        ),
         "semantic_reconciliation_node": "post-build-semantic-reconciliation",
         "source_acquisitions": [
             {"adapter_commit": release_commit, "node_id": "acquire-local-sources"}
@@ -2370,12 +2846,30 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
         },
     }
     contract["product_authority"] = _product_gate_payload(product_authority)
+    if manifest_inputs is not None:
+        contract["financial_epoch_manifest_inputs"] = _canonical_clone(manifest_inputs)
+        contract["financial_epoch_manifest_proof_sha256"] = hashlib.sha256(
+            canonical_json_bytes(recipe["financial_epoch_manifest_proof"])
+        ).hexdigest()
     contract_path = spec_path.with_name("portfolio-orchestration-contract.json")
     contract_bytes = canonical_json_bytes(contract)
     _write_exact(contract_path, contract_bytes)
     product_path = spec_path.with_name("financial-mvp-product-conformance.json")
     product_gates = _product_gate_rows(product_authority, product_path)
-    semantic_bytes = canonical_json_bytes(_semantic_gate_payload(recipe))
+    manifest_gate_path = spec_path.with_name(
+        "financial-epoch-manifest-input-authority.json"
+    )
+    manifest_gates = _financial_epoch_manifest_gate_rows(
+        manifest_inputs,
+        recipe.get("financial_epoch_manifest_proof"),
+        manifest_gate_path,
+    )
+    semantic_bytes = canonical_json_bytes(
+        _semantic_gate_payload(
+            recipe,
+            epoch_manifest_proof=recipe.get("financial_epoch_manifest_proof"),
+        )
+    )
     launcher = output_root / "stages" / "panel" / "index.html"
     spec = {
         "as_of_date": recipe["as_of_date"],
@@ -2403,6 +2897,7 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
                 "sha256": hashlib.sha256(semantic_bytes).hexdigest(),
             },
             *product_gates,
+            *manifest_gates,
         ],
         "nodes": nodes,
         "pipeline_id": recipe["pipeline_id"],
@@ -2526,11 +3021,29 @@ def build_production_spec(
     }:
         raise MaterializationError("prepared panel hybrid analytics authority differs")
 
-    expected_semantic = canonical_json_bytes(_semantic_gate_payload(recipe))
+    prepared_epoch_proof = _financial_epoch_manifest_proof(recipe, prepared_root)
+    accepted_epoch_proof = recipe.get("financial_epoch_manifest_proof")
+    if accepted_epoch_proof is None:
+        if prepared_epoch_proof is not None:
+            raise MaterializationError("prepared epoch-manifest proof differs")
+    elif (
+        not isinstance(accepted_epoch_proof, dict)
+        or prepared_epoch_proof is None
+        or canonical_json_bytes(prepared_epoch_proof)
+        != canonical_json_bytes(accepted_epoch_proof)
+    ):
+        raise MaterializationError("prepared epoch-manifest proof differs")
+    expected_semantic = canonical_json_bytes(
+        _semantic_gate_payload(recipe, epoch_manifest_proof=prepared_epoch_proof)
+    )
     if semantic_path.read_bytes() != expected_semantic:
         raise MaterializationError("prepared semantic gate differs")
     production_semantic = canonical_json_bytes(
-        _semantic_gate_payload(recipe, generation_ids)
+        _semantic_gate_payload(
+            recipe,
+            generation_ids,
+            epoch_manifest_proof=prepared_epoch_proof,
+        )
     )
     production_semantic_path = spec_path.with_name(
         "production-post-build-semantic.json"
@@ -2549,6 +3062,7 @@ def build_production_spec(
     if launcher_sha != recipe["panel_launcher_sha256"]:
         raise MaterializationError("prepared launcher differs")
 
+    manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
     contract = {
         "code_commit": release_commit,
         "generation_ids": generation_ids,
@@ -2559,13 +3073,28 @@ def build_production_spec(
             root_id: str(portfolio_root / relative)
             for root_id, relative in PRODUCTION_ROOTS.items()
         },
-        "schema_version": 2 if recipe.get("schema_version") == 3 else 1,
+        "schema_version": (
+            3
+            if manifest_inputs is not None
+            else 2
+            if recipe.get("schema_version") == 3
+            else 1
+        ),
         "semantic_gate_sha256": hashlib.sha256(expected_semantic).hexdigest(),
         "production_semantic_gate_sha256": hashlib.sha256(
             production_semantic
         ).hexdigest(),
         "source_generations": {key: str(value) for key, value in sources.items()},
     }
+    if manifest_inputs is not None:
+        if prepared_epoch_proof is None:
+            raise MaterializationError("prepared epoch-manifest proof is missing")
+        contract["financial_epoch_manifest_inputs_sha256"] = hashlib.sha256(
+            canonical_json_bytes(manifest_inputs)
+        ).hexdigest()
+        contract["financial_epoch_manifest_proof_sha256"] = hashlib.sha256(
+            canonical_json_bytes(prepared_epoch_proof)
+        ).hexdigest()
     production_product_authority = _canonical_clone(recipe["product_authority"])
     expected_admission = recipe["product_authority"]["conformance"][
         "provider_admission"
@@ -2597,6 +3126,11 @@ def build_production_spec(
     _write_exact(contract_path, contract_bytes)
     product_path = spec_path.with_name("financial-mvp-product-conformance.json")
     product_gates = _product_gate_rows(production_product_authority, product_path)
+    manifest_gates = _financial_epoch_manifest_gate_rows(
+        manifest_inputs,
+        prepared_epoch_proof,
+        spec_path.with_name("financial-epoch-manifest-input-authority.json"),
+    )
     spec = {
         "as_of_date": recipe["as_of_date"],
         "code_commit": release_commit,
@@ -2623,6 +3157,7 @@ def build_production_spec(
                 "sha256": hashlib.sha256(production_semantic).hexdigest(),
             },
             *product_gates,
+            *manifest_gates,
         ],
         "nodes": nodes,
         "pipeline_id": f"{recipe['pipeline_id']}-production",

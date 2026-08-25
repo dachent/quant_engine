@@ -396,7 +396,7 @@ def test_cli_emits_bound_source_identities_and_accepts_low_funded_nav(
     assert manifest_module.main(_producer_argv(inputs)) == 0
 
     manifest = json.loads(capsys.readouterr().out)
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
     assert manifest["source_identities"]["ledger"]["generation_id"] == (
         LEDGER_GENERATION_ID
     )
@@ -714,6 +714,61 @@ def test_validator_requires_nonempty_late_flows_and_canonical_dates(
         manifest_module.validate_manifest_schema(manifest)
 
 
+def test_validator_rejects_late_flow_status_not_derived_from_embedded_evidence(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest = _manifest_from_cli(
+        manifest_module, _write_valid_inputs(tmp_path), capsys
+    )
+    row = manifest["rows"][-1]
+    row["status"] = "FLOWS_AFTER_CLOSING_NAV"
+    row["late_flows"] = [{"class": "external", "date": "2026-01-07", "value": "10"}]
+    for field in (
+        "start",
+        "end",
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+        "observation_linked_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "opening_basis",
+        "observation_trace",
+        "capital_flow_trace",
+        "nav_observations",
+    ):
+        row.pop(field)
+    row["capital_flow_trace"] = [
+        {"class": "EXTERNAL_IN", "date": "2026-01-07", "amount": "10"}
+    ]
+    row["nav_observation_trace"] = [
+        {"date": "2026-01-04", "nav": "70"},
+        {"date": "2026-01-05", "nav": "75"},
+        {"date": "2026-01-06", "nav": "80"},
+    ]
+    manifest_module.validate_manifest_schema(manifest)
+
+    row["late_flows"][0]["date"] = "2026-01-05"
+
+    with pytest.raises(
+        manifest_module.ManifestError,
+        match="late-flow evidence differs",
+    ):
+        manifest_module.validate_manifest_schema(manifest)
+
+
 def test_successor_opened_from_predecessor_counts_first_day_flow(
     manifest_module: Any,
 ) -> None:
@@ -858,6 +913,84 @@ def test_same_day_opposite_external_flows_preserve_gross_legs(
     assert stats["withdrawn"] == manifest_module.Decimal("100")
     assert stats["net_capital"] == manifest_module.Decimal("100")
     assert stats["gain"] == manifest_module.Decimal("0")
+
+
+def test_producer_late_flows_with_same_day_external_legs_are_canonical_and_valid(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    epoch_key = ("synthetic-account", "synthetic-strategy-b", "2026-01-04", None)
+    produced = manifest_module.assemble_manifest(
+        {
+            "synthetic-account": {
+                "2026-01-04": Decimal("70"),
+                "2026-01-05": Decimal("75"),
+                "2026-01-06": Decimal("80"),
+            }
+        },
+        {"synthetic-account": {"provider": "SYNTHETIC"}},
+        {
+            "external_in": {"synthetic-account": {"2026-01-07": Decimal("10")}},
+            "external_out": {"synthetic-account": {"2026-01-07": Decimal("5")}},
+            "internal_in": {"synthetic-account": {}},
+            "internal_out": {"synthetic-account": {}},
+        },
+        {"synthetic-account": [{"_key": epoch_key}]},
+        {
+            epoch_key: {
+                "status": "FUNDED",
+                "authority": "SYNTHETIC_TEST_AUTHORITY",
+                "continuity_to_successor": False,
+            }
+        },
+        {},
+    )
+    produced_row = produced["rows"][0]
+    assert produced_row["late_flows"] == [
+        {"class": "external", "date": "2026-01-07", "value": "-5"},
+        {"class": "external", "date": "2026-01-07", "value": "10"},
+    ]
+
+    manifest = _manifest_from_cli(
+        manifest_module, _write_valid_inputs(tmp_path), capsys
+    )
+    row = manifest["rows"][-1]
+    row["status"] = produced_row["status"]
+    row["late_flows"] = produced_row["late_flows"]
+    row["capital_flow_trace"] = produced_row["capital_flow_trace"]
+    row["nav_observation_trace"] = produced_row["nav_observation_trace"]
+    for field in (
+        "start",
+        "end",
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+        "observation_linked_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "opening_basis",
+        "observation_trace",
+        "nav_observations",
+    ):
+        row.pop(field)
+
+    manifest_module.validate_manifest_schema(manifest)
+    row["late_flows"][0]["value"] = "-4"
+    with pytest.raises(
+        manifest_module.ManifestError, match="late-flow evidence differs"
+    ):
+        manifest_module.validate_manifest_schema(manifest)
 
 
 def test_nonpositive_net_capital_makes_ronc_diagnostics_unavailable(

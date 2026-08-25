@@ -11,6 +11,7 @@ from typing import Callable
 
 import pytest
 
+from quant_engine.core import pipeline as core_pipeline
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -306,6 +307,254 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     return recipe_path, output_root
 
 
+def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]:
+    """Install a real producer manifest and content-bound synthetic panel generation."""
+
+    target.mkdir(parents=True, exist_ok=True)
+    assignments = [
+        {
+            "account_id": "synthetic-account",
+            "strategy_id": "synthetic-strategy",
+            "effective_start": AS_OF.isoformat(),
+            "effective_end": None,
+        }
+    ]
+    old_baseline_id = json.loads(
+        (proof_root / "stage-results" / "baseline.json").read_text(encoding="utf-8")
+    )["generation_id"]
+    old_baseline = json.loads(
+        (
+            proof_root
+            / "stages"
+            / "baseline"
+            / "generations"
+            / old_baseline_id
+            / "portfolio-baseline.json"
+        ).read_text(encoding="utf-8")
+    )
+    old_baseline.update(
+        {
+            "accounts": [{"account_id": "synthetic-account", "provider": "SYNTHETIC"}],
+            "as_of_date": AS_OF.isoformat(),
+            "assignments": assignments,
+            "baseline_schema_version": 1,
+        }
+    )
+    baseline_generation = _generation(
+        proof_root / "stages" / "baseline",
+        "epoch-baseline",
+        {"portfolio-baseline.json": old_baseline},
+    )
+    old_baseline_generation = (
+        proof_root / "stages" / "baseline" / "generations" / old_baseline_id
+    )
+    if old_baseline_generation != baseline_generation:
+        shutil.rmtree(old_baseline_generation)
+    _write_json(
+        proof_root / "stage-results" / "baseline.json",
+        {"generation_id": baseline_generation.name},
+    )
+
+    ledger_path = target / "account_strategy_ledger.json"
+    _write_json(
+        ledger_path,
+        {
+            "accounting_currency": "USD",
+            "flows": [],
+            "nav_observations": [
+                {
+                    "account_id": "synthetic-account",
+                    "as_of_date": AS_OF.isoformat(),
+                    "nav": {
+                        "currency": "USD",
+                        "status": "AVAILABLE",
+                        "value": "125.50",
+                    },
+                }
+            ],
+        },
+    )
+    ledger_identity_path = target / "account_strategy_ledger_identity.json"
+    ledger_bytes = ledger_path.read_bytes()
+    ledger_identity = {
+        "schema_version": 1,
+        "generation_id": "1" * 64,
+        "artifact": {
+            "artifact_id": "normalized/provider-ledger.json",
+            "as_of_date": AS_OF.isoformat(),
+            "schema": {"name": "provider-ledger", "version": "1"},
+            "sha256": hashlib.sha256(ledger_bytes).hexdigest(),
+            "size_bytes": len(ledger_bytes),
+        },
+    }
+    _write_json(ledger_identity_path, ledger_identity)
+    classification_policy = json.loads(
+        materializer.ACCOUNT_STRATEGY_CLASSIFICATION_POLICY.read_text(encoding="utf-8")
+    )
+    classified_flows_path = target / "account_strategy_classified_flows.json"
+    _write_json(
+        classified_flows_path,
+        {
+            "schema_version": 3,
+            "artifact_id": "classified/synthetic-flows.json",
+            "as_of_date": AS_OF.isoformat(),
+            "ledger_identity": {
+                "generation_id": ledger_identity["generation_id"],
+                "artifact": ledger_identity["artifact"],
+            },
+            "classification_policy": {
+                "policy_id": classification_policy["policy_id"],
+                "policy_version": classification_policy["policy_version"],
+                "policy_as_of_date": classification_policy["as_of_date"],
+                "policy_sha256": hashlib.sha256(
+                    materializer.ACCOUNT_STRATEGY_CLASSIFICATION_POLICY.read_bytes()
+                ).hexdigest(),
+            },
+            "events": [],
+        },
+    )
+    admission_policy_path = target / "account_strategy_admission_policy.json"
+    assignment_sha256 = hashlib.sha256(
+        json.dumps(assignments, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    _write_json(
+        admission_policy_path,
+        {
+            "schema_version": 1,
+            "policy_id": "SYNTHETIC-ADMISSION",
+            "policy_version": "1",
+            "artifact_id": "policy/synthetic-admission.json",
+            "as_of_date": AS_OF.isoformat(),
+            "assignment_sha256": assignment_sha256,
+            "admissions": [
+                {
+                    **assignments[0],
+                    "status": "FUNDED",
+                    "authority": "SYNTHETIC_TEST_AUTHORITY",
+                    "continuity_to_successor": False,
+                }
+            ],
+        },
+    )
+    inputs = {
+        "account_strategy_ledger": ledger_path,
+        "account_strategy_ledger_identity": ledger_identity_path,
+        "account_strategy_classified_flows": classified_flows_path,
+        "account_strategy_admission_policy": admission_policy_path,
+    }
+    producer = materializer._account_strategy_manifest_module()
+    manifest = producer.build_manifest_candidate(
+        ledger_path=ledger_path,
+        ledger_identity_path=ledger_identity_path,
+        baseline_root=proof_root / "stages" / "baseline",
+        baseline_generation_id=baseline_generation.name,
+        classified_flows_path=classified_flows_path,
+        classification_policy_path=(
+            materializer.ACCOUNT_STRATEGY_CLASSIFICATION_POLICY
+        ),
+        admission_policy_path=admission_policy_path,
+    )
+    staged_path = proof_root / "stages" / "panel" / "account-strategy-manifest.json"
+    staged_bytes = canonical_json_bytes(manifest)
+    staged_path.write_bytes(staged_bytes)
+    verification = {
+        "method": "EXACT_REBUILD_REPORT_BASELINE_CANONICAL_POLICY_AND_TEMPLATE_BOUND",
+        "producer_readiness": manifest["authority_readiness"],
+        "publication_readiness": "READY",
+        "status": "PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED",
+    }
+    dashboard = {
+        "account_manifest": manifest,
+        "meta": {
+            "account_manifest_authority_profile": "INDEPENDENT_EXACT_REBUILD",
+            "account_manifest_sha256": hashlib.sha256(staged_bytes).hexdigest(),
+            "account_manifest_size_bytes": len(staged_bytes),
+            "account_manifest_verification": verification,
+        },
+    }
+    dashboard_bytes = canonical_json_bytes(dashboard)
+    candidate = {
+        "account_manifest_authority_profile": "INDEPENDENT_EXACT_REBUILD",
+        "account_manifest_verification": verification,
+        "artifact_sha256": {
+            "data/dashboard_data.json": hashlib.sha256(dashboard_bytes).hexdigest()
+        },
+    }
+    candidate_bytes = canonical_json_bytes(candidate)
+    artifacts = [
+        SourceArtifact(
+            artifact_id="input/account-strategy-manifest.json",
+            sha256=hashlib.sha256(staged_bytes).hexdigest(),
+            size_bytes=len(staged_bytes),
+            as_of_date=AS_OF,
+            schema_name="account-strategy-manifest",
+            schema_version="4",
+        ),
+        SourceArtifact(
+            artifact_id="panel/data/dashboard_data.json",
+            sha256=hashlib.sha256(dashboard_bytes).hexdigest(),
+            size_bytes=len(dashboard_bytes),
+            as_of_date=AS_OF,
+            schema_name="portfolio-control-panel-artifact",
+            schema_version="1",
+        ),
+        SourceArtifact(
+            artifact_id="panel/candidate.json",
+            sha256=hashlib.sha256(candidate_bytes).hexdigest(),
+            size_bytes=len(candidate_bytes),
+            as_of_date=AS_OF,
+            schema_name="portfolio-control-panel-artifact",
+            schema_version="1",
+        ),
+    ]
+    for key, artifact_id in {
+        "account_strategy_ledger": "input-bound/manifest_ledger",
+        "account_strategy_ledger_identity": "input-bound/manifest_ledger_identity",
+        "account_strategy_classified_flows": "input-bound/manifest_classified_flows",
+        "account_strategy_admission_policy": "input-bound/manifest_admission_policy",
+    }.items():
+        content = inputs[key].read_bytes()
+        artifacts.append(
+            SourceArtifact(
+                artifact_id=artifact_id,
+                sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content),
+                as_of_date=AS_OF,
+                schema_name="portfolio-control-panel-bound-input",
+                schema_version="1",
+            )
+        )
+    panel_manifest = GenerationManifest.build(
+        as_of_date=AS_OF,
+        adapter=AdapterIdentity("portfolio-control-panel-builder", "2.11.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="honest synthetic epoch seam without provider or native Excel",
+            fact_types=("portfolio control panel",),
+            observed_start=AS_OF,
+            observed_end=AS_OF,
+        ),
+        artifacts=tuple(artifacts),
+        verification=VerificationStatus.VERIFIED,
+    )
+    generation = (
+        proof_root / "stages" / "panel" / "generations" / panel_manifest.generation_id
+    )
+    for existing in generation.parent.iterdir():
+        if existing != generation:
+            shutil.rmtree(existing)
+    generation.mkdir(parents=True)
+    (generation / "generation.json").write_bytes(panel_manifest.to_json_bytes())
+    (generation / "data").mkdir()
+    (generation / "data" / "dashboard_data.json").write_bytes(dashboard_bytes)
+    (generation / "candidate.json").write_bytes(candidate_bytes)
+    _write_json(
+        proof_root / "stage-results" / "panel.json",
+        {"generation_id": panel_manifest.generation_id},
+    )
+    return inputs
+
+
 def test_create_recipe_rejects_current_schema_v6_without_product_authority(
     tmp_path: Path,
 ) -> None:
@@ -498,6 +747,382 @@ def test_create_recipe_binds_financial_mvp_authority_and_admission_receipt(
     assert str(tmp_path) not in json.dumps(
         orchestration["product_authority"], sort_keys=True
     )
+
+
+def test_schema_v8_rebinds_exact_epoch_manifest_inputs_into_every_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The materializer must not let the builder substitute financial inputs."""
+
+    source_recipe, proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
+    manifest_inputs = _install_real_epoch_proof(proof_root, tmp_path / "epoch-manifest")
+    for key, path in manifest_inputs.items():
+        vertical[key] = _definition(path)
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(product.generation)
+    vertical["schema_version"] = 8
+    _write_json(vertical_path, vertical)
+    monkeypatch.setattr(
+        materializer, "_financial_mvp_module", lambda: product.financial_module
+    )
+    pipeline_recipe = tmp_path / "schema-v8-pipeline-recipe.json"
+
+    materializer.create_recipe(
+        vertical_recipe=vertical_path,
+        proof_root=proof_root,
+        qa_dir=Path(source["qa_dir"]["path"]),
+        pipeline_id="schema-v8-financial-manifest",
+        output=pipeline_recipe,
+        financial_mvp_contract=product.contract_path,
+        financial_mvp_source_matrix=product.matrix_path,
+    )
+
+    accepted = materializer._recipe(pipeline_recipe)
+    assert accepted["financial_epoch_manifest_inputs"] == {
+        key: _definition(path) for key, path in manifest_inputs.items()
+    }
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="post-build epoch-manifest proof is required",
+    ):
+        materializer._semantic_gate_payload(accepted)
+    post_build_proof = materializer._financial_epoch_manifest_proof(
+        accepted, proof_root
+    )
+    assert post_build_proof == accepted["financial_epoch_manifest_proof"]
+    semantic_gate = materializer._semantic_gate_payload(
+        accepted, epoch_manifest_proof=post_build_proof
+    )
+    assert semantic_gate["checks"]["epoch_manifest_input_authority"] == "PASS"
+    assert (
+        semantic_gate["financial_epoch_manifest_proof_sha256"]
+        == hashlib.sha256(canonical_json_bytes(post_build_proof)).hexdigest()
+    )
+    manifest_inputs_sha256 = hashlib.sha256(
+        canonical_json_bytes(accepted["financial_epoch_manifest_inputs"])
+    ).hexdigest()
+    source_payload = materializer._source_payload(accepted)
+    assert {str(path) for path in manifest_inputs.values()} <= {
+        str(row["path"]) for row in source_payload["artifacts"]
+    }
+    acquisition_dir = tmp_path / "source-run"
+    materializer.acquire(pipeline_recipe, acquisition_dir)
+    materializer.authority(
+        pipeline_recipe,
+        acquisition_dir / "source-run.json",
+        tmp_path / "authority",
+    )
+    authority_snapshot = json.loads(
+        (tmp_path / "authority" / "authority-snapshot.json").read_text(encoding="utf-8")
+    )
+    assert (
+        authority_snapshot["financial_epoch_manifest_inputs_sha256"]
+        == manifest_inputs_sha256
+    )
+
+    monkeypatch.setenv("QE_PIPELINE_PYTHON", sys.executable)
+    monkeypatch.setattr(
+        materializer,
+        "_git",
+        lambda _repo, *args: "a" * 40 if args == ("rev-parse", "HEAD") else "",
+    )
+    monkeypatch.setattr(
+        materializer, "_validate_output_path_budget", lambda _root, _recipe: None
+    )
+    output_root = tmp_path / "schema-v8-dag"
+    spec_path = output_root / "pipeline-spec.json"
+    materializer.build_spec(pipeline_recipe, output_root, spec_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    nodes = {node["node_id"]: node for node in spec["nodes"]}
+    expected_flags = {
+        "--manifest-ledger": manifest_inputs["account_strategy_ledger"],
+        "--manifest-ledger-identity": manifest_inputs[
+            "account_strategy_ledger_identity"
+        ],
+        "--manifest-classified-flows": manifest_inputs[
+            "account_strategy_classified_flows"
+        ],
+        "--manifest-admission-policy": manifest_inputs[
+            "account_strategy_admission_policy"
+        ],
+    }
+    for role in materializer.STAGES:
+        command = nodes[f"build-{role}"]
+        for flag, path in expected_flags.items():
+            index = command["argv"].index(flag)
+            assert command["argv"][index + 1] == str(path)
+            assert str(path) in command["declared_reads"]
+    assert {str(path) for path in manifest_inputs.values()} <= set(
+        nodes["acquire-local-sources"]["declared_reads"]
+    )
+    assert "financial-epoch-manifest-input-authority" in {
+        row["gate_id"] for row in spec["gates"]
+    }
+    manifest_gate = json.loads(
+        (output_root / "financial-epoch-manifest-input-authority.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        manifest_gate["post_build_proof_sha256"]
+        == semantic_gate["financial_epoch_manifest_proof_sha256"]
+    )
+    built_spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
+    monkeypatch.setattr(
+        core_pipeline,
+        "_git_output",
+        lambda _repo, *args: "a" * 40 if args == ("rev-parse", "HEAD") else "",
+    )
+    core_pipeline.plan_pipeline(built_spec)
+    orchestration_gate_row = next(
+        row
+        for row in spec["gates"]
+        if row["gate_id"] == "portfolio-orchestration-contract"
+    )
+    orchestration_path = Path(orchestration_gate_row["path"])
+    orchestration_bytes = orchestration_path.read_bytes()
+    orchestration = json.loads(orchestration_bytes)
+    assert orchestration["schema_version"] == 3
+    orchestration["financial_epoch_manifest_proof_sha256"] = "f" * 64
+    tampered_orchestration_bytes = canonical_json_bytes(orchestration)
+    orchestration_path.write_bytes(tampered_orchestration_bytes)
+    tampered_spec_payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    next(
+        row
+        for row in tampered_spec_payload["gates"]
+        if row["gate_id"] == "portfolio-orchestration-contract"
+    )["sha256"] = hashlib.sha256(tampered_orchestration_bytes).hexdigest()
+    tampered_spec = PipelineSpec.from_json_bytes(
+        canonical_json_bytes(tampered_spec_payload)
+    )
+    with pytest.raises(
+        PipelineValidationError,
+        match="portfolio financial epoch manifest authority differs",
+    ):
+        core_pipeline.plan_pipeline(tampered_spec)
+    orchestration_path.write_bytes(orchestration_bytes)
+    built_semantic_gate = next(
+        gate for gate in built_spec.gates if gate.gate_id == "post-build-semantic"
+    )
+    _write_json(built_semantic_gate.path, semantic_gate)
+    core_pipeline._verify_post_build_semantic_gate(  # noqa: SLF001
+        built_spec, built_semantic_gate.path
+    )
+    tampered_semantic = dict(semantic_gate)
+    tampered_semantic["financial_epoch_manifest_proof_sha256"] = "f" * 64
+    _write_json(built_semantic_gate.path, tampered_semantic)
+    with pytest.raises(
+        PipelineValidationError,
+        match="financial epoch manifest semantic identities differ",
+    ):
+        core_pipeline._verify_post_build_semantic_gate(  # noqa: SLF001
+            built_spec, built_semantic_gate.path
+        )
+    _write_json(built_semantic_gate.path, semantic_gate)
+
+    staged_path = proof_root / "stages" / "panel" / "account-strategy-manifest.json"
+    staged_bytes = staged_path.read_bytes()
+    staged = json.loads(staged_bytes)
+    staged["rows"][0]["current_value"] = "999.99"
+    staged_path.write_bytes(canonical_json_bytes(staged))
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="panel artifact binding differs|staged.*rebuild",
+    ):
+        materializer._financial_epoch_manifest_proof(accepted, proof_root)
+    staged_path.write_bytes(staged_bytes)
+
+    staged = json.loads(staged_bytes)
+    staged["source_identities"]["ledger"]["generation_id"] = "f" * 64
+    staged_path.write_bytes(canonical_json_bytes(staged))
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="panel artifact binding differs|staged.*rebuild",
+    ):
+        materializer._financial_epoch_manifest_proof(accepted, proof_root)
+    staged_path.write_bytes(staged_bytes)
+
+    panel_generation = materializer._generation_dir(proof_root, accepted, "panel")
+    dashboard_path = panel_generation / "data" / "dashboard_data.json"
+    dashboard_bytes = dashboard_path.read_bytes()
+    dashboard = json.loads(dashboard_bytes)
+    dashboard["account_manifest"]["rows"][0]["status"] = "BLOCKED"
+    dashboard_path.write_bytes(canonical_json_bytes(dashboard))
+    with pytest.raises(
+        materializer.MaterializationError, match="panel artifact binding differs"
+    ):
+        materializer._financial_epoch_manifest_proof(accepted, proof_root)
+    dashboard_path.write_bytes(dashboard_bytes)
+
+    generation_path = panel_generation / "generation.json"
+    generation_bytes = generation_path.read_bytes()
+    generation = json.loads(generation_bytes)
+    generation["verification"] = "UNVERIFIED"
+    generation_path.write_bytes(canonical_json_bytes(generation))
+    with pytest.raises(materializer.MaterializationError, match="generation"):
+        materializer._financial_epoch_manifest_proof(accepted, proof_root)
+    generation_path.write_bytes(generation_bytes)
+
+    forged_proof = json.loads(json.dumps(post_build_proof))
+    forged_proof["epoch_row_count"] += 1
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="post-build epoch-manifest proof differs",
+    ):
+        materializer._semantic_gate_payload(accepted, epoch_manifest_proof=forged_proof)
+
+
+def test_schema_v8_declares_the_authority_snapshot_it_emits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_recipe, proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
+    manifest_inputs = _install_real_epoch_proof(proof_root, tmp_path / "epoch-manifest")
+    for key, path in manifest_inputs.items():
+        vertical[key] = _definition(path)
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(product.generation)
+    vertical["schema_version"] = 8
+    _write_json(vertical_path, vertical)
+    monkeypatch.setattr(
+        materializer, "_financial_mvp_module", lambda: product.financial_module
+    )
+    pipeline_recipe = tmp_path / "schema-v8-pipeline-recipe.json"
+    materializer.create_recipe(
+        vertical_recipe=vertical_path,
+        proof_root=proof_root,
+        qa_dir=Path(source["qa_dir"]["path"]),
+        pipeline_id="schema-v8-authority-snapshot",
+        output=pipeline_recipe,
+        financial_mvp_contract=product.contract_path,
+        financial_mvp_source_matrix=product.matrix_path,
+    )
+    acquisition_dir = tmp_path / "source-run"
+    materializer.acquire(pipeline_recipe, acquisition_dir)
+    authority_dir = tmp_path / "authority"
+    materializer.authority(
+        pipeline_recipe, acquisition_dir / "source-run.json", authority_dir
+    )
+    monkeypatch.setenv("QE_PIPELINE_PYTHON", sys.executable)
+    monkeypatch.setattr(
+        materializer,
+        "_git",
+        lambda _repo, *args: "a" * 40 if args == ("rev-parse", "HEAD") else "",
+    )
+    monkeypatch.setattr(
+        materializer, "_validate_output_path_budget", lambda _root, _recipe: None
+    )
+    output_root = tmp_path / "schema-v8-dag"
+    spec_path = output_root / "pipeline-spec.json"
+    materializer.build_spec(pipeline_recipe, output_root, spec_path)
+
+    declared = next(
+        node
+        for node in json.loads(spec_path.read_text(encoding="utf-8"))["nodes"]
+        if node["node_id"] == "authority-snapshot"
+    )
+    emitted = (authority_dir / "authority-snapshot.json").read_bytes()
+    assert declared["sha256"] == hashlib.sha256(emitted).hexdigest()
+    assert declared["size_bytes"] == len(emitted)
+
+
+def test_schema_v8_rejects_epoch_manifest_input_drift_after_recipe_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_recipe, proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
+    manifest_inputs = _install_real_epoch_proof(proof_root, tmp_path / "epoch-manifest")
+    for key, path in manifest_inputs.items():
+        vertical[key] = _definition(path)
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(product.generation)
+    vertical["schema_version"] = 8
+    _write_json(vertical_path, vertical)
+    monkeypatch.setattr(
+        materializer, "_financial_mvp_module", lambda: product.financial_module
+    )
+    pipeline_recipe = tmp_path / "schema-v8-pipeline-recipe.json"
+    materializer.create_recipe(
+        vertical_recipe=vertical_path,
+        proof_root=proof_root,
+        qa_dir=Path(source["qa_dir"]["path"]),
+        pipeline_id="schema-v8-financial-manifest",
+        output=pipeline_recipe,
+        financial_mvp_contract=product.contract_path,
+        financial_mvp_source_matrix=product.matrix_path,
+    )
+    _write_json(
+        tmp_path / "epoch-manifest" / "account_strategy_classified_flows.json",
+        {"input": "account_strategy_classified_flows", "version": 2},
+    )
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="financial epoch manifest account_strategy_classified_flows identity differs",
+    ):
+        materializer._recipe(pipeline_recipe)
+
+
+def test_schema_v8_rejects_missing_required_epoch_manifest_input(
+    tmp_path: Path,
+) -> None:
+    source_recipe, _proof_root = _fixture(tmp_path)
+    vertical_path = Path(
+        json.loads(source_recipe.read_text(encoding="utf-8"))["vertical_recipe"]["path"]
+    )
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    provider_generation = tmp_path / "provider-ledger-generation"
+    _write_json(provider_generation / "catalog.json", {"synthetic": True})
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(provider_generation)
+    vertical["schema_version"] = 8
+
+    _write_json(vertical_path, vertical)
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="financial epoch manifest schema-8 inputs differ",
+    ):
+        materializer._vertical_source_paths(vertical_path)
+
+
+def test_schema_v8_rejects_any_extra_financial_input_definition(
+    tmp_path: Path,
+) -> None:
+    source_recipe, _proof_root = _fixture(tmp_path)
+    vertical_path = Path(
+        json.loads(source_recipe.read_text(encoding="utf-8"))["vertical_recipe"]["path"]
+    )
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    provider_generation = tmp_path / "provider-ledger-generation"
+    _write_json(provider_generation / "catalog.json", {"synthetic": True})
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(provider_generation)
+    for key in materializer.EPOCH_MANIFEST_INPUTS:
+        path = tmp_path / "epoch-manifest" / f"{key}.json"
+        _write_json(path, {"input": key})
+        vertical[key] = _definition(path)
+    extra = tmp_path / "epoch-manifest" / "unapproved.json"
+    _write_json(extra, {"input": "unapproved"})
+    vertical["unapproved_financial_input"] = _definition(extra)
+    vertical["schema_version"] = 8
+    _write_json(vertical_path, vertical)
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="financial epoch manifest schema-8 inputs differ",
+    ):
+        materializer._vertical_source_paths(vertical_path)
 
 
 def test_financial_mvp_authority_rejects_receipt_outside_manifest(
