@@ -5,6 +5,8 @@ from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
 import importlib.util
 import json
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 import runpy
@@ -26,6 +28,10 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
+from tools.account_strategy_manifest import (
+    build_manifest_candidate,
+    validate_manifest_schema,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_control_panel.py"
@@ -918,8 +924,17 @@ def _panel_baseline_catalog(
             )
 
     catalog: dict[str, Any] = {
+        "accounts": [{"account_id": "account-seam", "provider": "SYNTHETIC"}],
         "allocations": matching_allocations,
         "as_of_date": "2026-07-30",
+        "assignments": [
+            {
+                "account_id": "account-seam",
+                "strategy_id": "strategy-a",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+            }
+        ],
         "baseline_schema_version": 1,
         "policy_version": "PORT-PERF-1",
         "source_artifacts": [],
@@ -1216,28 +1231,53 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
 
 def _qa(candidate: Path, root: Path) -> Path:
     qa = root / "qa"
+    candidate_record_bytes = (candidate / "candidate.json").read_bytes()
+    candidate_record = json.loads(candidate_record_bytes)
+    candidate_record_sha256 = hashlib.sha256(candidate_record_bytes).hexdigest()
+    artifact_sha256 = candidate_record["artifact_sha256"]
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d494844520000000100000001"
+        "08060000001f15c4890000000049454e44ae426082"
+    )
     for name in panel.CAPTURES:
         folder = qa / name
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / "screenshot.png").write_bytes(b"synthetic-png-evidence")
+        (folder / "screenshot.png").write_bytes(png)
         _write_json(folder / "console-events.json", [])
         _write_json(folder / "request-failures.json", [])
         _write_json(
             folder / "manifest.json",
-            {"target": f"file:///{candidate.name}/index.html#{name}"},
+            {
+                "artifact_sha256": artifact_sha256,
+                "candidate_record_sha256": candidate_record_sha256,
+                "target": f"file:///{candidate.name}/index.html#{name}",
+            },
         )
     for name in panel.LINT_CAPTURES:
         _write_json(
             qa / name / "visual-lint.json", {"finding_count": 0, "findings": []}
         )
-    (qa / "desktop-command" / "page.pdf").write_bytes(b"synthetic-pdf-evidence")
+    (qa / "desktop-command" / "page.pdf").write_bytes(b"%PDF-synthetic-evidence")
     checks = [
-        {"check": f"synthetic interaction {index}", "status": "PASS"}
+        {
+            "check": (
+                "Epoch manifest DOM matches exact source values and blockers"
+                if index == 0
+                else f"synthetic interaction {index}"
+            ),
+            "status": "PASS",
+        }
         for index in range(6)
     ]
     _write_json(
         qa / "interaction-results.json",
-        {"all_passed": True, "checks": checks, "panel_id": candidate.name},
+        {
+            "all_passed": True,
+            "artifact_sha256": artifact_sha256,
+            "candidate_record_sha256": candidate_record_sha256,
+            "checks": checks,
+            "panel_id": candidate.name,
+        },
     )
     return qa
 
@@ -1352,6 +1392,54 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         }
         for row in underwriting["rows"]
     )
+
+
+@pytest.mark.parametrize(
+    ("file_name", "injected_content"),
+    [
+        (
+            "index.html",
+            '<script src="file:///C:/mutable/override.js"></script>',
+        ),
+        ("index.html", '<img src="//attacker.invalid/pixel.png" alt="">'),
+        ("index.html", '<link rel="stylesheet" href="unexpected.css">'),
+        ("styles.css", "body { background: url(https://attacker.invalid/x); }"),
+        ("styles.css", r"body { background: u\72l(https://attacker.invalid/x); }"),
+        ("styles.css", r"@im\70ort 'https://attacker.invalid/x.css';"),
+        (
+            "styles.css",
+            "body { background: u/**/rl(https://attacker.invalid/x); }",
+        ),
+    ],
+)
+def test_verify_rejects_frontend_resources_outside_closed_allowlist(
+    inputs: dict[str, Path], file_name: str, injected_content: str
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    target = candidate / file_name
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n" + injected_content,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="Closed local frontend resource allowlist",
+    ):
+        panel.verify_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+        )
 
 
 def test_underwriting_gap_signatures_are_diagnostic_not_fabricated() -> None:
@@ -1633,6 +1721,43 @@ def test_panel_consumes_current_surface_lens_generations(
             inputs["legacy"],
             tmp_path / "legacy-output",
             decomposition_lenses_root=legacy_tree_root,
+            decomposition_plan_bundle=plan_bundle,
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+        )
+
+
+def test_current_surface_lens_rejects_static_dynamic_divergence(
+    inputs: dict[str, Path], tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    base = tmp_path_factory.getbasetemp() / "s2diverge"
+    lens_root, plan_bundle = _current_surface_lens_inputs(base)
+    static_root = lens_root / "LIVE_ONLY" / "STATIC" / "us-economic"
+    static_pointer = read_current(static_root)
+    static_path = (
+        static_root
+        / "generations"
+        / static_pointer.generation_id
+        / "decomposition.json"
+    )
+    divergent = json.loads(static_path.read_text(encoding="utf-8"))
+    divergent["analytics_hash"] = "divergent-static-dynamic-surface"
+    _publish_analytics(
+        lens_root / "LIVE_ONLY" / "DYNAMIC_FLS" / "us-economic",
+        "decomposition.json",
+        divergent,
+        "synthetic-us-economic-dynamic-divergent",
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="STATIC and DYNAMIC_FLS surfaces differ",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            decomposition_lenses_root=lens_root,
             decomposition_plan_bundle=plan_bundle,
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
@@ -2357,13 +2482,42 @@ def test_candidate_tamper_fails_closed(inputs: dict[str, Path]) -> None:
         )
 
 
-def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> None:
+def test_nonfinancial_candidate_cannot_be_published(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="publication requires financial mode",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+        )
+
+
+def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
@@ -2377,6 +2531,7 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     pointer = read_current(inputs["output"])
     assert published["publication_state"] == "PUBLISHED"
@@ -2412,12 +2567,14 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
 def test_stable_launcher_browser_qa_proves_redirect(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "candidate")
@@ -2429,6 +2586,7 @@ def test_stable_launcher_browser_qa_proves_redirect(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     launcher = inputs["output"] / "index.html"
     launcher_qa = _qa(candidate, tmp_path / "launcher")
@@ -2468,12 +2626,14 @@ def test_stable_launcher_browser_qa_proves_redirect(
 def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "candidate")
@@ -2485,6 +2645,7 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     launcher = inputs["output"] / "index.html"
     launcher_qa = _qa(candidate, tmp_path / "launcher")
@@ -2523,12 +2684,14 @@ def test_publication_manifest_uses_later_operational_freshness_date(
     for assessment in freshness["assessments"]:
         assessment["evaluated_on"] = "2026-07-31"
     _write_json(inputs["freshness"], freshness)
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
@@ -2541,6 +2704,7 @@ def test_publication_manifest_uses_later_operational_freshness_date(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
 
     generation = inputs["output"] / "generations" / str(published["generation_id"])
@@ -2559,6 +2723,7 @@ def test_publication_manifest_uses_later_operational_freshness_date(
 def test_launcher_failure_restores_prior_pointer_and_launcher(
     inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
     previous = GenerationManifest.build(
         as_of_date=date(2026, 7, 1),
         adapter=AdapterIdentity("prior-panel", "1.0.0"),
@@ -2592,6 +2757,7 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
@@ -2612,6 +2778,7 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
             inputs["output"],
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
+            **financial,
         )
 
     assert read_current(inputs["output"]).generation_id == previous.generation_id
@@ -2631,6 +2798,45 @@ def test_browser_qa_rejects_console_error(
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
     _write_json(qa / "desktop-risk" / "console-events.json", [{"text": "boom"}])
+    with pytest.raises(panel.ControlPanelValidationError, match="browser QA failed"):
+        panel.validate_qa(candidate, qa)
+
+
+def test_browser_qa_rejects_evidence_not_bound_to_candidate_artifacts(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path)
+    manifest_path = qa / "desktop-command" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["candidate_record_sha256"] = "0" * 64
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(panel.ControlPanelValidationError, match="browser QA failed"):
+        panel.validate_qa(candidate, qa)
+
+
+def test_browser_qa_rejects_non_png_screenshot(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path)
+    (qa / "desktop-command" / "screenshot.png").write_bytes(b"not a png")
+
     with pytest.raises(panel.ControlPanelValidationError, match="browser QA failed"):
         panel.validate_qa(candidate, qa)
 
@@ -2897,7 +3103,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 18" in renderer
+    assert "data.panel_schema_version !== 20" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -3141,6 +3347,21 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
 
     assert schema["properties"]["panel_schema_version"]["const"] == (
         panel.PANEL_SCHEMA_VERSION
+    )
+    manifest_schema = schema["$defs"]["account_manifest_v3"]
+    strict_manifest_schema = json.loads(
+        panel.ACCOUNT_MANIFEST_SCHEMA.read_text(encoding="utf-8")
+    )
+    assert manifest_schema == {"$ref": strict_manifest_schema["$id"]}
+    assert strict_manifest_schema["additionalProperties"] is False
+    assert strict_manifest_schema["properties"]["schema_version"] == {"const": 3}
+    assert "authority_readiness" in strict_manifest_schema["required"]
+    assert "authority_status" not in strict_manifest_schema["required"]
+    assert strict_manifest_schema["properties"]["authority_readiness"]["properties"][
+        "authority_status"
+    ] == {"const": "SOURCE_BOUND_CANDIDATE"}
+    assert (
+        "account_manifest_authority_profile" in schema["properties"]["meta"]["required"]
     )
     assert "canonical_strategy_series" in schema["required"]
     assert "hybrid_mode_gate" in schema["required"]
@@ -5104,7 +5325,11 @@ def _write_manifest(path: Path, rows: list[dict[str, Any]]) -> Path:
 def test_account_manifest_flows_through_build_and_verify(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
-    manifest_path = _write_manifest(tmp_path / "manifest.json", [_manifest_row()])
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "manifest",
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+    )
     built_with = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
@@ -5112,10 +5337,20 @@ def test_account_manifest_flows_through_build_and_verify(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=manifest_path,
+        financial_mode=True,
+        manifest_ledger_path=authority["ledger"],
+        manifest_ledger_identity_path=authority["ledger_identity"],
+        manifest_baseline_root=authority["baseline"],
+        manifest_classified_flows_path=authority["flows"],
+        manifest_classification_policy_path=authority["classification_policy"],
+        manifest_admission_policy_path=authority["policy"],
     )
     data = _candidate_data(built_with)
     assert data["account_manifest"]["rows"][0]["gain"] == "6832.54"
     assert data["meta"]["account_manifest_sha256"] == panel._hash(manifest_path)
+    assert data["meta"]["account_manifest_size_bytes"] == len(
+        manifest_path.read_bytes()
+    )
     # Determinism: identical artifact -> identical panel id.
     again = panel.build_candidate(
         inputs["report"],
@@ -5124,6 +5359,13 @@ def test_account_manifest_flows_through_build_and_verify(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=manifest_path,
+        financial_mode=True,
+        manifest_ledger_path=authority["ledger"],
+        manifest_ledger_identity_path=authority["ledger_identity"],
+        manifest_baseline_root=authority["baseline"],
+        manifest_classified_flows_path=authority["flows"],
+        manifest_classification_policy_path=authority["classification_policy"],
+        manifest_admission_policy_path=authority["policy"],
     )
     assert again["panel_id"] == built_with["panel_id"]
 
@@ -5136,6 +5378,13 @@ def test_account_manifest_flows_through_build_and_verify(
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
         )["all_passed"]
         is True
     )
@@ -5144,6 +5393,28 @@ def test_account_manifest_flows_through_build_and_verify(
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
     assert "data.account_manifest" in renderer
     assert "renderAccountManifest" in renderer
+
+
+def test_panel_formal_schema_embeds_strict_manifest_v3_contract(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    data = _candidate_data(built)
+    data["account_manifest"]["undeclared_field"] = "must fail"
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="panel data violates formal schema",
+    ):
+        panel._validate_panel_data_schema(data)
 
 
 def test_account_manifest_absent_leaves_panel_neutral(
@@ -5159,6 +5430,751 @@ def test_account_manifest_absent_leaves_panel_neutral(
     data = _candidate_data(built)
     assert data["account_manifest"] is None
     assert data["meta"]["account_manifest_sha256"] is None
+    assert (
+        data["meta"]["account_manifest_authority_profile"]
+        == panel.MANIFEST_AUTHORITY_ABSENT
+    )
+
+
+def test_financial_mode_requires_manifest_and_independent_authorities(
+    inputs: dict[str, Path],
+) -> None:
+    """A financial panel cannot silently fall back to an unbound manifest."""
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="financial mode requires an account manifest",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            financial_mode=True,
+        )
+
+
+def test_financial_mode_does_not_reuse_generic_report_baseline(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(tmp_path / "baseline-seam", "56832.54")
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independently selected baseline root",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rejects_distinct_manifest_baseline_root(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    alternate_root = tmp_path / "alternate-baseline-root"
+    shutil.copytree(inputs["baseline"], alternate_root)
+    financial["manifest_baseline_root"] = alternate_root
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="manifest baseline root differs from panel authority",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+
+
+def test_financial_mode_rejects_manifest_from_a_different_as_of_candidate(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "date-seam",
+        "56832.54",
+        as_of="2026-07-29",
+        accepted_baseline_root=inputs["baseline"],
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="manifest source dates differ from the report candidate",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rejects_manifest_outside_usd_reporting_perimeter(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "eur-seam",
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+        accounting_currency="EUR",
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="financial manifest accounting currency must be USD",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rejects_self_consistent_unapproved_policy_path(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "canonical",
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+    )
+    copied_policy = tmp_path / "copied-policy.json"
+    copied_policy.write_bytes(panel.FLOW_CLASSIFICATION_POLICY.read_bytes())
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="repository-governed flow classification policy",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=copied_policy,
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rejects_report_unbound_manifest_baseline(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "foreign-baseline", "56832.54"
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match=(
+            "independent account-manifest rebuild failed|"
+            "manifest baseline differs from the report authority"
+        ),
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rejects_caller_selected_renderer(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    forged_templates = tmp_path / "forged-templates"
+    shutil.copytree(panel.DEFAULT_TEMPLATE_ROOT, forged_templates)
+    app_path = forged_templates / "app.js"
+    app_path.write_text(
+        app_path.read_text(encoding="utf-8") + "\n// falsified renderer\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="repository-governed panel templates",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            template_root=forged_templates,
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+
+
+@pytest.mark.parametrize(
+    "drifted_authority",
+    [
+        "ledger",
+        "ledger_identity",
+        "baseline",
+        "classified_flows",
+        "classification_policy",
+        "admission_policy",
+    ],
+)
+def test_financial_mode_rebuild_rejects_independent_authority_drift(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    drifted_authority: str,
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / drifted_authority,
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+    )
+    if drifted_authority == "ledger":
+        payload = json.loads(authority["ledger"].read_text(encoding="utf-8"))
+        payload["nav_observations"][-1]["nav"]["value"] = "57999.99"
+        _write_json(authority["ledger"], payload)
+    elif drifted_authority == "ledger_identity":
+        payload = json.loads(authority["ledger_identity"].read_text(encoding="utf-8"))
+        payload["generation_id"] = "3" * 64
+        _write_json(authority["ledger_identity"], payload)
+    elif drifted_authority == "baseline":
+        forged_baseline = tmp_path / "forged-baseline"
+        shutil.copytree(authority["baseline"], forged_baseline)
+        authority["baseline"] = forged_baseline
+        generation_id = read_current(forged_baseline).generation_id
+        baseline_path = (
+            authority["baseline"]
+            / "generations"
+            / generation_id
+            / "portfolio-baseline.json"
+        )
+        payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+        payload["accounts"][0]["provider"] = "DRIFTED"
+        _write_json(baseline_path, payload)
+    elif drifted_authority == "classified_flows":
+        payload = json.loads(authority["flows"].read_text(encoding="utf-8"))
+        payload["classification_policy"]["policy_version"] = "2"
+        _write_json(authority["flows"], payload)
+    elif drifted_authority == "classification_policy":
+        payload = json.loads(
+            authority["classification_policy"].read_text(encoding="utf-8")
+        )
+        payload["event_dispositions"]["exact"][0]["disposition"] = "INTERNAL"
+        forged_policy = tmp_path / "forged-flow-classification-policy.json"
+        _write_json(forged_policy, payload)
+        authority["classification_policy"] = forged_policy
+    else:
+        payload = json.loads(authority["policy"].read_text(encoding="utf-8"))
+        payload["admissions"][0]["authority"] = "DRIFTED_TEST_AUTHORITY"
+        _write_json(authority["policy"], payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match=(
+            "independent account-manifest rebuild failed|"
+            "independently rebuilt candidate|"
+            "repository-governed flow classification policy"
+        ),
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "status-downgrade",
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = manifest["rows"][0]
+    row["admission_status"] = "BLOCKED"
+    row["status"] = "BLOCKED_ADMISSION"
+    row["blocking_reason"] = "EPOCH_NOT_EXPLICITLY_FUNDED"
+    for field in (
+        "start",
+        "end",
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+        "observation_linked_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "opening_basis",
+        "observation_trace",
+        "capital_flow_trace",
+        "nav_observations",
+    ):
+        row.pop(field)
+    validate_manifest_schema(manifest)
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independently rebuilt candidate",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_account_manifest_snapshot_bytes_are_read_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path, _ = _produce_manifest(tmp_path / "snapshot", "56832.54")
+    original_read_bytes = Path.read_bytes
+    reads = 0
+
+    def counted_read_bytes(path: Path) -> bytes:
+        nonlocal reads
+        if path == manifest_path:
+            reads += 1
+            if reads > 1:
+                raise AssertionError("account manifest was reread")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    manifest, identity = panel._account_manifest(
+        manifest_path,
+        financial_mode=False,
+        ledger_path=None,
+        ledger_identity_path=None,
+        baseline_root=None,
+        baseline_generation_id=None,
+        classified_flows_path=None,
+        classification_policy_path=None,
+        admission_policy_path=None,
+    )
+
+    assert manifest is not None
+    assert identity is not None
+    assert identity["authority_profile"] == panel.MANIFEST_AUTHORITY_INTERNAL
+    assert reads == 1
+
+
+def test_render_snapshots_core_inputs_once_and_binds_emitted_bytes(
+    inputs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A render must parse, bind, and emit one immutable byte snapshot per input.
+
+    This deliberately counts ``Path.open`` rather than just ``read_bytes``:
+    template text reads and ``hash_file`` calls are included in the same
+    no-reread contract.
+    """
+
+    decomposition_pointer = panel.read_current(inputs["decomposition"])
+    correlation_pointer = panel.read_current(inputs["correlation"])
+    decomposition_path = (
+        inputs["decomposition"]
+        / "generations"
+        / decomposition_pointer.generation_id
+        / "decomposition.json"
+    ).resolve()
+    correlation_path = (
+        inputs["correlation"]
+        / "generations"
+        / correlation_pointer.generation_id
+        / "correlation.json"
+    ).resolve()
+    tracked = {
+        inputs["freshness"].resolve(),
+        (inputs["legacy"] / "data" / "dashboard_data.json").resolve(),
+        (inputs["legacy"] / "styles.css").resolve(),
+        decomposition_path,
+        correlation_path,
+        *(
+            panel.DEFAULT_TEMPLATE_ROOT.joinpath(name).resolve()
+            for name in ("index.html", "analytics.css", "app.js")
+        ),
+    }
+    expected_hashes = {
+        name: _sha(path)
+        for name, path in {
+            "freshness": inputs["freshness"],
+            "legacy": inputs["legacy"] / "data" / "dashboard_data.json",
+            "legacy_styles": inputs["legacy"] / "styles.css",
+            "decomposition": decomposition_path,
+            "correlation": correlation_path,
+        }.items()
+    }
+    expected_template_bytes = {
+        name: (panel.DEFAULT_TEMPLATE_ROOT / name)
+        .read_bytes()
+        .replace(b"\r\n", b"\n")
+        .replace(b"\r", b"\n")
+        for name in ("index.html", "analytics.css", "app.js")
+    }
+    expected_template_source_hashes = {
+        name: _sha(panel.DEFAULT_TEMPLATE_ROOT / name)
+        for name in ("index.html", "analytics.css", "app.js")
+    }
+    expected_styles = (inputs["legacy"] / "styles.css").read_bytes()
+    expected_freshness = inputs["freshness"].read_bytes()
+    counts: dict[Path, int] = {}
+    original_open = Path.open
+
+    def counted_open(path: Path, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+        resolved = path.resolve()
+        if resolved in tracked:
+            counts[resolved] = counts.get(resolved, 0) + 1
+            if counts[resolved] > 1:
+                raise AssertionError(f"mutable input was reread: {resolved}")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    files, _data, bound_inputs = panel._rendered_files(
+        inputs["report"],
+        inputs["legacy"],
+        panel.DEFAULT_TEMPLATE_ROOT,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+
+    expected_raw = {
+        "freshness": inputs["freshness"],
+        "legacy": inputs["legacy"] / "data" / "dashboard_data.json",
+        "legacy_styles": inputs["legacy"] / "styles.css",
+        "decomposition": decomposition_path,
+        "correlation": correlation_path,
+    }
+    for name, path in expected_raw.items():
+        assert counts[path.resolve()] == 1
+        assert bound_inputs[name][1] == expected_hashes[name]
+    for name in ("index.html", "analytics.css", "app.js"):
+        path = panel.DEFAULT_TEMPLATE_ROOT / name
+        assert counts[path.resolve()] == 1
+        assert files[name] == expected_template_bytes[name]
+        assert (
+            bound_inputs[f"template:{name}"][1] == expected_template_source_hashes[name]
+        )
+    assert files["styles.css"] == expected_styles
+    assert files["data/freshness-health.json"] == expected_freshness
+
+
+def test_render_snapshots_optional_strategy_evidence_once(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "strategy-evidence.json"
+    _write_json(
+        evidence,
+        {
+            "as_of_date": "2026-07-31",
+            "schema_version": 1,
+            "strategies": [
+                {
+                    "account": {
+                        "observed_start": "2026-01-22",
+                        "observed_end": "2026-07-14",
+                        "return_observations": 124,
+                    },
+                    "current_snapshot": {"observed_date": "2026-07-27"},
+                    "evidence_layer": "PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE",
+                    "generation_id": "e" * 64,
+                    "generation_as_of_date": "2026-07-31",
+                    "overlap": {
+                        "account_minus_provider_cumulative": "-0.1642",
+                        "annualized_tracking_error": "0.1177",
+                        "daily_return_correlation": "0.8267",
+                        "status": "TESTED_EXACT_DATE_PATHS",
+                    },
+                    "provider": {
+                        "observed_start": "2025-05-12",
+                        "observed_end": "2026-07-24",
+                        "return_observations": 315,
+                    },
+                    "provider_id": "portfolio123",
+                    "sources": {},
+                    "strategy_id": "strategy-0",
+                    "strategy_name": STRATEGY_NAMES[0],
+                }
+            ],
+        },
+    )
+    original_open = Path.open
+    reads = 0
+
+    def counted_open(path: Path, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+        nonlocal reads
+        if path.resolve() == evidence.resolve():
+            reads += 1
+            if reads > 1:
+                raise AssertionError("strategy evidence was reread")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        strategy_evidence_path=evidence,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    assert reads == 1
+    candidate = Path(built["candidate_dir"])
+    record = json.loads((candidate / "candidate.json").read_text(encoding="utf-8"))
+    assert record["artifact_sha256"]["data/dashboard_data.json"] == _sha(
+        candidate / "data" / "dashboard_data.json"
+    )
+
+
+def test_render_snapshots_optional_candidate_driver_map_once(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cluster_ids = sorted(panel.DRIVER_MAP_CLUSTER_IDS)
+
+    def score(cluster_id: str) -> dict[str, object]:
+        return {
+            "cluster_id": cluster_id,
+            "status": "AVAILABLE_DESCRIPTIVE_FROZEN",
+            "missing_members": [],
+            "downside_correlation_mean": "0.2",
+            "pearson_mean": "0.1",
+            "worst_decile_candidate_return_minimum": "0.01",
+            "descriptive_rank": 1,
+            "window_start": "2026-01-01",
+            "window_end": "2026-07-17",
+        }
+
+    payload = {
+        "schema_version": 1,
+        "as_of_date": "2026-07-24",
+        "research_status": "FROZEN_EVIDENCE_NOT_CURRENT",
+        "coverage": {
+            "candidate_count": 33,
+            "measured_candidate_count": 33,
+            "unavailable_candidate_count": 0,
+            "refresh_status": "UNAVAILABLE_RAW_RETURN_INPUTS_NOT_RETAINED",
+        },
+        "portfolio": {"systematic_loss_limit": "0.15"},
+        "candidates": [
+            {
+                "candidate_id": f"candidate-{index}",
+                "ticker": f"C{index:02d}",
+                "category": "Test category",
+                "tier": "Tier 1",
+                "portfolio_role": "Research only",
+                "cost": {
+                    "status": "AVAILABLE_COMPONENTS_NO_MODELED_NOTIONAL",
+                    "expense_ratio": "0.01",
+                    "annual_fixed_cost": "0",
+                },
+                "live_metrics": {
+                    "status": "AVAILABLE_FROZEN_LIVE_VEHICLE_METRICS",
+                    "start_date": "2020-01-01",
+                    "end_date": "2026-07-24",
+                    "observations": 1000,
+                },
+                "cluster_scores": [score(cluster_id) for cluster_id in cluster_ids],
+            }
+            for index in range(33)
+        ],
+        "driver_clusters": [
+            {
+                "cluster_id": cluster_id,
+                "members": [f"member-{index}"],
+                "allocation_weight": "0.2",
+                "adverse_loss_budget": "0.03",
+                "budget_status": "WITHIN_LIMIT",
+                "observed_pair_count": 1,
+                "observed_pair_correlation_minimum": "0.1",
+                "observed_pair_correlation_maximum": "0.1",
+            }
+            for index, cluster_id in enumerate(cluster_ids)
+        ],
+        "tactical_leave_one_out": [
+            {
+                "series_id": f"strategy-{index}",
+                "correlation_one_loss_reduction": "0.01",
+                "central_case_loss_reduction": "0.005",
+                "cluster_loss_without": "0.1",
+                "cluster_budget_status_without": "WITHIN_LIMIT",
+            }
+            for index in range(4)
+        ],
+        "authority_boundary": {
+            "allocation_effect": "NONE",
+            "execution_effect": "NONE",
+            "readiness_effect": "NONE",
+            "automatic_add_drop_authority": "NONE",
+        },
+    }
+    driver_map = tmp_path / "candidate-driver-map.json"
+    _write_json(driver_map, payload)
+    expected_driver_map_bytes = driver_map.read_bytes()
+    original_open = Path.open
+    reads = 0
+
+    def counted_open(path: Path, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+        nonlocal reads
+        if path.resolve() == driver_map.resolve():
+            reads += 1
+            if reads > 1:
+                raise AssertionError("candidate driver map was reread")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        candidate_driver_map_path=driver_map,
+    )
+    assert reads == 1
+    candidate = Path(built["candidate_dir"])
+    assert (
+        candidate / panel.DRIVER_MAP_PANEL_FILE
+    ).read_bytes() == expected_driver_map_bytes
+
+
+def test_account_manifest_renderer_is_decimal_safe_and_uses_exact_blockers() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    section = (
+        "// Epoch-manifest decimals"
+        + renderer.split("// Epoch-manifest decimals", 1)[1].split(
+            "function renderSignals", 1
+        )[0]
+    )
+
+    assert "BigInt(" in section
+    assert "Number(" not in section
+    assert "row.status" in section
+    assert "row.blocking_reason" in section
+    assert "no NAV" not in section
+    assert "Observed return" in section
+    assert "observed_hwm_index" in section
+    assert "manifestBlockerText" in section
+    assert "row.late_flows" in section
+    index = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
+    assert 'id="account-manifest-authority"' in index
+    assert "Independently rebuilt in financial mode" not in index
+
+
+def test_account_manifest_renderer_formats_exact_percentages_in_node() -> None:
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required to verify the browser formatter"
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    section = (
+        "// Epoch-manifest decimals"
+        + renderer.split("// Epoch-manifest decimals", 1)[1].split(
+            "function renderSignals", 1
+        )[0]
+    )
+    probe = (
+        "const safe=(value)=>String(value ?? '');\n"
+        + section
+        + "\nconsole.log(JSON.stringify(["
+        + "manifestPct('0'),manifestPct('0.005'),manifestPct('0.1367'),"
+        + "manifestPct('-0.2289'),manifestFixed('9007199254740993.005',2),"
+        + "manifestFixed('9007199254740993.015',2),manifestPct('-0.00001'),"
+        + "manifestBlockerText({status:'FLOWS_AFTER_CLOSING_NAV',"
+        + "late_flows:[{date:'2026-08-14',class:'external',value:'123.45'}]})"
+        + "]));"
+    )
+    result = subprocess.run(
+        [node, "-e", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert json.loads(result.stdout) == [
+        "0.00%",
+        "0.50%",
+        "13.67%",
+        "-22.89%",
+        "9,007,199,254,740,993.00",
+        "9,007,199,254,740,993.02",
+        "0.00%",
+        "FLOWS_AFTER_CLOSING_NAV: 2026-08-14 external 123.45",
+    ]
 
 
 def test_account_manifest_money_identity_fails_closed(
@@ -5168,7 +6184,7 @@ def test_account_manifest_money_identity_fails_closed(
     manifest_path = _write_manifest(tmp_path / "broken-manifest.json", [broken_row])
     with pytest.raises(
         panel.ControlPanelValidationError,
-        match="money identity differs",
+        match="account manifest is invalid",
     ):
         panel.build_candidate(
             inputs["report"],
@@ -5198,7 +6214,7 @@ def test_account_manifest_epoch_continuity_fails_closed(
     )
     with pytest.raises(
         panel.ControlPanelValidationError,
-        match="epoch continuity differs",
+        match="account manifest is invalid",
     ):
         panel.build_candidate(
             inputs["report"],
@@ -5210,7 +6226,7 @@ def test_account_manifest_epoch_continuity_fails_closed(
         )
 
 
-def test_account_manifest_epoch_continuity_accepts_rollover(
+def test_account_manifest_v1_rollover_is_rejected(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     first = _manifest_row(strategy_id="strategy-a", current_value="56832.54")
@@ -5226,53 +6242,122 @@ def test_account_manifest_epoch_continuity_accepts_rollover(
     manifest_path = _write_manifest(
         tmp_path / "continuous-manifest.json", [first, successor]
     )
-    built = panel.build_candidate(
-        inputs["report"],
-        inputs["legacy"],
-        inputs["output"],
-        freshness_health_path=inputs["freshness"],
-        baseline_root=inputs["baseline"],
-        account_manifest_path=manifest_path,
-    )
-    data = _candidate_data(built)
-    assert len(data["account_manifest"]["rows"]) == 2
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="account manifest is invalid",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+        )
 
 
-def _produce_manifest(target_dir: Path, closing: str) -> Path:
-    """Run the real producer CLI over synthetic governed inputs."""
-    import subprocess
+def _synthetic_flow_classification_policy(as_of_date: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "artifact_id": "policy/synthetic-flow-classification.json",
+        "as_of_date": as_of_date,
+        "policy_id": "SYNTHETIC-FLOW-CLASSIFICATION",
+        "policy_version": "1",
+        "event_dispositions": {
+            "exact": [
+                {
+                    "flow_type": value,
+                    "disposition": "EXTERNAL",
+                    "amount_sign": amount_sign,
+                }
+                for value, amount_sign in (
+                    ("EXTERNAL_CONTRIBUTION", "POSITIVE"),
+                    ("EXTERNAL_WITHDRAWAL", "NEGATIVE"),
+                    ("EXTERNAL_PROVIDER_TRANSFER", "NONZERO"),
+                    ("DEPOSIT_OR_WITHDRAWAL", "NONZERO"),
+                )
+            ]
+            + [
+                {
+                    "flow_type": "ACCOUNT_TRANSFER",
+                    "disposition": "INTERNAL",
+                    "amount_sign": "NONZERO",
+                    "counterparty_rule": (
+                        "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+                    ),
+                }
+            ],
+            "prefix": [
+                {
+                    "flow_type_prefix": "TRANSFER:INTERNAL:",
+                    "disposition": "INTERNAL",
+                    "amount_sign": "NONZERO",
+                    "counterparty_rule": (
+                        "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+                    ),
+                }
+            ],
+        },
+    }
 
+
+def _produce_manifest(
+    target_dir: Path,
+    closing: str,
+    *,
+    as_of: str = "2026-07-30",
+    accepted_baseline_root: Path | None = None,
+    accounting_currency: str = "USD",
+) -> tuple[Path, dict[str, Path]]:
+    """Build a real v3 manifest and retain its independently selected inputs."""
     target_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = target_dir / "ledger.json"
-    _write_json(
-        ledger_path,
-        {
-            "nav_observations": [
-                {
-                    "account_id": "account-seam",
-                    "as_of_date": day,
-                    "nav": {"status": "AVAILABLE", "value": value},
-                }
-                for day, value in (
-                    ("2026-01-02", "50000"),
-                    ("2026-03-01", "50500"),
-                    ("2026-06-01", "51000"),
-                    ("2026-08-13", closing),
-                )
-            ],
-            "flows": [],
+    ledger = {
+        "accounting_currency": accounting_currency,
+        "nav_observations": [
+            {
+                "account_id": "account-seam",
+                "as_of_date": day,
+                "nav": {
+                    "currency": accounting_currency,
+                    "status": "AVAILABLE",
+                    "value": value,
+                },
+            }
+            for day, value in (
+                ("2026-01-02", "50000"),
+                ("2026-03-01", "50500"),
+                ("2026-06-01", "51000"),
+                (as_of, closing),
+            )
+        ],
+        "flows": [],
+    }
+    _write_json(ledger_path, ledger)
+    ledger_bytes = ledger_path.read_bytes()
+    ledger_identity_path = target_dir / "ledger-identity.json"
+    ledger_identity = {
+        "schema_version": 1,
+        "generation_id": "1" * 64,
+        "artifact": {
+            "artifact_id": "normalized/synthetic-ledger.json",
+            "as_of_date": as_of,
+            "schema": {"name": "provider-ledger", "version": "1"},
+            "sha256": hashlib.sha256(ledger_bytes).hexdigest(),
+            "size_bytes": len(ledger_bytes),
         },
-    )
-    baseline_root = target_dir / "baseline"
-    generation_dir = baseline_root / "generations" / "seam-generation"
-    generation_dir.mkdir(parents=True)
-    (baseline_root / "CURRENT.json").write_text(
-        '{"generation_id": "seam-generation"}', encoding="utf-8"
-    )
-    _write_json(
-        generation_dir / "portfolio-baseline.json",
-        {
-            "accounts": [{"account_id": "account-seam", "provider": "SCHWAB"}],
+    }
+    _write_json(ledger_identity_path, ledger_identity)
+    if accepted_baseline_root is None:
+        baseline_root = target_dir / "baseline"
+        generation_id = "2" * 64
+        generation_dir = baseline_root / "generations" / generation_id
+        generation_dir.mkdir(parents=True)
+        _write_json(baseline_root / "CURRENT.json", {"generation_id": generation_id})
+        baseline = {
+            "as_of_date": as_of,
+            "baseline_schema_version": 1,
+            "accounts": [{"account_id": "account-seam", "provider": "SYNTHETIC"}],
             "assignments": [
                 {
                     "account_id": "account-seam",
@@ -5281,31 +6366,107 @@ def _produce_manifest(target_dir: Path, closing: str) -> Path:
                     "effective_end": None,
                 }
             ],
+        }
+        _write_json(generation_dir / "portfolio-baseline.json", baseline)
+    else:
+        baseline_root = accepted_baseline_root
+        generation_id = read_current(baseline_root).generation_id
+        baseline = json.loads(
+            (
+                baseline_root
+                / "generations"
+                / generation_id
+                / "portfolio-baseline.json"
+            ).read_text(encoding="utf-8")
+        )
+    assignments = baseline["assignments"]
+    assignment_sha256 = hashlib.sha256(
+        json.dumps(assignments, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    admission_policy_path = target_dir / "admission-policy.json"
+    _write_json(
+        admission_policy_path,
+        {
+            "schema_version": 1,
+            "policy_id": "SYNTHETIC-ADMISSION",
+            "policy_version": "1",
+            "artifact_id": "policy/synthetic-admission.json",
+            "as_of_date": as_of,
+            "assignment_sha256": assignment_sha256,
+            "admissions": [
+                {
+                    **assignments[0],
+                    "status": "FUNDED",
+                    "authority": "SYNTHETIC_TEST_AUTHORITY",
+                    "continuity_to_successor": False,
+                }
+            ],
         },
     )
-    flows_path = target_dir / "flow-classes.json"
-    _write_json(flows_path, {"events": []})
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(REPOSITORY_ROOT / "tools" / "account_strategy_manifest.py"),
-            "--ledger-json",
-            str(ledger_path),
-            "--baseline-root",
-            str(baseline_root),
-            "--flow-classes-json",
-            str(flows_path),
-            "--format",
-            "json",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
+    classification_policy_path = panel.FLOW_CLASSIFICATION_POLICY
+    classification_policy = json.loads(
+        classification_policy_path.read_text(encoding="utf-8")
     )
-    assert proc.returncode == 0, proc.stderr
+    classification_policy_sha256 = hashlib.sha256(
+        classification_policy_path.read_bytes()
+    ).hexdigest()
+    flows_path = target_dir / "flow-classes.json"
+    _write_json(
+        flows_path,
+        {
+            "schema_version": 3,
+            "artifact_id": "classified/synthetic-flows.json",
+            "as_of_date": as_of,
+            "ledger_identity": {
+                "generation_id": ledger_identity["generation_id"],
+                "artifact": ledger_identity["artifact"],
+            },
+            "classification_policy": {
+                "policy_id": classification_policy["policy_id"],
+                "policy_version": classification_policy["policy_version"],
+                "policy_as_of_date": classification_policy["as_of_date"],
+                "policy_sha256": classification_policy_sha256,
+            },
+            "events": [],
+        },
+    )
+    manifest = build_manifest_candidate(
+        ledger_path=ledger_path,
+        ledger_identity_path=ledger_identity_path,
+        baseline_root=baseline_root,
+        baseline_generation_id=generation_id,
+        classified_flows_path=flows_path,
+        classification_policy_path=classification_policy_path,
+        admission_policy_path=admission_policy_path,
+    )
     manifest_path = target_dir / "produced-manifest.json"
-    manifest_path.write_text(proc.stdout, encoding="utf-8")
-    return manifest_path
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    return manifest_path, {
+        "ledger": ledger_path,
+        "ledger_identity": ledger_identity_path,
+        "baseline": baseline_root,
+        "flows": flows_path,
+        "classification_policy": classification_policy_path,
+        "policy": admission_policy_path,
+    }
+
+
+def _financial_manifest_kwargs(
+    target_dir: Path, accepted_baseline_root: Path
+) -> dict[str, Any]:
+    manifest_path, authority = _produce_manifest(
+        target_dir, "56832.54", accepted_baseline_root=accepted_baseline_root
+    )
+    return {
+        "account_manifest_path": manifest_path,
+        "financial_mode": True,
+        "manifest_ledger_path": authority["ledger"],
+        "manifest_ledger_identity_path": authority["ledger_identity"],
+        "manifest_baseline_root": authority["baseline"],
+        "manifest_classified_flows_path": authority["flows"],
+        "manifest_classification_policy_path": authority["classification_policy"],
+        "manifest_admission_policy_path": authority["policy"],
+    }
 
 
 def test_account_manifest_producer_to_publish_seam(
@@ -5313,7 +6474,11 @@ def test_account_manifest_producer_to_publish_seam(
 ) -> None:
     """Reviewer P1: the producer's OWN CLI output must survive build ->
     verify -> publish, and distinct manifests must yield distinct panels."""
-    manifest_path = _produce_manifest(tmp_path / "primary", "56832.54")
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "primary",
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+    )
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
@@ -5321,9 +6486,21 @@ def test_account_manifest_producer_to_publish_seam(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=manifest_path,
+        financial_mode=True,
+        manifest_ledger_path=authority["ledger"],
+        manifest_ledger_identity_path=authority["ledger_identity"],
+        manifest_baseline_root=authority["baseline"],
+        manifest_classified_flows_path=authority["flows"],
+        manifest_classification_policy_path=authority["classification_policy"],
+        manifest_admission_policy_path=authority["policy"],
     )
     candidate = Path(built["candidate_dir"])
-    row = _candidate_data(built)["account_manifest"]["rows"][0]
+    built_data = _candidate_data(built)
+    assert (
+        built_data["meta"]["account_manifest_authority_profile"]
+        == panel.MANIFEST_AUTHORITY_FINANCIAL
+    )
+    row = built_data["account_manifest"]["rows"][0]
     assert row["status"] == "OK"
     assert Decimal(row["invested"]) == Decimal("50000")
     assert Decimal(row["current_value"]) == Decimal("56832.54")
@@ -5339,11 +6516,22 @@ def test_account_manifest_producer_to_publish_seam(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=manifest_path,
+        financial_mode=True,
+        manifest_ledger_path=authority["ledger"],
+        manifest_ledger_identity_path=authority["ledger_identity"],
+        manifest_baseline_root=authority["baseline"],
+        manifest_classified_flows_path=authority["flows"],
+        manifest_classification_policy_path=authority["classification_policy"],
+        manifest_admission_policy_path=authority["policy"],
     )
     assert published["publication_state"] == "PUBLISHED"
 
     # Distinct manifest bytes must produce a distinct panel id.
-    other = _produce_manifest(tmp_path / "alternate", "57999.99")
+    other, other_authority = _produce_manifest(
+        tmp_path / "alternate",
+        "57999.99",
+        accepted_baseline_root=inputs["baseline"],
+    )
     rebuilt = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
@@ -5351,5 +6539,259 @@ def test_account_manifest_producer_to_publish_seam(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=other,
+        financial_mode=True,
+        manifest_ledger_path=other_authority["ledger"],
+        manifest_ledger_identity_path=other_authority["ledger_identity"],
+        manifest_baseline_root=other_authority["baseline"],
+        manifest_classified_flows_path=other_authority["flows"],
+        manifest_classification_policy_path=other_authority["classification_policy"],
+        manifest_admission_policy_path=other_authority["policy"],
     )
     assert rebuilt["panel_id"] != built["panel_id"]
+
+
+def test_financial_publish_rejects_manifest_change_after_verification(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    manifest_path = financial["account_manifest_path"]
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    original_verify = panel.verify_candidate
+
+    def verify_then_change(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_verify(*args, **kwargs)
+        manifest_path.write_bytes(b" " + manifest_path.read_bytes())
+        return result
+
+    monkeypatch.setattr(panel, "verify_candidate", verify_then_change)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="candidate changed after verification or source snapshot drifted",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutated_input",
+    [
+        "report",
+        "freshness",
+        "account_manifest",
+        "ledger",
+        "ledger_identity",
+        "classified_flows",
+        "classification_policy",
+        "admission_policy",
+        "baseline_catalog",
+        "baseline_generation_manifest",
+        "calculation_code",
+        "template_app",
+        "legacy_styles",
+    ],
+)
+def test_financial_publish_rejects_input_change_after_final_render(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutated_input: str,
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    original_rendered_files = panel._rendered_files
+    original_read_bytes = Path.read_bytes
+    calls = 0
+    mutate_active = False
+
+    baseline_generation_id = read_current(
+        financial["manifest_baseline_root"]
+    ).generation_id
+    mutation_paths = {
+        "account_manifest": financial["account_manifest_path"],
+        "admission_policy": financial["manifest_admission_policy_path"],
+        "baseline_catalog": (
+            financial["manifest_baseline_root"]
+            / "generations"
+            / baseline_generation_id
+            / "portfolio-baseline.json"
+        ),
+        "baseline_generation_manifest": (
+            financial["manifest_baseline_root"]
+            / "generations"
+            / baseline_generation_id
+            / "generation.json"
+        ),
+        "calculation_code": panel.ACCOUNT_MANIFEST_CALCULATION_CODE,
+        "classification_policy": financial["manifest_classification_policy_path"],
+        "classified_flows": financial["manifest_classified_flows_path"],
+        "freshness": inputs["freshness"],
+        "ledger": financial["manifest_ledger_path"],
+        "ledger_identity": financial["manifest_ledger_identity_path"],
+        "legacy_styles": inputs["legacy"] / "styles.css",
+        "template_app": panel.DEFAULT_TEMPLATE_ROOT / "app.js",
+    }
+    report_generation_id = read_current(inputs["report"]).generation_id
+    mutation_paths["report"] = (
+        inputs["report"]
+        / "generations"
+        / report_generation_id
+        / "portfolio-report-data.json"
+    )
+    mutation_path = mutation_paths[mutated_input].resolve()
+
+    def render_then_change(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls, mutate_active
+        result = original_rendered_files(*args, **kwargs)
+        calls += 1
+        if calls == 2:
+            mutate_active = True
+        return result
+
+    def changed_read_bytes(path: Path) -> bytes:
+        content = original_read_bytes(path)
+        if mutate_active and path.resolve() == mutation_path:
+            return b" " + content
+        return content
+
+    monkeypatch.setattr(panel, "_rendered_files", render_then_change)
+    monkeypatch.setattr(Path, "read_bytes", changed_read_bytes)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="publication input changed after final render",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+def test_financial_publish_revalidates_private_qa_snapshot_after_final_render(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    original_rendered_files = panel._rendered_files
+    calls = 0
+
+    def render_then_corrupt_qa(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        result = original_rendered_files(*args, **kwargs)
+        calls += 1
+        if calls == 2:
+            (qa / "interaction-results.json").write_text("{}", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(panel, "_rendered_files", render_then_corrupt_qa)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="interaction.checks must be an array",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+def test_financial_publish_rejects_coherent_candidate_and_qa_swap(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "original")
+    original_validated_qa_snapshots = panel._validated_qa_snapshots
+
+    def swap_then_validate_private_snapshot(*args: Any, **kwargs: Any) -> Any:
+        app_path = candidate / "app.js"
+        app_path.write_bytes(app_path.read_bytes() + b"\n/* swapped candidate */\n")
+        candidate_files = {
+            relative: (candidate / relative).read_bytes()
+            for relative in panel.PANEL_FILES
+        }
+        data = json.loads(candidate_files["data/dashboard_data.json"])
+        (candidate / "candidate.json").write_bytes(
+            canonical_json_bytes(panel._candidate_record(candidate_files, data))
+        )
+        replacement_qa = _qa(candidate, tmp_path / "replacement")
+        shutil.rmtree(qa)
+        shutil.copytree(replacement_qa, qa)
+        return original_validated_qa_snapshots(*args, **kwargs)
+
+    monkeypatch.setattr(
+        panel, "_validated_qa_snapshots", swap_then_validate_private_snapshot
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="browser QA failed",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()

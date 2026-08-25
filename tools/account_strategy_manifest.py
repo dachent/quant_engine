@@ -7,11 +7,13 @@ Owner-mandated epoch continuity rule (HWM-003, #324):
 
 Columns (owner-approved clean investor view):
     Account | Strategy | Started | Ended | Invested | Withdrawn |
-    Net capital | Current | Gain | RONC% | Ann RONC% | TWR% | HWM | MaxDD%
+    Net capital | Current | Gain | RONC% | Ann RONC% | Obs return% | Obs HWM |
+    Obs MaxDD%
 
 Definitions (owner-approved legend):
-    Invested   = opening capital + deposits + internal-in after start
-                 (flows ON the first funded day ARE the opening; excluded)
+    Invested   = explicit opening capital + deposits + internal-in after start.
+                 First-funded-day flows are opening basis only when predecessor
+                 continuity proves them; otherwise the row is blocked.
     Withdrawn  = external withdrawals + internal-out after start
     Net capital= Invested - Withdrawn (still at work)
     Current    = last funded NAV in the epoch window
@@ -27,15 +29,9 @@ The producer never labels Gain / Net capital as money-weighted return.  XIRR
 is emitted only as a diagnostic while a timing-sensitive return policy remains
 unavailable.
 
-Flow classification (fail-closed, ledger-evidence-derived):
-    TRANSFER:INTERNAL:*            -> INTERNAL (broker's own label)
-    ACCOUNT_TRANSFER               -> INTERNAL iff a same-date opposite-sign
-                                      counterparty row exists on another
-                                      account; otherwise UNRESOLVED (row is
-                                      flagged, never silently assumed)
-    *_CONTRIBUTION / *_WITHDRAWAL /
-    EXTERNAL_PROVIDER_TRANSFER /
-    DEPOSIT_OR_WITHDRAWAL          -> EXTERNAL
+Flow classification is consumed from a separately governed, ledger-bound
+artifact and reconciled one-to-one against every raw ledger flow. The manifest
+producer does not guess a class from a broker label or silently omit a row.
 
 Usage:
     python tools/account_strategy_manifest.py \
@@ -61,13 +57,6 @@ from quant_engine.core.contracts import (
 )
 
 getcontext().prec = 40
-
-EXTERNAL_PREFIXES = (
-    "EXTERNAL_CONTRIBUTION",
-    "EXTERNAL_WITHDRAWAL",
-    "EXTERNAL_PROVIDER_TRANSFER",
-    "DEPOSIT_OR_WITHDRAWAL",
-)
 
 
 class ManifestError(RuntimeError):
@@ -99,8 +88,10 @@ class InputSnapshot:
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_MANIFEST_SCHEMA_VERSION = 2
-_FLOW_CLASSES_SCHEMA_VERSION = 2
+_CURRENCY = re.compile(r"^[A-Z]{3}$")
+_MANIFEST_SCHEMA_VERSION = 3
+_FLOW_CLASSES_SCHEMA_VERSION = 3
+_FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION = 1
 _CENT = Decimal("0.01")
 _ADMISSION_STATUSES = frozenset({"FUNDED", "BLOCKED"})
 _FLOW_DISPOSITIONS = frozenset({"EXTERNAL", "INTERNAL"})
@@ -235,6 +226,11 @@ def _amount_value(row: dict[str, Any], field: str) -> Decimal | None:
 
 def load_ledger(payload: Mapping[str, Any]) -> dict[str, Any]:
     value = dict(payload)
+    currency = _require_nonempty_text(
+        value.get("accounting_currency"), "ledger accounting_currency"
+    )
+    if _CURRENCY.fullmatch(currency) is None:
+        raise ManifestError("ledger accounting_currency must be an ISO currency code")
     for section in ("nav_observations", "flows"):
         if not isinstance(value.get(section), list):
             raise ManifestError(f"ledger missing list section '{section}'")
@@ -242,11 +238,9 @@ def load_ledger(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def load_baseline(
-    pointer: Mapping[str, Any], baseline_payload: Mapping[str, Any]
+    generation_id: str, baseline_payload: Mapping[str, Any]
 ) -> tuple[dict[str, Any], str]:
-    generation_id = _generation_id(
-        pointer.get("generation_id"), "baseline generation_id"
-    )
+    generation_id = _generation_id(generation_id, "baseline generation_id")
     payload = dict(baseline_payload)
     for section in ("accounts", "assignments"):
         if not isinstance(payload.get(section), list):
@@ -256,7 +250,6 @@ def load_baseline(
 
 def baseline_source_identity(
     generation_id: str,
-    baseline_pointer_snapshot: InputSnapshot,
     baseline_snapshot: InputSnapshot,
     baseline: Mapping[str, Any],
 ) -> dict[str, object]:
@@ -267,13 +260,6 @@ def baseline_source_identity(
         raise ManifestError("baseline_schema_version must be an integer")
     return {
         "generation_id": generation_id,
-        "pointer_artifact": _source_artifact_from_snapshot(
-            baseline_pointer_snapshot,
-            artifact_id="baseline/CURRENT.json",
-            as_of_date=baseline.get("as_of_date"),
-            schema_name="portfolio-baseline-generation-pointer",
-            schema_version="1",
-        ),
         "artifact": _source_artifact_from_snapshot(
             baseline_snapshot,
             artifact_id="normalized/portfolio-baseline.json",
@@ -308,10 +294,188 @@ def load_ledger_identity(
     }
 
 
+def load_flow_classification_policy(
+    payload: Mapping[str, Any],
+    policy_snapshot: InputSnapshot,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load the separately selected flow-disposition authority exactly once."""
+    required = {
+        "schema_version",
+        "artifact_id",
+        "as_of_date",
+        "policy_id",
+        "policy_version",
+        "event_dispositions",
+    }
+    if set(payload) != required:
+        raise ManifestError("flow classification policy keys are invalid")
+    if payload["schema_version"] != _FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION:
+        raise ManifestError("flow classification policy schema_version must be 1")
+    policy_id = _require_nonempty_text(
+        payload["policy_id"], "flow classification policy.policy_id"
+    )
+    policy_version = _require_nonempty_text(
+        payload["policy_version"], "flow classification policy.policy_version"
+    )
+    policy_as_of_date = _iso_date(
+        payload["as_of_date"], "flow classification policy.as_of_date"
+    )
+    dispositions = payload["event_dispositions"]
+    if not isinstance(dispositions, dict) or set(dispositions) != {"exact", "prefix"}:
+        raise ManifestError("flow classification policy event_dispositions is invalid")
+    if not isinstance(dispositions["exact"], list) or not isinstance(
+        dispositions["prefix"], list
+    ):
+        raise ManifestError("flow classification policy rules must be lists")
+
+    exact: dict[str, dict[str, str]] = {}
+    counterparty_rule = "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+    for index, value in enumerate(dispositions["exact"]):
+        if not isinstance(value, dict):
+            raise ManifestError(
+                f"flow classification exact rule {index} must be an object"
+            )
+        if set(value) not in (
+            {"flow_type", "disposition", "amount_sign"},
+            {"flow_type", "disposition", "amount_sign", "counterparty_rule"},
+        ):
+            raise ManifestError(
+                f"flow classification exact rule {index} keys are invalid"
+            )
+        flow_type = _require_nonempty_text(
+            value.get("flow_type"), f"flow classification exact rule {index}.flow_type"
+        )
+        if flow_type in exact:
+            raise ManifestError(
+                f"duplicate flow classification exact rule '{flow_type}'"
+            )
+        disposition = _require_nonempty_text(
+            value.get("disposition"),
+            f"flow classification exact rule {index}.disposition",
+        )
+        if disposition not in _FLOW_DISPOSITIONS:
+            raise ManifestError(
+                f"flow classification exact rule {index}.disposition is invalid"
+            )
+        amount_sign = _require_nonempty_text(
+            value.get("amount_sign"),
+            f"flow classification exact rule {index}.amount_sign",
+        )
+        if amount_sign not in {"POSITIVE", "NEGATIVE", "NONZERO"}:
+            raise ManifestError(
+                f"flow classification exact rule {index}.amount_sign is invalid"
+            )
+        selected_rule = {"disposition": disposition, "amount_sign": amount_sign}
+        if "counterparty_rule" in value:
+            if (
+                disposition != "INTERNAL"
+                or value["counterparty_rule"] != counterparty_rule
+            ):
+                raise ManifestError(
+                    f"flow classification exact rule {index}.counterparty_rule is invalid"
+                )
+            selected_rule["counterparty_rule"] = counterparty_rule
+        if (disposition == "INTERNAL") != ("counterparty_rule" in selected_rule):
+            raise ManifestError(
+                f"flow classification exact rule {index} internal pairing is invalid"
+            )
+        exact[flow_type] = selected_rule
+
+    prefixes: list[dict[str, str]] = []
+    seen_prefixes: set[str] = set()
+    for index, value in enumerate(dispositions["prefix"]):
+        if not isinstance(value, dict) or set(value) not in (
+            {"flow_type_prefix", "disposition", "amount_sign"},
+            {
+                "flow_type_prefix",
+                "disposition",
+                "amount_sign",
+                "counterparty_rule",
+            },
+        ):
+            raise ManifestError(
+                f"flow classification prefix rule {index} keys are invalid"
+            )
+        prefix = _require_nonempty_text(
+            value.get("flow_type_prefix"),
+            f"flow classification prefix rule {index}.flow_type_prefix",
+        )
+        if prefix in seen_prefixes:
+            raise ManifestError(f"duplicate flow classification prefix rule '{prefix}'")
+        disposition = _require_nonempty_text(
+            value.get("disposition"),
+            f"flow classification prefix rule {index}.disposition",
+        )
+        if disposition not in _FLOW_DISPOSITIONS:
+            raise ManifestError(
+                f"flow classification prefix rule {index}.disposition is invalid"
+            )
+        amount_sign = _require_nonempty_text(
+            value.get("amount_sign"),
+            f"flow classification prefix rule {index}.amount_sign",
+        )
+        if amount_sign not in {"POSITIVE", "NEGATIVE", "NONZERO"}:
+            raise ManifestError(
+                f"flow classification prefix rule {index}.amount_sign is invalid"
+            )
+        selected_prefix = {
+            "flow_type_prefix": prefix,
+            "disposition": disposition,
+            "amount_sign": amount_sign,
+        }
+        if "counterparty_rule" in value:
+            if (
+                disposition != "INTERNAL"
+                or value["counterparty_rule"] != counterparty_rule
+            ):
+                raise ManifestError(
+                    f"flow classification prefix rule {index}.counterparty_rule is invalid"
+                )
+            selected_prefix["counterparty_rule"] = counterparty_rule
+        if (disposition == "INTERNAL") != ("counterparty_rule" in selected_prefix):
+            raise ManifestError(
+                f"flow classification prefix rule {index} internal pairing is invalid"
+            )
+        seen_prefixes.add(prefix)
+        prefixes.append(selected_prefix)
+
+    if not exact and not prefixes:
+        raise ManifestError("flow classification policy has no rules")
+    prefix_values = [rule["flow_type_prefix"] for rule in prefixes]
+    for index, prefix in enumerate(prefix_values):
+        if any(
+            prefix.startswith(other) or other.startswith(prefix)
+            for other in prefix_values[index + 1 :]
+        ):
+            raise ManifestError("flow classification prefix rules overlap")
+    if any(
+        flow_type.startswith(prefix) for flow_type in exact for prefix in prefix_values
+    ):
+        raise ManifestError("flow classification exact and prefix rules overlap")
+
+    artifact = _source_artifact_from_snapshot(
+        policy_snapshot,
+        artifact_id=payload["artifact_id"],
+        as_of_date=policy_as_of_date,
+        schema_name="flow-classification-policy",
+        schema_version=str(_FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION),
+    )
+    return (
+        {"exact": exact, "prefix": prefixes},
+        {
+            "policy_id": policy_id,
+            "policy_version": policy_version,
+            "event_dispositions": dispositions,
+            "artifact": artifact,
+        },
+    )
+
+
 def load_flow_classes(
     payload: Mapping[str, Any],
     classified_snapshot: InputSnapshot,
     ledger_identity: Mapping[str, object],
+    classification_policy_identity: Mapping[str, object],
 ) -> tuple[list[dict[str, Any]], dict[str, object], dict[str, str]]:
     """Load a hash-bound classified-flow artifact without fallbacks.
 
@@ -330,7 +494,7 @@ def load_flow_classes(
     if set(payload) != required:
         raise ManifestError("classified flows keys are invalid")
     if payload["schema_version"] != _FLOW_CLASSES_SCHEMA_VERSION:
-        raise ManifestError("classified flows schema_version must be 2")
+        raise ManifestError("classified flows schema_version must be 3")
     selected_ledger_identity = {
         "generation_id": ledger_identity.get("generation_id"),
         "artifact": ledger_identity.get("artifact"),
@@ -341,6 +505,7 @@ def load_flow_classes(
     if not isinstance(policy, dict) or set(policy) != {
         "policy_id",
         "policy_version",
+        "policy_as_of_date",
         "policy_sha256",
     }:
         raise ManifestError("classified flows classification_policy is invalid")
@@ -350,9 +515,25 @@ def load_flow_classes(
     policy_version = _require_nonempty_text(
         policy["policy_version"], "classification_policy.policy_version"
     )
+    policy_as_of_date = _iso_date(
+        policy["policy_as_of_date"], "classification_policy.policy_as_of_date"
+    )
     policy_sha256 = policy["policy_sha256"]
     if not isinstance(policy_sha256, str) or _SHA256.fullmatch(policy_sha256) is None:
         raise ManifestError("classification_policy.policy_sha256 is invalid")
+    policy_artifact = classification_policy_identity.get("artifact")
+    if not isinstance(policy_artifact, Mapping):
+        raise ManifestError("selected flow classification policy identity is invalid")
+    selected_policy_reference = {
+        "policy_id": classification_policy_identity.get("policy_id"),
+        "policy_version": classification_policy_identity.get("policy_version"),
+        "policy_as_of_date": policy_artifact.get("as_of_date"),
+        "policy_sha256": policy_artifact.get("sha256"),
+    }
+    if policy != selected_policy_reference:
+        raise ManifestError(
+            "classified flows classification policy differs from selected authority"
+        )
     if not isinstance(payload["events"], list):
         raise ManifestError("flow classes missing 'events' list")
     events: list[dict[str, Any]] = []
@@ -373,6 +554,7 @@ def load_flow_classes(
         {
             "policy_id": policy_id,
             "policy_version": policy_version,
+            "policy_as_of_date": policy_as_of_date,
             "policy_sha256": policy_sha256,
         },
     )
@@ -385,6 +567,9 @@ def parse_nav_observations(
     series: dict[str, dict[str, Decimal]] = defaultdict(dict)
     unavailable: dict[str, set[str]] = defaultdict(set)
     observed_keys: set[tuple[str, str]] = set()
+    accounting_currency = _require_nonempty_text(
+        ledger.get("accounting_currency"), "ledger accounting_currency"
+    )
     for index, obs in enumerate(ledger["nav_observations"]):
         if not isinstance(obs, dict):
             raise ManifestError(f"nav observation {index} must be an object")
@@ -399,11 +584,18 @@ def parse_nav_observations(
         nav = obs.get("nav")
         if not isinstance(nav, dict):
             raise ManifestError(f"nav[{account_id}/{as_of}] must be an object")
+        currency = _require_nonempty_text(
+            nav.get("currency"), f"nav[{account_id}/{as_of}].currency"
+        )
+        if currency != accounting_currency:
+            raise ManifestError(
+                f"nav[{account_id}/{as_of}] currency differs from accounting currency"
+            )
         status = _require_nonempty_text(
             nav.get("status"), f"nav[{account_id}/{as_of}].status"
         )
         if status == "UNAVAILABLE":
-            if set(nav) != {"status", "reason"}:
+            if set(nav) != {"currency", "status", "reason"}:
                 raise ManifestError(
                     f"nav[{account_id}/{as_of}] UNAVAILABLE must have reason and no value"
                 )
@@ -414,7 +606,7 @@ def parse_nav_observations(
             continue
         if status != "AVAILABLE":
             raise ManifestError(f"nav[{account_id}/{as_of}].status is invalid")
-        if set(nav) != {"status", "value"}:
+        if set(nav) != {"currency", "status", "value"}:
             raise ManifestError(
                 f"nav[{account_id}/{as_of}] AVAILABLE must have value and no reason"
             )
@@ -436,6 +628,9 @@ def _raw_flow_records(ledger: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     flows = ledger.get("flows")
     if not isinstance(flows, list):
         raise ManifestError("ledger missing list section 'flows'")
+    accounting_currency = _require_nonempty_text(
+        ledger.get("accounting_currency"), "ledger accounting_currency"
+    )
     for index, row in enumerate(flows):
         if not isinstance(row, dict):
             raise ManifestError(f"raw flow {index} must be an object")
@@ -444,6 +639,22 @@ def _raw_flow_records(ledger: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         )
         if record_id in raw:
             raise ManifestError(f"duplicate raw flow record_id '{record_id}'")
+        amount_value = row.get("amount")
+        if not isinstance(amount_value, dict) or set(amount_value) != {
+            "currency",
+            "status",
+            "value",
+        }:
+            raise ManifestError(f"raw flow {record_id}.amount contract is invalid")
+        if amount_value.get("status") != "AVAILABLE":
+            raise ManifestError(f"raw flow {record_id}.amount is unavailable")
+        currency = _require_nonempty_text(
+            amount_value.get("currency"), f"raw flow {record_id}.amount.currency"
+        )
+        if currency != accounting_currency:
+            raise ManifestError(
+                f"raw flow {record_id} currency differs from accounting currency"
+            )
         amount = _amount_value(row, f"raw flow {record_id}.amount")
         if amount is None:
             raise ManifestError(f"raw flow {record_id}.amount is missing")
@@ -465,21 +676,63 @@ def _raw_flow_records(ledger: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 
 def _expected_flow_dispositions(
     raw: Mapping[str, Mapping[str, Any]],
+    classification_policy: Mapping[str, Any],
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Classify only unambiguous broker semantics; unknowns hard-fail."""
+    """Apply only the separately selected policy; unknowns hard-fail."""
+    exact = classification_policy.get("exact")
+    prefixes = classification_policy.get("prefix")
+    if not isinstance(exact, Mapping) or not isinstance(prefixes, list):
+        raise ManifestError("flow classification policy is invalid")
+
+    def select_rule(record_id: str, flow_type: str) -> Mapping[str, Any]:
+        selected = exact.get(flow_type)
+        if selected is None:
+            matching_prefixes = [
+                rule
+                for rule in prefixes
+                if isinstance(rule, Mapping)
+                and flow_type.startswith(str(rule.get("flow_type_prefix", "")))
+            ]
+            if len(matching_prefixes) > 1:
+                raise ManifestError(
+                    f"raw flow {record_id} matches ambiguous classification prefixes"
+                )
+            selected = matching_prefixes[0] if matching_prefixes else None
+        if not isinstance(selected, Mapping):
+            raise ManifestError(
+                f"raw flow {record_id} has unresolved flow_type '{flow_type}'"
+            )
+        return selected
+
+    selected_rules: dict[str, Mapping[str, Any]] = {}
     transfers_by_day: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    for record in raw.values():
-        if record["flow_type"] == "ACCOUNT_TRANSFER":
+    for record_id, record in raw.items():
+        rule = select_rule(record_id, str(record["flow_type"]))
+        selected_rules[record_id] = rule
+        amount = record.get("amount")
+        if not isinstance(amount, Decimal):
+            raise ManifestError(f"raw flow {record_id} amount is invalid")
+        amount_sign = rule.get("amount_sign")
+        sign_valid = (
+            (amount_sign == "POSITIVE" and amount > 0)
+            or (amount_sign == "NEGATIVE" and amount < 0)
+            or (amount_sign == "NONZERO" and amount != 0)
+        )
+        if not sign_valid:
+            raise ManifestError(
+                f"raw flow {record_id} amount sign violates classification policy"
+            )
+        if "counterparty_rule" in rule:
             transfers_by_day[str(record["event_date"])].append(record)
 
     dispositions: dict[str, str] = {}
     counterparties: dict[str, str] = {}
     for record_id, record in raw.items():
-        flow_type = str(record["flow_type"])
-        if flow_type.startswith("TRANSFER:INTERNAL:"):
-            dispositions[record_id] = "INTERNAL"
-            continue
-        if flow_type == "ACCOUNT_TRANSFER":
+        selected_rule = selected_rules[record_id]
+        disposition = selected_rule.get("disposition")
+        if disposition not in _FLOW_DISPOSITIONS:
+            raise ManifestError(f"raw flow {record_id} policy disposition is invalid")
+        if "counterparty_rule" in selected_rule:
             candidates = [
                 other
                 for other in transfers_by_day[str(record["event_date"])]
@@ -489,22 +742,19 @@ def _expected_flow_dispositions(
             ]
             if len(candidates) != 1:
                 raise ManifestError(
-                    f"raw flow {record_id} ACCOUNT_TRANSFER is unpaired or ambiguous"
+                    f"raw flow {record_id} counterparty is unpaired or ambiguous"
                 )
-            dispositions[record_id] = "INTERNAL"
+            dispositions[record_id] = str(disposition)
             counterparties[record_id] = str(candidates[0]["record_id"])
             continue
-        if flow_type.startswith(EXTERNAL_PREFIXES):
-            dispositions[record_id] = "EXTERNAL"
-            continue
-        raise ManifestError(
-            f"raw flow {record_id} has unresolved flow_type '{flow_type}'"
-        )
+        dispositions[record_id] = str(disposition)
     return dispositions, counterparties
 
 
 def validate_classified_flow_coverage(
-    ledger: Mapping[str, Any], events: list[dict[str, Any]]
+    ledger: Mapping[str, Any],
+    events: list[dict[str, Any]],
+    classification_policy: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     """Require a one-to-one, field-for-field classified disposition.
 
@@ -512,7 +762,9 @@ def validate_classified_flow_coverage(
     classified id and the exact raw record id it covers.
     """
     raw = _raw_flow_records(ledger)
-    expected_dispositions, counterparties = _expected_flow_dispositions(raw)
+    expected_dispositions, counterparties = _expected_flow_dispositions(
+        raw, classification_policy
+    )
     classified_by_source: dict[str, dict[str, Any]] = {}
     classified_ids: set[str] = set()
     required = {
@@ -637,24 +889,63 @@ def flow_buckets_from_classes(
 
 
 def xirr(cashflows: list[tuple[date, Decimal]]) -> Decimal | None:
-    """Bisection XIRR; None when sign conditions or convergence fail."""
-    if len(cashflows) < 2 or len({a > 0 for _, a in cashflows}) < 2:
+    """Unique-root bisection XIRR; None when uniqueness or convergence fails."""
+    by_date: dict[date, Decimal] = defaultdict(Decimal)
+    for cashflow_date, amount in cashflows:
+        by_date[cashflow_date] += amount
+    ordered = [(day, amount) for day, amount in sorted(by_date.items()) if amount]
+    signs = [amount > 0 for _, amount in ordered]
+    sign_changes = sum(left != right for left, right in zip(signs, signs[1:]))
+    # More than one chronological sign change can produce multiple valid IRRs.
+    # A diagnostic must fail closed rather than select an arbitrary root.
+    if len(ordered) < 2 or sign_changes != 1:
         return None
-    t0 = cashflows[0][0]
+    t0 = ordered[0][0]
 
     def npv(rate: Decimal) -> Decimal:
         total = Decimal(0)
-        for dt, a in cashflows:
+        for dt, a in ordered:
             total += a / (
                 (Decimal(1) + rate) ** (Decimal((dt - t0).days) / Decimal(365))
             )
         return total
 
-    lo, hi = Decimal("-0.95"), Decimal("50")
-    flo = npv(lo)
-    if flo * npv(hi) > 0:
+    tolerance = max(abs(amount) for _, amount in ordered) * Decimal("1e-28")
+    zero = Decimal(0)
+    fzero = npv(zero)
+    if abs(fzero) <= tolerance:
+        return zero
+
+    bracket: tuple[Decimal, Decimal, Decimal, Decimal] | None = None
+    right, fright = zero, fzero
+    for exponent in range(1, getcontext().prec + 1):
+        left = Decimal(-1) + (Decimal(10) ** -exponent)
+        if left == right:
+            break
+        fleft = npv(left)
+        if abs(fleft) <= tolerance:
+            return left
+        if fleft * fright < 0:
+            bracket = (left, right, fleft, fright)
+            break
+        right, fright = left, fleft
+
+    if bracket is None:
+        left, fleft = zero, fzero
+        for exponent in range(1, getcontext().prec + 1):
+            right = (Decimal(10) ** exponent) - Decimal(1)
+            fright = npv(right)
+            if abs(fright) <= tolerance:
+                return right
+            if fleft * fright < 0:
+                bracket = (left, right, fleft, fright)
+                break
+            left, fleft = right, fright
+
+    if bracket is None:
         return None
-    for _ in range(300):
+    lo, hi, flo, _fhi = bracket
+    for _ in range(400):
         mid = (lo + hi) / 2
         fmid = npv(mid)
         if (fmid < 0) == (flo < 0):
@@ -662,7 +953,7 @@ def xirr(cashflows: list[tuple[date, Decimal]]) -> Decimal | None:
         else:
             hi = mid
     rate = (lo + hi) / 2
-    if abs(npv(rate)) >= Decimal("25"):
+    if abs(npv(rate)) > tolerance:
         return None
     # Bisection around an exact zero can leave a vanishing numerical residue.
     # Canonicalize that residue so JSON never carries an exponent-form pseudo-rate.
@@ -1105,6 +1396,7 @@ def analyze_epoch(
         return None
 
     if prev_closing is not None:
+        assert prev_closing_date is not None
         blocked = _apply_observation_link(
             prev_closing_date,
             first_funded,
@@ -1122,7 +1414,11 @@ def analyze_epoch(
             return blocked
     observation_linked_return = index / Decimal(100) - Decimal(1)
 
-    span_days = (date.fromisoformat(days[-1]) - date.fromisoformat(days[0])).days
+    opening_cashflow_date = prev_closing_date if prev_closing is not None else days[0]
+    assert opening_cashflow_date is not None
+    span_days = (
+        date.fromisoformat(days[-1]) - date.fromisoformat(opening_cashflow_date)
+    ).days
     # This is not money-weighted return: it ignores flow timing.  Preserve the
     # useful simple ratio under its accurate name and keep XIRR diagnostic-only
     # until a governed timing-sensitive return policy is admitted.
@@ -1132,8 +1428,6 @@ def analyze_epoch(
     else:
         annualized = return_on_net_capital * Decimal(365) / Decimal(max(span_days, 1))
 
-    opening_cashflow_date = prev_closing_date if prev_closing is not None else days[0]
-    assert opening_cashflow_date is not None
     closing_cashflows: list[tuple[date, Decimal]] = [
         (date.fromisoformat(opening_cashflow_date), -opening)
     ]
@@ -1378,13 +1672,33 @@ def _validate_manifest_semantics(manifest: Mapping[str, Any]) -> None:
     if not isinstance(source_identities, Mapping):
         raise ManifestError("manifest source identities must be an object")
     classified = source_identities.get("classified_flows")
+    classification_policy = source_identities.get("flow_classification_policy")
     admission_policy = source_identities.get("admission_policy")
-    if not isinstance(classified, Mapping) or not isinstance(admission_policy, Mapping):
+    if (
+        not isinstance(classified, Mapping)
+        or not isinstance(classification_policy, Mapping)
+        or not isinstance(admission_policy, Mapping)
+    ):
         raise ManifestError("manifest source identities are incomplete")
     if classified.get("ledger_identity") != source_identities.get("ledger"):
         raise ManifestError("classified ledger identity differs from ledger identity")
     if source_identities.get("assignment") != admission_policy.get("assignment"):
         raise ManifestError("assignment identity differs from admission policy")
+    policy_artifact = classification_policy.get("artifact")
+    policy_reference = classified.get("classification_policy")
+    if not isinstance(policy_artifact, Mapping) or not isinstance(
+        policy_reference, Mapping
+    ):
+        raise ManifestError("flow classification policy identity is incomplete")
+    if policy_reference != {
+        "policy_id": classification_policy.get("policy_id"),
+        "policy_version": classification_policy.get("policy_version"),
+        "policy_as_of_date": policy_artifact.get("as_of_date"),
+        "policy_sha256": policy_artifact.get("sha256"),
+    }:
+        raise ManifestError(
+            "classified flow policy reference differs from policy authority"
+        )
     rows = manifest.get("rows")
     if not isinstance(rows, list):
         raise ManifestError("manifest rows must be a list")
@@ -1521,7 +1835,26 @@ def _validate_manifest_semantics(manifest: Mapping[str, Any]) -> None:
         )
         if ronc != expected_ronc:
             raise ManifestError(f"row {index} RONC identity is invalid")
-        span_days = (date.fromisoformat(end) - date.fromisoformat(start)).days
+        opening_basis = row.get("opening_basis")
+        annualization_start = start
+        if opening_basis == "PREDECESSOR_CLOSING_NAV":
+            trace_for_span = row.get("observation_trace")
+            if not isinstance(trace_for_span, Mapping) or not isinstance(
+                trace_for_span.get("links"), list
+            ):
+                raise ManifestError(f"row {index} observation trace is invalid")
+            links_for_span = trace_for_span["links"]
+            if not links_for_span or not isinstance(links_for_span[0], Mapping):
+                raise ManifestError(
+                    f"row {index} predecessor observation trace is invalid"
+                )
+            annualization_start = _iso_date(
+                links_for_span[0].get("start_date"),
+                f"row[{index}].observation_trace[0].start_date",
+            )
+        span_days = (
+            date.fromisoformat(end) - date.fromisoformat(annualization_start)
+        ).days
         expected_annualized = (
             None if ronc is None else ronc * Decimal(365) / Decimal(max(span_days, 1))
         )
@@ -1554,7 +1887,6 @@ def _validate_manifest_semantics(manifest: Mapping[str, Any]) -> None:
         if not isinstance(trace, Mapping) or not isinstance(trace.get("links"), list):
             raise ManifestError(f"row {index} observation trace is invalid")
         links = trace["links"]
-        opening_basis = row.get("opening_basis")
         expected_link_count = int(row["nav_observations"]) - (
             1 if opening_basis == "FIRST_AVAILABLE_NAV" else 0
         )
@@ -1587,7 +1919,9 @@ def _validate_manifest_semantics(manifest: Mapping[str, Any]) -> None:
                     raise ManifestError(
                         f"row {index} observation trace opening is invalid"
                     )
-                if opening_basis == "PREDECESSOR_CLOSING_NAV" and start_date >= start:
+                if opening_basis == "PREDECESSOR_CLOSING_NAV" and (
+                    start_date >= start or end_date != start
+                ):
                     raise ManifestError(
                         f"row {index} observation trace predecessor is invalid"
                     )
@@ -1788,13 +2122,18 @@ def validate_manifest_schema(manifest: Mapping[str, Any]) -> None:
     selected governed inputs before any authority or publication claim.
     """
     try:
-        from jsonschema import Draft202012Validator, FormatChecker
+        from jsonschema import (  # type: ignore[import-untyped]
+            Draft202012Validator,
+            FormatChecker,
+        )
     except ImportError as exc:  # pragma: no cover - environment boundary
         raise ManifestError("jsonschema is required to validate the manifest") from exc
     schema = InputSnapshot.capture(
         _MANIFEST_SCHEMA_PATH, "account strategy manifest schema"
     ).json_object("account strategy manifest schema")
     serializable = json_ready(manifest)
+    if not isinstance(serializable, dict):  # defensive type boundary
+        raise ManifestError("manifest must be an object")
     errors = sorted(
         Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(
             serializable
@@ -1842,69 +2181,52 @@ def format_table(manifest: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ledger-json", type=Path, required=True)
-    parser.add_argument(
-        "--ledger-identity-json",
-        type=Path,
-        required=True,
-        help="generation and SourceArtifact identity for --ledger-json",
-    )
-    parser.add_argument(
-        "--baseline-root",
-        type=Path,
-        required=True,
-        help="dataPortfolio store root containing CURRENT.json (deployment-local)",
-    )
-    parser.add_argument(
-        "--flow-classes-json",
-        type=Path,
-        required=True,
-        help="schema-v2, event-reconciled classified-flows artifact",
-    )
-    parser.add_argument(
-        "--admission-policy-json",
-        type=Path,
-        required=True,
-        help="explicit funded-epoch admission policy bound to baseline assignments",
-    )
-    parser.add_argument("--format", choices=("table", "json"), default="table")
-    args = parser.parse_args(argv)
+def build_manifest_candidate(
+    *,
+    ledger_path: Path,
+    ledger_identity_path: Path,
+    baseline_root: Path,
+    baseline_generation_id: str,
+    classified_flows_path: Path,
+    classification_policy_path: Path,
+    admission_policy_path: Path,
+) -> dict[str, Any]:
+    """Build one internally validated source-bound manifest candidate.
 
-    ledger_snapshot = InputSnapshot.capture(args.ledger_json, "ledger")
+    The inputs are independently selected paths.  Each is captured exactly
+    once before parsing and identity binding so consumers can rebuild the
+    result without trusting declarations embedded in a supplied manifest.
+    """
+    ledger_snapshot = InputSnapshot.capture(ledger_path, "ledger")
     ledger_identity_snapshot = InputSnapshot.capture(
-        args.ledger_identity_json, "ledger identity"
+        ledger_identity_path, "ledger identity"
+    )
+    selected_baseline_generation_id = _generation_id(
+        baseline_generation_id, "baseline generation_id"
     )
     try:
-        baseline_root = args.baseline_root.resolve(strict=True)
-        baseline_pointer_path = (baseline_root / "CURRENT.json").resolve(strict=True)
-        baseline_pointer_path.relative_to(baseline_root)
-    except (OSError, ValueError) as exc:
-        raise ManifestError("baseline CURRENT pointer escapes baseline root") from exc
-    baseline_pointer_snapshot = InputSnapshot.capture(
-        baseline_pointer_path, "baseline CURRENT pointer"
-    )
-    baseline_pointer = baseline_pointer_snapshot.json_object("baseline CURRENT pointer")
-    baseline_generation_id = _generation_id(
-        baseline_pointer.get("generation_id"), "baseline generation_id"
-    )
+        resolved_baseline_root = baseline_root.resolve(strict=True)
+    except OSError as exc:
+        raise ManifestError("baseline root is missing") from exc
     try:
         baseline_path = (
-            baseline_root
+            resolved_baseline_root
             / "generations"
-            / baseline_generation_id
+            / selected_baseline_generation_id
             / "portfolio-baseline.json"
         ).resolve(strict=True)
-        baseline_path.relative_to(baseline_root)
+        baseline_path.relative_to(resolved_baseline_root)
     except (OSError, ValueError) as exc:
         raise ManifestError("baseline artifact escapes baseline root") from exc
     baseline_snapshot = InputSnapshot.capture(baseline_path, "baseline")
     classified_snapshot = InputSnapshot.capture(
-        args.flow_classes_json, "classified flows"
+        classified_flows_path, "classified flows"
+    )
+    classification_policy_snapshot = InputSnapshot.capture(
+        classification_policy_path, "flow classification policy"
     )
     admission_policy_snapshot = InputSnapshot.capture(
-        args.admission_policy_json, "admission policy"
+        admission_policy_path, "admission policy"
     )
     calculation_code_snapshot = InputSnapshot.capture(
         Path(__file__), "calculation code"
@@ -1916,12 +2238,11 @@ def main(argv: list[str] | None = None) -> int:
         ledger_identity_snapshot,
     )
     ledger = load_ledger(ledger_snapshot.json_object("ledger"))
-    baseline, baseline_generation_id = load_baseline(
-        baseline_pointer, baseline_snapshot.json_object("baseline")
+    baseline, selected_baseline_generation_id = load_baseline(
+        selected_baseline_generation_id, baseline_snapshot.json_object("baseline")
     )
     baseline_identity = baseline_source_identity(
-        baseline_generation_id,
-        baseline_pointer_snapshot,
+        selected_baseline_generation_id,
         baseline_snapshot,
         baseline,
     )
@@ -1935,12 +2256,21 @@ def main(argv: list[str] | None = None) -> int:
         typed_assignments,
     )
     chains = validate_assignment_topology(typed_assignments, admissions)
-    events, classified_artifact, classification_policy = load_flow_classes(
+    classification_policy, classification_policy_identity = (
+        load_flow_classification_policy(
+            classification_policy_snapshot.json_object("flow classification policy"),
+            classification_policy_snapshot,
+        )
+    )
+    events, classified_artifact, classification_policy_reference = load_flow_classes(
         classified_snapshot.json_object("classified flows"),
         classified_snapshot,
         ledger_identity,
+        classification_policy_identity,
     )
-    reconciled_events = validate_classified_flow_coverage(ledger, events)
+    reconciled_events = validate_classified_flow_coverage(
+        ledger, events, classification_policy
+    )
     buckets = flow_buckets_from_classes(reconciled_events)
     series, unavailable_navs = parse_nav_observations(ledger)
     accounts_index: dict[str, dict[str, Any]] = {}
@@ -1967,8 +2297,9 @@ def main(argv: list[str] | None = None) -> int:
                 "artifact": classified_artifact,
                 "schema_version": _FLOW_CLASSES_SCHEMA_VERSION,
                 "ledger_identity": ledger_identity,
-                "classification_policy": classification_policy,
+                "classification_policy": classification_policy_reference,
             },
+            "flow_classification_policy": classification_policy_identity,
             "admission_policy": admission_policy_identity,
             "assignment": admission_policy_identity["assignment"],
             "calculation_code": {
@@ -1981,9 +2312,62 @@ def main(argv: list[str] | None = None) -> int:
         },
         unavailable_navs,
     )
+    manifest["accounting_currency"] = ledger["accounting_currency"]
     validate_manifest_schema(manifest)
+    return json_ready(manifest)  # type: ignore[return-value]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ledger-json", type=Path, required=True)
+    parser.add_argument(
+        "--ledger-identity-json",
+        type=Path,
+        required=True,
+        help="generation and SourceArtifact identity for --ledger-json",
+    )
+    parser.add_argument(
+        "--baseline-root",
+        type=Path,
+        required=True,
+        help="dataPortfolio store root containing content-addressed generations",
+    )
+    parser.add_argument(
+        "--baseline-generation-id",
+        required=True,
+        help="exact content-addressed baseline generation (never CURRENT indirection)",
+    )
+    parser.add_argument(
+        "--flow-classes-json",
+        type=Path,
+        required=True,
+        help="schema-v3, event-reconciled classified-flows artifact",
+    )
+    parser.add_argument(
+        "--classification-policy-json",
+        type=Path,
+        required=True,
+        help="separately selected flow-classification policy authority",
+    )
+    parser.add_argument(
+        "--admission-policy-json",
+        type=Path,
+        required=True,
+        help="explicit funded-epoch admission policy bound to baseline assignments",
+    )
+    parser.add_argument("--format", choices=("table", "json"), default="table")
+    args = parser.parse_args(argv)
+    manifest = build_manifest_candidate(
+        ledger_path=args.ledger_json,
+        ledger_identity_path=args.ledger_identity_json,
+        baseline_root=args.baseline_root,
+        baseline_generation_id=args.baseline_generation_id,
+        classified_flows_path=args.flow_classes_json,
+        classification_policy_path=args.classification_policy_json,
+        admission_policy_path=args.admission_policy_json,
+    )
     if args.format == "json":
-        print(json.dumps(json_ready(manifest), indent=2))
+        print(json.dumps(manifest, indent=2))
     else:
         print(format_table(manifest))
     return 0

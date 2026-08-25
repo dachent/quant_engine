@@ -47,6 +47,66 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_bytes(_bytes(payload))
 
 
+def _flow_classification_policy(as_of_date: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "artifact_id": "policy/synthetic-flow-classification.json",
+        "as_of_date": as_of_date,
+        "policy_id": "SYNTHETIC-FLOW-CLASSIFICATION",
+        "policy_version": "1",
+        "event_dispositions": {
+            "exact": [
+                {
+                    "flow_type": value,
+                    "disposition": "EXTERNAL",
+                    "amount_sign": amount_sign,
+                }
+                for value, amount_sign in (
+                    ("EXTERNAL_CONTRIBUTION", "POSITIVE"),
+                    ("EXTERNAL_WITHDRAWAL", "NEGATIVE"),
+                    ("EXTERNAL_PROVIDER_TRANSFER", "NONZERO"),
+                    ("DEPOSIT_OR_WITHDRAWAL", "NONZERO"),
+                )
+            ]
+            + [
+                {
+                    "flow_type": "ACCOUNT_TRANSFER",
+                    "disposition": "INTERNAL",
+                    "amount_sign": "NONZERO",
+                    "counterparty_rule": (
+                        "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+                    ),
+                }
+            ],
+            "prefix": [
+                {
+                    "flow_type_prefix": "TRANSFER:INTERNAL:",
+                    "disposition": "INTERNAL",
+                    "amount_sign": "NONZERO",
+                    "counterparty_rule": (
+                        "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+                    ),
+                }
+            ],
+        },
+    }
+
+
+def _flow_classification_rules() -> dict[str, Any]:
+    policy = _flow_classification_policy("2026-01-06")["event_dispositions"]
+    return {
+        "exact": {
+            rule["flow_type"]: {
+                key: value
+                for key, value in rule.items()
+                if key in {"disposition", "amount_sign", "counterparty_rule"}
+            }
+            for rule in policy["exact"]
+        },
+        "prefix": policy["prefix"],
+    }
+
+
 def _baseline_assignments(*, gap: bool = False) -> list[dict[str, Any]]:
     second_start = "2026-01-05" if gap else "2026-01-04"
     return [
@@ -94,36 +154,37 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
     tmp_path.mkdir(parents=True, exist_ok=True)
     ledger_path = tmp_path / "provider-ledger.json"
     ledger = {
+        "accounting_currency": "USD",
         "nav_observations": [
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
-                "nav": {"status": "AVAILABLE", "value": "50"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
             },
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-02",
-                "nav": {"status": "AVAILABLE", "value": "60"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "60"},
             },
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-03",
-                "nav": {"status": "AVAILABLE", "value": "70"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
             },
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-04",
-                "nav": {"status": "AVAILABLE", "value": "70"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
             },
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-05",
-                "nav": {"status": "AVAILABLE", "value": "75"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "75"},
             },
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-06",
-                "nav": {"status": "AVAILABLE", "value": "80"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "80"},
             },
         ],
         "flows": [
@@ -132,7 +193,7 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
                 "account_id": "synthetic-account",
                 "event_date": "2026-01-02",
                 "flow_type": "EXTERNAL_CONTRIBUTION",
-                "amount": {"value": "10"},
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "10"},
             }
         ],
     }
@@ -175,18 +236,24 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
     policy_path = tmp_path / "admission-policy.json"
     _write_json(policy_path, _admission_policy(assignments, continuity=True))
 
+    classification_policy_path = tmp_path / "flow-classification-policy.json"
+    _write_json(classification_policy_path, _flow_classification_policy("2026-01-06"))
+    classification_policy_sha256 = hashlib.sha256(
+        classification_policy_path.read_bytes()
+    ).hexdigest()
     flows_path = tmp_path / "classified-flows.json"
     _write_json(
         flows_path,
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "artifact_id": "classified/synthetic-flows.json",
             "as_of_date": "2026-01-06",
             "ledger_identity": ledger_source_identity,
             "classification_policy": {
                 "policy_id": "SYNTHETIC-FLOW-CLASSIFICATION",
                 "policy_version": "1",
-                "policy_sha256": "a" * 64,
+                "policy_as_of_date": "2026-01-06",
+                "policy_sha256": classification_policy_sha256,
             },
             "events": [
                 {
@@ -205,6 +272,7 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
         "ledger_identity": ledger_identity_path,
         "baseline_root": baseline_root,
         "policy": policy_path,
+        "classification_policy": classification_policy_path,
         "flows": flows_path,
     }
 
@@ -217,10 +285,14 @@ def _producer_argv(inputs: dict[str, Path]) -> list[str]:
         str(inputs["ledger_identity"]),
         "--baseline-root",
         str(inputs["baseline_root"]),
+        "--baseline-generation-id",
+        BASELINE_GENERATION_ID,
         "--admission-policy-json",
         str(inputs["policy"]),
         "--flow-classes-json",
         str(inputs["flows"]),
+        "--classification-policy-json",
+        str(inputs["classification_policy"]),
         "--format",
         "json",
     ]
@@ -254,16 +326,17 @@ def test_duplicate_account_date_nav_is_rejected_even_when_values_match(
     manifest_module: Any,
 ) -> None:
     ledger = {
+        "accounting_currency": "USD",
         "nav_observations": [
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
-                "nav": {"status": "AVAILABLE", "value": "50"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
             },
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
-                "nav": {"status": "AVAILABLE", "value": "50"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
             },
         ],
         "flows": [],
@@ -280,7 +353,7 @@ def test_cli_requires_exact_classified_flow_coverage(
     _write_json(
         inputs["flows"],
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "artifact_id": "classified/synthetic-flows.json",
             "as_of_date": "2026-01-06",
             "ledger_identity": {
@@ -293,7 +366,10 @@ def test_cli_requires_exact_classified_flow_coverage(
             "classification_policy": {
                 "policy_id": "SYNTHETIC-FLOW-CLASSIFICATION",
                 "policy_version": "1",
-                "policy_sha256": "a" * 64,
+                "policy_as_of_date": "2026-01-06",
+                "policy_sha256": hashlib.sha256(
+                    inputs["classification_policy"].read_bytes()
+                ).hexdigest(),
             },
             "events": [],
         },
@@ -320,11 +396,17 @@ def test_cli_emits_bound_source_identities_and_accepts_low_funded_nav(
     assert manifest_module.main(_producer_argv(inputs)) == 0
 
     manifest = json.loads(capsys.readouterr().out)
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert manifest["source_identities"]["ledger"]["generation_id"] == (
         LEDGER_GENERATION_ID
     )
-    assert manifest["source_identities"]["classified_flows"]["schema_version"] == 2
+    assert manifest["source_identities"]["classified_flows"]["schema_version"] == 3
+    assert (
+        manifest["source_identities"]["flow_classification_policy"]["artifact"][
+            "sha256"
+        ]
+        == hashlib.sha256(inputs["classification_policy"].read_bytes()).hexdigest()
+    )
     assert manifest["source_identities"]["admission_policy"]["policy_id"] == (
         "SYNTHETIC-ACCOUNT-STRATEGY-ADMISSION"
     )
@@ -340,19 +422,72 @@ def test_cli_emits_bound_source_identities_and_accepts_low_funded_nav(
     assert "mwr" not in first
 
 
-def test_cli_binds_pointer_and_identity_artifact_snapshots(
+def test_reusable_build_candidate_matches_cli_output(
+    manifest_module: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The panel can independently rebuild exactly the manifest the CLI emits."""
+    inputs = _write_valid_inputs(tmp_path)
+    expected = _manifest_from_cli(manifest_module, inputs, capsys)
+
+    actual = manifest_module.build_manifest_candidate(
+        ledger_path=inputs["ledger"],
+        ledger_identity_path=inputs["ledger_identity"],
+        baseline_root=inputs["baseline_root"],
+        baseline_generation_id=BASELINE_GENERATION_ID,
+        classified_flows_path=inputs["flows"],
+        classification_policy_path=inputs["classification_policy"],
+        admission_policy_path=inputs["policy"],
+    )
+    assert actual == expected
+
+
+def test_cli_rejects_classified_policy_hash_not_matching_selected_policy(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    inputs = _write_valid_inputs(tmp_path)
+    classified = json.loads(inputs["flows"].read_text(encoding="utf-8"))
+    classified["classification_policy"]["policy_sha256"] = "f" * 64
+    _write_json(inputs["flows"], classified)
+
+    with pytest.raises(manifest_module.ManifestError, match="classification policy"):
+        manifest_module.main(_producer_argv(inputs))
+
+
+def test_cli_rejects_classified_disposition_forgery_against_selected_policy(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    inputs = _write_valid_inputs(tmp_path)
+    classified = json.loads(inputs["flows"].read_text(encoding="utf-8"))
+    classified["events"][0]["disposition"] = "INTERNAL"
+    _write_json(inputs["flows"], classified)
+
+    with pytest.raises(manifest_module.ManifestError, match="differs from raw record"):
+        manifest_module.main(_producer_argv(inputs))
+
+
+def test_cli_rejects_flow_currency_that_differs_from_accounting_currency(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    inputs = _write_valid_inputs(tmp_path)
+    ledger = json.loads(inputs["ledger"].read_text(encoding="utf-8"))
+    ledger["flows"][0]["amount"]["currency"] = "EUR"
+    _write_json(inputs["ledger"], ledger)
+    _refresh_ledger_identity(inputs)
+
+    with pytest.raises(manifest_module.ManifestError, match="currency"):
+        manifest_module.main(_producer_argv(inputs))
+
+
+def test_cli_binds_identity_artifact_and_ignores_mutable_current_pointer(
     manifest_module: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     inputs = _write_valid_inputs(tmp_path)
 
     manifest = _manifest_from_cli(manifest_module, inputs, capsys)
 
-    assert (
-        manifest["source_identities"]["baseline"]["pointer_artifact"]["sha256"]
-        == hashlib.sha256(
-            (inputs["baseline_root"] / "CURRENT.json").read_bytes()
-        ).hexdigest()
-    )
+    _write_json(inputs["baseline_root"] / "CURRENT.json", {"generation_id": "f" * 64})
+    rebuilt = _manifest_from_cli(manifest_module, inputs, capsys)
+    assert rebuilt == manifest
     assert (
         manifest["source_identities"]["ledger"]["identity_artifact"]["sha256"]
         == hashlib.sha256(inputs["ledger_identity"].read_bytes()).hexdigest()
@@ -363,13 +498,11 @@ def test_cli_rejects_non_hash_generation_ids_before_path_selection(
     manifest_module: Any, tmp_path: Path
 ) -> None:
     inputs = _write_valid_inputs(tmp_path)
-    _write_json(
-        inputs["baseline_root"] / "CURRENT.json",
-        {"generation_id": "../../outside"},
-    )
+    argv = _producer_argv(inputs)
+    argv[argv.index("--baseline-generation-id") + 1] = "../../outside"
 
     with pytest.raises(manifest_module.ManifestError, match="SHA-256 generation id"):
-        manifest_module.main(_producer_argv(inputs))
+        manifest_module.main(argv)
 
 
 def test_cli_rejects_assignment_gap_without_a_continuity_claim(
@@ -389,16 +522,17 @@ def test_nav_series_rejects_available_unavailable_duplicate_account_date(
     manifest_module: Any,
 ) -> None:
     ledger = {
+        "accounting_currency": "USD",
         "nav_observations": [
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
-                "nav": {"status": "AVAILABLE", "value": "50"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
             },
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
-                "nav": {"status": "UNAVAILABLE"},
+                "nav": {"currency": "USD", "status": "UNAVAILABLE"},
             },
         ],
         "flows": [],
@@ -442,7 +576,7 @@ def test_cli_rejects_assignment_for_unknown_baseline_account(
             {
                 "account_id": "synthetic-account",
                 "as_of_date": "2025-12-31",
-                "nav": {"status": "AVAILABLE", "value": "49"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "49"},
             },
         ),
         (
@@ -450,7 +584,7 @@ def test_cli_rejects_assignment_for_unknown_baseline_account(
             {
                 "account_id": "unknown-account",
                 "as_of_date": "2026-01-02",
-                "nav": {"status": "AVAILABLE", "value": "50"},
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
             },
         ),
     ],
@@ -820,11 +954,16 @@ def test_annualized_return_on_net_capital_is_consistently_linear(
     [
         (
             {
+                "accounting_currency": "USD",
                 "nav_observations": [
                     {
                         "account_id": "synthetic-account",
                         "as_of_date": "2026-01-01",
-                        "nav": {"status": "AVAILABLE", "value": "1.001"},
+                        "nav": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": "1.001",
+                        },
                     }
                 ],
                 "flows": [],
@@ -833,6 +972,7 @@ def test_annualized_return_on_net_capital_is_consistently_linear(
         ),
         (
             {
+                "accounting_currency": "USD",
                 "nav_observations": [],
                 "flows": [
                     {
@@ -840,7 +980,11 @@ def test_annualized_return_on_net_capital_is_consistently_linear(
                         "account_id": "synthetic-account",
                         "event_date": "2026-01-01",
                         "flow_type": "EXTERNAL_CONTRIBUTION",
-                        "amount": {"value": "1.00"},
+                        "amount": {
+                            "currency": "USD",
+                            "status": "AVAILABLE",
+                            "value": "1.00",
+                        },
                     }
                 ],
             },
@@ -864,7 +1008,9 @@ def test_source_money_values_must_be_exactly_cent_representable(
         if events is None:
             manifest_module.nav_series(ledger)
         else:
-            manifest_module.validate_classified_flow_coverage(ledger, events)
+            manifest_module.validate_classified_flow_coverage(
+                ledger, events, _flow_classification_rules()
+            )
 
 
 @pytest.mark.parametrize(
@@ -880,6 +1026,7 @@ def test_nav_status_contract_is_explicit_and_fail_closed(
     manifest_module: Any, nav: dict[str, str]
 ) -> None:
     ledger = {
+        "accounting_currency": "USD",
         "nav_observations": [
             {
                 "account_id": "synthetic-account",
@@ -905,7 +1052,11 @@ def test_unavailable_nav_inside_epoch_blocks_the_row(
         if item["account_id"] == "synthetic-account"
         and item["as_of_date"] == "2026-01-05"
     )
-    observation["nav"] = {"status": "UNAVAILABLE", "reason": "SOURCE_NOT_READY"}
+    observation["nav"] = {
+        "currency": "USD",
+        "status": "UNAVAILABLE",
+        "reason": "SOURCE_NOT_READY",
+    }
     _write_json(inputs["ledger"], ledger)
     _refresh_ledger_identity(inputs)
 
@@ -1094,6 +1245,147 @@ def test_predecessor_closing_date_is_the_xirr_opening_date(
     )
 
 
+def test_xirr_diagnostic_is_unavailable_when_cashflows_have_multiple_roots(
+    manifest_module: Any,
+) -> None:
+    """A precise XIRR number is misleading when the cashflow stream is non-unique.
+
+    For annual dates these amounts give the NPV polynomial
+    ``-100 + 350x - 350x^2 + 100x^3`` where ``x = 1 / (1 + rate)``.
+    It has three valid roots: -50%, 0%, and +100%.
+    """
+    cashflows = [
+        (manifest_module.date(2025, 1, 1), Decimal("-100")),
+        (manifest_module.date(2026, 1, 1), Decimal("350")),
+        (manifest_module.date(2027, 1, 1), Decimal("-350")),
+        (manifest_module.date(2028, 1, 1), Decimal("100")),
+    ]
+
+    assert manifest_module.xirr(cashflows) is None
+
+
+@pytest.mark.parametrize(
+    ("terminal_value", "expected"),
+    [("0.02", "-0.98"), ("100", "99")],
+)
+def test_xirr_does_not_drop_unique_roots_outside_implicit_solver_bounds(
+    manifest_module: Any, terminal_value: str, expected: str
+) -> None:
+    """A unique economically admissible root must not be lost to hidden bounds.
+
+    These annual cashflows each have exactly one sign change, hence one root
+    on r > -1 under the XIRR equation.  The current implementation silently
+    returns None for the -98% and +9,900% roots because it searches only
+    [-95%, +5,000%], despite no such admissibility bounds being in the
+    manifest contract.
+    """
+    cashflows = [
+        (manifest_module.date(2025, 1, 1), manifest_module.Decimal("-1")),
+        (manifest_module.date(2026, 1, 1), manifest_module.Decimal(terminal_value)),
+    ]
+
+    actual = manifest_module.xirr(cashflows)
+
+    assert actual is not None
+    assert abs(actual - manifest_module.Decimal(expected)) < manifest_module.Decimal(
+        "1e-30"
+    )
+
+
+def test_predecessor_continuity_annualized_ronc_counts_known_opening_exposure(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The annualization interval starts at a trusted predecessor close.
+
+    This is deliberately end-to-end: the delayed first successor NAV is legal
+    because the predecessor's closing NAV supplies the opening capital and the
+    first observation link covers the intervening exposure.
+    """
+    inputs = _write_valid_inputs(tmp_path)
+    ledger = json.loads(inputs["ledger"].read_text(encoding="utf-8"))
+    ledger["nav_observations"] = [
+        *ledger["nav_observations"][:3],
+        {
+            "account_id": "synthetic-account",
+            "as_of_date": "2026-01-13",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
+        },
+        {
+            "account_id": "synthetic-account",
+            "as_of_date": "2026-06-01",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
+        },
+        {
+            "account_id": "synthetic-account",
+            "as_of_date": "2027-01-03",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "77"},
+        },
+    ]
+    _write_json(inputs["ledger"], ledger)
+    _refresh_ledger_identity(inputs)
+
+    manifest = _manifest_from_cli(manifest_module, inputs, capsys)
+    successor = manifest["rows"][1]
+
+    assert successor["opening_basis"] == "PREDECESSOR_CLOSING_NAV"
+    assert successor["observation_trace"]["links"][0]["start_date"] == "2026-01-03"
+    assert Decimal(successor["return_on_net_capital"]) == Decimal("0.1")
+    assert Decimal(successor["annualized_return_on_net_capital"]) == Decimal("0.1")
+
+
+def test_semantic_validation_requires_predecessor_link_to_end_at_first_observed_nav(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A predecessor bridge must terminate at the row's first NAV date.
+
+    The trace validator already requires the predecessor link to start before
+    the row start, but without this end-date binding a forged trace can move
+    that link past the first observed NAV while retaining every displayed
+    financial number and all link arithmetic.
+    """
+    inputs = _write_valid_inputs(tmp_path)
+    ledger = json.loads(inputs["ledger"].read_text(encoding="utf-8"))
+    successor_observations = [
+        {
+            "account_id": "synthetic-account",
+            "as_of_date": "2026-01-13",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
+        },
+        {
+            "account_id": "synthetic-account",
+            "as_of_date": "2026-06-01",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
+        },
+        {
+            "account_id": "synthetic-account",
+            "as_of_date": "2027-01-03",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "77"},
+        },
+    ]
+    ledger["nav_observations"] = [
+        *ledger["nav_observations"][:3],
+        *successor_observations,
+    ]
+    _write_json(inputs["ledger"], ledger)
+    _refresh_ledger_identity(inputs)
+
+    manifest = _manifest_from_cli(manifest_module, inputs, capsys)
+    successor = manifest["rows"][1]
+    links = successor["observation_trace"]["links"]
+    assert successor["start"] == "2026-01-13"
+    assert links[0]["end_date"] == successor["start"]
+
+    links[0]["end_date"] = "2026-01-14"
+    links[1]["start_date"] = "2026-01-14"
+
+    with pytest.raises(manifest_module.ManifestError, match="observation trace"):
+        manifest_module.validate_manifest_schema(manifest)
+
+
 def test_assignment_projection_and_continuity_handoff_are_semantic_constraints(
     manifest_module: Any,
     tmp_path: Path,
@@ -1115,8 +1407,14 @@ def test_assignment_projection_and_continuity_handoff_are_semantic_constraints(
     successor["net_capital"] = "71"
     successor["gain"] = "9"
     successor["return_on_net_capital"] = str(Decimal(9) / Decimal(71))
+    span_days = (
+        manifest_module.date.fromisoformat(successor["end"])
+        - manifest_module.date.fromisoformat(
+            successor["observation_trace"]["links"][0]["start_date"]
+        )
+    ).days
     successor["annualized_return_on_net_capital"] = str(
-        Decimal(9) / Decimal(71) * Decimal(365) / Decimal(2)
+        Decimal(9) / Decimal(71) * Decimal(365) / Decimal(span_days)
     )
     successor["observation_trace"]["links"][0]["base_nav"] = "71"
     with pytest.raises(
@@ -1515,6 +1813,7 @@ def test_classified_event_reconciliation_rejects_non_bijective_records(
     manifest_module: Any, events: list[dict[str, str]], message: str
 ) -> None:
     ledger = {
+        "accounting_currency": "USD",
         "nav_observations": [],
         "flows": [
             {
@@ -1522,26 +1821,29 @@ def test_classified_event_reconciliation_rejects_non_bijective_records(
                 "account_id": "account-1",
                 "event_date": "2026-01-01",
                 "flow_type": "EXTERNAL_CONTRIBUTION",
-                "amount": {"value": "10"},
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "10"},
             },
             {
                 "record_id": "raw-2",
                 "account_id": "account-1",
                 "event_date": "2026-01-02",
                 "flow_type": "EXTERNAL_CONTRIBUTION",
-                "amount": {"value": "20"},
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
             },
         ],
     }
 
     with pytest.raises(manifest_module.ManifestError, match=message):
-        manifest_module.validate_classified_flow_coverage(ledger, events)
+        manifest_module.validate_classified_flow_coverage(
+            ledger, events, _flow_classification_rules()
+        )
 
 
 def test_classified_event_reconciliation_rejects_ambiguous_transfer(
     manifest_module: Any,
 ) -> None:
     ledger = {
+        "accounting_currency": "USD",
         "nav_observations": [],
         "flows": [
             {
@@ -1549,24 +1851,332 @@ def test_classified_event_reconciliation_rejects_ambiguous_transfer(
                 "account_id": "account-a",
                 "event_date": "2026-01-01",
                 "flow_type": "ACCOUNT_TRANSFER",
-                "amount": {"value": "10"},
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "10"},
             },
             {
                 "record_id": "raw-b",
                 "account_id": "account-b",
                 "event_date": "2026-01-01",
                 "flow_type": "ACCOUNT_TRANSFER",
-                "amount": {"value": "-10"},
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-10"},
             },
             {
                 "record_id": "raw-c",
                 "account_id": "account-c",
                 "event_date": "2026-01-01",
                 "flow_type": "ACCOUNT_TRANSFER",
-                "amount": {"value": "-10"},
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-10"},
             },
         ],
     }
 
     with pytest.raises(manifest_module.ManifestError, match="unpaired or ambiguous"):
-        manifest_module.validate_classified_flow_coverage(ledger, [])
+        manifest_module.validate_classified_flow_coverage(
+            ledger, [], _flow_classification_rules()
+        )
+
+
+def test_internal_prefix_transfer_requires_exact_opposite_counterparty(
+    manifest_module: Any,
+) -> None:
+    ledger = {
+        "accounting_currency": "USD",
+        "nav_observations": [],
+        "flows": [
+            {
+                "record_id": "orphan-internal",
+                "account_id": "account-a",
+                "event_date": "2026-01-01",
+                "flow_type": "TRANSFER:INTERNAL:ORPHAN",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+            }
+        ],
+    }
+    events = [
+        {
+            "event_id": "classified-orphan",
+            "source_record_id": "orphan-internal",
+            "account_id": "account-a",
+            "event_date": "2026-01-01",
+            "amount": "100",
+            "disposition": "INTERNAL",
+        }
+    ]
+
+    with pytest.raises(manifest_module.ManifestError, match="unpaired or ambiguous"):
+        manifest_module.validate_classified_flow_coverage(
+            ledger, events, _flow_classification_rules()
+        )
+
+
+def test_external_withdrawal_rejects_positive_amount_direction(
+    manifest_module: Any,
+) -> None:
+    ledger = {
+        "accounting_currency": "USD",
+        "nav_observations": [],
+        "flows": [
+            {
+                "record_id": "wrong-sign-withdrawal",
+                "account_id": "account-a",
+                "event_date": "2026-01-01",
+                "flow_type": "EXTERNAL_WITHDRAWAL",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+            }
+        ],
+    }
+    events = [
+        {
+            "event_id": "classified-wrong-sign",
+            "source_record_id": "wrong-sign-withdrawal",
+            "account_id": "account-a",
+            "event_date": "2026-01-01",
+            "amount": "100",
+            "disposition": "EXTERNAL",
+        }
+    ]
+
+    with pytest.raises(manifest_module.ManifestError, match="amount sign"):
+        manifest_module.validate_classified_flow_coverage(
+            ledger, events, _flow_classification_rules()
+        )
+
+
+def _coverage_ledger(flows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"accounting_currency": "USD", "nav_observations": [], "flows": flows}
+
+
+def _raw_flow(
+    record_id: str,
+    *,
+    account_id: str = "account-a",
+    event_date: str = "2026-01-01",
+    flow_type: str,
+    amount: str,
+) -> dict[str, Any]:
+    return {
+        "record_id": record_id,
+        "account_id": account_id,
+        "event_date": event_date,
+        "flow_type": flow_type,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+    }
+
+
+def _classified_flow(
+    event_id: str,
+    source_record_id: str,
+    *,
+    account_id: str,
+    event_date: str,
+    amount: str,
+    disposition: str,
+    counterparty_source_record_id: str | None = None,
+) -> dict[str, Any]:
+    event = {
+        "event_id": event_id,
+        "source_record_id": source_record_id,
+        "account_id": account_id,
+        "event_date": event_date,
+        "amount": amount,
+        "disposition": disposition,
+    }
+    if counterparty_source_record_id is not None:
+        event["counterparty_source_record_id"] = counterparty_source_record_id
+    return event
+
+
+def test_external_contribution_rejects_negative_amount_direction(
+    manifest_module: Any,
+) -> None:
+    ledger = _coverage_ledger(
+        [
+            _raw_flow(
+                "negative-contribution", flow_type="EXTERNAL_CONTRIBUTION", amount="-10"
+            )
+        ]
+    )
+    events = [
+        _classified_flow(
+            "classified-negative-contribution",
+            "negative-contribution",
+            account_id="account-a",
+            event_date="2026-01-01",
+            amount="-10",
+            disposition="EXTERNAL",
+        )
+    ]
+
+    with pytest.raises(manifest_module.ManifestError, match="amount sign"):
+        manifest_module.validate_classified_flow_coverage(
+            ledger, events, _flow_classification_rules()
+        )
+
+
+@pytest.mark.parametrize(
+    "flow_type", ["EXTERNAL_PROVIDER_TRANSFER", "DEPOSIT_OR_WITHDRAWAL"]
+)
+def test_zero_nonzero_flow_rejects_zero_amount(
+    manifest_module: Any, flow_type: str
+) -> None:
+    ledger = _coverage_ledger([_raw_flow("zero-flow", flow_type=flow_type, amount="0")])
+    events = [
+        _classified_flow(
+            "classified-zero-flow",
+            "zero-flow",
+            account_id="account-a",
+            event_date="2026-01-01",
+            amount="0",
+            disposition="EXTERNAL",
+        )
+    ]
+
+    with pytest.raises(manifest_module.ManifestError, match="amount sign"):
+        manifest_module.validate_classified_flow_coverage(
+            ledger, events, _flow_classification_rules()
+        )
+
+
+@pytest.mark.parametrize("amount", ["10", "-10"])
+def test_deposit_or_withdrawal_accepts_both_amount_directions(
+    manifest_module: Any, amount: str
+) -> None:
+    ledger = _coverage_ledger(
+        [
+            _raw_flow(
+                "bidirectional-flow", flow_type="DEPOSIT_OR_WITHDRAWAL", amount=amount
+            )
+        ]
+    )
+    events = [
+        _classified_flow(
+            "classified-bidirectional-flow",
+            "bidirectional-flow",
+            account_id="account-a",
+            event_date="2026-01-01",
+            amount=amount,
+            disposition="EXTERNAL",
+        )
+    ]
+
+    reconciled = manifest_module.validate_classified_flow_coverage(
+        ledger, events, _flow_classification_rules()
+    )
+    assert reconciled[0]["amount"] == manifest_module.Decimal(amount)
+
+
+def test_internal_prefix_transfer_accepts_valid_paired_counterparties(
+    manifest_module: Any,
+) -> None:
+    ledger = _coverage_ledger(
+        [
+            _raw_flow(
+                "prefix-in",
+                account_id="account-a",
+                flow_type="TRANSFER:INTERNAL:ACME",
+                amount="100",
+            ),
+            _raw_flow(
+                "prefix-out",
+                account_id="account-b",
+                flow_type="TRANSFER:INTERNAL:ACME",
+                amount="-100",
+            ),
+        ]
+    )
+    events = [
+        _classified_flow(
+            "classified-prefix-in",
+            "prefix-in",
+            account_id="account-a",
+            event_date="2026-01-01",
+            amount="100",
+            disposition="INTERNAL",
+            counterparty_source_record_id="prefix-out",
+        ),
+        _classified_flow(
+            "classified-prefix-out",
+            "prefix-out",
+            account_id="account-b",
+            event_date="2026-01-01",
+            amount="-100",
+            disposition="INTERNAL",
+            counterparty_source_record_id="prefix-in",
+        ),
+    ]
+
+    reconciled = manifest_module.validate_classified_flow_coverage(
+        ledger, events, _flow_classification_rules()
+    )
+    assert [event["counterparty_source_record_id"] for event in reconciled] == [
+        "prefix-out",
+        "prefix-in",
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutated_pair",
+    [
+        ("2026-01-02", "account-b", "-100"),  # wrong date
+        ("2026-01-01", "account-a", "-100"),  # same account
+        ("2026-01-01", "account-b", "-99"),  # wrong amount
+    ],
+)
+def test_internal_prefix_transfer_rejects_invalid_counterparty_pair(
+    manifest_module: Any, mutated_pair: tuple[str, str, str]
+) -> None:
+    event_date, account_id, amount = mutated_pair
+    ledger = _coverage_ledger(
+        [
+            _raw_flow(
+                "prefix-in",
+                account_id="account-a",
+                flow_type="TRANSFER:INTERNAL:ACME",
+                amount="100",
+            ),
+            _raw_flow(
+                "prefix-out",
+                account_id=account_id,
+                event_date=event_date,
+                flow_type="TRANSFER:INTERNAL:ACME",
+                amount=amount,
+            ),
+        ]
+    )
+
+    with pytest.raises(manifest_module.ManifestError, match="unpaired or ambiguous"):
+        manifest_module.validate_classified_flow_coverage(
+            ledger, [], _flow_classification_rules()
+        )
+
+
+def test_internal_prefix_transfer_rejects_multiple_counterparty_candidates(
+    manifest_module: Any,
+) -> None:
+    ledger = _coverage_ledger(
+        [
+            _raw_flow(
+                "prefix-in",
+                account_id="account-a",
+                flow_type="TRANSFER:INTERNAL:ACME",
+                amount="100",
+            ),
+            _raw_flow(
+                "prefix-out-1",
+                account_id="account-b",
+                flow_type="TRANSFER:INTERNAL:ACME",
+                amount="-100",
+            ),
+            _raw_flow(
+                "prefix-out-2",
+                account_id="account-c",
+                flow_type="TRANSFER:INTERNAL:ACME",
+                amount="-100",
+            ),
+        ]
+    )
+
+    with pytest.raises(manifest_module.ManifestError, match="unpaired or ambiguous"):
+        manifest_module.validate_classified_flow_coverage(
+            ledger, [], _flow_classification_rules()
+        )

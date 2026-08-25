@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "account_summary",
+    "account_manifest",
     "advisory",
     "allocations",
     "attribution_dispositions",
@@ -41,12 +42,32 @@
     "weekly_returns"
   ],
   "properties": {
-    "panel_schema_version": { "const": 18 },
+    "panel_schema_version": { "const": 20 },
+    "account_manifest": {
+      "anyOf": [
+        { "$ref": "#/$defs/account_manifest_v3" },
+        { "type": "null" }
+      ]
+    },
     "meta": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["baseline_generation_id", "candidate_driver_map_sha256", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "freshness_evaluated_on", "hwm_policy_sha256", "hwm_status_code_version", "hwm_status_semantics", "panel_mode", "portfolio_as_of", "replication_generation_id", "replication_sha256", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "strategy_evidence_source", "template_hashes", "underwriting_policy_sha256", "weekly_returns_generation_id", "weekly_returns_sha256"],
+      "required": ["account_manifest_authority_profile", "account_manifest_verification", "account_manifest_sha256", "account_manifest_size_bytes", "baseline_generation_id", "candidate_driver_map_sha256", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "freshness_evaluated_on", "hwm_policy_sha256", "hwm_status_code_version", "hwm_status_semantics", "panel_mode", "portfolio_as_of", "replication_generation_id", "replication_sha256", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "strategy_evidence_source", "template_hashes", "underwriting_policy_sha256", "weekly_returns_generation_id", "weekly_returns_sha256"],
       "properties": {
+        "account_manifest_authority_profile": { "enum": ["INDEPENDENT_EXACT_REBUILD", "INTERNAL_VALIDATION_ONLY_NON_RELEASEABLE", "NOT_SUPPLIED_NON_RELEASEABLE"] },
+        "account_manifest_verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "method", "producer_readiness", "publication_readiness"],
+          "properties": {
+            "status": {"enum": ["PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED", "INTERNAL_SCHEMA_AND_SEMANTIC_VALIDATION_ONLY", "NOT_SUPPLIED"]},
+            "method": {"enum": ["EXACT_REBUILD_REPORT_BASELINE_CANONICAL_POLICY_AND_TEMPLATE_BOUND", "SELF_CONTAINED_SCHEMA_AND_DERIVATION_CHECKS", "NONE"]},
+            "producer_readiness": {"anyOf": [{"type": "object"}, {"type": "null"}]},
+            "publication_readiness": {"enum": ["READY", "NOT_READY"]}
+          }
+        },
+        "account_manifest_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "account_manifest_size_bytes": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
         "baseline_generation_id": { "$ref": "#/$defs/hash" },
         "candidate_driver_map_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "correlation_generation_id": { "$ref": "#/$defs/hash" },
@@ -68,7 +89,7 @@
         "source_shell_hashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/hash" } },
         "strategy_evidence_as_of": { "type": ["string", "null"], "format": "date" },
         "strategy_evidence_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
-        "strategy_evidence_source": { "const": "CANONICAL_PORTFOLIO_REPORT" },
+        "strategy_evidence_source": { "enum": ["CANONICAL_PORTFOLIO_REPORT", "LEGACY_COMPATIBILITY_INPUT", null] },
         "template_hashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/hash" } },
         "underwriting_policy_sha256": { "$ref": "#/$defs/hash" },
         "weekly_returns_generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
@@ -223,7 +244,7 @@
         "lenses": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/properties/factor_analysis" }
+          "items": { "$ref": "#/$defs/decomposition_lens" }
         },
         "modes": {
           "type": "object",
@@ -233,12 +254,12 @@
             "LIVE_ONLY": {
               "type": "array",
               "minItems": 1,
-              "items": { "$ref": "#/properties/factor_analysis" }
+              "items": { "$ref": "#/$defs/decomposition_lens" }
             },
             "LIVE_PLUS_BACKTEST": {
               "type": "array",
               "minItems": 1,
-              "items": { "$ref": "#/properties/factor_analysis" }
+              "items": { "$ref": "#/$defs/decomposition_lens" }
             }
           }
         },
@@ -352,6 +373,7 @@
       ]
     },
     "hwm_portable_proof": { "$ref": "#/$defs/portable_hwm_proof" },
+    "hwm_governed_proof": { "$ref": "#/$defs/governed_hwm_proof" },
     "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "performance": { "$ref": "#/$defs/rows" },
     "positions": { "$ref": "#/$defs/rows" },
@@ -479,9 +501,173 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "meta": {
+            "properties": { "account_manifest_authority_profile": { "const": "NOT_SUPPLIED_NON_RELEASEABLE" } },
+            "required": ["account_manifest_authority_profile"]
+          }
+        },
+        "required": ["meta"]
+      },
+      "then": {
+        "properties": {
+          "account_manifest": { "type": "null" },
+          "meta": {
+            "properties": {
+              "account_manifest_sha256": { "type": "null" },
+              "account_manifest_size_bytes": { "type": "null" },
+              "account_manifest_verification": {
+                "properties": {
+                  "status": {"const": "NOT_SUPPLIED"},
+                  "method": {"const": "NONE"},
+                  "producer_readiness": {"type": "null"},
+                  "publication_readiness": {"const": "NOT_READY"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"meta": {"properties": {"account_manifest_authority_profile": {"const": "INDEPENDENT_EXACT_REBUILD"}}}},
+        "required": ["meta"]
+      },
+      "then": {
+        "properties": {"meta": {"properties": {"account_manifest_verification": {
+          "properties": {
+            "status": {"const": "PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED"},
+            "method": {"const": "EXACT_REBUILD_REPORT_BASELINE_CANONICAL_POLICY_AND_TEMPLATE_BOUND"},
+            "producer_readiness": {"type": "object"},
+            "publication_readiness": {"const": "READY"}
+          }
+        }}}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"meta": {"properties": {"account_manifest_authority_profile": {"const": "INTERNAL_VALIDATION_ONLY_NON_RELEASEABLE"}}}},
+        "required": ["meta"]
+      },
+      "then": {
+        "properties": {"meta": {"properties": {"account_manifest_verification": {
+          "properties": {
+            "status": {"const": "INTERNAL_SCHEMA_AND_SEMANTIC_VALIDATION_ONLY"},
+            "method": {"const": "SELF_CONTAINED_SCHEMA_AND_DERIVATION_CHECKS"},
+            "producer_readiness": {"type": "object"},
+            "publication_readiness": {"const": "NOT_READY"}
+          }
+        }}}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "meta": {
+            "properties": {
+              "account_manifest_authority_profile": {
+                "enum": ["INDEPENDENT_EXACT_REBUILD", "INTERNAL_VALIDATION_ONLY_NON_RELEASEABLE"]
+              }
+            },
+            "required": ["account_manifest_authority_profile"]
+          }
+        },
+        "required": ["meta"]
+      },
+      "then": {
+        "properties": {
+          "account_manifest": { "$ref": "#/$defs/account_manifest_v3" },
+          "meta": {
+            "properties": {
+              "account_manifest_sha256": { "$ref": "#/$defs/hash" },
+              "account_manifest_size_bytes": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
+    "decomposition_lens": {
+      "type": "object",
+      "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "lens_id", "lens_label", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "return_basis", "series", "source_sha256", "sources", "unavailable_count"],
+      "properties": {
+        "analytics_hash": { "$ref": "#/$defs/hash" },
+        "analytics_schema_version": { "enum": [1, 2] },
+        "as_of_date": { "type": "string", "format": "date" },
+        "available_count": { "type": "integer", "minimum": 0 },
+        "diagnostic_count": { "type": "integer", "minimum": 0 },
+        "dynamic_available_count": { "type": "integer", "minimum": 0 },
+        "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
+        "generation_id": { "$ref": "#/$defs/hash" },
+        "lens_id": { "type": "string", "minLength": 1 },
+        "lens_label": { "type": "string", "minLength": 1 },
+        "method_label": { "const": "MPI_INFORMED_NON_EQUIVALENT" },
+        "methodology_manifest_sha256": { "$ref": "#/$defs/hash" },
+        "methodology_version": { "type": "string", "minLength": 1 },
+        "plan_bundle_id": { "$ref": "#/$defs/hash" },
+        "proxy_governance": { "type": "object" },
+        "return_basis": { "type": "string", "minLength": 1 },
+        "series": { "type": "array" },
+        "source_sha256": { "$ref": "#/$defs/hash" },
+        "sources": { "anyOf": [{ "type": "array", "minItems": 1 }, { "type": "object", "minProperties": 1 }] },
+        "unavailable_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "decimal": { "type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" },
+    "account_manifest_v3": {
+      "$ref": "https://github.com/dachent/quant_engine/schemas/portfolio/account-strategy-manifest.schema.json"
+    },
     "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "governed_hwm_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status", "financial_acceptance", "assurance_profile", "policy_id", "policy_sha256", "calendar_sha256", "input_generation_sha256", "upstream_receipt_sha256", "receipt_sha256", "input_authority_class", "return_basis", "evaluated_on", "complete_through", "calculation_age_days", "maximum_age_days", "age_status", "warnings", "current_index", "current_hwm", "current_drawdown", "maximum_drawdown", "index_path"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "status": { "const": "AVAILABLE" },
+        "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+        "assurance_profile": { "type": "string", "minLength": 1 },
+        "policy_id": { "const": "PORT-HWM-4" },
+        "policy_sha256": { "$ref": "#/$defs/hash" },
+        "calendar_sha256": { "$ref": "#/$defs/hash" },
+        "input_generation_sha256": { "$ref": "#/$defs/hash" },
+        "upstream_receipt_sha256": { "$ref": "#/$defs/hash" },
+        "receipt_sha256": { "$ref": "#/$defs/hash" },
+        "input_authority_class": { "const": "ACCEPTED_GOVERNED" },
+        "return_basis": { "const": "ACCOUNT_LIVE_NET" },
+        "evaluated_on": { "type": "string", "format": "date" },
+        "complete_through": { "type": "string", "format": "date" },
+        "calculation_age_days": { "type": "integer", "minimum": 0 },
+        "maximum_age_days": { "type": "integer", "minimum": 0 },
+        "age_status": { "enum": ["CURRENT", "COMPLETE_DATA_AGE_WARNING"] },
+        "warnings": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "current_index": { "$ref": "#/$defs/decimal" },
+        "current_hwm": { "$ref": "#/$defs/decimal" },
+        "current_drawdown": { "$ref": "#/$defs/decimal" },
+        "maximum_drawdown": { "$ref": "#/$defs/decimal" },
+        "index_path": { "$ref": "#/$defs/hwm_index_path" }
+      }
+    },
+    "hwm_index_path": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["as_of", "index", "hwm", "drawdown"],
+        "properties": {
+          "as_of": { "type": "string", "format": "date" },
+          "index": { "$ref": "#/$defs/decimal" },
+          "hwm": { "$ref": "#/$defs/decimal" },
+          "drawdown": { "$ref": "#/$defs/decimal" }
+        }
+      }
+    },
     "portable_hwm_proof": {
       "type": "object",
       "additionalProperties": false,

@@ -8,6 +8,7 @@
   "required": [
     "schema_version",
     "artifact",
+    "accounting_currency",
     "authority_readiness",
     "source_identities",
     "epoch_continuity",
@@ -15,8 +16,9 @@
     "rows"
   ],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "artifact": {"const": "account-strategy-manifest"},
+    "accounting_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
     "authority_readiness": {
       "type": "object",
       "additionalProperties": false,
@@ -89,10 +91,9 @@
     "baseline_generation_source": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generation_id", "pointer_artifact", "artifact"],
+      "required": ["generation_id", "artifact"],
       "properties": {
         "generation_id": {"$ref": "#/$defs/sha256"},
-        "pointer_artifact": {"$ref": "#/$defs/source_artifact"},
         "artifact": {"$ref": "#/$defs/source_artifact"}
       }
     },
@@ -103,6 +104,7 @@
         "ledger",
         "baseline",
         "classified_flows",
+        "flow_classification_policy",
         "admission_policy",
         "assignment",
         "calculation_code"
@@ -116,18 +118,38 @@
           "required": ["artifact", "schema_version", "ledger_identity", "classification_policy"],
           "properties": {
             "artifact": {"$ref": "#/$defs/source_artifact"},
-            "schema_version": {"const": 2},
+            "schema_version": {"const": 3},
             "ledger_identity": {"$ref": "#/$defs/ledger_generation_source"},
             "classification_policy": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["policy_id", "policy_version", "policy_sha256"],
+              "required": ["policy_id", "policy_version", "policy_as_of_date", "policy_sha256"],
               "properties": {
                 "policy_id": {"type": "string", "minLength": 1},
                 "policy_version": {"type": "string", "minLength": 1},
+                "policy_as_of_date": {"$ref": "#/$defs/date"},
                 "policy_sha256": {"$ref": "#/$defs/sha256"}
               }
             }
+          }
+        },
+        "flow_classification_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["policy_id", "policy_version", "event_dispositions", "artifact"],
+          "properties": {
+            "policy_id": {"type": "string", "minLength": 1},
+            "policy_version": {"type": "string", "minLength": 1},
+            "event_dispositions": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["exact", "prefix"],
+              "properties": {
+                "exact": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+                "prefix": {"type": "array", "items": {"type": "object"}}
+              }
+            },
+            "artifact": {"$ref": "#/$defs/source_artifact"}
           }
         },
         "admission_policy": {

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -23,6 +24,9 @@ const { chromium } = await import(moduleUrl);
 const html = path.resolve(options.html);
 const output = path.resolve(options.output);
 const baseUrl = pathToFileURL(html).href;
+const candidateRecordBytes = await readFile(path.join(path.dirname(html), "candidate.json"));
+const candidateRecord = JSON.parse(candidateRecordBytes.toString("utf8"));
+const candidateRecordSha256 = createHash("sha256").update(candidateRecordBytes).digest("hex");
 const launchOptions = {
   headless: true,
   ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH
@@ -141,6 +145,8 @@ try {
     await page.screenshot({ path: path.join(folder, "screenshot.png"), fullPage: true });
     if (capture.pdf) await page.pdf({ path: path.join(folder, "page.pdf"), printBackground: true, preferCSSPageSize: true });
     const manifest = {
+      artifact_sha256: candidateRecord.artifact_sha256,
+      candidate_record_sha256: candidateRecordSha256,
       console_event_count: consoleEvents.length,
       console_events_path: path.join(folder, "console-events.json"),
       device_scale_factor: 1,

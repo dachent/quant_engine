@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -27,6 +28,10 @@ const { chromium } = await import(moduleUrl);
 const html = path.resolve(options.html);
 const output = path.resolve(options.output);
 const panelId = path.basename(path.dirname(html));
+const candidateRecordBytes = await readFile(path.join(path.dirname(html), "candidate.json"));
+const candidateRecord = JSON.parse(candidateRecordBytes.toString("utf8"));
+const candidateRecordSha256 = createHash("sha256").update(candidateRecordBytes).digest("hex");
+const dashboardData = JSON.parse(await readFile(path.join(path.dirname(html), "data", "dashboard_data.json"), "utf8"));
 const includeCandidates = options["exclude-candidates"] !== "true";
 const browser = await chromium.launch({
   headless: true,
@@ -43,6 +48,99 @@ await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
 const checks = [];
+function exactDecimal(value) {
+  const source = typeof value === "string" && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) ? value : null;
+  if (source == null) return null;
+  const negative = source.startsWith("-");
+  const unsigned = negative ? source.slice(1) : source;
+  const [whole, fraction = ""] = unsigned.split(".");
+  return { magnitude: BigInt(`${whole}${fraction}`), negative, scale: fraction.length };
+}
+function exactFixed(value, places = 2, scaleAdjustment = 0) {
+  const parsed = exactDecimal(value);
+  if (parsed == null) return "—";
+  const scale = parsed.scale + scaleAdjustment;
+  let rounded;
+  if (scale <= places) {
+    rounded = parsed.magnitude * (10n ** BigInt(places - scale));
+  } else {
+    const divisor = 10n ** BigInt(scale - places);
+    rounded = parsed.magnitude / divisor;
+    const remainder = parsed.magnitude % divisor;
+    const doubled = remainder * 2n;
+    if (doubled > divisor || (doubled === divisor && rounded % 2n !== 0n)) rounded += 1n;
+  }
+  let text = rounded.toString().padStart(places + 1, "0");
+  const decimals = places ? text.slice(-places) : "";
+  const integer = places ? text.slice(0, -places) : text;
+  const grouped = integer.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const signed = parsed.negative && rounded !== 0n ? `-${grouped}` : grouped;
+  return places ? `${signed}.${decimals}` : signed;
+}
+const exactMoney = (value) => exactFixed(value, 2);
+const exactPct = (value) => `${exactFixed(value, 2, -2)}%`;
+const epochManifest = dashboardData.account_manifest;
+const epochDom = await page.locator("#account-manifest-table").evaluate((table) => ({
+  caption: table.querySelector("caption")?.textContent?.trim() ?? null,
+  headers: Array.from(table.querySelectorAll("thead th"), (node) => node.textContent?.trim()),
+  rows: Array.from(table.querySelectorAll("tbody tr"), (row) => ({
+    accountId: row.getAttribute("data-account-id"),
+    cells: Array.from(row.querySelectorAll("td"), (cell) => ({
+      primary: cell.childNodes[0]?.textContent?.trim() ?? "",
+      secondary: cell.querySelector(".cell-secondary")?.textContent?.trim() ?? null,
+      text: cell.textContent?.trim() ?? "",
+    })),
+  })),
+}));
+const epochAuthority = await page.locator("#account-manifest-authority").textContent();
+const epochHeaders = [
+  "Account", "Strategy", "Observed interval", "Invested", "Withdrawn", "Net capital",
+  "Current", "Gain", "RONC", "Ann. RONC", "Observed return", "Observed HWM", "Observed Max DD",
+];
+let epochValuesMatch = false;
+const epochEvidence = { authority: epochAuthority, caption: epochDom.caption, headers: epochDom.headers, rows: epochDom.rows };
+if (!epochManifest || !Array.isArray(epochManifest.rows)) {
+  epochValuesMatch = epochAuthority?.trim() === "Manifest not supplied — non-releaseable"
+    && epochDom.headers.join("|") === "Epoch manifest unavailable"
+    && epochDom.caption === "Epoch manifest unavailable"
+    && epochDom.rows.length === 1
+    && epochDom.rows[0].cells[0].text === "No account-manifest evidence was supplied to this build";
+} else {
+  const expectedAuthority = dashboardData.meta.account_manifest_authority_profile === "INDEPENDENT_EXACT_REBUILD"
+    ? "Independent exact rebuild"
+    : "Internal validation only — non-releaseable";
+  const rowMatches = epochManifest.rows.length === epochDom.rows.length && epochManifest.rows.every((row, index) => {
+    const rendered = epochDom.rows[index];
+    if (!rendered || rendered.accountId !== row.account_id || rendered.cells.length !== 13) return false;
+    if (!rendered.cells[0].text || rendered.cells[1].text !== row.strategy_id) return false;
+    if (row.status !== "OK") {
+      const blocker = row.status === "FLOWS_AFTER_CLOSING_NAV"
+        ? `${row.status}: ${(row.late_flows || []).map((flow) => `${flow.date} ${flow.class} ${exactMoney(flow.value)}`).join("; ") || "late-flow evidence unavailable"}`
+        : `${row.status}: ${row.blocking_reason || "blocking reason unavailable"}`;
+      return rendered.cells[2].primary === row.effective_start
+        && rendered.cells[2].secondary === `${row.effective_end || "open"} · ${blocker}`
+        && rendered.cells.slice(3).every((cell) => cell.text === "—");
+    }
+    const expectedNumbers = [
+      exactMoney(row.invested), exactMoney(row.withdrawn), exactMoney(row.net_capital),
+      exactMoney(row.current_value), exactMoney(row.gain), exactPct(row.return_on_net_capital),
+      exactPct(row.annualized_return_on_net_capital), exactPct(row.observation_linked_return),
+      exactFixed(row.observed_hwm_index, 2), exactPct(row.observed_max_drawdown),
+    ];
+    return rendered.cells[2].primary === row.start
+      && rendered.cells[2].secondary === row.end
+      && rendered.cells.slice(3).every((cell, cellIndex) => cell.text === expectedNumbers[cellIndex]);
+  });
+  epochValuesMatch = epochAuthority?.trim() === expectedAuthority
+    && epochDom.caption === `Epoch manifest by account and strategy — monetary values ${epochManifest.accounting_currency}`
+    && epochDom.headers.join("|") === epochHeaders.join("|")
+    && rowMatches;
+}
+checks.push(check(
+  "Epoch manifest DOM matches exact source values and blockers",
+  epochValuesMatch,
+  epochEvidence,
+));
 await page.evaluate(() => {
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
 });
@@ -412,6 +510,12 @@ checks.push(check(
 ));
 await page.locator("#context-reset").click();
 await page.locator('[data-nav="risk"]').click();
+const hwmStatusText = await page.locator("#hwm-status").textContent();
+checks.push(check(
+  "HWM evidence summary never renders non-finite numbers when optional observation detail is absent",
+  !/(?:^|\W)(?:NaN|Infinity)(?:$|\W)/.test(hwmStatusText || ""),
+  hwmStatusText,
+));
 const historicalGapRows = await page.locator("#historical-gap-table tbody tr").count();
 const historicalGapHeading = await page.locator("#historical-gap-badge").textContent();
 const volatisPerformance = await page.locator("#performance-table tbody tr", { hasText: "Volatis" }).textContent();
@@ -599,7 +703,9 @@ checks.push(check("No console errors occur", consoleErrors.length === 0, console
 
 const result = {
   all_passed: checks.every((item) => item.status === "PASS"),
+  artifact_sha256: candidateRecord.artifact_sha256,
   browser_version: browser.version(),
+  candidate_record_sha256: candidateRecordSha256,
   checks,
   panel_id: panelId,
   scope: includeCandidates ? "FULL" : "NON_CANDIDATE",

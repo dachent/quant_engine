@@ -72,7 +72,7 @@
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
   const emptyRow = (columns, message = "No matching rows") => `<tr><td colspan="${columns}" class="cell-secondary">${safe(message)}</td></tr>`;
-  const tableMarkup = (headers, rows) => `<thead><tr>${headers.map(([label, cls = ""]) => `<th scope="col" class="${cls}">${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
+  const tableMarkup = (headers, rows, caption = null) => `${caption ? `<caption>${safe(caption)}</caption>` : ""}<thead><tr>${headers.map(([label, cls = ""]) => `<th scope="col" class="${cls}">${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
   const strategyByName = (name) => data.strategies.find((row) => row.strategy_name === name);
   const providerName = (providerId) => ({
     alpaca: "Alpaca",
@@ -141,6 +141,16 @@
       : evidence.account?.provider_id || evidence.provider_id;
     const layer = row.nav_evidence_layer === "PROVIDER_LIVE" ? "provider-live" : "account-live";
     return `${providerName(sourceProvider)} ${layer}`;
+  };
+  const hwmObservationSummary = (row) => {
+    const observations = number(row.nav_return_observations);
+    const observationText = observations == null
+      ? `${hwmEvidenceLabel(row)} return observation count unavailable`
+      : `${integer.format(observations)} ${hwmEvidenceLabel(row)} return observations`;
+    const intervalText = row.nav_observed_start && row.nav_observed_end
+      ? ` from ${formatDate(row.nav_observed_start)} through ${formatDate(row.nav_observed_end)}`
+      : "; observation interval unavailable";
+    return `${observationText}${intervalText}`;
   };
   const hwmExclusionNote = () => (data.hwm_summary.excluded_details || []).map((item) => `${item.strategy_name}: ${currencyExact(item.current_value_usd)} · ${item.reason}`).join(" · ") || "No policy exclusions";
   const VIEW_TITLES = {
@@ -345,7 +355,7 @@
     const passes = stress <= Number(data.advisory.hwm_limit);
     $("#stress-bar").innerHTML = `<div class="scenario-row"><div class="scenario-label">Current portfolio</div><div class="scenario-track"><span class="scenario-limit" aria-hidden="true"></span><span class="scenario-fill ${passes ? "pass" : ""}" style="width:${Math.min(100, stress / 0.4 * 100)}%"></span></div><div class="scenario-value ${passes ? "" : "status-text danger"}">${pct(stress)}</div></div><div class="callout callout-danger">Stress exceeds the 15% HWM boundary. This is advisory evidence, not a liquidation instruction.</div>`;
     const unavailableHwmSummary = (data.hwm_summary.uncovered_details || []).map((item) => `${item.strategy_name}: ${currencyExact(item.current_value_usd)} · ${humanStatus(item.qualification_gap)} · last accepted ${formatDate(item.last_accepted_date)} · ${item.freshness_reason || "No freshness reason recorded"}`).join(" · ");
-    const acceptedHwmSummary = acceptedHwmEvidence.map((row) => `${row.strategy_name}: ${integer.format(row.nav_return_observations)} ${hwmEvidenceLabel(row)} return observations from ${formatDate(row.nav_observed_start)} through ${formatDate(row.nav_observed_end)}`).join(" · ");
+    const acceptedHwmSummary = acceptedHwmEvidence.map((row) => `${row.strategy_name}: ${hwmObservationSummary(row)}`).join(" · ");
     const portableProof = data.hwm_portable_proof;
     const portableProofContext = data.advisory.hwm_numerical_status === "AVAILABLE" ? "The governed financial HWM remains independently available; these portable values do not replace it." : "The governed financial HWM remains unavailable; these portable values do not replace or populate it.";
     const portableProofCallout = portableProof ? `<div class="callout callout-neutral"><strong>DEVELOPMENT — NOT FINANCIAL ACCEPTANCE</strong><br>Portable PORT-HWM-4 proof only: path ${portableProof.index_path.map((point) => safe(point.index)).join(" → ")}; index ${safe(portableProof.current_index)}, HWM ${safe(portableProof.current_hwm)}, current drawdown ${pct(portableProof.current_drawdown)}, maximum drawdown ${pct(portableProof.maximum_drawdown)}. Complete data through ${formatDate(portableProof.complete_through)}, evaluated ${formatDate(portableProof.evaluated_on)} (${integer.format(portableProof.calculation_age_days)} days old; ${statusText(portableProof.age_status)}). Receipt ${safe(portableProof.receipt_sha256.slice(0, 12))}…. ${portableProofContext}</div>` : "";
@@ -371,35 +381,105 @@
     renderAccountManifest();
   }
 
-  const moneyExact2 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const manifestMoney = (value) => number(value) == null ? "—" : moneyExact2.format(Number(value));
-  const manifestPct = (value) => number(value) == null ? "—" : `${(Number(value) * 100).toFixed(2)}%`;
+  // Epoch-manifest decimals are evidence values, not browser floating point.
+  // Format exact decimal strings directly so large values and half-even ties do
+  // not change merely because the renderer coerced them through Number.
+  const manifestDecimal = (value) => typeof value === "string" && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) ? value : null;
+  const manifestShift = (value, places) => {
+    const source = manifestDecimal(value);
+    if (source == null) return null;
+    const negative = source.startsWith("-");
+    const unsigned = negative ? source.slice(1) : source;
+    const [whole, fraction = ""] = unsigned.split(".");
+    const digits = whole + fraction;
+    const point = whole.length + places;
+    const rawShifted = point >= digits.length
+      ? `${digits}${"0".repeat(point - digits.length)}`
+      : `${digits.slice(0, point)}.${digits.slice(point)}`;
+    const [shiftedWhole, shiftedFraction = ""] = rawShifted.split(".");
+    const normalizedWhole = shiftedWhole.replace(/^0+(?=\d)/, "") || "0";
+    const shifted = shiftedFraction
+      ? `${normalizedWhole}.${shiftedFraction}`
+      : normalizedWhole;
+    return negative && /[1-9]/.test(shifted) ? `-${shifted}` : shifted;
+  };
+  const manifestFixed = (value, places = 2) => {
+    const source = manifestDecimal(value);
+    if (source == null) return "—";
+    const negative = source.startsWith("-");
+    const unsigned = negative ? source.slice(1) : source;
+    const [whole, rawFraction = ""] = unsigned.split(".");
+    const fraction = rawFraction.padEnd(places + 1, "0");
+    let rounded = BigInt(`${whole}${fraction.slice(0, places) || "0"}`);
+    const next = fraction[places] || "0";
+    const remaining = rawFraction.slice(places + 1);
+    const tie = next === "5" && !/[1-9]/.test(remaining);
+    if (next > "5" || (next === "5" && (!tie || rounded % 2n !== 0n))) rounded += 1n;
+    let text = rounded.toString().padStart(places + 1, "0");
+    const fractional = places ? text.slice(-places) : "";
+    text = places ? `${text.slice(0, -places)}.${fractional}` : text;
+    const [integer, decimals = ""] = text.split(".");
+    const grouped = integer.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    const nonzero = /[1-9]/.test(text);
+    return `${negative && nonzero ? "-" : ""}${grouped}${places ? `.${decimals}` : ""}`;
+  };
+  const manifestNegative = (value) => {
+    const source = manifestDecimal(value);
+    return source != null && source.startsWith("-") && /[1-9]/.test(source);
+  };
+  const manifestMoney = (value) => manifestFixed(value, 2);
+  const manifestPct = (value) => {
+    const shifted = manifestShift(value, 2);
+    return shifted == null ? "—" : `${manifestFixed(shifted, 2)}%`;
+  };
+  const manifestBlockerText = (row) => {
+    if (row.status === "FLOWS_AFTER_CLOSING_NAV") {
+      const lateFlows = Array.isArray(row.late_flows) ? row.late_flows : [];
+      const evidence = lateFlows.map((flow) =>
+        `${safe(flow.date)} ${safe(flow.class)} ${manifestMoney(flow.value)}`
+      ).join("; ");
+      return `${safe(row.status)}: ${evidence || "late-flow evidence unavailable"}`;
+    }
+    return `${safe(row.status)}: ${safe(row.blocking_reason || "blocking reason unavailable")}`;
+  };
 
   function renderAccountManifest() {
     const manifest = data.account_manifest;
     const legend = $("#account-manifest-legend");
     if (!manifest || !Array.isArray(manifest.rows)) {
-      $("#account-manifest-table").innerHTML = tableMarkup([["Epoch manifest unavailable"]], [emptyRow(1, "No account-manifest evidence was supplied to this build")]);
+      $("#account-manifest-table").innerHTML = tableMarkup([["Epoch manifest unavailable"]], [emptyRow(1, "No account-manifest evidence was supplied to this build")], "Epoch manifest unavailable");
       legend.innerHTML = "No epoch-manifest artifact was bound to this panel build; nothing is inferred.";
+      $("#account-manifest-authority").textContent = "Manifest not supplied — non-releaseable";
       return;
     }
+    const authorityProfile = data.meta.account_manifest_authority_profile;
+    const panelVerification = data.meta.account_manifest_verification;
+    const accountingCurrency = String(manifest.accounting_currency || "UNAVAILABLE");
+    $("#account-manifest-authority").textContent = authorityProfile === "INDEPENDENT_EXACT_REBUILD"
+      ? "Independent exact rebuild"
+      : "Internal validation only — non-releaseable";
     const rows = manifest.rows.map((row) => {
-      const label = row.account_number ? safe(row.account_number) : "<span class=\"cell-secondary\">unnumbered</span>";
+      const label = safe(accountLabel(row.account_id));
       if (row.status !== "OK") {
-        return `<tr><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.effective_start)}</td><td><span class="cell-secondary">${safe(row.effective_end || "open")}</span></td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td>no NAV</td></tr>`;
+        return `<tr data-account-id="${safe(row.account_id)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.effective_start)}<span class="cell-secondary">${safe(row.effective_end || "open")} · ${manifestBlockerText(row)}</span></td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td></tr>`;
       }
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric">${manifestMoney(row.invested)}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${Number(row.net_capital) < 0 ? "is-negative" : ""}">${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}</td><td class="numeric ${Number(row.gain) < 0 ? "is-negative" : ""}">${manifestMoney(row.gain)}</td><td class="numeric">${manifestPct(row.mwr)}</td><td class="numeric">${manifestPct(row.annualized_mwr)}</td><td class="numeric">${manifestPct(row.twr)}</td><td class="numeric">${decimal(row.hwm_index, 2)}</td><td class="numeric ${Number(row.max_drawdown) < 0 ? "is-negative" : ""}">${manifestPct(row.max_drawdown)}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric">${manifestMoney(row.invested)}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${manifestNegative(row.net_capital) ? "is-negative" : ""}">${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}</td><td class="numeric ${manifestNegative(row.gain) ? "is-negative" : ""}">${manifestMoney(row.gain)}</td><td class="numeric">${manifestPct(row.return_on_net_capital)}</td><td class="numeric">${manifestPct(row.annualized_return_on_net_capital)}</td><td class="numeric">${manifestPct(row.observation_linked_return)}</td><td class="numeric">${manifestFixed(row.observed_hwm_index, 2)}</td><td class="numeric ${manifestNegative(row.observed_max_drawdown) ? "is-negative" : ""}">${manifestPct(row.observed_max_drawdown)}</td></tr>`;
     });
     $("#account-manifest-table").innerHTML = tableMarkup([
       ["Account"], ["Strategy"], ["Observed interval"],
       ["Invested", "numeric"], ["Withdrawn", "numeric"], ["Net capital", "numeric"],
       ["Current", "numeric"], ["Gain", "numeric"],
-      ["MWR", "numeric"], ["Ann. MWR", "numeric"], ["TWR", "numeric"],
-      ["HWM", "numeric"], ["Max DD", "numeric"],
-    ], rows);
-    legend.innerHTML = `<strong>Definitions.</strong> Invested = opening capital + deposits + internal-in after start (flows on the first funded day ARE the opening). Withdrawn = external withdrawals + internal-out. Net capital = Invested − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital (exact). MWR = Gain ÷ Net capital, annualized as (1+MWR)^(365/days) − 1 from day 366. TWR = flow-adjusted linked daily index. HWM / Max DD = running peak and worst drawdown of that daily index.`;
+      ["RONC", "numeric"], ["Ann. RONC", "numeric"], ["Observed return", "numeric"],
+      ["Observed HWM", "numeric"], ["Observed Max DD", "numeric"],
+    ], rows, `Epoch manifest by account and strategy — monetary values ${accountingCurrency}`);
+    legend.innerHTML = `<strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Invested = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Invested − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is a simple diagnostic. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.`;
     const disclosure = $("#account-manifest-disclosure");
-    const notes = Array.isArray(manifest.reconciliation_disclosure) ? manifest.reconciliation_disclosure : [];
+    const notes = [
+      `Panel authority profile: ${authorityProfile}`,
+      `Panel verification: ${panelVerification.status}; ${panelVerification.method}; publication ${panelVerification.publication_readiness}.`,
+      `Manifest self-declared readiness: ${manifest.authority_readiness.authority_status}; independent verification ${manifest.authority_readiness.independent_authority_verification}; publication ${manifest.authority_readiness.publication_readiness}.`,
+      `Flow reconciliation: ${manifest.flow_reconciliation.status}; ${manifest.flow_reconciliation.method}.`,
+    ];
     if (notes.length) {
       disclosure.hidden = false;
       $("#account-manifest-disclosure-list").innerHTML = notes.map((note) => `<li>${safe(note)}</li>`).join("");
@@ -1261,7 +1341,7 @@
 
   function init() {
     try {
-      if (!data || data.panel_schema_version !== 18) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || data.panel_schema_version !== 20) throw new Error("Embedded dashboard data is missing or unsupported");
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
