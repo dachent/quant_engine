@@ -1,0 +1,331 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/account-strategy-manifest.schema.json",
+  "title": "Account strategy epoch manifest",
+  "description": "Hash-bound, fail-closed account by strategy epoch accounting output.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact",
+    "authority_readiness",
+    "source_identities",
+    "epoch_continuity",
+    "flow_reconciliation",
+    "rows"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "artifact": {"const": "account-strategy-manifest"},
+    "authority_readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_status", "independent_authority_verification", "publication_readiness"],
+      "properties": {
+        "authority_status": {"const": "SOURCE_BOUND_CANDIDATE"},
+        "independent_authority_verification": {"const": "NOT_PERFORMED"},
+        "publication_readiness": {"const": "NOT_READY"}
+      }
+    },
+    "source_identities": {"$ref": "#/$defs/source_identities"},
+    "epoch_continuity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule_id", "status", "rule"],
+      "properties": {
+        "rule_id": {"const": "EXPLICIT_FUNDED_EPOCH_CONTINUITY_V1"},
+        "status": {"const": "POLICY_BOUND_ONLY"},
+        "rule": {"type": "string", "minLength": 1}
+      }
+    },
+    "flow_reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "method"],
+      "properties": {
+        "status": {"const": "ONE_TO_ONE_VERIFIED"},
+        "method": {"const": "EXACT_RAW_RECORD_TO_CLASSIFIED_EVENT_BINDING"}
+      }
+    },
+    "rows": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/row"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "date": {"type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "decimal": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"},
+    "source_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "as_of_date", "schema", "sha256", "size_bytes"],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 1},
+        "as_of_date": {"$ref": "#/$defs/date"},
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "version": {"type": "string", "minLength": 1}
+          }
+        },
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ledger_generation_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "artifact", "identity_artifact"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "artifact": {"$ref": "#/$defs/source_artifact"},
+        "identity_artifact": {"$ref": "#/$defs/source_artifact"}
+      }
+    },
+    "baseline_generation_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "pointer_artifact", "artifact"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "pointer_artifact": {"$ref": "#/$defs/source_artifact"},
+        "artifact": {"$ref": "#/$defs/source_artifact"}
+      }
+    },
+    "source_identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ledger",
+        "baseline",
+        "classified_flows",
+        "admission_policy",
+        "assignment",
+        "calculation_code"
+      ],
+      "properties": {
+        "ledger": {"$ref": "#/$defs/ledger_generation_source"},
+        "baseline": {"$ref": "#/$defs/baseline_generation_source"},
+        "classified_flows": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact", "schema_version", "ledger_identity", "classification_policy"],
+          "properties": {
+            "artifact": {"$ref": "#/$defs/source_artifact"},
+            "schema_version": {"const": 2},
+            "ledger_identity": {"$ref": "#/$defs/ledger_generation_source"},
+            "classification_policy": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["policy_id", "policy_version", "policy_sha256"],
+              "properties": {
+                "policy_id": {"type": "string", "minLength": 1},
+                "policy_version": {"type": "string", "minLength": 1},
+                "policy_sha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          }
+        },
+        "admission_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["policy_id", "policy_version", "artifact", "assignment"],
+          "properties": {
+            "policy_id": {"type": "string", "minLength": 1},
+            "policy_version": {"type": "string", "minLength": 1},
+            "artifact": {"$ref": "#/$defs/source_artifact"},
+            "assignment": {"$ref": "#/$defs/assignment_identity"}
+          }
+        },
+        "assignment": {"$ref": "#/$defs/assignment_identity"},
+        "calculation_code": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact_id", "sha256", "size_bytes"],
+          "properties": {
+            "artifact_id": {"const": "tools/account_strategy_manifest.py"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "size_bytes": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "assignment_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "count"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "observation_trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["links"],
+      "properties": {
+        "links": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["start_date", "end_date", "base_nav", "ending_nav", "net_flow", "factor", "cumulative_index", "running_hwm_index", "drawdown"],
+            "properties": {
+              "start_date": {"$ref": "#/$defs/date"},
+              "end_date": {"$ref": "#/$defs/date"},
+              "base_nav": {"$ref": "#/$defs/decimal"},
+              "ending_nav": {"$ref": "#/$defs/decimal"},
+              "net_flow": {"$ref": "#/$defs/decimal"},
+              "factor": {"$ref": "#/$defs/decimal"},
+              "cumulative_index": {"$ref": "#/$defs/decimal"},
+              "running_hwm_index": {"$ref": "#/$defs/decimal"},
+              "drawdown": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        }
+      }
+    },
+    "capital_flow_trace": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["class", "date", "amount"],
+        "properties": {
+          "class": {"enum": ["EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT"]},
+          "date": {"$ref": "#/$defs/date"},
+          "amount": {"$ref": "#/$defs/decimal"}
+        }
+      }
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "provider",
+        "strategy_id",
+        "effective_start",
+        "effective_end",
+        "admission_status",
+        "admission_policy_reference",
+        "continuity_to_successor",
+        "status"
+      ],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1},
+        "provider": {"type": "string"},
+        "strategy_id": {"type": "string", "minLength": 1},
+        "effective_start": {"$ref": "#/$defs/date"},
+        "effective_end": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+        "admission_status": {"enum": ["FUNDED", "BLOCKED"]},
+        "admission_policy_reference": {"type": "string", "minLength": 1},
+        "continuity_to_successor": {"type": "boolean"},
+        "status": {
+          "enum": [
+            "OK",
+            "BLOCKED_ADMISSION",
+            "NO_ADMITTED_NAV",
+            "FLOWS_AFTER_CLOSING_NAV",
+            "BLOCKED_CONTINUITY_AFTER_WITHDRAWAL",
+            "BLOCKED_UNDEFINED_RETURN",
+            "BLOCKED_UNPROVABLE_OPENING_FLOWS",
+            "BLOCKED_UNAVAILABLE_NAV_OBSERVATION",
+            "BLOCKED_MISSING_PREDECESSOR_CONTINUITY"
+          ]
+        },
+        "blocking_reason": {"type": "string", "minLength": 1},
+        "late_flows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["class", "date", "value"],
+            "properties": {
+              "class": {"enum": ["external", "internal_in", "internal_out"]},
+              "date": {"$ref": "#/$defs/date"},
+              "value": {"$ref": "#/$defs/decimal"}
+            }
+          }
+        },
+        "start": {"$ref": "#/$defs/date"},
+        "end": {"$ref": "#/$defs/date"},
+        "opening_capital": {"$ref": "#/$defs/decimal"},
+        "deposits": {"$ref": "#/$defs/decimal"},
+        "internal_in": {"$ref": "#/$defs/decimal"},
+        "invested": {"$ref": "#/$defs/decimal"},
+        "external_withdrawals": {"$ref": "#/$defs/decimal"},
+        "internal_out": {"$ref": "#/$defs/decimal"},
+        "withdrawn": {"$ref": "#/$defs/decimal"},
+        "net_capital": {"$ref": "#/$defs/decimal"},
+        "current_value": {"$ref": "#/$defs/decimal"},
+        "gain": {"$ref": "#/$defs/decimal"},
+        "return_on_net_capital": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "annualized_return_on_net_capital": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "xirr_diagnostic": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "observation_linked_return": {"$ref": "#/$defs/decimal"},
+        "observed_hwm_index": {"$ref": "#/$defs/decimal"},
+        "observed_max_drawdown": {"$ref": "#/$defs/decimal"},
+        "opening_basis": {"enum": ["FIRST_AVAILABLE_NAV", "PREDECESSOR_CLOSING_NAV"]},
+        "observation_trace": {"$ref": "#/$defs/observation_trace"},
+        "capital_flow_trace": {"$ref": "#/$defs/capital_flow_trace"},
+        "nav_observations": {"type": "integer", "minimum": 3}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "OK"}}, "required": ["status"]},
+          "then": {
+            "required": [
+              "start", "end", "opening_capital", "deposits", "internal_in",
+              "invested", "external_withdrawals", "internal_out", "withdrawn",
+              "net_capital", "current_value", "gain", "return_on_net_capital",
+              "annualized_return_on_net_capital", "xirr_diagnostic", "observation_linked_return",
+              "observed_hwm_index", "observed_max_drawdown", "opening_basis", "observation_trace", "capital_flow_trace", "nav_observations"
+            ],
+            "properties": {"admission_status": {"const": "FUNDED"}},
+            "not": {"anyOf": [{"required": ["blocking_reason"]}, {"required": ["late_flows"]}]}
+          }
+        },
+        {
+          "if": {"properties": {"status": {"const": "BLOCKED_ADMISSION"}}, "required": ["status"]},
+          "then": {
+            "required": ["blocking_reason"],
+            "properties": {"admission_status": {"const": "BLOCKED"}},
+            "allOf": [
+              {"not": {"required": ["late_flows"]}},
+              {"not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observations"]}]}}
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"status": {"enum": ["NO_ADMITTED_NAV", "BLOCKED_CONTINUITY_AFTER_WITHDRAWAL", "BLOCKED_UNDEFINED_RETURN", "BLOCKED_UNPROVABLE_OPENING_FLOWS", "BLOCKED_UNAVAILABLE_NAV_OBSERVATION", "BLOCKED_MISSING_PREDECESSOR_CONTINUITY"]}}, "required": ["status"]},
+          "then": {
+            "required": ["blocking_reason"],
+            "properties": {"admission_status": {"const": "FUNDED"}},
+            "allOf": [
+              {"not": {"required": ["late_flows"]}},
+              {"not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observations"]}]}}
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"status": {"const": "FLOWS_AFTER_CLOSING_NAV"}}, "required": ["status"]},
+          "then": {
+            "required": ["late_flows"],
+            "properties": {"admission_status": {"const": "FUNDED"}},
+            "allOf": [
+              {"not": {"required": ["blocking_reason"]}},
+              {"not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observations"]}]}}
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
