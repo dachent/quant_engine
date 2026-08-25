@@ -342,7 +342,10 @@ def _authorization_directory_identity(path: Path, field_name: str) -> dict[str, 
                     "size_bytes": len(content),
                 }
             )
-    content = canonical_json_bytes(rows)
+    content = (
+        json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
     return {
         "file_count": len(rows),
         "inventory_sha256": hashlib.sha256(content).hexdigest(),

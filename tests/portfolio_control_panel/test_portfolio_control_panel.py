@@ -126,9 +126,7 @@ def _directory_identity(path: Path) -> dict[str, object]:
                     "size_bytes": len(content),
                 }
             )
-    content = json.dumps(
-        rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
+    content = canonical_json_bytes(rows)
     return {
         "file_count": len(rows),
         "inventory_sha256": hashlib.sha256(content).hexdigest(),
@@ -173,6 +171,7 @@ def _frozen_financial_receipt(
     (qa_dir / "semantic-validation.json").write_bytes(
         canonical_json_bytes(verification)
     )
+    panel.validate_qa(candidate, qa_dir)
     return _coordinated_release_receipt(
         tmp_path, inputs["output"], candidate, qa_dir
     )
@@ -6637,6 +6636,315 @@ def test_coordinated_receipt_decoder_rejects_strict_contract_mutations(
         panel._validated_coordinated_release_receipt(
             receipt_path, output, candidate, qa
         )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-root-key",
+        "extra-root-key",
+        "malformed-receipt",
+        "schema-version-value",
+        "schema-version-type",
+        "candidate-malformed",
+        "candidate-non-object",
+        "qa-malformed",
+        "qa-non-object",
+        "operation",
+        "state",
+        "coordinator",
+        "output-root",
+        "candidate-path",
+        "candidate-file-count",
+        "candidate-inventory",
+        "qa-path",
+        "qa-file-count",
+        "qa-inventory",
+        "empty-release-id",
+        "empty-release-commit",
+    ),
+)
+def test_publish_rejects_every_authorization_receipt_mutation_before_pointer_write(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """Every strict receipt field fails closed after staging, before pointer I/O."""
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    receipt_path = _frozen_financial_receipt(
+        tmp_path, inputs, candidate, qa, financial
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if mutation == "missing-root-key":
+        receipt.pop("release_id")
+    elif mutation == "extra-root-key":
+        receipt["unexpected"] = True
+    elif mutation == "malformed-receipt":
+        receipt_path.write_bytes(b"{")
+        receipt = None
+    elif mutation == "schema-version-value":
+        receipt["schema_version"] = 2
+    elif mutation == "schema-version-type":
+        receipt["schema_version"] = "1"
+    elif mutation == "candidate-malformed":
+        receipt["candidate"] = {"path": str(candidate.resolve())}
+    elif mutation == "candidate-non-object":
+        receipt["candidate"] = []
+    elif mutation == "qa-malformed":
+        receipt["qa"] = {"path": str(qa.resolve())}
+    elif mutation == "qa-non-object":
+        receipt["qa"] = None
+    elif mutation == "operation":
+        receipt["operation"] = "PUBLISH_OTHER"
+    elif mutation == "state":
+        receipt["state"] = "DRAFT"
+    elif mutation == "coordinator":
+        receipt["coordinator"] = "other-coordinator"
+    elif mutation == "output-root":
+        receipt["output_root"] = str(tmp_path / "other-output")
+    elif mutation == "candidate-path":
+        receipt["candidate"]["path"] = str(tmp_path / "other-candidate")
+    elif mutation == "candidate-file-count":
+        receipt["candidate"]["file_count"] += 1
+    elif mutation == "candidate-inventory":
+        receipt["candidate"]["inventory_sha256"] = "0" * 64
+    elif mutation == "qa-path":
+        receipt["qa"]["path"] = str(tmp_path / "other-qa")
+    elif mutation == "qa-file-count":
+        receipt["qa"]["file_count"] += 1
+    elif mutation == "qa-inventory":
+        receipt["qa"]["inventory_sha256"] = "0" * 64
+    elif mutation == "empty-release-id":
+        receipt["release_id"] = ""
+    else:
+        assert mutation == "empty-release-commit"
+        receipt["release_commit"] = ""
+    if receipt is not None:
+        receipt_path.write_bytes(canonical_json_bytes(receipt))
+
+    def pointer_writer_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError(f"pointer writer invoked for {mutation}")
+
+    monkeypatch.setattr(panel, "publish_generation", pointer_writer_must_not_run)
+    with pytest.raises(panel.ControlPanelValidationError, match="coordinated release receipt"):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            coordinated_release_receipt=receipt_path,
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+@pytest.mark.parametrize("mutated_tree", ("candidate", "qa"))
+def test_publish_rejects_post_receipt_tree_mutation_before_pointer_write(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutated_tree: str,
+) -> None:
+    """Receipt identities are checked after QA snapshots, immediately before pointer I/O."""
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    receipt_path = _frozen_financial_receipt(
+        tmp_path, inputs, candidate, qa, financial
+    )
+    original = panel._validated_qa_snapshots
+
+    def validate_then_mutate(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        root = candidate if mutated_tree == "candidate" else qa
+        (root / f"post-receipt-{mutated_tree}.txt").write_text(
+            "changed", encoding="utf-8"
+        )
+        return result
+
+    def pointer_writer_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("pointer writer invoked after receipt-bound tree mutation")
+
+    monkeypatch.setattr(panel, "_validated_qa_snapshots", validate_then_mutate)
+    monkeypatch.setattr(panel, "publish_generation", pointer_writer_must_not_run)
+    with pytest.raises(panel.ControlPanelValidationError, match="identity differs"):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            coordinated_release_receipt=receipt_path,
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+@pytest.mark.parametrize("kind", ("file", "directory"))
+def test_coordinated_receipt_rejects_nested_symlinked_tree_entry(
+    tmp_path: Path, kind: str
+) -> None:
+    """Inventory rejects every nested link before it can represent authority."""
+    output = tmp_path / "output"
+    candidate = tmp_path / "candidate"
+    qa = tmp_path / "qa"
+    target = tmp_path / "target"
+    candidate.mkdir()
+    qa.mkdir()
+    target.mkdir()
+    (candidate / "panel.txt").write_text("candidate", encoding="utf-8")
+    (qa / "qa.txt").write_text("qa", encoding="utf-8")
+    (target / "outside.txt").write_text("outside", encoding="utf-8")
+    receipt_path = _coordinated_release_receipt(tmp_path, output, candidate, qa)
+    root = candidate if kind == "file" else qa
+    link = root / ("linked.txt" if kind == "file" else "linked")
+    try:
+        link.symlink_to(
+            target / "outside.txt" if kind == "file" else target,
+            target_is_directory=kind == "directory",
+        )
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    with pytest.raises(panel.ControlPanelValidationError, match="contains a link"):
+        panel._validated_coordinated_release_receipt(
+            receipt_path, output, candidate, qa
+        )
+
+
+def test_authorization_reparse_metadata_is_classified_as_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows reparse attributes fail closed even where junction setup is unavailable."""
+    reparse_point = 0x400
+    monkeypatch.setattr(
+        panel.stat, "FILE_ATTRIBUTE_REPARSE_POINT", reparse_point, raising=False
+    )
+
+    class ReparsePoint:
+        def lstat(self) -> object:
+            return type("Stat", (), {"st_file_attributes": reparse_point})()
+
+        def is_symlink(self) -> bool:
+            return False
+
+    assert panel._is_link_or_reparse_point(ReparsePoint()) is True
+
+
+def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_receipt(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wrapper passes canonical authority bytes into the real panel seam."""
+    builder_spec = importlib.util.spec_from_file_location(
+        "portfolio_release_builder_panel_seam",
+        REPOSITORY_ROOT / "tools" / "portfolio_release_builder.py",
+    )
+    assert builder_spec is not None and builder_spec.loader is not None
+    builder = importlib.util.module_from_spec(builder_spec)
+    builder_spec.loader.exec_module(builder)
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_bytes(b'{"fixture":"builder-panel-seam"}')
+    recipe = {
+        "pipeline_id": "synthetic-builder-panel-seam",
+        "release_commit": "a" * 40,
+        "legacy_panel": {"path": str(inputs["legacy"])},
+        "schema_version": 6,
+    }
+    monkeypatch.setattr(builder, "_recipe", lambda _path: recipe)
+    monkeypatch.setattr(builder, "_panel_financial_arguments", lambda *_args: [])
+    panel_result: dict[str, Any] = {}
+
+    def real_panel_tool(*args: object, **_kwargs: object) -> dict[str, Any]:
+        nonlocal panel_result
+        assert args[0] == "portfolio_control_panel.py"
+        command = args[1]
+        if command == "verify":
+            return panel.verify_candidate(
+                inputs["report"],
+                inputs["legacy"],
+                candidate,
+                freshness_health_path=inputs["freshness"],
+                baseline_root=inputs["baseline"],
+                **financial,
+            )
+        if command == "qa":
+            return panel.validate_qa(candidate, qa)
+        assert command == "publish"
+        receipt_path = Path(
+            str(args[args.index("--coordinated-release-receipt") + 1])
+        )
+        receipt_bytes = receipt_path.read_bytes()
+        assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
+        panel_result = panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            coordinated_release_receipt=receipt_path,
+            **financial,
+        )
+        return panel_result
+
+    monkeypatch.setattr(builder, "_tool", real_panel_tool)
+    result = builder.publish_panel(
+        recipe_path,
+        inputs["report"],
+        inputs["baseline"],
+        tmp_path / "bundle",
+        {
+            "decomposition_root": str(tmp_path / "decomposition"),
+            "decomposition_lenses_root": str(tmp_path / "lenses"),
+            "correlation_root": str(tmp_path / "correlation"),
+            "weekly_root": str(tmp_path / "weekly"),
+        },
+        inputs["freshness"],
+        candidate,
+        qa,
+        inputs["output"],
+    )
+
+    assert result["publication_state"] == "PUBLISHED"
+    assert result["coordinated_release_receipt_sha256"] == panel_result[
+        "coordinated_release_receipt_sha256"
+    ]
+    assert result["release_id"] == panel_result["release_id"]
 
 
 def test_account_manifest_producer_to_publish_seam(

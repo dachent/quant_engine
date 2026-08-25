@@ -144,8 +144,9 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
                 "size_bytes": size,
             }
         )
-    content = json.dumps(
-        rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    content = (
+        json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
     ).encode("utf-8")
     return {
         "file_count": len(rows),
@@ -4056,6 +4057,15 @@ def publish_panel(
     )
     _write_exact(
         qa_dir / "semantic-validation.json", canonical_json_bytes(semantic_validation)
+    )
+    _tool(
+        "portfolio_control_panel.py",
+        "qa",
+        "--candidate-dir",
+        str(candidate),
+        "--qa-dir",
+        str(qa_dir),
+        timeout=7200,
     )
     receipt_path, receipt = _panel_publication_receipt(
         recipe_path, recipe, output_root, candidate, qa_dir

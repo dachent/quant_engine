@@ -2540,11 +2540,145 @@ def test_panel_invocations_carry_baseline_root(
         tmp_path / "stages" / "panel",
     )
 
-    assert [call[1] for call in calls] == ["build", "verify", "verify", "publish"]
-    for call in calls:
+    assert [call[1] for call in calls] == ["build", "verify", "verify", "qa", "publish"]
+    for call in (call for call in calls if call[1] != "qa"):
         assert call[0] == "portfolio_control_panel.py"
         assert "--baseline-root" in call
         assert call[call.index("--baseline-root") + 1] == str(baseline_root)
+
+
+def test_panel_publication_validates_browser_qa_before_authorizing_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The builder freezes semantic and browser QA before inventorying authority."""
+    recipe = _recipe(tmp_path)
+    candidate = tmp_path / "candidate"
+    qa = tmp_path / "qa"
+    candidate.mkdir()
+    qa.mkdir()
+    (candidate / "panel.html").write_text("candidate", encoding="utf-8")
+    (qa / "browser.json").write_text("{}", encoding="utf-8")
+    calls: list[tuple[object, ...]] = []
+
+    receipt_bytes: bytes | None = None
+    qa_bytes_at_receipt: dict[str, bytes] | None = None
+    panel_result: dict[str, object] = {}
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal receipt_bytes, qa_bytes_at_receipt, panel_result
+        calls.append(args)
+        if args[1] == "qa":
+            assert (qa / "semantic-validation.json").is_file()
+        if args[1] == "publish":
+            receipt_path = Path(str(args[args.index("--coordinated-release-receipt") + 1]))
+            receipt_bytes = receipt_path.read_bytes()
+            qa_bytes_at_receipt = {
+                item.relative_to(qa).as_posix(): item.read_bytes()
+                for item in qa.rglob("*")
+                if item.is_file()
+            }
+            receipt = json.loads(receipt_bytes)
+            panel_result = {
+                "coordinated_release_receipt_sha256": hashlib.sha256(
+                    receipt_bytes
+                ).hexdigest(),
+                "release_id": receipt["release_id"],
+            }
+            return panel_result
+        return {"publication_state": "PUBLISHED"}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    analytics = {
+        "decomposition_root": str(tmp_path / "decomposition"),
+        "decomposition_lenses_root": str(tmp_path / "lenses"),
+        "correlation_root": str(tmp_path / "correlation"),
+        "weekly_root": str(tmp_path / "weekly"),
+    }
+
+    result = builder.publish_panel(
+        recipe,
+        tmp_path / "report",
+        tmp_path / "baseline",
+        tmp_path / "bundle",
+        analytics,
+        tmp_path / "freshness.json",
+        candidate,
+        qa,
+        tmp_path / "output",
+    )
+
+    assert [call[1] for call in calls] == ["verify", "qa", "publish"]
+    assert receipt_bytes is not None
+    assert qa_bytes_at_receipt is not None
+    assert qa_bytes_at_receipt == {
+        item.relative_to(qa).as_posix(): item.read_bytes()
+        for item in qa.rglob("*")
+        if item.is_file()
+    }
+    assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
+    assert result["coordinated_release_receipt_sha256"] == panel_result[
+        "coordinated_release_receipt_sha256"
+    ]
+    assert result["release_id"] == panel_result["release_id"]
+
+
+def test_panel_publication_receipt_uses_exact_canonical_release_id_preimage(
+    tmp_path: Path,
+) -> None:
+    recipe_path = _recipe(tmp_path)
+    recipe = builder._recipe(recipe_path)
+    candidate = tmp_path / "candidate"
+    qa = tmp_path / "qa"
+    candidate.mkdir()
+    qa.mkdir()
+    (candidate / "panel.html").write_text("candidate", encoding="utf-8")
+    (qa / "browser.json").write_text("{}", encoding="utf-8")
+
+    _path, receipt = builder._panel_publication_receipt(
+        recipe_path, recipe, tmp_path / "output", candidate, qa
+    )
+    recipe_bytes = recipe_path.read_bytes()
+    preimage = {
+        "pipeline_id": recipe["pipeline_id"],
+        "recipe": {
+            "sha256": hashlib.sha256(recipe_bytes).hexdigest(),
+            "size_bytes": len(recipe_bytes),
+        },
+        "release_commit": recipe["release_commit"],
+    }
+    assert receipt["release_id"] == hashlib.sha256(
+        canonical_json_bytes(preimage)
+    ).hexdigest()
+
+
+def test_panel_publication_receipt_is_create_only_byte_idempotent(
+    tmp_path: Path,
+) -> None:
+    recipe_path = _recipe(tmp_path)
+    recipe = builder._recipe(recipe_path)
+    output = tmp_path / "output"
+    candidate = tmp_path / "candidate"
+    qa = tmp_path / "qa"
+    candidate.mkdir()
+    qa.mkdir()
+    candidate_file = candidate / "panel.html"
+    candidate_file.write_text("candidate-v1", encoding="utf-8")
+    (qa / "browser.json").write_text("{}", encoding="utf-8")
+
+    receipt_path, first = builder._panel_publication_receipt(
+        recipe_path, recipe, output, candidate, qa
+    )
+    original_bytes = receipt_path.read_bytes()
+    second_path, second = builder._panel_publication_receipt(
+        recipe_path, recipe, output, candidate, qa
+    )
+    assert second_path == receipt_path
+    assert second == first
+    assert receipt_path.read_bytes() == original_bytes
+
+    candidate_file.write_text("candidate-v2", encoding="utf-8")
+    with pytest.raises(builder.VerticalBuildError, match="create-only output differs"):
+        builder._panel_publication_receipt(recipe_path, recipe, output, candidate, qa)
 
 
 def test_schema8_stages_one_manifest_and_uses_it_for_every_panel_gate(
@@ -2643,6 +2777,12 @@ def test_schema8_stages_one_manifest_and_uses_it_for_every_panel_gate(
             ),
         )
     staged_manifest.write_bytes(staged_bytes)
+    (tmp_path / "candidate").mkdir()
+    (tmp_path / "candidate" / "panel.html").write_text(
+        "candidate", encoding="utf-8"
+    )
+    (tmp_path / "qa").mkdir()
+    (tmp_path / "qa" / "browser.json").write_text("{}", encoding="utf-8")
     builder.publish_panel(
         recipe,
         report_root,
@@ -2667,9 +2807,13 @@ def test_schema8_stages_one_manifest_and_uses_it_for_every_panel_gate(
         "portfolio_control_panel.py",
         "portfolio_control_panel.py",
         "portfolio_control_panel.py",
+        "portfolio_control_panel.py",
+        "portfolio_control_panel.py",
     ]
-    assert [call[1] for call in calls[1:]] == ["build", "verify", "publish"]
-    for call in calls[1:]:
+    assert [call[1] for call in calls[1:]] == [
+        "build", "verify", "verify", "qa", "publish"
+    ]
+    for call in (call for call in calls[1:] if call[1] != "qa"):
         assert "--financial-mode" in call
         assert call[call.index("--account-manifest") + 1] == str(staged_manifest)
         assert call[call.index("--manifest-ledger") + 1] == str(
