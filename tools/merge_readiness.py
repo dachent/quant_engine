@@ -143,6 +143,32 @@ def _check_run_order_key(
     )
 
 
+def _stable_status_id(raw: dict[str, object]) -> int | None:
+    for key in ("id", "status_id"):
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _status_order_key(
+    raw: dict[str, object],
+) -> tuple[bool, datetime, bool, datetime, bool, int, str]:
+    minimum = datetime.min.replace(tzinfo=timezone.utc)
+    updated_at = _parse_check_timestamp(raw.get("updated_at"))
+    created_at = _parse_check_timestamp(raw.get("created_at"))
+    status_id = _stable_status_id(raw)
+    return (
+        updated_at is not None,
+        updated_at or minimum,
+        created_at is not None,
+        created_at or minimum,
+        status_id is not None,
+        status_id if status_id is not None else -1,
+        json.dumps(raw, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _check_states(head_sha: str) -> tuple[list[str], list[str], list[str]]:
     """Return failing, pending, and missing checks for the exact head SHA."""
     latest_by_key: dict[tuple[str, int | None], dict[str, object]] = {}
@@ -203,7 +229,11 @@ def _check_states(head_sha: str) -> tuple[list[str], list[str], list[str]]:
                 if not isinstance(context, str) or not context:
                     raise RuntimeError("commit-status context is invalid")
                 if context in missing_legacy_runs:
-                    latest_status_by_context.setdefault(context, raw)
+                    current = latest_status_by_context.get(context)
+                    if current is None or _status_order_key(raw) > _status_order_key(
+                        current
+                    ):
+                        latest_status_by_context[context] = raw
             if len(payload) < 100:
                 break
             page += 1
