@@ -154,6 +154,30 @@ def _coordinated_release_receipt(
     return path
 
 
+def _frozen_financial_receipt(
+    tmp_path: Path,
+    inputs: dict[str, Path],
+    candidate: Path,
+    qa_dir: Path,
+    financial: dict[str, object],
+) -> Path:
+    """Freeze independently verified semantic QA before inventorying the receipt."""
+    verification = panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    (qa_dir / "semantic-validation.json").write_bytes(
+        canonical_json_bytes(verification)
+    )
+    return _coordinated_release_receipt(
+        tmp_path, inputs["output"], candidate, qa_dir
+    )
+
+
 def _report() -> dict[str, object]:
     strategies = [
         {
@@ -2566,6 +2590,7 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
     qa = _qa(candidate, tmp_path)
     qa_result = panel.validate_qa(candidate, qa)
     assert qa_result["all_passed"] is True
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     published = panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
@@ -2574,6 +2599,7 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
         **financial,
     )
     pointer = read_current(inputs["output"])
@@ -2621,6 +2647,7 @@ def test_stable_launcher_browser_qa_proves_redirect(
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "candidate")
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     published = panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
@@ -2629,6 +2656,7 @@ def test_stable_launcher_browser_qa_proves_redirect(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
         **financial,
     )
     launcher = inputs["output"] / "index.html"
@@ -2680,6 +2708,7 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "candidate")
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     published = panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
@@ -2688,6 +2717,7 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
         **financial,
     )
     launcher = inputs["output"] / "index.html"
@@ -2738,6 +2768,7 @@ def test_publication_manifest_uses_later_operational_freshness_date(
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
 
     published = panel.publish_panel(
         inputs["report"],
@@ -2747,6 +2778,7 @@ def test_publication_manifest_uses_later_operational_freshness_date(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
         **financial,
     )
 
@@ -2804,6 +2836,7 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
 
     original = panel._publish_current_launcher
 
@@ -2821,6 +2854,7 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
             inputs["output"],
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
+            coordinated_release_receipt=receipt,
             **financial,
         )
 
@@ -6572,6 +6606,39 @@ def test_publish_cli_requires_coordinated_receipt_argument() -> None:
     assert exc_info.value.code == 2
 
 
+@pytest.mark.parametrize("mutation", ("duplicate", "noncanonical", "bool", "path"))
+def test_coordinated_receipt_decoder_rejects_strict_contract_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Each mutation catches a decoder weakening before pointer inspection."""
+    output = tmp_path / "output"
+    candidate = tmp_path / "candidate"
+    qa = tmp_path / "qa"
+    candidate.mkdir()
+    qa.mkdir()
+    (candidate / "panel.txt").write_text("candidate", encoding="utf-8")
+    (qa / "qa.txt").write_text("qa", encoding="utf-8")
+    receipt_path = _coordinated_release_receipt(tmp_path, output, candidate, qa)
+    if mutation == "duplicate":
+        content = receipt_path.read_bytes().replace(
+            b'"schema_version":1,', b'"schema_version":1,"schema_version":1,'
+        )
+        receipt_path.write_bytes(content)
+    elif mutation == "noncanonical":
+        receipt_path.write_bytes(receipt_path.read_bytes() + b"\n")
+    else:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if mutation == "bool":
+            receipt["schema_version"] = True
+        else:
+            receipt["candidate"]["path"] += " "
+        receipt_path.write_bytes(canonical_json_bytes(receipt))
+    with pytest.raises(panel.ControlPanelValidationError, match="coordinated release receipt"):
+        panel._validated_coordinated_release_receipt(
+            receipt_path, output, candidate, qa
+        )
+
+
 def test_account_manifest_producer_to_publish_seam(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -6610,6 +6677,17 @@ def test_account_manifest_producer_to_publish_seam(
     assert Decimal(row["gain"]) == Decimal("56832.54") - Decimal("50000")
 
     qa = _qa(candidate, tmp_path / "qa-primary")
+    financial = {
+        "account_manifest_path": manifest_path,
+        "financial_mode": True,
+        "manifest_ledger_path": authority["ledger"],
+        "manifest_ledger_identity_path": authority["ledger_identity"],
+        "manifest_baseline_root": authority["baseline"],
+        "manifest_classified_flows_path": authority["flows"],
+        "manifest_classification_policy_path": authority["classification_policy"],
+        "manifest_admission_policy_path": authority["policy"],
+    }
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     published = panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
@@ -6626,6 +6704,7 @@ def test_account_manifest_producer_to_publish_seam(
         manifest_classified_flows_path=authority["flows"],
         manifest_classification_policy_path=authority["classification_policy"],
         manifest_admission_policy_path=authority["policy"],
+        coordinated_release_receipt=receipt,
     )
     assert published["publication_state"] == "PUBLISHED"
 

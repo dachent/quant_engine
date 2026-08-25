@@ -360,14 +360,25 @@ def _validated_coordinated_release_receipt(
     content, receipt_sha256 = _read_snapshot(
         receipt_path, "coordinated release receipt"
     )
-    receipt = _json_from_bytes(content, "coordinated release receipt")
+    try:
+        receipt = json.loads(
+            content.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ControlPanelValidationError(
+            "coordinated release receipt is not strict JSON"
+        ) from exc
+    receipt = _object(receipt, "coordinated release receipt")
+    if canonical_json_bytes(receipt) != content:
+        raise ControlPanelValidationError("coordinated release receipt is not canonical")
     expected_keys = {
         "schema_version", "operation", "state", "coordinator", "release_id",
         "release_commit", "output_root", "candidate", "qa",
     }
     if set(receipt) != expected_keys:
         raise ControlPanelValidationError("coordinated release receipt root keys differ")
-    if receipt.get("schema_version") != 1:
+    if type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1:
         raise ControlPanelValidationError("coordinated release receipt schema differs")
     if receipt.get("operation") != "PUBLISH_PANEL_CURRENT":
         raise ControlPanelValidationError("coordinated release receipt operation differs")
@@ -375,23 +386,40 @@ def _validated_coordinated_release_receipt(
         raise ControlPanelValidationError("coordinated release receipt state differs")
     if receipt.get("coordinator") != "portfolio-release-builder":
         raise ControlPanelValidationError("coordinated release receipt coordinator differs")
-    release_id = _text(receipt.get("release_id"), "coordinated release receipt release_id")
-    _text(receipt.get("release_commit"), "coordinated release receipt release_commit")
-    if _text(receipt.get("output_root"), "coordinated release receipt output_root") != str(output_root.resolve()):
+    release_id = _receipt_text(receipt.get("release_id"), "release_id")
+    _receipt_text(receipt.get("release_commit"), "release_commit")
+    if _receipt_text(receipt.get("output_root"), "output_root") != str(output_root.resolve()):
         raise ControlPanelValidationError("coordinated release receipt output root differs")
     for name, path in (("candidate", candidate_dir), ("qa", qa_dir)):
         identity = _object(receipt.get(name), f"coordinated release receipt {name}")
         if set(identity) != {"path", "file_count", "inventory_sha256"}:
             raise ControlPanelValidationError(f"coordinated release receipt {name} keys differ")
-        if _text(identity.get("path"), f"coordinated release receipt {name}.path") != str(path.resolve()):
+        if _receipt_text(identity.get("path"), f"{name}.path") != str(path.resolve()):
             raise ControlPanelValidationError(f"coordinated release receipt {name} path differs")
         if type(identity.get("file_count")) is not int or identity["file_count"] < 0:
             raise ControlPanelValidationError(f"coordinated release receipt {name} file count differs")
-        expected_hash = _text(identity.get("inventory_sha256"), f"coordinated release receipt {name} inventory")
+        expected_hash = _receipt_text(identity.get("inventory_sha256"), f"{name}.inventory_sha256")
         actual = _authorization_directory_identity(path, name)
         if identity["file_count"] != actual["file_count"] or expected_hash != actual["inventory_sha256"]:
             raise ControlPanelValidationError(f"coordinated release receipt {name} identity differs")
     return receipt_sha256, release_id
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _receipt_text(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ControlPanelValidationError(
+            f"coordinated release receipt {field_name} must be non-empty text"
+        )
+    return value
 
 
 def _load_json(path: Path, field_name: str) -> dict[str, Any]:
