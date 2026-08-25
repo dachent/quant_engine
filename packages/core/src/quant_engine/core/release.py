@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -10,6 +12,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import tempfile
 from typing import Any, Callable, Final, Mapping, Self
 
@@ -30,16 +33,44 @@ from quant_engine.core.publication import (
 
 
 _LEGACY_SCHEMA_VERSION: Final = 1
-_SCHEMA_VERSION: Final = 2
+_COORDINATED_SCHEMA_VERSION: Final = 2
+_SCHEMA_VERSION: Final = 3
 _AUTHORITY_SCHEMA_VERSION: Final = 1
 _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PREDECESSOR_REPAIR_GATE_ID: Final = "predecessor-authority-repair"
+_FILE_ATTRIBUTE_REPARSE_POINT: Final = 0x400
+_FILE_READ_ATTRIBUTES: Final = 0x80
+_FILE_SHARE_READ: Final = 0x1
+_FILE_SHARE_WRITE: Final = 0x2
+_OPEN_EXISTING: Final = 3
+_FILE_FLAG_BACKUP_SEMANTICS: Final = 0x02000000
 
 
 class ReleaseValidationError(ValueError):
     """A release manifest, journal, or root mapping is invalid."""
+
+
+class ReleasePublicationUnavailableError(RuntimeError):
+    """The coordinated publication namespace is not trustworthy."""
+
+    code: Final = "WINDOWS_NAMESPACE_UNTRUSTED"
+
+    def __init__(self, operation: str) -> None:
+        if operation not in {"commit_release", "recover_release", "rollback_release"}:
+            raise ValueError("unsupported coordinated publication operation")
+        self.operation = operation
+        super().__init__(f"{self.code}: {operation}")
+
+
+def _require_trusted_coordinated_namespace(operation: str) -> None:
+    if _is_windows_platform():
+        raise ReleasePublicationUnavailableError(operation)
+
+
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
 
 
 class ReleaseConflictError(RuntimeError):
@@ -123,6 +154,196 @@ def _normalize_roots(roots: Mapping[str, Path]) -> dict[str, Path]:
                 f"release roots alias the same location: {prior}, {root_id}"
             )
     return normalized
+
+
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _companion_path(root: Path, relative_path: str) -> Path:
+    """Resolve a companion path only through regular parent directories."""
+
+    current = root
+    parents = PurePosixPath(relative_path).parts[:-1]
+    for component in (None, *parents):
+        if component is not None:
+            current /= component
+        if _is_reparse_point(current):
+            raise ReleaseConflictError(
+                f"companion parent path contains a reparse point: {current.name}"
+            )
+        if current.exists() and not current.is_dir():
+            raise ReleaseConflictError(
+                f"companion parent path is not a directory: {current.name}"
+            )
+    return root / relative_path
+
+
+def _identity_digest(path: Path, device: int, inode: int) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "normalized_path": os.path.normcase(str(path)),
+                "st_dev": device,
+                "st_ino": inode,
+            }
+        )
+    ).hexdigest()
+
+
+class _WindowsFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", wintypes.DWORD),
+        ("ftCreationTime", wintypes.FILETIME),
+        ("ftLastAccessTime", wintypes.FILETIME),
+        ("ftLastWriteTime", wintypes.FILETIME),
+        ("dwVolumeSerialNumber", wintypes.DWORD),
+        ("nFileSizeHigh", wintypes.DWORD),
+        ("nFileSizeLow", wintypes.DWORD),
+        ("nNumberOfLinks", wintypes.DWORD),
+        ("nFileIndexHigh", wintypes.DWORD),
+        ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+
+@dataclass
+class _DirectoryLease:
+    path: Path
+    identity: str
+    handle: int
+    windows: bool
+
+    @classmethod
+    def acquire(cls, path: Path) -> Self:
+        if not path.is_dir():
+            raise ReleaseConflictError(
+                f"security directory lease requires a regular directory: {path.name}"
+            )
+        if os.name == "nt":
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_file = kernel32.CreateFileW
+            create_file.argtypes = (
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.HANDLE,
+            )
+            create_file.restype = wintypes.HANDLE
+            raw_handle = create_file(
+                str(path),
+                _FILE_READ_ATTRIBUTES,
+                _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+                None,
+                _OPEN_EXISTING,
+                _FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+            handle = int(raw_handle or 0)
+            if handle == int(ctypes.c_void_p(-1).value or -1):
+                raise ReleaseConflictError(
+                    f"security directory lease could not be acquired: {path.name}"
+                )
+            information = _WindowsFileInformation()
+            get_information = kernel32.GetFileInformationByHandle
+            get_information.argtypes = (
+                wintypes.HANDLE,
+                ctypes.POINTER(_WindowsFileInformation),
+            )
+            get_information.restype = wintypes.BOOL
+            if not get_information(wintypes.HANDLE(handle), ctypes.byref(information)):
+                kernel32.CloseHandle(wintypes.HANDLE(handle))
+                raise ReleaseConflictError(
+                    f"security directory lease identity failed: {path.name}"
+                )
+            inode = (int(information.nFileIndexHigh) << 32) | int(
+                information.nFileIndexLow
+            )
+            identity = _identity_digest(
+                path, int(information.dwVolumeSerialNumber), inode
+            )
+            return cls(path, identity, handle, True)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise ReleaseConflictError(
+                f"security directory lease could not be acquired: {path.name}"
+            ) from exc
+        metadata = os.fstat(descriptor)
+        return cls(
+            path,
+            _identity_digest(path, metadata.st_dev, metadata.st_ino),
+            descriptor,
+            False,
+        )
+
+    def verify(self) -> None:
+        if not self.path.is_dir():
+            raise ReleaseConflictError(
+                f"security directory lease path changed: {self.path.name}"
+            )
+        metadata = self.path.stat(follow_symlinks=False)
+        observed = _identity_digest(self.path, metadata.st_dev, metadata.st_ino)
+        if observed != self.identity:
+            raise ReleaseConflictError(
+                f"security directory lease identity changed: {self.path.name}"
+            )
+
+    def close(self) -> None:
+        if self.windows:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CloseHandle(wintypes.HANDLE(self.handle))
+        else:
+            os.close(self.handle)
+
+
+def _acquire_directory_leases(
+    expected: Mapping[Path, str | None],
+) -> tuple[_DirectoryLease, ...]:
+    leases: list[_DirectoryLease] = []
+    try:
+        for path in sorted(expected, key=lambda item: os.path.normcase(str(item))):
+            lease = _DirectoryLease.acquire(path)
+            leases.append(lease)
+            identity = expected[path]
+            if identity is not None and lease.identity != identity:
+                raise ReleaseConflictError(
+                    f"security directory lease identity differs: {path.name}"
+                )
+        for lease in leases:
+            lease.verify()
+        return tuple(leases)
+    except Exception:
+        for lease in reversed(leases):
+            lease.close()
+        raise
+
+
+def _close_directory_leases(leases: tuple[_DirectoryLease, ...]) -> None:
+    for lease in reversed(leases):
+        lease.close()
+
+
+def _verify_directory_leases(leases: tuple[_DirectoryLease, ...]) -> None:
+    for lease in leases:
+        lease.verify()
+
+
+def _root_identity(root: Path) -> str:
+    lease = _DirectoryLease.acquire(root)
+    try:
+        return lease.identity
+    finally:
+        lease.close()
 
 
 def _reject_coordination_alias(
@@ -262,17 +483,23 @@ class ReleaseAuthorityPointer:
 @dataclass(frozen=True)
 class ReleaseTarget:
     root_id: str
+    root_identity: str | None
     proposed_generation_id: str
     proposed_manifest_sha256: str
     proposed_inventory_sha256: str | None
     previous_pointer: CurrentPointer | None
+    previous_inventory_sha256: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "root_id", _identifier(self.root_id, "root_id"))
+        if self.root_identity is not None:
+            _hash(self.root_identity, "root_identity")
         _hash(self.proposed_generation_id, "proposed_generation_id")
         _hash(self.proposed_manifest_sha256, "proposed_manifest_sha256")
         if self.proposed_inventory_sha256 is not None:
             _hash(self.proposed_inventory_sha256, "proposed_inventory_sha256")
+        if self.previous_inventory_sha256 is not None:
+            _hash(self.previous_inventory_sha256, "previous_inventory_sha256")
 
     def to_dict(
         self, *, release_schema_version: int = _SCHEMA_VERSION
@@ -288,19 +515,33 @@ class ReleaseTarget:
             "root_id": self.root_id,
         }
         if release_schema_version >= _SCHEMA_VERSION:
+            if self.root_identity is None:
+                raise ReleaseValidationError("release target lacks a root identity")
+            if self.proposed_inventory_sha256 is None:
+                raise ReleaseValidationError(
+                    "schema-v3 proposed inventory hash is mandatory"
+                )
+            value["previous_inventory_sha256"] = self.previous_inventory_sha256
+            value["proposed_inventory_sha256"] = self.proposed_inventory_sha256
+            value["root_identity"] = self.root_identity
+        elif release_schema_version >= _COORDINATED_SCHEMA_VERSION:
             value["proposed_inventory_sha256"] = self.proposed_inventory_sha256
         return value
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> Self:
+    def from_dict(
+        cls, value: Mapping[str, Any], *, release_schema_version: int
+    ) -> Self:
         expected = {
             "previous_pointer",
             "proposed_generation_id",
             "proposed_manifest_sha256",
             "root_id",
         }
-        if "proposed_inventory_sha256" in value:
+        if release_schema_version >= _COORDINATED_SCHEMA_VERSION:
             expected.add("proposed_inventory_sha256")
+        if release_schema_version >= _SCHEMA_VERSION:
+            expected.update({"previous_inventory_sha256", "root_identity"})
         _strict(value, expected, "release_target")
         previous = value["previous_pointer"]
         if previous is not None and not isinstance(previous, Mapping):
@@ -314,6 +555,11 @@ class ReleaseTarget:
             raise ReleaseValidationError("release target identifiers must be strings")
         return cls(
             root_id=value["root_id"],
+            root_identity=(
+                value.get("root_identity")
+                if isinstance(value.get("root_identity"), str)
+                else None
+            ),
             proposed_generation_id=value["proposed_generation_id"],
             proposed_manifest_sha256=value["proposed_manifest_sha256"],
             proposed_inventory_sha256=(
@@ -325,6 +571,11 @@ class ReleaseTarget:
                 None
                 if previous is None
                 else CurrentPointer.from_json_bytes(canonical_json_bytes(previous))
+            ),
+            previous_inventory_sha256=(
+                value.get("previous_inventory_sha256")
+                if isinstance(value.get("previous_inventory_sha256"), str)
+                else None
             ),
         )
 
@@ -351,6 +602,7 @@ class CompanionPlan:
     relative_path: str
     proposed_sha256: str
     previous_sha256: str | None
+    parent_identity: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -361,27 +613,43 @@ class CompanionPlan:
         _hash(self.proposed_sha256, "proposed_sha256")
         if self.previous_sha256 is not None:
             _hash(self.previous_sha256, "previous_sha256")
+        if self.parent_identity is not None:
+            _hash(self.parent_identity, "parent_identity")
 
-    def to_dict(self) -> dict[str, object]:
-        return {
+    def to_dict(
+        self, *, release_schema_version: int = _SCHEMA_VERSION
+    ) -> dict[str, object]:
+        value: dict[str, object] = {
             "companion_id": self.companion_id,
             "previous_sha256": self.previous_sha256,
             "proposed_sha256": self.proposed_sha256,
             "relative_path": self.relative_path,
             "root_id": self.root_id,
         }
+        if release_schema_version >= _SCHEMA_VERSION:
+            if self.parent_identity is None:
+                raise ReleaseValidationError(
+                    "schema-v3 companion parent identity is mandatory"
+                )
+            value["parent_identity"] = self.parent_identity
+        return value
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> Self:
+    def from_dict(
+        cls, value: Mapping[str, Any], *, release_schema_version: int
+    ) -> Self:
+        expected = {
+            "companion_id",
+            "previous_sha256",
+            "proposed_sha256",
+            "relative_path",
+            "root_id",
+        }
+        if release_schema_version >= _SCHEMA_VERSION:
+            expected.add("parent_identity")
         _strict(
             value,
-            {
-                "companion_id",
-                "previous_sha256",
-                "proposed_sha256",
-                "relative_path",
-                "root_id",
-            },
+            expected,
             "companion_plan",
         )
         previous = value["previous_sha256"]
@@ -401,6 +669,11 @@ class CompanionPlan:
             relative_path=value["relative_path"],
             proposed_sha256=value["proposed_sha256"],
             previous_sha256=previous,
+            parent_identity=(
+                value.get("parent_identity")
+                if isinstance(value.get("parent_identity"), str)
+                else None
+            ),
         )
 
 
@@ -423,6 +696,7 @@ class ReleaseManifest:
             raise ReleaseValidationError("created_at must be timezone-aware")
         if self.release_schema_version not in {
             _LEGACY_SCHEMA_VERSION,
+            _COORDINATED_SCHEMA_VERSION,
             _SCHEMA_VERSION,
         }:
             raise ReleaseValidationError("release schema version is unsupported")
@@ -447,6 +721,30 @@ class ReleaseManifest:
         root_ids = {item.root_id for item in targets}
         if any(item.root_id not in root_ids for item in companions):
             raise ReleaseValidationError("companion references an unknown root")
+        if self.release_schema_version >= _SCHEMA_VERSION and any(
+            item.root_identity is None for item in targets
+        ):
+            raise ReleaseValidationError("release target lacks a root identity")
+        if self.release_schema_version >= _SCHEMA_VERSION and any(
+            item.proposed_inventory_sha256 is None for item in targets
+        ):
+            raise ReleaseValidationError(
+                "schema-v3 proposed inventory hash is mandatory"
+            )
+        if self.release_schema_version >= _SCHEMA_VERSION and any(
+            item.parent_identity is None for item in companions
+        ):
+            raise ReleaseValidationError(
+                "schema-v3 companion parent identity is mandatory"
+            )
+        if self.release_schema_version >= _SCHEMA_VERSION and any(
+            (item.previous_pointer is None)
+            != (item.previous_inventory_sha256 is None)
+            for item in targets
+        ):
+            raise ReleaseValidationError(
+                "release predecessor pointer and inventory must be bound together"
+            )
         object.__setattr__(self, "targets", targets)
         object.__setattr__(self, "gates", gates)
         object.__setattr__(self, "companions", companions)
@@ -459,7 +757,10 @@ class ReleaseManifest:
     def identity_payload(self) -> dict[str, object]:
         value: dict[str, object] = {
             "code_commit": self.code_commit,
-            "companions": [item.to_dict() for item in self.companions],
+            "companions": [
+                item.to_dict(release_schema_version=self.release_schema_version)
+                for item in self.companions
+            ],
             "created_at": self.created_at.isoformat(),
             "gates": [item.to_dict() for item in self.gates],
             "release_schema_version": self.release_schema_version,
@@ -468,7 +769,7 @@ class ReleaseManifest:
                 for item in self.targets
             ],
         }
-        if self.release_schema_version >= _SCHEMA_VERSION:
+        if self.release_schema_version >= _COORDINATED_SCHEMA_VERSION:
             value["previous_authority"] = (
                 self.previous_authority.to_dict()
                 if self.previous_authority is not None
@@ -499,7 +800,10 @@ class ReleaseManifest:
         )
         payload = {
             "code_commit": code_commit,
-            "companions": [item.to_dict() for item in ordered_companions],
+            "companions": [
+                item.to_dict(release_schema_version=_SCHEMA_VERSION)
+                for item in ordered_companions
+            ],
             "created_at": created_at.isoformat(),
             "gates": [item.to_dict() for item in ordered_gates],
             "release_schema_version": _SCHEMA_VERSION,
@@ -542,7 +846,7 @@ class ReleaseManifest:
             "release_schema_version",
             "targets",
         }
-        if schema_version >= _SCHEMA_VERSION:
+        if schema_version >= _COORDINATED_SCHEMA_VERSION:
             expected.add("previous_authority")
         _strict(decoded, expected, "release")
         if not isinstance(decoded["release_id"], str) or not isinstance(
@@ -569,9 +873,19 @@ class ReleaseManifest:
             release_id=decoded["release_id"],
             code_commit=decoded["code_commit"],
             created_at=created_at,
-            targets=tuple(ReleaseTarget.from_dict(item) for item in targets),
+            targets=tuple(
+                ReleaseTarget.from_dict(
+                    item, release_schema_version=schema_version
+                )
+                for item in targets
+            ),
             gates=tuple(GateEvidence.from_dict(item) for item in gates),
-            companions=tuple(CompanionPlan.from_dict(item) for item in companions),
+            companions=tuple(
+                CompanionPlan.from_dict(
+                    item, release_schema_version=schema_version
+                )
+                for item in companions
+            ),
             previous_authority=(
                 None
                 if previous_authority is None
@@ -732,7 +1046,11 @@ def _validate_invalid_previous_artifact_inventory(
         if pointer is None or (
             pointer.generation_id != target.proposed_generation_id
             or pointer.manifest_sha256 != target.proposed_manifest_sha256
-            or pointer.artifact_inventory_sha256 != target.proposed_inventory_sha256
+            or (
+                pointer.pointer_schema_version != _LEGACY_SCHEMA_VERSION
+                and pointer.artifact_inventory_sha256
+                != target.proposed_inventory_sha256
+            )
         ):
             raise ReleaseConflictError(
                 f"recorded predecessor pointer graph differs: {target.root_id}"
@@ -745,10 +1063,12 @@ def _validate_invalid_previous_artifact_inventory(
             raise ReleaseConflictError(
                 f"recorded predecessor manifest differs: {target.root_id}"
             )
-        if (
+        actual_inventory = generation_inventory_sha256(
+            root, target.proposed_generation_id
+        )
+        if pointer.pointer_schema_version == _LEGACY_SCHEMA_VERSION or (
             target.proposed_inventory_sha256 is not None
-            and generation_inventory_sha256(root, target.proposed_generation_id)
-            != target.proposed_inventory_sha256
+            and actual_inventory != target.proposed_inventory_sha256
         ):
             drifted = True
     if not drifted:
@@ -756,7 +1076,9 @@ def _validate_invalid_previous_artifact_inventory(
             "predecessor repair requires an artifact inventory mismatch"
         )
     for companion in manifest.companions:
-        path = roots[companion.root_id].resolve() / companion.relative_path
+        path = _companion_path(
+            roots[companion.root_id].resolve(), companion.relative_path
+        )
         if _companion_hash(path) != companion.proposed_sha256:
             raise ReleaseConflictError(
                 f"recorded predecessor companion differs: {companion.companion_id}"
@@ -767,6 +1089,55 @@ def _validate_invalid_previous_artifact_inventory(
 
 def _repairs_invalid_previous_inventory(manifest: ReleaseManifest) -> bool:
     return any(item.gate_id == _PREDECESSOR_REPAIR_GATE_ID for item in manifest.gates)
+
+
+def _validate_root_identities(
+    manifest: ReleaseManifest, roots: Mapping[str, Path]
+) -> None:
+    if manifest.release_schema_version < _SCHEMA_VERSION:
+        return
+    for target in manifest.targets:
+        if _root_identity(roots[target.root_id]) != target.root_identity:
+            raise ReleaseConflictError(
+                f"release root identity changed: {target.root_id}"
+            )
+
+
+def _release_lease_expectations(
+    manifest: ReleaseManifest, roots: Mapping[str, Path]
+) -> dict[Path, str | None]:
+    expected: dict[Path, str | None] = {}
+    for target in manifest.targets:
+        expected[roots[target.root_id]] = target.root_identity
+    for companion in manifest.companions:
+        parent = _companion_path(
+            roots[companion.root_id], companion.relative_path
+        ).parent
+        prior = expected.get(parent)
+        if (
+            prior is not None
+            and companion.parent_identity is not None
+            and prior != companion.parent_identity
+        ):
+            raise ReleaseConflictError("release directory identities conflict")
+        expected[parent] = companion.parent_identity or prior
+    return expected
+
+
+def _validate_previous_inventory(root: Path, target: ReleaseTarget) -> None:
+    if target.previous_pointer is None:
+        return
+    if target.previous_inventory_sha256 is None:
+        raise ReleaseConflictError(
+            f"previous generation inventory is unbound: {target.root_id}"
+        )
+    if (
+        generation_inventory_sha256(root, target.previous_pointer.generation_id)
+        != target.previous_inventory_sha256
+    ):
+        raise ReleaseConflictError(
+            f"previous generation inventory changed after prepare: {target.root_id}"
+        )
 
 
 def prepare_release(
@@ -804,6 +1175,7 @@ def prepare_release(
     targets: list[ReleaseTarget] = []
     for root_id in sorted(normalized_roots):
         root = normalized_roots[root_id]
+        root_identity = _root_identity(root)
         generation_manifest = read_generation(root, normalized_proposed[root_id])
         if generation_manifest.verification is not VerificationStatus.VERIFIED:
             raise PublicationRejectedError("release target is not verified")
@@ -812,15 +1184,27 @@ def prepare_release(
             is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
         ):
             raise PublicationRejectedError("release target coverage is not complete")
+        previous_inventory_sha256: str | None
         try:
             previous_pointer = _read_optional_current(root)
+            previous_inventory_sha256 = (
+                previous_pointer.artifact_inventory_sha256
+                if previous_pointer is not None
+                else None
+            )
         except PointerIntegrityError:
             if not allow_invalid_previous_artifact_inventory:
                 raise
             previous_pointer = _read_recorded_current(root)
+            previous_inventory_sha256 = (
+                generation_inventory_sha256(root, previous_pointer.generation_id)
+                if previous_pointer is not None
+                else None
+            )
         targets.append(
             ReleaseTarget(
                 root_id=root_id,
+                root_identity=root_identity,
                 proposed_generation_id=generation_manifest.generation_id,
                 proposed_manifest_sha256=hashlib.sha256(
                     generation_manifest.to_json_bytes()
@@ -829,13 +1213,16 @@ def prepare_release(
                     root, generation_manifest.generation_id
                 ),
                 previous_pointer=previous_pointer,
+                previous_inventory_sha256=previous_inventory_sha256,
             )
         )
     plans: list[CompanionPlan] = []
     for item in companions:
         if item.root_id not in normalized_roots:
             raise ReleaseValidationError("companion references an unknown root")
-        companion_path = normalized_roots[item.root_id] / item.relative_path
+        companion_path = _companion_path(
+            normalized_roots[item.root_id], item.relative_path
+        )
         if companion_path.is_symlink():
             raise ReleaseConflictError("companion target must not be a symlink")
         previous = companion_path.read_bytes() if companion_path.exists() else None
@@ -850,6 +1237,7 @@ def prepare_release(
                     if previous is not None
                     else None
                 ),
+                parent_identity=_root_identity(companion_path.parent),
             )
         )
     previous_authority = _read_optional_authority(coordination_root)
@@ -886,7 +1274,9 @@ def prepare_release(
     directory = _release_dir(coordination_root, release_manifest.release_id)
     _create_exact(directory / "release.json", release_manifest.to_json_bytes())
     for plan in release_manifest.companions:
-        companion_path = normalized_roots[plan.root_id] / plan.relative_path
+        companion_path = _companion_path(
+            normalized_roots[plan.root_id], plan.relative_path
+        )
         if plan.previous_sha256 is not None:
             _create_exact(
                 directory / "recovery" / f"{plan.companion_id}.bin",
@@ -898,6 +1288,9 @@ def prepare_release(
             release_manifest.release_id, ReleaseState.PREPARED
         ).to_json_bytes(),
     )
+    _validate_root_identities(release_manifest, normalized_roots)
+    for plan in release_manifest.companions:
+        _companion_path(normalized_roots[plan.root_id], plan.relative_path)
     return release_manifest
 
 
@@ -929,6 +1322,7 @@ def _validate_prepared_state(
 ) -> None:
     if set(roots) != {item.root_id for item in manifest.targets}:
         raise ReleaseValidationError("runtime roots differ from release roots")
+    _validate_root_identities(manifest, roots)
     for target in manifest.targets:
         root = roots[target.root_id].resolve()
         current = (
@@ -940,6 +1334,8 @@ def _validate_prepared_state(
             raise ReleaseConflictError(
                 f"current pointer changed after prepare: {target.root_id}"
             )
+        if manifest.release_schema_version >= _SCHEMA_VERSION:
+            _validate_previous_inventory(root, target)
         proposed = read_generation(root, target.proposed_generation_id)
         if (
             hashlib.sha256(proposed.to_json_bytes()).hexdigest()
@@ -955,12 +1351,14 @@ def _validate_prepared_state(
                 f"proposed generation inventory changed: {target.root_id}"
             )
     for companion in manifest.companions:
-        path = roots[companion.root_id].resolve() / companion.relative_path
+        path = _companion_path(
+            roots[companion.root_id].resolve(), companion.relative_path
+        )
         if _companion_hash(path) != companion.previous_sha256:
             raise ReleaseConflictError(
                 f"companion changed after prepare: {companion.companion_id}"
             )
-    if manifest.release_schema_version >= _SCHEMA_VERSION:
+    if manifest.release_schema_version >= _COORDINATED_SCHEMA_VERSION:
         if coordination_root is None:
             raise ReleaseValidationError(
                 "coordination root is required for release authority validation"
@@ -977,6 +1375,7 @@ def _validate_committed_state(
 ) -> None:
     if set(roots) != {item.root_id for item in manifest.targets}:
         raise ReleaseValidationError("runtime roots differ from release roots")
+    _validate_root_identities(manifest, roots)
     for target in manifest.targets:
         pointer = read_current(roots[target.root_id].resolve())
         if (
@@ -992,12 +1391,14 @@ def _validate_committed_state(
                 f"committed pointer graph differs: {target.root_id}"
             )
     for companion in manifest.companions:
-        path = roots[companion.root_id].resolve() / companion.relative_path
+        path = _companion_path(
+            roots[companion.root_id].resolve(), companion.relative_path
+        )
         if _companion_hash(path) != companion.proposed_sha256:
             raise ReleaseConflictError(
                 f"committed companion differs: {companion.companion_id}"
             )
-    if manifest.release_schema_version >= _SCHEMA_VERSION:
+    if manifest.release_schema_version >= _COORDINATED_SCHEMA_VERSION:
         if coordination_root is None:
             raise ReleaseValidationError(
                 "coordination root is required for release authority validation"
@@ -1014,6 +1415,7 @@ def _validate_rolled_back_state(
 ) -> None:
     if set(roots) != {item.root_id for item in manifest.targets}:
         raise ReleaseValidationError("runtime roots differ from release roots")
+    _validate_root_identities(manifest, roots)
     for target in manifest.targets:
         root = roots[target.root_id].resolve()
         current = (
@@ -1025,13 +1427,17 @@ def _validate_rolled_back_state(
             raise ReleaseConflictError(
                 f"rolled-back pointer graph differs: {target.root_id}"
             )
+        if manifest.release_schema_version >= _SCHEMA_VERSION:
+            _validate_previous_inventory(root, target)
     for companion in manifest.companions:
-        path = roots[companion.root_id].resolve() / companion.relative_path
+        path = _companion_path(
+            roots[companion.root_id].resolve(), companion.relative_path
+        )
         if _companion_hash(path) != companion.previous_sha256:
             raise ReleaseConflictError(
                 f"rolled-back companion differs: {companion.companion_id}"
             )
-    if manifest.release_schema_version >= _SCHEMA_VERSION:
+    if manifest.release_schema_version >= _COORDINATED_SCHEMA_VERSION:
         if coordination_root is None:
             raise ReleaseValidationError(
                 "coordination root is required for release authority validation"
@@ -1091,6 +1497,11 @@ def rollback_release(
 ) -> ReleaseJournal:
     """Idempotently restore every recorded release intent in reverse order."""
 
+    _require_trusted_coordinated_namespace("rollback_release")
+    _validate_root_identities(manifest, roots)
+    directory_leases = _acquire_directory_leases(
+        _release_lease_expectations(manifest, roots)
+    )
     rolling = ReleaseJournal(
         manifest.release_id,
         ReleaseState.ROLLING_BACK,
@@ -1098,12 +1509,16 @@ def rollback_release(
         journal.applied_companions,
         journal.last_error,
     )
-    _write_journal(coordination_root, rolling)
     try:
+        _write_journal(coordination_root, rolling)
         companions = {item.companion_id: item for item in manifest.companions}
         for companion_id in reversed(rolling.applied_companions):
             plan = companions[companion_id]
-            companion_path = roots[plan.root_id].resolve() / plan.relative_path
+            _verify_directory_leases(directory_leases)
+            _validate_root_identities(manifest, roots)
+            companion_path = _companion_path(
+                roots[plan.root_id].resolve(), plan.relative_path
+            )
             current_hash = _companion_hash(companion_path)
             if current_hash == plan.previous_sha256:
                 pass
@@ -1138,6 +1553,8 @@ def rollback_release(
                 fault_hook("after-companion-restore", companion_id)
         targets = {item.root_id: item for item in manifest.targets}
         for root_id in reversed(rolling.applied_targets):
+            _verify_directory_leases(directory_leases)
+            _validate_root_identities(manifest, roots)
             release_target = targets[root_id]
             root = roots[root_id].resolve()
             current = (
@@ -1175,7 +1592,9 @@ def rollback_release(
                 )
             if fault_hook is not None:
                 fault_hook("after-target-restore", root_id)
-        if manifest.release_schema_version >= _SCHEMA_VERSION:
+        _validate_root_identities(manifest, roots)
+        _verify_directory_leases(directory_leases)
+        if manifest.release_schema_version >= _COORDINATED_SCHEMA_VERSION:
             current_authority = _read_optional_authority(coordination_root)
             proposed_authority = _expected_authority(manifest)
             if current_authority == manifest.previous_authority:
@@ -1217,6 +1636,8 @@ def rollback_release(
         )
         _write_journal(coordination_root, failed)
         raise ReleaseCommitError("release recovery failed") from exc
+    finally:
+        _close_directory_leases(directory_leases)
 
 
 def _acquire_lock(lock: Path, release_id: str) -> None:
@@ -1268,51 +1689,80 @@ def recover_release(
     confirm its removal, and its contents must name this exact release.
     """
 
+    _require_trusted_coordinated_namespace("recover_release")
     manifest, journal = read_release(coordination_root, release_id)
     normalized_roots = _normalize_roots(roots)
     if set(normalized_roots) != {item.root_id for item in manifest.targets}:
         raise ReleaseValidationError("runtime roots differ from release roots")
     coordination_root = coordination_root.resolve()
     _reject_coordination_alias(coordination_root, normalized_roots)
+    _validate_root_identities(manifest, normalized_roots)
+    directory_leases = _acquire_directory_leases(
+        _release_lease_expectations(manifest, normalized_roots)
+    )
     lock = coordination_root / "release.lock"
     lock_present = lock.exists() or lock.is_symlink()
     if journal.state is ReleaseState.PREPARED:
-        if not lock_present:
-            raise ReleaseConflictError("release is not recoverable: PREPARED")
-        _validate_prepared_state(
-            manifest,
-            normalized_roots,
-            coordination_root=coordination_root,
-        )
-        _clear_confirmed_stale_lock(lock, release_id, confirmed=clear_stale_lock)
-        return journal
+        try:
+            if not lock_present:
+                raise ReleaseConflictError("release is not recoverable: PREPARED")
+            _validate_prepared_state(
+                manifest,
+                normalized_roots,
+                coordination_root=coordination_root,
+            )
+            _verify_directory_leases(directory_leases)
+            _clear_confirmed_stale_lock(lock, release_id, confirmed=clear_stale_lock)
+            return journal
+        finally:
+            _close_directory_leases(directory_leases)
     if journal.state is ReleaseState.COMMITTED:
-        _validate_committed_state(
-            manifest,
-            normalized_roots,
-            coordination_root=coordination_root,
-        )
-        if lock_present:
-            _clear_confirmed_stale_lock(lock, release_id, confirmed=clear_stale_lock)
-        return journal
+        try:
+            _validate_committed_state(
+                manifest,
+                normalized_roots,
+                coordination_root=coordination_root,
+            )
+            _verify_directory_leases(directory_leases)
+            if lock_present:
+                _clear_confirmed_stale_lock(
+                    lock, release_id, confirmed=clear_stale_lock
+                )
+            return journal
+        finally:
+            _close_directory_leases(directory_leases)
     if journal.state is ReleaseState.ROLLED_BACK:
-        _validate_rolled_back_state(
-            manifest,
-            normalized_roots,
-            coordination_root=coordination_root,
-        )
-        if lock_present:
-            _clear_confirmed_stale_lock(lock, release_id, confirmed=clear_stale_lock)
-        return journal
+        try:
+            _validate_rolled_back_state(
+                manifest,
+                normalized_roots,
+                coordination_root=coordination_root,
+            )
+            _verify_directory_leases(directory_leases)
+            if lock_present:
+                _clear_confirmed_stale_lock(
+                    lock, release_id, confirmed=clear_stale_lock
+                )
+            return journal
+        finally:
+            _close_directory_leases(directory_leases)
     if journal.state not in {
         ReleaseState.COMMITTING,
         ReleaseState.ROLLING_BACK,
         ReleaseState.RECOVERY_FAILED,
     }:
+        _close_directory_leases(directory_leases)
         raise ReleaseConflictError(f"release is not recoverable: {journal.state.value}")
-    if lock_present:
-        _clear_confirmed_stale_lock(lock, release_id, confirmed=clear_stale_lock)
-    _acquire_lock(lock, release_id)
+    try:
+        _verify_directory_leases(directory_leases)
+        if lock_present:
+            _clear_confirmed_stale_lock(
+                lock, release_id, confirmed=clear_stale_lock
+            )
+        _acquire_lock(lock, release_id)
+    except Exception:
+        _close_directory_leases(directory_leases)
+        raise
     try:
         return rollback_release(
             coordination_root=coordination_root,
@@ -1323,6 +1773,7 @@ def recover_release(
         )
     finally:
         lock.unlink(missing_ok=True)
+        _close_directory_leases(directory_leases)
 
 
 def commit_release(
@@ -1335,27 +1786,39 @@ def commit_release(
 ) -> ReleaseJournal:
     """Commit every pointer and companion or restore the prepared predecessor graph."""
 
+    _require_trusted_coordinated_namespace("commit_release")
     manifest, journal = read_release(coordination_root, release_id)
     normalized_roots = _normalize_roots(roots)
     coordination_root = coordination_root.resolve()
     _reject_coordination_alias(coordination_root, normalized_roots)
+    _validate_root_identities(manifest, normalized_roots)
+    directory_leases = _acquire_directory_leases(
+        _release_lease_expectations(manifest, normalized_roots)
+    )
     if journal.state is ReleaseState.COMMITTED:
-        _validate_committed_state(
-            manifest,
-            normalized_roots,
-            coordination_root=coordination_root,
-        )
-        return journal
+        try:
+            _validate_committed_state(
+                manifest,
+                normalized_roots,
+                coordination_root=coordination_root,
+            )
+            return journal
+        finally:
+            _close_directory_leases(directory_leases)
     if journal.state is not ReleaseState.PREPARED:
+        _close_directory_leases(directory_leases)
         raise ReleaseConflictError(f"release is not prepared: {journal.state.value}")
     coordination_root.mkdir(parents=True, exist_ok=True)
     lock = coordination_root / "release.lock"
-    _acquire_lock(lock, manifest.release_id)
-    if fault_hook is not None:
-        fault_hook("after-lock-acquire", manifest.release_id)
-
+    try:
+        _acquire_lock(lock, manifest.release_id)
+    except Exception:
+        _close_directory_leases(directory_leases)
+        raise
     current: ReleaseJournal | None = None
     try:
+        if fault_hook is not None:
+            fault_hook("after-lock-acquire", manifest.release_id)
         _validate_prepared_state(
             manifest,
             normalized_roots,
@@ -1378,6 +1841,7 @@ def commit_release(
         for target in manifest.targets:
             if fault_hook is not None:
                 fault_hook("before-target", target.root_id)
+            _validate_root_identities(manifest, normalized_roots)
             current = ReleaseJournal(
                 manifest.release_id,
                 ReleaseState.COMMITTING,
@@ -1387,6 +1851,8 @@ def commit_release(
             _write_journal(coordination_root, current)
             if fault_hook is not None:
                 fault_hook("after-target-intent", target.root_id)
+            _verify_directory_leases(directory_leases)
+            _validate_root_identities(manifest, normalized_roots)
             publish_generation(
                 normalized_roots[target.root_id], target.proposed_generation_id
             )
@@ -1395,6 +1861,10 @@ def commit_release(
         for companion in manifest.companions:
             if fault_hook is not None:
                 fault_hook("before-companion", companion.companion_id)
+            _validate_root_identities(manifest, normalized_roots)
+            companion_path = _companion_path(
+                normalized_roots[companion.root_id], companion.relative_path
+            )
             current = ReleaseJournal(
                 manifest.release_id,
                 ReleaseState.COMMITTING,
@@ -1404,8 +1874,13 @@ def commit_release(
             _write_journal(coordination_root, current)
             if fault_hook is not None:
                 fault_hook("after-companion-intent", companion.companion_id)
+            _verify_directory_leases(directory_leases)
+            _validate_root_identities(manifest, normalized_roots)
+            companion_path = _companion_path(
+                normalized_roots[companion.root_id], companion.relative_path
+            )
             _atomic_write(
-                normalized_roots[companion.root_id] / companion.relative_path,
+                companion_path,
                 companion_contents[companion.companion_id],
             )
             if fault_hook is not None:
@@ -1425,12 +1900,14 @@ def commit_release(
                     f"published pointer differs: {target.root_id}"
                 )
         for companion in manifest.companions:
-            content = (
-                normalized_roots[companion.root_id] / companion.relative_path
-            ).read_bytes()
-            if hashlib.sha256(content).hexdigest() != companion.proposed_sha256:
+            path = _companion_path(
+                normalized_roots[companion.root_id], companion.relative_path
+            )
+            if _companion_hash(path) != companion.proposed_sha256:
                 raise ReleaseConflictError("published companion hash differs")
-        if manifest.release_schema_version >= _SCHEMA_VERSION:
+        _validate_root_identities(manifest, normalized_roots)
+        _verify_directory_leases(directory_leases)
+        if manifest.release_schema_version >= _COORDINATED_SCHEMA_VERSION:
             _atomic_write(
                 _authority_path(coordination_root),
                 _expected_authority(manifest).to_json_bytes(),
@@ -1449,7 +1926,7 @@ def commit_release(
             current.applied_companions,
         )
         _write_journal(coordination_root, committed)
-        if manifest.release_schema_version >= _SCHEMA_VERSION:
+        if manifest.release_schema_version >= _COORDINATED_SCHEMA_VERSION:
             read_current_release(coordination_root, normalized_roots)
         if fault_hook is not None:
             fault_hook("after-committed-journal", manifest.release_id)
@@ -1476,3 +1953,4 @@ def commit_release(
         ) from exc
     finally:
         lock.unlink(missing_ok=True)
+        _close_directory_leases(directory_leases)

@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 import hashlib
 import json
+import os
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -18,6 +20,7 @@ from quant_engine.core import (
     PipelineSpec,
     PipelineUnknownOutcomeError,
     PipelineValidationError,
+    ReleasePublicationUnavailableError,
     SourceArtifact,
     VerificationStatus,
     execute_pipeline,
@@ -29,10 +32,23 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import release as release_module
 
 
 AS_OF = date(2026, 8, 2)
 COMMIT = "d" * 40
+
+
+@pytest.fixture(autouse=True)
+def _skip_posix_pipeline_behavior_on_windows(
+    request: pytest.FixtureRequest
+) -> None:
+    if (
+        os.name == "nt"
+        and "windows" not in request.node.name
+        and "default_runner_child" not in request.node.name
+    ):
+        pytest.skip("POSIX coordinated pipeline behavior is verified on POSIX")
 
 
 def _manifest(label: str) -> GenerationManifest:
@@ -650,6 +666,116 @@ def test_unknown_external_read_is_never_retried(tmp_path: Path) -> None:
     assert not (target / "generations" / proposed.generation_id).exists()
 
 
+def test_external_read_persists_unknown_before_spawn_and_never_replays(
+    tmp_path: Path,
+) -> None:
+    command = {
+        "argv": ["synthetic", "external-read"],
+        "cwd": str(tmp_path),
+        "declared_reads": [],
+        "declared_writes": [],
+        "depends_on": [],
+        "effect": "READ_ONLY_EXTERNAL",
+        "kind": "COMMAND",
+        "node_id": "provider-read",
+        "request_identity": "e" * 64,
+        "retry_limit": 0,
+        "timeout_seconds": 10,
+    }
+    raw, _, _, _ = _spec_dict(tmp_path, command=command)
+    spec = _parse(raw)
+    calls = 0
+
+    def terminate_after_spawn(_node: object) -> tuple[int, bytes, bytes]:
+        nonlocal calls
+        calls += 1
+        receipt_path = next(
+            path
+            for path in spec.state_root.rglob("provider-read.json")
+            if path.parent.name == "receipts"
+        )
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["state"] == "UNKNOWN"
+        assert receipt["attempts"] == 1
+        assert receipt["command_evidence"]["attempts"][-1]["outcome"] == "IN_FLIGHT"
+        raise KeyboardInterrupt("synthetic abrupt termination")
+
+    with pytest.raises(KeyboardInterrupt, match="abrupt termination"):
+        execute_pipeline(
+            spec,
+            allow_external_read=True,
+            command_runner=terminate_after_spawn,
+        )
+    with pytest.raises(PipelineUnknownOutcomeError, match="unknown external-read"):
+        execute_pipeline(
+            spec,
+            allow_external_read=True,
+            command_runner=lambda _node: (0, b"must not run", b""),
+        )
+
+    assert calls == 1
+
+
+def test_default_runner_child_observes_unknown_in_flight_receipt_before_spawn(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    child = (
+        "import json;"
+        "from pathlib import Path;"
+        f"paths=list(Path({str(state_root)!r}).rglob('provider-read.json'));"
+        "assert len(paths)==1;"
+        "receipt=json.loads(paths[0].read_text(encoding='utf-8'));"
+        "assert receipt['state']=='UNKNOWN';"
+        "assert receipt['attempts']==1;"
+        "assert receipt['command_evidence']['attempts'][-1]['outcome']=='IN_FLIGHT'"
+    )
+    command = {
+        "argv": [sys.executable, "-c", child],
+        "cwd": str(tmp_path),
+        "declared_reads": [],
+        "declared_writes": [],
+        "depends_on": [],
+        "effect": "READ_ONLY_EXTERNAL",
+        "kind": "COMMAND",
+        "node_id": "provider-read",
+        "request_identity": "e" * 64,
+        "retry_limit": 0,
+        "timeout_seconds": 10,
+    }
+    raw, _, _, _ = _spec_dict(tmp_path, command=command)
+    spec = _parse(raw)
+
+    execute_pipeline(spec, allow_external_read=True)
+
+    receipt_path = next(spec.state_root.rglob("provider-read.json"))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["state"] == "COMPLETED"
+    assert receipt["command_evidence"]["attempts"][-1]["outcome"] == "COMPLETED"
+
+
+def test_pipeline_stops_after_prepare_when_windows_publication_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, previous, proposed, target = _spec_dict(tmp_path)
+    spec = _parse(raw)
+    prepared = execute_pipeline(spec)
+    journal_path = (
+        spec.coordination_root / "releases" / str(prepared["release_id"]) / "journal.json"
+    )
+    before_journal = journal_path.read_bytes()
+
+    monkeypatch.setattr(release_module, "_is_windows_platform", lambda: True)
+    with pytest.raises(ReleasePublicationUnavailableError) as raised:
+        execute_pipeline(spec, commit=True)
+
+    assert raised.value.operation == "commit_release"
+    assert journal_path.read_bytes() == before_journal
+    assert read_current(target).generation_id == previous.generation_id
+    assert not (target / "index.html").exists()
+    assert (target / "generations" / proposed.generation_id).is_dir()
+
+
 def test_external_read_requires_explicit_execution_authority(tmp_path: Path) -> None:
     command = {
         "argv": ["synthetic", "external-read"],
@@ -752,6 +878,56 @@ def test_command_receipt_retains_hashed_reproducibility_evidence_without_secrets
         == hashlib.sha256(b"output\n").hexdigest()
     )
     assert evidence["tool_identity"]["executable_name"] == "synthetic"
+
+
+def test_default_runner_caps_stream_capture_and_retains_hash_only_evidence(
+    tmp_path: Path,
+) -> None:
+    stdout = b"x" * (128 * 1024)
+    stderr = b"y" * (96 * 1024)
+    command = {
+        "argv": [
+            sys.executable,
+            "-c",
+            (
+                "import sys;"
+                "sys.stdout.buffer.write(b'x'*(128*1024));"
+                "sys.stderr.buffer.write(b'y'*(96*1024))"
+            ),
+        ],
+        "cwd": str(tmp_path),
+        "declared_reads": [],
+        "declared_writes": [],
+        "depends_on": [],
+        "effect": "LOCAL_ONLY",
+        "kind": "COMMAND",
+        "node_id": "bounded-output",
+        "request_identity": None,
+        "retry_limit": 0,
+        "timeout_seconds": 10,
+    }
+    raw, _, _, _ = _spec_dict(tmp_path, command=command)
+    spec = _parse(raw)
+
+    execute_pipeline(spec)
+
+    receipt_path = next(
+        path
+        for path in spec.state_root.rglob("bounded-output.json")
+        if path.parent.name == "receipts"
+    )
+    raw_receipt = receipt_path.read_text(encoding="utf-8")
+    attempt = json.loads(raw_receipt)["command_evidence"]["attempts"][-1]
+    assert attempt["stdout_sha256"] == hashlib.sha256(stdout).hexdigest()
+    assert attempt["stderr_sha256"] == hashlib.sha256(stderr).hexdigest()
+    assert attempt["stdout_size_bytes"] == len(stdout)
+    assert attempt["stderr_size_bytes"] == len(stderr)
+    assert attempt["stdout_captured_bytes"] == 64 * 1024
+    assert attempt["stderr_captured_bytes"] == 64 * 1024
+    assert attempt["stdout_truncated"] is True
+    assert attempt["stderr_truncated"] is True
+    assert "x" * 128 not in raw_receipt
+    assert "y" * 128 not in raw_receipt
 
 
 def test_completed_command_receipt_rejects_declared_output_drift(

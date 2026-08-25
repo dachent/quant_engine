@@ -59,3 +59,12 @@ Pipeline command receipts retain credential-safe argv fingerprints, cwd,
 return code, stdout/stderr hashes, interpreter/tool identity, and pre/post hashes
 for every declared read and write. Completed commands are not silently reused
 when a declared output has drifted.
+
+On Windows, the coordinated publication entry points (`commit_release`,
+`recover_release`, and `rollback_release`) fail closed with
+`WINDOWS_NAMESPACE_UNTRUSTED` before reading or mutating their roots. This does
+not affect `prepare_release`, which stages immutable evidence only. The generic
+single-root `publish_generation` primitive is outside this coordinated
+hostile-writer guarantee. A future trusted Windows implementation must retain
+stable directory identities and handles through the whole transaction; pathname
+revalidation is insufficient.
