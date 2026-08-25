@@ -243,6 +243,208 @@ def test_directory_inventory_is_path_order_independent(tmp_path: Path) -> None:
     assert builder._directory_inventory(first) == builder._directory_inventory(second)
 
 
+@pytest.mark.parametrize("kind", ("directory", "file"))
+def test_directory_inventory_rejects_nested_links(tmp_path: Path, kind: str) -> None:
+    """A candidate inventory may not hide content behind a nested link."""
+    root = tmp_path / "candidate"
+    nested = root / "nested"
+    target = tmp_path / "target"
+    root.mkdir()
+    nested.mkdir()
+    target.mkdir()
+    (target / "evidence.txt").write_text("outside", encoding="utf-8")
+    link = nested / "linked" if kind == "directory" else nested / "linked.txt"
+    try:
+        link.symlink_to(target if kind == "directory" else target / "evidence.txt", target_is_directory=kind == "directory")
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(builder.VerticalBuildError, match="contains a link"):
+        builder._directory_inventory(root)
+
+
+def test_reparse_metadata_is_treated_as_a_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Covers Windows reparse-point detection where symlink privilege is absent."""
+    reparse_point = 0x400
+    monkeypatch.setattr(
+        builder.stat, "FILE_ATTRIBUTE_REPARSE_POINT", reparse_point, raising=False
+    )
+
+    class ReparsePoint:
+        def lstat(self) -> object:
+            return type("Stat", (), {"st_file_attributes": reparse_point})()
+
+        def is_symlink(self) -> bool:
+            return False
+
+    assert builder._is_link_or_reparse_point(ReparsePoint()) is True
+
+
+def _panel_checkpoint_stage_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, Path, list[Path]]:
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_bytes(b"{}\n")
+    output_root = tmp_path / "output"
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    candidate_file = candidate / "panel.html"
+    candidate_file.write_text("candidate-v1", encoding="utf-8")
+    implementation = tmp_path / "implementation.json"
+    return_attribution = tmp_path / "return-attribution.json"
+    strategy_root = tmp_path / "strategy-root"
+    implementation.write_text("{}", encoding="utf-8")
+    return_attribution.write_text("{}", encoding="utf-8")
+    strategy_root.mkdir()
+
+    stages = output_root / "stage-results"
+    stages.mkdir(parents=True)
+    values = {
+        "ledger": {"freshness_health": str(tmp_path / "freshness.json")},
+        "baseline": {},
+        "attribution": {"destination": str(tmp_path / "attribution")},
+        "analytics": {"correlation_root": str(tmp_path / "correlation")},
+        "report": {},
+        "workbook": {},
+    }
+    for role, value in values.items():
+        (stages / f"{role}.json").write_bytes(canonical_json_bytes(value))
+
+    recipe = {
+        "implementation_reconciliation": {"path": str(implementation)},
+        "implementation_return_attribution": {"path": str(return_attribution)},
+        "release_commit": "a" * 40,
+        "strategy_attribution_root": {"path": str(strategy_root)},
+    }
+    monkeypatch.setattr(builder, "_recipe", lambda _path: recipe)
+    monkeypatch.setattr(
+        builder, "_history_contract_path", lambda _recipe: tmp_path / "history.json"
+    )
+    monkeypatch.setattr(
+        builder, "_validate_stage_financial_arguments", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        builder,
+        "build_panel_candidate",
+        lambda *_args, **_kwargs: {"candidate_dir": str(candidate)},
+    )
+    published: list[Path] = []
+
+    def fake_publish(*args: object, **_kwargs: object) -> dict[str, object]:
+        published.append(Path(str(args[6])).resolve())
+        return {"candidate_dir": str(args[6]), "published": True}
+
+    monkeypatch.setattr(builder, "publish_panel", fake_publish)
+    return recipe_path, output_root, candidate_file, published
+
+
+def test_panel_candidate_checkpoint_rejects_foreign_or_stale_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reuse fails closed before panel publication for every bound identity."""
+    recipe_path, output_root, candidate_file, published = _panel_checkpoint_stage_fixture(
+        tmp_path, monkeypatch
+    )
+    candidate_result = builder.build_stage(recipe_path, output_root, "panel-candidate")
+    checkpoint_path = output_root / "stage-results" / "panel-candidate.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    expected_keys = {
+        "schema_version",
+        "role",
+        "recipe",
+        "release_commit",
+        "predecessors",
+        "candidate",
+        "result",
+    }
+
+    # This branch makes the initial RED case explicit: the historical raw
+    # result shape allowed foreign checkpoints to reach publication.
+    if set(checkpoint) != expected_keys:
+        checkpoint_path.write_bytes(canonical_json_bytes(candidate_result))
+        with pytest.raises(builder.VerticalBuildError, match="panel candidate checkpoint"):
+            builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
+        assert published == []
+        return
+
+    recipe_bytes = recipe_path.read_bytes()
+    predecessor_path = output_root / "stage-results" / "workbook.json"
+    predecessor_bytes = predecessor_path.read_bytes()
+    candidate_bytes = candidate_file.read_bytes()
+
+    def reject(label: str, mutate: Callable[[dict[str, object]], None]) -> None:
+        recipe_path.write_bytes(recipe_bytes)
+        predecessor_path.write_bytes(predecessor_bytes)
+        candidate_file.write_bytes(candidate_bytes)
+        checkpoint_path.write_bytes(canonical_json_bytes(checkpoint))
+        mutated = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        mutate(mutated)
+        checkpoint_path.write_bytes(canonical_json_bytes(mutated))
+        with pytest.raises(builder.VerticalBuildError, match="panel candidate checkpoint"):
+            builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
+        assert published == [], label
+
+    reject(
+        "release commit",
+        lambda value: value.__setitem__("release_commit", "b" * 40),
+    )
+    reject(
+        "recipe bytes",
+        lambda _value: recipe_path.write_bytes(recipe_bytes + b"\n"),
+    )
+    reject(
+        "predecessor bytes",
+        lambda _value: predecessor_path.write_bytes(b"{ }\n"),
+    )
+    reject(
+        "candidate content",
+        lambda _value: candidate_file.write_text("candidate-v2", encoding="utf-8"),
+    )
+    reject(
+        "candidate path",
+        lambda value: value["candidate"].__setitem__("path", str(tmp_path / "other")),
+    )
+    reject(
+        "candidate inventory",
+        lambda value: value["candidate"].__setitem__("inventory_sha256", "0" * 64),
+    )
+    reject("missing key", lambda value: value.pop("recipe"))
+    reject("extra key", lambda value: value.__setitem__("extra", True))
+    reject("wrong schema", lambda value: value.__setitem__("schema_version", 2))
+    reject("wrong role", lambda value: value.__setitem__("role", "panel"))
+    reject("wrong type", lambda value: value.__setitem__("predecessors", []))
+    reject("nested candidate", lambda value: value["result"].__setitem__("candidate_dir", str(tmp_path / "other")))
+
+    checkpoint_path.write_bytes(canonical_json_bytes(candidate_result))
+    with pytest.raises(builder.VerticalBuildError, match="panel candidate checkpoint"):
+        builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
+    assert published == []
+
+
+def test_panel_candidate_checkpoint_reuses_unchanged_candidate_for_panel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A validated checkpoint passes its nested result to publication unchanged."""
+    recipe_path, output_root, candidate_file, published = _panel_checkpoint_stage_fixture(
+        tmp_path, monkeypatch
+    )
+    candidate_result = builder.build_stage(recipe_path, output_root, "panel-candidate")
+    checkpoint_path = output_root / "stage-results" / "panel-candidate.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+
+    assert checkpoint["role"] == "panel-candidate"
+    assert checkpoint["result"] == candidate_result
+    assert checkpoint["candidate"]["path"] == str(candidate_file.parent.resolve())
+    published_result = builder.build_stage(
+        recipe_path, output_root, "panel", qa_dir=tmp_path / "qa"
+    )
+
+    assert published_result["published"] is True
+    assert published == [candidate_file.parent.resolve()]
+
+
 def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     provider = tmp_path / "provider.json"
     baseline = tmp_path / "baseline.json"

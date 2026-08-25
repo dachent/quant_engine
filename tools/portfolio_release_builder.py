@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -117,15 +118,24 @@ def _sha(path: Path) -> tuple[str, int]:
         raise VerticalBuildError(f"source artifact is unavailable: {path}") from exc
 
 
+def _is_link_or_reparse_point(path: Path) -> bool:
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError as exc:
+        raise VerticalBuildError(f"source artifact is unavailable: {path}") from exc
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return path.is_symlink() or bool(attributes & reparse_point)
+
+
 def _directory_inventory(path: Path) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_dir():
+    if _is_link_or_reparse_point(path) or not path.is_dir():
         raise VerticalBuildError(f"source directory is unavailable: {path}")
     rows = []
-    for item in sorted(
-        candidate for candidate in path.rglob("*") if candidate.is_file()
-    ):
-        if item.is_symlink():
+    for item in sorted(path.rglob("*")):
+        if _is_link_or_reparse_point(item):
             raise VerticalBuildError(f"source directory contains a link: {item}")
+        if not item.is_file():
+            continue
         sha256, size = _sha(item)
         rows.append(
             {
@@ -4057,7 +4067,120 @@ def _stage_result(output_root: Path, role: str) -> dict[str, Any]:
 
 
 def _record_stage(output_root: Path, role: str, result: Mapping[str, Any]) -> None:
+    if role == "panel-candidate":
+        raise VerticalBuildError("panel candidate checkpoint requires provenance envelope")
     _write_exact(_stage_path(output_root, role), canonical_json_bytes(dict(result)))
+
+
+_PANEL_CANDIDATE_PREDECESSORS = (
+    "ledger",
+    "baseline",
+    "attribution",
+    "analytics",
+    "report",
+    "workbook",
+)
+
+
+def _panel_candidate_checkpoint_error(detail: str) -> VerticalBuildError:
+    return VerticalBuildError(f"panel candidate checkpoint {detail}")
+
+
+def _panel_candidate_predecessors(output_root: Path) -> dict[str, dict[str, Any]]:
+    predecessors: dict[str, dict[str, Any]] = {}
+    for role in _PANEL_CANDIDATE_PREDECESSORS:
+        sha256, size_bytes = _sha(_stage_path(output_root, role))
+        predecessors[role] = {"sha256": sha256, "size_bytes": size_bytes}
+    return predecessors
+
+
+def _panel_candidate_checkpoint(
+    recipe_path: Path,
+    recipe: Mapping[str, Any],
+    output_root: Path,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    candidate = _path(result.get("candidate_dir"), "panel candidate")
+    recipe_sha256, recipe_size_bytes = _sha(recipe_path)
+    return {
+        "schema_version": 1,
+        "role": "panel-candidate",
+        "recipe": {
+            "sha256": recipe_sha256,
+            "size_bytes": recipe_size_bytes,
+        },
+        "release_commit": _text(recipe.get("release_commit"), "release_commit"),
+        "predecessors": _panel_candidate_predecessors(output_root),
+        "candidate": {
+            "path": str(candidate),
+            **_directory_inventory(candidate),
+        },
+        "result": dict(result),
+    }
+
+
+def _record_panel_candidate_checkpoint(
+    recipe_path: Path,
+    recipe: Mapping[str, Any],
+    output_root: Path,
+    result: Mapping[str, Any],
+) -> None:
+    checkpoint_path = _stage_path(output_root, "panel-candidate")
+    if checkpoint_path.exists():
+        raise _panel_candidate_checkpoint_error("already exists")
+    envelope = _panel_candidate_checkpoint(recipe_path, recipe, output_root, result)
+    try:
+        _write_exact(checkpoint_path, canonical_json_bytes(envelope))
+    except VerticalBuildError as exc:
+        raise _panel_candidate_checkpoint_error("cannot be created") from exc
+
+
+def _load_panel_candidate_checkpoint(
+    recipe_path: Path, recipe: Mapping[str, Any], output_root: Path
+) -> dict[str, Any]:
+    try:
+        envelope = _load(
+            _stage_path(output_root, "panel-candidate"), "panel candidate checkpoint"
+        )
+    except VerticalBuildError as exc:
+        raise _panel_candidate_checkpoint_error("is unreadable") from exc
+    required = {
+        "schema_version",
+        "role",
+        "recipe",
+        "release_commit",
+        "predecessors",
+        "candidate",
+        "result",
+    }
+    if set(envelope) != required:
+        raise _panel_candidate_checkpoint_error("keys differ")
+    if envelope.get("schema_version") != 1:
+        raise _panel_candidate_checkpoint_error("schema differs")
+    if envelope.get("role") != "panel-candidate":
+        raise _panel_candidate_checkpoint_error("role differs")
+    result = envelope.get("result")
+    if not isinstance(result, dict):
+        raise _panel_candidate_checkpoint_error("result differs")
+    try:
+        expected = _panel_candidate_checkpoint(recipe_path, recipe, output_root, result)
+    except VerticalBuildError as exc:
+        raise _panel_candidate_checkpoint_error("nested result differs") from exc
+    if envelope.get("recipe") != expected["recipe"]:
+        raise _panel_candidate_checkpoint_error("recipe differs")
+    if envelope.get("release_commit") != expected["release_commit"]:
+        raise _panel_candidate_checkpoint_error("release_commit differs")
+    if envelope.get("predecessors") != expected["predecessors"]:
+        raise _panel_candidate_checkpoint_error("predecessors differ")
+    if envelope.get("candidate") != expected["candidate"]:
+        raise _panel_candidate_checkpoint_error("candidate differs")
+    try:
+        nested_candidate = _path(result.get("candidate_dir"), "panel candidate")
+    except VerticalBuildError as exc:
+        raise _panel_candidate_checkpoint_error("nested result differs") from exc
+    if nested_candidate != Path(str(expected["candidate"]["path"])):
+        raise _panel_candidate_checkpoint_error("nested candidate differs")
+    return result
 
 
 def _validate_stage_financial_arguments(
@@ -4179,7 +4302,7 @@ def build_stage(
         _stage_result(output_root, "workbook")
         candidate_result_path = _stage_path(output_root, "panel-candidate")
         panel = (
-            _load(candidate_result_path, "panel candidate stage result")
+            _load_panel_candidate_checkpoint(recipe_path, recipe, output_root)
             if candidate_result_path.is_file()
             else build_panel_candidate(
                 recipe_path,
@@ -4191,6 +4314,8 @@ def build_stage(
                 stages / "panel",
             )
         )
+        if not candidate_result_path.is_file():
+            _record_panel_candidate_checkpoint(recipe_path, recipe, output_root, panel)
         if role == "panel-candidate":
             result = panel
         elif qa_dir is not None:
@@ -4231,7 +4356,8 @@ def build_stage(
             raise VerticalBuildError("panel publication requires browser QA")
     else:
         raise VerticalBuildError(f"unsupported vertical stage: {role}")
-    _record_stage(output_root, role, result)
+    if role != "panel-candidate":
+        _record_stage(output_root, role, result)
     return result
 
 
