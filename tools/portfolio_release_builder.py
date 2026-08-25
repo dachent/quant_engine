@@ -4135,15 +4135,40 @@ def _record_panel_candidate_checkpoint(
         raise _panel_candidate_checkpoint_error("cannot be created") from exc
 
 
-def _load_panel_candidate_checkpoint(
-    recipe_path: Path, recipe: Mapping[str, Any], output_root: Path
-) -> dict[str, Any]:
+def _load_strict_panel_candidate_checkpoint(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise _panel_candidate_checkpoint_error("is not a regular file")
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise _panel_candidate_checkpoint_error("contains duplicate JSON keys")
+            value[key] = item
+        return value
+
     try:
-        envelope = _load(
-            _stage_path(output_root, "panel-candidate"), "panel candidate checkpoint"
-        )
-    except VerticalBuildError as exc:
-        raise _panel_candidate_checkpoint_error("is unreadable") from exc
+        content = path.read_bytes()
+        value = json.loads(content, object_pairs_hook=reject_duplicate_keys)
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        VerticalBuildError,
+    ) as exc:
+        raise _panel_candidate_checkpoint_error("is not readable strict JSON") from exc
+    if type(value) is not dict:
+        raise _panel_candidate_checkpoint_error("root must be an object")
+    try:
+        canonical = canonical_json_bytes(value)
+    except (TypeError, ValueError) as exc:
+        raise _panel_candidate_checkpoint_error("is not canonical JSON") from exc
+    if content != canonical:
+        raise _panel_candidate_checkpoint_error("bytes are not canonical")
+    return value
+
+
+def _validate_panel_candidate_checkpoint_shape(envelope: Mapping[str, Any]) -> None:
     required = {
         "schema_version",
         "role",
@@ -4155,13 +4180,59 @@ def _load_panel_candidate_checkpoint(
     }
     if set(envelope) != required:
         raise _panel_candidate_checkpoint_error("keys differ")
-    if envelope.get("schema_version") != 1:
+    if type(envelope["schema_version"]) is not int or envelope["schema_version"] != 1:
         raise _panel_candidate_checkpoint_error("schema differs")
-    if envelope.get("role") != "panel-candidate":
+    if type(envelope["role"]) is not str or envelope["role"] != "panel-candidate":
         raise _panel_candidate_checkpoint_error("role differs")
-    result = envelope.get("result")
-    if not isinstance(result, dict):
+    if type(envelope["release_commit"]) is not str:
+        raise _panel_candidate_checkpoint_error("release_commit differs")
+    for label, definition, keys in (
+        ("recipe", envelope["recipe"], {"sha256", "size_bytes"}),
+        ("candidate", envelope["candidate"], {"path", "file_count", "inventory_sha256"}),
+    ):
+        if type(definition) is not dict or set(definition) != keys:
+            raise _panel_candidate_checkpoint_error(f"{label} shape differs")
+    recipe = envelope["recipe"]
+    candidate = envelope["candidate"]
+    assert type(recipe) is dict and type(candidate) is dict
+    if type(recipe["sha256"]) is not str or type(recipe["size_bytes"]) is not int:
+        raise _panel_candidate_checkpoint_error("recipe scalar types differ")
+    if (
+        type(candidate["path"]) is not str
+        or type(candidate["file_count"]) is not int
+        or type(candidate["inventory_sha256"]) is not str
+    ):
+        raise _panel_candidate_checkpoint_error("candidate scalar types differ")
+    predecessors = envelope["predecessors"]
+    if type(predecessors) is not dict or set(predecessors) != set(
+        _PANEL_CANDIDATE_PREDECESSORS
+    ):
+        raise _panel_candidate_checkpoint_error("predecessors shape differs")
+    for role in _PANEL_CANDIDATE_PREDECESSORS:
+        definition = predecessors[role]
+        if (
+            type(definition) is not dict
+            or set(definition) != {"sha256", "size_bytes"}
+            or type(definition["sha256"]) is not str
+            or type(definition["size_bytes"]) is not int
+        ):
+            raise _panel_candidate_checkpoint_error("predecessor scalar types differ")
+    if type(envelope["result"]) is not dict:
         raise _panel_candidate_checkpoint_error("result differs")
+
+
+def _load_panel_candidate_checkpoint(
+    recipe_path: Path, recipe: Mapping[str, Any], output_root: Path
+) -> dict[str, Any]:
+    try:
+        envelope = _load_strict_panel_candidate_checkpoint(
+            _stage_path(output_root, "panel-candidate")
+        )
+    except VerticalBuildError as exc:
+        raise _panel_candidate_checkpoint_error("is unreadable") from exc
+    _validate_panel_candidate_checkpoint_shape(envelope)
+    result = envelope.get("result")
+    assert type(result) is dict
     try:
         expected = _panel_candidate_checkpoint(recipe_path, recipe, output_root, result)
     except VerticalBuildError as exc:
@@ -4319,6 +4390,17 @@ def build_stage(
         if role == "panel-candidate":
             result = panel
         elif qa_dir is not None:
+            final_recipe = _recipe(recipe_path)
+            _validate_stage_financial_arguments(
+                final_recipe,
+                manifest_ledger=manifest_ledger,
+                manifest_ledger_identity=manifest_ledger_identity,
+                manifest_classified_flows=manifest_classified_flows,
+                manifest_admission_policy=manifest_admission_policy,
+            )
+            panel = _load_panel_candidate_checkpoint(
+                recipe_path, final_recipe, output_root
+            )
             staged_manifest = panel.get("account_strategy_manifest")
             result = publish_panel(
                 recipe_path,

@@ -412,9 +412,47 @@ def test_panel_candidate_checkpoint_rejects_foreign_or_stale_provenance(
     )
     reject("missing key", lambda value: value.pop("recipe"))
     reject("extra key", lambda value: value.__setitem__("extra", True))
+    reject("boolean schema", lambda value: value.__setitem__("schema_version", True))
+    reject("float schema", lambda value: value.__setitem__("schema_version", 1.0))
     reject("wrong schema", lambda value: value.__setitem__("schema_version", 2))
+    reject("wrong scalar role", lambda value: value.__setitem__("role", 1))
     reject("wrong role", lambda value: value.__setitem__("role", "panel"))
     reject("wrong type", lambda value: value.__setitem__("predecessors", []))
+    reject(
+        "boolean candidate file count",
+        lambda value: value["candidate"].__setitem__("file_count", True),
+    )
+    reject(
+        "float candidate file count",
+        lambda value: value["candidate"].__setitem__("file_count", 1.0),
+    )
+    reject(
+        "boolean recipe size",
+        lambda value: value["recipe"].__setitem__("size_bytes", True),
+    )
+    reject(
+        "float predecessor size",
+        lambda value: value["predecessors"]["ledger"].__setitem__(
+            "size_bytes", 1.0
+        ),
+    )
+    reject(
+        "wrong scalar candidate path",
+        lambda value: value["candidate"].__setitem__("path", True),
+    )
+    reject(
+        "wrong scalar release commit",
+        lambda value: value.__setitem__("release_commit", 1),
+    )
+    reject("recipe wrong container", lambda value: value.__setitem__("recipe", []))
+    reject(
+        "recipe nested keys",
+        lambda value: value["recipe"].__setitem__("extra", True),
+    )
+    reject(
+        "predecessor nested keys",
+        lambda value: value["predecessors"]["ledger"].__setitem__("extra", True),
+    )
     reject("nested candidate", lambda value: value["result"].__setitem__("candidate_dir", str(tmp_path / "other")))
 
     checkpoint_path.write_bytes(canonical_json_bytes(candidate_result))
@@ -443,6 +481,75 @@ def test_panel_candidate_checkpoint_reuses_unchanged_candidate_for_panel(
 
     assert published_result["published"] is True
     assert published == [candidate_file.parent.resolve()]
+
+
+@pytest.mark.parametrize("payload", (b'{"schema_version":1,"schema_version":1}', b'{"candidate":{"path":"a","path":"b"}}'))
+def test_panel_candidate_checkpoint_rejects_duplicate_json_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: bytes
+) -> None:
+    """Duplicate keys are rejected before a checkpoint can be interpreted."""
+    recipe_path, output_root, _candidate_file, published = _panel_checkpoint_stage_fixture(
+        tmp_path, monkeypatch
+    )
+    builder.build_stage(recipe_path, output_root, "panel-candidate")
+    checkpoint_path = output_root / "stage-results" / "panel-candidate.json"
+    checkpoint_path.write_bytes(payload)
+
+    with pytest.raises(builder.VerticalBuildError, match="panel candidate checkpoint"):
+        builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
+
+    assert published == []
+
+
+def test_panel_candidate_checkpoint_rejects_noncanonical_json_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A semantically equal but noncanonical checkpoint is not reusable."""
+    recipe_path, output_root, _candidate_file, published = _panel_checkpoint_stage_fixture(
+        tmp_path, monkeypatch
+    )
+    builder.build_stage(recipe_path, output_root, "panel-candidate")
+    checkpoint_path = output_root / "stage-results" / "panel-candidate.json"
+    checkpoint_path.write_bytes(checkpoint_path.read_bytes() + b"\n")
+
+    with pytest.raises(builder.VerticalBuildError, match="panel candidate checkpoint"):
+        builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
+
+    assert published == []
+
+
+@pytest.mark.parametrize("mutation", ("recipe", "candidate"))
+def test_panel_revalidates_checkpoint_immediately_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    """Post-load recipe or candidate drift blocks publication at the last gate."""
+    recipe_path, output_root, candidate_file, published = _panel_checkpoint_stage_fixture(
+        tmp_path, monkeypatch
+    )
+    builder.build_stage(recipe_path, output_root, "panel-candidate")
+    original_load = builder._load_panel_candidate_checkpoint
+    calls = 0
+
+    def mutate_after_initial_load(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        result = original_load(*args, **kwargs)
+        if calls == 1:
+            if mutation == "recipe":
+                recipe_path.write_bytes(recipe_path.read_bytes() + b"\n")
+            else:
+                candidate_file.write_text("candidate-v2", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(
+        builder, "_load_panel_candidate_checkpoint", mutate_after_initial_load
+    )
+
+    with pytest.raises(builder.VerticalBuildError, match="panel candidate checkpoint"):
+        builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
+
+    assert calls == 2
+    assert published == []
 
 
 def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
