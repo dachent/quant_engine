@@ -28,6 +28,43 @@ All `POST` and `PUT` requests are rejected. The only supported credential
 source is the Windows Generic Credential `BIT.com-API`; values remain in memory
 and are never accepted through arguments, environment variables, or files.
 Live reads require separate, current authority in the governing GitHub issue.
+Before the adapter constructs a production transport, the operator must supply
+one reviewed JSON evidence file with a current authority record and an issue
+comment (or equivalent review) reference. This is a local operator attestation:
+the adapter validates the reference's exact shape but does not remotely fetch,
+cryptographically authenticate, or prove the immutability of that review. Do
+not treat the JSON as independent proof of approval outside a trusted operator
+session. The evidence is otherwise fail-closed and must bind all of the
+following:
+
+- the exact CLI/programmatic operation (`auth-test`, `extract`, or `run`), its
+  mode, and every approved `GET` catalog path;
+- review identity/reference, `CURRENT` authority status, issuance time, and
+  expiry time;
+- the accepted Matrixport live-read terms version and SHA-256, plus the
+  deterministic catalog SHA-256 for the adapter being run; and
+- a positive request ceiling and `retry_count: 0`.
+
+The evidence is not a template or substitute for a recorded approval; agents
+and operators must not invent one. On first use the adapter exclusively creates
+`<state-base>/quant_engine/matrixport/governance/live-read-receipts/<evidence-sha256>.json`
+under one deterministic per-user Matrixport receipt authority: `LOCALAPPDATA`
+on Windows, or `XDG_STATE_HOME` (falling back to `~/.local/state`) elsewhere.
+This fixed, reparse-free canonical location keeps the same approval from being
+replayed through copied evidence files, a different working directory, or
+another output workspace path. It records each request reservation before the
+HTTP session call, blocks replay after a crash or second consumer, and never
+stores credential material or copies the supplied evidence into the receipt. A
+consumed approval cannot be resumed or retried; obtain a new review artifact
+instead. `auth-test`, `extract`, and `run` all require
+`--governance-evidence <operator-supplied.json>`.
+
+Those receipt guarantees assume no other same-user process concurrently mutates
+the canonical receipt authority. The current pathname-based implementation
+rejects reparse components at inspection time but cannot bind subsequent opens
+to the same directory object on Windows; a concurrent junction/rename attacker
+can race the check. Such a process can also bypass the local adapter entirely,
+so this control is an honest-operator guard, not a same-user security boundary.
 
 Official source references retained by the endpoint catalog are the
 [Wallet API](https://www.bit.com/docs/en-us/wallet.html),

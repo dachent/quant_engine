@@ -3,12 +3,16 @@ from __future__ import annotations
 import hashlib
 import hmac
 import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import requests
 
+from quant_engine.matrixport import governance as governance_module
 from quant_engine.matrixport.catalog import (
     ENDPOINTS,
     PHOENIX_HOST,
@@ -21,6 +25,11 @@ from quant_engine.matrixport.credentials import (
     CredentialError,
     load_credentials,
 )
+from quant_engine.matrixport.governance import (
+    TERMS_SHA256,
+    TERMS_VERSION,
+    authorize_live_read,
+)
 from quant_engine.matrixport.signing import (
     build_v2_headers,
     encode_query,
@@ -32,6 +41,7 @@ from quant_engine.matrixport.transport import (
     TransportError,
     TransportPolicyError,
 )
+from quant_engine.matrixport.util import canonical_json
 
 
 class FakeResponse:
@@ -39,6 +49,13 @@ class FakeResponse:
         self.status_code = status_code
         self.content = content
         self.headers = headers or {}
+
+
+@pytest.fixture(autouse=True)
+def canonical_governance_root(tmp_path, monkeypatch):
+    root = tmp_path / "canonical-governance"
+    monkeypatch.setattr(governance_module, "_canonical_state_root", lambda: root)
+    return root
 
 
 class FakeSession:
@@ -60,6 +77,44 @@ def credentials():
 
 
 def make_transport(credentials, session=None, **kwargs):
+    workspace = Path(tempfile.mkdtemp(prefix="matrixport-governance-test-"))
+    evidence = workspace / "synthetic-reviewed-live-read.json"
+    now = datetime.now(timezone.utc)
+    evidence.write_text(
+        canonical_json(
+            {
+                "schema_version": 1,
+                "operation": "extract",
+                "mode": "full",
+                "scope": {
+                    "endpoints": [
+                        {"method": endpoint.method, "path": endpoint.path}
+                        for endpoint in ENDPOINTS
+                        if endpoint.live_enabled
+                    ]
+                },
+                "review": {
+                    "identity": "synthetic-test-reviewer",
+                    "reference": "https://github.com/dachent/quant_engine/issues/374#issuecomment-1",
+                },
+                "authority": {
+                    "status": "CURRENT",
+                    "issued_at": (now - timedelta(minutes=1)).isoformat(),
+                    "expires_at": (now + timedelta(minutes=5)).isoformat(),
+                },
+                "terms": {"version": TERMS_VERSION, "sha256": TERMS_SHA256},
+                "catalog": {
+                    "sha256": hashlib.sha256(
+                        canonical_json(catalog_rows()).encode("utf-8")
+                    ).hexdigest()
+                },
+                "metering": {"max_requests": 100, "retry_count": 0},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    governance = authorize_live_read(evidence, operation="extract", mode="full")
     return ReadOnlyTransport(
         credentials,
         session=session or FakeSession(),
@@ -68,6 +123,7 @@ def make_transport(credentials, session=None, **kwargs):
         clock=lambda: 1_731_931_956.0,
         monotonic=lambda: 100.0,
         random_source=lambda: 0.0,
+        governance=governance,
         **kwargs,
     )
 
@@ -279,13 +335,24 @@ def test_redirect_is_never_followed_and_error_is_sanitized(credentials):
     assert len(session.calls) == 1
 
 
-def test_retry_after_and_retry_limit(credentials):
-    responses = [FakeResponse(429, headers={"Retry-After": "0"}) for _ in range(6)]
-    session = FakeSession(responses)
-    transport = make_transport(credentials, session, max_retries=5)
+def test_governed_transport_rejects_nonzero_retry_configuration(credentials):
+    with pytest.raises(ValueError, match="max_retries=0"):
+        make_transport(credentials, max_retries=1)
+
+
+def test_transport_defaults_to_one_network_attempt(credentials):
+    session = FakeSession(
+        [
+            requests.ConnectionError("first attempt fails"),
+            FakeResponse(200),
+        ]
+    )
+    transport = make_transport(credentials, session)
+
     with pytest.raises(TransportError):
         transport.get("/mapi/v1/wallet/balance")
-    assert len(session.calls) == 6
+
+    assert len(session.calls) == 1
 
 
 def test_connection_exception_is_sanitized(credentials):

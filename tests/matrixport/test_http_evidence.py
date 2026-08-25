@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 import quant_engine.matrixport.pipeline as pipeline_module
+from quant_engine.matrixport import governance as governance_module
 from quant_engine.matrixport.credentials import ApiCredentials
+from quant_engine.matrixport.catalog import catalog_rows
+from quant_engine.matrixport.governance import (
+    TERMS_SHA256,
+    TERMS_VERSION,
+    authorize_live_read,
+)
 from quant_engine.matrixport.pipeline import ExtractionError, MatrixportExtractor
 from quant_engine.matrixport.raw_store import RawStore, request_fingerprint
 from quant_engine.matrixport.transport import (
@@ -13,10 +24,18 @@ from quant_engine.matrixport.transport import (
     SanitizedResponse,
     TransportHTTPError,
 )
+from quant_engine.matrixport.util import canonical_json
 
 
 RUN_ID = "20260725T120000.000Z"
 BALANCE_PATH = "/mapi/v1/wallet/balance"
+
+
+@pytest.fixture(autouse=True)
+def canonical_governance_root(tmp_path, monkeypatch):
+    root = tmp_path / "canonical-governance"
+    monkeypatch.setattr(governance_module, "_canonical_state_root", lambda: root)
+    return root
 
 
 class FakeResponse:
@@ -56,6 +75,38 @@ class NoReplayTransport:
 
 
 def make_http_transport(session: FakeSession) -> ReadOnlyTransport:
+    workspace = Path(tempfile.mkdtemp(prefix="matrixport-governance-test-"))
+    evidence = workspace / "synthetic-reviewed-live-read.json"
+    now = datetime.now(timezone.utc)
+    evidence.write_text(
+        canonical_json(
+            {
+                "schema_version": 1,
+                "operation": "extract",
+                "mode": "full",
+                "scope": {"endpoints": [{"method": "GET", "path": BALANCE_PATH}]},
+                "review": {
+                    "identity": "synthetic-test-reviewer",
+                    "reference": "https://github.com/dachent/quant_engine/issues/374#issuecomment-1",
+                },
+                "authority": {
+                    "status": "CURRENT",
+                    "issued_at": (now - timedelta(minutes=1)).isoformat(),
+                    "expires_at": (now + timedelta(minutes=5)).isoformat(),
+                },
+                "terms": {"version": TERMS_VERSION, "sha256": TERMS_SHA256},
+                "catalog": {
+                    "sha256": hashlib.sha256(
+                        canonical_json(catalog_rows()).encode("utf-8")
+                    ).hexdigest()
+                },
+                "metering": {"max_requests": 1, "retry_count": 0},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    governance = authorize_live_read(evidence, operation="extract", mode="full")
     return ReadOnlyTransport(
         ApiCredentials("access-key-canary", "secret-key-canary"),
         session=session,
@@ -65,6 +116,7 @@ def make_http_transport(session: FakeSession) -> ReadOnlyTransport:
         clock=lambda: 1_731_931_956.0,
         monotonic=lambda: 100.0,
         random_source=lambda: 0.0,
+        governance=governance,
     )
 
 
