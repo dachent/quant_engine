@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,7 +11,7 @@ import pytest
 
 from quant_engine.matrixport import cli
 from quant_engine.matrixport import governance as governance_module
-from quant_engine.matrixport.catalog import catalog_rows
+from quant_engine.matrixport.catalog import catalog_rows, get_endpoint
 from quant_engine.matrixport.credentials import ApiCredentials
 from quant_engine.matrixport.governance import (
     GovernanceError,
@@ -81,17 +82,6 @@ def _evidence(
     return path
 
 
-@pytest.fixture(autouse=True)
-def canonical_governance_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Path:
-    root = tmp_path / "canonical-governance"
-    monkeypatch.setattr(
-        governance_module, "_canonical_state_root", lambda: root, raising=False
-    )
-    return root
-
-
 def test_same_evidence_cannot_be_consumed_from_an_alternate_output_workspace(
     tmp_path: Path, canonical_governance_root: Path
 ) -> None:
@@ -140,6 +130,51 @@ def test_governance_consumes_receipt_before_the_first_network_call(
         session.receipt_at_call["evidence_sha256"]
         == hashlib.sha256(evidence.read_bytes()).hexdigest()
     )
+
+
+def test_receipt_creation_commits_its_directory_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence = _evidence(tmp_path)
+    committed: list[Path] = []
+    monkeypatch.setattr(
+        governance_module,
+        "_commit_receipt_directory_entry",
+        committed.append,
+        raising=False,
+    )
+
+    grant = authorize_live_read(evidence, operation="auth-test", mode=None)
+
+    assert committed == [grant.receipt_path]
+
+
+def test_request_reservation_uses_a_mode_0600_temp_and_commits_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence = _evidence(tmp_path)
+    grant = authorize_live_read(evidence, operation="auth-test", mode=None)
+    opened_modes: list[int] = []
+    committed: list[Path] = []
+    real_open = os.open
+
+    def recording_open(path: str | bytes | Path, flags: int, mode: int = 0o777) -> int:
+        opened_modes.append(mode)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(governance_module.os, "open", recording_open)
+    monkeypatch.setattr(
+        governance_module,
+        "_commit_receipt_directory_entry",
+        committed.append,
+        raising=False,
+    )
+
+    grant.reserve_request(get_endpoint("/mapi/v1/wallet/balance"))
+
+    assert 0o600 in opened_modes
+    assert committed == [grant.receipt_path]
+    assert json.loads(grant.receipt_path.read_text(encoding="utf-8"))["used_requests"] == 1
 
 
 def test_transport_cannot_be_created_without_consumed_governance_evidence() -> None:

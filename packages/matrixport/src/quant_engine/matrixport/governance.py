@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from .catalog import Endpoint, catalog_rows, get_endpoint
-from .util import atomic_write, canonical_json
+from .util import canonical_json
 
 
 TERMS_VERSION = "matrixport-live-read-terms-v1"
@@ -153,7 +154,7 @@ class LiveReadGovernance:
                 "used_requests": self._used_requests,
                 "retry_count": 0,
             }
-            atomic_write(
+            _secure_write_receipt(
                 self.receipt_path,
                 (canonical_json(receipt) + "\n").encode("utf-8"),
             )
@@ -273,16 +274,13 @@ def authorize_live_read(
         "retry_count": 0,
     }
     try:
-        descriptor = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        _create_receipt_exclusively(
+            receipt_path, (canonical_json(initial_receipt) + "\n").encode("utf-8")
+        )
     except FileExistsError:
         raise GovernanceError(
             "live-read governance evidence is already consumed"
         ) from None
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write((canonical_json(initial_receipt) + "\n").encode("utf-8"))
-            handle.flush()
-            os.fsync(handle.fileno())
     except Exception:
         # A partial receipt is deliberately retained: reuse after an interrupted
         # consumption attempt would be less safe than requiring new approval.
@@ -298,6 +296,136 @@ def authorize_live_read(
         max_requests=max_requests,
         review=review,
     )
+
+
+def _create_receipt_exclusively(path: Path, content: bytes) -> None:
+    """Create, flush, and commit an initial receipt without allowing replay."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    _commit_receipt_directory_entry(path)
+
+
+def _secure_write_receipt(path: Path, content: bytes) -> None:
+    """Replace one receipt with a mode-0600, durable same-directory temporary."""
+    if path.is_symlink():
+        raise GovernanceError("live-read governance receipt cannot be a symlink")
+    temporary = path.with_name(f".{path.name}-{secrets.token_hex(16)}.tmp")
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace_receipt(temporary, path)
+        _commit_receipt_directory_entry(path)
+    except GovernanceError:
+        raise
+    except Exception:
+        raise GovernanceError(
+            "live-read governance receipt could not be durably updated"
+        ) from None
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _replace_receipt(source: Path, destination: Path) -> None:
+    """Atomically replace a receipt and request platform-specific durability."""
+    if os.name != "nt":
+        os.replace(source, destination)
+        return
+
+    import ctypes
+
+    move_file_ex = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+    move_file_ex.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_ulong)
+    move_file_ex.restype = ctypes.c_int
+    movefile_replace_existing = 0x1
+    movefile_write_through = 0x8
+    if not move_file_ex(
+        str(source), str(destination), movefile_replace_existing | movefile_write_through
+    ):
+        raise OSError(ctypes.get_last_error(), "MoveFileExW failed")
+
+
+def _commit_receipt_directory_entry(receipt_path: Path) -> None:
+    """Durably commit a receipt's containing-directory entry.
+
+    POSIX uses an fsync on the containing directory after create or replace.
+    Windows does not support that POSIX primitive for directory handles, so the
+    Windows path uses MoveFileExW with MOVEFILE_WRITE_THROUGH for replacements
+    and FlushFileBuffers on a write-through receipt handle after each entry
+    change.  Both branches fail closed when their durability operation fails.
+    """
+    if os.name == "nt":
+        _flush_windows_receipt_entry(receipt_path)
+        return
+    if os.name != "posix":
+        raise GovernanceError("receipt directory durability is unsupported")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(receipt_path.parent, flags)
+    except OSError:
+        raise GovernanceError("receipt directory could not be opened for durability") from None
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        raise GovernanceError("receipt directory durability could not be established") from None
+    finally:
+        os.close(descriptor)
+
+
+def _flush_windows_receipt_entry(receipt_path: Path) -> None:
+    """Flush Windows receipt data and metadata after a name entry transition."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    generic_write = 0x40000000
+    share_all = 0x7
+    open_existing = 3
+    file_attribute_normal = 0x80
+    file_flag_write_through = 0x80000000
+    handle = create_file(
+        str(receipt_path),
+        generic_write,
+        share_all,
+        None,
+        open_existing,
+        file_attribute_normal | file_flag_write_through,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise GovernanceError("receipt entry could not be opened for durability")
+    flush = kernel32.FlushFileBuffers
+    flush.argtypes = (wintypes.HANDLE,)
+    flush.restype = wintypes.BOOL
+    close = kernel32.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+    try:
+        if not flush(handle):
+            raise GovernanceError("receipt entry durability could not be established")
+    finally:
+        close(handle)
 
 
 def _canonical_state_root() -> Path:

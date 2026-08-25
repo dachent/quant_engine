@@ -59,6 +59,14 @@ consumed approval cannot be resumed or retried; obtain a new review artifact
 instead. `auth-test`, `extract`, and `run` all require
 `--governance-evidence <operator-supplied.json>`.
 
+Receipt transitions are durable before a live request is permitted. On POSIX,
+the adapter fsyncs the receipt's containing directory after exclusive creation
+and after each atomic replacement. Windows does not support that POSIX
+directory-fsync primitive, so replacement uses `MoveFileExW` with
+`MOVEFILE_WRITE_THROUGH` and every entry transition flushes the receipt through
+a write-through handle. A failure in either platform-specific durability path
+fails closed; a retained receipt continues to block reuse.
+
 Those receipt guarantees assume no other same-user process concurrently mutates
 the canonical receipt authority. The current pathname-based implementation
 rejects reparse components at inspection time but cannot bind subsequent opens

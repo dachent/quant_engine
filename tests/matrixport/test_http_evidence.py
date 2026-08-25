@@ -1,22 +1,12 @@
 from __future__ import annotations
 
 import json
-import hashlib
-import tempfile
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
 import quant_engine.matrixport.pipeline as pipeline_module
-from quant_engine.matrixport import governance as governance_module
 from quant_engine.matrixport.credentials import ApiCredentials
-from quant_engine.matrixport.catalog import catalog_rows
-from quant_engine.matrixport.governance import (
-    TERMS_SHA256,
-    TERMS_VERSION,
-    authorize_live_read,
-)
+from quant_engine.matrixport.governance import authorize_live_read
 from quant_engine.matrixport.pipeline import ExtractionError, MatrixportExtractor
 from quant_engine.matrixport.raw_store import RawStore, request_fingerprint
 from quant_engine.matrixport.transport import (
@@ -24,18 +14,10 @@ from quant_engine.matrixport.transport import (
     SanitizedResponse,
     TransportHTTPError,
 )
-from quant_engine.matrixport.util import canonical_json
 
 
 RUN_ID = "20260725T120000.000Z"
 BALANCE_PATH = "/mapi/v1/wallet/balance"
-
-
-@pytest.fixture(autouse=True)
-def canonical_governance_root(tmp_path, monkeypatch):
-    root = tmp_path / "canonical-governance"
-    monkeypatch.setattr(governance_module, "_canonical_state_root", lambda: root)
-    return root
 
 
 class FakeResponse:
@@ -74,37 +56,9 @@ class NoReplayTransport:
         raise AssertionError("orphan evidence must prevent network replay")
 
 
-def make_http_transport(session: FakeSession) -> ReadOnlyTransport:
-    workspace = Path(tempfile.mkdtemp(prefix="matrixport-governance-test-"))
-    evidence = workspace / "synthetic-reviewed-live-read.json"
-    now = datetime.now(timezone.utc)
-    evidence.write_text(
-        canonical_json(
-            {
-                "schema_version": 1,
-                "operation": "extract",
-                "mode": "full",
-                "scope": {"endpoints": [{"method": "GET", "path": BALANCE_PATH}]},
-                "review": {
-                    "identity": "synthetic-test-reviewer",
-                    "reference": "https://github.com/dachent/quant_engine/issues/374#issuecomment-1",
-                },
-                "authority": {
-                    "status": "CURRENT",
-                    "issued_at": (now - timedelta(minutes=1)).isoformat(),
-                    "expires_at": (now + timedelta(minutes=5)).isoformat(),
-                },
-                "terms": {"version": TERMS_VERSION, "sha256": TERMS_SHA256},
-                "catalog": {
-                    "sha256": hashlib.sha256(
-                        canonical_json(catalog_rows()).encode("utf-8")
-                    ).hexdigest()
-                },
-                "metering": {"max_requests": 1, "retry_count": 0},
-            }
-        )
-        + "\n",
-        encoding="utf-8",
+def make_http_transport(session: FakeSession, synthetic_live_read_evidence) -> ReadOnlyTransport:
+    evidence = synthetic_live_read_evidence(
+        scope=(("GET", BALANCE_PATH),), max_requests=1
     )
     governance = authorize_live_read(evidence, operation="extract", mode="full")
     return ReadOnlyTransport(
@@ -129,14 +83,18 @@ def make_extractor(tmp_path, transport) -> MatrixportExtractor:
     )
 
 
-def test_final_non_2xx_bytes_are_archived_and_exception_is_sanitized(tmp_path):
+def test_final_non_2xx_bytes_are_archived_and_exception_is_sanitized(
+    tmp_path, synthetic_live_read_evidence
+):
     auth_field = "author" + "ization"
     body = json.dumps(
         {auth_field: "Basic auth-canary", "detail": "body-canary"},
         separators=(",", ":"),
     ).encode()
     session = FakeSession(FakeResponse(503, body))
-    extractor = make_extractor(tmp_path, make_http_transport(session))
+    extractor = make_extractor(
+        tmp_path, make_http_transport(session, synthetic_live_read_evidence)
+    )
     try:
         with pytest.raises(TransportHTTPError) as raised:
             extractor._call(BALANCE_PATH)
