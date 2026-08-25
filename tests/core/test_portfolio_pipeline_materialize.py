@@ -1709,6 +1709,218 @@ def test_production_spec_binds_stable_twenty_root_authority(
         pipeline_status(stripped_spec)
 
 
+def test_schema_v8_production_spec_binds_real_epoch_manifest_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Schema-8 producer evidence must survive the production rebind seam."""
+
+    short_stage_roots = dict(materializer.PRODUCTION_STAGE_ROOTS)
+    analytics_root_ids = [
+        root_id
+        for root_id in short_stage_roots
+        if not root_id.startswith("portfolio-") and root_id != "provider-ledger"
+    ]
+    for index, root_id in enumerate(analytics_root_ids):
+        short_stage_roots[root_id] = Path("stages") / "a" / str(index)
+    monkeypatch.setattr(materializer, "PRODUCTION_STAGE_ROOTS", short_stage_roots)
+
+    source_recipe, prepared_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
+    manifest_inputs = _install_real_epoch_proof(
+        prepared_root, tmp_path / "epoch-manifest"
+    )
+    for key, path in manifest_inputs.items():
+        vertical[key] = _definition(path)
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(product.generation)
+    vertical["schema_version"] = 8
+    _write_json(vertical_path, vertical)
+    monkeypatch.setattr(
+        materializer, "_financial_mvp_module", lambda: product.financial_module
+    )
+    recipe_path = tmp_path / "schema-v8-production-recipe.json"
+    materializer.create_recipe(
+        vertical_recipe=vertical_path,
+        proof_root=prepared_root,
+        qa_dir=Path(source["qa_dir"]["path"]),
+        pipeline_id="schema-v8-production-seam",
+        output=recipe_path,
+        financial_mvp_contract=product.contract_path,
+        financial_mvp_source_matrix=product.matrix_path,
+    )
+
+    staged_ledger_root = prepared_root / "stages" / "ledger" / "generations"
+    for existing in staged_ledger_root.iterdir():
+        shutil.rmtree(existing)
+    staged_admission_generation = staged_ledger_root / product.generation.name
+    shutil.copytree(product.generation, staged_admission_generation)
+    recipe = materializer._recipe(recipe_path)
+    recipe["product_authority"] = materializer._derive_product_authority(
+        vertical_path,
+        product.contract_path,
+        product.matrix_path,
+        {
+            role: (
+                product.generation.name
+                if role == "ledger"
+                else str(recipe["expected_generations"][role]["generation_id"])
+            )
+            for role in materializer.RELEASE_ROLES
+        },
+    )
+    staged_admission_inventory = inventory_generation(staged_admission_generation)
+    recipe["expected_generations"]["ledger"] = {
+        "files": staged_admission_inventory["files"],
+        "generation_id": staged_admission_inventory["generation_id"],
+        "manifest_sha256": staged_admission_inventory["manifest_sha256"],
+    }
+    _write_json(recipe_path, recipe)
+
+    analytics_ids: dict[str, str] = {}
+    for root_id, relative in materializer.PRODUCTION_STAGE_ROOTS.items():
+        if root_id.startswith("portfolio-") or root_id == "provider-ledger":
+            continue
+        staged_root = prepared_root / relative
+        generation = _generation(
+            staged_root,
+            root_id,
+            {"analytics.json": {"root_id": root_id}},
+        )
+        _write_json(staged_root / "CURRENT.json", {"generation_id": generation.name})
+        analytics_ids[root_id] = generation.name
+    panel = next((prepared_root / "stages" / "panel" / "generations").iterdir())
+
+    def bind_panel_analytics(payload: dict[str, object]) -> None:
+        meta = payload["meta"]
+        assert isinstance(meta, dict)
+        meta.update(
+            {
+                "correlation_generation_id": analytics_ids["correlation"],
+                "decomposition_generation_id": analytics_ids["factor-decomposition"],
+                "weekly_returns_generation_id": analytics_ids["weekly-returns"],
+            }
+        )
+        payload["decomposition_lenses"] = _hybrid_panel_lenses(analytics_ids)
+
+    _mutate_json(panel / "data" / "dashboard_data.json", bind_panel_analytics)
+    dashboard_path = panel / "data" / "dashboard_data.json"
+    candidate_path = panel / "candidate.json"
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    candidate["artifact_sha256"]["data/dashboard_data.json"] = hashlib.sha256(
+        dashboard_path.read_bytes()
+    ).hexdigest()
+    _write_json(candidate_path, candidate)
+    panel_manifest = GenerationManifest.from_json_bytes(
+        (panel / "generation.json").read_bytes()
+    )
+    rebound_artifacts = tuple(
+        SourceArtifact(
+            artifact_id=artifact.artifact_id,
+            sha256=(
+                hashlib.sha256(dashboard_path.read_bytes()).hexdigest()
+                if artifact.artifact_id == "panel/data/dashboard_data.json"
+                else hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+                if artifact.artifact_id == "panel/candidate.json"
+                else artifact.sha256
+            ),
+            size_bytes=(
+                len(dashboard_path.read_bytes())
+                if artifact.artifact_id == "panel/data/dashboard_data.json"
+                else len(candidate_path.read_bytes())
+                if artifact.artifact_id == "panel/candidate.json"
+                else artifact.size_bytes
+            ),
+            as_of_date=artifact.as_of_date,
+            schema_name=artifact.schema_name,
+            schema_version=artifact.schema_version,
+        )
+        for artifact in panel_manifest.artifacts
+    )
+    rebound_manifest = GenerationManifest.build(
+        as_of_date=panel_manifest.as_of_date,
+        adapter=panel_manifest.adapter,
+        coverage=panel_manifest.coverage,
+        artifacts=rebound_artifacts,
+        verification=panel_manifest.verification,
+    )
+    (panel / "generation.json").write_bytes(rebound_manifest.to_json_bytes())
+    rebound_panel = panel.parent / rebound_manifest.generation_id
+    panel.rename(rebound_panel)
+    _write_json(
+        prepared_root / "stage-results" / "panel.json",
+        {"generation_id": rebound_manifest.generation_id},
+    )
+    _refresh_expected_generation(recipe_path, prepared_root, "panel")
+    recipe = materializer._recipe(recipe_path)
+    prepared_proof = materializer._financial_epoch_manifest_proof(recipe, prepared_root)
+    assert prepared_proof is not None
+    recipe["financial_epoch_manifest_proof"] = prepared_proof
+    _write_json(recipe_path, recipe)
+    accepted_recipe = materializer._recipe(recipe_path)
+    _write_json(
+        prepared_root / "evidence" / "post-build-semantic.json",
+        materializer._semantic_gate_payload(
+            accepted_recipe, epoch_manifest_proof=prepared_proof
+        ),
+    )
+    _write_json(
+        prepared_root / "portfolio-orchestration-contract.json",
+        {"release_commit": "a" * 40, "state": "PASS"},
+    )
+    monkeypatch.setattr(
+        materializer,
+        "_git",
+        lambda _repo, *args: "a" * 40 if args == ("rev-parse", "HEAD") else "",
+    )
+    production_root = tmp_path / "production"
+    spec_path = tmp_path / "release" / "production-spec.json"
+    result = materializer.build_production_spec(
+        recipe_path,
+        prepared_root,
+        prepared_root / "evidence" / "post-build-semantic.json",
+        production_root,
+        tmp_path / "production-state",
+        spec_path,
+    )
+
+    spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
+    production_contract = json.loads(Path(result["contract"]).read_text(encoding="utf-8"))
+    assert production_contract["schema_version"] == 3
+    assert (
+        production_contract["financial_epoch_manifest_inputs_sha256"]
+        == hashlib.sha256(
+            canonical_json_bytes(accepted_recipe["financial_epoch_manifest_inputs"])
+        ).hexdigest()
+    )
+    assert (
+        production_contract["financial_epoch_manifest_proof_sha256"]
+        == hashlib.sha256(canonical_json_bytes(prepared_proof)).hexdigest()
+    )
+    core_pipeline.plan_pipeline(spec)
+
+    forged = json.loads(spec_path.read_text(encoding="utf-8"))
+    forged_contract = dict(production_contract)
+    forged_contract["financial_epoch_manifest_inputs_sha256"] = "0" * 64
+    forged_contract["financial_epoch_manifest_proof_sha256"] = "f" * 64
+    forged_contract_bytes = canonical_json_bytes(forged_contract)
+    Path(result["contract"]).write_bytes(forged_contract_bytes)
+    next(
+        row
+        for row in forged["gates"]
+        if row["gate_id"] == "port-underwrite-production-rebind"
+    )["sha256"] = hashlib.sha256(forged_contract_bytes).hexdigest()
+    with pytest.raises(
+        PipelineValidationError, match="financial MVP production binding differs"
+    ):
+        core_pipeline.plan_pipeline(
+            PipelineSpec.from_json_bytes(canonical_json_bytes(forged))
+        )
+    Path(result["contract"]).write_bytes(canonical_json_bytes(production_contract))
+
+
 def test_semantic_accepts_explicitly_rendered_freshness_blocker(
     tmp_path: Path,
 ) -> None:
