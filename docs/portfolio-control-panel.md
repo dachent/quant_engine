@@ -322,6 +322,14 @@ mappings, analytics/report/panel equality, freshness, and generation-wide
 invariants; and report zero unwaived blocking exceptions. A failure prevents
 release preparation, leaving publication authority unchanged.
 
+For a financial release, the panel command also requires `--financial-mode`,
+the staged schema-3 `--account-manifest`, and exact ledger, ledger-identity,
+baseline-root, classified-flow, classification-policy, and admission-policy
+authorities. The release builder supplies these from schema 8 and reuses the
+same staged manifest for build, verify, and publish. Omitting them is permitted
+only for an explicitly non-financial development view; it cannot publish the
+financial product.
+
 Use the same CLI for the portfolio profile:
 
 ```powershell
@@ -345,6 +353,7 @@ pass, publish the already accepted local candidate:
 uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --report-root $report --baseline-root $baseline --legacy-panel $legacy `
   --candidate-dir <candidate-directory> --qa-dir $qa --output-root $output `
+  --coordinated-release-receipt <release-builder-stage-results/panel-publication-authorization.json> `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `
@@ -352,7 +361,11 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --freshness-health $freshness
 ```
 
-Publication hash-binds the accepted portfolio, decomposition, correlation, and
+Direct publication requires the release builder's hash-bound coordinated-release
+receipt for that exact output root, candidate, and frozen QA inventory. This is
+an honest-operator guard against accidental out-of-band authority advancement;
+it is not a security boundary against a local principal able to write the
+receipt and output trees. Publication hash-binds the accepted portfolio, decomposition, correlation, and
 weekly-return artifacts, stages an immutable generation, copies the panel and
 both the browser and content-addressed semantic validation results, then creates
 the relative stable launcher. Before coordinated release, run the same browser

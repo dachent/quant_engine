@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import tempfile
 from typing import TYPE_CHECKING, Any, Final, Mapping, Sequence
@@ -313,6 +314,84 @@ def _text(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ControlPanelValidationError(f"{field_name} must be non-empty text")
     return value.strip()
+
+
+def _is_link_or_reparse_point(path: Path) -> bool:
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError as exc:
+        raise ControlPanelValidationError(f"authorization path is unavailable: {path}") from exc
+    return path.is_symlink() or bool(
+        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def _authorization_directory_identity(path: Path, field_name: str) -> dict[str, Any]:
+    if _is_link_or_reparse_point(path) or not path.is_dir():
+        raise ControlPanelValidationError(f"{field_name} is unavailable or linked")
+    rows: list[dict[str, Any]] = []
+    for item in sorted(path.rglob("*")):
+        if _is_link_or_reparse_point(item):
+            raise ControlPanelValidationError(f"{field_name} contains a link: {item}")
+        if item.is_file():
+            content = item.read_bytes()
+            rows.append(
+                {
+                    "path": item.relative_to(path).as_posix(),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size_bytes": len(content),
+                }
+            )
+    content = canonical_json_bytes(rows)
+    return {
+        "file_count": len(rows),
+        "inventory_sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def _validated_coordinated_release_receipt(
+    receipt_path: Path | None,
+    output_root: Path,
+    candidate_dir: Path,
+    qa_dir: Path,
+) -> tuple[str, str]:
+    if receipt_path is None:
+        raise ControlPanelValidationError("coordinated release receipt is required")
+    content, receipt_sha256 = _read_snapshot(
+        receipt_path, "coordinated release receipt"
+    )
+    receipt = _json_from_bytes(content, "coordinated release receipt")
+    expected_keys = {
+        "schema_version", "operation", "state", "coordinator", "release_id",
+        "release_commit", "output_root", "candidate", "qa",
+    }
+    if set(receipt) != expected_keys:
+        raise ControlPanelValidationError("coordinated release receipt root keys differ")
+    if receipt.get("schema_version") != 1:
+        raise ControlPanelValidationError("coordinated release receipt schema differs")
+    if receipt.get("operation") != "PUBLISH_PANEL_CURRENT":
+        raise ControlPanelValidationError("coordinated release receipt operation differs")
+    if receipt.get("state") != "AUTHORIZED":
+        raise ControlPanelValidationError("coordinated release receipt state differs")
+    if receipt.get("coordinator") != "portfolio-release-builder":
+        raise ControlPanelValidationError("coordinated release receipt coordinator differs")
+    release_id = _text(receipt.get("release_id"), "coordinated release receipt release_id")
+    _text(receipt.get("release_commit"), "coordinated release receipt release_commit")
+    if _text(receipt.get("output_root"), "coordinated release receipt output_root") != str(output_root.resolve()):
+        raise ControlPanelValidationError("coordinated release receipt output root differs")
+    for name, path in (("candidate", candidate_dir), ("qa", qa_dir)):
+        identity = _object(receipt.get(name), f"coordinated release receipt {name}")
+        if set(identity) != {"path", "file_count", "inventory_sha256"}:
+            raise ControlPanelValidationError(f"coordinated release receipt {name} keys differ")
+        if _text(identity.get("path"), f"coordinated release receipt {name}.path") != str(path.resolve()):
+            raise ControlPanelValidationError(f"coordinated release receipt {name} path differs")
+        if type(identity.get("file_count")) is not int or identity["file_count"] < 0:
+            raise ControlPanelValidationError(f"coordinated release receipt {name} file count differs")
+        expected_hash = _text(identity.get("inventory_sha256"), f"coordinated release receipt {name} inventory")
+        actual = _authorization_directory_identity(path, name)
+        if identity["file_count"] != actual["file_count"] or expected_hash != actual["inventory_sha256"]:
+            raise ControlPanelValidationError(f"coordinated release receipt {name} identity differs")
+    return receipt_sha256, release_id
 
 
 def _load_json(path: Path, field_name: str) -> dict[str, Any]:
@@ -8037,6 +8116,7 @@ def publish_panel(
     manifest_classified_flows_path: Path | None = None,
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
+    coordinated_release_receipt: Path | None = None,
 ) -> dict[str, Any]:
     if not financial_mode:
         raise ControlPanelValidationError(
@@ -8435,6 +8515,9 @@ def publish_panel(
         _write_exact(generation_dir / relative, published_panel_bytes[relative])
     for relative, content in sorted(qa_snapshots.items()):
         _write_exact(generation_dir / "qa" / relative, content)
+    receipt_sha256, release_id = _validated_coordinated_release_receipt(
+        coordinated_release_receipt, output_root, candidate_dir, qa_dir
+    )
     try:
         previous_pointer = read_current(output_root)
     except FileNotFoundError:
@@ -8463,6 +8546,8 @@ def publish_panel(
         "panel_id": verification["panel_id"],
         "publication_state": pointer.state.value,
         "report_generation_id": verification["report_generation_id"],
+        "release_id": release_id,
+        "coordinated_release_receipt_sha256": receipt_sha256,
         "weekly_returns_generation_id": data["meta"]["weekly_returns_generation_id"],
         "stable_launcher": str(output_root / "index.html"),
     }
@@ -8547,6 +8632,9 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--candidate-dir", type=Path, required=True)
         if name == "publish":
             command.add_argument("--qa-dir", type=Path, required=True)
+            command.add_argument(
+                "--coordinated-release-receipt", type=Path, required=True
+            )
             # Governed HWM bundle: result JSON + the three evidence artifacts.
             command.add_argument(
                 "--hwm-governed-result",
@@ -8676,6 +8764,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
+                coordinated_release_receipt=args.coordinated_release_receipt,
                 hwm_portable_receipt=_load_optional_json_arg(
                     getattr(args, "hwm_portable_receipt", None)
                 ),

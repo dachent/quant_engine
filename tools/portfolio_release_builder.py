@@ -153,6 +153,36 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
     }
 
 
+def _panel_publication_receipt(
+    recipe_path: Path, recipe: Mapping[str, Any], output_root: Path, candidate: Path, qa_dir: Path
+) -> tuple[Path, dict[str, Any]]:
+    recipe_sha256, recipe_size_bytes = _sha(recipe_path)
+    release_commit = _text(recipe.get("release_commit"), "release_commit")
+    release_id = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "pipeline_id": _text(recipe.get("pipeline_id"), "pipeline_id"),
+                "recipe": {"sha256": recipe_sha256, "size_bytes": recipe_size_bytes},
+                "release_commit": release_commit,
+            }
+        )
+    ).hexdigest()
+    receipt = {
+        "schema_version": 1,
+        "operation": "PUBLISH_PANEL_CURRENT",
+        "state": "AUTHORIZED",
+        "coordinator": "portfolio-release-builder",
+        "release_id": release_id,
+        "release_commit": release_commit,
+        "output_root": str(output_root.resolve()),
+        "candidate": {"path": str(candidate.resolve()), **_directory_inventory(candidate)},
+        "qa": {"path": str(qa_dir.resolve()), **_directory_inventory(qa_dir)},
+    }
+    path = output_root / "stage-results" / "panel-publication-authorization.json"
+    _write_exact(path, canonical_json_bytes(receipt))
+    return path, receipt
+
+
 def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
     if path.is_symlink() or not path.is_dir():
         raise VerticalBuildError("reusable provider-ledger generation is unavailable")
@@ -4009,6 +4039,27 @@ def publish_panel(
             raise VerticalBuildError(
                 "staged account-strategy manifest identity differs"
             )
+    semantic_validation = _tool(
+        "portfolio_control_panel.py",
+        "verify",
+        "--report-root", str(report_root), "--baseline-root", str(baseline_root),
+        "--legacy-panel", str(legacy_panel),
+        "--decomposition-root", _text(analytics.get("decomposition_root"), "decomposition_root"),
+        "--decomposition-lenses-root", _text(analytics.get("decomposition_lenses_root"), "decomposition_lenses_root"),
+        "--decomposition-plan-bundle", str(attribution_bundle),
+        "--correlation-root", _text(analytics.get("correlation_root"), "correlation_root"),
+        "--weekly-returns-root", _text(analytics.get("weekly_root"), "weekly_root"),
+        *financial_arguments,
+        "--freshness-health", str(freshness_health),
+        "--candidate-dir", str(candidate),
+        timeout=7200,
+    )
+    _write_exact(
+        qa_dir / "semantic-validation.json", canonical_json_bytes(semantic_validation)
+    )
+    receipt_path, receipt = _panel_publication_receipt(
+        recipe_path, recipe, output_root, candidate, qa_dir
+    )
     result = _tool(
         "portfolio_control_panel.py",
         "publish",
@@ -4038,6 +4089,8 @@ def publish_panel(
         str(candidate),
         "--qa-dir",
         str(qa_dir),
+        "--coordinated-release-receipt",
+        str(receipt_path),
         "--output-root",
         str(output_root),
         timeout=7200,
@@ -4054,6 +4107,11 @@ def publish_panel(
             else {}
         ),
         "candidate_dir": str(candidate),
+        "coordinated_release_receipt": str(receipt_path),
+        "coordinated_release_receipt_sha256": hashlib.sha256(
+            canonical_json_bytes(receipt)
+        ).hexdigest(),
+        "release_id": receipt["release_id"],
         "root": str(output_root),
     }
 

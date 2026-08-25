@@ -111,6 +111,49 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _directory_identity(path: Path) -> dict[str, object]:
+    """Independent test fixture identity; this is not a signing boundary."""
+    rows: list[dict[str, object]] = []
+    for item in sorted(path.rglob("*")):
+        if item.is_symlink():
+            raise AssertionError(f"fixture cannot inventory linked path: {item}")
+        if item.is_file():
+            content = item.read_bytes()
+            rows.append(
+                {
+                    "path": item.relative_to(path).as_posix(),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size_bytes": len(content),
+                }
+            )
+    content = json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return {
+        "file_count": len(rows),
+        "inventory_sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def _coordinated_release_receipt(
+    tmp_path: Path, output_root: Path, candidate: Path, qa_dir: Path
+) -> Path:
+    receipt = {
+        "schema_version": 1,
+        "operation": "PUBLISH_PANEL_CURRENT",
+        "state": "AUTHORIZED",
+        "coordinator": "portfolio-release-builder",
+        "release_id": "test-release-id",
+        "release_commit": "a" * 40,
+        "output_root": str(output_root.resolve()),
+        "candidate": {"path": str(candidate.resolve()), **_directory_identity(candidate)},
+        "qa": {"path": str(qa_dir.resolve()), **_directory_identity(qa_dir)},
+    }
+    path = tmp_path / "panel-publication-authorization.json"
+    path.write_bytes(canonical_json_bytes(receipt))
+    return path
+
+
 def _report() -> dict[str, object]:
     strategies = [
         {
@@ -6467,6 +6510,66 @@ def _financial_manifest_kwargs(
         "manifest_classification_policy_path": authority["classification_policy"],
         "manifest_admission_policy_path": authority["policy"],
     }
+
+
+def test_publish_requires_coordinated_receipt_after_immutable_staging(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing the receipt authority must retain, but never publish, a generation."""
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+
+    def pointer_writer_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("pointer writer was invoked without authorization")
+
+    monkeypatch.setattr(panel, "publish_generation", pointer_writer_must_not_run)
+    with pytest.raises(panel.ControlPanelValidationError, match="coordinated release"):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+    assert not (inputs["output"] / "index.html").exists()
+    assert any((inputs["output"] / "generations").iterdir())
+
+
+def test_publish_cli_requires_coordinated_receipt_argument() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        panel._parser().parse_args(
+            [
+                "publish",
+                "--report-root",
+                "report",
+                "--legacy-panel",
+                "legacy",
+                "--candidate-dir",
+                "candidate",
+                "--qa-dir",
+                "qa",
+                "--output-root",
+                "output",
+                "--freshness-health",
+                "freshness",
+                "--baseline-root",
+                "baseline",
+            ]
+        )
+    assert exc_info.value.code == 2
 
 
 def test_account_manifest_producer_to_publish_seam(

@@ -2506,6 +2506,12 @@ def test_panel_invocations_carry_baseline_root(
         return {"candidate_dir": str(tmp_path / "candidate")}
 
     monkeypatch.setattr(builder, "_tool", fake_tool)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "panel.html").write_text("candidate", encoding="utf-8")
+    qa = tmp_path / "qa"
+    qa.mkdir()
+    (qa / "browser.json").write_text("{}", encoding="utf-8")
     analytics = {
         "decomposition_root": str(tmp_path / "decomposition"),
         "decomposition_lenses_root": str(tmp_path / "lenses"),
@@ -2529,12 +2535,12 @@ def test_panel_invocations_carry_baseline_root(
         tmp_path / "bundle",
         analytics,
         tmp_path / "freshness.json",
-        tmp_path / "candidate",
-        tmp_path / "qa",
+        candidate,
+        qa,
         tmp_path / "stages" / "panel",
     )
 
-    assert [call[1] for call in calls] == ["build", "verify", "publish"]
+    assert [call[1] for call in calls] == ["build", "verify", "verify", "publish"]
     for call in calls:
         assert call[0] == "portfolio_control_panel.py"
         assert "--baseline-root" in call
