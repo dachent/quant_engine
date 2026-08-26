@@ -2,89 +2,452 @@
 
 ## Status and purpose
 
-This design repairs the production disconnect reproduced by MVP-AUDIT-001: the retained real baseline cannot enter the epoch-manifest producer, the required real authority artifacts do not exist, and provider flow inventories are not equivalent to proven interval completeness. The outcome is one reproducible path from retained provider evidence to the financial panel, with every displayed amount and ratio independently checkable.
+This revision is the accepted correction to the failed Task 5 adversarial
+review. It defines an additive, snapshot-first private generation bundle for
+the retained real account-strategy authority. It does not authorize provider
+access, publication, pointer changes, release consumption, or trading.
+
+The retained real result is expected to remain honest and incomplete:
+
+- 18 accounts and 26 assignment/perimeter rows;
+- 15 `STRATEGY_MAPPED` rows: 12 current/open-ended and 3 closed;
+- 7 `HISTORICAL_POOL_ONLY` rows;
+- 4 `RESERVE_NOT_APPLICABLE` rows;
+- 15 blocked mapped rows and zero numeric rows unless an admissible version-2
+  account-interval retrieval receipt is found and independently verified.
+
+An absent flow row is never zero. `VerificationStatus.VERIFIED` means that the
+private bundle passed artifact-integrity and independent semantic comparison;
+it does not mean complete financial coverage or publication readiness.
 
 ## Considered approaches
 
-### 1. Explicit perimeter and completeness authorities — selected
+### 1. Additive snapshot-first bundle API -- selected
 
-Partition baseline assignments by their governed disposition, retain an explicit non-strategy coverage ledger for historical/reserve facts, and calculate only `STRATEGY_MAPPED` epochs. Require a new hash-bound flow-coverage authority for every calculated account/interval, in addition to the existing one-to-one classified-flow artifact. Build and retain all candidate inputs and the output manifest in one content-addressed generation.
+Keep the existing `GenerationManifest`, `stage_generation`, `read_generation`,
+and legacy generation consumers unchanged. Add immutable byte snapshots, a
+snapshot-native epoch producer entry point, version-2 closed retrieval
+receipts, a 26-row perimeter artifact, an independent verifier, and new atomic
+bundle functions: `stage_generation_bundle`, `verify_generation_bundle`, and
+`read_generation_bundle`.
 
-This is the smallest approach that both supports the real baseline and prevents an absent flow row from silently becoming zero.
+This is the smallest architecture that fixes one-time reads, receipt authority,
+the generation-envelope circularity, full-perimeter evidence, and independent
+verification without migrating existing producers.
 
-### 2. Treat provider `COMPLETE_WITHIN_DECLARED_BOUNDARY` as zero-flow proof — rejected
+### 2. Epoch-specific manifest and store -- rejected
 
-This would populate more rows quickly, but current boundaries are provider-level prose with heterogeneous fact vocabularies. Schwab does not even declare cash-flow coverage, Matrixport does not claim provider-lifetime retention, and baseline flow coverage is explicitly `PARTIAL`. The approach would convert broad metadata into unreviewed financial assertions.
+A custom epoch manifest would duplicate content addressing, inventory,
+collision, recovery, and later release lineage. Task 6 would then need an
+adapter from the custom store into the existing core generation contract.
 
-### 3. Keep every real row unavailable and preserve synthetic-only production tests — rejected
+### 3. `GenerationManifest` version-2 migration -- rejected
 
-This is fail-closed but does not deliver a functional financial MVP. It also leaves the producer incompatible with its own real baseline and allows synthetic tests to stand in for acceptance.
+Embedding new inventory fields in a new manifest version would require a
+cross-repository producer and consumer migration. It would not eliminate the
+need for excluded detached control files, and its regression surface is
+disproportionate to Task 5.
 
-## Assignment perimeter
+## Boundaries and sequencing
 
-The exact baseline assignment set remains the source perimeter. The producer validates every assignment and partitions it without dropping rows:
+Task 5 is implemented and reviewed sequentially:
 
-- `STRATEGY_MAPPED` requires a non-empty known `strategy_id` and enters the calculable epoch chain.
-- `HISTORICAL_POOL_ONLY` requires no strategy and enters the explicit non-strategy fact-coverage chain.
-- `RESERVE_NOT_APPLICABLE` requires no strategy and enters the explicit non-strategy fact-coverage chain.
-- any unknown disposition, mapped row without a strategy, or non-strategy row with a strategy fails before calculation.
+1. **5A -- strict input authority:** strict JSON, immutable snapshots,
+   snapshot-native producer API, and coverage/receipt version 2.
+2. **5B -- atomic bundle envelope:** additive stage, verify, and read APIs with
+   detached inventory and receipt.
+3. **5C -- private authority generator:** perimeter, generator, independent
+   verifier, private display adapter, schemas, contract, and synthetic tests.
+4. **5D -- retained real build:** one local build from the pinned bytes,
+   exhaustive mutation evidence, and private human reports.
 
-Every NAV and classified-flow fact must map to exactly one assignment interval. Facts on non-strategy intervals are counted and bound into the output's perimeter evidence but never contribute to strategy money or return fields. The panel shows active/current mapped strategy epochs by default; historical mapped epochs remain available through the manifest, while reserve and historical-pool coverage appears as a nonnumeric coverage summary rather than misleading epoch performance rows.
+Each tranche receives a fresh read-only adversarial review before the next
+tranche begins. No Task 5 implementation begins until the 5A implementation
+brief has been extracted from the approved plan.
 
-## Flow authority
+Task 5 does not modify `publish_generation`, current-pointer logic,
+authority/release/pipeline consumption, or financial panel materialization.
+Task 6 owns verified-bundle consumption and publication integration.
 
-The classified-flow artifact continues to provide one exact disposition for every raw provider-ledger flow. A separate closed-schema `account-flow-coverage` artifact authorizes whether that inventory is complete for a specific account and inclusive date interval.
+## Immutable snapshot authority
 
-Each coverage row contains:
+`InputSnapshot` is a frozen value containing a label, immutable bytes, SHA-256,
+byte size, and an optional path used only in diagnostics. `capture(path,
+label)` performs one byte read. `from_bytes(label, contents)` creates a snapshot
+for a generated in-memory artifact. Parsing, identity binding, artifact
+construction, calculation, and independent verification use `contents` only;
+they never reopen the diagnostic path.
 
-- `account_id`, `effective_start`, and `effective_end`;
-- `status`: `COMPLETE` or `BLOCKED`;
-- `source_artifact_ids`: non-empty for `COMPLETE`;
-- `authority_kind`: a closed vocabulary describing the verified provider retrieval boundary;
-- `reason`: null for `COMPLETE`, non-empty for `BLOCKED`.
+The generation command snapshots these selected inputs exactly once before it
+parses or derives anything:
 
-The top-level artifact binds the exact provider-ledger identity and carries its own source artifact identity. Complete rows must be non-overlapping, must not extend beyond admitted provider evidence, and must cover the full calculated epoch through its final NAV date. A listed flow on one date never proves adjacent dates. A provider-level status string alone cannot generate a complete row.
+- the pinned provider-ledger catalog and its identity manifest;
+- the pinned baseline catalog;
+- the flow-classification policy;
+- every candidate retrieval receipt;
+- the accepted epoch producer source;
+- the generation builder source;
+- the independent verifier source.
 
-Initial real-data coverage is generated only where retained machine-readable source receipts prove the retrieval boundary. Unprovable providers/accounts receive explicit `BLOCKED` rows. The design does not manufacture attestations from human-readable coverage prose.
+The provider-ledger generation, hash, and size and the baseline generation,
+hash, and size must match the pinned Task 5 values. `CURRENT.json` is never
+resolved. A stale generation declaration, wrong bound source identity, linked
+path, path escape, or byte mismatch fails before derivation.
 
-## Admission and continuity authority
+The existing path-based `build_manifest_candidate(...)` remains a compatibility
+wrapper. It captures each path once and delegates to
+`build_manifest_candidate_from_snapshots(...)`. The Task 5 generator calls only
+the snapshot-native entry point. A test mutates every selected path after
+capture and proves that the generated bytes are unchanged and that no path is
+reopened.
 
-The admission policy covers the mapped assignment identity, while the full assignment identity remains separately bound as the perimeter. A `FUNDED` admission must cite a closed authority kind and exact source record identities proving positive funded NAV within the interval. A `BLOCKED` admission carries a reason and cannot emit numeric metrics.
+## One strict JSON boundary
 
-`continuity_to_successor` is allowed only when two mapped epochs on the same account are contiguous and the predecessor closing NAV is the successor opening boundary. It is false across non-strategy intervals, gaps, missing closing NAV, or blocked flow coverage.
+One shared core loader is used by every Task 5 authority and generation
+boundary, including `InputSnapshot.json_object`, `GenerationManifest`, retrieval
+receipts, coverage, perimeter, independent reports, inventory, and bundle
+receipts.
 
-## Calculation and display
+The loader:
 
-Money identities retain the existing definitions. Observation-linked return aggregates every classified flow in `(prior_nav_date, current_nav_date]`; it does not require consecutive calendar days and does not pretend sparse observations are daily performance. Leading nonpositive NAV observations are excluded only through an explicit funded-start rule; a nonpositive return base after funding blocks the epoch.
+- decodes strict UTF-8;
+- rejects duplicate object keys at every nesting depth;
+- rejects `NaN`, `Infinity`, and `-Infinity`;
+- rejects malformed JSON and trailing content;
+- optionally requires an object root;
+- never silently normalizes source bytes.
 
-An epoch emits numeric money, RONC, XIRR diagnostic, observation-linked return, HWM, and MaxDD only when assignment, admission, NAV, flow classification, flow coverage, and continuity preconditions all pass. Otherwise every numeric metric is null and the exact blocker is preserved. The UI label must continue to distinguish RONC, diagnostic XIRR, and observation-linked return; none may be relabeled MWR or daily TWR.
+Generated JSON must additionally equal the repository's canonical JSON bytes.
+Selected source JSON may be noncanonical, but duplicate keys and invalid
+numbers are always rejected.
 
-## Durable generation and release lineage
+## Assignment perimeter artifact
 
-The build command snapshots each selected input once and writes a content-addressed generation containing:
+The selected baseline remains the full assignment source. The producer
+validates every assignment and partitions without dropping rows:
 
-- provider-ledger identity;
-- full baseline/perimeter identity;
-- classified-flow artifact and classification policy;
-- account-flow-coverage artifact;
-- mapped-epoch admission policy;
-- calculation-code identity;
-- generated account-strategy manifest;
-- independent verification report with exact per-cell comparisons.
+- `STRATEGY_MAPPED` requires a known nonempty strategy and is eligible for
+  coverage, admission, and calculation;
+- `HISTORICAL_POOL_ONLY` requires no strategy and is retained as nonnumeric
+  perimeter evidence;
+- `RESERVE_NOT_APPLICABLE` requires no strategy and is retained as nonnumeric
+  perimeter evidence.
 
-Financial release construction accepts only that generation and rechecks every identity before staging. The same manifest bytes flow through release materialization, workbook proof, dashboard generation, current pointer, and browser rendering. Development mode may omit the manifest only when explicitly non-financial.
+The separate `account-assignment-perimeter` artifact contains:
 
-## Error handling and stop rules
+- `schema_version`, `artifact_id`, and `as_of_date`;
+- the exact selected baseline identity;
+- `full_perimeter_identity` with canonical hash and count;
+- `account_count`, `assignment_count`, and closed partition counts;
+- `fact_bijection_status`, `unassigned_fact_count`, and `unassigned_facts`;
+- one row per baseline assignment.
 
-- Never infer a mapping, flow, zero, funding threshold, calendar, or continuity rule.
-- Unknown or incomplete provider boundaries remain `BLOCKED`.
-- No partial numeric row may escape a blocked epoch.
-- No private full account number enters Git, logs, reports, browser fixtures, or GitHub; public surfaces use provider nickname and approved last-four only.
-- No provider, trading, pointer, or publication effect occurs during audit generation.
-- A real-data build that cannot cover the full current strategy perimeter is an honest partial-data result, not MVP-2 acceptance.
+Each row contains the assignment identity, internal account ID, provider,
+strategy disposition, nullable strategy ID, effective dates, calculation
+eligibility, and counts for available NAV, unavailable NAV, raw flows, and
+classified flows.
 
-## Verification
+Every retained NAV and raw/classified-flow fact must map to exactly one full
+assignment interval. A fact outside every interval or in overlapping intervals
+fails verification. Non-strategy facts remain counted and hash-bound but never
+enter numeric calculation.
 
-Tests must first fail against the current producer using a fixture that mirrors the real mixed mapped/historical/reserve baseline. Additional tests cover malformed partition states, total fact coverage, interval-completeness gaps, neighboring-date nonproof, non-observation-date flows, sparse accepted calendars, leading zero NAV, blocked metric withholding, durable generation identity, release mutation rejection, and exact browser cell parity.
+For the pinned retained build, the verifier requires exactly 18 accounts,
+26 rows, and the 15/7/4 partition. The schema remains general; these exact
+counts are retained-run acceptance assertions rather than universal schema
+constants.
 
-The final audit independently reconstructs each real row without importing producer calculation helpers. Every numeric cell must match exactly before formatting and after browser rendering. A hostile reviewer must review each bounded tranche, and exact-head Quality, Security, Data boundary, and Issue guard contexts must succeed before readiness.
+## Account-interval flow-completeness authority version 2
+
+Version 1 cannot authorize `COMPLETE` because its arbitrary source IDs do not
+prove account, interval, category coverage, terminal pagination, or selected
+source identity. Task 5 rejects version-1 `COMPLETE`. An explicit legacy
+conversion may produce only `BLOCKED` with
+`LEGACY_RECEIPT_UNVERIFIABLE`; it may never preserve `COMPLETE`.
+
+The version-2 coverage artifact contains:
+
+- `schema_version: 2`, `artifact_id`, and `as_of_date`;
+- exact ledger and classified-flow identities;
+- the exact mapped-assignment identity;
+- the declared receipt artifacts;
+- exactly one row for every mapped assignment.
+
+Each row contains the closed assignment key, `COMPLETE` or `BLOCKED`,
+`ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2` or `NONE`, a nullable receipt artifact
+ID, and a closed blocker code/detail. Supported blocker codes are:
+
+- `NO_ADMISSIBLE_V2_RECEIPT`;
+- `ACCOUNT_BINDING_MISMATCH`;
+- `INTERVAL_BOUNDARY_MISMATCH`;
+- `CATEGORY_SET_INCOMPLETE`;
+- `PAGINATION_NOT_TERMINAL`;
+- `SOURCE_IDENTITY_MISMATCH`;
+- `RECEIPT_OVERLAP`;
+- `RECEIPT_GAP`;
+- `LEGACY_RECEIPT_UNVERIFIABLE`.
+
+A `COMPLETE` row is valid only when the referenced strict receipt bytes are
+present and satisfy the closed receipt schema. The receipt binds:
+
+- issuer adapter name/version and code SHA-256;
+- provider, provider generation, generation-manifest artifact, and exact raw
+  evidence artifacts;
+- internal account ID, provider, and a source-account-identity SHA-256;
+- requested and covered inclusive start/end dates;
+- sorted unique required, completed, and unavailable flow categories;
+- pagination mode, page count, request/response chain hashes, terminal-response
+  hash, and `terminal: true`;
+- `EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES` and `truncated: false`.
+
+The validator requires exact account equality, full inclusive interval
+coverage, identical required/completed category sets, no unavailable category,
+terminal pagination, and exact equality to the selected immutable source
+identity.
+
+The reversible current ruling is an empty receipt-issuer allowlist unless an
+exact retained adapter/code identity and category contract already exist.
+Consequently the current real run remains 15 blocked mapped rows and zero
+numeric rows. Future provider-specific work may add issuer/category contracts
+without changing this generation envelope or the Task 4 calculations.
+
+## Admission and calculation
+
+The generator deterministically classifies each selected raw flow exactly once
+under the snapshotted policy and emits a redacted calculation-input projection
+that retains exact source record IDs and calculation facts without full account
+numbers.
+
+Mapped admission is built against exact positive `AVAILABLE` NAV record IDs and
+the accepted Task 3 policy. Mapped assignments without qualifying in-interval
+NAV remain blocked. Continuity remains allowed only across contiguous mapped
+epochs with accepted predecessor closing NAV and complete flow coverage.
+
+Only after coverage and admission pass may the accepted Task 4 producer emit a
+numeric row. A blocked row has no numeric metric or calculation trace. Task 5
+does not change the Task 4 money, RONC, XIRR diagnostic, observed-return, HWM,
+or MaxDD definitions.
+
+The accepted observation calculation aggregates every classified flow in
+`(prior_nav_date, current_nav_date]`; it does not require consecutive calendar
+days and does not relabel sparse observations as daily performance. Leading
+nonpositive NAV observations are excluded only through the explicit funded-
+start rule. A nonpositive return base after funding blocks the epoch. Human and
+browser labels continue to distinguish RONC, diagnostic XIRR, and observation-
+linked return; none is relabeled MWR or daily TWR.
+
+## Independent verifier
+
+`IndependentAccountManifestVerifier` is a named, separate implementation. Its
+production module is forbidden from importing:
+
+- `tools.account_strategy_manifest`;
+- `tools.build_account_manifest_generation`;
+- any producer calculation helper.
+
+An AST/import test enforces that boundary. The verifier may use shared strict
+JSON, canonical bytes, schema validation, and core immutable contract types.
+It independently parses the selected snapshots and candidate payload byte map.
+
+It verifies:
+
+- exact canonical payload paths and bytes;
+- every source identity, artifact SHA-256, and size;
+- the 26-row perimeter and fact bijection;
+- one coverage and admission disposition per mapped assignment;
+- classified-flow identity, amount, sign, date, disposition, and reconciliation;
+- funded NAV identity, account, date, status, and value;
+- absence of every numeric field and trace on blocked rows;
+- exact recomputation of every numeric field on a positive synthetic fixture;
+- exact blocker propagation and zero-numeric proof on the retained run.
+
+Its verification subject is the exact semantic payload path/hash/size set that
+excludes `verification/independent-verification.json`. Its canonical report
+contains verifier/code identity, selected source identities, the sorted subject
+entries and their canonical semantic digest, exact counts, one blocker proof per
+mapped assignment, numeric candidate/comparison/discrepancy counts, invariant
+results, and status. The verifier recomputes the expected report from that
+subject set and compares the finalized report bytes; it never hashes a set that
+contains its own report.
+
+The retained run is non-vacuous even with zero numeric rows: verification must
+show 15 independent blocker chains, 15 blocked output rows, no forbidden numeric
+field or trace, zero numeric candidates, zero numeric comparisons, and zero
+discrepancies. A separate positive synthetic fixture ensures the independent
+numeric implementation is exercised and catches value and trace mutation.
+
+## Non-circular generation envelope
+
+Construction order is fixed and non-circular:
+
+1. derive and canonicalize the independent-verifier subject payloads;
+2. independently verify their exact path/hash/size set and create the finalized
+   report that binds only that subject set;
+3. build `GenerationManifest` over the subject payloads plus the finalized
+   report;
+4. build and verify the detached inventory and receipt over the complete
+   manifest-declared set.
+
+`GenerationManifest` remains unchanged and continues to define the generation
+ID from its canonical identity payload. Its artifacts are the exact subject
+payload files plus `verification/independent-verification.json`. It does not
+declare itself or either detached control file.
+
+For a retained run without admissible receipts, the exact semantic payload set
+is:
+
+- `authority/selected-input-identities.json`;
+- `authority/account-assignment-perimeter.json`;
+- `authority/calculation-inputs.json`;
+- `authority/flow-classification-policy.json`;
+- `authority/classified-flows.json`;
+- `authority/account-flow-coverage.json`;
+- `authority/mapped-epoch-admission.json`;
+- `authority/code-identities.json`;
+- `outputs/account-strategy-manifest.json`;
+- `verification/independent-verification.json`.
+
+An accepted future receipt is stored under
+`authority/retrieval-receipts/<receipt-id>.json` and declared as a normal
+payload artifact.
+
+The three control files are:
+
+1. `generation.json`: the unchanged core `GenerationManifest`;
+2. `generation-inventory.json`: canonical exact path/hash/size entries for
+   `generation.json` plus every declared payload; it excludes itself and the
+   receipt;
+3. `generation-receipt.json`: binds the generation ID, manifest hash/size,
+   inventory hash/size, independent-report artifact identity, exact path count,
+   and envelope schema version.
+
+This ordering is non-circular. The existing
+`generation_inventory_sha256(root, generation_id)` continues to hash every
+regular file in the final directory, including both detached control files.
+That full-directory digest is reported externally and is never embedded in the
+generation.
+
+## Atomic create-only staging
+
+`stage_generation_bundle(root, manifest, payloads)` validates the entire
+in-memory bundle before writing. The manifest artifact path set must equal the
+payload mapping exactly. Paths are portable POSIX-relative names with no drive,
+backslash, empty component, `.`, `..`, control-file collision, or duplicate.
+
+The function creates a sibling `.stage-*` directory, writes every file with
+exclusive creation, flushes files, validates the on-disk temporary bundle, and
+performs one directory rename to `generations/<generation_id>`.
+
+Recovery and collision rules are exact:
+
+- failure before rename leaves no final generation;
+- a process death may leave only an ignored `.stage-*` orphan;
+- orphans are never promoted, read as generations, or automatically deleted by
+  Task 5;
+- after rename the final directory is complete because nothing is appended;
+- an existing final directory is idempotent only when the exact expected path
+  set and every byte match;
+- missing, extra, different, linked, or irregular content is a conflict and is
+  never repaired in place;
+- root, generations root, final directory, nested directories, and files must
+  not be symlinks;
+- a linked or irregular object fails closed;
+- bounded transient Windows rename-denial retries reuse the existing delay
+  policy; an exhausted retry preserves any prior final generation.
+
+`verify_generation_bundle` repeats strict parsing, canonical-byte validation,
+manifest identity, artifact hashes/sizes, inventory, receipt, path-set, and
+link checks. `read_generation_bundle` succeeds only after that verification and
+returns immutable bytes. Legacy `stage_generation` and `read_generation`
+behavior remain unchanged.
+
+Task 5 does not alter `publish_generation`. Task 6 must require a verified
+bundle before using or publishing the epoch generation.
+
+## Private human display identity
+
+Machine artifacts use stable internal account IDs. Human audit tables use a
+private redacted crosswalk outside the generation. Each row contains only:
+
+- internal account ID;
+- provider;
+- approved nickname;
+- exactly four decimal digits in `last_four`.
+
+`PrivateDisplayIdentityAdapter` rejects unknown keys such as
+`account_number`, routing or external identifiers, duplicate IDs, provider
+mismatches, a last-four value not matching four digits, and any account-number-
+like sequence of five or more digits after separator normalization. A sentinel
+privacy test plants a forbidden full-number token and proves rejection and
+absence from outputs, logs, exceptions, and generated artifacts.
+
+Human tables lead with provider, approved nickname/last-four, strategy name,
+effective dates, NAV observation range/count, coverage blocker, admission
+blocker, and numeric-row disposition. The required 15-row mapped table and
+26-row perimeter reconciliation are written outside
+`generations/<generation_id>`. They may reference the generation ID but are not
+manifest artifacts and cannot affect machine identity.
+
+## Contract and release lineage
+
+The financial-MVP source contract declares the epoch-generation source and
+required artifact roles but does not commit a private retained generation ID or
+private values. `docs/data-rollforward.md` documents the snapshot-only command,
+bundle layout, `PARTIAL + VERIFIED` semantics, and recovery rules.
+
+Task 6 accepts only `read_generation_bundle` output, binds the verified bundle
+identity, and passes the exact `outputs/account-strategy-manifest.json` bytes
+through release materialization, workbook proof, dashboard generation, pointer
+candidate, and browser rendering. Task 7 reviews the exact unchanged bundle and
+manifest bytes used by Task 6.
+
+## Verification and mutation requirements
+
+The first Task 5 RED is a real-shape mixed-baseline integration test requiring
+26 perimeter rows, the 15/7/4 partition, 15 mapped dispositions, and every
+semantic payload hash-bound by `generation.json`.
+
+Required mutation proofs include:
+
+- post-snapshot path mutation and a path-read spy;
+- duplicate keys at top-level and nested JSON boundaries;
+- invalid UTF-8 and nonfinite JSON numbers;
+- version-1 complete coverage, missing receipt, wrong account, wrong interval,
+  category gap, nonterminal pagination, source mismatch, receipt overlap/gap;
+- perimeter row removal/disposition change and fact assignment drift;
+- classified-event identity, amount, sign, date, and disposition mutation;
+- funded-NAV identity, account, date, status, and value mutation;
+- blocked-row blocker/status mutation and insertion of any numeric field/trace;
+- positive synthetic numeric value and trace mutation;
+- independent report discrepancy/count mutation;
+- independent subject path/hash/size/digest mutation, report self-inclusion,
+  report omission from `generation.json`, and finalized report byte mutation;
+- payload path, canonical bytes, artifact hash/size, generation ID, detached
+  inventory, receipt, and full-directory inventory mutation;
+- identical restaging, differing collision, interrupted rename, stale orphan,
+  extra/missing file, and file/directory symlink behavior;
+- forbidden verifier imports;
+- full-account sentinel privacy and proof that display edits do not alter the
+  generation ID;
+- a network/provider call trap proving zero calls.
+
+Two builds from identical immutable snapshots must produce byte-identical
+semantic authorities, independent report, `generation.json`, generation ID,
+detached inventory, detached receipt, and full-directory inventory digest.
+
+## Stop rules and scope exclusions
+
+- Never infer a mapping, receipt, flow, zero, funding threshold, calendar, or
+  continuity rule.
+- Unknown or incomplete receipt authority remains `BLOCKED`.
+- No partial numeric row may escape a blocked mapped assignment.
+- No full account number enters Git, fixtures, logs, exceptions, reports, or
+  bundle artifacts.
+- The unresolved Alpaca later interval `2026-04-18..2026-07-17` remains
+  unmapped; Task 5 does not infer a strategy.
+- No provider, credential, browser, trading, pointer, publication, GitHub, or
+  merge effect occurs during Task 5 generation.
+- Task 5 does not modify Task 4 calculations, Task 6 consumers, or unrelated
+  Schwab work.
+- A 15-blocked/zero-numeric retained build is an honest partial-data authority,
+  not a functional MVP-2 acceptance.
