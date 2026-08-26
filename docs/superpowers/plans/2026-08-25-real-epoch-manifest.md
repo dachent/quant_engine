@@ -94,12 +94,68 @@
 
 ### Task 5: Retained real authority generation
 
-Task 5 is four sequential review tranches. Do not begin 5A implementation
-until an implementation brief for 5A alone has been extracted from this plan.
-After each tranche, run a fresh read-only adversarial review and resolve every
-validated finding before extracting the next brief. Task 5 never calls
-`publish_generation` and does not modify pointer, authority, release, pipeline,
+The five remaining broad requirement groups (5B, 5C, 5D, 6, and 7) execute through the bounded acceptance
+units below. Do not begin any unit until its one-unit implementation brief has
+been extracted from this plan. After each security or authority boundary, run a
+fresh read-only adversarial review and resolve every validated finding before
+starting its dependants. Task 5A through 5D never call
+`publish_generation` and do not modify pointer, authority, release, pipeline,
 or panel consumption.
+
+#### Execution-unit decomposition (governing)
+
+The broad Task 5B/5C/5D/6/7 sections below are requirement catalogs, not
+single-writer implementation tranches. Execution is divided into the 24
+acceptance units in this table. This is an acceptance-unit count, not a target
+for simultaneous agents or commits.
+
+Every unit has at most one writer, one primary invariant, bounded targeted
+tests, exact file ownership, and an explicit stop condition. Shared files are
+leased sequentially. A unit stops before editing if it needs a second primary
+invariant or an undeclared file. Full suites are run only for a changed exact
+head; unchanged evidence is referenced, not rerun. Security and authority
+boundaries receive a fresh read-only hostile review before their dependants may
+start.
+
+Gate 0 closes Task 5A first: separately accept strict JSON, one-read immutable
+snapshots, receipt predicate/schema validation, a supported public loader with
+no caller-injectable coverage authority, blocked-only producer integration,
+and SHA-bound exact-head evidence. It requires two fresh exact-head read-only
+reviewers (authority/API
+surface and execution evidence) plus a controller transcript that records the
+same Git SHA before and after every declared gate. Stop on authority forgeable
+through the supported public API or a documented production entry point, any
+reviewer finding, SHA drift, or missing exact-head transcript. Arbitrary
+same-process reflection is not claimed as a Python-module security property;
+the later persisted bundle and separately invoked independent verifier own the
+file/process trust boundary.
+
+| Unit | One accepted invariant | Exclusive implementation ownership | Smallest proof and stop condition |
+|---|---|---|---|
+| 5B.1 | In-memory bundle paths, payload identities, and detached-control objects are canonical and non-circular. | `packages/core/src/quant_engine/core/publication.py`; create `schemas/core/generation-inventory.schema.json` and `schemas/core/generation-receipt.schema.json`; `tests/core/test_generation_envelope.py`. No filesystem staging. | Path/artifact/control mutation matrix and schema meta-validation. Stop on ambiguous report selection or normalized unsafe path. |
+| 5B.2 | Bundle staging is exclusive-create, fsynced, create-only, and one-rename atomic with bounded recovery. | Sequential lease on `packages/core/src/quant_engine/core/publication.py`; `tests/core/test_generation_envelope.py`. | Interrupted rename, stale orphan, identical/different collision, and pre-existing-final preservation. Stop on in-place repair or deletion of an orphan. |
+| 5B.3 | Verify/read returns immutable exact bytes and rejects every path/link/content drift without changing legacy APIs. | Sequential lease on `packages/core/src/quant_engine/core/publication.py`; `packages/core/src/quant_engine/core/__init__.py`; `tests/core/test_generation_envelope.py`. | Missing/extra/linked/irregular/hash/size/canonical-byte mutations plus legacy regression. Hostile review before 5C. |
+| 5C.1 | The perimeter artifact is a 26-row assignment/fact bijection with exact 15/7/4 partition. | Create `tools/build_account_manifest_generation.py` and `schemas/portfolio/account-assignment-perimeter.schema.json`; `tests/portfolio_control_panel/test_account_manifest_generation.py`. | Row removal, disposition change, duplicate/unassigned fact, interval escape. Stop on any inferred mapping. |
+| 5C.2 | Selected snapshot identities and one generation date are deterministic and independent of clocks/filesystem metadata. | Sequential lease on `tools/build_account_manifest_generation.py`; `tests/portfolio_control_panel/test_account_manifest_generation.py`. | All source-date orders, malformed dates, clock/timezone/locale/timestamp traps. |
+| 5C.3 | Classification, coverage, admission, and calculation-input payloads preserve exact source facts and yield blocked zero-numeric retained output. | Sequential lease on `tools/build_account_manifest_generation.py`; `schemas/portfolio/account-strategy-manifest.schema.json`; `tests/portfolio_control_panel/test_account_manifest_generation.py`. No verifier implementation or helper sharing. | Event/NAV/source-binding mutations and numeric-field insertion. Stop on unexpected `COMPLETE` or any retained numeric row. |
+| 5C.4 | A separately invoked independent verifier reparses independently and emits a non-circular report over the exact persisted subject set. | Create `tools/verify_account_manifest_generation.py` and `schemas/portfolio/account-manifest-independent-verification.schema.json`; `tests/portfolio_control_panel/test_account_manifest_generation.py`. | Import AST/runtime traps, subprocess/file-boundary invocation, subject/report path/hash/size/digest mutations, and a positive arithmetic fixture. Hostile authority review before composition. |
+| 5C.5 | Private display identity cannot affect machine identity or leak account numbers. | Create `tools/private_account_display.py`; `tests/portfolio_control_panel/test_account_manifest_generation.py`. | Unknown-key, duplicate/provider/last-four failures and full-number sentinel scan over bytes/logs/errors. |
+| 5C.6 | Composition builds the exact payload set, finalizes the report, creates `GenerationManifest`, and invokes 5B deterministically with no external calls. | Sequential lease on `tools/build_account_manifest_generation.py`; `tests/portfolio_control_panel/test_account_manifest_generation.py`; `docs/analytics/account-strategy-manifest.md`; `docs/data-rollforward.md`. No new calculation/verifier logic. | Two-root byte identity under different wall environments and provider/network/browser traps. Hostile review before retained build. |
+| 5D.1 | Pinned provider/baseline bytes and the private 18-account crosswalk are exact before capture. | `.codex-bootstrap/mvp-audit-001/human-readable-epoch-crosswalk.md` and create `.codex-bootstrap/mvp-audit-001/account-manifest-audit/preflight.md`; no tracked writes. | Generation/hash/size and strict redacted crosswalk checks. If absent, stale, or privacy-invalid, terminalize Task 5D as blocked; do not run 5D.2–5D.5 or Task 6. |
+| 5D.2 | The first retained build has exact 18/26/15/7/4 structure, 15 blocked mapped rows, and zero numeric rows. | Create only `.codex-bootstrap/mvp-audit-001/account-manifest-generation/first/generations/<generation-id>/**` and `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/structural-disposition.md`. | Bundle verification and structural disposition report. Stop on unexpected receipt `COMPLETE`, numeric row, or external call. |
+| 5D.3 | Every declared mutation is rejected against unchanged retained snapshots. | Create only `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/mutation-transcript.txt`. | Snapshot/receipt/perimeter/fact/NAV/blocker/verifier/envelope/privacy matrix once per unchanged candidate. |
+| 5D.4 | A second private root is byte-identical and human evidence is complete without entering machine identity. | Create only `.codex-bootstrap/mvp-audit-001/account-manifest-generation/second/generations/<generation-id>/**`, `commands.txt`, and the mapped/perimeter/verification reports under `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/`. | All payload/control/digest identities equal; mapped and perimeter tables reconcile. |
+| 5D.5 | The exact retained bundle receives fresh hostile review and Task 5 closes with no tracked/private leakage. | Create only `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/exact-bundle-review.md` and `task-5-closure.md`. | Exact hash review, status audit, privacy scan. Stop on any tracked private value or head drift. |
+| 6A | The dedicated `epoch_manifest_source` contract and generated views bind the bundle without changing historical `source_segments`. | `contracts/portfolio-financial-mvp-source-v1.json`; `schemas/portfolio/financial-mvp-source-contract.schema.json`; `tools/portfolio_financial_mvp_contract.py`; `tests/core/test_portfolio_financial_mvp_contract.py`; `generated/financial-mvp/current-product.md`; `generated/financial-mvp/source-matrix.json`. | Deep equality/digest proof for historical subtree plus `check_views` stale/mutation cases. |
+| 6B | Publication accepts only verified `read_generation_bundle` output for the epoch source. | Sequential lease on `packages/core/src/quant_engine/core/publication.py`; `tests/core/test_generation_envelope.py`. | Bare legacy generation and receipt/inventory/report identity mutations fail. |
+| 6C | Pipeline/materializer/workbook/proof/pointer candidates carry the exact account-manifest bytes unchanged. | `packages/core/src/quant_engine/core/pipeline.py`; `tools/portfolio_pipeline_materialize.py`; `tests/core/test_portfolio_pipeline_materialize.py`; `tests/core/test_portfolio_pipeline_orchestration.py`. | Stage-by-stage byte/hash/size equality and one-byte mutation/omission cases. |
+| 6D | The portfolio-control-panel producer consumes only the verified exact epoch bytes and preserves null/blocker semantics. | `tools/portfolio_control_panel.py`; `tests/portfolio_control_panel/test_portfolio_control_panel.py`. | Source/value/provenance/bundle mutations and column-level numeric/null assertions. |
+| 6E | Browser rendering matches the exact bundle manifest for labels, blockers, nulls, and 13-column shape. | `apps/portfolio-control-panel/app.js`; `apps/portfolio-control-panel/browser_qa.mjs`; browser fixtures already owned by `tests/portfolio_control_panel/test_portfolio_control_panel.py`. | Node/browser interaction assertions and rendered-cell parity; stop on derived or cached substitute values. |
+| 6F | The composed financial release has one exact-byte lineage through publication, workbook, panel, browser, and pointer candidate. | `tests/core/test_portfolio_pipeline_materialize.py`; `tests/core/test_portfolio_pipeline_orchestration.py`; `tests/portfolio_control_panel/test_portfolio_control_panel.py`. No new component logic. | Cross-layer mutation/omission gates, targeted suite, exact-head review. Stop on any layer accepting different bytes. |
+| 7A | One clean-head evidence inventory binds code, tests, retained bundle, consumed bytes, generated views, and status. | Update `.codex-bootstrap/mvp-audit-001/epoch-manifest-root-cause-report.md` and create `.codex-bootstrap/mvp-audit-001/real-epoch-manifest-acceptance.md`. | SHA/path/status reconciliation; stop on dirty scoped files or stale evidence. |
+| 7B | Three independent hostile lanes agree on calculation, authority/lineage/security, and rendered-cell/browser correctness. | Create only `.codex-bootstrap/mvp-audit-001/acceptance-reviews/calculation.md`, `authority-lineage-security.md`, and `rendered-cells-browser.md`; all review work is read-only. | Each lane cites exact head/bundle; stop acceptance on any validated finding. |
+| 7C | Each validated finding is fixed as its own TDD tranche and independently re-reviewed. | One finding, one writer, and create `.superpowers/sdd/2026-08-25-real-epoch-manifest/findings/<finding-id>-brief.md` listing exact tracked files before editing. | Targeted RED/GREEN plus affected exact-head gate; no bundled fixes. |
+| 7D | Required remote contexts and governed issue/PR handoff bind the reviewed exact head; no merge occurs. | External readback and user-approved issue/PR updates only; locally update `.codex-bootstrap/mvp-audit-001/real-epoch-manifest-acceptance.md`. | Quality/Security/Data-boundary/Issue-guard results and readback. Stop on SHA mismatch, missing approval, or failed context. |
 
 #### Task 5A: Strict JSON, immutable snapshots, and receipt-bound coverage v2
 
@@ -181,19 +237,25 @@ or panel consumption.
   terminal page evidence, exact completeness, and `truncated: false`. Add REDs
   for version-1 complete, missing receipt bytes, wrong account, early/late
   boundary, category gap, nonterminal pagination, wrong source generation/hash,
-  receipt overlap, and receipt gap. Add one fully valid synthetic receipt.
+  receipt overlap, and receipt gap. Validate one fully formed synthetic receipt
+  only at the strict predicate/schema layer; it must not be installable as a
+  production authority contract or drive a production candidate to `COMPLETE`.
 
 - [ ] **Step 7: Implement coverage v2 fail-closed validation.** Require exactly
   one coverage disposition per mapped assignment. A complete row must resolve
   to present strict receipt bytes and pass every account/interval/category/
   pagination/source check. Use the closed blocker codes in the design. Keep the
   issuer allowlist empty unless an exact retained issuer code and category
-  contract are independently present.
+  contract are independently present. The allowlist must be closed over by the
+  production loader: no loader, builder, assembler, CLI, sentinel, classmethod,
+  or test-named production helper may accept or construct caller-supplied trust
+  capable of emitting a numeric row.
 
 - [ ] **Step 8: Update every in-repo epoch coverage fixture and caller.** The
   seam must have no producer consumer left on version 1. Synthetic complete
-  fixtures carry valid receipt bytes; blocked fixtures carry null receipt IDs
-  and precise closed blockers.
+  receipts remain schema/predicate fixtures only; end-to-end producer fixtures
+  remain blocked until an exact retained contract exists. Blocked fixtures
+  carry null receipt IDs and precise closed blockers.
 
 - [ ] **Step 9: Verify 5A.** Run
   `python -m pytest tests/core/test_snapshots.py tests/core/test_generation_envelope.py tests/portfolio_control_panel/test_account_strategy_manifest.py -q`,
@@ -202,8 +264,10 @@ or panel consumption.
   key hook one at a time and prove the targeted tests fail before restoring.
 
 - [ ] **Step 10: Review and commit 5A only.** Record the exact tests and
-  mutation failures, obtain the read-only review, and commit only the files in
-  5A with subject `feat: bind epoch inputs and flow receipts`.
+  mutation failures; obtain separate exact-head authority/API-surface and
+  execution-evidence read-only reviews; retain a controller transcript that
+  records the same Git SHA before and after every declared gate. Commit only
+  the files in 5A with subject `feat: bind epoch inputs and flow receipts`.
 
 #### Task 5B: Atomic non-circular generation bundle
 
@@ -355,12 +419,12 @@ or panel consumption.
   provider-before-baseline, baseline-before-provider, and equal dates. Trap
   wall-clock, local-date, timezone, locale, and filesystem-timestamp reads.
 
-- [ ] **Step 5: Implement the independent verifier and fixed construction
-  order.** First derive and canonicalize every subject payload except
+- [ ] **Step 5: Implement the separately invoked independent verifier and fixed
+  construction order.** First derive and canonicalize every subject payload except
   `verification/independent-verification.json`. Independently reparse the
   selected snapshots and exact subject map, reconcile every perimeter and
   classified fact, validate admissions, and compare exact paths/canonical
-  bytes. Finalize a report containing verifier code identity, sorted subject
+  bytes across the persisted file/process boundary. Finalize a report containing verifier code identity, sorted subject
   path/hash/size entries, their canonical semantic digest, exact counts, one
   blocker chain per mapped assignment, numeric candidate/comparison/discrepancy
   counts, and invariants. Then build `GenerationManifest` over the exact subject
@@ -429,11 +493,18 @@ or panel consumption.
 #### Task 5D: Retained real build and exhaustive private evidence
 
 **Files:**
-- Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-generation/generations/<generation-id>/**`
+- Read ignored: `.codex-bootstrap/mvp-audit-001/human-readable-epoch-crosswalk.md`
+- Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-audit/preflight.md`
+- Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-generation/first/generations/<generation-id>/**`
+- Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-generation/second/generations/<generation-id>/**`
+- Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/structural-disposition.md`
 - Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/mapped-assignments.md`
 - Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/perimeter-reconciliation.md`
 - Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/verification-summary.md`
+- Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/mutation-transcript.txt`
 - Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/commands.txt`
+- Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/exact-bundle-review.md`
+- Create ignored: `.codex-bootstrap/mvp-audit-001/account-manifest-audit/<generation-id>/task-5-closure.md`
 - Modify tracked: none
 
 **Interfaces:**
@@ -453,9 +524,10 @@ or panel consumption.
 
 - [ ] **Step 2: Validate the private display crosswalk.** Require all 18 machine
   accounts to resolve to provider, approved nickname, and last four. If the
-  strict redacted crosswalk is absent or invalid, retain the machine bundle but
-  report `BLOCKED_PRIVATE_DISPLAY_CROSSWALK_MISSING`; do not infer labels or
-  claim Task 5 accepted.
+  strict redacted crosswalk is absent or invalid, write only the preflight
+  `BLOCKED_PRIVATE_DISPLAY_CROSSWALK_MISSING` result and terminalize Task 5D.
+  Do not build or retain a machine bundle, do not run Steps 3–9, do not begin
+  Task 6, do not infer labels, and do not claim Task 5 accepted.
 
 - [ ] **Step 3: Run one local snapshot-only build.** Use the pinned generation
   IDs, accepted policy, existing local receipt candidates only, the private
@@ -495,8 +567,9 @@ or panel consumption.
 
 - [ ] **Step 9: Close the Task 5 boundary without a commit.** Confirm no private
   value is tracked, `git status --short` contains no Task 5D tracked change,
-  and the reviewed Task 5C commit remains the implementation head. Record that
-  commit and the private bundle identities as the Task 5 handoff to Task 6.
+  and the reviewed Task 5C commit remains the implementation head. Only after
+  the 5D.1 preflight and Steps 3–8 pass, record that commit and the private
+  bundle identities as the Task 5 handoff to Task 6.
 
 ### Task 6: Financial release and browser byte lineage
 
@@ -506,13 +579,15 @@ or panel consumption.
 - Modify: `tools/portfolio_financial_mvp_contract.py`
 - Modify: `packages/core/src/quant_engine/core/publication.py`
 - Modify: `packages/core/src/quant_engine/core/pipeline.py`
-- Modify: `packages/core/src/quant_engine/core/portfolio_pipeline.py`
+- Modify: `tools/portfolio_pipeline_materialize.py`
 - Modify: `tools/portfolio_control_panel.py`
 - Modify: `tests/core/test_portfolio_financial_mvp_contract.py`
 - Modify: `tests/core/test_generation_envelope.py`
 - Modify: `tests/core/test_portfolio_pipeline_materialize.py`
+- Modify: `tests/core/test_portfolio_pipeline_orchestration.py`
 - Modify: `tests/portfolio_control_panel/test_portfolio_control_panel.py`
 - Modify: `apps/portfolio-control-panel/app.js`
+- Modify: `apps/portfolio-control-panel/browser_qa.mjs`
 - Modify generated: `generated/financial-mvp/current-product.md`
 - Modify generated: `generated/financial-mvp/source-matrix.json`
 
@@ -587,6 +662,10 @@ or panel consumption.
 **Files:**
 - Modify: `.codex-bootstrap/mvp-audit-001/epoch-manifest-root-cause-report.md`
 - Create: `.codex-bootstrap/mvp-audit-001/real-epoch-manifest-acceptance.md`
+- Create: `.codex-bootstrap/mvp-audit-001/acceptance-reviews/calculation.md`
+- Create: `.codex-bootstrap/mvp-audit-001/acceptance-reviews/authority-lineage-security.md`
+- Create: `.codex-bootstrap/mvp-audit-001/acceptance-reviews/rendered-cells-browser.md`
+- Create per finding: `.superpowers/sdd/2026-08-25-real-epoch-manifest/findings/<finding-id>-brief.md`
 
 **Interfaces:**
 - Consumes: exact branch head, retained test outputs, hostile reviews, the exact reviewed Task 5 bundle identity, and the exact account-manifest bytes consumed by Task 6.

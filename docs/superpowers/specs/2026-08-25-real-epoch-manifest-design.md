@@ -238,6 +238,24 @@ Consequently the current real run remains 15 blocked mapped rows and zero
 numeric rows. Future provider-specific work may add issuer/category contracts
 without changing this generation envelope or the Task 4 calculations.
 
+The retained allowlist is a closed supported-API boundary, not a caller
+argument.
+No production loader, candidate builder, assembler, or CLI entry point may
+accept a caller-supplied issuer/category contract, validated-coverage token, or
+synthetic authority registry. Tests may exercise strict receipt predicates and
+arithmetic with test-local data. A pure predicate helper may return
+non-authoritative validated `COMPLETE` facts, but it must not install synthetic
+trust into the production producer, construct the opaque production coverage
+object, or emit a numeric candidate.
+
+This is an API and architecture boundary for cooperative code using the
+supported surface, not isolation from arbitrary code already executing in the
+same Python interpreter. Private names, closures, and slot-only objects are not
+treated as security controls because Python reflection can inspect them. The
+durable authority boundary is the exact persisted bundle plus a separately
+invoked independent verifier in Tasks 5B/5C; that boundary still assumes the
+checked-out code, interpreter, and operating system are trusted.
+
 ## Admission and calculation
 
 The generator deterministically classifies each selected raw flow exactly once
@@ -452,6 +470,9 @@ Required mutation proofs include:
   and identical bytes/identity under different mocked dates and timezones;
 - version-1 complete coverage, missing receipt, wrong account, wrong interval,
   category gap, nonterminal pagination, source mismatch, receipt overlap/gap;
+- absence from the supported public API and documented production entry points
+  of caller-injectable receipt authority, coverage construction, or lower-level
+  numeric assembly; no claim is made against arbitrary same-process reflection;
 - perimeter row removal/disposition change and fact assignment drift;
 - classified-event identity, amount, sign, date, and disposition mutation;
 - funded-NAV identity, account, date, status, and value mutation;

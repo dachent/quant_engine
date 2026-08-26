@@ -100,52 +100,9 @@ _FLOW_COVERAGE_BLOCKERS = frozenset(
 )
 
 
-def _freeze_authority_value(value: object) -> object:
-    """Copy authority data recursively so callers cannot alter it in flight."""
-    if isinstance(value, Mapping):
-        return MappingProxyType(
-            {str(key): _freeze_authority_value(item) for key, item in value.items()}
-        )
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_authority_value(item) for item in value)
-    return value
-
-
-@dataclass(frozen=True)
-class ReceiptAuthorityContract:
-    """Closed adapter/source declaration allowed to authorize a v2 receipt."""
-
-    adapter_name: str
-    adapter_version: str
-    code_sha256: str
-    provider: str
-    account_id: str
-    source_account_identity_sha256: str
-    provider_generation: str
-    provider_generation_manifest: Mapping[str, object]
-    raw_evidence_artifacts: tuple[Mapping[str, object], ...]
-    required_categories: tuple[str, ...]
-    pagination: Mapping[str, object]
-
-    def __post_init__(self) -> None:
-        """Freeze nested authority data at the producer boundary."""
-        object.__setattr__(
-            self,
-            "provider_generation_manifest",
-            _freeze_authority_value(self.provider_generation_manifest),
-        )
-        object.__setattr__(
-            self,
-            "raw_evidence_artifacts",
-            tuple(_freeze_authority_value(value) for value in self.raw_evidence_artifacts),
-        )
-        object.__setattr__(self, "required_categories", tuple(self.required_categories))
-        object.__setattr__(self, "pagination", _freeze_authority_value(self.pagination))
-
-
-_RETAINED_RECEIPT_AUTHORITY_CONTRACTS: Mapping[
-    tuple[str, str, str], ReceiptAuthorityContract
-] = MappingProxyType({})
+# Retained receipt contracts are lexically owned by the closed coverage loader.
+# Within the supported API boundary, no caller, test, CLI argument,
+# module-global reassignment, or input artifact may extend that registry.
 _ASSIGNMENT_DISPOSITIONS = frozenset(
     {
         "STRATEGY_MAPPED",
@@ -529,106 +486,21 @@ def load_flow_classification_policy(
     )
 
 
-_VALIDATED_COVERAGE_INDEX = object()
-
-
-class CoverageIndex:
-    """Closed account-and-inclusive-interval flow-completeness authority."""
-
-    __slots__ = ("_rows",)
-
-    def __init__(
-        self, rows: list[dict[str, object]], *, _capability: object | None = None
-    ) -> None:
-        if _capability is not _VALIDATED_COVERAGE_INDEX:
-            raise ManifestError(
-                "CoverageIndex must be created by validated coverage loading"
-            )
-        object.__setattr__(
-            self, "_rows", tuple(MappingProxyType(dict(row)) for row in rows)
-        )
-
-    def __setattr__(self, _name: str, _value: object) -> None:
-        raise AttributeError("CoverageIndex is immutable")
-
-    @classmethod
-    def _from_validated_rows(cls, rows: list[dict[str, object]]) -> "CoverageIndex":
-        return cls(rows, _capability=_VALIDATED_COVERAGE_INDEX)
-
-    def is_complete(self, account_id: str, effective_start: str, effective_end: str) -> bool:
-        """Return true only for one same-account COMPLETE covering interval."""
-        return any(
-            row["account_id"] == account_id
-            and row["status"] == "COMPLETE"
-            and str(row["effective_start"]) == effective_start
-            and str(row["effective_end"]) == effective_end
-            for row in self._rows
-        )
-
-    def is_complete_assignment(self, assignment: Mapping[str, object]) -> bool:
-        """Return COMPLETE only for the exact producer-selected assignment key."""
-        return any(
-            row["status"] == "COMPLETE"
-            and row.get("assignment_key") == _assignment_key(dict(assignment))
-            for row in self._rows
-        )
-
-
-def _load_flow_coverage_for_testing(
-    coverage_snapshot: InputSnapshot,
-    ledger_identity: Mapping[str, object],
-    classified_flows_artifact: Mapping[str, object],
-    receipt_snapshots: Mapping[str, InputSnapshot],
-    mapped_assignments: list[dict[str, Any]],
-    receipt_authority_contracts: Mapping[
-        tuple[str, str, str], ReceiptAuthorityContract
-    ] = _RETAINED_RECEIPT_AUTHORITY_CONTRACTS,
-) -> tuple[CoverageIndex, dict[str, object]]:
-    """Strict-decode and load one hash-bound coverage artifact."""
-    if type(coverage_snapshot) is not InputSnapshot:
-        raise ManifestError("flow coverage must be an InputSnapshot")
-    if not isinstance(receipt_snapshots, Mapping):
-        raise ManifestError("retrieval receipts must be a mapping")
-    if any(
-        not isinstance(key, str) or not key.strip() or type(value) is not InputSnapshot
-        for key, value in receipt_snapshots.items()
-    ):
-        raise ManifestError("retrieval receipts must be InputSnapshots")
-    return _load_flow_coverage_payload(
-        coverage_snapshot.json_object("flow coverage"), coverage_snapshot,
-        ledger_identity, classified_flows_artifact, receipt_snapshots,
-        mapped_assignments,
-        receipt_authority_contracts,
-    )
-
-
-def load_flow_coverage(
-    coverage_snapshot: InputSnapshot,
-    ledger_identity: Mapping[str, object],
-    classified_flows_artifact: Mapping[str, object],
-    receipt_snapshots: Mapping[str, InputSnapshot],
-    mapped_assignments: list[dict[str, Any]],
-) -> tuple[CoverageIndex, dict[str, object]]:
-    """Load coverage against immutable production receipt authority only."""
-    return _load_flow_coverage_for_testing(
-        coverage_snapshot, ledger_identity, classified_flows_artifact,
-        receipt_snapshots, mapped_assignments,
-        _RETAINED_RECEIPT_AUTHORITY_CONTRACTS,
-    )
-
-
-def _load_flow_coverage_payload(
+def _validate_flow_coverage_payload(
     payload: Mapping[str, Any],
     coverage_snapshot: InputSnapshot,
     ledger_identity: Mapping[str, object],
     classified_flows_artifact: Mapping[str, object],
     receipt_snapshots: Mapping[str, InputSnapshot],
     mapped_assignments: list[dict[str, Any]],
-    receipt_authority_contracts: Mapping[
-        tuple[str, str, str], ReceiptAuthorityContract
-    ],
-) -> tuple[CoverageIndex, dict[str, object]]:
-    """Private decoded implementation; public entry only accepts snapshot bytes."""
+    receipt_validator: Any,
+) -> tuple[tuple[Mapping[str, object], ...], dict[str, object]]:
+    """Validate coverage facts without constructing numeric-row authority.
+
+    The injected predicate is confined to this pure validation layer. Its
+    result is immutable row data, not the opaque coverage object accepted by
+    the production assembler.
+    """
     required = {
         "schema_version",
         "artifact_id",
@@ -751,14 +623,13 @@ def _load_flow_coverage_payload(
             if snapshot is None:
                 raise ManifestError(f"flow coverage row {index} receipt is missing")
             receipt = snapshot.json_object(f"retrieval receipt {receipt_id}")
-            _validate_complete_receipt(
+            receipt_validator(
                 receipt,
                 receipt_id,
                 account_id,
                 requested_start,
                 requested_end,
                 coverage_as_of_date,
-                receipt_authority_contracts,
             )
             complete_receipt_ids.add(receipt_id)
         elif authority_kind != "NONE" or receipt_id is not None or blocker not in _FLOW_COVERAGE_BLOCKERS or not isinstance(detail, str) or not detail.strip():
@@ -791,11 +662,123 @@ def _load_flow_coverage_payload(
         schema_name="account-flow-coverage",
         schema_version=str(_FLOW_COVERAGE_SCHEMA_VERSION),
     )
-    return CoverageIndex._from_validated_rows(rows), artifact
+    return tuple(MappingProxyType(dict(row)) for row in rows), artifact
+
+
+def _make_coverage_loader(receipt_predicate: Any) -> Any:
+    """Bind coverage construction inside this module, never at a call site."""
+    capability = object()
+    retained_contracts: Mapping[tuple[str, str, str], Mapping[str, object]] = (
+        MappingProxyType({})
+    )
+
+    class _CoverageIndex:
+        __slots__ = ("_rows",)
+
+        def __init__(self, rows: list[dict[str, object]], *, _capability: object) -> None:
+            if _capability is not capability:
+                raise ManifestError("coverage authority construction is denied")
+            object.__setattr__(
+                self, "_rows", tuple(MappingProxyType(dict(row)) for row in rows)
+            )
+
+        def __setattr__(self, _name: str, _value: object) -> None:
+            raise AttributeError("coverage authority is immutable")
+
+        def is_complete(
+            self, account_id: str, effective_start: str, effective_end: str
+        ) -> bool:
+            return any(
+                row["account_id"] == account_id
+                and row["status"] == "COMPLETE"
+                and str(row["effective_start"]) == effective_start
+                and str(row["effective_end"]) == effective_end
+                for row in self._rows
+            )
+
+        def is_complete_assignment(self, assignment: Mapping[str, object]) -> bool:
+            return any(
+                row["status"] == "COMPLETE"
+                and row.get("assignment_key") == _assignment_key(dict(assignment))
+                for row in self._rows
+            )
+
+    coverage_validator = _validate_flow_coverage_payload
+
+    def validate_complete_receipt(
+        receipt: Mapping[str, object],
+        receipt_id: str,
+        account_id: str,
+        requested_start: str,
+        requested_end: str,
+        coverage_as_of_date: str,
+    ) -> None:
+        issuer = receipt.get("issuer")
+        if not isinstance(issuer, Mapping) or set(issuer) != {
+            "adapter_name",
+            "adapter_version",
+            "code_sha256",
+        }:
+            raise ManifestError("retrieval receipt issuer is invalid")
+        issuer_name = _require_nonempty_text(
+            issuer.get("adapter_name"), "retrieval receipt issuer.adapter_name"
+        )
+        issuer_version = _require_nonempty_text(
+            issuer.get("adapter_version"), "retrieval receipt issuer.adapter_version"
+        )
+        issuer_code = issuer.get("code_sha256")
+        if not isinstance(issuer_code, str) or _SHA256.fullmatch(issuer_code) is None:
+            raise ManifestError("retrieval receipt issuer is invalid")
+        contract = retained_contracts.get(
+            (issuer_name, issuer_version, issuer_code)
+        )
+        if contract is None:
+            raise ManifestError("retrieval receipt issuer is not admissible")
+        receipt_predicate(
+            receipt,
+            receipt_id,
+            account_id,
+            requested_start,
+            requested_end,
+            coverage_as_of_date,
+            contract,
+        )
+
+    def load_flow_coverage(
+        coverage_snapshot: InputSnapshot,
+        ledger_identity: Mapping[str, object],
+        classified_flows_artifact: Mapping[str, object],
+        receipt_snapshots: Mapping[str, InputSnapshot],
+        mapped_assignments: list[dict[str, Any]],
+    ) -> tuple[object, dict[str, object]]:
+        """Load coverage against retained authority only."""
+        if type(coverage_snapshot) is not InputSnapshot:
+            raise ManifestError("flow coverage must be an InputSnapshot")
+        if not isinstance(receipt_snapshots, Mapping):
+            raise ManifestError("retrieval receipts must be a mapping")
+        if any(
+            not isinstance(key, str)
+            or not key.strip()
+            or type(value) is not InputSnapshot
+            for key, value in receipt_snapshots.items()
+        ):
+            raise ManifestError("retrieval receipts must be InputSnapshots")
+        rows, artifact = coverage_validator(
+            coverage_snapshot.json_object("flow coverage"),
+            coverage_snapshot,
+            ledger_identity,
+            classified_flows_artifact,
+            receipt_snapshots,
+            mapped_assignments,
+            validate_complete_receipt,
+        )
+        return _CoverageIndex(list(rows), _capability=capability), artifact
+
+    return load_flow_coverage
 
 
 def _validate_artifact_shape(value: object, field: str) -> dict[str, object]:
-    """Validate a portable artifact object before it becomes receipt authority."""
+    """Validate a portable artifact object before comparing authority facts."""
     if not isinstance(value, Mapping):
         raise ManifestError(f"{field} is invalid")
     try:
@@ -809,12 +792,22 @@ def _validate_artifact_shape(value: object, field: str) -> dict[str, object]:
 
 
 def _validate_pagination_shape(value: object, field: str) -> dict[str, object]:
-    required = {"mode", "page_count", "request_response_chain_sha256", "terminal_response_sha256", "terminal"}
+    required = {
+        "mode",
+        "page_count",
+        "request_response_chain_sha256",
+        "terminal_response_sha256",
+        "terminal",
+    }
     if not isinstance(value, Mapping) or set(value) != required:
         raise ManifestError(f"{field} is invalid")
     mode = _require_nonempty_text(value["mode"], f"{field}.mode")
     page_count = value["page_count"]
-    if isinstance(page_count, bool) or not isinstance(page_count, int) or page_count < 1:
+    if (
+        isinstance(page_count, bool)
+        or not isinstance(page_count, int)
+        or page_count < 1
+    ):
         raise ManifestError(f"{field}.page_count is invalid")
     result: dict[str, object] = {"mode": mode, "page_count": page_count}
     for name in ("request_response_chain_sha256", "terminal_response_sha256"):
@@ -838,79 +831,214 @@ def _validate_categories(value: object, field: str) -> tuple[str, ...]:
 
 
 def _validate_receipt_contract(
-    contract: ReceiptAuthorityContract,
-) -> tuple[dict[str, object], tuple[dict[str, object], ...], tuple[str, ...], dict[str, object]]:
-    for field in ("adapter_name", "adapter_version", "provider", "account_id"):
-        _require_nonempty_text(getattr(contract, field), f"receipt authority.{field}")
-    for field in ("code_sha256", "source_account_identity_sha256", "provider_generation"):
-        value = getattr(contract, field)
+    contract: Mapping[str, object],
+) -> tuple[
+    tuple[str, str, str],
+    dict[str, object],
+    tuple[dict[str, object], ...],
+    tuple[str, ...],
+    dict[str, object],
+]:
+    required = {
+        "adapter_name",
+        "adapter_version",
+        "code_sha256",
+        "provider",
+        "account_id",
+        "source_account_identity_sha256",
+        "provider_generation",
+        "provider_generation_manifest",
+        "raw_evidence_artifacts",
+        "required_categories",
+        "pagination",
+    }
+    if set(contract) != required:
+        raise ManifestError("receipt authority contract is invalid")
+    adapter_name = _require_nonempty_text(
+        contract["adapter_name"], "receipt authority.adapter_name"
+    )
+    adapter_version = _require_nonempty_text(
+        contract["adapter_version"], "receipt authority.adapter_version"
+    )
+    _require_nonempty_text(contract["provider"], "receipt authority.provider")
+    _require_nonempty_text(contract["account_id"], "receipt authority.account_id")
+    for field in (
+        "code_sha256",
+        "source_account_identity_sha256",
+        "provider_generation",
+    ):
+        value = contract[field]
         if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
             raise ManifestError(f"receipt authority.{field} is invalid")
-    manifest = _validate_artifact_shape(contract.provider_generation_manifest, "receipt authority.provider_generation_manifest")
-    raw = contract.raw_evidence_artifacts
-    if not isinstance(raw, tuple) or not raw:
+    manifest = _validate_artifact_shape(
+        contract["provider_generation_manifest"],
+        "receipt authority.provider_generation_manifest",
+    )
+    raw = contract["raw_evidence_artifacts"]
+    if not isinstance(raw, (list, tuple)) or not raw:
         raise ManifestError("receipt authority.raw_evidence_artifacts is invalid")
-    raw_artifacts = tuple(_validate_artifact_shape(value, "receipt authority.raw_evidence_artifact") for value in raw)
-    if len({str(value["artifact_id"]) for value in raw_artifacts}) != len(raw_artifacts):
+    raw_artifacts = tuple(
+        _validate_artifact_shape(
+            value, "receipt authority.raw_evidence_artifact"
+        )
+        for value in raw
+    )
+    if len({str(value["artifact_id"]) for value in raw_artifacts}) != len(
+        raw_artifacts
+    ):
         raise ManifestError("receipt authority.raw_evidence_artifacts is invalid")
-    categories = _validate_categories(list(contract.required_categories), "receipt authority.required_categories")
-    pagination = _validate_pagination_shape(contract.pagination, "receipt authority.pagination")
-    return manifest, raw_artifacts, categories, pagination
+    categories = _validate_categories(
+        contract["required_categories"], "receipt authority.required_categories"
+    )
+    pagination = _validate_pagination_shape(
+        contract["pagination"], "receipt authority.pagination"
+    )
+    return (
+        (adapter_name, adapter_version, str(contract["code_sha256"])),
+        manifest,
+        raw_artifacts,
+        categories,
+        pagination,
+    )
 
 
-def _validate_complete_receipt(
-    receipt: Mapping[str, object], receipt_id: str, account_id: str,
-    requested_start: str, requested_end: str, coverage_as_of_date: str,
-    authority_contracts: Mapping[tuple[str, str, str], ReceiptAuthorityContract],
+def _validate_receipt_against_contract(
+    receipt: Mapping[str, object],
+    receipt_id: str,
+    account_id: str,
+    requested_start: str,
+    requested_end: str,
+    coverage_as_of_date: str,
+    contract: Mapping[str, object],
 ) -> None:
-    required = {"schema_version", "artifact_id", "issuer", "provider", "provider_generation", "provider_generation_manifest", "raw_evidence_artifacts", "account_id", "source_account_identity_sha256", "requested_start", "requested_end", "covered_start", "covered_end", "required_categories", "completed_categories", "unavailable_categories", "pagination", "completeness", "truncated"}
-    if set(receipt) != required or receipt.get("schema_version") != 2 or receipt.get("artifact_id") != receipt_id:
+    """Pure predicate check; its result is not an authority capability."""
+    required = {
+        "schema_version",
+        "artifact_id",
+        "issuer",
+        "provider",
+        "provider_generation",
+        "provider_generation_manifest",
+        "raw_evidence_artifacts",
+        "account_id",
+        "source_account_identity_sha256",
+        "requested_start",
+        "requested_end",
+        "covered_start",
+        "covered_end",
+        "required_categories",
+        "completed_categories",
+        "unavailable_categories",
+        "pagination",
+        "completeness",
+        "truncated",
+    }
+    if (
+        set(receipt) != required
+        or receipt.get("schema_version") != 2
+        or receipt.get("artifact_id") != receipt_id
+    ):
         raise ManifestError("retrieval receipt identity is invalid")
     issuer = receipt.get("issuer")
-    if not isinstance(issuer, Mapping) or set(issuer) != {"adapter_name", "adapter_version", "code_sha256"}:
+    if not isinstance(issuer, Mapping) or set(issuer) != {
+        "adapter_name",
+        "adapter_version",
+        "code_sha256",
+    }:
         raise ManifestError("retrieval receipt issuer is invalid")
-    issuer_name = _require_nonempty_text(issuer.get("adapter_name"), "retrieval receipt issuer.adapter_name")
-    issuer_version = _require_nonempty_text(issuer.get("adapter_version"), "retrieval receipt issuer.adapter_version")
+    issuer_name = _require_nonempty_text(
+        issuer.get("adapter_name"), "retrieval receipt issuer.adapter_name"
+    )
+    issuer_version = _require_nonempty_text(
+        issuer.get("adapter_version"), "retrieval receipt issuer.adapter_version"
+    )
     issuer_code = issuer.get("code_sha256")
     if not isinstance(issuer_code, str) or _SHA256.fullmatch(issuer_code) is None:
         raise ManifestError("retrieval receipt issuer is invalid")
-    issuer_key = (issuer_name, issuer_version, issuer_code)
-    contract = authority_contracts.get(issuer_key)
-    if contract is None:
+    (
+        contract_issuer,
+        manifest,
+        raw_artifacts,
+        contract_categories,
+        contract_pagination,
+    ) = _validate_receipt_contract(contract)
+    if (issuer_name, issuer_version, issuer_code) != contract_issuer:
         raise ManifestError("retrieval receipt issuer is not admissible")
-    manifest, raw_artifacts, contract_categories, contract_pagination = _validate_receipt_contract(contract)
-    if issuer_key != (contract.adapter_name, contract.adapter_version, contract.code_sha256):
-        raise ManifestError("retrieval receipt issuer is not admissible")
-    provider = _require_nonempty_text(receipt.get("provider"), "retrieval receipt.provider")
-    receipt_account = _require_nonempty_text(receipt.get("account_id"), "retrieval receipt.account_id")
+    provider = _require_nonempty_text(
+        receipt.get("provider"), "retrieval receipt.provider"
+    )
+    receipt_account = _require_nonempty_text(
+        receipt.get("account_id"), "retrieval receipt.account_id"
+    )
     source_identity = receipt.get("source_account_identity_sha256")
     generation = receipt.get("provider_generation")
-    if not isinstance(source_identity, str) or _SHA256.fullmatch(source_identity) is None or not isinstance(generation, str) or _SHA256.fullmatch(generation) is None:
+    if (
+        not isinstance(source_identity, str)
+        or _SHA256.fullmatch(source_identity) is None
+        or not isinstance(generation, str)
+        or _SHA256.fullmatch(generation) is None
+    ):
         raise ManifestError("retrieval receipt source binding differs")
-    if provider != contract.provider or receipt_account != contract.account_id or account_id != contract.account_id or source_identity != contract.source_account_identity_sha256:
+    if (
+        provider != contract["provider"]
+        or receipt_account != contract["account_id"]
+        or account_id != contract["account_id"]
+        or source_identity != contract["source_account_identity_sha256"]
+    ):
         raise ManifestError("retrieval receipt source binding differs")
-    receipt_manifest = _validate_artifact_shape(receipt.get("provider_generation_manifest"), "retrieval receipt.provider_generation_manifest")
+    receipt_manifest = _validate_artifact_shape(
+        receipt.get("provider_generation_manifest"),
+        "retrieval receipt.provider_generation_manifest",
+    )
     raw = receipt.get("raw_evidence_artifacts")
     if not isinstance(raw, list) or not raw:
         raise ManifestError("retrieval receipt.raw_evidence_artifacts is invalid")
-    receipt_raw = tuple(_validate_artifact_shape(value, "retrieval receipt.raw_evidence_artifact") for value in raw)
+    receipt_raw = tuple(
+        _validate_artifact_shape(value, "retrieval receipt.raw_evidence_artifact")
+        for value in raw
+    )
     if len({str(value["artifact_id"]) for value in receipt_raw}) != len(receipt_raw):
         raise ManifestError("retrieval receipt.raw_evidence_artifacts is invalid")
-    if generation != contract.provider_generation or receipt_manifest != manifest or receipt_raw != raw_artifacts:
+    if (
+        generation != contract["provider_generation"]
+        or receipt_manifest != manifest
+        or receipt_raw != raw_artifacts
+    ):
         raise ManifestError("retrieval receipt provider evidence differs")
-    if receipt_account != account_id:
-        raise ManifestError("retrieval receipt account binding differs")
     for field in ("requested_start", "requested_end", "covered_start", "covered_end"):
         if _iso_date(receipt.get(field), f"retrieval receipt.{field}") > coverage_as_of_date:
             raise ManifestError("retrieval receipt interval exceeds coverage as_of_date")
-    if receipt.get("requested_start") != requested_start or receipt.get("requested_end") != requested_end or receipt.get("covered_start") != requested_start or receipt.get("covered_end") != requested_end:
+    if (
+        receipt.get("requested_start") != requested_start
+        or receipt.get("requested_end") != requested_end
+        or receipt.get("covered_start") != requested_start
+        or receipt.get("covered_end") != requested_end
+    ):
         raise ManifestError("retrieval receipt interval boundary differs")
-    required_categories = receipt.get("required_categories")
-    if _validate_categories(required_categories, "retrieval receipt.required_categories") != contract_categories or receipt.get("completed_categories") != list(contract_categories) or receipt.get("unavailable_categories") != []:
+    if (
+        _validate_categories(
+            receipt.get("required_categories"),
+            "retrieval receipt.required_categories",
+        )
+        != contract_categories
+        or receipt.get("completed_categories") != list(contract_categories)
+        or receipt.get("unavailable_categories") != []
+    ):
         raise ManifestError("retrieval receipt categories are incomplete")
-    pagination = receipt.get("pagination")
-    if _validate_pagination_shape(pagination, "retrieval receipt.pagination") != contract_pagination or receipt.get("truncated") is not False or receipt.get("completeness") != "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES":
+    if (
+        _validate_pagination_shape(
+            receipt.get("pagination"), "retrieval receipt.pagination"
+        )
+        != contract_pagination
+        or receipt.get("truncated") is not False
+        or receipt.get("completeness")
+        != "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES"
+    ):
         raise ManifestError("retrieval receipt pagination is not terminal")
+
+
+load_flow_coverage = _make_coverage_loader(_validate_receipt_against_contract)
+del _make_coverage_loader
 
 
 def load_flow_classes(
@@ -1738,7 +1866,7 @@ def validate_assignment_topology(
     assignments: list[dict[str, Any]],
     admissions: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
     full_chains: Mapping[str, list[dict[str, Any]]],
-    flow_coverage: CoverageIndex | None = None,
+    flow_coverage: Any | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Validate epoch chronology before assigning capital to any epoch."""
     chains: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -2233,7 +2361,7 @@ def _assemble_manifest_impl(
     chains: Mapping[str, list[dict[str, Any]]],
     admissions: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
     source_identities: Mapping[str, object],
-    flow_coverage: CoverageIndex,
+    flow_coverage: Any,
     unavailable_navs: Mapping[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
@@ -2407,42 +2535,6 @@ def _assemble_manifest_impl(
         },
         "rows": rows,
     }
-
-
-def assemble_manifest(
-    series: dict[str, dict[str, Decimal]],
-    accounts_index: dict[str, dict[str, Any]],
-    buckets: dict[str, dict[str, dict[str, Decimal]]],
-    chains: Mapping[str, list[dict[str, Any]]],
-    admissions: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
-    source_identities: Mapping[str, object],
-    flow_coverage: CoverageIndex,
-    unavailable_navs: Mapping[str, set[str]] | None = None,
-) -> dict[str, Any]:
-    """Assemble only from coverage constructed by validated loading."""
-    if type(flow_coverage) is not CoverageIndex:
-        raise ManifestError("flow coverage must be a validated CoverageIndex")
-    return _assemble_manifest_impl(
-        series, accounts_index, buckets, chains, admissions, source_identities,
-        flow_coverage, unavailable_navs,
-    )
-
-
-def _assemble_manifest_for_testing(
-    series: dict[str, dict[str, Decimal]],
-    accounts_index: dict[str, dict[str, Any]],
-    buckets: dict[str, dict[str, dict[str, Decimal]]],
-    chains: Mapping[str, list[dict[str, Any]]],
-    admissions: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
-    source_identities: Mapping[str, object],
-    flow_coverage: object,
-    unavailable_navs: Mapping[str, set[str]] | None = None,
-) -> dict[str, Any]:
-    """Private arithmetic-test entry; never used by the byte-only producer."""
-    return _assemble_manifest_impl(
-        series, accounts_index, buckets, chains, admissions, source_identities,
-        flow_coverage, unavailable_navs,  # type: ignore[arg-type]
-    )
 
 
 MONEY_FIELDS = (
@@ -3091,9 +3183,8 @@ class ManifestCandidateSnapshots:
 
 def _build_manifest_candidate_from_snapshots_impl(
     inputs: ManifestCandidateSnapshots,
-    receipt_authority_contracts: Mapping[
-        tuple[str, str, str], ReceiptAuthorityContract
-    ],
+    coverage_loader: Any,
+    assembler: Any,
 ) -> dict[str, Any]:
     """Build a candidate from immutable bytes without reopening a path."""
     ledger_snapshot = inputs.ledger
@@ -3157,13 +3248,12 @@ def _build_manifest_candidate_from_snapshots_impl(
         ledger_identity,
         classification_policy_identity,
     )
-    flow_coverage, flow_coverage_artifact = _load_flow_coverage_for_testing(
+    flow_coverage, flow_coverage_artifact = coverage_loader(
         flow_coverage_snapshot,
         ledger_identity,
         classified_artifact,
         inputs.retrieval_receipts,
         mapped_assignments,
-        receipt_authority_contracts,
     )
     admissions, admission_policy_identity = load_admission_policy(
         admission_policy_snapshot.json_object("admission policy"),
@@ -3182,7 +3272,7 @@ def _build_manifest_candidate_from_snapshots_impl(
     validate_evidence_coverage(
         ledger, reconciled_events, perimeter.full_chains, accounts_index
     )
-    manifest = assemble_manifest(
+    manifest = assembler(
         series,
         accounts_index,
         buckets,
@@ -3225,28 +3315,7 @@ def _build_manifest_candidate_from_snapshots_impl(
     return json_ready(manifest)  # type: ignore[return-value]
 
 
-def build_manifest_candidate_from_snapshots(
-    inputs: ManifestCandidateSnapshots,
-) -> dict[str, Any]:
-    """Build from public snapshots with the immutable production authority set."""
-    return _build_manifest_candidate_from_snapshots_impl(
-        inputs, _RETAINED_RECEIPT_AUTHORITY_CONTRACTS
-    )
-
-
-def _build_manifest_candidate_from_snapshots_for_testing(
-    inputs: ManifestCandidateSnapshots,
-    receipt_authority_contracts: Mapping[
-        tuple[str, str, str], ReceiptAuthorityContract
-    ],
-) -> dict[str, Any]:
-    """Private synthetic seam; public snapshots cannot self-authorize receipts."""
-    return _build_manifest_candidate_from_snapshots_impl(
-        inputs, receipt_authority_contracts
-    )
-
-
-def _build_manifest_candidate_for_testing(
+def _capture_manifest_candidate_inputs(
     *,
     ledger_path: Path,
     ledger_identity_path: Path,
@@ -3257,9 +3326,6 @@ def _build_manifest_candidate_for_testing(
     admission_policy_path: Path,
     flow_coverage_path: Path,
     retrieval_receipt_paths: Mapping[str, Path] | None = None,
-    _receipt_authority_contracts: Mapping[
-        tuple[str, str, str], ReceiptAuthorityContract
-    ] | None = None,
 ) -> dict[str, Any]:
     """Capture every selected path once, then delegate to the byte-only producer."""
     selected_baseline_generation_id = _generation_id(
@@ -3277,7 +3343,7 @@ def _build_manifest_candidate_for_testing(
     except (OSError, ValueError) as exc:
         raise ManifestError("baseline artifact escapes baseline root") from exc
     try:
-        return _build_manifest_candidate_from_snapshots_for_testing(
+        return build_manifest_candidate_from_snapshots(
             ManifestCandidateSnapshots(
                 ledger=InputSnapshot.capture(ledger_path, "ledger"),
                 ledger_identity=InputSnapshot.capture(
@@ -3308,11 +3374,6 @@ def _build_manifest_candidate_for_testing(
                 ),
                 baseline_generation_id=selected_baseline_generation_id,
             ),
-            (
-                _RETAINED_RECEIPT_AUTHORITY_CONTRACTS
-                if _receipt_authority_contracts is None
-                else _receipt_authority_contracts
-            ),
         )
     except OSError as exc:
         safe_label = str(exc)
@@ -3340,7 +3401,7 @@ def build_manifest_candidate(
     retrieval_receipt_paths: Mapping[str, Path] | None = None,
 ) -> dict[str, Any]:
     """Capture public inputs using only immutable retained receipt authority."""
-    return _build_manifest_candidate_for_testing(
+    return _capture_manifest_candidate_inputs(
         ledger_path=ledger_path,
         ledger_identity_path=ledger_identity_path,
         baseline_root=baseline_root,
@@ -3350,16 +3411,10 @@ def build_manifest_candidate(
         admission_policy_path=admission_policy_path,
         flow_coverage_path=flow_coverage_path,
         retrieval_receipt_paths=retrieval_receipt_paths,
-        _receipt_authority_contracts=_RETAINED_RECEIPT_AUTHORITY_CONTRACTS,
     )
 
 
-def _main_with_receipt_authority_for_testing(
-    argv: list[str] | None = None,
-    receipt_authority_contracts: Mapping[
-        tuple[str, str, str], ReceiptAuthorityContract
-    ] = _RETAINED_RECEIPT_AUTHORITY_CONTRACTS,
-) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ledger-json", type=Path, required=True)
     parser.add_argument(
@@ -3418,7 +3473,7 @@ def _main_with_receipt_authority_for_testing(
         if not separator or not artifact_id or not raw_path or artifact_id in receipt_paths:
             raise ManifestError("--retrieval-receipt-json must be unique ARTIFACT_ID=PATH")
         receipt_paths[artifact_id] = Path(raw_path)
-    manifest = _build_manifest_candidate_for_testing(
+    manifest = build_manifest_candidate(
         ledger_path=args.ledger_json,
         ledger_identity_path=args.ledger_identity_json,
         baseline_root=args.baseline_root,
@@ -3428,7 +3483,6 @@ def _main_with_receipt_authority_for_testing(
         admission_policy_path=args.admission_policy_json,
         flow_coverage_path=args.flow_coverage_json,
         retrieval_receipt_paths=receipt_paths,
-        _receipt_authority_contracts=receipt_authority_contracts,
     )
     if args.format == "json":
         print(json.dumps(manifest, indent=2))
@@ -3437,11 +3491,24 @@ def _main_with_receipt_authority_for_testing(
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the public CLI with the immutable production authority set only."""
-    return _main_with_receipt_authority_for_testing(
-        argv, _RETAINED_RECEIPT_AUTHORITY_CONTRACTS
-    )
+def _make_snapshot_builder() -> Any:
+    """Close validated coverage loading and numeric assembly over one builder."""
+    coverage_loader = load_flow_coverage
+    assembler = _assemble_manifest_impl
+    raw_builder = _build_manifest_candidate_from_snapshots_impl
+
+    def build_manifest_candidate_from_snapshots(
+        inputs: ManifestCandidateSnapshots,
+    ) -> dict[str, Any]:
+        return raw_builder(inputs, coverage_loader, assembler)
+
+    return build_manifest_candidate_from_snapshots
+
+
+build_manifest_candidate_from_snapshots = _make_snapshot_builder()
+del _make_snapshot_builder
+globals().pop("_build_manifest_candidate_from_snapshots_impl")
+globals().pop("_assemble_manifest_impl")
 
 
 if __name__ == "__main__":
