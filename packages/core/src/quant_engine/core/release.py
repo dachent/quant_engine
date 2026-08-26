@@ -694,11 +694,15 @@ class ReleaseManifest:
             raise ReleaseValidationError("code_commit must be 40 lower-case hex")
         if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
             raise ReleaseValidationError("created_at must be timezone-aware")
-        if self.release_schema_version not in {
+        if (
+            isinstance(self.release_schema_version, bool)
+            or not isinstance(self.release_schema_version, int)
+            or self.release_schema_version not in {
             _LEGACY_SCHEMA_VERSION,
             _COORDINATED_SCHEMA_VERSION,
             _SCHEMA_VERSION,
-        }:
+            }
+        ):
             raise ReleaseValidationError("release schema version is unsupported")
         if (
             self.release_schema_version == _LEGACY_SCHEMA_VERSION

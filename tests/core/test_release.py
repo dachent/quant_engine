@@ -27,6 +27,7 @@ from quant_engine.core import (
     ReleaseManifest,
     ReleasePublicationUnavailableError,
     ReleaseState,
+    ReleaseTarget,
     ReleaseValidationError,
     SourceArtifact,
     VerificationStatus,
@@ -308,6 +309,37 @@ def test_release_manifest_schema_has_disjoint_legacy_and_current_versions(
     with pytest.raises(ReleaseValidationError, match="release_target keys differ"):
         ReleaseManifest.from_json_bytes(
             canonical_json_bytes(legacy_with_v2_target_field)
+        )
+
+
+def test_release_manifest_constructor_rejects_boolean_schema_version() -> None:
+    target = ReleaseTarget(
+        root_id="root",
+        root_identity="a" * 64,
+        proposed_generation_id="b" * 64,
+        proposed_manifest_sha256="c" * 64,
+        proposed_inventory_sha256="d" * 64,
+        previous_pointer=None,
+    )
+    created_at = datetime(2026, 8, 2, 10, tzinfo=UTC)
+    identity = {
+        "code_commit": COMMIT,
+        "companions": [],
+        "created_at": created_at.isoformat(),
+        "gates": [GateEvidence("bounded-tests", "e" * 64).to_dict()],
+        "release_schema_version": True,
+        "targets": [target.to_dict(release_schema_version=True)],
+    }
+
+    with pytest.raises(ReleaseValidationError, match="schema version is unsupported"):
+        ReleaseManifest(
+            release_id=hashlib.sha256(canonical_json_bytes(identity)).hexdigest(),
+            code_commit=COMMIT,
+            created_at=created_at,
+            targets=(target,),
+            gates=(GateEvidence("bounded-tests", "e" * 64),),
+            companions=(),
+            release_schema_version=True,
         )
 
 
