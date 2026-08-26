@@ -7,9 +7,9 @@
   "properties": {
     "schema_version": {"const": 2}, "artifact_id": {"type": "string", "minLength": 1},
     "issuer": {"type": "object", "additionalProperties": false, "required": ["adapter_name", "adapter_version", "code_sha256"], "properties": {"adapter_name": {"type": "string", "minLength": 1}, "adapter_version": {"type": "string", "minLength": 1}, "code_sha256": {"$ref": "#/$defs/sha256"}}},
-    "provider": {"type": "string", "minLength": 1}, "provider_generation": {"$ref": "#/$defs/sha256"}, "provider_generation_manifest": {"$ref": "#/$defs/artifact"}, "raw_evidence_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}},
+    "provider": {"type": "string", "minLength": 1}, "provider_generation": {"$ref": "#/$defs/sha256"}, "provider_generation_manifest": {"$ref": "#/$defs/artifact"}, "raw_evidence_artifacts": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/artifact"}},
     "account_id": {"type": "string", "minLength": 1}, "source_account_identity_sha256": {"$ref": "#/$defs/sha256"}, "requested_start": {"$ref": "#/$defs/date"}, "requested_end": {"$ref": "#/$defs/date"}, "covered_start": {"$ref": "#/$defs/date"}, "covered_end": {"$ref": "#/$defs/date"},
-    "required_categories": {"$ref": "#/$defs/categories"}, "completed_categories": {"$ref": "#/$defs/categories"}, "unavailable_categories": {"$ref": "#/$defs/optional_categories"},
+    "required_categories": {"$ref": "#/$defs/categories"}, "completed_categories": {"$ref": "#/$defs/categories"}, "unavailable_categories": {"type": "array", "maxItems": 0},
     "pagination": {"type": "object", "additionalProperties": false, "required": ["mode", "page_count", "request_response_chain_sha256", "terminal_response_sha256", "terminal"], "properties": {"mode": {"type": "string", "minLength": 1}, "page_count": {"type": "integer", "minimum": 1}, "request_response_chain_sha256": {"$ref": "#/$defs/sha256"}, "terminal_response_sha256": {"$ref": "#/$defs/sha256"}, "terminal": {"const": true}}},
     "completeness": {"const": "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES"}, "truncated": {"const": false}
   },

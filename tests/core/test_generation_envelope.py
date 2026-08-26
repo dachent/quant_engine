@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import quant_engine.core.publication as publication
+from quant_engine.core.strict_json import StrictJSONError
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -103,14 +104,22 @@ def test_generation_identity_and_bytes_are_deterministic() -> None:
     "contents",
     [
         b'{"generation_id":"x","generation_id":"y"}',
+        b'{"nested":{"x":1,"x":2}}',
         b'{"value":NaN}',
+        b'{"value":Infinity}',
+        b'{"value":-Infinity}',
+        b'{"value":1e999999}',
+        b'{"value":1} trailing',
+        b'[]',
         b'\xff',
     ],
 )
 def test_generation_manifest_uses_the_strict_json_boundary(contents: bytes) -> None:
     """Replacing strict parsing would silently rewrite a manifest authority."""
-    with pytest.raises(ManifestValidationError, match="manifest"):
+    with pytest.raises(ManifestValidationError, match="manifest") as excinfo:
         GenerationManifest.from_json_bytes(contents)
+
+    assert isinstance(excinfo.value.__cause__, StrictJSONError)
 
 
 def test_source_artifact_hashes_content_without_recording_a_path(

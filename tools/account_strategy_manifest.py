@@ -535,10 +535,21 @@ _VALIDATED_COVERAGE_INDEX = object()
 class CoverageIndex:
     """Closed account-and-inclusive-interval flow-completeness authority."""
 
-    def __init__(self, rows: list[dict[str, object]], *, _capability: object | None = None) -> None:
+    __slots__ = ("_rows",)
+
+    def __init__(
+        self, rows: list[dict[str, object]], *, _capability: object | None = None
+    ) -> None:
         if _capability is not _VALIDATED_COVERAGE_INDEX:
-            raise ManifestError("CoverageIndex must be created by validated coverage loading")
-        self._rows = tuple(rows)
+            raise ManifestError(
+                "CoverageIndex must be created by validated coverage loading"
+            )
+        object.__setattr__(
+            self, "_rows", tuple(MappingProxyType(dict(row)) for row in rows)
+        )
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("CoverageIndex is immutable")
 
     @classmethod
     def _from_validated_rows(cls, rows: list[dict[str, object]]) -> "CoverageIndex":
@@ -576,7 +587,12 @@ def _load_flow_coverage_for_testing(
     """Strict-decode and load one hash-bound coverage artifact."""
     if type(coverage_snapshot) is not InputSnapshot:
         raise ManifestError("flow coverage must be an InputSnapshot")
-    if any(type(value) is not InputSnapshot for value in receipt_snapshots.values()):
+    if not isinstance(receipt_snapshots, Mapping):
+        raise ManifestError("retrieval receipts must be a mapping")
+    if any(
+        not isinstance(key, str) or not key.strip() or type(value) is not InputSnapshot
+        for key, value in receipt_snapshots.items()
+    ):
         raise ManifestError("retrieval receipts must be InputSnapshots")
     return _load_flow_coverage_payload(
         coverage_snapshot.json_object("flow coverage"), coverage_snapshot,
@@ -3061,7 +3077,12 @@ class ManifestCandidateSnapshots:
         ):
             if type(getattr(self, field_name)) is not InputSnapshot:
                 raise ManifestError(f"{field_name} must be an InputSnapshot")
-        if any(type(value) is not InputSnapshot for value in self.retrieval_receipts.values()):
+        if not isinstance(self.retrieval_receipts, Mapping):
+            raise ManifestError("retrieval receipts must be a mapping")
+        if any(
+            not isinstance(key, str) or not key.strip() or type(value) is not InputSnapshot
+            for key, value in self.retrieval_receipts.items()
+        ):
             raise ManifestError("retrieval receipts must be InputSnapshots")
         object.__setattr__(
             self, "retrieval_receipts", MappingProxyType(dict(self.retrieval_receipts))

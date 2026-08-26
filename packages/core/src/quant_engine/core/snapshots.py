@@ -33,8 +33,8 @@ class InputSnapshot:
         """Capture a path exactly once; subsequent consumers use only bytes."""
         try:
             contents = path.read_bytes()
-        except OSError as exc:
-            raise ValueError(f"cannot capture {label}") from exc
+        except OSError:
+            raise ValueError(f"cannot capture {label}") from None
         return cls(label=label, contents=contents, path=path)
 
     @classmethod

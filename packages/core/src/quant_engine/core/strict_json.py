@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 
@@ -33,11 +34,21 @@ def strict_json_loads(value: bytes, *, label: str) -> object:
     def reject_nonfinite(constant: str) -> object:
         raise _error(label, f"contains nonfinite JSON constant {constant}")
 
+    def reject_overflow_float(number: str) -> float:
+        try:
+            parsed = float(number)
+        except OverflowError:
+            raise _error(label, "contains nonfinite JSON number") from None
+        if not math.isfinite(parsed):
+            raise _error(label, "contains nonfinite JSON number")
+        return parsed
+
     try:
         return json.loads(
             decoded,
             object_pairs_hook=reject_duplicates,
             parse_constant=reject_nonfinite,
+            parse_float=reject_overflow_float,
         )
     except StrictJSONError:
         raise
