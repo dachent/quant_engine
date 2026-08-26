@@ -95,6 +95,13 @@ _FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION = 1
 _CENT = Decimal("0.01")
 _ADMISSION_STATUSES = frozenset({"FUNDED", "BLOCKED"})
 _FLOW_DISPOSITIONS = frozenset({"EXTERNAL", "INTERNAL"})
+_ASSIGNMENT_DISPOSITIONS = frozenset(
+    {
+        "STRATEGY_MAPPED",
+        "HISTORICAL_POOL_ONLY",
+        "RESERVE_NOT_APPLICABLE",
+    }
+)
 
 
 def _require_nonempty_text(value: object, field: str) -> str:
@@ -983,6 +990,141 @@ def _assignment_key(assignment: Mapping[str, Any]) -> tuple[str, str, str, str |
     return account_id, strategy_id, effective_start, effective_end
 
 
+class AssignmentPerimeter:
+    """The complete baseline perimeter, split before strategy calculation."""
+
+    def __init__(
+        self,
+        *,
+        mapped_chains: dict[str, list[dict[str, Any]]],
+        non_strategy_chains: dict[str, list[dict[str, Any]]],
+        full_chains: dict[str, list[dict[str, Any]]],
+        full_perimeter_identity: dict[str, object],
+    ) -> None:
+        self.mapped_chains = mapped_chains
+        self.non_strategy_chains = non_strategy_chains
+        self.full_chains = full_chains
+        self.full_perimeter_identity = full_perimeter_identity
+
+
+def _assignment_interval_key(
+    assignment: Mapping[str, Any],
+) -> tuple[str, str, str | None]:
+    account_id = _require_nonempty_text(
+        assignment.get("account_id"), "assignment.account_id"
+    )
+    effective_start = _iso_date(
+        assignment.get("effective_start"), "assignment.effective_start"
+    )
+    effective_end_raw = assignment.get("effective_end")
+    effective_end = (
+        None
+        if effective_end_raw is None
+        else _iso_date(effective_end_raw, "assignment.effective_end")
+    )
+    if effective_end is not None and effective_end < effective_start:
+        raise ManifestError(f"assignment {account_id} has reversed effective dates")
+    return account_id, effective_start, effective_end
+
+
+def partition_assignments(assignments: list[dict[str, Any]]) -> AssignmentPerimeter:
+    """Validate the closed baseline dispositions before any strategy topology.
+
+    Mapped rows are the only rows permitted to reach admission and calculation.
+    The complete baseline remains available for evidence-coverage validation.
+    """
+    mapped_chains: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    non_strategy_chains: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    full_chains: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    identity_rows: list[dict[str, object]] = []
+
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            raise ManifestError("baseline assignment must be an object")
+        account_id, effective_start, effective_end = _assignment_interval_key(assignment)
+        disposition = _require_nonempty_text(
+            assignment.get("strategy_mapping_disposition"),
+            "assignment.strategy_mapping_disposition",
+        )
+        if disposition not in _ASSIGNMENT_DISPOSITIONS:
+            raise ManifestError("assignment.strategy_mapping_disposition is invalid")
+        strategy_id = assignment.get("strategy_id")
+        if disposition == "STRATEGY_MAPPED":
+            mapped_strategy_id = _require_nonempty_text(
+                strategy_id, "mapped assignment.strategy_id"
+            )
+            key: tuple[str, str | None, str, str | None] = (
+                account_id,
+                mapped_strategy_id,
+                effective_start,
+                effective_end,
+            )
+            target = mapped_chains
+        else:
+            if strategy_id is not None:
+                raise ManifestError("non-strategy assignment.strategy_id must be null")
+            key = (account_id, None, effective_start, effective_end)
+            target = non_strategy_chains
+        normalized_assignment = {**assignment, "_key": key}
+        target[account_id].append(normalized_assignment)
+        full_chains[account_id].append(normalized_assignment)
+        identity_rows.append(
+            {
+                "account_id": account_id,
+                "strategy_id": key[1],
+                "strategy_mapping_disposition": disposition,
+                "effective_start": effective_start,
+                "effective_end": effective_end,
+            }
+        )
+
+    for account_id, chain in full_chains.items():
+        chain.sort(key=lambda assignment: assignment["_key"][2])
+        for index, assignment in enumerate(chain):
+            _, _, start, end = assignment["_key"]
+            if end is None and index != len(chain) - 1:
+                if chain[index + 1]["_key"][2] <= start:
+                    raise ManifestError(f"assignments overlap for account {account_id}")
+                raise ManifestError(
+                    f"open-ended assignment is not last for account {account_id}"
+                )
+            if index == 0:
+                continue
+            previous_end = chain[index - 1]["_key"][3]
+            if previous_end is None:
+                if start <= chain[index - 1]["_key"][2]:
+                    raise ManifestError(f"assignments overlap for account {account_id}")
+                raise ManifestError(
+                    f"open-ended assignment is not last for account {account_id}"
+                )
+            if previous_end >= start:
+                raise ManifestError(f"assignments overlap for account {account_id}")
+            expected_start = (date.fromisoformat(previous_end) + timedelta(days=1)).isoformat()
+            if start != expected_start:
+                raise ManifestError(f"assignments have a gap for account {account_id}")
+
+    normalized_identity_rows = sorted(
+        identity_rows,
+        key=lambda row: (
+            str(row["account_id"]),
+            str(row["effective_start"]),
+            str(row["effective_end"]),
+            str(row["strategy_id"]),
+        ),
+    )
+    return AssignmentPerimeter(
+        mapped_chains={account_id: list(chain) for account_id, chain in mapped_chains.items()},
+        non_strategy_chains={
+            account_id: list(chain) for account_id, chain in non_strategy_chains.items()
+        },
+        full_chains={account_id: list(chain) for account_id, chain in full_chains.items()},
+        full_perimeter_identity={
+            "sha256": _canonical_digest(normalized_identity_rows),
+            "count": len(normalized_identity_rows),
+        },
+    )
+
+
 def _assignment_identity(assignments: list[dict[str, Any]]) -> tuple[str, int]:
     normalized = [
         {
@@ -1117,11 +1259,6 @@ def validate_assignment_topology(
                 )
             if previous_end >= start:
                 raise ManifestError(f"assignments overlap for account {account_id}")
-            expected_start = (
-                date.fromisoformat(previous_end) + timedelta(days=1)
-            ).isoformat()
-            if start != expected_start:
-                raise ManifestError(f"assignments have a gap for account {account_id}")
             if admission["continuity_to_successor"] and end is None:
                 raise ManifestError(
                     f"open-ended assignment cannot claim a successor for account {account_id}"
@@ -2378,12 +2515,18 @@ def build_manifest_candidate(
     if not all(isinstance(assignment, dict) for assignment in assignments):
         raise ManifestError("baseline assignments must contain only objects")
     typed_assignments = [dict(assignment) for assignment in assignments]
+    perimeter = partition_assignments(typed_assignments)
+    mapped_assignments = [
+        assignment
+        for chain in perimeter.mapped_chains.values()
+        for assignment in chain
+    ]
     admissions, admission_policy_identity = load_admission_policy(
         admission_policy_snapshot.json_object("admission policy"),
         admission_policy_snapshot,
-        typed_assignments,
+        mapped_assignments,
     )
-    chains = validate_assignment_topology(typed_assignments, admissions)
+    chains = validate_assignment_topology(mapped_assignments, admissions)
     classification_policy, classification_policy_identity = (
         load_flow_classification_policy(
             classification_policy_snapshot.json_object("flow classification policy"),
@@ -2411,7 +2554,9 @@ def build_manifest_candidate(
         if account_id in accounts_index:
             raise ManifestError(f"duplicate baseline account_id '{account_id}'")
         accounts_index[account_id] = account
-    validate_evidence_coverage(ledger, reconciled_events, chains, accounts_index)
+    validate_evidence_coverage(
+        ledger, reconciled_events, perimeter.full_chains, accounts_index
+    )
     manifest = assemble_manifest(
         series,
         accounts_index,

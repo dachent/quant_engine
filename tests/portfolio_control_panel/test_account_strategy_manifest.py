@@ -113,12 +113,14 @@ def _baseline_assignments(*, gap: bool = False) -> list[dict[str, Any]]:
         {
             "account_id": "synthetic-account",
             "strategy_id": "synthetic-strategy-a",
+            "strategy_mapping_disposition": "STRATEGY_MAPPED",
             "effective_start": "2026-01-01",
             "effective_end": "2026-01-03",
         },
         {
             "account_id": "synthetic-account",
             "strategy_id": "synthetic-strategy-b",
+            "strategy_mapping_disposition": "STRATEGY_MAPPED",
             "effective_start": second_start,
             "effective_end": None,
         },
@@ -134,7 +136,17 @@ def _admission_policy(
         "policy_version": "1",
         "artifact_id": "policy/synthetic-account-strategy-admission.json",
         "as_of_date": "2026-01-06",
-        "assignment_sha256": _sha256(assignments),
+        "assignment_sha256": _sha256(
+            [
+                {
+                    "account_id": assignment["account_id"],
+                    "strategy_id": assignment["strategy_id"],
+                    "effective_start": assignment["effective_start"],
+                    "effective_end": assignment["effective_end"],
+                }
+                for assignment in assignments
+            ]
+        ),
         "admissions": [
             {
                 "account_id": assignment["account_id"],
@@ -275,6 +287,204 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
         "classification_policy": classification_policy_path,
         "flows": flows_path,
     }
+
+
+def _real_shape_assignments() -> list[dict[str, Any]]:
+    return [
+        {
+            "account_id": "mapped-account",
+            "strategy_id": "mapped-strategy",
+            "strategy_mapping_disposition": "STRATEGY_MAPPED",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        },
+        {
+            "account_id": "historical-account",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        },
+        {
+            "account_id": "reserve-account",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        },
+    ]
+
+
+def test_partition_assignments_retains_full_real_shape_and_calculates_only_mapped(
+    manifest_module: Any,
+) -> None:
+    """Removing the disposition filter would expose non-strategy rows to math."""
+    assignments = _real_shape_assignments()
+
+    perimeter = manifest_module.partition_assignments(assignments)
+
+    assert list(perimeter.mapped_chains) == ["mapped-account"]
+    assert list(perimeter.non_strategy_chains) == [
+        "historical-account",
+        "reserve-account",
+    ]
+    assert perimeter.full_perimeter_identity == {
+        "sha256": _sha256(
+            [
+                assignments[1],
+                assignments[0],
+                assignments[2],
+            ]
+        ),
+        "count": 3,
+    }
+    assert [
+        assignment["strategy_id"]
+        for chain in perimeter.mapped_chains.values()
+        for assignment in chain
+    ] == ["mapped-strategy"]
+
+
+def test_cli_accepts_real_shape_null_strategies_without_calculating_them(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-strategy interval remains perimeter evidence, never an epoch row.
+
+    Formal-schema validation is separately covered; the local `rpds` extension
+    cannot load under the sandbox identity, so keep this producer-boundary test
+    focused on the partition, admission, evidence, and assembly path.
+    """
+    inputs = _write_valid_inputs(tmp_path)
+    assignments = _real_shape_assignments()
+    baseline_path = (
+        inputs["baseline_root"]
+        / "generations"
+        / BASELINE_GENERATION_ID
+        / "portfolio-baseline.json"
+    )
+    _write_json(
+        baseline_path,
+        {
+            "as_of_date": "2026-01-06",
+            "baseline_schema_version": 1,
+            "accounts": [
+                {"account_id": "mapped-account", "provider": "SYNTHETIC"},
+                {"account_id": "historical-account", "provider": "SYNTHETIC"},
+                {"account_id": "reserve-account", "provider": "SYNTHETIC"},
+            ],
+            "assignments": assignments,
+        },
+    )
+    _write_json(inputs["policy"], _admission_policy([assignments[0]], continuity=False))
+    ledger = json.loads(inputs["ledger"].read_text(encoding="utf-8"))
+    for observation in ledger["nav_observations"]:
+        observation["account_id"] = "mapped-account"
+    ledger["flows"][0]["account_id"] = "mapped-account"
+    _write_json(inputs["ledger"], ledger)
+    classified = json.loads(inputs["flows"].read_text(encoding="utf-8"))
+    classified["events"][0]["account_id"] = "mapped-account"
+    _write_json(inputs["flows"], classified)
+    _refresh_ledger_identity(inputs)
+    monkeypatch.setattr(manifest_module, "validate_manifest_schema", lambda _: None)
+
+    manifest = _manifest_from_cli(manifest_module, inputs, capsys)
+
+    assert [row["strategy_id"] for row in manifest["rows"]] == ["mapped-strategy"]
+
+
+@pytest.mark.parametrize(
+    ("assignment", "message"),
+    [
+        (
+            {
+                "account_id": "mapped-account",
+                "strategy_id": None,
+                "strategy_mapping_disposition": "STRATEGY_MAPPED",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+            },
+            "mapped assignment.strategy_id must be a non-empty string",
+        ),
+        (
+            {
+                "account_id": "historical-account",
+                "strategy_id": "should-not-calculate",
+                "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+            },
+            "non-strategy assignment.strategy_id must be null",
+        ),
+        (
+            {
+                "account_id": "unknown-account",
+                "strategy_id": None,
+                "strategy_mapping_disposition": "UNKNOWN",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+            },
+            "assignment.strategy_mapping_disposition is invalid",
+        ),
+    ],
+)
+def test_partition_assignments_rejects_invalid_disposition_contract(
+    manifest_module: Any, assignment: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(manifest_module.ManifestError, match=message):
+        manifest_module.partition_assignments([assignment])
+
+
+def test_partition_assignments_rejects_full_perimeter_overlap(
+    manifest_module: Any,
+) -> None:
+    assignments = _real_shape_assignments()
+    assignments.append(
+        {
+            "account_id": "mapped-account",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        }
+    )
+
+    with pytest.raises(manifest_module.ManifestError, match="assignments overlap"):
+        manifest_module.partition_assignments(assignments)
+
+
+@pytest.mark.parametrize("fact_kind", ["NAV", "classified flow"])
+def test_full_perimeter_coverage_rejects_fact_outside_every_assignment_interval(
+    manifest_module: Any, fact_kind: str
+) -> None:
+    perimeter = manifest_module.partition_assignments(_real_shape_assignments())
+    ledger = {
+        "nav_observations": [],
+        "flows": [],
+    }
+    events: list[dict[str, Any]] = []
+    if fact_kind == "NAV":
+        ledger["nav_observations"] = [
+            {"account_id": "mapped-account", "as_of_date": "2025-12-31"}
+        ]
+    else:
+        events = [
+            {"account_id": "mapped-account", "event_date": "2025-12-31"}
+        ]
+
+    with pytest.raises(manifest_module.ManifestError, match="exactly one baseline"):
+        manifest_module.validate_evidence_coverage(
+            ledger,
+            events,
+            perimeter.full_chains,
+            {
+                "mapped-account": {},
+                "historical-account": {},
+                "reserve-account": {},
+            },
+        )
 
 
 def _producer_argv(inputs: dict[str, Path]) -> list[str]:
