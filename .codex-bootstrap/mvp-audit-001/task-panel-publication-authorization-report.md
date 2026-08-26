@@ -1,39 +1,79 @@
-# MVP-AUDIT-001 panel publication authorization report
+# MVP-AUDIT-001 panel-publication authorization report
 
-Status: PARTIAL — receipt authority seam and release-builder handoff implemented;
-successful direct publication and launcher rollback cases now supply frozen
-independent receipts, but the complete required mutation/link and builder
-lifecycle matrix remains unfinished.
+Status: COMMITTED
 
-Root cause: a staged panel generation could previously advance `CURRENT.json`
-and the stable launcher without a release-builder-bound authorization artifact.
+Commit: `5f4a0b5 Enforce coordinated panel publication authorization`
 
-Contract: the builder writes a create-only canonical receipt at
-`stage-results/panel-publication-authorization.json`, binding exact resolved
-output, candidate, and frozen QA directory identities plus canonical
-recipe/pipeline/release-commit release ID. Panel publication reads it once after
-immutable staging and immediately before pointer/launcher inspection, rejects
-all malformed or mismatched identities, and returns its hash and release ID.
-This is an honest local-control guard, not a security boundary against a local
-principal able to write the receipt and output trees.
+## Root cause and remediation
 
-Files: `tools/portfolio_control_panel.py`, `tools/portfolio_release_builder.py`,
-`tests/portfolio_control_panel/test_portfolio_control_panel.py`,
-`tests/core/test_portfolio_release_builder.py`, and
-`docs/portfolio-control-panel.md`.
+The release builder had two incomplete lifecycle/compatibility behaviors:
 
-RED/GREEN: initial no-receipt test exposed a missing parameter binding; after
-correction, focused missing-receipt/CLI tests passed (2 passed), the focused
-release-builder handoff test passed (1 passed), and strict-decoder mutations
-cover duplicate keys, noncanonical bytes, boolean schema, and path whitespace.
-Ruff and mypy passed on the changed Python files.
+- It wrote semantic validation and created the authorization receipt without first
+  validating the supplied browser-QA evidence.
+- Its directory-inventory preimage omitted the canonical JSON trailing newline,
+  while the panel independently used canonical inventory bytes. A builder receipt
+  was therefore rejected at the panel authority seam even when all content was
+  unchanged.
 
-Uncertainty/blocker: the full required receipt mutation matrix (nested
-candidate/QA objects, every vocabulary/identity mutation, post-receipt
-candidate/QA mutation, links/reparse), the builder order/idempotence/argument
-byte matrix, and the complete bounded panel/release-builder selection remain
-to be implemented and run. Acceptance is not claimed.
+The builder now invokes the panel QA validator after semantic validation and
+before receipt creation. Both the builder and panel derive the identical
+deterministic inventory preimage (sorted relative-path, SHA-256, and byte-size
+rows serialized with canonical JSON bytes including the trailing newline).
 
-Next action: update every successful direct publish test with an independently
-computed frozen candidate/QA receipt, add mutation/link cases, then run bounded
-panel/release-builder regression gates and final checkpoint revalidation.
+The receipt remains an honest-operator guard against accidental out-of-band
+pointer advancement; it is not a signer or security boundary against a local
+principal able to alter both the receipt and output trees.
+
+## Receipt contract covered
+
+- Exact root keys, schema/version/type, operation/state/coordinator vocabulary,
+  non-empty release ID and release commit, and independently observed output,
+  candidate, and QA identities fail closed before `publish_generation`.
+- Candidate and QA tree mutations after receipt creation fail before pointer
+  movement.
+- Nested file/directory links are rejected where symlink creation is available;
+  this Windows environment skipped those two hermetic cases because it lacks the
+  symlink privilege (`WinError 1314`). A direct reparse-point classifier unit
+  test remains green and proves reparse metadata is treated as a link.
+- Browser QA and semantic validation are frozen before the receipt; the builder
+  does no QA-tree write after receipt creation.
+- The release-ID SHA-256 preimage is asserted exactly, and receipt creation is
+  same-byte idempotent but rejects a different candidate-derived byte sequence.
+- A real builder-wrapper-to-panel publication path verifies canonical raw receipt
+  bytes and binds wrapper receipt SHA-256/release ID to the panel result.
+
+## TDD and verification evidence
+
+- RED: `python -m pytest tests/core/test_portfolio_release_builder.py::test_panel_publication_validates_browser_qa_before_authorizing_receipt -q`
+  failed as expected: actual tool calls were `verify, publish`, missing `qa`.
+- GREEN for that lifecycle test: `1 passed in 2.87s` after the minimal QA call.
+- Builder selection: `5 passed in 13.46s`.
+- Final rollback/post-receipt mutation selection (captured by integration owner):
+  `3 passed in 117.83s`.
+- Final authorization mutation/link matrix (captured by integration owner):
+  `22 passed, 2 skipped in 524.18s`.
+- Real wrapper-to-panel positive seam: `1 passed in 64.91s` after cross-layer
+  canonical-inventory alignment.
+- Ruff: `All checks passed!`
+- Mypy: `Success: no issues found in 2 source files`
+- `git diff --check` exited 0.
+
+All panel tests requiring the `rpds` dependency needed the approved elevated
+Windows execution path: non-elevated collection failed with `DLL load failed:
+Access is denied`. No test or validation was weakened to work around that
+environmental constraint.
+
+## Scoped files
+
+- `tools/portfolio_release_builder.py`
+- `tools/portfolio_control_panel.py`
+- `tests/core/test_portfolio_release_builder.py`
+- `tests/portfolio_control_panel/test_portfolio_control_panel.py`
+
+## Self-review and next action
+
+The change is limited to the authorization matrix, canonical cross-layer
+inventory compatibility, and required lifecycle proof. No provider, browser,
+Excel, GitHub, pointer, or publication target was touched outside temporary test
+directories. Next action: hand committed SHA `5f4a0b5` to the integration owner
+for final branch-wide verification.
