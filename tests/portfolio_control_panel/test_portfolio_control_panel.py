@@ -5965,6 +5965,7 @@ def test_account_manifest_snapshot_bytes_are_read_once(
         baseline_root=None,
         baseline_generation_id=None,
         classified_flows_path=None,
+        flow_coverage_path=None,
         classification_policy_path=None,
         admission_policy_path=None,
     )
