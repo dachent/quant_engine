@@ -1857,8 +1857,8 @@ def assemble_manifest(
     chains: Mapping[str, list[dict[str, Any]]],
     admissions: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
     source_identities: Mapping[str, object],
+    flow_coverage: CoverageIndex,
     unavailable_navs: Mapping[str, set[str]] | None = None,
-    flow_coverage: CoverageIndex | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     unavailable_navs = unavailable_navs or {}
@@ -1916,12 +1916,8 @@ def assemble_manifest(
                 if d >= w0 and (w1 is None or d <= w1)
             }
             final_nav_date = max(window, default=None)
-            if (
-                flow_coverage is not None
-                and final_nav_date is not None
-                and not flow_coverage.is_complete(
+            if final_nav_date is not None and not flow_coverage.is_complete(
                 aid, w0, final_nav_date
-                )
             ):
                 rows.append(
                     {
@@ -2873,8 +2869,8 @@ def build_manifest_candidate(
                 "size_bytes": len(calculation_code_snapshot.contents),
             },
         },
-        unavailable_navs,
         flow_coverage,
+        unavailable_navs,
     )
     manifest["accounting_currency"] = ledger["accounting_currency"]
     validate_manifest_schema(manifest, full_chains=perimeter.full_chains)

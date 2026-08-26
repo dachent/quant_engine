@@ -131,6 +131,21 @@ def _load_flow_coverage(
     )
 
 
+def _test_complete_coverage(manifest_module: Any, *account_ids: str) -> Any:
+    """Test-only complete receipts for direct arithmetic unit tests."""
+    return manifest_module.CoverageIndex(
+        [
+            {
+                "account_id": account_id,
+                "effective_start": "0001-01-01",
+                "effective_end": "9999-12-31",
+                "status": "COMPLETE",
+            }
+            for account_id in account_ids
+        ]
+    )
+
+
 def test_flow_coverage_does_not_extend_one_day_receipt_to_neighboring_dates(
     manifest_module: Any, tmp_path: Path
 ) -> None:
@@ -947,6 +962,7 @@ def test_final_semantic_validator_accepts_mapped_gap_only_with_full_coverage(
         chains,
         admissions,
         source_identities,
+        _test_complete_coverage(manifest_module, "bridge-account"),
     )
 
     manifest_module._validate_manifest_semantics(
@@ -1014,6 +1030,7 @@ def test_final_semantic_validator_rejects_continuity_across_non_strategy_gap(
         perimeter.mapped_chains,
         admissions,
         source_identities,
+        _test_complete_coverage(manifest_module, "bridge-account"),
     )
 
     successor = manifest["rows"][1]
@@ -1701,6 +1718,7 @@ def test_producer_late_flows_with_same_day_external_legs_are_canonical_and_valid
             }
         },
         {},
+        _test_complete_coverage(manifest_module, "synthetic-account"),
     )
     produced_row = produced["rows"][0]
     assert produced_row["late_flows"] == [
@@ -2488,6 +2506,7 @@ def _continuity_case(manifest_module: Any, case: str) -> list[dict[str, Any]]:
         chains,
         admissions,
         {},
+        _test_complete_coverage(manifest_module, "synthetic-account"),
     )
     return manifest["rows"]
 
