@@ -7,4 +7,6 @@
 *.toml text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+/.gitleaksignore text eol=lf
+/.github/gitleaks-suppressions.json text eol=lf
 /.githooks/* text eol=lf
