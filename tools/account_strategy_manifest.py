@@ -2617,8 +2617,21 @@ def build_manifest_candidate(
     assignments = baseline["assignments"]
     if not all(isinstance(assignment, dict) for assignment in assignments):
         raise ManifestError("baseline assignments must contain only objects")
+    accounts_index: dict[str, dict[str, Any]] = {}
+    for index, account in enumerate(baseline["accounts"]):
+        if not isinstance(account, dict):
+            raise ManifestError(f"baseline account {index} must be an object")
+        account_id = _require_nonempty_text(
+            account.get("account_id"), f"baseline account {index}.account_id"
+        )
+        if account_id in accounts_index:
+            raise ManifestError(f"duplicate baseline account_id '{account_id}'")
+        accounts_index[account_id] = account
     typed_assignments = [dict(assignment) for assignment in assignments]
     perimeter = partition_assignments(typed_assignments)
+    for account_id in perimeter.full_chains:
+        if account_id not in accounts_index:
+            raise ManifestError(f"baseline assignment account is unknown: {account_id}")
     mapped_assignments = [
         assignment
         for chain in perimeter.mapped_chains.values()
@@ -2649,16 +2662,6 @@ def build_manifest_candidate(
     )
     buckets = flow_buckets_from_classes(reconciled_events)
     series, unavailable_navs = parse_nav_observations(ledger)
-    accounts_index: dict[str, dict[str, Any]] = {}
-    for index, account in enumerate(baseline["accounts"]):
-        if not isinstance(account, dict):
-            raise ManifestError(f"baseline account {index} must be an object")
-        account_id = _require_nonempty_text(
-            account.get("account_id"), f"baseline account {index}.account_id"
-        )
-        if account_id in accounts_index:
-            raise ManifestError(f"duplicate baseline account_id '{account_id}'")
-        accounts_index[account_id] = account
     validate_evidence_coverage(
         ledger, reconciled_events, perimeter.full_chains, accounts_index
     )
