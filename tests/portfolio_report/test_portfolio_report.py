@@ -1813,12 +1813,51 @@ def test_publish_requires_external_native_receipt_for_every_caller_input(
     )
     published_root = _published_baseline(tmp_path / "published")
     pointer_before = (published_root / "CURRENT.json").read_bytes()
+    generations_before = sorted((published_root / "generations").iterdir())
     receipt: Path | None = binding_path
     if receipt_kind == "missing":
         receipt = None
     elif receipt_kind == "malformed":
         receipt = candidate / "fake-native-receipt.json"
         receipt.write_text("{not-json", encoding="utf-8")
+    elif receipt_kind == "caller_created":
+        receipt = candidate / "fake-native-receipt.json"
+        events = candidate / "xlsx-events.json"
+        events.write_bytes(canonical_json_bytes({"events": [{"type": "save_as"}]}))
+        receipt.write_bytes(
+            canonical_json_bytes(
+                {
+                    "actual_job_path": str(candidate / "xlsx-job.json"),
+                    "actual_job_sha256": hashlib.sha256(
+                        (candidate / "xlsx-job.json").read_bytes()
+                    ).hexdigest(),
+                    "actual_result_path": str(run_result),
+                    "actual_result_sha256": hashlib.sha256(
+                        run_result.read_bytes()
+                    ).hexdigest(),
+                    "events_path": str(events),
+                    "events_sha256": hashlib.sha256(events.read_bytes()).hexdigest(),
+                    "original_workbook": {
+                        "path": str(candidate / reporter.WORKBOOK_NAME),
+                        "sha256": hashlib.sha256(
+                            (candidate / reporter.WORKBOOK_NAME).read_bytes()
+                        ).hexdigest(),
+                    },
+                    "published_workbook": {
+                        "path": str(published_root / reporter.WORKBOOK_NAME),
+                        "sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
+                    },
+                    "run_id": json.loads(
+                        run_result.read_text(encoding="utf-8")
+                    )["run_id"],
+                    "schema_version": "xlsx-win-native-receipt/1",
+                    "staged_workbook": {
+                        "path": str(workbook),
+                        "sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
+                    },
+                }
+            )
+        )
 
     with pytest.raises(
         reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
@@ -1834,7 +1873,9 @@ def test_publish_requires_external_native_receipt_for_every_caller_input(
         )
 
     assert (published_root / "CURRENT.json").read_bytes() == pointer_before
+    assert sorted((published_root / "generations").iterdir()) == generations_before
     assert not (published_root / "CURRENT_RELEASE.json").exists()
+    assert not list(published_root.rglob("report-verification.json"))
 
 
 def test_publish_cli_rejects_synthetic_sidecars_without_a_release_receipt(
