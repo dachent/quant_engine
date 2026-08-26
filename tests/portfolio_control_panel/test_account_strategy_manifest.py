@@ -47,6 +47,340 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_bytes(_bytes(payload))
 
 
+def _classified_flow_artifact(path: Path) -> dict[str, Any]:
+    """Hand-build the source identity bound by the coverage authority."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    contents = path.read_bytes()
+    return {
+        "artifact_id": payload["artifact_id"],
+        "as_of_date": payload["as_of_date"],
+        "schema": {"name": "classified-flows", "version": "3"},
+        "sha256": hashlib.sha256(contents).hexdigest(),
+        "size_bytes": len(contents),
+    }
+
+
+def _flow_coverage_payload(
+    inputs: dict[str, Path], rows: list[dict[str, Any]], **overrides: object
+) -> dict[str, Any]:
+    """Synthetic account-and-interval receipt fixture with literal identities."""
+    ledger_identity = json.loads(
+        inputs["ledger_identity"].read_text(encoding="utf-8")
+    )
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "artifact_id": "coverage/synthetic-account-flow-coverage.json",
+        "as_of_date": "2026-01-06",
+        "ledger_identity": {
+            "generation_id": ledger_identity["generation_id"],
+            "artifact": ledger_identity["artifact"],
+        },
+        "classified_flows_artifact": _classified_flow_artifact(inputs["flows"]),
+        "rows": rows,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _coverage_row(
+    start: str,
+    end: str,
+    *,
+    account_id: str = "synthetic-account",
+    status: str = "COMPLETE",
+    source_artifact_ids: list[str] | None = None,
+    authority_kind: str = "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V1",
+    reason: str | None = None,
+) -> dict[str, Any]:
+    if source_artifact_ids is None:
+        source_artifact_ids = ["receipt/synthetic-account-interval.json"]
+    if status == "BLOCKED" and reason is None:
+        reason = "SYNTHETIC_RETRIEVAL_GAP"
+    return {
+        "account_id": account_id,
+        "effective_start": start,
+        "effective_end": end,
+        "status": status,
+        "source_artifact_ids": source_artifact_ids,
+        "authority_kind": authority_kind,
+        "reason": reason,
+    }
+
+
+def _load_flow_coverage(
+    manifest_module: Any,
+    tmp_path: Path,
+    inputs: dict[str, Path],
+    rows: list[dict[str, Any]],
+    **overrides: object,
+) -> Any:
+    coverage_path = tmp_path / "account-flow-coverage.json"
+    _write_json(coverage_path, _flow_coverage_payload(inputs, rows, **overrides))
+    coverage_snapshot = manifest_module.InputSnapshot.capture(
+        coverage_path, "flow coverage"
+    )
+    ledger_identity = json.loads(inputs["ledger_identity"].read_text(encoding="utf-8"))
+    return manifest_module.load_flow_coverage(
+        coverage_snapshot.json_object("flow coverage"),
+        coverage_snapshot,
+        {
+            "generation_id": ledger_identity["generation_id"],
+            "artifact": ledger_identity["artifact"],
+        },
+        _classified_flow_artifact(inputs["flows"]),
+    )
+
+
+def test_flow_coverage_does_not_extend_one_day_receipt_to_neighboring_dates(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    """Changing containment to accept a partial receipt would authorize absent flows."""
+    inputs = _write_valid_inputs(tmp_path / "inputs")
+
+    coverage, _artifact = _load_flow_coverage(
+        manifest_module,
+        tmp_path,
+        inputs,
+        [_coverage_row("2026-01-02", "2026-01-02")],
+    )
+
+    assert not coverage.is_complete(
+        "synthetic-account", "2026-01-01", "2026-01-03"
+    )
+
+
+def test_flow_coverage_accepts_exact_complete_interval_for_no_row_date(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    """Changing same-account complete containment to reject exact bounds blocks proven zero."""
+    inputs = _write_valid_inputs(tmp_path / "inputs")
+
+    coverage, _artifact = _load_flow_coverage(
+        manifest_module,
+        tmp_path,
+        inputs,
+        [_coverage_row("2026-01-01", "2026-01-03")],
+    )
+
+    assert coverage.is_complete(
+        "synthetic-account", "2026-01-01", "2026-01-03"
+    )
+
+
+def test_flow_coverage_rejects_broad_provider_metadata(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    """Accepting provider-wide prose would replace account/interval proof."""
+    inputs = _write_valid_inputs(tmp_path / "inputs")
+
+    with pytest.raises(manifest_module.ManifestError, match="coverage keys"):
+        _load_flow_coverage(
+            manifest_module,
+            tmp_path,
+            inputs,
+            [_coverage_row("2026-01-01", "2026-01-03")],
+            provider_coverage_status="COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        )
+
+
+def test_flow_coverage_rejects_overlap_and_fails_closed_across_gap(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    """Merging overlap or a gap would fabricate a continuous retrieval interval."""
+    inputs = _write_valid_inputs(tmp_path / "inputs")
+    with pytest.raises(manifest_module.ManifestError, match="overlap"):
+        _load_flow_coverage(
+            manifest_module,
+            tmp_path,
+            inputs,
+            [
+                _coverage_row("2026-01-01", "2026-01-02"),
+                _coverage_row("2026-01-02", "2026-01-03"),
+            ],
+        )
+
+    coverage, _artifact = _load_flow_coverage(
+        manifest_module,
+        tmp_path,
+        inputs,
+        [
+            _coverage_row("2026-01-01", "2026-01-01"),
+            _coverage_row("2026-01-03", "2026-01-03"),
+        ],
+    )
+    assert not coverage.is_complete(
+        "synthetic-account", "2026-01-01", "2026-01-03"
+    )
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _coverage_row(
+            "2026-01-01", "2026-01-03", source_artifact_ids=[]
+        ),
+        _coverage_row(
+            "2026-01-01",
+            "2026-01-03",
+            authority_kind="COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        ),
+        _coverage_row("2026-01-03", "2026-01-01"),
+    ],
+)
+def test_flow_coverage_rejects_source_less_or_non_machine_complete_claim(
+    manifest_module: Any, tmp_path: Path, row: dict[str, Any]
+) -> None:
+    """Accepting these claims would turn human labels into absent-flow authority."""
+    inputs = _write_valid_inputs(tmp_path / "inputs")
+
+    with pytest.raises(manifest_module.ManifestError):
+        _load_flow_coverage(manifest_module, tmp_path, inputs, [row])
+
+
+@pytest.mark.parametrize(
+    "account_id,start,end",
+    [
+        ("other-synthetic-account", "2026-01-01", "2026-01-03"),
+        ("synthetic-account", "2025-12-31", "2026-01-03"),
+        ("synthetic-account", "2026-01-01", "2026-01-04"),
+    ],
+)
+def test_flow_coverage_rejects_account_and_boundary_overreach(
+    manifest_module: Any,
+    tmp_path: Path,
+    account_id: str,
+    start: str,
+    end: str,
+) -> None:
+    """Ignoring account/start/end containment would prove the wrong epoch."""
+    inputs = _write_valid_inputs(tmp_path / "inputs")
+    coverage, _artifact = _load_flow_coverage(
+        manifest_module,
+        tmp_path,
+        inputs,
+        [_coverage_row("2026-01-01", "2026-01-03")],
+    )
+
+    assert not coverage.is_complete(account_id, start, end)
+
+
+@pytest.mark.parametrize("identity_key", ["ledger_identity", "classified_flows_artifact"])
+def test_flow_coverage_rejects_ledger_and_source_identity_mismatch(
+    manifest_module: Any, tmp_path: Path, identity_key: str
+) -> None:
+    """Changing identity equality to accept a mismatch detaches coverage from its facts."""
+    inputs = _write_valid_inputs(tmp_path / "inputs")
+    payload = _flow_coverage_payload(
+        inputs, [_coverage_row("2026-01-01", "2026-01-03")]
+    )
+    if identity_key == "ledger_identity":
+        payload[identity_key]["generation_id"] = "f" * 64
+    else:
+        payload[identity_key]["sha256"] = "f" * 64
+    coverage_path = tmp_path / "account-flow-coverage.json"
+    _write_json(coverage_path, payload)
+    coverage_snapshot = manifest_module.InputSnapshot.capture(
+        coverage_path, "flow coverage"
+    )
+    ledger_identity = json.loads(inputs["ledger_identity"].read_text(encoding="utf-8"))
+
+    with pytest.raises(manifest_module.ManifestError, match="identity"):
+        manifest_module.load_flow_coverage(
+            coverage_snapshot.json_object("flow coverage"),
+            coverage_snapshot,
+            {
+                "generation_id": ledger_identity["generation_id"],
+                "artifact": ledger_identity["artifact"],
+            },
+            _classified_flow_artifact(inputs["flows"]),
+        )
+
+
+def test_blocked_flow_coverage_prevents_epoch_calculation_and_stale_metrics(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    """Removing the pre-calculation coverage gate would compute an absent flow as zero."""
+    inputs = _write_valid_inputs(tmp_path / "inputs")
+    coverage, _artifact = _load_flow_coverage(
+        manifest_module,
+        tmp_path,
+        inputs,
+        [
+            _coverage_row(
+                "2026-01-01",
+                "2026-01-03",
+                status="BLOCKED",
+                source_artifact_ids=[],
+                authority_kind="NONE",
+                reason="SYNTHETIC_RECEIPT_NOT_COMPLETE",
+            )
+        ],
+    )
+
+    manifest = manifest_module.assemble_manifest(
+        {
+            "synthetic-account": {
+                "2026-01-01": manifest_module.Decimal("50"),
+                "2026-01-02": manifest_module.Decimal("60"),
+                "2026-01-03": manifest_module.Decimal("70"),
+            }
+        },
+        {"synthetic-account": {"provider": "SYNTHETIC"}},
+        {key: {} for key in ("external_in", "external_out", "internal_in", "internal_out")},
+        {
+            "synthetic-account": [
+                {
+                    "_key": (
+                        "synthetic-account",
+                        "synthetic-strategy",
+                        "2026-01-01",
+                        "2026-01-03",
+                    )
+                }
+            ]
+        },
+        {
+            (
+                "synthetic-account",
+                "synthetic-strategy",
+                "2026-01-01",
+                "2026-01-03",
+            ): {
+                "status": "FUNDED",
+                "authority": "SYNTHETIC_TEST_AUTHORITY",
+                "continuity_to_successor": False,
+            }
+        },
+        {},
+        flow_coverage=coverage,
+    )
+
+    row = manifest["rows"][0]
+    assert row["status"] == "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+    assert row["blocking_reason"] == "FLOW_COMPLETENESS_NOT_PROVEN"
+    assert not {
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+        "observation_linked_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "nav_observations",
+    }.intersection(row)
+    assert "observation_trace" not in row
+    assert "capital_flow_trace" not in row
+
+
 def _flow_classification_policy(as_of_date: str) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -279,6 +613,17 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
             ],
         },
     )
+    coverage_path = tmp_path / "account-flow-coverage.json"
+    _write_json(
+        coverage_path,
+        _flow_coverage_payload(
+            {
+                "ledger_identity": ledger_identity_path,
+                "flows": flows_path,
+            },
+            [_coverage_row("2026-01-01", "2026-01-06")],
+        ),
+    )
     return {
         "ledger": ledger_path,
         "ledger_identity": ledger_identity_path,
@@ -286,6 +631,7 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
         "policy": policy_path,
         "classification_policy": classification_policy_path,
         "flows": flows_path,
+        "flow_coverage": coverage_path,
     }
 
 
@@ -694,6 +1040,8 @@ def _producer_argv(inputs: dict[str, Path]) -> list[str]:
         str(inputs["flows"]),
         "--classification-policy-json",
         str(inputs["classification_policy"]),
+        "--flow-coverage-json",
+        str(inputs["flow_coverage"]),
         "--format",
         "json",
     ]
@@ -712,6 +1060,10 @@ def _refresh_ledger_identity(inputs: dict[str, Path]) -> None:
         "artifact": identity["artifact"],
     }
     _write_json(inputs["flows"], classified)
+    coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
+    coverage["ledger_identity"] = classified["ledger_identity"]
+    coverage["classified_flows_artifact"] = _classified_flow_artifact(inputs["flows"])
+    _write_json(inputs["flow_coverage"], coverage)
 
 
 def _manifest_from_cli(
@@ -775,6 +1127,7 @@ def test_cli_requires_exact_classified_flow_coverage(
             "events": [],
         },
     )
+    _refresh_ledger_identity(inputs)
 
     with pytest.raises(manifest_module.ManifestError, match="missing classified"):
         manifest_module.main(_producer_argv(inputs))
@@ -838,6 +1191,7 @@ def test_reusable_build_candidate_matches_cli_output(
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
         admission_policy_path=inputs["policy"],
+        flow_coverage_path=inputs["flow_coverage"],
     )
     assert actual == expected
 
@@ -861,6 +1215,7 @@ def test_cli_rejects_classified_disposition_forgery_against_selected_policy(
     classified = json.loads(inputs["flows"].read_text(encoding="utf-8"))
     classified["events"][0]["disposition"] = "INTERNAL"
     _write_json(inputs["flows"], classified)
+    _refresh_ledger_identity(inputs)
 
     with pytest.raises(manifest_module.ManifestError, match="differs from raw record"):
         manifest_module.main(_producer_argv(inputs))

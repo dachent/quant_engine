@@ -92,9 +92,18 @@ _CURRENCY = re.compile(r"^[A-Z]{3}$")
 _MANIFEST_SCHEMA_VERSION = 4
 _FLOW_CLASSES_SCHEMA_VERSION = 3
 _FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION = 1
+_FLOW_COVERAGE_SCHEMA_VERSION = 1
 _CENT = Decimal("0.01")
 _ADMISSION_STATUSES = frozenset({"FUNDED", "BLOCKED"})
 _FLOW_DISPOSITIONS = frozenset({"EXTERNAL", "INTERNAL"})
+_FLOW_COVERAGE_STATUSES = frozenset({"COMPLETE", "BLOCKED"})
+_FLOW_COVERAGE_AUTHORITY_KINDS = frozenset(
+    {
+        "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V1",
+        "NONE",
+        "PARTIAL_RETRIEVAL_RECEIPT_V1",
+    }
+)
 _ASSIGNMENT_DISPOSITIONS = frozenset(
     {
         "STRATEGY_MAPPED",
@@ -476,6 +485,145 @@ def load_flow_classification_policy(
             "artifact": artifact,
         },
     )
+
+
+class CoverageIndex:
+    """Closed account-and-inclusive-interval flow-completeness authority."""
+
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = tuple(rows)
+
+    def is_complete(self, account_id: str, effective_start: str, effective_end: str) -> bool:
+        """Return true only for one same-account COMPLETE covering interval."""
+        return any(
+            row["account_id"] == account_id
+            and row["status"] == "COMPLETE"
+            and str(row["effective_start"]) <= effective_start
+            and effective_end <= str(row["effective_end"])
+            for row in self._rows
+        )
+
+
+def load_flow_coverage(
+    payload: Mapping[str, Any],
+    coverage_snapshot: InputSnapshot,
+    ledger_identity: Mapping[str, object],
+    classified_flows_artifact: Mapping[str, object],
+) -> tuple[CoverageIndex, dict[str, object]]:
+    """Load one hash-bound, account/interval flow-completeness artifact."""
+    required = {
+        "schema_version",
+        "artifact_id",
+        "as_of_date",
+        "ledger_identity",
+        "classified_flows_artifact",
+        "rows",
+    }
+    if set(payload) != required:
+        raise ManifestError("flow coverage keys are invalid")
+    if payload["schema_version"] != _FLOW_COVERAGE_SCHEMA_VERSION:
+        raise ManifestError("flow coverage schema_version must be 1")
+    selected_ledger_identity = {
+        "generation_id": ledger_identity.get("generation_id"),
+        "artifact": ledger_identity.get("artifact"),
+    }
+    coverage_ledger_identity = payload["ledger_identity"]
+    if coverage_ledger_identity != selected_ledger_identity:
+        raise ManifestError("flow coverage ledger identity differs from ledger identity")
+    coverage_classified_artifact = payload["classified_flows_artifact"]
+    if coverage_classified_artifact != classified_flows_artifact:
+        raise ManifestError(
+            "flow coverage classified-flow source identity differs from classified flows"
+        )
+    rows_payload = payload["rows"]
+    if not isinstance(rows_payload, list):
+        raise ManifestError("flow coverage rows must be a list")
+
+    rows: list[dict[str, object]] = []
+    seen_intervals: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for index, value in enumerate(rows_payload):
+        if not isinstance(value, Mapping) or set(value) != {
+            "account_id",
+            "effective_start",
+            "effective_end",
+            "status",
+            "source_artifact_ids",
+            "authority_kind",
+            "reason",
+        }:
+            raise ManifestError(f"flow coverage row {index} keys are invalid")
+        account_id = _require_nonempty_text(
+            value["account_id"], f"flow coverage row {index}.account_id"
+        )
+        effective_start = _iso_date(
+            value["effective_start"], f"flow coverage row {index}.effective_start"
+        )
+        effective_end = _iso_date(
+            value["effective_end"], f"flow coverage row {index}.effective_end"
+        )
+        if effective_end < effective_start:
+            raise ManifestError(f"flow coverage row {index} interval is reversed")
+        status = _require_nonempty_text(
+            value["status"], f"flow coverage row {index}.status"
+        )
+        if status not in _FLOW_COVERAGE_STATUSES:
+            raise ManifestError(f"flow coverage row {index}.status is invalid")
+        source_artifact_ids = value["source_artifact_ids"]
+        if not isinstance(source_artifact_ids, list) or not all(
+            isinstance(item, str) and item.strip() for item in source_artifact_ids
+        ):
+            raise ManifestError(
+                f"flow coverage row {index}.source_artifact_ids is invalid"
+            )
+        if len(set(source_artifact_ids)) != len(source_artifact_ids):
+            raise ManifestError(
+                f"flow coverage row {index}.source_artifact_ids contains duplicates"
+            )
+        authority_kind = _require_nonempty_text(
+            value["authority_kind"], f"flow coverage row {index}.authority_kind"
+        )
+        if authority_kind not in _FLOW_COVERAGE_AUTHORITY_KINDS:
+            raise ManifestError(
+                f"flow coverage row {index}.authority_kind is not machine-verifiable"
+            )
+        reason = value["reason"]
+        if status == "COMPLETE":
+            if not source_artifact_ids:
+                raise ManifestError(
+                    f"flow coverage row {index} COMPLETE requires source artifacts"
+                )
+            if authority_kind != "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V1":
+                raise ManifestError(
+                    f"flow coverage row {index} COMPLETE authority is invalid"
+                )
+            if reason is not None:
+                raise ManifestError(f"flow coverage row {index} COMPLETE reason is invalid")
+        elif not isinstance(reason, str) or not reason.strip():
+            raise ManifestError(f"flow coverage row {index} BLOCKED reason is invalid")
+        rows.append(
+            {
+                "account_id": account_id,
+                "effective_start": effective_start,
+                "effective_end": effective_end,
+                "status": status,
+            }
+        )
+        seen_intervals[account_id].append((effective_start, effective_end))
+
+    for account_id, intervals in seen_intervals.items():
+        intervals.sort()
+        for previous, current in zip(intervals, intervals[1:]):
+            if current[0] <= previous[1]:
+                raise ManifestError(f"flow coverage intervals overlap for '{account_id}'")
+
+    artifact = _source_artifact_from_snapshot(
+        coverage_snapshot,
+        artifact_id=payload["artifact_id"],
+        as_of_date=payload["as_of_date"],
+        schema_name="account-flow-coverage",
+        schema_version=str(_FLOW_COVERAGE_SCHEMA_VERSION),
+    )
+    return CoverageIndex(rows), artifact
 
 
 def load_flow_classes(
@@ -1710,6 +1858,7 @@ def assemble_manifest(
     admissions: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
     source_identities: Mapping[str, object],
     unavailable_navs: Mapping[str, set[str]] | None = None,
+    flow_coverage: CoverageIndex | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     unavailable_navs = unavailable_navs or {}
@@ -1761,6 +1910,29 @@ def assemble_manifest(
                 prev_closing = None
                 prev_closing_date = None
                 continue
+            window = {
+                d: v
+                for d, v in series.get(aid, {}).items()
+                if d >= w0 and (w1 is None or d <= w1)
+            }
+            final_nav_date = max(window, default=None)
+            if (
+                flow_coverage is not None
+                and final_nav_date is not None
+                and not flow_coverage.is_complete(
+                aid, w0, final_nav_date
+                )
+            ):
+                rows.append(
+                    {
+                        **base,
+                        "status": "BLOCKED_UNPROVABLE_OPENING_FLOWS",
+                        "blocking_reason": "FLOW_COMPLETENESS_NOT_PROVEN",
+                    }
+                )
+                prev_closing = None
+                prev_closing_date = None
+                continue
             if any(_in_window(day, w0, w1) for day in unavailable_navs.get(aid, set())):
                 rows.append(
                     {
@@ -1772,11 +1944,6 @@ def assemble_manifest(
                 prev_closing = None
                 prev_closing_date = None
                 continue
-            window = {
-                d: v
-                for d, v in series.get(aid, {}).items()
-                if d >= w0 and (w1 is None or d <= w1)
-            }
             stats = analyze_epoch(
                 window,
                 buckets["external_in"].get(aid, {}),
@@ -2565,6 +2732,7 @@ def build_manifest_candidate(
     classified_flows_path: Path,
     classification_policy_path: Path,
     admission_policy_path: Path,
+    flow_coverage_path: Path,
 ) -> dict[str, Any]:
     """Build one internally validated source-bound manifest candidate.
 
@@ -2597,6 +2765,7 @@ def build_manifest_candidate(
     classified_snapshot = InputSnapshot.capture(
         classified_flows_path, "classified flows"
     )
+    flow_coverage_snapshot = InputSnapshot.capture(flow_coverage_path, "flow coverage")
     classification_policy_snapshot = InputSnapshot.capture(
         classification_policy_path, "flow classification policy"
     )
@@ -2664,6 +2833,12 @@ def build_manifest_candidate(
         ledger_identity,
         classification_policy_identity,
     )
+    flow_coverage, _flow_coverage_artifact = load_flow_coverage(
+        flow_coverage_snapshot.json_object("flow coverage"),
+        flow_coverage_snapshot,
+        ledger_identity,
+        classified_artifact,
+    )
     reconciled_events = validate_classified_flow_coverage(
         ledger, events, classification_policy
     )
@@ -2699,6 +2874,7 @@ def build_manifest_candidate(
             },
         },
         unavailable_navs,
+        flow_coverage,
     )
     manifest["accounting_currency"] = ledger["accounting_currency"]
     validate_manifest_schema(manifest, full_chains=perimeter.full_chains)
@@ -2743,6 +2919,12 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="explicit funded-epoch admission policy bound to baseline assignments",
     )
+    parser.add_argument(
+        "--flow-coverage-json",
+        type=Path,
+        required=True,
+        help="hash-bound account-and-inclusive-interval flow-completeness authority",
+    )
     parser.add_argument("--format", choices=("table", "json"), default="table")
     args = parser.parse_args(argv)
     manifest = build_manifest_candidate(
@@ -2753,6 +2935,7 @@ def main(argv: list[str] | None = None) -> int:
         classified_flows_path=args.flow_classes_json,
         classification_policy_path=args.classification_policy_json,
         admission_policy_path=args.admission_policy_json,
+        flow_coverage_path=args.flow_coverage_json,
     )
     if args.format == "json":
         print(json.dumps(manifest, indent=2))

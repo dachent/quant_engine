@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/account-flow-coverage.schema.json",
+  "title": "Account flow coverage authority",
+  "description": "Hash-bound, closed account and inclusive-interval authority for classified-flow completeness.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "artifact_id", "as_of_date", "ledger_identity", "classified_flows_artifact", "rows"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_id": {"type": "string", "minLength": 1},
+    "as_of_date": {"$ref": "#/$defs/date"},
+    "ledger_identity": {"$ref": "#/$defs/ledger_identity"},
+    "classified_flows_artifact": {"$ref": "#/$defs/source_artifact"},
+    "rows": {"type": "array", "items": {"$ref": "#/$defs/row"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "date": {"type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "source_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "as_of_date", "schema", "sha256", "size_bytes"],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 1},
+        "as_of_date": {"$ref": "#/$defs/date"},
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {"name": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}
+        },
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ledger_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "artifact"],
+      "properties": {"generation_id": {"$ref": "#/$defs/sha256"}, "artifact": {"$ref": "#/$defs/source_artifact"}}
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "effective_start", "effective_end", "status", "source_artifact_ids", "authority_kind", "reason"],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1},
+        "effective_start": {"$ref": "#/$defs/date"},
+        "effective_end": {"$ref": "#/$defs/date"},
+        "status": {"enum": ["COMPLETE", "BLOCKED"]},
+        "source_artifact_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "authority_kind": {"enum": ["ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V1", "NONE", "PARTIAL_RETRIEVAL_RECEIPT_V1"]},
+        "reason": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1}]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "COMPLETE"}}, "required": ["status"]},
+          "then": {"properties": {"source_artifact_ids": {"minItems": 1}, "authority_kind": {"const": "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V1"}, "reason": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"status": {"const": "BLOCKED"}}, "required": ["status"]},
+          "then": {"properties": {"reason": {"type": "string", "minLength": 1}}}
+        }
+      ]
+    }
+  }
+}
