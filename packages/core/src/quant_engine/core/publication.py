@@ -371,6 +371,10 @@ def read_current(root: Path) -> CurrentPointer:
         raise PointerIntegrityError("CURRENT.json must not be a symlink")
     content = current_path.read_bytes()
     pointer = CurrentPointer.from_json_bytes(content)
+    if pointer.pointer_schema_version == _LEGACY_POINTER_SCHEMA_VERSION:
+        raise PointerIntegrityError(
+            "legacy pointer schema is not accepted as current authority"
+        )
     manifest_path = _generation_path(root, pointer.generation_id)
     if manifest_path.is_symlink():
         raise PointerIntegrityError("current generation manifest must not be a symlink")

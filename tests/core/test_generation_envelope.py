@@ -22,6 +22,7 @@ from quant_engine.core import (
     PublicationState,
     SourceArtifact,
     VerificationStatus,
+    generation_inventory_sha256,
     publication_state,
     publish_generation,
     read_current,
@@ -288,10 +289,29 @@ def test_current_pointer_rejects_manually_selected_partial_generation(
     pointer = CurrentPointer(
         generation_id=partial.generation_id,
         manifest_sha256=hashlib.sha256(partial.to_json_bytes()).hexdigest(),
+        artifact_inventory_sha256=generation_inventory_sha256(
+            tmp_path, partial.generation_id
+        ),
+        pointer_schema_version=2,
     )
     (tmp_path / "CURRENT.json").write_bytes(pointer.to_json_bytes())
 
     with pytest.raises(PointerIntegrityError, match="not publication eligible"):
+        read_current(tmp_path)
+
+
+def test_security_sensitive_current_read_rejects_legacy_pointer_schema(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest()
+    stage_generation(tmp_path, manifest)
+    legacy = CurrentPointer(
+        generation_id=manifest.generation_id,
+        manifest_sha256=hashlib.sha256(manifest.to_json_bytes()).hexdigest(),
+    )
+    (tmp_path / "CURRENT.json").write_bytes(legacy.to_json_bytes())
+
+    with pytest.raises(PointerIntegrityError, match="legacy pointer schema"):
         read_current(tmp_path)
 
 
