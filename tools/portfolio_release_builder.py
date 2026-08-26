@@ -3868,7 +3868,7 @@ def _stage_account_strategy_manifest(
         "--format",
         "json",
     )
-    if manifest.get("schema_version") != 5:
+    if manifest.get("schema_version") != 6:
         raise VerticalBuildError("account-strategy manifest schema differs")
     staged = output_root / "account-strategy-manifest.json"
     _write_exact(staged, canonical_json_bytes(manifest))

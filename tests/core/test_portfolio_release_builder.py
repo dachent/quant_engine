@@ -2718,7 +2718,7 @@ def test_schema9_stages_one_manifest_and_uses_it_for_every_panel_gate(
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
         calls.append(args)
         if args[0] == "account_strategy_manifest.py":
-            return {"schema_version": 5}
+            return {"schema_version": 6}
         return {"candidate_dir": str(tmp_path / "candidate")}
 
     monkeypatch.setattr(builder, "_tool", fake_tool)

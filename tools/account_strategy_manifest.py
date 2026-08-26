@@ -89,12 +89,15 @@ class InputSnapshot:
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
-_MANIFEST_SCHEMA_VERSION = 5
+_MANIFEST_SCHEMA_VERSION = 6
 _FLOW_CLASSES_SCHEMA_VERSION = 3
 _FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION = 1
 _FLOW_COVERAGE_SCHEMA_VERSION = 1
 _CENT = Decimal("0.01")
 _ADMISSION_STATUSES = frozenset({"FUNDED", "BLOCKED"})
+_ADMISSION_AUTHORITY_KINDS = frozenset(
+    {"LEDGER_AVAILABLE_POSITIVE_NAV_V1", "NONE"}
+)
 _FLOW_DISPOSITIONS = frozenset({"EXTERNAL", "INTERNAL"})
 _FLOW_COVERAGE_STATUSES = frozenset({"COMPLETE", "BLOCKED"})
 _FLOW_COVERAGE_AUTHORITY_KINDS = frozenset(
@@ -1290,6 +1293,7 @@ def load_admission_policy(
     payload: Mapping[str, Any],
     policy_snapshot: InputSnapshot,
     assignments: list[dict[str, Any]],
+    ledger: Mapping[str, Any],
 ) -> tuple[dict[tuple[str, str, str, str | None], dict[str, Any]], dict[str, object]]:
     """Load an explicit, hash-bound membership/admission policy.
 
@@ -1308,8 +1312,8 @@ def load_admission_policy(
     }
     if set(payload) != required:
         raise ManifestError("admission policy keys are invalid")
-    if payload["schema_version"] != 1:
-        raise ManifestError("admission policy schema_version must be 1")
+    if payload["schema_version"] != 2:
+        raise ManifestError("admission policy schema_version must be 2")
     policy_id = _require_nonempty_text(payload["policy_id"], "admission policy id")
     policy_version = _require_nonempty_text(
         payload["policy_version"], "admission policy version"
@@ -1319,24 +1323,53 @@ def load_admission_policy(
         raise ManifestError("admission policy assignment identity differs")
     if not isinstance(payload["admissions"], list):
         raise ManifestError("admission policy admissions must be a list")
+    nav_records: dict[str, dict[str, object]] = {}
+    observations = ledger.get("nav_observations")
+    if not isinstance(observations, list):
+        raise ManifestError("ledger missing list section 'nav_observations'")
+    for nav_index, observation in enumerate(observations):
+        if not isinstance(observation, Mapping):
+            raise ManifestError(f"nav observation {nav_index} must be an object")
+        record_id = _require_nonempty_text(
+            observation.get("record_id"), f"nav[{nav_index}].record_id"
+        )
+        if record_id in nav_records:
+            raise ManifestError(f"duplicate NAV record_id '{record_id}'")
+        account_id = _require_nonempty_text(
+            observation.get("account_id"), f"nav[{nav_index}].account_id"
+        )
+        as_of_date = _iso_date(
+            observation.get("as_of_date"), f"nav[{nav_index}].as_of_date"
+        )
+        nav = observation.get("nav")
+        if not isinstance(nav, Mapping):
+            raise ManifestError(f"nav[{nav_index}].nav must be an object")
+        nav_records[record_id] = {
+            "account_id": account_id,
+            "as_of_date": as_of_date,
+            "status": nav.get("status"),
+            "value": nav.get("value"),
+        }
+
     admissions: dict[tuple[str, str, str, str | None], dict[str, Any]] = {}
+    cited_record_ids: set[str] = set()
+    assignment_keys = {_assignment_key(assignment) for assignment in assignments}
     for index, admission in enumerate(payload["admissions"]):
         if not isinstance(admission, dict):
             raise ManifestError(f"admission policy admission {index} must be an object")
-        expected = {
+        common = {
             "account_id",
             "strategy_id",
             "effective_start",
             "effective_end",
             "status",
-            "authority",
             "continuity_to_successor",
         }
-        if set(admission) != expected:
-            raise ManifestError(f"admission policy admission {index} keys are invalid")
         key = _assignment_key(admission)
         if key in admissions:
             raise ManifestError(f"duplicate admission policy epoch {key}")
+        if key not in assignment_keys:
+            raise ManifestError("admission policy contains a non-strategy or unknown epoch")
         status = _require_nonempty_text(
             admission["status"], f"admission {index}.status"
         )
@@ -1346,14 +1379,58 @@ def load_admission_policy(
             raise ManifestError(
                 f"admission {index}.continuity_to_successor must be boolean"
             )
+        if status == "BLOCKED":
+            if set(admission) != common | {"reason"}:
+                raise ManifestError(f"admission {index} BLOCKED keys are invalid")
+            admissions[key] = {
+                "status": status,
+                "authority_kind": "NONE",
+                "funded_nav_record_ids": [],
+                "reason": _require_nonempty_text(
+                    admission.get("reason"), f"admission {index}.reason"
+                ),
+                "continuity_to_successor": admission["continuity_to_successor"],
+            }
+            continue
+        if set(admission) != common | {"authority_kind", "funded_nav_record_ids"}:
+            raise ManifestError(f"admission {index} FUNDED keys are invalid")
+        authority_kind = _require_nonempty_text(
+            admission.get("authority_kind"), f"admission {index}.authority_kind"
+        )
+        if authority_kind not in _ADMISSION_AUTHORITY_KINDS - {"NONE"}:
+            raise ManifestError(f"admission {index}.authority kind is invalid")
+        record_ids = admission.get("funded_nav_record_ids")
+        if not isinstance(record_ids, list) or not record_ids:
+            raise ManifestError(f"admission {index}.FUNDED requires NAV record evidence")
+        if not all(isinstance(record_id, str) and record_id.strip() for record_id in record_ids):
+            raise ManifestError(f"admission {index}.funded_nav_record_ids is invalid")
+        if len(set(record_ids)) != len(record_ids):
+            raise ManifestError(f"admission {index}.funded_nav_record_ids contains duplicates")
+        evidence_dates: list[str] = []
+        for record_id in record_ids:
+            if record_id in cited_record_ids:
+                raise ManifestError(f"duplicate funded NAV citation '{record_id}'")
+            cited_record_ids.add(record_id)
+            record = nav_records.get(record_id)
+            if record is None:
+                raise ManifestError(f"funded NAV record '{record_id}' does not exist")
+            if record["account_id"] != key[0]:
+                raise ManifestError(f"funded NAV record '{record_id}' account differs")
+            record_date = str(record["as_of_date"])
+            if not _in_window(record_date, key[2], key[3]):
+                raise ManifestError(f"funded NAV record '{record_id}' is outside assignment")
+            if record["status"] != "AVAILABLE":
+                raise ManifestError(f"funded NAV record '{record_id}' is not AVAILABLE")
+            if _money(record["value"], f"funded NAV record '{record_id}'.value") <= 0:
+                raise ManifestError(f"funded NAV record '{record_id}' must be strictly positive")
+            evidence_dates.append(record_date)
         admissions[key] = {
             "status": status,
-            "authority": _require_nonempty_text(
-                admission["authority"], f"admission {index}.authority"
-            ),
+            "authority_kind": authority_kind,
+            "funded_nav_record_ids": list(record_ids),
+            "funded_nav_dates": evidence_dates,
             "continuity_to_successor": admission["continuity_to_successor"],
         }
-    assignment_keys = {_assignment_key(assignment) for assignment in assignments}
     if set(admissions) != assignment_keys:
         raise ManifestError(
             "admission policy coverage differs from baseline assignments"
@@ -1363,7 +1440,7 @@ def load_admission_policy(
         artifact_id=payload["artifact_id"],
         as_of_date=payload["as_of_date"],
         schema_name="account-strategy-manifest-admission-policy",
-        schema_version="1",
+        schema_version="2",
     )
     return admissions, {
         "policy_id": policy_id,
@@ -1377,6 +1454,7 @@ def validate_assignment_topology(
     assignments: list[dict[str, Any]],
     admissions: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
     full_chains: Mapping[str, list[dict[str, Any]]],
+    flow_coverage: CoverageIndex | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Validate epoch chronology before assigning capital to any epoch."""
     chains: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1436,6 +1514,34 @@ def validate_assignment_topology(
                     raise ManifestError(
                         f"continuity cannot cross a non-strategy interval for account {account_id}"
                     )
+                successor_admission = admissions.get(successor["_key"])
+                if (
+                    admission.get("status") != "FUNDED"
+                    or not isinstance(successor_admission, Mapping)
+                    or successor_admission.get("status") != "FUNDED"
+                ):
+                    raise ManifestError(
+                        f"continuity requires funded predecessor and successor for account {account_id}"
+                    )
+                if end not in admission.get("funded_nav_dates", []):
+                    raise ManifestError(
+                        f"continuity requires predecessor closing NAV evidence for account {account_id}"
+                    )
+                if flow_coverage is not None:
+                    successor_dates = successor_admission.get("funded_nav_dates")
+                    if (
+                        not flow_coverage.is_complete(account_id, start, str(end))
+                        or not isinstance(successor_dates, list)
+                        or not successor_dates
+                        or not flow_coverage.is_complete(
+                            account_id,
+                            successor["_key"][2],
+                            max(str(day) for day in successor_dates),
+                        )
+                    ):
+                        raise ManifestError(
+                            f"continuity requires complete flow coverage for account {account_id}"
+                        )
             if index == 0:
                 continue
             previous = chain[index - 1]
@@ -1879,7 +1985,9 @@ def assemble_manifest(
                 "effective_start": w0,
                 "effective_end": w1,
                 "admission_status": admission["status"],
-                "admission_policy_reference": admission["authority"],
+                "admission_policy_reference": admission["authority_kind"],
+                "admission_authority_kind": admission["authority_kind"],
+                "funded_nav_record_ids": list(admission["funded_nav_record_ids"]),
                 "continuity_to_successor": admission["continuity_to_successor"],
             }
             previous_claimed_continuity = (
@@ -1904,7 +2012,9 @@ def assemble_manifest(
                     {
                         **base,
                         "status": "BLOCKED_ADMISSION",
-                        "blocking_reason": "EPOCH_NOT_EXPLICITLY_FUNDED",
+                        "blocking_reason": admission.get(
+                            "reason", "EPOCH_NOT_EXPLICITLY_FUNDED"
+                        ),
                     }
                 )
                 prev_closing = None
@@ -2144,6 +2254,26 @@ def _validate_manifest_semantics(
         if epoch_key in seen_epochs:
             raise ManifestError(f"duplicate manifest epoch {epoch_key}")
         seen_epochs.add(epoch_key)
+        admission_status = row.get("admission_status")
+        admission_kind = row.get("admission_authority_kind")
+        funded_record_ids = row.get("funded_nav_record_ids")
+        if row.get("admission_policy_reference") != admission_kind:
+            raise ManifestError(f"row {index} admission provenance reference is invalid")
+        if not isinstance(funded_record_ids, list) or not all(
+            isinstance(record_id, str) and record_id for record_id in funded_record_ids
+        ) or len(set(funded_record_ids)) != len(funded_record_ids):
+            raise ManifestError(f"row {index} funded NAV record provenance is invalid")
+        if admission_status == "FUNDED":
+            if (
+                admission_kind != "LEDGER_AVAILABLE_POSITIVE_NAV_V1"
+                or not funded_record_ids
+            ):
+                raise ManifestError(f"row {index} funded admission provenance is invalid")
+        elif admission_status == "BLOCKED":
+            if admission_kind != "NONE" or funded_record_ids:
+                raise ManifestError(f"row {index} blocked admission provenance is invalid")
+        else:
+            raise ManifestError(f"row {index} admission status is invalid")
         status = row.get("status")
         late_flows = row.get("late_flows")
         if status == "FLOWS_AFTER_CLOSING_NAV":
@@ -2821,14 +2951,6 @@ def build_manifest_candidate(
         for chain in perimeter.mapped_chains.values()
         for assignment in chain
     ]
-    admissions, admission_policy_identity = load_admission_policy(
-        admission_policy_snapshot.json_object("admission policy"),
-        admission_policy_snapshot,
-        mapped_assignments,
-    )
-    chains = validate_assignment_topology(
-        mapped_assignments, admissions, perimeter.full_chains
-    )
     classification_policy, classification_policy_identity = (
         load_flow_classification_policy(
             classification_policy_snapshot.json_object("flow classification policy"),
@@ -2846,6 +2968,15 @@ def build_manifest_candidate(
         flow_coverage_snapshot,
         ledger_identity,
         classified_artifact,
+    )
+    admissions, admission_policy_identity = load_admission_policy(
+        admission_policy_snapshot.json_object("admission policy"),
+        admission_policy_snapshot,
+        mapped_assignments,
+        ledger,
+    )
+    chains = validate_assignment_topology(
+        mapped_assignments, admissions, perimeter.full_chains, flow_coverage
     )
     reconciled_events = validate_classified_flow_coverage(
         ledger, events, classification_policy

@@ -3425,13 +3425,13 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     assert schema["properties"]["panel_schema_version"]["const"] == (
         panel.PANEL_SCHEMA_VERSION
     )
-    manifest_schema = schema["$defs"]["account_manifest_v5"]
+    manifest_schema = schema["$defs"]["account_manifest_v6"]
     strict_manifest_schema = json.loads(
         panel.ACCOUNT_MANIFEST_SCHEMA.read_text(encoding="utf-8")
     )
     assert manifest_schema == {"$ref": strict_manifest_schema["$id"]}
     assert strict_manifest_schema["additionalProperties"] is False
-    assert strict_manifest_schema["properties"]["schema_version"] == {"const": 5}
+    assert strict_manifest_schema["properties"]["schema_version"] == {"const": 6}
     assert "authority_readiness" in strict_manifest_schema["required"]
     assert "authority_status" not in strict_manifest_schema["required"]
     assert strict_manifest_schema["properties"]["authority_readiness"]["properties"][
@@ -5475,7 +5475,7 @@ def test_account_manifest_flows_through_build_and_verify(
     assert "renderAccountManifest" in renderer
 
 
-def test_panel_formal_schema_embeds_strict_manifest_v5_contract(
+def test_panel_formal_schema_embeds_strict_manifest_v6_contract(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
@@ -6453,13 +6453,14 @@ def _produce_manifest(
     accepted_baseline_root: Path | None = None,
     accounting_currency: str = "USD",
 ) -> tuple[Path, dict[str, Path]]:
-    """Build a real v5 manifest and retain its independently selected inputs."""
+    """Build a real v6 manifest and retain its independently selected inputs."""
     target_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = target_dir / "ledger.json"
     ledger = {
         "accounting_currency": accounting_currency,
         "nav_observations": [
             {
+                "record_id": f"nav-{day}",
                 "account_id": "account-seam",
                 "as_of_date": day,
                 "nav": {
@@ -6547,7 +6548,7 @@ def _produce_manifest(
     _write_json(
         admission_policy_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "policy_id": "SYNTHETIC-ADMISSION",
             "policy_version": "1",
             "artifact_id": "policy/synthetic-admission.json",
@@ -6565,7 +6566,8 @@ def _produce_manifest(
                         )
                     },
                     "status": "FUNDED",
-                    "authority": "SYNTHETIC_TEST_AUTHORITY",
+                    "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                    "funded_nav_record_ids": [f"nav-{as_of}"],
                     "continuity_to_successor": False,
                 }
             ],

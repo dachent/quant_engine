@@ -45,7 +45,7 @@
     "panel_schema_version": { "const": 21 },
     "account_manifest": {
       "anyOf": [
-        { "$ref": "#/$defs/account_manifest_v5" },
+        { "$ref": "#/$defs/account_manifest_v6" },
         { "type": "null" }
       ]
     },
@@ -580,7 +580,7 @@
       },
       "then": {
         "properties": {
-          "account_manifest": { "$ref": "#/$defs/account_manifest_v5" },
+          "account_manifest": { "$ref": "#/$defs/account_manifest_v6" },
           "meta": {
             "properties": {
               "account_manifest_sha256": { "$ref": "#/$defs/hash" },
@@ -619,7 +619,7 @@
       }
     },
     "decimal": { "type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" },
-    "account_manifest_v5": {
+    "account_manifest_v6": {
       "$ref": "https://github.com/dachent/quant_engine/schemas/portfolio/account-strategy-manifest.schema.json"
     },
     "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

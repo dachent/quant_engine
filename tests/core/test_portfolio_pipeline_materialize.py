@@ -364,6 +364,7 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
             "flows": [],
             "nav_observations": [
                 {
+                    "record_id": "synthetic-nav-as-of",
                     "account_id": "synthetic-account",
                     "as_of_date": AS_OF.isoformat(),
                     "nav": {
@@ -468,7 +469,7 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
     _write_json(
         admission_policy_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "policy_id": "SYNTHETIC-ADMISSION",
             "policy_version": "1",
             "artifact_id": "policy/synthetic-admission.json",
@@ -486,7 +487,8 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
                         )
                     },
                     "status": "FUNDED",
-                    "authority": "SYNTHETIC_TEST_AUTHORITY",
+                    "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                    "funded_nav_record_ids": ["synthetic-nav-as-of"],
                     "continuity_to_successor": False,
                 }
             ],
@@ -546,7 +548,7 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
             size_bytes=len(staged_bytes),
             as_of_date=AS_OF,
             schema_name="account-strategy-manifest",
-            schema_version="5",
+            schema_version="6",
         ),
         SourceArtifact(
             artifact_id="panel/data/dashboard_data.json",

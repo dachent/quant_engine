@@ -16,7 +16,7 @@
     "rows"
   ],
   "properties": {
-    "schema_version": {"const": 5},
+    "schema_version": {"const": 6},
     "artifact": {"const": "account-strategy-manifest"},
     "accounting_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
     "authority_readiness": {
@@ -260,6 +260,8 @@
         "effective_end",
         "admission_status",
         "admission_policy_reference",
+        "admission_authority_kind",
+        "funded_nav_record_ids",
         "continuity_to_successor",
         "status"
       ],
@@ -271,6 +273,14 @@
         "effective_end": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
         "admission_status": {"enum": ["FUNDED", "BLOCKED"]},
         "admission_policy_reference": {"type": "string", "minLength": 1},
+        "admission_authority_kind": {
+          "enum": ["LEDGER_AVAILABLE_POSITIVE_NAV_V1", "NONE"]
+        },
+        "funded_nav_record_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
         "continuity_to_successor": {"type": "boolean"},
         "status": {
           "enum": [
@@ -335,7 +345,11 @@
               "annualized_return_on_net_capital", "xirr_diagnostic", "observation_linked_return",
               "observed_hwm_index", "observed_max_drawdown", "opening_basis", "observation_trace", "capital_flow_trace", "nav_observations"
             ],
-            "properties": {"admission_status": {"const": "FUNDED"}},
+            "properties": {
+              "admission_status": {"const": "FUNDED"},
+              "admission_authority_kind": {"const": "LEDGER_AVAILABLE_POSITIVE_NAV_V1"},
+              "funded_nav_record_ids": {"minItems": 1}
+            },
             "not": {"anyOf": [{"required": ["blocking_reason"]}, {"required": ["late_flows"]}, {"required": ["nav_observation_trace"]}]}
           }
         },
@@ -343,7 +357,11 @@
           "if": {"properties": {"status": {"const": "BLOCKED_ADMISSION"}}, "required": ["status"]},
           "then": {
             "required": ["blocking_reason"],
-            "properties": {"admission_status": {"const": "BLOCKED"}},
+            "properties": {
+              "admission_status": {"const": "BLOCKED"},
+              "admission_authority_kind": {"const": "NONE"},
+              "funded_nav_record_ids": {"maxItems": 0}
+            },
             "allOf": [
               {"not": {"required": ["late_flows"]}},
               {"not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observation_trace"]}, {"required": ["nav_observations"]}]}}
@@ -354,7 +372,11 @@
           "if": {"properties": {"status": {"enum": ["NO_ADMITTED_NAV", "BLOCKED_CONTINUITY_AFTER_WITHDRAWAL", "BLOCKED_UNDEFINED_RETURN", "BLOCKED_UNPROVABLE_OPENING_FLOWS", "BLOCKED_UNAVAILABLE_NAV_OBSERVATION", "BLOCKED_MISSING_PREDECESSOR_CONTINUITY"]}}, "required": ["status"]},
           "then": {
             "required": ["blocking_reason"],
-            "properties": {"admission_status": {"const": "FUNDED"}},
+            "properties": {
+              "admission_status": {"const": "FUNDED"},
+              "admission_authority_kind": {"const": "LEDGER_AVAILABLE_POSITIVE_NAV_V1"},
+              "funded_nav_record_ids": {"minItems": 1}
+            },
             "allOf": [
               {"not": {"required": ["late_flows"]}},
               {"not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observation_trace"]}, {"required": ["nav_observations"]}]}}
@@ -365,7 +387,11 @@
           "if": {"properties": {"status": {"const": "FLOWS_AFTER_CLOSING_NAV"}}, "required": ["status"]},
           "then": {
             "required": ["late_flows", "capital_flow_trace", "nav_observation_trace"],
-            "properties": {"admission_status": {"const": "FUNDED"}},
+            "properties": {
+              "admission_status": {"const": "FUNDED"},
+              "admission_authority_kind": {"const": "LEDGER_AVAILABLE_POSITIVE_NAV_V1"},
+              "funded_nav_record_ids": {"minItems": 1}
+            },
             "allOf": [
               {"not": {"required": ["blocking_reason"]}},
               {"not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["nav_observations"]}]}}

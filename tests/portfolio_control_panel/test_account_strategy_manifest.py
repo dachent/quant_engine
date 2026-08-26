@@ -35,6 +35,35 @@ def manifest_module() -> Any:
     return module
 
 
+def test_manifest_schema_has_no_duplicate_json_keys_and_keeps_ok_provenance_rules() -> None:
+    """A duplicate JSON key silently discards row constraints in standard parsers."""
+    schema_path = (
+        REPOSITORY_ROOT
+        / "schemas"
+        / "portfolio"
+        / "account-strategy-manifest.schema.json"
+    )
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            assert key not in result, f"duplicate schema JSON key: {key}"
+            result[key] = value
+        return result
+
+    schema = json.loads(schema_path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+    row = schema["$defs"]["row"]
+    ok_then = row["allOf"][0]["then"]
+
+    assert ok_then["properties"] == {
+        "admission_status": {"const": "FUNDED"},
+        "admission_authority_kind": {
+            "const": "LEDGER_AVAILABLE_POSITIVE_NAV_V1"
+        },
+        "funded_nav_record_ids": {"minItems": 1},
+    }
+
+
 def _bytes(payload: object) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -362,7 +391,8 @@ def test_blocked_flow_coverage_prevents_epoch_calculation_and_stale_metrics(
                 "2026-01-03",
             ): {
                 "status": "FUNDED",
-                "authority": "SYNTHETIC_TEST_AUTHORITY",
+                "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                "funded_nav_record_ids": ["synthetic-nav-1"],
                 "continuity_to_successor": False,
             }
         },
@@ -480,7 +510,7 @@ def _admission_policy(
     assignments: list[dict[str, Any]], *, continuity: bool
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "policy_id": "SYNTHETIC-ACCOUNT-STRATEGY-ADMISSION",
         "policy_version": "1",
         "artifact_id": "policy/synthetic-account-strategy-admission.json",
@@ -503,7 +533,10 @@ def _admission_policy(
                 "effective_start": assignment["effective_start"],
                 "effective_end": assignment["effective_end"],
                 "status": "FUNDED",
-                "authority": "SYNTHETIC_TEST_AUTHORITY",
+                "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                "funded_nav_record_ids": [
+                    f"nav-{int((assignment['effective_end'] or assignment['effective_start'])[-2:])}"
+                ],
                 "continuity_to_successor": continuity and index == 0,
             }
             for index, assignment in enumerate(assignments)
@@ -518,31 +551,37 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
         "accounting_currency": "USD",
         "nav_observations": [
             {
+                "record_id": "nav-1",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
             },
             {
+                "record_id": "nav-2",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-02",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "60"},
             },
             {
+                "record_id": "nav-3",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-03",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
             },
             {
+                "record_id": "nav-4",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-04",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
             },
             {
+                "record_id": "nav-5",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-05",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "75"},
             },
             {
+                "record_id": "nav-6",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-06",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "80"},
@@ -648,6 +687,141 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
         "flows": flows_path,
         "flow_coverage": coverage_path,
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("authority_kind", "garbage", "authority kind"),
+        ("funded_nav_record_ids", ["missing-nav"], "does not exist"),
+        ("funded_nav_record_ids", ["nav-1", "nav-1"], "duplicates"),
+    ],
+)
+def test_funded_admission_rejects_unverifiable_machine_evidence(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    """Removing exact ledger verification would admit arbitrary policy prose."""
+    inputs = _write_valid_inputs(tmp_path)
+    policy = json.loads(inputs["policy"].read_text(encoding="utf-8"))
+    policy["admissions"][0][field] = value
+    _write_json(inputs["policy"], policy)
+
+    with pytest.raises(manifest_module.ManifestError, match=message):
+        _manifest_from_cli(manifest_module, inputs, capsys)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (("account_id", "other-account"), "account differs"),
+        (("as_of_date", "2025-12-31"), "outside assignment"),
+        (("nav.status", "UNAVAILABLE"), "not AVAILABLE"),
+        (("nav.value", "0"), "strictly positive"),
+        (("nav.value", "-1"), "strictly positive"),
+    ],
+)
+def test_funded_admission_rejects_mutated_ledger_nav_evidence(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    mutation: tuple[str, str],
+    message: str,
+) -> None:
+    """Each cited NAV fact is an immutable account/date/availability/value claim."""
+    inputs = _write_valid_inputs(tmp_path)
+    ledger = json.loads(inputs["ledger"].read_text(encoding="utf-8"))
+    field, value = mutation
+    target = next(
+        observation
+        for observation in ledger["nav_observations"]
+        if observation["record_id"] == "nav-3"
+    )
+    if field.startswith("nav."):
+        target["nav"][field.removeprefix("nav.")] = value
+        if value == "UNAVAILABLE":
+            target["nav"].pop("value")
+            target["nav"]["reason"] = "synthetic outage"
+    else:
+        target[field] = value
+    _write_json(inputs["ledger"], ledger)
+    _refresh_ledger_identity(inputs)
+
+    with pytest.raises(manifest_module.ManifestError, match=message):
+        _manifest_from_cli(manifest_module, inputs, capsys)
+
+
+def test_blocked_and_funded_admission_evidence_are_mutually_exclusive(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A blocked row is an explicit reason, never dormant funded evidence."""
+    inputs = _write_valid_inputs(tmp_path)
+    policy = json.loads(inputs["policy"].read_text(encoding="utf-8"))
+    policy["admissions"][0]["status"] = "BLOCKED"
+    policy["admissions"][0]["reason"] = "RETRIEVAL_BOUNDARY_UNPROVEN"
+    _write_json(inputs["policy"], policy)
+
+    with pytest.raises(manifest_module.ManifestError, match="BLOCKED"):
+        _manifest_from_cli(manifest_module, inputs, capsys)
+
+    policy["admissions"][0] = {
+        key: value
+        for key, value in policy["admissions"][0].items()
+        if key not in {"authority_kind", "funded_nav_record_ids"}
+    }
+    policy["admissions"][0]["status"] = "FUNDED"
+    _write_json(inputs["policy"], policy)
+    with pytest.raises(manifest_module.ManifestError, match="FUNDED"):
+        _manifest_from_cli(manifest_module, inputs, capsys)
+
+
+def test_blocked_admission_preserves_policy_reason_in_manifest(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The explicit blocked-policy reason remains audited output provenance."""
+    inputs = _write_valid_inputs(tmp_path)
+    policy = json.loads(inputs["policy"].read_text(encoding="utf-8"))
+    policy["admissions"][0]["continuity_to_successor"] = False
+    policy["admissions"][1] = {
+        key: value
+        for key, value in policy["admissions"][1].items()
+        if key not in {"authority_kind", "funded_nav_record_ids"}
+    }
+    policy["admissions"][1].update(
+        {"status": "BLOCKED", "reason": "RETRIEVAL_BOUNDARY_UNPROVEN"}
+    )
+    _write_json(inputs["policy"], policy)
+
+    manifest = _manifest_from_cli(manifest_module, inputs, capsys)
+
+    assert manifest["rows"][1]["blocking_reason"] == "RETRIEVAL_BOUNDARY_UNPROVEN"
+    assert manifest["rows"][1]["admission_authority_kind"] == "NONE"
+    assert manifest["rows"][1]["funded_nav_record_ids"] == []
+
+
+def test_valid_funded_admission_retains_closed_nav_provenance_in_manifest(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The output retains source-bound admission evidence, not a prose label."""
+    manifest = _manifest_from_cli(
+        manifest_module, _write_valid_inputs(tmp_path), capsys
+    )
+
+    assert manifest["schema_version"] == 6
+    assert manifest["rows"][0]["admission_authority_kind"] == (
+        "LEDGER_AVAILABLE_POSITIVE_NAV_V1"
+    )
+    assert manifest["rows"][0]["funded_nav_record_ids"] == ["nav-3"]
 
 
 def _real_shape_assignments() -> list[dict[str, Any]]:
@@ -873,12 +1047,14 @@ def _bridge_admissions(
     return {
         ("bridge-account", "strategy-a", "2026-01-01", "2026-01-03"): {
             "status": "FUNDED",
-            "authority": "SYNTHETIC_TEST_AUTHORITY",
+            "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+            "funded_nav_record_ids": ["synthetic-nav-1"],
             "continuity_to_successor": predecessor_continuity,
         },
         ("bridge-account", "strategy-b", "2026-01-07", None): {
             "status": "FUNDED",
-            "authority": "SYNTHETIC_TEST_AUTHORITY",
+            "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+            "funded_nav_record_ids": ["synthetic-nav-2"],
             "continuity_to_successor": False,
         },
     }
@@ -1167,7 +1343,7 @@ def test_cli_emits_bound_source_identities_and_accepts_low_funded_nav(
     assert manifest_module.main(_producer_argv(inputs)) == 0
 
     manifest = json.loads(capsys.readouterr().out)
-    assert manifest["schema_version"] == 5
+    assert manifest["schema_version"] == 6
     assert manifest["source_identities"]["ledger"]["generation_id"] == (
         LEDGER_GENERATION_ID
     )
@@ -1361,6 +1537,7 @@ def test_cli_rejects_assignment_for_unknown_baseline_account(
         (
             "before every epoch",
             {
+                "record_id": "outside-before-epoch",
                 "account_id": "synthetic-account",
                 "as_of_date": "2025-12-31",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "49"},
@@ -1369,6 +1546,7 @@ def test_cli_rejects_assignment_for_unknown_baseline_account(
         (
             "unknown account",
             {
+                "record_id": "outside-unknown-account",
                 "account_id": "unknown-account",
                 "as_of_date": "2026-01-02",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
@@ -1727,7 +1905,8 @@ def test_producer_late_flows_with_same_day_external_legs_are_canonical_and_valid
         {
             epoch_key: {
                 "status": "FUNDED",
-                "authority": "SYNTHETIC_TEST_AUTHORITY",
+                "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                "funded_nav_record_ids": ["synthetic-nav-1"],
                 "continuity_to_successor": False,
             }
         },
@@ -2489,12 +2668,14 @@ def _continuity_case(manifest_module: Any, case: str) -> list[dict[str, Any]]:
     admissions = {
         first_key: {
             "status": "BLOCKED" if case == "BLOCKED_ADMISSION" else "FUNDED",
-            "authority": "SYNTHETIC_TEST_AUTHORITY",
+            "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+            "funded_nav_record_ids": ["synthetic-nav-1"],
             "continuity_to_successor": True,
         },
         second_key: {
             "status": "FUNDED",
-            "authority": "SYNTHETIC_TEST_AUTHORITY",
+            "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+            "funded_nav_record_ids": ["synthetic-nav-2"],
             "continuity_to_successor": False,
         },
     }
@@ -2564,7 +2745,9 @@ def test_failed_continuity_predecessor_blocks_successor(
         "effective_start": "2026-01-05",
         "effective_end": None,
         "admission_status": "FUNDED",
-        "admission_policy_reference": "SYNTHETIC_TEST_AUTHORITY",
+        "admission_policy_reference": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+        "admission_authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+        "funded_nav_record_ids": ["synthetic-nav-2"],
         "continuity_to_successor": False,
         "status": "BLOCKED_MISSING_PREDECESSOR_CONTINUITY",
         "blocking_reason": "PREDECESSOR_CONTINUITY_CLOSING_NAV_UNAVAILABLE",
