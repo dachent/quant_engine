@@ -25,7 +25,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
-    subcommands.add_parser("auth-test", help="Test BIT.com-API using one Wallet read")
+    auth_test = subcommands.add_parser(
+        "auth-test", help="Test BIT.com-API using one Wallet read"
+    )
+    auth_test.add_argument("--governance-evidence", required=True)
     subcommands.add_parser("catalog", help="Write the durable endpoint catalog")
 
     extract = subcommands.add_parser("extract", help="Extract raw and canonical data")
@@ -39,6 +42,7 @@ def _parser() -> argparse.ArgumentParser:
     extract.add_argument(
         "--resume", metavar="RUN_ID", help="Resume an interrupted RUNNING run"
     )
+    extract.add_argument("--governance-evidence", required=True)
 
     export = subcommands.add_parser("export", help="Generate CSV and XLSX outputs")
     export.add_argument("--run-id", required=True)
@@ -50,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
 
     run = subcommands.add_parser("run", help="Extract, export, and verify")
     run.add_argument("--full", action="store_true", required=True)
+    run.add_argument("--governance-evidence", required=True)
     return parser
 
 
@@ -77,6 +82,7 @@ def _extract(args: argparse.Namespace) -> int:
         mode=mode,
         run_id=args.resume,
         resume=bool(args.resume),
+        governance_evidence=args.governance_evidence,
         reporter=_report,
     )
     try:
@@ -124,7 +130,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "auth-test":
-            print(canonical_json(live_auth_test()))
+            print(
+                canonical_json(live_auth_test(_workspace(), args.governance_evidence))
+            )
             return 0
         if args.command == "catalog":
             csv_path, json_path = export_catalog(_workspace())
@@ -156,7 +164,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run":
             credentials = load_credentials()
             extractor = MatrixportExtractor(
-                _workspace(), mode="full", credentials=credentials, reporter=_report
+                _workspace(),
+                mode="full",
+                credentials=credentials,
+                governance_evidence=args.governance_evidence,
+                live_operation="run",
+                reporter=_report,
             )
             try:
                 extraction = extractor.extract()

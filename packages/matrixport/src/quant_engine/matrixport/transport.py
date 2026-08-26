@@ -17,6 +17,7 @@ import requests
 
 from .catalog import BASE_URL, PRODUCTION_HOST, Endpoint, get_endpoint
 from .credentials import ApiCredentials
+from .governance import LiveReadGovernance
 from .signing import QueryParams, build_v2_headers, encode_query
 
 
@@ -93,11 +94,12 @@ class ReadOnlyTransport:
         requests_per_second: float = 1.0,
         connect_timeout: float = 10.0,
         read_timeout: float = 60.0,
-        max_retries: int = 5,
+        max_retries: int = 0,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         random_source: Callable[[], float] = random.random,
+        governance: LiveReadGovernance | None = None,
     ) -> None:
         if requests_per_second <= 0:
             raise ValueError("requests_per_second must be positive")
@@ -105,6 +107,10 @@ class ReadOnlyTransport:
             raise ValueError("timeouts must be positive")
         if not 0 <= max_retries <= 5:
             raise ValueError("max_retries must be between 0 and 5")
+        if governance is None:
+            raise ValueError("live-read governance evidence is required")
+        if max_retries != 0:
+            raise ValueError("governed live reads require max_retries=0")
         self._credentials = credentials
         self._session = session or requests.Session()
         self._minimum_interval = 1.0 / requests_per_second
@@ -114,6 +120,7 @@ class ReadOnlyTransport:
         self._monotonic = monotonic
         self._sleep = sleeper
         self._random = random_source
+        self._governance = governance
         self._rate_lock = threading.Lock()
         self._last_request_started: float | None = None
 
@@ -249,6 +256,7 @@ class ReadOnlyTransport:
     ) -> SanitizedResponse:
         endpoint = self._resolve_endpoint(target, method)
         self._validate_params(endpoint, params)
+        self._governance.reserve_request(endpoint)
         encoded_query = encode_query(params)
         url = f"{BASE_URL}{endpoint.path}"
         if encoded_query:

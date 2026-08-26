@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import threading
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import pytest
 from quant_engine.matrixport import cli
 from quant_engine.matrixport import governance as governance_module
 from quant_engine.matrixport.catalog import catalog_rows, get_endpoint
-from quant_engine.matrixport.credentials import ApiCredentials
+from quant_engine.matrixport.credentials import ApiCredentials, CredentialError
 from quant_engine.matrixport.governance import (
     GovernanceError,
     TERMS_SHA256,
@@ -302,6 +303,67 @@ def test_live_cli_commands_require_a_governance_evidence_path(argv: list[str]) -
     with pytest.raises(SystemExit) as raised:
         cli.main(argv)
     assert raised.value.code == 2
+
+
+def test_run_reuses_the_exact_credentials_that_signed_live_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second credential read must not strand or mis-verify a completed run."""
+
+    signed_credentials = ApiCredentials("signed-key", "signed-secret")
+    credential_reads = 0
+    extractor_credentials: list[ApiCredentials] = []
+    verification_needles: list[bytes] = []
+
+    def sequential_credentials() -> ApiCredentials:
+        nonlocal credential_reads
+        credential_reads += 1
+        if credential_reads == 1:
+            return signed_credentials
+        raise CredentialError("credential rotated after the live read")
+
+    class FakeExtractor:
+        def __init__(self, workspace: Path, *, credentials=None, **_kwargs: object):
+            selected = credentials or sequential_credentials()
+            extractor_credentials.append(selected)
+            self.run_dir = workspace / "output" / "run-1"
+
+        def extract(self):
+            return SimpleNamespace(
+                run_id="run-1",
+                run_dir=self.run_dir,
+                request_count=1,
+                status="COMPLETED",
+            )
+
+        def close(self) -> None:
+            return None
+
+    def verify(_run_dir: Path, needles: list[bytes]) -> dict[str, object]:
+        verification_needles.extend(needles)
+        return {"ok": True, "status": "VERIFIED"}
+
+    monkeypatch.setattr(cli, "load_credentials", sequential_credentials)
+    monkeypatch.setattr(cli, "MatrixportExtractor", FakeExtractor)
+    monkeypatch.setattr(cli, "_workspace", lambda: tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "export_run",
+        lambda *_args: {"csv": [tmp_path / "one.csv"], "xlsx": {}},
+    )
+    monkeypatch.setattr(cli, "verify_run", verify)
+    monkeypatch.setattr(cli, "atomic_write", lambda *_args, **_kwargs: None)
+
+    assert (
+        cli.main(
+            ["run", "--full", "--governance-evidence", str(tmp_path / "grant.json")]
+        )
+        == 0
+    )
+    assert credential_reads == 1
+    assert extractor_credentials == [signed_credentials]
+    assert signed_credentials.key_identifier.encode("utf-8") in verification_needles
+    assert signed_credentials.signing_material.encode("utf-8") in verification_needles
 
 
 def test_copied_evidence_cannot_reset_the_governed_consumption_receipt(
