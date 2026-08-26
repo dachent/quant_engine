@@ -1167,7 +1167,7 @@ def test_cli_emits_bound_source_identities_and_accepts_low_funded_nav(
     assert manifest_module.main(_producer_argv(inputs)) == 0
 
     manifest = json.loads(capsys.readouterr().out)
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     assert manifest["source_identities"]["ledger"]["generation_id"] == (
         LEDGER_GENERATION_ID
     )
@@ -1199,6 +1199,20 @@ def test_reusable_build_candidate_matches_cli_output(
     """The panel can independently rebuild exactly the manifest the CLI emits."""
     inputs = _write_valid_inputs(tmp_path)
     expected = _manifest_from_cli(manifest_module, inputs, capsys)
+    coverage_bytes = inputs["flow_coverage"].read_bytes()
+    assert expected["source_identities"]["flow_coverage"] == {
+        "artifact": {
+            "artifact_id": "coverage/synthetic-account-flow-coverage.json",
+            "as_of_date": "2026-01-06",
+            "schema": {"name": "account-flow-coverage", "version": "1"},
+            "sha256": hashlib.sha256(coverage_bytes).hexdigest(),
+            "size_bytes": len(coverage_bytes),
+        },
+        "ledger_identity": expected["source_identities"]["ledger"],
+        "classified_flows_artifact": expected["source_identities"][
+            "classified_flows"
+        ]["artifact"],
+    }
 
     actual = manifest_module.build_manifest_candidate(
         ledger_path=inputs["ledger"],
@@ -2040,6 +2054,13 @@ def test_semantic_validation_cross_binds_duplicate_identities(
     with pytest.raises(manifest_module.ManifestError, match="assignment identity"):
         manifest_module.validate_manifest_schema(manifest)
 
+    manifest = json.loads(json.dumps(valid_manifest))
+    manifest["source_identities"]["flow_coverage"]["ledger_identity"][
+        "generation_id"
+    ] = "c" * 64
+    with pytest.raises(manifest_module.ManifestError, match="flow coverage ledger identity"):
+        manifest_module.validate_manifest_schema(manifest)
+
 
 @pytest.mark.parametrize(
     ("field", "replacement"),
@@ -2232,10 +2253,16 @@ def test_predecessor_continuity_annualized_ronc_counts_known_opening_exposure(
     ]
     _write_json(inputs["ledger"], ledger)
     _refresh_ledger_identity(inputs)
+    coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
+    coverage["rows"][0]["effective_end"] = "2027-01-03"
+    _write_json(inputs["flow_coverage"], coverage)
 
     manifest = _manifest_from_cli(manifest_module, inputs, capsys)
     successor = manifest["rows"][1]
 
+    assert coverage["rows"] == [
+        _coverage_row("2026-01-01", "2027-01-03")
+    ]
     assert successor["opening_basis"] == "PREDECESSOR_CLOSING_NAV"
     assert successor["observation_trace"]["links"][0]["start_date"] == "2026-01-03"
     assert Decimal(successor["return_on_net_capital"]) == Decimal("0.1")
@@ -2279,6 +2306,9 @@ def test_semantic_validation_requires_predecessor_link_to_end_at_first_observed_
     ]
     _write_json(inputs["ledger"], ledger)
     _refresh_ledger_identity(inputs)
+    coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
+    coverage["rows"][0]["effective_end"] = "2027-01-03"
+    _write_json(inputs["flow_coverage"], coverage)
 
     manifest = _manifest_from_cli(manifest_module, inputs, capsys)
     successor = manifest["rows"][1]

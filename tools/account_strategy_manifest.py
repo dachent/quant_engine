@@ -89,7 +89,7 @@ class InputSnapshot:
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
-_MANIFEST_SCHEMA_VERSION = 4
+_MANIFEST_SCHEMA_VERSION = 5
 _FLOW_CLASSES_SCHEMA_VERSION = 3
 _FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION = 1
 _FLOW_COVERAGE_SCHEMA_VERSION = 1
@@ -2078,6 +2078,7 @@ def _validate_manifest_semantics(
         raise ManifestError("manifest source identities must be an object")
     classified = source_identities.get("classified_flows")
     classification_policy = source_identities.get("flow_classification_policy")
+    flow_coverage = source_identities.get("flow_coverage")
     admission_policy = source_identities.get("admission_policy")
     if (
         not isinstance(classified, Mapping)
@@ -2087,6 +2088,17 @@ def _validate_manifest_semantics(
         raise ManifestError("manifest source identities are incomplete")
     if classified.get("ledger_identity") != source_identities.get("ledger"):
         raise ManifestError("classified ledger identity differs from ledger identity")
+    if flow_coverage is not None:
+        if not isinstance(flow_coverage, Mapping):
+            raise ManifestError("flow coverage source identity is invalid")
+        if flow_coverage.get("ledger_identity") != source_identities.get("ledger"):
+            raise ManifestError(
+                "flow coverage ledger identity differs from ledger identity"
+            )
+        if flow_coverage.get("classified_flows_artifact") != classified.get("artifact"):
+            raise ManifestError(
+                "flow coverage classified artifact differs from classified flows"
+            )
     if source_identities.get("assignment") != admission_policy.get("assignment"):
         raise ManifestError("assignment identity differs from admission policy")
     policy_artifact = classification_policy.get("artifact")
@@ -2829,7 +2841,7 @@ def build_manifest_candidate(
         ledger_identity,
         classification_policy_identity,
     )
-    flow_coverage, _flow_coverage_artifact = load_flow_coverage(
+    flow_coverage, flow_coverage_artifact = load_flow_coverage(
         flow_coverage_snapshot.json_object("flow coverage"),
         flow_coverage_snapshot,
         ledger_identity,
@@ -2859,6 +2871,11 @@ def build_manifest_candidate(
                 "classification_policy": classification_policy_reference,
             },
             "flow_classification_policy": classification_policy_identity,
+            "flow_coverage": {
+                "artifact": flow_coverage_artifact,
+                "ledger_identity": ledger_identity,
+                "classified_flows_artifact": classified_artifact,
+            },
             "admission_policy": admission_policy_identity,
             "assignment": admission_policy_identity["assignment"],
             "calculation_code": {

@@ -16,7 +16,7 @@
     "rows"
   ],
   "properties": {
-    "schema_version": {"const": 4},
+    "schema_version": {"const": 5},
     "artifact": {"const": "account-strategy-manifest"},
     "accounting_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
     "authority_readiness": {
@@ -105,6 +105,7 @@
         "baseline",
         "classified_flows",
         "flow_classification_policy",
+        "flow_coverage",
         "admission_policy",
         "assignment",
         "calculation_code"
@@ -150,6 +151,16 @@
               }
             },
             "artifact": {"$ref": "#/$defs/source_artifact"}
+          }
+        },
+        "flow_coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact", "ledger_identity", "classified_flows_artifact"],
+          "properties": {
+            "artifact": {"$ref": "#/$defs/source_artifact"},
+            "ledger_identity": {"$ref": "#/$defs/ledger_generation_source"},
+            "classified_flows_artifact": {"$ref": "#/$defs/source_artifact"}
           }
         },
         "admission_policy": {
