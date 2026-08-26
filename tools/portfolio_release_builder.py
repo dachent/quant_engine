@@ -375,7 +375,7 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
 def _recipe(path: Path) -> dict[str, Any]:
     recipe = _load(path, "vertical-build recipe")
     schema_version = recipe.get("schema_version")
-    if schema_version not in {6, 7, 8}:
+    if schema_version not in {6, 7, 9}:
         raise VerticalBuildError("vertical-build recipe schema is unsupported")
     required = {
         "as_of_date",
@@ -394,12 +394,13 @@ def _recipe(path: Path) -> dict[str, Any]:
     required.add(
         "provider_ledger_spec" if schema_version == 6 else "provider_ledger_generation"
     )
-    if schema_version == 8:
+    if schema_version == 9:
         required.update(
             {
                 "account_strategy_ledger",
                 "account_strategy_ledger_identity",
                 "account_strategy_classified_flows",
+                "account_strategy_flow_coverage",
                 "account_strategy_admission_policy",
             }
         )
@@ -454,7 +455,7 @@ def _recipe(path: Path) -> dict[str, Any]:
             "inventory_sha256": definition["inventory_sha256"],
         }:
             raise VerticalBuildError(f"{key} inventory differs")
-    if schema_version in {7, 8}:
+    if schema_version in {7, 9}:
         definition = recipe["provider_ledger_generation"]
         if not isinstance(definition, dict) or set(definition) != {
             "file_count",
@@ -470,11 +471,12 @@ def _recipe(path: Path) -> dict[str, Any]:
         }:
             raise VerticalBuildError("provider_ledger_generation inventory differs")
         _validated_reusable_provider_ledger(generation)
-    if schema_version == 8:
+    if schema_version == 9:
         for key in (
             "account_strategy_ledger",
             "account_strategy_ledger_identity",
             "account_strategy_classified_flows",
+            "account_strategy_flow_coverage",
             "account_strategy_admission_policy",
         ):
             definition = recipe[key]
@@ -526,6 +528,7 @@ def create_recipe(
     account_strategy_ledger: Path | None = None,
     account_strategy_ledger_identity: Path | None = None,
     account_strategy_classified_flows: Path | None = None,
+    account_strategy_flow_coverage: Path | None = None,
     account_strategy_admission_policy: Path | None = None,
 ) -> dict[str, Any]:
     date.fromisoformat(as_of_date)
@@ -537,6 +540,7 @@ def create_recipe(
         "account_strategy_ledger": account_strategy_ledger,
         "account_strategy_ledger_identity": account_strategy_ledger_identity,
         "account_strategy_classified_flows": account_strategy_classified_flows,
+        "account_strategy_flow_coverage": account_strategy_flow_coverage,
         "account_strategy_admission_policy": account_strategy_admission_policy,
     }
     supplied_financial_sources = [
@@ -546,7 +550,7 @@ def create_recipe(
         financial_sources
     ):
         raise VerticalBuildError(
-            "all four account-strategy financial sources must be supplied together"
+            "all five account-strategy financial sources must be supplied together"
         )
     if supplied_financial_sources and provider_ledger_generation is None:
         raise VerticalBuildError(
@@ -603,7 +607,7 @@ def create_recipe(
                 if value is not None
             }
         )
-        payload["schema_version"] = 8
+        payload["schema_version"] = 9
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
     return {"pipeline_id": pipeline_id, "recipe": str(output)}
@@ -3780,12 +3784,12 @@ def build_report(
 
 
 def _financial_epoch_inputs(recipe: Mapping[str, Any]) -> dict[str, Path] | None:
-    """Return the four independently bound inputs for a schema-8 release.
+    """Return the five independently bound inputs for a schema-9 release.
 
     Classification policy and UI templates deliberately do not appear here:
     they are repository-owned authorities, never recipe-controlled paths.
     """
-    if recipe["schema_version"] != 8:
+    if recipe["schema_version"] != 9:
         return None
     return {
         "ledger": _path(
@@ -3799,6 +3803,10 @@ def _financial_epoch_inputs(recipe: Mapping[str, Any]) -> dict[str, Path] | None
         "classified_flows": _path(
             recipe["account_strategy_classified_flows"]["path"],
             "account strategy classified flows",
+        ),
+        "flow_coverage": _path(
+            recipe["account_strategy_flow_coverage"]["path"],
+            "account strategy flow coverage",
         ),
         "admission_policy": _path(
             recipe["account_strategy_admission_policy"]["path"],
@@ -3851,6 +3859,8 @@ def _stage_account_strategy_manifest(
         report_baseline_id,
         "--flow-classes-json",
         str(financial_inputs["classified_flows"]),
+        "--flow-coverage-json",
+        str(financial_inputs["flow_coverage"]),
         "--classification-policy-json",
         str(ACCOUNT_STRATEGY_CLASSIFICATION_POLICY),
         "--admission-policy-json",
@@ -3858,7 +3868,7 @@ def _stage_account_strategy_manifest(
         "--format",
         "json",
     )
-    if manifest.get("schema_version") != 4:
+    if manifest.get("schema_version") != 5:
         raise VerticalBuildError("account-strategy manifest schema differs")
     staged = output_root / "account-strategy-manifest.json"
     _write_exact(staged, canonical_json_bytes(manifest))
@@ -3889,6 +3899,8 @@ def _panel_financial_arguments(
         str(baseline_root),
         "--manifest-classified-flows",
         str(financial_inputs["classified_flows"]),
+        "--manifest-flow-coverage",
+        str(financial_inputs["flow_coverage"]),
         "--manifest-classification-policy",
         str(ACCOUNT_STRATEGY_CLASSIFICATION_POLICY),
         "--manifest-admission-policy",
@@ -4017,7 +4029,7 @@ def publish_panel(
 ) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     legacy_panel = _path(recipe["legacy_panel"]["path"], "legacy panel")
-    if recipe["schema_version"] == 8 and account_strategy_manifest is None:
+    if recipe["schema_version"] == 9 and account_strategy_manifest is None:
         account_strategy_manifest = _stage_account_strategy_manifest(
             recipe,
             report_root,
@@ -4328,12 +4340,14 @@ def _validate_stage_financial_arguments(
     manifest_ledger: Path | None,
     manifest_ledger_identity: Path | None,
     manifest_classified_flows: Path | None,
+    manifest_flow_coverage: Path | None,
     manifest_admission_policy: Path | None,
 ) -> None:
     supplied = {
         "ledger": manifest_ledger,
         "ledger_identity": manifest_ledger_identity,
         "classified_flows": manifest_classified_flows,
+        "flow_coverage": manifest_flow_coverage,
         "admission_policy": manifest_admission_policy,
     }
     expected = _financial_epoch_inputs(recipe)
@@ -4345,7 +4359,7 @@ def _validate_stage_financial_arguments(
         return
     if any(path is None for path in supplied.values()):
         raise VerticalBuildError(
-            "financial stage requires all four epoch-manifest inputs"
+            "financial stage requires all five epoch-manifest inputs"
         )
     for key, expected_path in expected.items():
         observed = supplied[key]
@@ -4363,6 +4377,7 @@ def build_stage(
     manifest_ledger: Path | None = None,
     manifest_ledger_identity: Path | None = None,
     manifest_classified_flows: Path | None = None,
+    manifest_flow_coverage: Path | None = None,
     manifest_admission_policy: Path | None = None,
 ) -> dict[str, Any]:
     """Build exactly one source-to-panel stage from its predecessor outputs."""
@@ -4374,6 +4389,7 @@ def build_stage(
         manifest_ledger=manifest_ledger,
         manifest_ledger_identity=manifest_ledger_identity,
         manifest_classified_flows=manifest_classified_flows,
+        manifest_flow_coverage=manifest_flow_coverage,
         manifest_admission_policy=manifest_admission_policy,
     )
     history_contract = _history_contract_path(recipe)
@@ -4464,6 +4480,7 @@ def build_stage(
                 manifest_ledger=manifest_ledger,
                 manifest_ledger_identity=manifest_ledger_identity,
                 manifest_classified_flows=manifest_classified_flows,
+                manifest_flow_coverage=manifest_flow_coverage,
                 manifest_admission_policy=manifest_admission_policy,
             )
             panel = _load_panel_candidate_checkpoint(
@@ -4519,6 +4536,7 @@ def build_all(recipe_path: Path, output_root: Path) -> dict[str, Any]:
             "manifest_ledger": inputs["ledger"],
             "manifest_ledger_identity": inputs["ledger_identity"],
             "manifest_classified_flows": inputs["classified_flows"],
+            "manifest_flow_coverage": inputs["flow_coverage"],
             "manifest_admission_policy": inputs["admission_policy"],
         }
         if inputs is not None
@@ -4582,6 +4600,7 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--account-strategy-ledger", type=Path)
     recipe.add_argument("--account-strategy-ledger-identity", type=Path)
     recipe.add_argument("--account-strategy-classified-flows", type=Path)
+    recipe.add_argument("--account-strategy-flow-coverage", type=Path)
     recipe.add_argument("--account-strategy-admission-policy", type=Path)
     recipe.add_argument("--output", type=Path, required=True)
     stage = commands.add_parser("stage")
@@ -4605,6 +4624,7 @@ def _parser() -> argparse.ArgumentParser:
     stage.add_argument("--manifest-ledger", type=Path)
     stage.add_argument("--manifest-ledger-identity", type=Path)
     stage.add_argument("--manifest-classified-flows", type=Path)
+    stage.add_argument("--manifest-flow-coverage", type=Path)
     stage.add_argument("--manifest-admission-policy", type=Path)
     return parser
 
@@ -4637,6 +4657,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 account_strategy_ledger=args.account_strategy_ledger,
                 account_strategy_ledger_identity=args.account_strategy_ledger_identity,
                 account_strategy_classified_flows=args.account_strategy_classified_flows,
+                account_strategy_flow_coverage=args.account_strategy_flow_coverage,
                 account_strategy_admission_policy=args.account_strategy_admission_policy,
             )
         else:
@@ -4648,6 +4669,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest_ledger=args.manifest_ledger,
                 manifest_ledger_identity=args.manifest_ledger_identity,
                 manifest_classified_flows=args.manifest_classified_flows,
+                manifest_flow_coverage=args.manifest_flow_coverage,
                 manifest_admission_policy=args.manifest_admission_policy,
             )
     except (OSError, RuntimeError, ValueError) as exc:

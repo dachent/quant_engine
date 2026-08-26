@@ -673,11 +673,11 @@ def test_create_recipe_can_bind_verified_immutable_provider_ledger(
     assert accepted["provider_ledger_generation"]["path"] == str(generation)
 
 
-def test_create_recipe_schema8_binds_exact_financial_epoch_inputs(
+def test_create_recipe_schema9_binds_exact_financial_epoch_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Schema 8 admits precisely the four selected financial inputs.
+    """Schema 9 admits precisely the five selected financial inputs.
 
     The policy and template authorities are repository-owned implementation
     constants, so a recipe must not be able to substitute either one.
@@ -689,6 +689,7 @@ def test_create_recipe_schema8_binds_exact_financial_epoch_inputs(
         "account_strategy_ledger": tmp_path / "account-ledger.json",
         "account_strategy_ledger_identity": tmp_path / "account-ledger-id.json",
         "account_strategy_classified_flows": tmp_path / "classified-flows.json",
+        "account_strategy_flow_coverage": tmp_path / "flow-coverage.json",
         "account_strategy_admission_policy": tmp_path / "admission-policy.json",
     }
     for path in financial_inputs.values():
@@ -726,7 +727,7 @@ def test_create_recipe_schema8_binds_exact_financial_epoch_inputs(
 
     accepted = builder._recipe(output)
 
-    assert accepted["schema_version"] == 8
+    assert accepted["schema_version"] == 9
     assert set(accepted) - set(payload) == {
         *financial_inputs,
         "provider_ledger_generation",
@@ -2681,7 +2682,7 @@ def test_panel_publication_receipt_is_create_only_byte_idempotent(
         builder._panel_publication_receipt(recipe_path, recipe, output, candidate, qa)
 
 
-def test_schema8_stages_one_manifest_and_uses_it_for_every_panel_gate(
+def test_schema9_stages_one_manifest_and_uses_it_for_every_panel_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Financial panel build/verify/publish share one exact staged manifest."""
@@ -2697,12 +2698,13 @@ def test_schema8_stages_one_manifest_and_uses_it_for_every_panel_gate(
         "account_strategy_ledger": tmp_path / "account-ledger.json",
         "account_strategy_ledger_identity": tmp_path / "account-ledger-id.json",
         "account_strategy_classified_flows": tmp_path / "classified-flows.json",
+        "account_strategy_flow_coverage": tmp_path / "flow-coverage.json",
         "account_strategy_admission_policy": tmp_path / "admission-policy.json",
     }
     for key, path in financial_paths.items():
         path.write_text("{}", encoding="utf-8")
         payload[key] = _file_definition(path)
-    payload["schema_version"] = 8
+    payload["schema_version"] = 9
     recipe.write_bytes(canonical_json_bytes(payload))
     monkeypatch.setattr(
         builder,
@@ -2716,7 +2718,7 @@ def test_schema8_stages_one_manifest_and_uses_it_for_every_panel_gate(
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
         calls.append(args)
         if args[0] == "account_strategy_manifest.py":
-            return {"schema_version": 4}
+            return {"schema_version": 5}
         return {"candidate_dir": str(tmp_path / "candidate")}
 
     monkeypatch.setattr(builder, "_tool", fake_tool)
@@ -2825,6 +2827,9 @@ def test_schema8_stages_one_manifest_and_uses_it_for_every_panel_gate(
         assert call[call.index("--manifest-classified-flows") + 1] == str(
             financial_paths["account_strategy_classified_flows"]
         )
+        assert call[call.index("--manifest-flow-coverage") + 1] == str(
+            financial_paths["account_strategy_flow_coverage"]
+        )
         assert call[call.index("--manifest-admission-policy") + 1] == str(
             financial_paths["account_strategy_admission_policy"]
         )
@@ -2841,15 +2846,19 @@ def test_schema8_stages_one_manifest_and_uses_it_for_every_panel_gate(
         manifest_ledger=financial_paths["account_strategy_ledger"],
         manifest_ledger_identity=financial_paths["account_strategy_ledger_identity"],
         manifest_classified_flows=financial_paths["account_strategy_classified_flows"],
+        manifest_flow_coverage=financial_paths["account_strategy_flow_coverage"],
         manifest_admission_policy=financial_paths["account_strategy_admission_policy"],
     )
-    with pytest.raises(builder.VerticalBuildError, match="requires all four"):
+    with pytest.raises(builder.VerticalBuildError, match="requires all five"):
         builder._validate_stage_financial_arguments(
             parsed,
             manifest_ledger=financial_paths["account_strategy_ledger"],
             manifest_ledger_identity=None,
             manifest_classified_flows=financial_paths[
                 "account_strategy_classified_flows"
+            ],
+            manifest_flow_coverage=financial_paths[
+                "account_strategy_flow_coverage"
             ],
             manifest_admission_policy=financial_paths[
                 "account_strategy_admission_policy"

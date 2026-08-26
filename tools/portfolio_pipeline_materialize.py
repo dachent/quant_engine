@@ -73,9 +73,10 @@ EPOCH_MANIFEST_INPUTS = {
     "account_strategy_ledger": "--manifest-ledger",
     "account_strategy_ledger_identity": "--manifest-ledger-identity",
     "account_strategy_classified_flows": "--manifest-classified-flows",
+    "account_strategy_flow_coverage": "--manifest-flow-coverage",
     "account_strategy_admission_policy": "--manifest-admission-policy",
 }
-SCHEMA_8_VERTICAL_RECIPE_KEYS = frozenset(
+SCHEMA_9_VERTICAL_RECIPE_KEYS = frozenset(
     {
         "as_of_date",
         "base_factor_file",
@@ -459,18 +460,18 @@ def _validate_file_definition(value: object, label: str) -> Path:
 def _financial_epoch_manifest_inputs(
     vertical: Mapping[str, Any],
 ) -> dict[str, dict[str, object]] | None:
-    """Return the immutable four-file manifest authority for schema-8 recipes.
+    """Return the immutable five-file manifest authority for schema-9 recipes.
 
-    Schema 8 is deliberately an additive, fail-closed extension of schema 7:
-    the builder is allowed no caller-selected financial input beyond these four
+    Schema 9 is deliberately an additive, fail-closed extension of schema 7:
+    the builder is allowed no caller-selected financial input beyond these five
     file identities.  The returned definitions are freshly derived from the
     files, not copied from a mutable recipe object.
     """
 
-    if vertical.get("schema_version") != 8:
+    if vertical.get("schema_version") != 9:
         return None
-    if set(vertical) != SCHEMA_8_VERTICAL_RECIPE_KEYS:
-        raise MaterializationError("financial epoch manifest schema-8 inputs differ")
+    if set(vertical) != SCHEMA_9_VERTICAL_RECIPE_KEYS:
+        raise MaterializationError("financial epoch manifest schema-9 inputs differ")
     definitions: dict[str, dict[str, object]] = {}
     for key in EPOCH_MANIFEST_INPUTS:
         path = _validate_file_definition(
@@ -1165,9 +1166,9 @@ def _derive_product_authority(
     rederive_registry_path: Path | None = None,
 ) -> dict[str, Any]:
     vertical = _load(vertical_path, "vertical recipe")
-    if vertical.get("schema_version") not in {7, 8}:
+    if vertical.get("schema_version") not in {7, 9}:
         raise MaterializationError(
-            "financial MVP composition requires vertical recipe schema 7 or 8"
+            "financial MVP composition requires vertical recipe schema 7 or 9"
         )
     contract_path = contract_path.resolve()
     source_matrix_path = source_matrix_path.resolve()
@@ -1442,7 +1443,7 @@ def _recipe(path: Path) -> dict[str, Any]:
     )
     vertical = _load(vertical_path, "vertical recipe")
     if (
-        vertical.get("schema_version") not in {6, 7, 8}
+        vertical.get("schema_version") not in {6, 7, 9}
         or vertical.get("release_commit") != recipe["release_commit"]
         or vertical.get("as_of_date") != recipe["as_of_date"]
     ):
@@ -1530,7 +1531,7 @@ def _recipe(path: Path) -> dict[str, Any]:
 def _vertical_source_paths(vertical_path: Path) -> list[Path]:
     vertical = _load(vertical_path, "vertical recipe")
     schema_version = vertical.get("schema_version")
-    if schema_version not in {6, 7, 8}:
+    if schema_version not in {6, 7, 9}:
         raise MaterializationError("vertical recipe schema differs")
     paths = [vertical_path]
     for key in (
@@ -1603,11 +1604,11 @@ def _epoch_json_snapshot(path: Path, label: str) -> tuple[bytes, dict[str, Any]]
 def _financial_epoch_manifest_proof(
     recipe: Mapping[str, Any], output_root: Path
 ) -> dict[str, Any] | None:
-    """Independently prove the emitted schema-8 producer -> panel seam.
+    """Independently prove the emitted schema-9 producer -> panel seam.
 
     Recipe definitions are only selectors.  PASS evidence comes from reopening
     the exact emitted panel generation, checking its GenerationManifest, and
-    rebuilding the complete account-strategy manifest from the four selected
+    rebuilding the complete account-strategy manifest from the five selected
     inputs plus the exact emitted baseline generation and repository policy.
     The rebuilt object must equal both the staged producer artifact and the
     manifest embedded in dashboard data, so every row, status, value, and
@@ -1670,7 +1671,7 @@ def _financial_epoch_manifest_proof(
     )
     if (
         account_artifact.schema_name != "account-strategy-manifest"
-        or account_artifact.schema_version != "4"
+        or account_artifact.schema_version != "5"
         or (account_artifact.sha256, account_artifact.size_bytes)
         != (hashlib.sha256(staged_bytes).hexdigest(), len(staged_bytes))
         or (dashboard_artifact.sha256, dashboard_artifact.size_bytes)
@@ -1684,6 +1685,7 @@ def _financial_epoch_manifest_proof(
         "account_strategy_ledger": "input-bound/manifest_ledger",
         "account_strategy_ledger_identity": "input-bound/manifest_ledger_identity",
         "account_strategy_classified_flows": ("input-bound/manifest_classified_flows"),
+        "account_strategy_flow_coverage": ("input-bound/manifest_flow_coverage"),
         "account_strategy_admission_policy": ("input-bound/manifest_admission_policy"),
     }
     bound_inputs: dict[str, dict[str, object]] = {}
@@ -1725,6 +1727,7 @@ def _financial_epoch_manifest_proof(
             baseline_root=output_root / "stages" / "baseline",
             baseline_generation_id=baseline_generation_id,
             classified_flows_path=selected_paths["account_strategy_classified_flows"],
+            flow_coverage_path=selected_paths["account_strategy_flow_coverage"],
             classification_policy_path=ACCOUNT_STRATEGY_CLASSIFICATION_POLICY,
             admission_policy_path=selected_paths["account_strategy_admission_policy"],
         )
@@ -1830,7 +1833,7 @@ def create_recipe(
     rederive_receipt_registry: Path | None = None,
 ) -> dict[str, Any]:
     vertical = _load(vertical_recipe.resolve(), "vertical recipe")
-    if vertical.get("schema_version") not in {6, 7, 8}:
+    if vertical.get("schema_version") not in {6, 7, 9}:
         raise MaterializationError("vertical recipe schema differs")
     expected: dict[str, object] = {}
     for role in RELEASE_ROLES:

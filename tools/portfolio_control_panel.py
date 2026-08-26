@@ -6049,6 +6049,7 @@ def _account_manifest(
     baseline_root: Path | None,
     baseline_generation_id: str | None,
     classified_flows_path: Path | None,
+    flow_coverage_path: Path | None,
     classification_policy_path: Path | None,
     admission_policy_path: Path | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -6064,6 +6065,7 @@ def _account_manifest(
         "baseline root": baseline_root,
         "baseline generation id": baseline_generation_id,
         "classified flows": classified_flows_path,
+        "flow coverage": flow_coverage_path,
         "flow classification policy": classification_policy_path,
         "admission policy": admission_policy_path,
     }
@@ -6120,6 +6122,7 @@ def _account_manifest(
         assert baseline_root is not None
         assert baseline_generation_id is not None
         assert classified_flows_path is not None
+        assert flow_coverage_path is not None
         assert classification_policy_path is not None
         assert admission_policy_path is not None
         try:
@@ -6129,6 +6132,7 @@ def _account_manifest(
                 baseline_root=baseline_root,
                 baseline_generation_id=baseline_generation_id,
                 classified_flows_path=classified_flows_path,
+                flow_coverage_path=flow_coverage_path,
                 classification_policy_path=classification_policy_path,
                 admission_policy_path=admission_policy_path,
             )
@@ -6240,6 +6244,7 @@ def _rendered_files(
     manifest_ledger_identity_path: Path | None = None,
     manifest_baseline_root: Path | None = None,
     manifest_classified_flows_path: Path | None = None,
+    manifest_flow_coverage_path: Path | None = None,
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
 ) -> tuple[
@@ -6351,6 +6356,7 @@ def _rendered_files(
             else None
         ),
         classified_flows_path=manifest_classified_flows_path,
+        flow_coverage_path=manifest_flow_coverage_path,
         classification_policy_path=manifest_classification_policy_path,
         admission_policy_path=manifest_admission_policy_path,
     )
@@ -6397,6 +6403,7 @@ def _rendered_files(
                 "ledger",
                 "baseline",
                 "classified_flows",
+                "flow_coverage",
                 "admission_policy",
             )
         }
@@ -6599,6 +6606,7 @@ def _rendered_files(
         assert manifest_ledger_identity_path is not None
         assert manifest_baseline_root is not None
         assert manifest_classified_flows_path is not None
+        assert manifest_flow_coverage_path is not None
         assert manifest_classification_policy_path is not None
         assert manifest_admission_policy_path is not None
         manifest_sources = _object(
@@ -6643,6 +6651,10 @@ def _rendered_files(
                 "manifest_classified_flows": (
                     manifest_classified_flows_path,
                     source_artifact_sha256("classified_flows"),
+                ),
+                "manifest_flow_coverage": (
+                    manifest_flow_coverage_path,
+                    source_artifact_sha256("flow_coverage"),
                 ),
                 "manifest_classification_policy": (
                     manifest_classification_policy_path,
@@ -6785,6 +6797,7 @@ def build_candidate(
     manifest_ledger_identity_path: Path | None = None,
     manifest_baseline_root: Path | None = None,
     manifest_classified_flows_path: Path | None = None,
+    manifest_flow_coverage_path: Path | None = None,
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -6815,6 +6828,7 @@ def build_candidate(
         manifest_ledger_identity_path=manifest_ledger_identity_path,
         manifest_baseline_root=manifest_baseline_root,
         manifest_classified_flows_path=manifest_classified_flows_path,
+        manifest_flow_coverage_path=manifest_flow_coverage_path,
         manifest_classification_policy_path=manifest_classification_policy_path,
         manifest_admission_policy_path=manifest_admission_policy_path,
     )
@@ -6896,6 +6910,7 @@ def verify_candidate(
     manifest_ledger_identity_path: Path | None = None,
     manifest_baseline_root: Path | None = None,
     manifest_classified_flows_path: Path | None = None,
+    manifest_flow_coverage_path: Path | None = None,
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -6926,6 +6941,7 @@ def verify_candidate(
         manifest_ledger_identity_path=manifest_ledger_identity_path,
         manifest_baseline_root=manifest_baseline_root,
         manifest_classified_flows_path=manifest_classified_flows_path,
+        manifest_flow_coverage_path=manifest_flow_coverage_path,
         manifest_classification_policy_path=manifest_classification_policy_path,
         manifest_admission_policy_path=manifest_admission_policy_path,
     )
@@ -8145,6 +8161,7 @@ def publish_panel(
     manifest_ledger_identity_path: Path | None = None,
     manifest_baseline_root: Path | None = None,
     manifest_classified_flows_path: Path | None = None,
+    manifest_flow_coverage_path: Path | None = None,
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
     coordinated_release_receipt: Path | None = None,
@@ -8181,6 +8198,7 @@ def publish_panel(
         manifest_ledger_identity_path=manifest_ledger_identity_path,
         manifest_baseline_root=manifest_baseline_root,
         manifest_classified_flows_path=manifest_classified_flows_path,
+        manifest_flow_coverage_path=manifest_flow_coverage_path,
         manifest_classification_policy_path=manifest_classification_policy_path,
         manifest_admission_policy_path=manifest_admission_policy_path,
     )
@@ -8215,6 +8233,7 @@ def publish_panel(
         manifest_ledger_identity_path=manifest_ledger_identity_path,
         manifest_baseline_root=manifest_baseline_root,
         manifest_classified_flows_path=manifest_classified_flows_path,
+        manifest_flow_coverage_path=manifest_flow_coverage_path,
         manifest_classification_policy_path=manifest_classification_policy_path,
         manifest_admission_policy_path=manifest_admission_policy_path,
     )
@@ -8321,7 +8340,7 @@ def publish_panel(
                     artifact_id="input/account-strategy-manifest.json",
                     as_of_date=publication_as_of,
                     schema_name="account-strategy-manifest",
-                    schema_version="4",
+                    schema_version="5",
                     sha256=_text(
                         data["meta"]["account_manifest_sha256"],
                         "account manifest snapshot hash",
@@ -8613,7 +8632,7 @@ def _parser() -> argparse.ArgumentParser:
             "--financial-mode",
             action="store_true",
             help=(
-                "Require a v4 epoch manifest and independently selected "
+                "Require a v5 epoch manifest and independently selected "
                 "producer inputs; intended for financial release wiring."
             ),
         )
@@ -8636,6 +8655,11 @@ def _parser() -> argparse.ArgumentParser:
             "--manifest-classified-flows",
             type=Path,
             help="Selected classified-flow artifact used by the manifest",
+        )
+        command.add_argument(
+            "--manifest-flow-coverage",
+            type=Path,
+            help="Selected account-and-interval flow-completeness authority",
         )
         command.add_argument(
             "--manifest-classification-policy",
@@ -8729,6 +8753,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest_ledger_identity_path=args.manifest_ledger_identity,
                 manifest_baseline_root=args.manifest_baseline_root,
                 manifest_classified_flows_path=args.manifest_classified_flows,
+                manifest_flow_coverage_path=args.manifest_flow_coverage,
                 manifest_classification_policy_path=(
                     args.manifest_classification_policy
                 ),
@@ -8756,6 +8781,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest_ledger_identity_path=args.manifest_ledger_identity,
                 manifest_baseline_root=args.manifest_baseline_root,
                 manifest_classified_flows_path=args.manifest_classified_flows,
+                manifest_flow_coverage_path=args.manifest_flow_coverage,
                 manifest_classification_policy_path=(
                     args.manifest_classification_policy
                 ),
@@ -8791,6 +8817,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest_ledger_identity_path=args.manifest_ledger_identity,
                 manifest_baseline_root=args.manifest_baseline_root,
                 manifest_classified_flows_path=args.manifest_classified_flows,
+                manifest_flow_coverage_path=args.manifest_flow_coverage,
                 manifest_classification_policy_path=(
                     args.manifest_classification_policy
                 ),

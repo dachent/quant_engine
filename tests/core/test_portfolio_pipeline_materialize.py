@@ -315,6 +315,7 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
         {
             "account_id": "synthetic-account",
             "strategy_id": "synthetic-strategy",
+            "strategy_mapping_disposition": "STRATEGY_MAPPED",
             "effective_start": AS_OF.isoformat(),
             "effective_end": None,
         }
@@ -413,9 +414,56 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
             "events": [],
         },
     )
+    flow_coverage_path = target / "account_strategy_flow_coverage.json"
+    classified_bytes = classified_flows_path.read_bytes()
+    _write_json(
+        flow_coverage_path,
+        {
+            "schema_version": 1,
+            "artifact_id": "coverage/synthetic-account-flow-coverage.json",
+            "as_of_date": AS_OF.isoformat(),
+            "ledger_identity": {
+                "generation_id": ledger_identity["generation_id"],
+                "artifact": ledger_identity["artifact"],
+            },
+            "classified_flows_artifact": {
+                "artifact_id": "classified/synthetic-flows.json",
+                "as_of_date": AS_OF.isoformat(),
+                "schema": {"name": "classified-flows", "version": "3"},
+                "sha256": hashlib.sha256(classified_bytes).hexdigest(),
+                "size_bytes": len(classified_bytes),
+            },
+            "rows": [
+                {
+                    "account_id": "synthetic-account",
+                    "effective_start": AS_OF.isoformat(),
+                    "effective_end": AS_OF.isoformat(),
+                    "status": "COMPLETE",
+                    "source_artifact_ids": ["receipt/synthetic-account-interval.json"],
+                    "authority_kind": "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V1",
+                    "reason": None,
+                }
+            ],
+        },
+    )
     admission_policy_path = target / "account_strategy_admission_policy.json"
     assignment_sha256 = hashlib.sha256(
-        json.dumps(assignments, sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(
+            [
+                {
+                    key: assignment[key]
+                    for key in (
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
+                }
+                for assignment in assignments
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
     _write_json(
         admission_policy_path,
@@ -428,7 +476,15 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
             "assignment_sha256": assignment_sha256,
             "admissions": [
                 {
-                    **assignments[0],
+                    **{
+                        key: assignments[0][key]
+                        for key in (
+                            "account_id",
+                            "strategy_id",
+                            "effective_start",
+                            "effective_end",
+                        )
+                    },
                     "status": "FUNDED",
                     "authority": "SYNTHETIC_TEST_AUTHORITY",
                     "continuity_to_successor": False,
@@ -440,6 +496,7 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
         "account_strategy_ledger": ledger_path,
         "account_strategy_ledger_identity": ledger_identity_path,
         "account_strategy_classified_flows": classified_flows_path,
+        "account_strategy_flow_coverage": flow_coverage_path,
         "account_strategy_admission_policy": admission_policy_path,
     }
     producer = materializer._account_strategy_manifest_module()
@@ -449,6 +506,7 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
         baseline_root=proof_root / "stages" / "baseline",
         baseline_generation_id=baseline_generation.name,
         classified_flows_path=classified_flows_path,
+        flow_coverage_path=flow_coverage_path,
         classification_policy_path=(
             materializer.ACCOUNT_STRATEGY_CLASSIFICATION_POLICY
         ),
@@ -488,7 +546,7 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
             size_bytes=len(staged_bytes),
             as_of_date=AS_OF,
             schema_name="account-strategy-manifest",
-            schema_version="4",
+            schema_version="5",
         ),
         SourceArtifact(
             artifact_id="panel/data/dashboard_data.json",
@@ -511,6 +569,7 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
         "account_strategy_ledger": "input-bound/manifest_ledger",
         "account_strategy_ledger_identity": "input-bound/manifest_ledger_identity",
         "account_strategy_classified_flows": "input-bound/manifest_classified_flows",
+        "account_strategy_flow_coverage": "input-bound/manifest_flow_coverage",
         "account_strategy_admission_policy": "input-bound/manifest_admission_policy",
     }.items():
         content = inputs[key].read_bytes()
@@ -749,7 +808,7 @@ def test_create_recipe_binds_financial_mvp_authority_and_admission_receipt(
     )
 
 
-def test_schema_v8_rebinds_exact_epoch_manifest_inputs_into_every_stage(
+def test_schema_v9_rebinds_exact_epoch_manifest_inputs_into_every_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The materializer must not let the builder substitute financial inputs."""
@@ -764,18 +823,18 @@ def test_schema_v8_rebinds_exact_epoch_manifest_inputs_into_every_stage(
         vertical[key] = _definition(path)
     vertical.pop("provider_ledger_spec")
     vertical["provider_ledger_generation"] = _dir_definition(product.generation)
-    vertical["schema_version"] = 8
+    vertical["schema_version"] = 9
     _write_json(vertical_path, vertical)
     monkeypatch.setattr(
         materializer, "_financial_mvp_module", lambda: product.financial_module
     )
-    pipeline_recipe = tmp_path / "schema-v8-pipeline-recipe.json"
+    pipeline_recipe = tmp_path / "schema-v9-pipeline-recipe.json"
 
     materializer.create_recipe(
         vertical_recipe=vertical_path,
         proof_root=proof_root,
         qa_dir=Path(source["qa_dir"]["path"]),
-        pipeline_id="schema-v8-financial-manifest",
+        pipeline_id="schema-v9-financial-manifest",
         output=pipeline_recipe,
         financial_mvp_contract=product.contract_path,
         financial_mvp_source_matrix=product.matrix_path,
@@ -845,6 +904,9 @@ def test_schema_v8_rebinds_exact_epoch_manifest_inputs_into_every_stage(
         ],
         "--manifest-classified-flows": manifest_inputs[
             "account_strategy_classified_flows"
+        ],
+        "--manifest-flow-coverage": manifest_inputs[
+            "account_strategy_flow_coverage"
         ],
         "--manifest-admission-policy": manifest_inputs[
             "account_strategy_admission_policy"
@@ -976,7 +1038,7 @@ def test_schema_v8_rebinds_exact_epoch_manifest_inputs_into_every_stage(
         materializer._semantic_gate_payload(accepted, epoch_manifest_proof=forged_proof)
 
 
-def test_schema_v8_declares_the_authority_snapshot_it_emits(
+def test_schema_v9_declares_the_authority_snapshot_it_emits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source_recipe, proof_root = _fixture(tmp_path)
@@ -989,17 +1051,17 @@ def test_schema_v8_declares_the_authority_snapshot_it_emits(
         vertical[key] = _definition(path)
     vertical.pop("provider_ledger_spec")
     vertical["provider_ledger_generation"] = _dir_definition(product.generation)
-    vertical["schema_version"] = 8
+    vertical["schema_version"] = 9
     _write_json(vertical_path, vertical)
     monkeypatch.setattr(
         materializer, "_financial_mvp_module", lambda: product.financial_module
     )
-    pipeline_recipe = tmp_path / "schema-v8-pipeline-recipe.json"
+    pipeline_recipe = tmp_path / "schema-v9-pipeline-recipe.json"
     materializer.create_recipe(
         vertical_recipe=vertical_path,
         proof_root=proof_root,
         qa_dir=Path(source["qa_dir"]["path"]),
-        pipeline_id="schema-v8-authority-snapshot",
+        pipeline_id="schema-v9-authority-snapshot",
         output=pipeline_recipe,
         financial_mvp_contract=product.contract_path,
         financial_mvp_source_matrix=product.matrix_path,
@@ -1019,7 +1081,7 @@ def test_schema_v8_declares_the_authority_snapshot_it_emits(
     monkeypatch.setattr(
         materializer, "_validate_output_path_budget", lambda _root, _recipe: None
     )
-    output_root = tmp_path / "schema-v8-dag"
+    output_root = tmp_path / "schema-v9-dag"
     spec_path = output_root / "pipeline-spec.json"
     materializer.build_spec(pipeline_recipe, output_root, spec_path)
 
@@ -1033,7 +1095,7 @@ def test_schema_v8_declares_the_authority_snapshot_it_emits(
     assert declared["size_bytes"] == len(emitted)
 
 
-def test_schema_v8_rejects_epoch_manifest_input_drift_after_recipe_creation(
+def test_schema_v9_rejects_epoch_manifest_input_drift_after_recipe_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source_recipe, proof_root = _fixture(tmp_path)
@@ -1046,7 +1108,7 @@ def test_schema_v8_rejects_epoch_manifest_input_drift_after_recipe_creation(
         vertical[key] = _definition(path)
     vertical.pop("provider_ledger_spec")
     vertical["provider_ledger_generation"] = _dir_definition(product.generation)
-    vertical["schema_version"] = 8
+    vertical["schema_version"] = 9
     _write_json(vertical_path, vertical)
     monkeypatch.setattr(
         materializer, "_financial_mvp_module", lambda: product.financial_module
@@ -1073,7 +1135,7 @@ def test_schema_v8_rejects_epoch_manifest_input_drift_after_recipe_creation(
         materializer._recipe(pipeline_recipe)
 
 
-def test_schema_v8_rejects_missing_required_epoch_manifest_input(
+def test_schema_v9_rejects_missing_required_epoch_manifest_input(
     tmp_path: Path,
 ) -> None:
     source_recipe, _proof_root = _fixture(tmp_path)
@@ -1085,18 +1147,18 @@ def test_schema_v8_rejects_missing_required_epoch_manifest_input(
     _write_json(provider_generation / "catalog.json", {"synthetic": True})
     vertical.pop("provider_ledger_spec")
     vertical["provider_ledger_generation"] = _dir_definition(provider_generation)
-    vertical["schema_version"] = 8
+    vertical["schema_version"] = 9
 
     _write_json(vertical_path, vertical)
 
     with pytest.raises(
         materializer.MaterializationError,
-        match="financial epoch manifest schema-8 inputs differ",
+        match="financial epoch manifest schema-9 inputs differ",
     ):
         materializer._vertical_source_paths(vertical_path)
 
 
-def test_schema_v8_rejects_any_extra_financial_input_definition(
+def test_schema_v9_rejects_any_extra_financial_input_definition(
     tmp_path: Path,
 ) -> None:
     source_recipe, _proof_root = _fixture(tmp_path)
@@ -1115,12 +1177,12 @@ def test_schema_v8_rejects_any_extra_financial_input_definition(
     extra = tmp_path / "epoch-manifest" / "unapproved.json"
     _write_json(extra, {"input": "unapproved"})
     vertical["unapproved_financial_input"] = _definition(extra)
-    vertical["schema_version"] = 8
+    vertical["schema_version"] = 9
     _write_json(vertical_path, vertical)
 
     with pytest.raises(
         materializer.MaterializationError,
-        match="financial epoch manifest schema-8 inputs differ",
+        match="financial epoch manifest schema-9 inputs differ",
     ):
         materializer._vertical_source_paths(vertical_path)
 
@@ -1709,7 +1771,7 @@ def test_production_spec_binds_stable_twenty_root_authority(
         pipeline_status(stripped_spec)
 
 
-def test_schema_v8_production_spec_binds_real_epoch_manifest_authority(
+def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Schema-8 producer evidence must survive the production rebind seam."""
@@ -1736,12 +1798,12 @@ def test_schema_v8_production_spec_binds_real_epoch_manifest_authority(
         vertical[key] = _definition(path)
     vertical.pop("provider_ledger_spec")
     vertical["provider_ledger_generation"] = _dir_definition(product.generation)
-    vertical["schema_version"] = 8
+    vertical["schema_version"] = 9
     _write_json(vertical_path, vertical)
     monkeypatch.setattr(
         materializer, "_financial_mvp_module", lambda: product.financial_module
     )
-    recipe_path = tmp_path / "schema-v8-production-recipe.json"
+    recipe_path = tmp_path / "schema-v9-production-recipe.json"
     materializer.create_recipe(
         vertical_recipe=vertical_path,
         proof_root=prepared_root,

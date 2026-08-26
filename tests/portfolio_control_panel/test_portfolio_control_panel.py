@@ -997,6 +997,7 @@ def _panel_baseline_catalog(
             {
                 "account_id": "account-seam",
                 "strategy_id": "strategy-a",
+                "strategy_mapping_disposition": "STRATEGY_MAPPED",
                 "effective_start": "2026-01-01",
                 "effective_end": None,
             }
@@ -5418,6 +5419,7 @@ def test_account_manifest_flows_through_build_and_verify(
         manifest_ledger_identity_path=authority["ledger_identity"],
         manifest_baseline_root=authority["baseline"],
         manifest_classified_flows_path=authority["flows"],
+        manifest_flow_coverage_path=authority["flow_coverage"],
         manifest_classification_policy_path=authority["classification_policy"],
         manifest_admission_policy_path=authority["policy"],
     )
@@ -5440,6 +5442,7 @@ def test_account_manifest_flows_through_build_and_verify(
         manifest_ledger_identity_path=authority["ledger_identity"],
         manifest_baseline_root=authority["baseline"],
         manifest_classified_flows_path=authority["flows"],
+        manifest_flow_coverage_path=authority["flow_coverage"],
         manifest_classification_policy_path=authority["classification_policy"],
         manifest_admission_policy_path=authority["policy"],
     )
@@ -5459,6 +5462,7 @@ def test_account_manifest_flows_through_build_and_verify(
             manifest_ledger_identity_path=authority["ledger_identity"],
             manifest_baseline_root=authority["baseline"],
             manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
         )["all_passed"]
@@ -5471,7 +5475,7 @@ def test_account_manifest_flows_through_build_and_verify(
     assert "renderAccountManifest" in renderer
 
 
-def test_panel_formal_schema_embeds_strict_manifest_v4_contract(
+def test_panel_formal_schema_embeds_strict_manifest_v5_contract(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
@@ -5527,6 +5531,63 @@ def test_financial_mode_requires_manifest_and_independent_authorities(
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             financial_mode=True,
+        )
+
+
+def test_financial_mode_requires_separately_selected_flow_coverage(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """Omitting the receipt input must not let financial mode treat flows as zero."""
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "manifest", "56832.54", accepted_baseline_root=inputs["baseline"]
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independently selected.*flow coverage",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_manifest_rejects_mutated_flow_coverage_input(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The panel rebuild must bind the exact receipt bytes, not only its path."""
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    coverage_path = Path(financial["manifest_flow_coverage_path"])
+    coverage_path.write_bytes(b" " + coverage_path.read_bytes())
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="account manifest differs from independently rebuilt candidate",
+    ):
+        panel.verify_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            Path(built["candidate_dir"]),
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
         )
 
 
@@ -5601,6 +5662,7 @@ def test_financial_mode_rejects_manifest_from_a_different_as_of_candidate(
             manifest_ledger_identity_path=authority["ledger_identity"],
             manifest_baseline_root=authority["baseline"],
             manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
         )
@@ -5632,6 +5694,7 @@ def test_financial_mode_rejects_manifest_outside_usd_reporting_perimeter(
             manifest_ledger_identity_path=authority["ledger_identity"],
             manifest_baseline_root=authority["baseline"],
             manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
         )
@@ -5664,6 +5727,7 @@ def test_financial_mode_rejects_self_consistent_unapproved_policy_path(
             manifest_ledger_identity_path=authority["ledger_identity"],
             manifest_baseline_root=authority["baseline"],
             manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=copied_policy,
             manifest_admission_policy_path=authority["policy"],
         )
@@ -5695,6 +5759,7 @@ def test_financial_mode_rejects_report_unbound_manifest_baseline(
             manifest_ledger_identity_path=authority["ledger_identity"],
             manifest_baseline_root=authority["baseline"],
             manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
         )
@@ -5807,6 +5872,7 @@ def test_financial_mode_rebuild_rejects_independent_authority_drift(
             manifest_ledger_identity_path=authority["ledger_identity"],
             manifest_baseline_root=authority["baseline"],
             manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
         )
@@ -5869,6 +5935,7 @@ def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
             manifest_ledger_identity_path=authority["ledger_identity"],
             manifest_baseline_root=authority["baseline"],
             manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
             manifest_classification_policy_path=authority["classification_policy"],
             manifest_admission_policy_path=authority["policy"],
         )
@@ -6385,7 +6452,7 @@ def _produce_manifest(
     accepted_baseline_root: Path | None = None,
     accounting_currency: str = "USD",
 ) -> tuple[Path, dict[str, Path]]:
-    """Build a real v4 manifest and retain its independently selected inputs."""
+    """Build a real v5 manifest and retain its independently selected inputs."""
     target_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = target_dir / "ledger.json"
     ledger = {
@@ -6438,6 +6505,7 @@ def _produce_manifest(
                 {
                     "account_id": "account-seam",
                     "strategy_id": "strategy-a",
+                    "strategy_mapping_disposition": "STRATEGY_MAPPED",
                     "effective_start": "2026-01-01",
                     "effective_end": None,
                 }
@@ -6457,7 +6525,22 @@ def _produce_manifest(
         )
     assignments = baseline["assignments"]
     assignment_sha256 = hashlib.sha256(
-        json.dumps(assignments, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            [
+                {
+                    key: assignment[key]
+                    for key in (
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
+                }
+                for assignment in assignments
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     ).hexdigest()
     admission_policy_path = target_dir / "admission-policy.json"
     _write_json(
@@ -6471,7 +6554,15 @@ def _produce_manifest(
             "assignment_sha256": assignment_sha256,
             "admissions": [
                 {
-                    **assignments[0],
+                    **{
+                        key: assignments[0][key]
+                        for key in (
+                            "account_id",
+                            "strategy_id",
+                            "effective_start",
+                            "effective_end",
+                        )
+                    },
                     "status": "FUNDED",
                     "authority": "SYNTHETIC_TEST_AUTHORITY",
                     "continuity_to_successor": False,
@@ -6506,12 +6597,47 @@ def _produce_manifest(
             "events": [],
         },
     )
+    flow_coverage_path = target_dir / "flow-coverage.json"
+    classified_bytes = flows_path.read_bytes()
+    _write_json(
+        flow_coverage_path,
+        {
+            "schema_version": 1,
+            "artifact_id": "coverage/synthetic-account-flow-coverage.json",
+            "as_of_date": as_of,
+            "ledger_identity": {
+                "generation_id": ledger_identity["generation_id"],
+                "artifact": ledger_identity["artifact"],
+            },
+            "classified_flows_artifact": {
+                "artifact_id": "classified/synthetic-flows.json",
+                "as_of_date": as_of,
+                "schema": {"name": "classified-flows", "version": "3"},
+                "sha256": hashlib.sha256(classified_bytes).hexdigest(),
+                "size_bytes": len(classified_bytes),
+            },
+            "rows": [
+                {
+                    "account_id": "account-seam",
+                    "effective_start": "2026-01-01",
+                    "effective_end": as_of,
+                    "status": "COMPLETE",
+                    "source_artifact_ids": [
+                        "receipt/synthetic-account-interval.json"
+                    ],
+                    "authority_kind": "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V1",
+                    "reason": None,
+                }
+            ],
+        },
+    )
     manifest = build_manifest_candidate(
         ledger_path=ledger_path,
         ledger_identity_path=ledger_identity_path,
         baseline_root=baseline_root,
         baseline_generation_id=generation_id,
         classified_flows_path=flows_path,
+        flow_coverage_path=flow_coverage_path,
         classification_policy_path=classification_policy_path,
         admission_policy_path=admission_policy_path,
     )
@@ -6522,6 +6648,7 @@ def _produce_manifest(
         "ledger_identity": ledger_identity_path,
         "baseline": baseline_root,
         "flows": flows_path,
+        "flow_coverage": flow_coverage_path,
         "classification_policy": classification_policy_path,
         "policy": admission_policy_path,
     }
@@ -6540,6 +6667,7 @@ def _financial_manifest_kwargs(
         "manifest_ledger_identity_path": authority["ledger_identity"],
         "manifest_baseline_root": authority["baseline"],
         "manifest_classified_flows_path": authority["flows"],
+        "manifest_flow_coverage_path": authority["flow_coverage"],
         "manifest_classification_policy_path": authority["classification_policy"],
         "manifest_admission_policy_path": authority["policy"],
     }
@@ -6969,6 +7097,7 @@ def test_account_manifest_producer_to_publish_seam(
         manifest_ledger_identity_path=authority["ledger_identity"],
         manifest_baseline_root=authority["baseline"],
         manifest_classified_flows_path=authority["flows"],
+        manifest_flow_coverage_path=authority["flow_coverage"],
         manifest_classification_policy_path=authority["classification_policy"],
         manifest_admission_policy_path=authority["policy"],
     )
@@ -6992,6 +7121,7 @@ def test_account_manifest_producer_to_publish_seam(
         "manifest_ledger_identity_path": authority["ledger_identity"],
         "manifest_baseline_root": authority["baseline"],
         "manifest_classified_flows_path": authority["flows"],
+        "manifest_flow_coverage_path": authority["flow_coverage"],
         "manifest_classification_policy_path": authority["classification_policy"],
         "manifest_admission_policy_path": authority["policy"],
     }
@@ -7010,6 +7140,7 @@ def test_account_manifest_producer_to_publish_seam(
         manifest_ledger_identity_path=authority["ledger_identity"],
         manifest_baseline_root=authority["baseline"],
         manifest_classified_flows_path=authority["flows"],
+        manifest_flow_coverage_path=authority["flow_coverage"],
         manifest_classification_policy_path=authority["classification_policy"],
         manifest_admission_policy_path=authority["policy"],
         coordinated_release_receipt=receipt,
@@ -7034,6 +7165,7 @@ def test_account_manifest_producer_to_publish_seam(
         manifest_ledger_identity_path=other_authority["ledger_identity"],
         manifest_baseline_root=other_authority["baseline"],
         manifest_classified_flows_path=other_authority["flows"],
+        manifest_flow_coverage_path=other_authority["flow_coverage"],
         manifest_classification_policy_path=other_authority["classification_policy"],
         manifest_admission_policy_path=other_authority["policy"],
     )
