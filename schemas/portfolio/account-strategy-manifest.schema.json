@@ -297,20 +297,6 @@
           ]
         },
         "blocking_reason": {"type": "string", "minLength": 1},
-        "late_flows": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["class", "date", "value"],
-            "properties": {
-              "class": {"enum": ["external", "internal_in", "internal_out"]},
-              "date": {"$ref": "#/$defs/date"},
-              "value": {"$ref": "#/$defs/decimal"}
-            }
-          }
-        },
         "start": {"$ref": "#/$defs/date"},
         "end": {"$ref": "#/$defs/date"},
         "opening_capital": {"$ref": "#/$defs/decimal"},
@@ -351,7 +337,7 @@
               "admission_authority_kind": {"const": "LEDGER_AVAILABLE_POSITIVE_NAV_V1"},
               "funded_nav_record_ids": {"minItems": 1}
             },
-            "not": {"anyOf": [{"required": ["blocking_reason"]}, {"required": ["late_flows"]}, {"required": ["nav_observation_trace"]}]}
+            "not": {"anyOf": [{"required": ["blocking_reason"]}, {"required": ["nav_observation_trace"]}]}
           }
         },
         {
@@ -364,7 +350,6 @@
               "funded_nav_record_ids": {"maxItems": 0}
             },
             "allOf": [
-              {"not": {"required": ["late_flows"]}},
               {"not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observation_trace"]}, {"required": ["nav_observations"]}]}}
             ]
           }
@@ -379,7 +364,6 @@
               "funded_nav_record_ids": {"minItems": 1}
             },
             "allOf": [
-              {"not": {"required": ["late_flows"]}},
               {"not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observation_trace"]}, {"required": ["nav_observations"]}]}}
             ]
           }
@@ -387,7 +371,6 @@
         {
           "if": {"properties": {"status": {"const": "FLOWS_AFTER_CLOSING_NAV"}}, "required": ["status"]},
           "then": {
-            "required": ["late_flows"],
             "properties": {
               "admission_status": {"const": "FUNDED"},
               "admission_authority_kind": {"const": "LEDGER_AVAILABLE_POSITIVE_NAV_V1"},
@@ -395,7 +378,7 @@
             },
             "allOf": [
               {"not": {"required": ["blocking_reason"]}},
-              {"not": {"anyOf": [{"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observation_trace"]}, {"required": ["nav_observations"]}]}}
+              {"not": {"anyOf": [{"required": ["late_flows"]}, {"required": ["start"]}, {"required": ["end"]}, {"required": ["opening_capital"]}, {"required": ["deposits"]}, {"required": ["internal_in"]}, {"required": ["invested"]}, {"required": ["external_withdrawals"]}, {"required": ["internal_out"]}, {"required": ["withdrawn"]}, {"required": ["net_capital"]}, {"required": ["current_value"]}, {"required": ["gain"]}, {"required": ["return_on_net_capital"]}, {"required": ["annualized_return_on_net_capital"]}, {"required": ["xirr_diagnostic"]}, {"required": ["observation_linked_return"]}, {"required": ["observed_hwm_index"]}, {"required": ["observed_max_drawdown"]}, {"required": ["opening_basis"]}, {"required": ["observation_trace"]}, {"required": ["capital_flow_trace"]}, {"required": ["nav_observation_trace"]}, {"required": ["nav_observations"]}]}}
             ]
           }
         }

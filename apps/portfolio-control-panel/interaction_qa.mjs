@@ -115,7 +115,7 @@ if (!epochManifest || !Array.isArray(epochManifest.rows)) {
     if (!rendered.cells[0].text || rendered.cells[1].text !== row.strategy_id) return false;
     if (row.status !== "OK") {
       const blocker = row.status === "FLOWS_AFTER_CLOSING_NAV"
-        ? `${row.status}: ${(row.late_flows || []).map((flow) => `${flow.date} ${flow.class} ${exactMoney(flow.value)}`).join("; ") || "late-flow evidence unavailable"}`
+        ? row.status
         : `${row.status}: ${row.blocking_reason || "blocking reason unavailable"}`;
       return rendered.cells[2].primary === row.effective_start
         && rendered.cells[2].secondary === `${row.effective_end || "open"} · ${blocker}`

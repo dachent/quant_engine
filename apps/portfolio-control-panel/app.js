@@ -434,11 +434,7 @@
   };
   const manifestBlockerText = (row) => {
     if (row.status === "FLOWS_AFTER_CLOSING_NAV") {
-      const lateFlows = Array.isArray(row.late_flows) ? row.late_flows : [];
-      const evidence = lateFlows.map((flow) =>
-        `${safe(flow.date)} ${safe(flow.class)} ${manifestMoney(flow.value)}`
-      ).join("; ");
-      return `${safe(row.status)}: ${evidence || "late-flow evidence unavailable"}`;
+      return safe(row.status);
     }
     return `${safe(row.status)}: ${safe(row.blocking_reason || "blocking reason unavailable")}`;
   };

@@ -1725,34 +1725,20 @@ def analyze_epoch(
     if len(days) < 3:
         return None
     closing_nav_date = days[-1]
-    late_sources = [
-        (label, d, sign * v)
-        for label, sign, source_days in (
-            ("external", 1, external_in_by_day),
-            ("external", -1, external_out_by_day),
-            ("internal_in", 1, int_in_by_day),
-            ("internal_out", -1, int_out_by_day),
+    if any(
+        flow_date > closing_nav_date
+        for source_days in (
+            external_in_by_day,
+            external_out_by_day,
+            int_in_by_day,
+            int_out_by_day,
         )
-        for d, v in source_days.items()
-        if d > closing_nav_date
-    ]
-    if late_sources:
+        for flow_date in source_days
+    ):
         # Fail-closed (reviewer P1): a flow after the last funded NAV would
         # corrupt the money identity while being absent from Current. The
         # epoch stays unavailable until a covering NAV observation exists.
-        return {
-            "unavailable_status": "FLOWS_AFTER_CLOSING_NAV",
-            "late_flows": [
-                {
-                    "class": label,
-                    "date": day,
-                    "value": _fixed_decimal(value),
-                }
-                for label, day, value in sorted(
-                    late_sources, key=lambda item: (item[1], item[0], item[2])
-                )
-            ],
-        }
+        return {"unavailable_status": "FLOWS_AFTER_CLOSING_NAV"}
 
     if prev_closing is None and any(
         day <= first_funded
@@ -2070,8 +2056,6 @@ def assemble_manifest(
                     **base,
                     "status": stats["unavailable_status"],
                 }
-                if "late_flows" in stats:
-                    unavailable_row["late_flows"] = stats["late_flows"]
                 if "blocking_reason" in stats:
                     unavailable_row["blocking_reason"] = stats["blocking_reason"]
                 rows.append(unavailable_row)
@@ -2274,38 +2258,18 @@ def _validate_manifest_semantics(
         else:
             raise ManifestError(f"row {index} admission status is invalid")
         status = row.get("status")
-        late_flows = row.get("late_flows")
         if status == "FLOWS_AFTER_CLOSING_NAV":
-            if (
-                "capital_flow_trace" in row
-                or "nav_observation_trace" in row
-            ):
-                raise ManifestError(f"row {index} blocked late-flow row has a trace")
-            if not isinstance(late_flows, list) or not late_flows:
-                raise ManifestError(f"row {index} late-flow evidence is invalid")
-            normalized_late_flows: list[tuple[str, str, Decimal]] = []
-            for late_index, late in enumerate(late_flows):
-                if not isinstance(late, Mapping):
-                    raise ManifestError(f"row {index} late-flow evidence is invalid")
-                flow_class = late.get("class")
-                if flow_class not in {"external", "internal_in", "internal_out"}:
-                    raise ManifestError(f"row {index} late-flow evidence is invalid")
-                normalized_late_flows.append(
-                    (
-                        _iso_date(
-                            late.get("date"),
-                            f"row[{index}].late_flows[{late_index}].date",
-                        ),
-                        str(flow_class),
-                        _manifest_decimal(
-                            late.get("value"),
-                            f"row[{index}].late_flows[{late_index}].value",
-                            money=True,
-                        ),
-                    )
-                )
-            if normalized_late_flows != sorted(normalized_late_flows):
-                raise ManifestError(f"row {index} late-flow evidence is not ordered")
+            forbidden_fields = (
+                "late_flows", "start", "end", "opening_capital", "deposits",
+                "internal_in", "invested", "external_withdrawals", "internal_out",
+                "withdrawn", "net_capital", "current_value", "gain",
+                "return_on_net_capital", "annualized_return_on_net_capital",
+                "xirr_diagnostic", "observation_linked_return", "observed_hwm_index",
+                "observed_max_drawdown", "opening_basis", "observation_trace",
+                "capital_flow_trace", "nav_observation_trace", "nav_observations",
+            )
+            if any(field in row for field in forbidden_fields):
+                raise ManifestError(f"row {index} blocked late-flow row has evidence")
             continue
 
         if status != "OK":

@@ -6274,7 +6274,7 @@ def test_account_manifest_renderer_is_decimal_safe_and_uses_exact_blockers() -> 
     assert "Observed return" in section
     assert "observed_hwm_index" in section
     assert "manifestBlockerText" in section
-    assert "row.late_flows" in section
+    assert "row.late_flows" not in section
     index = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
     assert 'id="account-manifest-authority"' in index
     assert "Independently rebuilt in financial mode" not in index
@@ -6297,8 +6297,7 @@ def test_account_manifest_renderer_formats_exact_percentages_in_node() -> None:
         + "manifestPct('0'),manifestPct('0.005'),manifestPct('0.1367'),"
         + "manifestPct('-0.2289'),manifestFixed('9007199254740993.005',2),"
         + "manifestFixed('9007199254740993.015',2),manifestPct('-0.00001'),"
-        + "manifestBlockerText({status:'FLOWS_AFTER_CLOSING_NAV',"
-        + "late_flows:[{date:'2026-08-14',class:'external',value:'123.45'}]})"
+        + "manifestBlockerText({status:'FLOWS_AFTER_CLOSING_NAV'})"
         + "]));"
     )
     result = subprocess.run(
@@ -6317,7 +6316,7 @@ def test_account_manifest_renderer_formats_exact_percentages_in_node() -> None:
         "9,007,199,254,740,993.00",
         "9,007,199,254,740,993.02",
         "0.00%",
-        "FLOWS_AFTER_CLOSING_NAV: 2026-08-14 external 123.45",
+        "FLOWS_AFTER_CLOSING_NAV",
     ]
 
 

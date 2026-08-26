@@ -1638,7 +1638,7 @@ def test_validator_rejects_blocked_row_with_financial_metrics(
         manifest_module.validate_manifest_schema(manifest)
 
 
-def test_validator_requires_nonempty_late_flows_and_canonical_dates(
+def test_validator_allows_trace_free_late_flow_block_and_rejects_late_flows(
     manifest_module: Any,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1646,9 +1646,8 @@ def test_validator_requires_nonempty_late_flows_and_canonical_dates(
     manifest = _manifest_from_cli(
         manifest_module, _write_valid_inputs(tmp_path), capsys
     )
-    row = manifest["rows"][0]
+    row = manifest["rows"][-1]
     row["status"] = "FLOWS_AFTER_CLOSING_NAV"
-    row["late_flows"] = []
     for field in (
         "start",
         "end",
@@ -1675,10 +1674,9 @@ def test_validator_requires_nonempty_late_flows_and_canonical_dates(
     ):
         row.pop(field)
 
-    with pytest.raises(manifest_module.ManifestError, match="formal schema"):
-        manifest_module.validate_manifest_schema(manifest)
+    manifest_module.validate_manifest_schema(manifest)
 
-    row["late_flows"] = [{"class": "external", "date": "2026-1-7", "value": "10"}]
+    row["late_flows"] = [{"class": "external", "date": "2026-01-07", "value": "10"}]
     with pytest.raises(manifest_module.ManifestError, match="formal schema"):
         manifest_module.validate_manifest_schema(manifest)
 
@@ -1693,7 +1691,6 @@ def test_validator_rejects_late_flow_status_with_forbidden_trace(
     )
     row = manifest["rows"][-1]
     row["status"] = "FLOWS_AFTER_CLOSING_NAV"
-    row["late_flows"] = [{"class": "external", "date": "2026-01-07", "value": "10"}]
     for field in (
         "start",
         "end",
@@ -1881,7 +1878,7 @@ def test_same_day_opposite_external_flows_preserve_gross_legs(
     assert stats["gain"] == manifest_module.Decimal("0")
 
 
-def test_producer_late_flows_with_same_day_external_legs_are_canonical_and_valid(
+def test_producer_late_flows_emit_no_self_asserted_evidence(
     manifest_module: Any,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1915,11 +1912,8 @@ def test_producer_late_flows_with_same_day_external_legs_are_canonical_and_valid
         _test_complete_coverage(manifest_module, "synthetic-account"),
     )
     produced_row = produced["rows"][0]
-    assert produced_row["late_flows"] == [
-        {"class": "external", "date": "2026-01-07", "value": "-5"},
-        {"class": "external", "date": "2026-01-07", "value": "10"},
-    ]
-
+    assert produced_row["status"] == "FLOWS_AFTER_CLOSING_NAV"
+    assert "late_flows" not in produced_row
     assert "capital_flow_trace" not in produced_row
     assert "nav_observation_trace" not in produced_row
 
@@ -1970,13 +1964,11 @@ def test_late_flow_block_emits_no_trace_and_schema_forbids_one(
         "funded_nav_record_ids": ["synthetic-nav-1"],
         "continuity_to_successor": False,
         "status": "FLOWS_AFTER_CLOSING_NAV",
-        "late_flows": [{"class": "external", "date": "2026-01-07", "value": "10"}],
     }
 
     manifest = _manifest_from_cli(manifest_module, _write_valid_inputs(tmp_path), capsys)
     row = manifest["rows"][-1]
     row["status"] = "FLOWS_AFTER_CLOSING_NAV"
-    row["late_flows"] = [{"class": "external", "date": "2026-01-07", "value": "10"}]
     for field in (
         "start", "end", "opening_capital", "deposits", "internal_in", "invested",
         "external_withdrawals", "internal_out", "withdrawn", "net_capital",
@@ -1987,7 +1979,7 @@ def test_late_flow_block_emits_no_trace_and_schema_forbids_one(
     ):
         row.pop(field)
     manifest_module.validate_manifest_schema(manifest)
-    row["capital_flow_trace"] = []
+    row["late_flows"] = [{"class": "external", "date": "2026-01-07", "value": "10"}]
     with pytest.raises(manifest_module.ManifestError, match="formal schema"):
         manifest_module.validate_manifest_schema(manifest)
 
