@@ -1807,6 +1807,7 @@ def test_successor_observation_link_includes_predecessor_closing_segment(
     "navs",
     [
         ["100", "0", "100"],
+        ["0", "100", "0"],
         ["-1", "100", "0", "100"],
     ],
 )
@@ -1923,44 +1924,75 @@ def test_producer_late_flows_with_same_day_external_legs_are_canonical_and_valid
         {"class": "external", "date": "2026-01-07", "value": "10"},
     ]
 
-    manifest = _manifest_from_cli(
-        manifest_module, _write_valid_inputs(tmp_path), capsys
+    assert "capital_flow_trace" not in produced_row
+    assert "nav_observation_trace" not in produced_row
+
+
+def test_late_flow_block_emits_no_trace_and_schema_forbids_one(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    epoch_key = ("synthetic-account", "synthetic-strategy-b", "2026-01-04", None)
+    produced = manifest_module.assemble_manifest(
+        {
+            "synthetic-account": {
+                "2026-01-04": Decimal("70"),
+                "2026-01-05": Decimal("75"),
+                "2026-01-06": Decimal("80"),
+            }
+        },
+        {"synthetic-account": {"provider": "SYNTHETIC"}},
+        {
+            "external_in": {"synthetic-account": {"2026-01-07": Decimal("10")}},
+            "external_out": {"synthetic-account": {}},
+            "internal_in": {"synthetic-account": {}},
+            "internal_out": {"synthetic-account": {}},
+        },
+        {"synthetic-account": [{"_key": epoch_key}]},
+        {
+            epoch_key: {
+                "status": "FUNDED",
+                "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                "funded_nav_record_ids": ["synthetic-nav-1"],
+                "continuity_to_successor": False,
+            }
+        },
+        {},
+        _test_complete_coverage(manifest_module, "synthetic-account"),
     )
+
+    assert produced["rows"][0] == {
+        "account_id": "synthetic-account",
+        "provider": "SYNTHETIC",
+        "strategy_id": "synthetic-strategy-b",
+        "effective_start": "2026-01-04",
+        "effective_end": None,
+        "admission_status": "FUNDED",
+        "admission_policy_reference": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+        "admission_authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+        "funded_nav_record_ids": ["synthetic-nav-1"],
+        "continuity_to_successor": False,
+        "status": "FLOWS_AFTER_CLOSING_NAV",
+        "late_flows": [{"class": "external", "date": "2026-01-07", "value": "10"}],
+    }
+
+    manifest = _manifest_from_cli(manifest_module, _write_valid_inputs(tmp_path), capsys)
     row = manifest["rows"][-1]
-    row["status"] = produced_row["status"]
-    row["late_flows"] = produced_row["late_flows"]
-    row["capital_flow_trace"] = produced_row["capital_flow_trace"]
-    row["nav_observation_trace"] = produced_row["nav_observation_trace"]
+    row["status"] = "FLOWS_AFTER_CLOSING_NAV"
+    row["late_flows"] = [{"class": "external", "date": "2026-01-07", "value": "10"}]
     for field in (
-        "start",
-        "end",
-        "opening_capital",
-        "deposits",
-        "internal_in",
-        "invested",
-        "external_withdrawals",
-        "internal_out",
-        "withdrawn",
-        "net_capital",
-        "current_value",
-        "gain",
-        "return_on_net_capital",
-        "annualized_return_on_net_capital",
-        "xirr_diagnostic",
-        "observation_linked_return",
-        "observed_hwm_index",
-        "observed_max_drawdown",
-        "opening_basis",
-        "observation_trace",
-        "nav_observations",
+        "start", "end", "opening_capital", "deposits", "internal_in", "invested",
+        "external_withdrawals", "internal_out", "withdrawn", "net_capital",
+        "current_value", "gain", "return_on_net_capital",
+        "annualized_return_on_net_capital", "xirr_diagnostic",
+        "observation_linked_return", "observed_hwm_index", "observed_max_drawdown",
+        "opening_basis", "observation_trace", "capital_flow_trace", "nav_observations",
     ):
         row.pop(field)
-
     manifest_module.validate_manifest_schema(manifest)
-    row["late_flows"][0]["value"] = "-4"
-    with pytest.raises(
-        manifest_module.ManifestError, match="late-flow evidence differs"
-    ):
+    row["capital_flow_trace"] = []
+    with pytest.raises(manifest_module.ManifestError, match="formal schema"):
         manifest_module.validate_manifest_schema(manifest)
 
 
@@ -2597,6 +2629,37 @@ def test_predecessor_link_includes_every_flow_before_first_successor_nav(
         "net_flow"
     ] == manifest_module.Decimal("20")
     assert stats["observation_linked_return"] == manifest_module.Decimal("0")
+
+
+def test_delayed_successor_link_includes_all_intervening_flow_legs_once(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-06": Decimal("117"),
+            "2026-01-09": Decimal("117"),
+            "2026-01-12": Decimal("117"),
+        },
+        {"2026-01-02": Decimal("10"), "2026-01-04": Decimal("5")},
+        {"2026-01-05": Decimal("3")},
+        {"2026-01-03": Decimal("7")},
+        {"2026-01-04": Decimal("2")},
+        Decimal("100"),
+        "2026-01-02",
+        None,
+        "2026-01-01",
+    )
+
+    assert stats is not None
+    assert stats["deposits"] == Decimal("15")
+    assert stats["external_withdrawals"] == Decimal("3")
+    assert stats["internal_in"] == Decimal("7")
+    assert stats["internal_out"] == Decimal("2")
+    assert [link["net_flow"] for link in stats["observation_trace"]["links"]] == [
+        Decimal("17"),
+        Decimal("0"),
+        Decimal("0"),
+    ]
 
 
 def test_missing_predecessor_block_is_impossible_after_ok_predecessor(

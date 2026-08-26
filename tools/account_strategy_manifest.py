@@ -1717,6 +1717,11 @@ def analyze_epoch(
     if first_funded is None:
         return None
     days = [day for day in all_days if day >= first_funded]
+    if any(window_navs[day] <= 0 for day in days):
+        return {
+            "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
+            "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
+        }
     if len(days) < 3:
         return None
     closing_nav_date = days[-1]
@@ -1747,10 +1752,6 @@ def analyze_epoch(
                     late_sources, key=lambda item: (item[1], item[0], item[2])
                 )
             ],
-            "capital_flow_trace": capital_flow_trace,
-            "nav_observation_trace": [
-                {"date": day, "nav": window_navs[day]} for day in days
-            ],
         }
 
     if prev_closing is None and any(
@@ -1769,12 +1770,6 @@ def analyze_epoch(
                 "FLOW_ON_OR_BEFORE_FIRST_AVAILABLE_NAV_WITHOUT_PREDECESSOR_CLOSING"
             ),
         }
-    if any(window_navs[day] <= 0 for day in days):
-        return {
-            "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
-            "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
-        }
-
     opening = prev_closing if prev_closing is not None else window_navs[first_funded]
     opening_basis = (
         "PREDECESSOR_CLOSING_NAV" if prev_closing is not None else "FIRST_AVAILABLE_NAV"
@@ -2075,13 +2070,8 @@ def assemble_manifest(
                     **base,
                     "status": stats["unavailable_status"],
                 }
-                for evidence_field in (
-                    "late_flows",
-                    "capital_flow_trace",
-                    "nav_observation_trace",
-                ):
-                    if evidence_field in stats:
-                        unavailable_row[evidence_field] = stats[evidence_field]
+                if "late_flows" in stats:
+                    unavailable_row["late_flows"] = stats["late_flows"]
                 if "blocking_reason" in stats:
                     unavailable_row["blocking_reason"] = stats["blocking_reason"]
                 rows.append(unavailable_row)
@@ -2286,6 +2276,39 @@ def _validate_manifest_semantics(
         status = row.get("status")
         late_flows = row.get("late_flows")
         if status == "FLOWS_AFTER_CLOSING_NAV":
+            if (
+                "capital_flow_trace" in row
+                or "nav_observation_trace" in row
+            ):
+                raise ManifestError(f"row {index} blocked late-flow row has a trace")
+            if not isinstance(late_flows, list) or not late_flows:
+                raise ManifestError(f"row {index} late-flow evidence is invalid")
+            normalized_late_flows: list[tuple[str, str, Decimal]] = []
+            for late_index, late in enumerate(late_flows):
+                if not isinstance(late, Mapping):
+                    raise ManifestError(f"row {index} late-flow evidence is invalid")
+                flow_class = late.get("class")
+                if flow_class not in {"external", "internal_in", "internal_out"}:
+                    raise ManifestError(f"row {index} late-flow evidence is invalid")
+                normalized_late_flows.append(
+                    (
+                        _iso_date(
+                            late.get("date"),
+                            f"row[{index}].late_flows[{late_index}].date",
+                        ),
+                        str(flow_class),
+                        _manifest_decimal(
+                            late.get("value"),
+                            f"row[{index}].late_flows[{late_index}].value",
+                            money=True,
+                        ),
+                    )
+                )
+            if normalized_late_flows != sorted(normalized_late_flows):
+                raise ManifestError(f"row {index} late-flow evidence is not ordered")
+            continue
+
+        if False:  # retained below only until the v6 late-flow trace validator is removed
             nav_trace = row.get("nav_observation_trace")
             if not isinstance(nav_trace, list) or len(nav_trace) < 3:
                 raise ManifestError(f"row {index} late-flow NAV evidence is invalid")
