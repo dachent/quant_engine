@@ -1275,11 +1275,13 @@ def test_duplicate_account_date_nav_is_rejected_even_when_values_match(
         "accounting_currency": "USD",
         "nav_observations": [
             {
+                "record_id": "synthetic-nav-duplicate-a",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
             },
             {
+                "record_id": "synthetic-nav-duplicate-b",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
@@ -1488,11 +1490,13 @@ def test_nav_series_rejects_available_unavailable_duplicate_account_date(
         "accounting_currency": "USD",
         "nav_observations": [
             {
+                "record_id": "synthetic-nav-available",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
                 "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
             },
             {
+                "record_id": "synthetic-nav-unavailable",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
                 "nav": {"currency": "USD", "status": "UNAVAILABLE"},
@@ -2057,6 +2061,7 @@ def test_annualized_return_on_net_capital_is_consistently_linear(
                 "accounting_currency": "USD",
                 "nav_observations": [
                     {
+                        "record_id": "synthetic-nav-fractional-cent",
                         "account_id": "synthetic-account",
                         "as_of_date": "2026-01-01",
                         "nav": {
@@ -2129,6 +2134,7 @@ def test_nav_status_contract_is_explicit_and_fail_closed(
         "accounting_currency": "USD",
         "nav_observations": [
             {
+                "record_id": "synthetic-nav-status-contract",
                 "account_id": "synthetic-account",
                 "as_of_date": "2026-01-01",
                 "nav": nav,
@@ -2415,21 +2421,27 @@ def test_predecessor_continuity_annualized_ronc_counts_known_opening_exposure(
     ledger["nav_observations"] = [
         *ledger["nav_observations"][:3],
         {
+            "record_id": "nav-2026-01-13",
             "account_id": "synthetic-account",
             "as_of_date": "2026-01-13",
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
         },
         {
+            "record_id": "nav-2026-06-01",
             "account_id": "synthetic-account",
             "as_of_date": "2026-06-01",
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
         },
         {
+            "record_id": "nav-2027-01-03",
             "account_id": "synthetic-account",
             "as_of_date": "2027-01-03",
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": "77"},
         },
     ]
+    policy = json.loads(inputs["policy"].read_text(encoding="utf-8"))
+    policy["admissions"][1]["funded_nav_record_ids"] = ["nav-2027-01-03"]
+    _write_json(inputs["policy"], policy)
     _write_json(inputs["ledger"], ledger)
     _refresh_ledger_identity(inputs)
     coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
@@ -2464,16 +2476,19 @@ def test_semantic_validation_requires_predecessor_link_to_end_at_first_observed_
     ledger = json.loads(inputs["ledger"].read_text(encoding="utf-8"))
     successor_observations = [
         {
+            "record_id": "nav-2026-01-13",
             "account_id": "synthetic-account",
             "as_of_date": "2026-01-13",
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
         },
         {
+            "record_id": "nav-2026-06-01",
             "account_id": "synthetic-account",
             "as_of_date": "2026-06-01",
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
         },
         {
+            "record_id": "nav-2027-01-03",
             "account_id": "synthetic-account",
             "as_of_date": "2027-01-03",
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": "77"},
@@ -2483,6 +2498,9 @@ def test_semantic_validation_requires_predecessor_link_to_end_at_first_observed_
         *ledger["nav_observations"][:3],
         *successor_observations,
     ]
+    policy = json.loads(inputs["policy"].read_text(encoding="utf-8"))
+    policy["admissions"][1]["funded_nav_record_ids"] = ["nav-2027-01-03"]
+    _write_json(inputs["policy"], policy)
     _write_json(inputs["ledger"], ledger)
     _refresh_ledger_identity(inputs)
     coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
