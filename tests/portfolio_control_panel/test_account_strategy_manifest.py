@@ -349,14 +349,8 @@ def test_cli_accepts_real_shape_null_strategies_without_calculating_them(
     manifest_module: Any,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-strategy interval remains perimeter evidence, never an epoch row.
-
-    Formal-schema validation is separately covered; the local `rpds` extension
-    cannot load under the sandbox identity, so keep this producer-boundary test
-    focused on the partition, admission, evidence, and assembly path.
-    """
+    """A non-strategy interval remains perimeter evidence, never an epoch row."""
     inputs = _write_valid_inputs(tmp_path)
     assignments = _real_shape_assignments()
     baseline_path = (
@@ -388,7 +382,6 @@ def test_cli_accepts_real_shape_null_strategies_without_calculating_them(
     classified["events"][0]["account_id"] = "mapped-account"
     _write_json(inputs["flows"], classified)
     _refresh_ledger_identity(inputs)
-    monkeypatch.setattr(manifest_module, "validate_manifest_schema", lambda _: None)
 
     manifest = _manifest_from_cli(manifest_module, inputs, capsys)
 
@@ -484,6 +477,138 @@ def test_full_perimeter_coverage_rejects_fact_outside_every_assignment_interval(
                 "historical-account": {},
                 "reserve-account": {},
             },
+        )
+
+
+def _non_strategy_bridge_assignments() -> list[dict[str, Any]]:
+    return [
+        {
+            "account_id": "bridge-account",
+            "strategy_id": "strategy-a",
+            "strategy_mapping_disposition": "STRATEGY_MAPPED",
+            "effective_start": "2026-01-01",
+            "effective_end": "2026-01-03",
+        },
+        {
+            "account_id": "bridge-account",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+            "effective_start": "2026-01-04",
+            "effective_end": "2026-01-06",
+        },
+        {
+            "account_id": "bridge-account",
+            "strategy_id": "strategy-b",
+            "strategy_mapping_disposition": "STRATEGY_MAPPED",
+            "effective_start": "2026-01-07",
+            "effective_end": None,
+        },
+    ]
+
+
+def _bridge_admissions(
+    manifest_module: Any, *, predecessor_continuity: bool
+) -> dict[tuple[str, str, str, str | None], dict[str, Any]]:
+    return {
+        ("bridge-account", "strategy-a", "2026-01-01", "2026-01-03"): {
+            "status": "FUNDED",
+            "authority": "SYNTHETIC_TEST_AUTHORITY",
+            "continuity_to_successor": predecessor_continuity,
+        },
+        ("bridge-account", "strategy-b", "2026-01-07", None): {
+            "status": "FUNDED",
+            "authority": "SYNTHETIC_TEST_AUTHORITY",
+            "continuity_to_successor": False,
+        },
+    }
+
+
+def test_mapped_topology_rejects_continuity_across_non_strategy_interval(
+    manifest_module: Any,
+) -> None:
+    """A full-perimeter historical interval cannot be skipped for capital continuity."""
+    perimeter = manifest_module.partition_assignments(_non_strategy_bridge_assignments())
+    mapped_assignments = [
+        assignment
+        for chain in perimeter.mapped_chains.values()
+        for assignment in chain
+    ]
+
+    with pytest.raises(manifest_module.ManifestError, match="non-strategy interval"):
+        manifest_module.validate_assignment_topology(
+            mapped_assignments,
+            _bridge_admissions(manifest_module, predecessor_continuity=True),
+            perimeter.full_chains,
+        )
+
+
+def test_final_semantic_validator_accepts_mapped_gap_only_with_full_coverage(
+    manifest_module: Any,
+) -> None:
+    """The producer's final semantic pass receives the full perimeter evidence."""
+    perimeter = manifest_module.partition_assignments(_non_strategy_bridge_assignments())
+    mapped_assignments = [
+        assignment
+        for chain in perimeter.mapped_chains.values()
+        for assignment in chain
+    ]
+    admissions = _bridge_admissions(manifest_module, predecessor_continuity=False)
+    chains = manifest_module.validate_assignment_topology(
+        mapped_assignments, admissions, perimeter.full_chains
+    )
+    assignment_sha256, assignment_count = manifest_module._assignment_identity(
+        mapped_assignments
+    )
+    assignment_identity = {"sha256": assignment_sha256, "count": assignment_count}
+    policy_artifact = {"as_of_date": "2026-01-09", "sha256": "a" * 64}
+    source_identities = {
+        "ledger": {"generation_id": "b" * 64},
+        "classified_flows": {
+            "ledger_identity": {"generation_id": "b" * 64},
+            "classification_policy": {
+                "policy_id": "SYNTHETIC",
+                "policy_version": "1",
+                "policy_as_of_date": "2026-01-09",
+                "policy_sha256": "a" * 64,
+            },
+        },
+        "flow_classification_policy": {
+            "policy_id": "SYNTHETIC",
+            "policy_version": "1",
+            "artifact": policy_artifact,
+        },
+        "admission_policy": {"assignment": assignment_identity},
+        "assignment": assignment_identity,
+    }
+    manifest = manifest_module.assemble_manifest(
+        {
+            "bridge-account": {
+                "2026-01-01": manifest_module.Decimal("100"),
+                "2026-01-02": manifest_module.Decimal("110"),
+                "2026-01-03": manifest_module.Decimal("120"),
+                "2026-01-07": manifest_module.Decimal("200"),
+                "2026-01-08": manifest_module.Decimal("210"),
+                "2026-01-09": manifest_module.Decimal("220"),
+            }
+        },
+        {"bridge-account": {"provider": "SYNTHETIC"}},
+        {
+            "external_in": {"bridge-account": {}},
+            "external_out": {"bridge-account": {}},
+            "internal_in": {"bridge-account": {}},
+            "internal_out": {"bridge-account": {}},
+        },
+        chains,
+        admissions,
+        source_identities,
+    )
+
+    manifest_module._validate_manifest_semantics(
+        manifest_module.json_ready(manifest), full_chains=perimeter.full_chains
+    )
+    with pytest.raises(manifest_module.ManifestError, match="gap or overlap"):
+        manifest_module._validate_manifest_semantics(
+            manifest_module.json_ready(manifest), full_chains={}
         )
 
 

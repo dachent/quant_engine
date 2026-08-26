@@ -1228,6 +1228,7 @@ def load_admission_policy(
 def validate_assignment_topology(
     assignments: list[dict[str, Any]],
     admissions: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+    full_chains: Mapping[str, list[dict[str, Any]]],
 ) -> dict[str, list[dict[str, Any]]]:
     """Validate epoch chronology before assigning capital to any epoch."""
     chains: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1241,14 +1242,52 @@ def validate_assignment_topology(
         seen.add(key)
         chains[key[0]].append({**assignment, "_key": key})
     for account_id, chain in chains.items():
+        full_chain = full_chains.get(account_id)
+        if not isinstance(full_chain, list):
+            raise ManifestError(
+                f"full assignment perimeter is missing account {account_id}"
+            )
         chain.sort(key=lambda assignment: assignment["_key"][2])
         for index, assignment in enumerate(chain):
             _, _, start, end = assignment["_key"]
             admission = admissions[assignment["_key"]]
+            full_index = next(
+                (
+                    candidate_index
+                    for candidate_index, candidate in enumerate(full_chain)
+                    if candidate.get("_key") == assignment["_key"]
+                ),
+                None,
+            )
+            if full_index is None:
+                raise ManifestError(
+                    f"mapped assignment is absent from full perimeter for account {account_id}"
+                )
             if end is None and index != len(chain) - 1:
                 raise ManifestError(
                     f"open-ended assignment is not last for account {account_id}"
                 )
+            if admission["continuity_to_successor"] and end is None:
+                raise ManifestError(
+                    f"open-ended assignment cannot claim a successor for account {account_id}"
+                )
+            if admission["continuity_to_successor"]:
+                if full_index + 1 >= len(full_chain):
+                    raise ManifestError(
+                        f"continuity has no full-perimeter successor for account {account_id}"
+                    )
+                successor = full_chain[full_index + 1]
+                expected_successor_start = (
+                    date.fromisoformat(str(end)) + timedelta(days=1)
+                ).isoformat()
+                if (
+                    successor.get("strategy_mapping_disposition")
+                    != "STRATEGY_MAPPED"
+                    or successor["_key"][2] != expected_successor_start
+                ):
+                    raise ManifestError(
+                        f"continuity cannot cross a non-strategy interval for account {account_id}"
+                    )
             if index == 0:
                 continue
             previous = chain[index - 1]
@@ -1259,11 +1298,62 @@ def validate_assignment_topology(
                 )
             if previous_end >= start:
                 raise ManifestError(f"assignments overlap for account {account_id}")
-            if admission["continuity_to_successor"] and end is None:
-                raise ManifestError(
-                    f"open-ended assignment cannot claim a successor for account {account_id}"
-                )
     return {account_id: list(chain) for account_id, chain in chains.items()}
+
+
+def _mapped_gap_has_non_strategy_coverage(
+    account_id: str,
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+    full_chains: Mapping[str, list[dict[str, Any]]],
+) -> bool:
+    """Prove a missing manifest-row span is entirely non-strategy coverage."""
+    full_chain = full_chains.get(account_id)
+    if not isinstance(full_chain, list):
+        return False
+    previous_key = (
+        account_id,
+        previous.get("strategy_id"),
+        previous.get("effective_start"),
+        previous.get("effective_end"),
+    )
+    current_key = (
+        account_id,
+        current.get("strategy_id"),
+        current.get("effective_start"),
+        current.get("effective_end"),
+    )
+    try:
+        previous_index = next(
+            index
+            for index, assignment in enumerate(full_chain)
+            if assignment.get("_key") == previous_key
+        )
+        current_index = next(
+            index
+            for index, assignment in enumerate(full_chain)
+            if assignment.get("_key") == current_key
+        )
+    except StopIteration:
+        return False
+    if current_index <= previous_index + 1:
+        return False
+    previous_end = previous.get("effective_end")
+    if not isinstance(previous_end, str):
+        return False
+    expected_start = (date.fromisoformat(previous_end) + timedelta(days=1)).isoformat()
+    for assignment in full_chain[previous_index + 1 : current_index]:
+        key = assignment.get("_key")
+        if (
+            not isinstance(key, tuple)
+            or len(key) != 4
+            or assignment.get("strategy_mapping_disposition") == "STRATEGY_MAPPED"
+            or key[2] != expected_start
+            or key[3] is None
+        ):
+            return False
+        expected_start = (date.fromisoformat(key[3]) + timedelta(days=1)).isoformat()
+    return expected_start == current.get("effective_start")
 
 
 def validate_evidence_coverage(
@@ -1815,7 +1905,11 @@ def _manifest_decimal(raw: object, field: str, *, money: bool = False) -> Decima
     return value
 
 
-def _validate_manifest_semantics(manifest: Mapping[str, Any]) -> None:
+def _validate_manifest_semantics(
+    manifest: Mapping[str, Any],
+    *,
+    full_chains: Mapping[str, list[dict[str, Any]]] | None = None,
+) -> None:
     source_identities = manifest.get("source_identities")
     if not isinstance(source_identities, Mapping):
         raise ManifestError("manifest source identities must be an object")
@@ -2341,7 +2435,12 @@ def _validate_manifest_semantics(manifest: Mapping[str, Any]) -> None:
             expected_start = (
                 date.fromisoformat(str(previous_end)) + timedelta(days=1)
             ).isoformat()
-            if current_start != expected_start:
+            if current_start != expected_start and (
+                full_chains is None
+                or not _mapped_gap_has_non_strategy_coverage(
+                    account_id, previous, row, full_chains
+                )
+            ):
                 raise ManifestError(
                     f"manifest row chain has a gap or overlap: {account_id}"
                 )
@@ -2379,7 +2478,11 @@ def _validate_manifest_semantics(manifest: Mapping[str, Any]) -> None:
                 raise ManifestError("manifest continuity capital handoff is invalid")
 
 
-def validate_manifest_schema(manifest: Mapping[str, Any]) -> None:
+def validate_manifest_schema(
+    manifest: Mapping[str, Any],
+    *,
+    full_chains: Mapping[str, list[dict[str, Any]]] | None = None,
+) -> None:
     """Validate formal/internal derivation, not cryptographic source authenticity.
 
     This proves the self-contained candidate is internally consistent.  Slice B
@@ -2409,7 +2512,7 @@ def validate_manifest_schema(manifest: Mapping[str, Any]) -> None:
         raise ManifestError(
             f"manifest does not satisfy formal schema: {errors[0].message}"
         )
-    _validate_manifest_semantics(serializable)
+    _validate_manifest_semantics(serializable, full_chains=full_chains)
 
 
 def format_table(manifest: dict[str, Any]) -> str:
@@ -2526,7 +2629,9 @@ def build_manifest_candidate(
         admission_policy_snapshot,
         mapped_assignments,
     )
-    chains = validate_assignment_topology(mapped_assignments, admissions)
+    chains = validate_assignment_topology(
+        mapped_assignments, admissions, perimeter.full_chains
+    )
     classification_policy, classification_policy_identity = (
         load_flow_classification_policy(
             classification_policy_snapshot.json_object("flow classification policy"),
@@ -2586,7 +2691,7 @@ def build_manifest_candidate(
         unavailable_navs,
     )
     manifest["accounting_currency"] = ledger["accounting_currency"]
-    validate_manifest_schema(manifest)
+    validate_manifest_schema(manifest, full_chains=perimeter.full_chains)
     return json_ready(manifest)  # type: ignore[return-value]
 
 
