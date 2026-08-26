@@ -892,7 +892,7 @@ def test_schema_v9_rebinds_exact_epoch_manifest_inputs_into_every_stage(
     monkeypatch.setattr(
         materializer, "_validate_output_path_budget", lambda _root, _recipe: None
     )
-    output_root = tmp_path / "schema-v8-dag"
+    output_root = tmp_path / "schema-v9-dag"
     spec_path = output_root / "pipeline-spec.json"
     materializer.build_spec(pipeline_recipe, output_root, spec_path)
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -1095,8 +1095,15 @@ def test_schema_v9_declares_the_authority_snapshot_it_emits(
     assert declared["size_bytes"] == len(emitted)
 
 
+@pytest.mark.parametrize(
+    "input_key",
+    (
+        "account_strategy_classified_flows",
+        "account_strategy_flow_coverage",
+    ),
+)
 def test_schema_v9_rejects_epoch_manifest_input_drift_after_recipe_creation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, input_key: str
 ) -> None:
     source_recipe, proof_root = _fixture(tmp_path)
     source = json.loads(source_recipe.read_text(encoding="utf-8"))
@@ -1113,24 +1120,21 @@ def test_schema_v9_rejects_epoch_manifest_input_drift_after_recipe_creation(
     monkeypatch.setattr(
         materializer, "_financial_mvp_module", lambda: product.financial_module
     )
-    pipeline_recipe = tmp_path / "schema-v8-pipeline-recipe.json"
+    pipeline_recipe = tmp_path / "schema-v9-pipeline-recipe.json"
     materializer.create_recipe(
         vertical_recipe=vertical_path,
         proof_root=proof_root,
         qa_dir=Path(source["qa_dir"]["path"]),
-        pipeline_id="schema-v8-financial-manifest",
+        pipeline_id="schema-v9-financial-manifest",
         output=pipeline_recipe,
         financial_mvp_contract=product.contract_path,
         financial_mvp_source_matrix=product.matrix_path,
     )
-    _write_json(
-        tmp_path / "epoch-manifest" / "account_strategy_classified_flows.json",
-        {"input": "account_strategy_classified_flows", "version": 2},
-    )
+    _write_json(manifest_inputs[input_key], {"input": input_key, "version": 2})
 
     with pytest.raises(
         materializer.MaterializationError,
-        match="financial epoch manifest account_strategy_classified_flows identity differs",
+        match=f"financial epoch manifest {input_key} identity differs",
     ):
         materializer._recipe(pipeline_recipe)
 
@@ -1147,6 +1151,12 @@ def test_schema_v9_rejects_missing_required_epoch_manifest_input(
     _write_json(provider_generation / "catalog.json", {"synthetic": True})
     vertical.pop("provider_ledger_spec")
     vertical["provider_ledger_generation"] = _dir_definition(provider_generation)
+    for key in materializer.EPOCH_MANIFEST_INPUTS:
+        if key == "account_strategy_flow_coverage":
+            continue
+        path = tmp_path / "epoch-manifest" / f"{key}.json"
+        _write_json(path, {"input": key})
+        vertical[key] = _definition(path)
     vertical["schema_version"] = 9
 
     _write_json(vertical_path, vertical)
@@ -1774,7 +1784,7 @@ def test_production_spec_binds_stable_twenty_root_authority(
 def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Schema-8 producer evidence must survive the production rebind seam."""
+    """Schema-v9 five-input producer evidence survives the production rebind seam."""
 
     short_stage_roots = dict(materializer.PRODUCTION_STAGE_ROOTS)
     analytics_root_ids = [
@@ -1808,7 +1818,7 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
         vertical_recipe=vertical_path,
         proof_root=prepared_root,
         qa_dir=Path(source["qa_dir"]["path"]),
-        pipeline_id="schema-v8-production-seam",
+        pipeline_id="schema-v9-production-seam",
         output=recipe_path,
         financial_mvp_contract=product.contract_path,
         financial_mvp_source_matrix=product.matrix_path,
@@ -1961,6 +1971,13 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
         production_contract["financial_epoch_manifest_proof_sha256"]
         == hashlib.sha256(canonical_json_bytes(prepared_proof)).hexdigest()
     )
+    assert core_pipeline._FINANCIAL_EPOCH_MANIFEST_INPUTS == {
+        "account_strategy_admission_policy",
+        "account_strategy_classified_flows",
+        "account_strategy_flow_coverage",
+        "account_strategy_ledger",
+        "account_strategy_ledger_identity",
+    }
     core_pipeline.plan_pipeline(spec)
 
     forged = json.loads(spec_path.read_text(encoding="utf-8"))

@@ -55,6 +55,7 @@ _FINANCIAL_EPOCH_MANIFEST_GATE: Final = "financial-epoch-manifest-input-authorit
 _FINANCIAL_EPOCH_MANIFEST_INPUTS: Final = {
     "account_strategy_admission_policy",
     "account_strategy_classified_flows",
+    "account_strategy_flow_coverage",
     "account_strategy_ledger",
     "account_strategy_ledger_identity",
 }
