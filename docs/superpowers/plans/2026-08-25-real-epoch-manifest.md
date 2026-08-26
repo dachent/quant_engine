@@ -105,12 +105,14 @@ or panel consumption.
 
 **Files:**
 - Create: `packages/core/src/quant_engine/core/strict_json.py`
+- Create: `packages/core/src/quant_engine/core/snapshots.py`
 - Create: `schemas/portfolio/account-interval-retrieval-receipt.schema.json`
 - Modify: `packages/core/src/quant_engine/core/contracts.py`
 - Modify: `packages/core/src/quant_engine/core/__init__.py`
 - Modify: `tools/account_strategy_manifest.py`
 - Modify: `schemas/portfolio/account-flow-coverage.schema.json`
 - Modify: `docs/analytics/account-strategy-manifest.md`
+- Create: `tests/core/test_snapshots.py`
 - Modify: `tests/core/test_generation_envelope.py`
 - Modify: `tests/portfolio_control_panel/test_account_strategy_manifest.py`
 
@@ -120,10 +122,15 @@ or panel consumption.
 - Produces:
   `strict_json_loads(value: bytes, *, label: str) -> object`,
   `strict_json_object(value: bytes, *, label: str) -> dict[str, object]`,
-  frozen `InputSnapshot.capture(path: Path, label: str) -> InputSnapshot`,
+  producer-independent frozen
+  `quant_engine.core.InputSnapshot.capture(path: Path, label: str) -> InputSnapshot`,
   `InputSnapshot.from_bytes(label: str, contents: bytes) -> InputSnapshot`,
   frozen `ManifestCandidateSnapshots`, and
   `build_manifest_candidate_from_snapshots(inputs: ManifestCandidateSnapshots) -> dict[str, Any]`.
+- `InputSnapshot` owns label, immutable bytes, SHA-256, byte size,
+  diagnostic-only path, and strict parsing. It has no JSON serialization API.
+  Producer, generator, and verifier use this exact exported core type or its
+  immutable bytes; no module defines a private snapshot lookalike.
 - Compatibility: the existing `build_manifest_candidate(...)` captures each
   path once and delegates. `GenerationManifest` identity and serialization do
   not change; `from_json_bytes` gains duplicate-key/nonfinite rejection.
@@ -138,14 +145,16 @@ or panel consumption.
   them without echoing private bytes.
 
 - [ ] **Step 2: Run the strict boundary REDs.** Run
-  `python -m pytest tests/core/test_generation_envelope.py tests/portfolio_control_panel/test_account_strategy_manifest.py -k "duplicate or utf or nonfinite or snapshot" -q`.
+  `python -m pytest tests/core/test_snapshots.py tests/core/test_generation_envelope.py tests/portfolio_control_panel/test_account_strategy_manifest.py -k "duplicate or utf or nonfinite or snapshot" -q`.
   Expected: failures because the shared loader and snapshot-native API do not
   exist and duplicate keys are silently accepted.
 
-- [ ] **Step 3: Implement the single strict loader and immutable snapshot
-  value.** Use `object_pairs_hook` to reject a repeated member at every nesting
-  depth and `parse_constant` to reject nonfinite values. Keep snapshot source
-  paths diagnostic-only and make `contents`, SHA-256, and size immutable.
+- [ ] **Step 3: Implement the single strict loader and producer-independent
+  snapshot value.** Use `object_pairs_hook` to reject a repeated member at every
+  nesting depth and `parse_constant` to reject nonfinite values. Define the
+  frozen `InputSnapshot` only in `quant_engine.core.snapshots`, export it from
+  core, keep source paths diagnostic-only, and make contents/SHA-256/size
+  immutable. Give it strict object parsing and no JSON serialization method.
 
 - [ ] **Step 4: Split the producer boundary.** Move the body of the current
   path-based producer behind `build_manifest_candidate_from_snapshots`. Add
@@ -159,6 +168,11 @@ or panel consumption.
   snapshot-native producer. Assert exact equality to the pre-mutation candidate
   and zero reads after capture. Add a positive control showing that mutation
   before capture changes identity or fails a pinned hash.
+
+- [ ] **Step 5a: Prove the snapshot/import boundary.** Assert the producer's
+  `InputSnapshot`, the core export, and the snapshots module type are the same
+  object and reject a private producer snapshot class. Task 5C extends this
+  identity check to the generator and verifier when those modules are created.
 
 - [ ] **Step 6: Define receipt v2 and coverage v2 REDs.** Use closed synthetic
   receipts binding issuer code, provider generation and raw artifacts, internal
@@ -182,8 +196,8 @@ or panel consumption.
   and precise closed blockers.
 
 - [ ] **Step 9: Verify 5A.** Run
-  `python -m pytest tests/core/test_generation_envelope.py tests/portfolio_control_panel/test_account_strategy_manifest.py -q`,
-  `python -m ruff check packages/core/src/quant_engine/core/strict_json.py packages/core/src/quant_engine/core/contracts.py tools/account_strategy_manifest.py tests/core/test_generation_envelope.py tests/portfolio_control_panel/test_account_strategy_manifest.py`,
+  `python -m pytest tests/core/test_snapshots.py tests/core/test_generation_envelope.py tests/portfolio_control_panel/test_account_strategy_manifest.py -q`,
+  `python -m ruff check packages/core/src/quant_engine/core/strict_json.py packages/core/src/quant_engine/core/snapshots.py packages/core/src/quant_engine/core/contracts.py tools/account_strategy_manifest.py tests/core/test_snapshots.py tests/core/test_generation_envelope.py tests/portfolio_control_panel/test_account_strategy_manifest.py`,
   and `git diff --check`. Mutate the receipt containment predicate and duplicate
   key hook one at a time and prove the targeted tests fail before restoring.
 
@@ -283,10 +297,6 @@ or panel consumption.
 - Create: `schemas/portfolio/account-manifest-independent-verification.schema.json`
 - Create: `tests/portfolio_control_panel/test_account_manifest_generation.py`
 - Modify: `schemas/portfolio/account-strategy-manifest.schema.json`
-- Modify: `contracts/portfolio-financial-mvp-source-v1.json`
-- Modify: `schemas/portfolio/financial-mvp-source-contract.schema.json` only if
-  the new epoch-generation source role cannot validate under the existing
-  schema
 - Modify: `docs/analytics/account-strategy-manifest.md`
 - Modify: `docs/data-rollforward.md`
 
@@ -303,6 +313,11 @@ or panel consumption.
   returns canonical report bytes binding the exact sorted subject path/hash/size
   entries and semantic digest; `subject_payloads` must not contain the report.
   The verifier may not import the producer or generator.
+- `derive_generation_as_of_date(provider_ledger: InputSnapshot, baseline: InputSnapshot) -> date`
+  strictly parses both top-level canonical ISO `as_of_date` values and returns
+  their maximum. That one date governs every generated as-of field.
+- Producer, generator, and verifier consume the exact exported
+  `quant_engine.core.InputSnapshot` type or its immutable bytes.
 - `PrivateDisplayIdentityAdapter.from_snapshot(snapshot)` accepts only internal
   account ID, provider, approved nickname, and exact four-digit last four.
 
@@ -331,6 +346,15 @@ or panel consumption.
   issuer allowlist, every real mapped coverage row is blocked and no numeric
   field or trace may appear.
 
+- [ ] **Step 4a: Derive one deterministic generation date.** Strictly parse the
+  top-level provider-ledger and baseline `as_of_date` values and set
+  `generation_as_of_date = max(provider_ledger_as_of_date, baseline_as_of_date)`.
+  Use that exact date for `GenerationManifest` and every generated payload,
+  report, inventory, and receipt field with as-of semantics. Reject missing,
+  non-string, malformed, and noncanonical source dates. Add positive cases for
+  provider-before-baseline, baseline-before-provider, and equal dates. Trap
+  wall-clock, local-date, timezone, locale, and filesystem-timestamp reads.
+
 - [ ] **Step 5: Implement the independent verifier and fixed construction
   order.** First derive and canonicalize every subject payload except
   `verification/independent-verification.json`. Independently reparse the
@@ -347,7 +371,10 @@ or panel consumption.
 - [ ] **Step 6: Enforce verifier independence.** Parse the verifier module AST
   and fail if it imports `tools.account_strategy_manifest`,
   `tools.build_account_manifest_generation`, or a producer calculation helper.
-  Add an import-spy runtime positive control.
+  Add an import-spy runtime positive control proving that verifier import does
+  not load producer/generator modules. Assert producer, generator, and verifier
+  all use the exact exported core `InputSnapshot` type and define no private
+  snapshot class.
 
 - [ ] **Step 7: Make the zero-numeric proof non-vacuous.** For the 15-blocked
   fixture, mutate each coverage blocker, admission, output status, assignment
@@ -383,24 +410,20 @@ or panel consumption.
   admission blocker, and numeric disposition. Never display internal IDs as the
   account label.
 
-- [ ] **Step 11: Bind the financial source contract without private values.**
-  Add the epoch-generation source and required artifact roles, leave its current
-  generation unset, and state that `PARTIAL + VERIFIED` is not publication
-  ready. Document the bundle layout, command boundary, and recovery behavior.
-
-- [ ] **Step 12: Prove determinism and no external calls.** Build twice from the
+- [ ] **Step 11: Prove determinism and no external calls.** Build twice from the
   same snapshots and compare every subject payload, finalized independent report,
   generation ID, detached inventory, detached receipt, and full-directory
-  inventory digest byte-for-byte. Trap provider/network/browser functions and
-  assert zero calls.
+  inventory digest byte-for-byte. Repeat under different mocked wall dates,
+  timezones, and locales and require identical bytes and identities. Trap
+  provider/network/browser/time functions and assert zero calls.
 
-- [ ] **Step 13: Verify 5C.** Run
-  `python -m pytest tests/portfolio_control_panel/test_account_manifest_generation.py tests/portfolio_control_panel/test_account_strategy_manifest.py tests/core/test_generation_envelope.py tests/core/test_portfolio_financial_mvp_contract.py -q`,
+- [ ] **Step 12: Verify 5C.** Run
+  `python -m pytest tests/portfolio_control_panel/test_account_manifest_generation.py tests/portfolio_control_panel/test_account_strategy_manifest.py tests/core/test_snapshots.py tests/core/test_generation_envelope.py -q`,
   `python -m ruff check tools/build_account_manifest_generation.py tools/verify_account_manifest_generation.py tools/private_account_display.py tests/portfolio_control_panel/test_account_manifest_generation.py`,
   the repository schema checks for every new schema, and `git diff --check`.
 
-- [ ] **Step 14: Review and commit 5C only.** Record every mutation proof,
-  obtain the read-only review, and commit only 5C code/contracts/tests/docs with
+- [ ] **Step 13: Review and commit 5C only.** Record every mutation proof,
+  obtain the read-only review, and commit only 5C code/tests/docs with
   subject `feat: build independently verified epoch authority`.
 
 #### Task 5D: Retained real build and exhaustive private evidence
@@ -478,28 +501,86 @@ or panel consumption.
 ### Task 6: Financial release and browser byte lineage
 
 **Files:**
+- Modify: `contracts/portfolio-financial-mvp-source-v1.json`
+- Modify: `schemas/portfolio/financial-mvp-source-contract.schema.json`
+- Modify: `tools/portfolio_financial_mvp_contract.py`
 - Modify: `packages/core/src/quant_engine/core/publication.py`
 - Modify: `packages/core/src/quant_engine/core/pipeline.py`
 - Modify: `packages/core/src/quant_engine/core/portfolio_pipeline.py`
 - Modify: `tools/portfolio_control_panel.py`
+- Modify: `tests/core/test_portfolio_financial_mvp_contract.py`
 - Modify: `tests/core/test_generation_envelope.py`
 - Modify: `tests/core/test_portfolio_pipeline_materialize.py`
 - Modify: `tests/portfolio_control_panel/test_portfolio_control_panel.py`
 - Modify: `apps/portfolio-control-panel/app.js`
+- Modify generated: `generated/financial-mvp/current-product.md`
+- Modify generated: `generated/financial-mvp/source-matrix.json`
 
 **Interfaces:**
 - Consumes: the exact Task 5D bundle identity through
   `read_generation_bundle`, plus the exact
   `outputs/account-strategy-manifest.json` bytes from that verified bundle.
+- Adds one dedicated top-level contract field, `epoch_manifest_source`, binding
+  bundle generation/manifest/receipt/inventory identities and the exact manifest
+  artifact path/SHA-256/size/schema. It does not add or copy the epoch source
+  into `source_segments`; accepted historical-source equality remains unchanged.
 - Produces: release/workbook/dashboard/current-pointer candidates that all bind
   the same verified bundle identity and exact manifest bytes.
 
-- [ ] Add a failing composed test requiring a verified Task 5 bundle in financial mode and exact account-manifest byte identity at each stage; a bare legacy `read_generation` result is insufficient for this source role.
-- [ ] Integrate verified-bundle consumption and publication checks in Task 6, then thread the bundle identity and exact manifest bytes through preparation, materialization, workbook proof, dashboard build, and publication authorization.
-- [ ] Add single-byte/source/value/provenance mutation rejection tests and non-financial omission positive control.
-- [ ] Add browser assertions for human labels, exact null/blocker rendering, 13-column shape, and formatted parity with the manifest.
-- [ ] Run core, panel, Node interaction, and schema tests; mutate each authority comparison to prove the composed test fails.
-- [ ] Commit the release lineage tranche.
+- [ ] **Step 1: Write the dedicated-field contract RED.** Add a fixture with a
+  top-level `epoch_manifest_source` containing verified bundle identity and
+  exact manifest artifact identity. Assert the current schema rejects the new
+  field. Assert adding, removing, or mutating that field cannot alter the
+  accepted `source_segments` historical-source set or its equality digest.
+
+- [ ] **Step 2: Write lineage REDs.** Require the dedicated field to bind bundle
+  generation ID, `generation.json` hash, `generation-receipt.json` hash,
+  externally reported full-directory inventory hash, and exact
+  `outputs/account-strategy-manifest.json` path/hash/size/schema. Reject a bare
+  legacy `read_generation` result, wrong bundle/artifact path, one-byte payload
+  mutation, wrong hash/size/schema, wrong report identity, or mismatched bundle
+  generation.
+
+- [ ] **Step 3: Implement and validate `epoch_manifest_source`.** Bump the
+  financial contract schema version as required, add the closed dedicated field
+  to the contract/schema/tool, and validate it through
+  `read_generation_bundle`. Require deep equality of the `source_segments`
+  subtree and equality of its accepted historical-source identity/digest before
+  and after adding `epoch_manifest_source`.
+
+- [ ] **Step 4: Regenerate and check views.** Update rendering for the dedicated
+  field, regenerate `generated/financial-mvp/current-product.md` and
+  `generated/financial-mvp/source-matrix.json`, and run
+  `python tools/portfolio_financial_mvp_contract.py check`. Add REDs proving a
+  stale/missing/incorrect generated view makes `check_views` fail and the
+  regenerated exact bytes pass.
+
+- [ ] **Step 5: Add the financial composed RED.** Require a verified Task 5
+  bundle in financial mode and exact account-manifest byte identity at every
+  stage. A bare legacy generation or contract identity without verified bundle
+  bytes is insufficient.
+
+- [ ] **Step 6: Integrate consumption and publication in Task 6.** Thread the
+  dedicated field, verified bundle identity, and exact manifest bytes through
+  preparation, materialization, workbook proof, dashboard build, publication
+  authorization, and pointer candidate. Task 6 may now make publication bundle-
+  aware; Task 5 did not.
+
+- [ ] **Step 7: Add mutation and omission controls.** Reject single-byte,
+  source, value, provenance, bundle, and artifact mutations. Prove the
+  nonfinancial mode may omit `epoch_manifest_source` only under its existing
+  explicit omission rule, without changing historical-source equality.
+
+- [ ] **Step 8: Add browser assertions.** Verify human labels, exact null/
+  blocker rendering, 13-column shape, and formatted parity with the exact
+  bundle manifest bytes.
+
+- [ ] **Step 9: Verify and commit Task 6.** Run the financial contract/schema/
+  `check_views` tests, core generation/materialization tests, panel tests, Node
+  interaction tests, Ruff, and `git diff --check`. Mutate each dedicated-field,
+  bundle, artifact, and byte comparison one at a time and prove the composed
+  test fails. Commit the release-lineage tranche only after generated views are
+  current.
 
 ### Task 7: Acceptance and governed handoff
 
