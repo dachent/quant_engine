@@ -77,6 +77,402 @@ def _manifest(
     )
 
 
+def _envelope_manifest_and_payloads() -> tuple[GenerationManifest, dict[str, bytes]]:
+    """A valid two-payload subject set with the required independent report."""
+    facts = publication.canonical_json_bytes({"account_count": 18, "status": "BLOCKED"})
+    report = publication.canonical_json_bytes(
+        {"status": "VERIFIED", "verification_schema_version": 1}
+    )
+    artifacts = (
+        _artifact("authority/selected-input-identities.json", facts),
+        _artifact("verification/independent-verification.json", report),
+    )
+    return _manifest(artifacts=artifacts), {
+        artifacts[1].artifact_id: report,
+        artifacts[0].artifact_id: facts,
+    }
+
+
+def test_prepare_generation_bundle_is_deterministic_non_circular_and_pure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+
+    def filesystem_trap(*_: object, **__: object) -> object:
+        raise AssertionError("in-memory preparation must not call the filesystem")
+
+    monkeypatch.setattr(publication, "Path", filesystem_trap)
+    monkeypatch.setattr("builtins.open", filesystem_trap)
+    for dependency in ("os", "shutil", "tempfile", "time"):
+        monkeypatch.setattr(publication, dependency, filesystem_trap)
+    for helper in (
+        "_generation_path",
+        "_sync_directory",
+        "_validate_root",
+        "_write_and_sync",
+        "generation_inventory_sha256",
+        "read_generation",
+        "stage_generation",
+    ):
+        monkeypatch.setattr(publication, helper, filesystem_trap)
+
+    prepared = publication._prepare_generation_bundle(manifest, payloads)
+
+    expected_payload_paths = tuple(sorted(payloads))
+    assert tuple(prepared.final_files) == (
+        "authority/selected-input-identities.json",
+        "generation-inventory.json",
+        "generation-receipt.json",
+        "generation.json",
+        "verification/independent-verification.json",
+    )
+    assert prepared.final_files["generation.json"] == manifest.to_json_bytes()
+    assert prepared.final_files["authority/selected-input-identities.json"] == payloads[
+        "authority/selected-input-identities.json"
+    ]
+    prepared_payload = prepared.final_files["authority/selected-input-identities.json"]
+    payloads["authority/selected-input-identities.json"] = b'{"changed":true}\n'
+    assert prepared.final_files["authority/selected-input-identities.json"] == prepared_payload
+    with pytest.raises(TypeError):
+        prepared.final_files["later.json"] = b"{}\n"  # type: ignore[index]
+
+    inventory = json.loads(prepared.final_files["generation-inventory.json"])
+    assert inventory["generation_id"] == manifest.generation_id
+    assert inventory["inventory_schema_version"] == 1
+    assert [entry["relative_path"] for entry in inventory["files"]] == [
+        "authority/selected-input-identities.json",
+        "generation.json",
+        "verification/independent-verification.json",
+    ]
+    assert "generation-inventory.json" not in {
+        entry["relative_path"] for entry in inventory["files"]
+    }
+    assert "generation-receipt.json" not in {
+        entry["relative_path"] for entry in inventory["files"]
+    }
+    expected_inventory_bytes = {
+        "generation.json": manifest.to_json_bytes(),
+        "authority/selected-input-identities.json": prepared_payload,
+        "verification/independent-verification.json": payloads[
+            "verification/independent-verification.json"
+        ],
+    }
+    for entry in inventory["files"]:
+        content = expected_inventory_bytes[entry["relative_path"]]
+        assert entry["sha256"] == hashlib.sha256(content).hexdigest()
+        assert entry["size_bytes"] == len(content)
+
+    receipt = json.loads(prepared.final_files["generation-receipt.json"])
+    report_artifact = next(
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == "verification/independent-verification.json"
+    )
+    assert receipt["generation_id"] == manifest.generation_id
+    assert receipt["final_path_count"] == len(expected_payload_paths) + 3
+    assert receipt["independent_report"] == report_artifact.to_dict()
+    assert receipt["inventory"]["relative_path"] == "generation-inventory.json"
+    assert receipt["manifest"]["relative_path"] == "generation.json"
+    assert receipt["inventory"]["sha256"] == hashlib.sha256(
+        prepared.final_files["generation-inventory.json"]
+    ).hexdigest()
+    assert receipt["inventory"]["size_bytes"] == len(
+        prepared.final_files["generation-inventory.json"]
+    )
+    assert receipt["manifest"]["sha256"] == hashlib.sha256(
+        manifest.to_json_bytes()
+    ).hexdigest()
+    assert receipt["manifest"]["size_bytes"] == len(manifest.to_json_bytes())
+    assert "generation-receipt.json" not in receipt
+
+    _, reordered_payloads = _envelope_manifest_and_payloads()
+    prepared_again = publication._prepare_generation_bundle(
+        manifest, dict(reversed(tuple(reordered_payloads.items())))
+    )
+    assert prepared_again.final_files == prepared.final_files
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda payloads: payloads.pop("authority/selected-input-identities.json"), "keys"),
+        (lambda payloads: payloads.__setitem__("extra.json", b"{}\n"), "keys"),
+        (
+            lambda payloads: payloads.__setitem__(
+                "authority/selected-input-identities.json", bytearray(b"{}\n")
+            ),
+            "bytes",
+        ),
+        (
+            lambda payloads: payloads.__setitem__(
+                "authority/selected-input-identities.json", b'{"account_count":19,"status":"BLOCKED"}\n'
+            ),
+            "sha256",
+        ),
+        (
+            lambda payloads: payloads.__setitem__(
+                "authority/selected-input-identities.json", b'{"account_count":180,"status":"BLOCKED"}\n'
+            ),
+            "size_bytes",
+        ),
+        (
+            lambda payloads: payloads.__setitem__(
+                "authority/selected-input-identities.json", b'{"status":"BLOCKED", "account_count":18}\n'
+            ),
+            "canonical",
+        ),
+        (
+            lambda payloads: payloads.__setitem__(
+                "authority/selected-input-identities.json", b'{"account_count":18,"account_count":18,"status":"BLOCKED"}\n'
+            ),
+            "JSON",
+        ),
+        (
+            lambda payloads: payloads.__setitem__(
+                "authority/selected-input-identities.json", b'{"account_count":NaN,"status":"BLOCKED"}\n'
+            ),
+            "JSON",
+        ),
+        (
+            lambda payloads: payloads.__setitem__(
+                "authority/selected-input-identities.json", b"\xff"
+            ),
+            "JSON",
+        ),
+    ],
+)
+def test_prepare_generation_bundle_rejects_payload_identity_and_json_drift(
+    mutate: object, message: str
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    mutate(payloads)  # type: ignore[operator]
+
+    with pytest.raises(ManifestValidationError, match=message):
+        publication._prepare_generation_bundle(manifest, payloads)
+
+
+def test_prepare_generation_bundle_requires_a_mapping_payload_input() -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+
+    with pytest.raises(ManifestValidationError, match="mapping"):
+        publication._prepare_generation_bundle(manifest, list(payloads.items()))
+
+
+def test_prepare_generation_bundle_treats_json_suffix_case_insensitively() -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    report = manifest.artifacts[1]
+    ambiguous_json = b'{"duplicate":1,"duplicate":2}\n'
+    upper_json = _artifact("authority/selected-input-identities.JSON", ambiguous_json)
+    manifest = _manifest(artifacts=(upper_json, report))
+    payloads = {
+        upper_json.artifact_id: ambiguous_json,
+        report.artifact_id: payloads[report.artifact_id],
+    }
+
+    with pytest.raises(ManifestValidationError, match="strict JSON"):
+        publication._prepare_generation_bundle(manifest, payloads)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "",
+        "/absolute.json",
+        "C:drive.json",
+        "directory\\file.json",
+        "directory//file.json",
+        "directory/./file.json",
+        "directory/../file.json",
+        "control\x01.json",
+        "directory/report.",
+        "directory/report ",
+        "directory/report.json:receipt",
+        "directory/question?.json",
+        "NUL",
+        "evidence/CON.txt",
+        "evidence/com1.json",
+        "evidence/COM¹.json",
+        "evidence/Lpt9.data",
+        "evidence/LPT³.data",
+        "evidence/CONIN$",
+        "generation.json",
+        "generation-inventory.json",
+        "generation-receipt.json",
+        "GENERATION.JSON",
+    ],
+)
+def test_prepare_generation_bundle_rejects_unsafe_raw_artifact_paths(path: str) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    replacement = _artifact("safe.json", b"{}\n")
+    object.__setattr__(replacement, "artifact_id", path)
+    object.__setattr__(manifest, "artifacts", (replacement, *manifest.artifacts[1:]))
+    payloads.pop("authority/selected-input-identities.json")
+    payloads[path] = b"{}\n"
+
+    with pytest.raises(ManifestValidationError, match="path"):
+        publication._prepare_generation_bundle(manifest, payloads)
+
+
+def test_prepare_generation_bundle_rejects_case_aliases_and_report_substitutes() -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    report = next(artifact for artifact in manifest.artifacts if artifact.artifact_id.startswith("verification/"))
+    case_alias = _artifact("VERIFICATION/independent-verification.json", payloads[report.artifact_id])
+    object.__setattr__(manifest, "artifacts", (manifest.artifacts[0], case_alias))
+    payloads.pop(report.artifact_id)
+    payloads[case_alias.artifact_id] = payloads["verification/independent-verification.json"] if "verification/independent-verification.json" in payloads else b"{}\n"
+
+    with pytest.raises(ManifestValidationError, match="independent report"):
+        publication._prepare_generation_bundle(manifest, payloads)
+
+    manifest, payloads = _envelope_manifest_and_payloads()
+    duplicate = _artifact("AUTHORITY/selected-input-identities.json", b"{}\n")
+    object.__setattr__(manifest, "artifacts", (*manifest.artifacts, duplicate))
+    payloads[duplicate.artifact_id] = b"{}\n"
+    with pytest.raises(ManifestValidationError, match="case-insensitive"):
+        publication._prepare_generation_bundle(manifest, payloads)
+
+
+def test_generation_envelope_schemas_are_closed_and_validate_prepared_controls() -> None:
+    try:
+        import jsonschema
+    except ImportError as exc:
+        pytest.skip(f"jsonschema runtime is unavailable: {exc}")
+    manifest, payloads = _envelope_manifest_and_payloads()
+    prepared = publication._prepare_generation_bundle(manifest, payloads)
+    schema_root = Path(__file__).parents[2] / "schemas" / "core"
+    inventory_schema = json.loads(
+        (schema_root / "generation-inventory.schema.json").read_bytes()
+    )
+    receipt_schema = json.loads(
+        (schema_root / "generation-receipt.schema.json").read_bytes()
+    )
+    jsonschema.Draft202012Validator.check_schema(inventory_schema)
+    jsonschema.Draft202012Validator.check_schema(receipt_schema)
+    jsonschema.Draft202012Validator(inventory_schema).validate(
+        json.loads(prepared.final_files["generation-inventory.json"])
+    )
+    jsonschema.Draft202012Validator(receipt_schema).validate(
+        json.loads(prepared.final_files["generation-receipt.json"])
+    )
+
+
+@pytest.mark.parametrize(
+    ("control_name", "mutate"),
+    [
+        ("inventory", lambda value: value.__setitem__("unexpected", True)),
+        (
+            "inventory",
+            lambda value: value.__setitem__("inventory_schema_version", 2),
+        ),
+        (
+            "inventory",
+            lambda value: value["files"][0].__setitem__("extra", True),
+        ),
+        (
+            "inventory",
+            lambda value: value["files"][0].__setitem__("sha256", "A" * 64),
+        ),
+        (
+            "inventory",
+            lambda value: value["files"][0].__setitem__("size_bytes", -1),
+        ),
+        (
+            "inventory",
+            lambda value: value["files"][0].__setitem__("relative_path", "/unsafe"),
+        ),
+        (
+            "inventory",
+            lambda value: value["files"][0].__setitem__(
+                "relative_path", "authority/"
+            ),
+        ),
+        (
+            "inventory",
+            lambda value: value["files"][0].__setitem__(
+                "relative_path", "authority/report."
+            ),
+        ),
+        (
+            "inventory",
+            lambda value: value["files"][0].__setitem__(
+                "relative_path", "authority/report.json:receipt"
+            ),
+        ),
+        (
+            "inventory",
+            lambda value: value["files"][0].__setitem__(
+                "relative_path", "authority/NUL.json"
+            ),
+        ),
+        (
+            "inventory",
+            lambda value: value["files"][0].__setitem__(
+                "relative_path", "authority/COM¹.json"
+            ),
+        ),
+        (
+            "inventory",
+            lambda value: value["files"].append(value["files"][0]),
+        ),
+        ("receipt", lambda value: value.__setitem__("unexpected", True)),
+        (
+            "receipt",
+            lambda value: value.__setitem__("envelope_schema_version", 2),
+        ),
+        ("receipt", lambda value: value.__setitem__("final_path_count", 3)),
+        (
+            "receipt",
+            lambda value: value["inventory"].__setitem__("relative_path", "other.json"),
+        ),
+        (
+            "receipt",
+            lambda value: value["manifest"].__setitem__("sha256", "A" * 64),
+        ),
+        (
+            "receipt",
+            lambda value: value["independent_report"].__setitem__(
+                "artifact_id", "verification/other.json"
+            ),
+        ),
+        (
+            "receipt",
+            lambda value: value["independent_report"]["schema"].__setitem__(
+                "unexpected", True
+            ),
+        ),
+        (
+            "receipt",
+            lambda value: value["independent_report"].__setitem__(
+                "as_of_date", "not-an-iso-date"
+            ),
+        ),
+        (
+            "receipt",
+            lambda value: value["independent_report"].__setitem__("size_bytes", -1),
+        ),
+    ],
+)
+def test_generation_envelope_schemas_reject_closed_contract_mutations(
+    control_name: str, mutate: object
+) -> None:
+    try:
+        import jsonschema
+    except ImportError as exc:
+        pytest.skip(f"jsonschema runtime is unavailable: {exc}")
+    manifest, payloads = _envelope_manifest_and_payloads()
+    prepared = publication._prepare_generation_bundle(manifest, payloads)
+    schema_root = Path(__file__).parents[2] / "schemas" / "core"
+    schema = json.loads((schema_root / f"generation-{control_name}.schema.json").read_bytes())
+    value = json.loads(prepared.final_files[f"generation-{control_name}.json"])
+    mutate(value)  # type: ignore[operator]
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(
+            schema,
+            format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER,
+        ).validate(value)
+
+
 def test_generation_identity_and_bytes_are_deterministic() -> None:
     first = _artifact("inputs/a.json", b"a")
     second = _artifact("inputs/b.json", b"b")

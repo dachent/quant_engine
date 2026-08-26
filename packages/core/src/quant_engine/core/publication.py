@@ -12,6 +12,8 @@ import re
 import shutil
 import tempfile
 import time
+from types import MappingProxyType
+from typing import Mapping
 
 from quant_engine.core.contracts import (
     CoverageStatus,
@@ -20,13 +22,42 @@ from quant_engine.core.contracts import (
     VerificationStatus,
     canonical_json_bytes,
 )
+from quant_engine.core.strict_json import StrictJSONError, strict_json_loads
 
 
 _GENERATION_ID = re.compile(r"^[0-9a-f]{64}$")
 _LEGACY_POINTER_SCHEMA_VERSION = 1
 _POINTER_SCHEMA_VERSION = 2
 _INVENTORY_SCHEMA_VERSION = 1
+_ENVELOPE_SCHEMA_VERSION = 1
+_BUNDLE_INVENTORY_SCHEMA_VERSION = 1
 _STAGE_RENAME_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
+_GENERATION_MANIFEST_PATH = "generation.json"
+_GENERATION_INVENTORY_PATH = "generation-inventory.json"
+_GENERATION_RECEIPT_PATH = "generation-receipt.json"
+_INDEPENDENT_REPORT_PATH = "verification/independent-verification.json"
+_CONTROL_PATHS = frozenset(
+    {
+        _GENERATION_MANIFEST_PATH,
+        _GENERATION_INVENTORY_PATH,
+        _GENERATION_RECEIPT_PATH,
+    }
+)
+_WINDOWS_FORBIDDEN_PATH_CHARACTERS = frozenset('<>:"|?*')
+_WINDOWS_RESERVED_COMPONENT_STEMS = frozenset(
+    {
+        "aux",
+        "con",
+        "conin$",
+        "conout$",
+        "nul",
+        "prn",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"com{suffix}" for suffix in ("¹", "²", "³")),
+        *(f"lpt{index}" for index in range(1, 10)),
+        *(f"lpt{suffix}" for suffix in ("¹", "²", "³")),
+    }
+)
 
 
 class GenerationConflictError(RuntimeError):
@@ -39,6 +70,168 @@ class PublicationRejectedError(RuntimeError):
 
 class PointerIntegrityError(RuntimeError):
     """The current pointer or referenced manifest failed integrity checks."""
+
+
+@dataclass(frozen=True)
+class _PreparedGenerationBundle:
+    """Exact, portable generation bytes validated before any staging operation."""
+
+    final_files: Mapping[str, bytes]
+
+
+def _sha256_and_size(value: bytes) -> tuple[str, int]:
+    return hashlib.sha256(value).hexdigest(), len(value)
+
+
+def _validate_raw_artifact_path(path: object, *, seen_casefolded: set[str]) -> str:
+    """Reject unsafe raw strings before any path construction or normalization."""
+
+    if not isinstance(path, str) or not path:
+        raise ManifestValidationError("artifact path must be a non-empty string")
+    if (
+        path.startswith("/")
+        or re.match(r"^[A-Za-z]:", path) is not None
+        or "\\" in path
+        or any(character in _WINDOWS_FORBIDDEN_PATH_CHARACTERS for character in path)
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+    ):
+        raise ManifestValidationError("artifact path is not a portable raw path")
+    components = path.split("/")
+    if any(component in {"", ".", ".."} for component in components):
+        raise ManifestValidationError("artifact path has an unsafe component")
+    if any(component.endswith((" ", ".")) for component in components):
+        raise ManifestValidationError(
+            "artifact path has a Windows-normalized trailing character"
+        )
+    if any(
+        component.split(".", maxsplit=1)[0].casefold()
+        in _WINDOWS_RESERVED_COMPONENT_STEMS
+        for component in components
+    ):
+        raise ManifestValidationError("artifact path has a reserved Windows component")
+    folded = path.casefold()
+    if folded in seen_casefolded:
+        raise ManifestValidationError("artifact paths must be unique case-insensitively")
+    if folded in {control.casefold() for control in _CONTROL_PATHS}:
+        raise ManifestValidationError("artifact path collides with a generation control path")
+    seen_casefolded.add(folded)
+    return path
+
+
+def _canonical_json_payload(value: bytes, *, artifact_id: str) -> None:
+    try:
+        parsed = strict_json_loads(value, label=f"payload {artifact_id}")
+    except StrictJSONError as exc:
+        raise ManifestValidationError("payload JSON is not strict JSON") from exc
+    if canonical_json_bytes(parsed) != value:  # type: ignore[arg-type]
+        raise ManifestValidationError("payload JSON bytes are not canonical")
+
+
+def _prepare_generation_bundle(
+    manifest: GenerationManifest, payloads: Mapping[str, bytes]
+) -> _PreparedGenerationBundle:
+    """Build the non-circular final generation file set entirely in memory."""
+
+    if not isinstance(payloads, Mapping):
+        raise ManifestValidationError("generation bundle payloads must be a mapping")
+    artifacts = tuple(manifest.artifacts)
+    seen_casefolded: set[str] = set()
+    artifact_ids = tuple(
+        _validate_raw_artifact_path(artifact.artifact_id, seen_casefolded=seen_casefolded)
+        for artifact in artifacts
+    )
+    report_artifacts = [
+        artifact
+        for artifact in artifacts
+        if artifact.artifact_id == _INDEPENDENT_REPORT_PATH
+    ]
+    if len(report_artifacts) != 1:
+        raise ManifestValidationError(
+            "generation must declare exactly one independent report artifact"
+        )
+    try:
+        manifest = GenerationManifest.from_json_bytes(manifest.to_json_bytes())
+    except ManifestValidationError as exc:
+        raise ManifestValidationError(
+            "generation manifest failed in-memory integrity validation"
+        ) from exc
+    artifacts = tuple(manifest.artifacts)
+    report_artifacts = [
+        artifact
+        for artifact in artifacts
+        if artifact.artifact_id == _INDEPENDENT_REPORT_PATH
+    ]
+    if set(payloads) != set(artifact_ids):
+        raise ManifestValidationError("payload keys must equal manifest artifact IDs")
+
+    payload_bytes: dict[str, bytes] = {}
+    for artifact in artifacts:
+        value = payloads[artifact.artifact_id]
+        if type(value) is not bytes:
+            raise ManifestValidationError("payload values must have exact type bytes")
+        if artifact.artifact_id.casefold().endswith(".json"):
+            _canonical_json_payload(value, artifact_id=artifact.artifact_id)
+        actual_sha256, actual_size = _sha256_and_size(value)
+        if actual_size != artifact.size_bytes:
+            raise ManifestValidationError("payload size_bytes differs from manifest")
+        if actual_sha256 != artifact.sha256:
+            raise ManifestValidationError("payload sha256 differs from manifest")
+        payload_bytes[artifact.artifact_id] = value
+
+    manifest_bytes = manifest.to_json_bytes()
+    manifest_sha256, manifest_size = _sha256_and_size(manifest_bytes)
+    inventory_files = [
+        {
+            "relative_path": _GENERATION_MANIFEST_PATH,
+            "sha256": manifest_sha256,
+            "size_bytes": manifest_size,
+        },
+        *[
+            {
+                "relative_path": artifact.artifact_id,
+                "sha256": artifact.sha256,
+                "size_bytes": artifact.size_bytes,
+            }
+            for artifact in artifacts
+        ],
+    ]
+    inventory_files.sort(key=lambda item: str(item["relative_path"]))
+    inventory_bytes = canonical_json_bytes(
+        {
+            "files": inventory_files,
+            "generation_id": manifest.generation_id,
+            "inventory_schema_version": _BUNDLE_INVENTORY_SCHEMA_VERSION,
+        }
+    )
+    inventory_sha256, inventory_size = _sha256_and_size(inventory_bytes)
+    report = report_artifacts[0]
+    receipt_bytes = canonical_json_bytes(
+        {
+            "envelope_schema_version": _ENVELOPE_SCHEMA_VERSION,
+            "final_path_count": len(artifacts) + 3,
+            "generation_id": manifest.generation_id,
+            "independent_report": report.to_dict(),
+            "inventory": {
+                "relative_path": _GENERATION_INVENTORY_PATH,
+                "sha256": inventory_sha256,
+                "size_bytes": inventory_size,
+            },
+            "manifest": {
+                "relative_path": _GENERATION_MANIFEST_PATH,
+                "sha256": manifest_sha256,
+                "size_bytes": manifest_size,
+            },
+        }
+    )
+    final_files = {
+        _GENERATION_MANIFEST_PATH: manifest_bytes,
+        **payload_bytes,
+        _GENERATION_INVENTORY_PATH: inventory_bytes,
+        _GENERATION_RECEIPT_PATH: receipt_bytes,
+    }
+    return _PreparedGenerationBundle(
+        final_files=MappingProxyType(dict(sorted(final_files.items())))
+    )
 
 
 class PublicationState(StrEnum):
