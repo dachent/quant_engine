@@ -34,6 +34,8 @@ from quant_engine.core.contracts import (
     VerificationStatus,
     hash_file,
 )
+from quant_engine.core.snapshots import InputSnapshot
+from quant_engine.core.strict_json import StrictJSONError, strict_json_loads, strict_json_object
 from quant_engine.core.filesystem import rename_directory_with_retry
 from quant_engine.core.publication import (
     CurrentPointer,
@@ -126,6 +128,7 @@ __all__ = [
     "GenerationManifest",
     "GateEvidence",
     "ManifestValidationError",
+    "InputSnapshot",
     "PointerIntegrityError",
     "PublicationDisposition",
     "PublicationRejectedError",
@@ -143,12 +146,15 @@ __all__ = [
     "RevisionPolicy",
     "RevisionState",
     "SourceArtifact",
+    "StrictJSONError",
     "SubjectType",
     "VerificationStatus",
     "decide_admission",
     "local_freshness_alerts",
     "commit_release",
     "hash_file",
+    "strict_json_loads",
+    "strict_json_object",
     "generation_inventory_sha256",
     "publication_state",
     "prepare_release",

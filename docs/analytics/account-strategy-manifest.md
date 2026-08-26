@@ -11,20 +11,22 @@ provider-ledger generation/artifact and exact classified-flow artifact used by
 the producer. The manifest records the coverage artifact's `SourceArtifact`
 identity alongside those same two input identities.
 
-Every coverage row is for one synthetic-safe `account_id` and one closed,
-inclusive date interval. `COMPLETE` is valid only with non-empty exact source
-artifact IDs, `reason: null`, and the closed machine-receipt kind
-`ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V1`. `BLOCKED` has a non-empty reason and
-never provides absent-flow-as-zero authority. Provider-wide prose, unknown
-properties, unknown authority labels, identity mismatches, malformed dates,
-and overlapping same-account rows are rejected.
+Coverage is schema version 2. It has exactly one row for each producer-selected
+mapped assignment key, retaining a nullable assignment end separately from the
+finite requested/covered receipt interval. The coverage artifact declares the
+exact selected receipt IDs, SHA-256 values, and byte sizes. `COMPLETE` requires
+`ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2`, one declared receipt, and null
+blockers; that receipt must bind the exact account, full assignment interval,
+provider/source identity, issuer contract, evidence artifacts, categories, and
+terminal pagination. `BLOCKED` requires `NONE`, no receipt, and one closed
+blocker/detail. The production retained issuer contract set is empty in this
+task, so real receipts cannot become complete here.
 
 For a funded mapped epoch, the producer determines its final available NAV
-date, then requires a single same-account `COMPLETE` coverage row that contains
-the entire interval from the epoch's effective start through that final NAV
-date. Adjacent rows do not combine; a classified flow on one date says nothing
-about a neighboring date. A coverage end before the final NAV date, a start
-after the epoch start, another account, a `BLOCKED` row, or a gap fails closed.
+date, then requires the exact `COMPLETE` row for that mapped assignment.
+Coverage rows never combine or extend to a neighboring subinterval. A different
+assignment key, a partial interval, another account, a `BLOCKED` row, or a gap
+fails closed.
 
 When completeness is not proven, the epoch output has status
 `BLOCKED_UNPROVABLE_OPENING_FLOWS` and blocker

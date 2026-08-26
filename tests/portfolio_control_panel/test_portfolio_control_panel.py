@@ -6604,7 +6604,7 @@ def _produce_manifest(
     _write_json(
         flow_coverage_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifact_id": "coverage/synthetic-account-flow-coverage.json",
             "as_of_date": as_of,
             "ledger_identity": {
@@ -6618,17 +6618,18 @@ def _produce_manifest(
                 "sha256": hashlib.sha256(classified_bytes).hexdigest(),
                 "size_bytes": len(classified_bytes),
             },
+            "mapped_assignments_identity": {"sha256": assignment_sha256, "count": len(assignments)},
+            "receipt_artifacts": [],
             "rows": [
                 {
-                    "account_id": "account-seam",
-                    "effective_start": "2026-01-01",
-                    "effective_end": as_of,
-                    "status": "COMPLETE",
-                    "source_artifact_ids": [
-                        "receipt/synthetic-account-interval.json"
-                    ],
-                    "authority_kind": "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V1",
-                    "reason": None,
+                    "assignment": {key: assignments[0][key] for key in ("account_id", "strategy_id", "effective_start", "effective_end")},
+                    "requested_start": "2026-01-01",
+                    "requested_end": as_of,
+                    "status": "BLOCKED",
+                    "authority_kind": "NONE",
+                    "receipt_artifact_id": None,
+                    "blocker_code": "LEGACY_RECEIPT_UNVERIFIABLE",
+                    "blocker_detail": "synthetic direct-consumer fixture has no retained v2 receipt",
                 }
             ],
         },

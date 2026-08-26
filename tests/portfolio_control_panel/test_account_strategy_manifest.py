@@ -10,11 +10,13 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
+from quant_engine.core import InputSnapshot
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -31,8 +33,94 @@ def manifest_module() -> Any:
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_producer_imports_the_core_owned_snapshot_type(manifest_module: Any) -> None:
+    """A producer-local lookalike would split the immutable input boundary."""
+    assert manifest_module.InputSnapshot is InputSnapshot
+
+
+def test_snapshot_native_producer_matches_the_compatibility_wrapper(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    """A native producer that reopens a path could diverge after capture."""
+    inputs = _write_valid_inputs(tmp_path)
+    baseline = (
+        inputs["baseline_root"]
+        / "generations"
+        / BASELINE_GENERATION_ID
+        / "portfolio-baseline.json"
+    )
+    snapshots = manifest_module.ManifestCandidateSnapshots(
+        ledger=InputSnapshot.capture(inputs["ledger"], "ledger"),
+        ledger_identity=InputSnapshot.capture(inputs["ledger_identity"], "ledger identity"),
+        baseline=InputSnapshot.capture(baseline, "baseline"),
+        classified_flows=InputSnapshot.capture(inputs["flows"], "classified flows"),
+        classification_policy=InputSnapshot.capture(
+            inputs["classification_policy"], "flow classification policy"
+        ),
+        admission_policy=InputSnapshot.capture(inputs["policy"], "admission policy"),
+        flow_coverage=InputSnapshot.capture(inputs["flow_coverage"], "flow coverage"),
+        retrieval_receipts={
+            "receipt/synthetic-2026-01-01-2026-01-03.json": InputSnapshot.capture(
+                inputs["retrieval_receipt"], "retrieval receipt"
+            ),
+            "receipt/synthetic-2026-01-04-2026-01-06.json": InputSnapshot.capture(
+                inputs["retrieval_receipt_b"], "retrieval receipt"
+            ),
+        },
+        calculation_code=InputSnapshot.capture(MODULE_PATH, "calculation code"),
+        manifest_schema=InputSnapshot.capture(
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "account-strategy-manifest.schema.json",
+            "account strategy manifest schema",
+        ),
+        baseline_generation_id=BASELINE_GENERATION_ID,
+    )
+
+    assert manifest_module._build_manifest_candidate_from_snapshots_for_testing(
+        snapshots, _synthetic_receipt_contract(manifest_module)
+    ) == (
+        manifest_module._build_manifest_candidate_for_testing(
+            ledger_path=inputs["ledger"],
+            ledger_identity_path=inputs["ledger_identity"],
+            baseline_root=inputs["baseline_root"],
+            baseline_generation_id=BASELINE_GENERATION_ID,
+            classified_flows_path=inputs["flows"],
+            classification_policy_path=inputs["classification_policy"],
+            admission_policy_path=inputs["policy"],
+            flow_coverage_path=inputs["flow_coverage"],
+            retrieval_receipt_paths={
+                "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"],
+                "receipt/synthetic-2026-01-04-2026-01-06.json": inputs["retrieval_receipt_b"],
+            },
+        _receipt_authority_contracts=_synthetic_receipt_contract(manifest_module),
+        )
+    )
+
+
+def test_public_producer_rejects_valid_looking_synthetic_receipts(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    """Only the private synthetic seam may use an injected receipt contract."""
+    inputs = _write_valid_inputs(tmp_path)
+    with pytest.raises(manifest_module.ManifestError, match="issuer is not admissible"):
+        manifest_module.build_manifest_candidate(
+            ledger_path=inputs["ledger"],
+            ledger_identity_path=inputs["ledger_identity"],
+            baseline_root=inputs["baseline_root"],
+            baseline_generation_id=BASELINE_GENERATION_ID,
+            classified_flows_path=inputs["flows"],
+            classification_policy_path=inputs["classification_policy"],
+            admission_policy_path=inputs["policy"],
+            flow_coverage_path=inputs["flow_coverage"],
+            retrieval_receipt_paths={
+                "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"],
+                "receipt/synthetic-2026-01-04-2026-01-06.json": inputs["retrieval_receipt_b"],
+            },
+        )
 
 
 def test_manifest_schema_has_no_duplicate_json_keys_and_keeps_ok_provenance_rules() -> None:
@@ -97,7 +185,7 @@ def _flow_coverage_payload(
         inputs["ledger_identity"].read_text(encoding="utf-8")
     )
     payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact_id": "coverage/synthetic-account-flow-coverage.json",
         "as_of_date": "2026-01-06",
         "ledger_identity": {
@@ -105,6 +193,8 @@ def _flow_coverage_payload(
             "artifact": ledger_identity["artifact"],
         },
         "classified_flows_artifact": _classified_flow_artifact(inputs["flows"]),
+        "mapped_assignments_identity": {"sha256": "0" * 64, "count": 0},
+        "receipt_artifacts": [],
         "rows": rows,
     }
     payload.update(overrides)
@@ -116,23 +206,34 @@ def _coverage_row(
     end: str,
     *,
     account_id: str = "synthetic-account",
+    strategy_id: str = "synthetic-strategy-a",
+    assignment_end: str | None = None,
     status: str = "COMPLETE",
     source_artifact_ids: list[str] | None = None,
-    authority_kind: str = "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V1",
+    authority_kind: str = "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2",
     reason: str | None = None,
 ) -> dict[str, Any]:
-    if source_artifact_ids is None:
-        source_artifact_ids = ["receipt/synthetic-account-interval.json"]
     if status == "BLOCKED" and reason is None:
-        reason = "SYNTHETIC_RETRIEVAL_GAP"
+        reason = "NO_ADMISSIBLE_V2_RECEIPT"
+    if status == "BLOCKED" and reason not in {
+        "NO_ADMISSIBLE_V2_RECEIPT", "ACCOUNT_BINDING_MISMATCH", "INTERVAL_BOUNDARY_MISMATCH",
+        "CATEGORY_SET_INCOMPLETE", "PAGINATION_NOT_TERMINAL", "SOURCE_IDENTITY_MISMATCH",
+        "RECEIPT_OVERLAP", "RECEIPT_GAP", "LEGACY_RECEIPT_UNVERIFIABLE",
+    }:
+        reason = "NO_ADMISSIBLE_V2_RECEIPT"
     return {
-        "account_id": account_id,
-        "effective_start": start,
-        "effective_end": end,
+        "assignment": {"account_id": account_id, "strategy_id": strategy_id, "effective_start": start, "effective_end": assignment_end if assignment_end is not None else (end if strategy_id == "synthetic-strategy-a" else None)},
+        "requested_start": start,
+        "requested_end": end,
         "status": status,
-        "source_artifact_ids": source_artifact_ids,
-        "authority_kind": authority_kind,
-        "reason": reason,
+        "authority_kind": authority_kind if status == "COMPLETE" else "NONE",
+        "receipt_artifact_id": (
+            f"receipt/synthetic-{start}-{end}.json"
+            if status == "COMPLETE" and source_artifact_ids != []
+            else None
+        ),
+        "blocker_code": None if status == "COMPLETE" else reason,
+        "blocker_detail": None if status == "COMPLETE" else "synthetic blocked receipt",
     }
 
 
@@ -143,36 +244,60 @@ def _load_flow_coverage(
     rows: list[dict[str, Any]],
     **overrides: object,
 ) -> Any:
+    receipt_path = tmp_path / "synthetic-receipt.json"
+    receipt_snapshots: dict[str, Any] = {}
+    for index, complete in enumerate(row for row in rows if row["status"] == "COMPLETE"):
+        path = receipt_path.with_name(f"synthetic-receipt-{index}.json")
+        _write_json(path, _retrieval_receipt(str(complete["requested_start"]), str(complete["requested_end"]), str(complete["receipt_artifact_id"])))
+        receipt_snapshots[str(complete["receipt_artifact_id"])] = manifest_module.InputSnapshot.capture(path, "retrieval receipt")
+    receipt_artifacts = [
+        {"artifact_id": artifact_id, "sha256": snapshot.sha256, "size_bytes": snapshot.size_bytes}
+        for artifact_id, snapshot in sorted(receipt_snapshots.items())
+    ]
+    mapped_assignments = [dict(row["assignment"]) for row in rows]
+    assignment_sha256, assignment_count = manifest_module._assignment_identity(mapped_assignments)
     coverage_path = tmp_path / "account-flow-coverage.json"
-    _write_json(coverage_path, _flow_coverage_payload(inputs, rows, **overrides))
-    coverage_snapshot = manifest_module.InputSnapshot.capture(
-        coverage_path, "flow coverage"
-    )
+    _write_json(coverage_path, _flow_coverage_payload(inputs, rows, receipt_artifacts=receipt_artifacts, mapped_assignments_identity={"sha256": assignment_sha256, "count": assignment_count}, **overrides))
+    coverage_snapshot = manifest_module.InputSnapshot.capture(coverage_path, "flow coverage")
     ledger_identity = json.loads(inputs["ledger_identity"].read_text(encoding="utf-8"))
-    return manifest_module.load_flow_coverage(
-        coverage_snapshot.json_object("flow coverage"),
+    return manifest_module._load_flow_coverage_for_testing(
         coverage_snapshot,
         {
             "generation_id": ledger_identity["generation_id"],
             "artifact": ledger_identity["artifact"],
         },
         _classified_flow_artifact(inputs["flows"]),
+        receipt_snapshots,
+        mapped_assignments,
+        _synthetic_receipt_contract(manifest_module),
     )
+
+
+def _retrieval_receipt(start: str, end: str, artifact_id: str = "receipt/synthetic-2026-01-01-2026-01-06.json") -> dict[str, Any]:
+    artifact = {"artifact_id": "raw/synthetic.json", "as_of_date": "2026-01-06", "schema": {"name": "synthetic", "version": "1"}, "sha256": "a" * 64, "size_bytes": 1}
+    return {"schema_version": 2, "artifact_id": artifact_id, "issuer": {"adapter_name": "SYNTHETIC", "adapter_version": "1", "code_sha256": "b" * 64}, "provider": "SYNTHETIC", "provider_generation": "c" * 64, "provider_generation_manifest": artifact, "raw_evidence_artifacts": [artifact], "account_id": "synthetic-account", "source_account_identity_sha256": "d" * 64, "requested_start": start, "requested_end": end, "covered_start": start, "covered_end": end, "required_categories": ["CASH"], "completed_categories": ["CASH"], "unavailable_categories": [], "pagination": {"mode": "SYNTHETIC", "page_count": 1, "request_response_chain_sha256": "e" * 64, "terminal_response_sha256": "f" * 64, "terminal": True}, "completeness": "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES", "truncated": False}
+
+
+def _synthetic_receipt_contract(manifest_module: Any) -> dict[tuple[str, str, str], Any]:
+    receipt = _retrieval_receipt("2026-01-01", "2026-01-01")
+    issuer = receipt["issuer"]
+    return {
+        (issuer["adapter_name"], issuer["adapter_version"], issuer["code_sha256"]): manifest_module.ReceiptAuthorityContract(
+            adapter_name=issuer["adapter_name"], adapter_version=issuer["adapter_version"], code_sha256=issuer["code_sha256"], provider=receipt["provider"], account_id=receipt["account_id"], source_account_identity_sha256=receipt["source_account_identity_sha256"], provider_generation=receipt["provider_generation"], provider_generation_manifest=receipt["provider_generation_manifest"], raw_evidence_artifacts=tuple(receipt["raw_evidence_artifacts"]), required_categories=tuple(receipt["required_categories"]), pagination=receipt["pagination"],
+        )
+    }
 
 
 def _test_complete_coverage(manifest_module: Any, *account_ids: str) -> Any:
     """Test-only complete receipts for direct arithmetic unit tests."""
-    return manifest_module.CoverageIndex(
-        [
-            {
-                "account_id": account_id,
-                "effective_start": "0001-01-01",
-                "effective_end": "9999-12-31",
-                "status": "COMPLETE",
-            }
-            for account_id in account_ids
-        ]
-    )
+    class _CompleteCoverageForArithmeticOnly:
+        def is_complete(self, account_id: str, _start: str, _end: str) -> bool:
+            return account_id in account_ids
+
+        def is_complete_assignment(self, assignment: dict[str, object]) -> bool:
+            return assignment.get("account_id") in account_ids
+
+    return _CompleteCoverageForArithmeticOnly()
 
 
 def test_flow_coverage_does_not_extend_one_day_receipt_to_neighboring_dates(
@@ -314,8 +439,11 @@ def test_flow_coverage_rejects_ledger_and_source_identity_mismatch(
 ) -> None:
     """Changing identity equality to accept a mismatch detaches coverage from its facts."""
     inputs = _write_valid_inputs(tmp_path / "inputs")
+    rows = [_coverage_row("2026-01-01", "2026-01-03")]
+    mapped_assignments = [dict(rows[0]["assignment"])]
+    assignment_sha256, assignment_count = manifest_module._assignment_identity(mapped_assignments)
     payload = _flow_coverage_payload(
-        inputs, [_coverage_row("2026-01-01", "2026-01-03")]
+        inputs, rows, mapped_assignments_identity={"sha256": assignment_sha256, "count": assignment_count}
     )
     if identity_key == "ledger_identity":
         payload[identity_key]["generation_id"] = "f" * 64
@@ -330,13 +458,14 @@ def test_flow_coverage_rejects_ledger_and_source_identity_mismatch(
 
     with pytest.raises(manifest_module.ManifestError, match="identity"):
         manifest_module.load_flow_coverage(
-            coverage_snapshot.json_object("flow coverage"),
             coverage_snapshot,
             {
                 "generation_id": ledger_identity["generation_id"],
                 "artifact": ledger_identity["artifact"],
             },
             _classified_flow_artifact(inputs["flows"]),
+            {},
+            mapped_assignments,
         )
 
 
@@ -361,7 +490,7 @@ def test_blocked_flow_coverage_prevents_epoch_calculation_and_stale_metrics(
         ],
     )
 
-    manifest = manifest_module.assemble_manifest(
+    manifest = manifest_module._assemble_manifest_for_testing(
         {
             "synthetic-account": {
                 "2026-01-01": manifest_module.Decimal("50"),
@@ -667,6 +796,18 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
             ],
         },
     )
+    receipt_path = tmp_path / "synthetic-retrieval-receipt-a.json"
+    receipt_b_path = tmp_path / "synthetic-retrieval-receipt-b.json"
+    receipt_a_id = "receipt/synthetic-2026-01-01-2026-01-03.json"
+    receipt_b_id = "receipt/synthetic-2026-01-04-2026-01-06.json"
+    _write_json(receipt_path, _retrieval_receipt("2026-01-01", "2026-01-03", receipt_a_id))
+    _write_json(receipt_b_path, _retrieval_receipt("2026-01-04", "2026-01-06", receipt_b_id))
+    receipt_bytes = receipt_path.read_bytes()
+    receipt_b_bytes = receipt_b_path.read_bytes()
+    mapped_projection = [
+        {key: assignment[key] for key in ("account_id", "strategy_id", "effective_start", "effective_end")}
+        for assignment in assignments
+    ]
     coverage_path = tmp_path / "account-flow-coverage.json"
     _write_json(
         coverage_path,
@@ -675,7 +816,9 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
                 "ledger_identity": ledger_identity_path,
                 "flows": flows_path,
             },
-            [_coverage_row("2026-01-01", "2026-01-06")],
+            [_coverage_row("2026-01-01", "2026-01-03", assignment_end="2026-01-03"), _coverage_row("2026-01-04", "2026-01-06", strategy_id="synthetic-strategy-b", assignment_end=None)],
+            mapped_assignments_identity={"sha256": _sha256(mapped_projection), "count": len(mapped_projection)},
+            receipt_artifacts=[{"artifact_id": receipt_a_id, "sha256": hashlib.sha256(receipt_bytes).hexdigest(), "size_bytes": len(receipt_bytes)}, {"artifact_id": receipt_b_id, "sha256": hashlib.sha256(receipt_b_bytes).hexdigest(), "size_bytes": len(receipt_b_bytes)}],
         ),
     )
     return {
@@ -686,6 +829,8 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
         "classification_policy": classification_policy_path,
         "flows": flows_path,
         "flow_coverage": coverage_path,
+        "retrieval_receipt": receipt_path,
+        "retrieval_receipt_b": receipt_b_path,
     }
 
 
@@ -917,6 +1062,36 @@ def test_cli_accepts_real_shape_null_strategies_without_calculating_them(
     classified["events"][0]["account_id"] = "mapped-account"
     _write_json(inputs["flows"], classified)
     _refresh_ledger_identity(inputs)
+    mapped_assignments = [assignments[0]]
+    assignment_sha256, assignment_count = manifest_module._assignment_identity(
+        mapped_assignments
+    )
+    blocked_row = {
+        "assignment": {
+            "account_id": "mapped-account",
+            "strategy_id": "mapped-strategy",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        },
+        "requested_start": "2026-01-01",
+        "requested_end": "2026-01-06",
+        "status": "BLOCKED",
+        "authority_kind": "NONE",
+        "receipt_artifact_id": None,
+        "blocker_code": "NO_ADMISSIBLE_V2_RECEIPT",
+        "blocker_detail": "partition-only synthetic fixture",
+    }
+    _write_json(
+        inputs["flow_coverage"],
+        _flow_coverage_payload(
+            inputs,
+            [blocked_row],
+            mapped_assignments_identity={
+                "sha256": assignment_sha256,
+                "count": assignment_count,
+            },
+        ),
+    )
 
     manifest = _manifest_from_cli(manifest_module, inputs, capsys)
 
@@ -1117,7 +1292,7 @@ def test_final_semantic_validator_accepts_mapped_gap_only_with_full_coverage(
         "admission_policy": {"assignment": assignment_identity},
         "assignment": assignment_identity,
     }
-    manifest = manifest_module.assemble_manifest(
+    manifest = manifest_module._assemble_manifest_for_testing(
         {
             "bridge-account": {
                 "2026-01-01": manifest_module.Decimal("100"),
@@ -1185,7 +1360,7 @@ def test_final_semantic_validator_rejects_continuity_across_non_strategy_gap(
         "admission_policy": {"assignment": assignment_identity},
         "assignment": assignment_identity,
     }
-    manifest = manifest_module.assemble_manifest(
+    manifest = manifest_module._assemble_manifest_for_testing(
         {
             "bridge-account": {
                 "2026-01-01": manifest_module.Decimal("100"),
@@ -1235,6 +1410,10 @@ def _producer_argv(inputs: dict[str, Path]) -> list[str]:
         str(inputs["classification_policy"]),
         "--flow-coverage-json",
         str(inputs["flow_coverage"]),
+        "--retrieval-receipt-json",
+        "receipt/synthetic-2026-01-01-2026-01-03.json=" + str(inputs["retrieval_receipt"]),
+        "--retrieval-receipt-json",
+        "receipt/synthetic-2026-01-04-2026-01-06.json=" + str(inputs["retrieval_receipt_b"]),
         "--format",
         "json",
     ]
@@ -1264,8 +1443,53 @@ def _manifest_from_cli(
     inputs: dict[str, Path],
     capsys: pytest.CaptureFixture[str],
 ) -> dict[str, Any]:
-    assert manifest_module.main(_producer_argv(inputs)) == 0
-    return json.loads(capsys.readouterr().out)
+    coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
+    receipt_paths = {
+        "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"],
+        "receipt/synthetic-2026-01-04-2026-01-06.json": inputs["retrieval_receipt_b"],
+    }
+    selected_receipts = {
+        row["receipt_artifact_id"]: receipt_paths[row["receipt_artifact_id"]]
+        for row in coverage["rows"]
+        if row["status"] == "COMPLETE"
+    }
+    return manifest_module._build_manifest_candidate_for_testing(
+        ledger_path=inputs["ledger"], ledger_identity_path=inputs["ledger_identity"],
+        baseline_root=inputs["baseline_root"], baseline_generation_id=BASELINE_GENERATION_ID,
+        classified_flows_path=inputs["flows"], classification_policy_path=inputs["classification_policy"],
+        admission_policy_path=inputs["policy"], flow_coverage_path=inputs["flow_coverage"],
+        retrieval_receipt_paths=selected_receipts,
+        _receipt_authority_contracts=_synthetic_receipt_contract(manifest_module),
+    )
+
+
+def _synthetic_main(manifest_module: Any, argv: list[str]) -> int:
+    """Private test seam: public CLI retains the empty production authority set."""
+    return manifest_module._main_with_receipt_authority_for_testing(
+        argv, _synthetic_receipt_contract(manifest_module)
+    )
+
+
+def _extend_open_receipt_coverage(inputs: dict[str, Path], end: str) -> None:
+    """Keep the open mapped assignment and its receipt bytes bound to a new as-of."""
+    coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
+    coverage["as_of_date"] = end
+    open_row = coverage["rows"][1]
+    open_row["requested_end"] = end
+    receipt_id = str(open_row["receipt_artifact_id"])
+    _write_json(
+        inputs["retrieval_receipt_b"],
+        _retrieval_receipt("2026-01-04", end, receipt_id),
+    )
+    receipt_bytes = inputs["retrieval_receipt_b"].read_bytes()
+    for artifact in coverage["receipt_artifacts"]:
+        if artifact["artifact_id"] == receipt_id:
+            artifact["sha256"] = hashlib.sha256(receipt_bytes).hexdigest()
+            artifact["size_bytes"] = len(receipt_bytes)
+            break
+    else:
+        raise AssertionError("synthetic receipt declaration is missing")
+    _write_json(inputs["flow_coverage"], coverage)
 
 
 def test_duplicate_account_date_nav_is_rejected_even_when_values_match(
@@ -1325,7 +1549,7 @@ def test_cli_requires_exact_classified_flow_coverage(
     _refresh_ledger_identity(inputs)
 
     with pytest.raises(manifest_module.ManifestError, match="missing classified"):
-        manifest_module.main(_producer_argv(inputs))
+        _synthetic_main(manifest_module, _producer_argv(inputs))
 
 
 def test_cli_rejects_gap_when_policy_claims_epoch_continuity(
@@ -1334,7 +1558,7 @@ def test_cli_rejects_gap_when_policy_claims_epoch_continuity(
     inputs = _write_valid_inputs(tmp_path, gap=True)
 
     with pytest.raises(manifest_module.ManifestError, match="gap"):
-        manifest_module.main(_producer_argv(inputs))
+        _synthetic_main(manifest_module, _producer_argv(inputs))
 
 
 def test_cli_emits_bound_source_identities_and_accepts_low_funded_nav(
@@ -1342,7 +1566,7 @@ def test_cli_emits_bound_source_identities_and_accepts_low_funded_nav(
 ) -> None:
     inputs = _write_valid_inputs(tmp_path)
 
-    assert manifest_module.main(_producer_argv(inputs)) == 0
+    assert _synthetic_main(manifest_module, _producer_argv(inputs)) == 0
 
     manifest = json.loads(capsys.readouterr().out)
     assert manifest["schema_version"] == 7
@@ -1382,7 +1606,7 @@ def test_reusable_build_candidate_matches_cli_output(
         "artifact": {
             "artifact_id": "coverage/synthetic-account-flow-coverage.json",
             "as_of_date": "2026-01-06",
-            "schema": {"name": "account-flow-coverage", "version": "1"},
+                "schema": {"name": "account-flow-coverage", "version": "2"},
             "sha256": hashlib.sha256(coverage_bytes).hexdigest(),
             "size_bytes": len(coverage_bytes),
         },
@@ -1392,16 +1616,21 @@ def test_reusable_build_candidate_matches_cli_output(
         ]["artifact"],
     }
 
-    actual = manifest_module.build_manifest_candidate(
+    actual = manifest_module._build_manifest_candidate_for_testing(
         ledger_path=inputs["ledger"],
         ledger_identity_path=inputs["ledger_identity"],
         baseline_root=inputs["baseline_root"],
         baseline_generation_id=BASELINE_GENERATION_ID,
         classified_flows_path=inputs["flows"],
         classification_policy_path=inputs["classification_policy"],
-        admission_policy_path=inputs["policy"],
-        flow_coverage_path=inputs["flow_coverage"],
-    )
+            admission_policy_path=inputs["policy"],
+            flow_coverage_path=inputs["flow_coverage"],
+            retrieval_receipt_paths={
+                "receipt/synthetic-2026-01-01-2026-01-03.json": inputs["retrieval_receipt"],
+                "receipt/synthetic-2026-01-04-2026-01-06.json": inputs["retrieval_receipt_b"],
+            },
+        _receipt_authority_contracts=_synthetic_receipt_contract(manifest_module),
+        )
     assert actual == expected
 
 
@@ -1414,7 +1643,7 @@ def test_cli_rejects_classified_policy_hash_not_matching_selected_policy(
     _write_json(inputs["flows"], classified)
 
     with pytest.raises(manifest_module.ManifestError, match="classification policy"):
-        manifest_module.main(_producer_argv(inputs))
+        _synthetic_main(manifest_module, _producer_argv(inputs))
 
 
 def test_cli_rejects_classified_disposition_forgery_against_selected_policy(
@@ -1427,7 +1656,7 @@ def test_cli_rejects_classified_disposition_forgery_against_selected_policy(
     _refresh_ledger_identity(inputs)
 
     with pytest.raises(manifest_module.ManifestError, match="differs from raw record"):
-        manifest_module.main(_producer_argv(inputs))
+        _synthetic_main(manifest_module, _producer_argv(inputs))
 
 
 def test_cli_rejects_flow_currency_that_differs_from_accounting_currency(
@@ -1440,7 +1669,7 @@ def test_cli_rejects_flow_currency_that_differs_from_accounting_currency(
     _refresh_ledger_identity(inputs)
 
     with pytest.raises(manifest_module.ManifestError, match="currency"):
-        manifest_module.main(_producer_argv(inputs))
+        _synthetic_main(manifest_module, _producer_argv(inputs))
 
 
 def test_cli_binds_identity_artifact_and_ignores_mutable_current_pointer(
@@ -1480,7 +1709,7 @@ def test_cli_rejects_assignment_gap_without_a_continuity_claim(
     _write_json(inputs["policy"], policy)
 
     with pytest.raises(manifest_module.ManifestError, match="gap"):
-        manifest_module.main(_producer_argv(inputs))
+        _synthetic_main(manifest_module, _producer_argv(inputs))
 
 
 def test_nav_series_rejects_available_unavailable_duplicate_account_date(
@@ -1532,7 +1761,7 @@ def test_cli_rejects_assignment_for_unknown_baseline_account(
     with pytest.raises(
         manifest_module.ManifestError, match="assignment account is unknown"
     ):
-        manifest_module.main(_producer_argv(inputs))
+        _synthetic_main(manifest_module, _producer_argv(inputs))
 
 
 @pytest.mark.parametrize(
@@ -1573,7 +1802,7 @@ def test_cli_rejects_nav_evidence_outside_known_baseline_epoch(
     with pytest.raises(
         manifest_module.ManifestError, match="baseline assignment|account is unknown"
     ):
-        manifest_module.main(_producer_argv(inputs))
+        _synthetic_main(manifest_module, _producer_argv(inputs))
 
 
 def test_cli_rejects_reconciled_flow_outside_known_epoch(
@@ -1589,7 +1818,7 @@ def test_cli_rejects_reconciled_flow_outside_known_epoch(
     _refresh_ledger_identity(inputs)
 
     with pytest.raises(manifest_module.ManifestError, match="baseline assignment"):
-        manifest_module.main(_producer_argv(inputs))
+        _synthetic_main(manifest_module, _producer_argv(inputs))
 
 
 def test_cli_uses_one_ledger_snapshot_for_hash_and_calculation(
@@ -1884,7 +2113,7 @@ def test_producer_late_flows_emit_no_self_asserted_evidence(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     epoch_key = ("synthetic-account", "synthetic-strategy-b", "2026-01-04", None)
-    produced = manifest_module.assemble_manifest(
+    produced = manifest_module._assemble_manifest_for_testing(
         {
             "synthetic-account": {
                 "2026-01-04": Decimal("70"),
@@ -1924,7 +2153,7 @@ def test_late_flow_block_emits_no_trace_and_schema_forbids_one(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     epoch_key = ("synthetic-account", "synthetic-strategy-b", "2026-01-04", None)
-    produced = manifest_module.assemble_manifest(
+    produced = manifest_module._assemble_manifest_for_testing(
         {
             "synthetic-account": {
                 "2026-01-04": Decimal("70"),
@@ -2464,16 +2693,19 @@ def test_predecessor_continuity_annualized_ronc_counts_known_opening_exposure(
     _write_json(inputs["policy"], policy)
     _write_json(inputs["ledger"], ledger)
     _refresh_ledger_identity(inputs)
-    coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
-    coverage["rows"][0]["effective_end"] = "2027-01-03"
-    _write_json(inputs["flow_coverage"], coverage)
+    _extend_open_receipt_coverage(inputs, "2027-01-03")
 
     manifest = _manifest_from_cli(manifest_module, inputs, capsys)
     successor = manifest["rows"][1]
 
-    assert coverage["rows"] == [
-        _coverage_row("2026-01-01", "2027-01-03")
-    ]
+    coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
+    assert coverage["rows"][0] == _coverage_row(
+        "2026-01-01", "2026-01-03", assignment_end="2026-01-03"
+    )
+    assert coverage["rows"][1]["assignment"] == _coverage_row(
+        "2026-01-04", "2027-01-03", strategy_id="synthetic-strategy-b"
+    )["assignment"]
+    assert coverage["rows"][1]["requested_end"] == "2027-01-03"
     assert successor["opening_basis"] == "PREDECESSOR_CLOSING_NAV"
     assert successor["observation_trace"]["links"][0]["start_date"] == "2026-01-03"
     assert Decimal(successor["return_on_net_capital"]) == Decimal("0.1")
@@ -2523,9 +2755,7 @@ def test_semantic_validation_requires_predecessor_link_to_end_at_first_observed_
     _write_json(inputs["policy"], policy)
     _write_json(inputs["ledger"], ledger)
     _refresh_ledger_identity(inputs)
-    coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
-    coverage["rows"][0]["effective_end"] = "2027-01-03"
-    _write_json(inputs["flow_coverage"], coverage)
+    _extend_open_receipt_coverage(inputs, "2027-01-03")
 
     manifest = _manifest_from_cli(manifest_module, inputs, capsys)
     successor = manifest["rows"][1]
@@ -2779,7 +3009,7 @@ def _continuity_case(manifest_module: Any, case: str) -> list[dict[str, Any]]:
         series["synthetic-account"]["2026-01-02"] = manifest_module.Decimal("0")
         series["synthetic-account"]["2026-01-03"] = manifest_module.Decimal("100")
 
-    manifest = manifest_module.assemble_manifest(
+    manifest = manifest_module._assemble_manifest_for_testing(
         series,
         {"synthetic-account": {"provider": "SYNTHETIC"}},
         buckets,

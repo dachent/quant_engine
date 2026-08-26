@@ -99,6 +99,20 @@ def test_generation_identity_and_bytes_are_deterministic() -> None:
     assert GenerationManifest.from_json_bytes(left.to_json_bytes()) == left
 
 
+@pytest.mark.parametrize(
+    "contents",
+    [
+        b'{"generation_id":"x","generation_id":"y"}',
+        b'{"value":NaN}',
+        b'\xff',
+    ],
+)
+def test_generation_manifest_uses_the_strict_json_boundary(contents: bytes) -> None:
+    """Replacing strict parsing would silently rewrite a manifest authority."""
+    with pytest.raises(ManifestValidationError, match="manifest"):
+        GenerationManifest.from_json_bytes(contents)
+
+
 def test_source_artifact_hashes_content_without_recording_a_path(
     tmp_path: Path,
 ) -> None:
