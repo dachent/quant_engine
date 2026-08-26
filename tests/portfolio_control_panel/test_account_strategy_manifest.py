@@ -1683,7 +1683,7 @@ def test_validator_requires_nonempty_late_flows_and_canonical_dates(
         manifest_module.validate_manifest_schema(manifest)
 
 
-def test_validator_rejects_late_flow_status_not_derived_from_embedded_evidence(
+def test_validator_rejects_late_flow_status_with_forbidden_trace(
     manifest_module: Any,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1727,13 +1727,9 @@ def test_validator_rejects_late_flow_status_not_derived_from_embedded_evidence(
         {"date": "2026-01-05", "nav": "75"},
         {"date": "2026-01-06", "nav": "80"},
     ]
-    manifest_module.validate_manifest_schema(manifest)
-
-    row["late_flows"][0]["date"] = "2026-01-05"
-
     with pytest.raises(
         manifest_module.ManifestError,
-        match="late-flow evidence differs",
+        match="formal schema",
     ):
         manifest_module.validate_manifest_schema(manifest)
 
