@@ -612,6 +612,72 @@ def test_final_semantic_validator_accepts_mapped_gap_only_with_full_coverage(
         )
 
 
+def test_final_semantic_validator_rejects_continuity_across_non_strategy_gap(
+    manifest_module: Any,
+) -> None:
+    """Full-perimeter gap evidence must never authorize a capital handoff."""
+    perimeter = manifest_module.partition_assignments(_non_strategy_bridge_assignments())
+    mapped_assignments = [
+        assignment
+        for chain in perimeter.mapped_chains.values()
+        for assignment in chain
+    ]
+    admissions = _bridge_admissions(manifest_module, predecessor_continuity=True)
+    assignment_sha256, assignment_count = manifest_module._assignment_identity(
+        mapped_assignments
+    )
+    assignment_identity = {"sha256": assignment_sha256, "count": assignment_count}
+    policy_artifact = {"as_of_date": "2026-01-09", "sha256": "a" * 64}
+    source_identities = {
+        "ledger": {"generation_id": "b" * 64},
+        "classified_flows": {
+            "ledger_identity": {"generation_id": "b" * 64},
+            "classification_policy": {
+                "policy_id": "SYNTHETIC",
+                "policy_version": "1",
+                "policy_as_of_date": "2026-01-09",
+                "policy_sha256": "a" * 64,
+            },
+        },
+        "flow_classification_policy": {
+            "policy_id": "SYNTHETIC",
+            "policy_version": "1",
+            "artifact": policy_artifact,
+        },
+        "admission_policy": {"assignment": assignment_identity},
+        "assignment": assignment_identity,
+    }
+    manifest = manifest_module.assemble_manifest(
+        {
+            "bridge-account": {
+                "2026-01-01": manifest_module.Decimal("100"),
+                "2026-01-02": manifest_module.Decimal("110"),
+                "2026-01-03": manifest_module.Decimal("120"),
+                "2026-01-07": manifest_module.Decimal("200"),
+                "2026-01-08": manifest_module.Decimal("210"),
+                "2026-01-09": manifest_module.Decimal("220"),
+            }
+        },
+        {"bridge-account": {"provider": "SYNTHETIC"}},
+        {
+            "external_in": {"bridge-account": {}},
+            "external_out": {"bridge-account": {}},
+            "internal_in": {"bridge-account": {}},
+            "internal_out": {"bridge-account": {}},
+        },
+        perimeter.mapped_chains,
+        admissions,
+        source_identities,
+    )
+
+    successor = manifest["rows"][1]
+    assert successor["opening_basis"] == "PREDECESSOR_CLOSING_NAV"
+    with pytest.raises(manifest_module.ManifestError, match="non-strategy gap"):
+        manifest_module._validate_manifest_semantics(
+            manifest_module.json_ready(manifest), full_chains=perimeter.full_chains
+        )
+
+
 def _producer_argv(inputs: dict[str, Path]) -> list[str]:
     return [
         "--ledger-json",

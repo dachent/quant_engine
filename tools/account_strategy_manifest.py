@@ -2435,15 +2435,22 @@ def _validate_manifest_semantics(
             expected_start = (
                 date.fromisoformat(str(previous_end)) + timedelta(days=1)
             ).isoformat()
-            if current_start != expected_start and (
-                full_chains is None
-                or not _mapped_gap_has_non_strategy_coverage(
+            has_non_strategy_gap = current_start != expected_start
+            if has_non_strategy_gap:
+                if full_chains is None or not _mapped_gap_has_non_strategy_coverage(
                     account_id, previous, row, full_chains
-                )
-            ):
-                raise ManifestError(
-                    f"manifest row chain has a gap or overlap: {account_id}"
-                )
+                ):
+                    raise ManifestError(
+                        f"manifest row chain has a gap or overlap: {account_id}"
+                    )
+                if previous["continuity_to_successor"]:
+                    raise ManifestError(
+                        "manifest non-strategy gap cannot claim predecessor continuity"
+                    )
+                if row.get("opening_basis") == "PREDECESSOR_CLOSING_NAV":
+                    raise ManifestError(
+                        "manifest non-strategy gap cannot use predecessor closing NAV"
+                    )
             previous_continuity = bool(previous["continuity_to_successor"])
             if row.get("status") == "BLOCKED_MISSING_PREDECESSOR_CONTINUITY" and not (
                 previous_continuity and previous.get("status") != "OK"
