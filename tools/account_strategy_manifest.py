@@ -89,7 +89,7 @@ class InputSnapshot:
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
-_MANIFEST_SCHEMA_VERSION = 6
+_MANIFEST_SCHEMA_VERSION = 7
 _FLOW_CLASSES_SCHEMA_VERSION = 3
 _FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION = 1
 _FLOW_COVERAGE_SCHEMA_VERSION = 1
@@ -1706,10 +1706,19 @@ def analyze_epoch(
                 {"class": flow_class, "date": flow_date, "amount": amount}
             )
     capital_flow_trace.sort(key=lambda entry: (str(entry["date"]), str(entry["class"])))
-    if len(window_navs) < 3:
+    # The only permitted NAV trimming is the deterministic leading pre-funding
+    # prefix.  Once a strictly-positive AVAILABLE NAV is observed, every later
+    # observation is a return base and must therefore itself be positive.
+    all_days = sorted(window_navs)
+    first_funded = next(
+        (day for day in all_days if window_navs[day] > 0),
+        None,
+    )
+    if first_funded is None:
         return None
-    days = sorted(window_navs)
-    first_funded = days[0]
+    days = [day for day in all_days if day >= first_funded]
+    if len(days) < 3:
+        return None
     closing_nav_date = days[-1]
     late_sources = [
         (label, d, sign * v)
@@ -1760,7 +1769,7 @@ def analyze_epoch(
                 "FLOW_ON_OR_BEFORE_FIRST_AVAILABLE_NAV_WITHOUT_PREDECESSOR_CLOSING"
             ),
         }
-    if any(value <= 0 for value in window_navs.values()):
+    if any(window_navs[day] <= 0 for day in days):
         return {
             "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
             "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
@@ -1865,8 +1874,8 @@ def analyze_epoch(
             }
         index *= factor
         hwm = max(hwm, index)
-        drawdown = index / hwm - Decimal(1)
-        max_dd = min(max_dd, drawdown)
+        drawdown = Decimal(1) - index / hwm
+        max_dd = max(max_dd, drawdown)
         trace_links.append(
             {
                 "start_date": start_date,
@@ -1931,7 +1940,7 @@ def analyze_epoch(
     xirr_rate = xirr(closing_cashflows)
 
     return {
-        "start": days[0],
+        "start": first_funded,
         "end": days[-1],
         "opening_capital": opening,
         "deposits": dep,
@@ -2547,6 +2556,8 @@ def _validate_manifest_semantics(
             row.get("observed_max_drawdown"),
             f"row[{index}].observed_max_drawdown",
         )
+        if observed_drawdown < 0:
+            raise ManifestError(f"row {index} observed max drawdown is negative")
         trace = row.get("observation_trace")
         if not isinstance(trace, Mapping) or not isinstance(trace.get("links"), list):
             raise ManifestError(f"row {index} observation trace is invalid")
@@ -2633,8 +2644,8 @@ def _validate_manifest_semantics(
                 raise ManifestError(f"row {index} observation trace factor is invalid")
             cumulative_index *= factor
             running_hwm = max(running_hwm, cumulative_index)
-            drawdown = cumulative_index / running_hwm - Decimal(1)
-            max_drawdown = min(max_drawdown, drawdown)
+            drawdown = Decimal(1) - cumulative_index / running_hwm
+            max_drawdown = max(max_drawdown, drawdown)
             if (
                 _manifest_decimal(
                     link.get("cumulative_index"),

@@ -1671,7 +1671,7 @@ def _financial_epoch_manifest_proof(
     )
     if (
         account_artifact.schema_name != "account-strategy-manifest"
-        or account_artifact.schema_version != "6"
+        or account_artifact.schema_version != "7"
         or (account_artifact.sha256, account_artifact.size_bytes)
         != (hashlib.sha256(staged_bytes).hexdigest(), len(staged_bytes))
         or (dashboard_artifact.sha256, dashboard_artifact.size_bytes)

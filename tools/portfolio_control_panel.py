@@ -8340,7 +8340,7 @@ def publish_panel(
                     artifact_id="input/account-strategy-manifest.json",
                     as_of_date=publication_as_of,
                     schema_name="account-strategy-manifest",
-                    schema_version="6",
+                    schema_version="7",
                     sha256=_text(
                         data["meta"]["account_manifest_sha256"],
                         "account manifest snapshot hash",

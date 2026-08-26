@@ -817,7 +817,7 @@ def test_valid_funded_admission_retains_closed_nav_provenance_in_manifest(
         manifest_module, _write_valid_inputs(tmp_path), capsys
     )
 
-    assert manifest["schema_version"] == 6
+    assert manifest["schema_version"] == 7
     assert manifest["rows"][0]["admission_authority_kind"] == (
         "LEDGER_AVAILABLE_POSITIVE_NAV_V1"
     )
@@ -1345,7 +1345,7 @@ def test_cli_emits_bound_source_identities_and_accepts_low_funded_nav(
     assert manifest_module.main(_producer_argv(inputs)) == 0
 
     manifest = json.loads(capsys.readouterr().out)
-    assert manifest["schema_version"] == 6
+    assert manifest["schema_version"] == 7
     assert manifest["source_identities"]["ledger"]["generation_id"] == (
         LEDGER_GENERATION_ID
     )
@@ -1807,7 +1807,7 @@ def test_successor_observation_link_includes_predecessor_closing_segment(
     "navs",
     [
         ["100", "0", "100"],
-        ["-1", "100", "100"],
+        ["-1", "100", "0", "100"],
     ],
 )
 def test_nonpositive_nav_return_base_is_blocked_without_metrics(
@@ -3319,3 +3319,173 @@ def test_internal_prefix_transfer_rejects_multiple_counterparty_candidates(
         manifest_module.validate_classified_flow_coverage(
             ledger, [], _flow_classification_rules()
         )
+
+
+def test_epoch_trims_leading_nonpositive_navs_before_the_funded_start(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-01": Decimal("0"),
+            "2026-01-02": Decimal("0"),
+            "2026-01-03": Decimal("100"),
+            "2026-01-04": Decimal("105"),
+            "2026-01-05": Decimal("110"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2026-01-01",
+        None,
+    )
+
+    assert stats is not None
+    assert stats.get("start") == "2026-01-03"
+    assert stats.get("nav_observations") == 3
+
+
+def test_epoch_blocks_nonpositive_nav_after_funded_start(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-01": Decimal("100"),
+            "2026-01-02": Decimal("0"),
+            "2026-01-03": Decimal("110"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2026-01-01",
+        None,
+    )
+
+    assert stats == {
+        "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
+        "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
+    }
+
+
+def test_epoch_accepts_sparse_observations_and_buckets_a_weekend_flow(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-02": Decimal("100"),
+            "2026-01-05": Decimal("120"),
+            "2026-01-09": Decimal("126"),
+        },
+        {"2026-01-03": Decimal("10")},
+        {},
+        {},
+        {},
+        None,
+        "2026-01-02",
+        None,
+    )
+
+    assert stats is not None
+    assert [link["net_flow"] for link in stats["observation_trace"]["links"]] == [
+        Decimal("10"),
+        Decimal("0"),
+    ]
+    assert stats["observation_linked_return"] == Decimal("0.155")
+
+
+def test_epoch_aggregates_external_and_internal_legs_once_per_interval(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-02": Decimal("100"),
+            "2026-01-05": Decimal("120"),
+            "2026-01-09": Decimal("126"),
+        },
+        {"2026-01-03": Decimal("10")},
+        {"2026-01-03": Decimal("3")},
+        {"2026-01-03": Decimal("7")},
+        {"2026-01-03": Decimal("2")},
+        None,
+        "2026-01-02",
+        None,
+    )
+
+    assert stats is not None
+    assert stats["observation_trace"]["links"][0]["net_flow"] == Decimal("12")
+    assert stats["observation_linked_return"] == Decimal("0.134")
+
+
+def test_epoch_assigns_a_flow_on_an_observation_date_to_that_link_only(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-02": Decimal("100"),
+            "2026-01-05": Decimal("110"),
+            "2026-01-09": Decimal("121"),
+        },
+        {"2026-01-05": Decimal("10")},
+        {},
+        {},
+        {},
+        None,
+        "2026-01-02",
+        None,
+    )
+
+    assert stats is not None
+    assert [link["net_flow"] for link in stats["observation_trace"]["links"]] == [
+        Decimal("10"),
+        Decimal("0"),
+    ]
+
+
+def test_epoch_reports_positive_drawdown_magnitude_from_observed_links(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-01": Decimal("100"),
+            "2026-01-02": Decimal("120"),
+            "2026-01-03": Decimal("90"),
+            "2026-01-04": Decimal("108"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2026-01-01",
+        None,
+    )
+
+    assert stats is not None
+    assert stats["observed_hwm_index"] == Decimal("120")
+    assert stats["observed_max_drawdown"] == Decimal("0.25")
+    assert stats["observation_trace"]["links"][1]["drawdown"] == Decimal("0.25")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda row: row["observation_trace"]["links"][0].__setitem__(
+            "drawdown", "-0.01"
+        ),
+        lambda row: row.__setitem__("observed_max_drawdown", "-0.01"),
+    ],
+)
+def test_schema_and_semantics_reject_negative_drawdown_values(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    mutate: Any,
+) -> None:
+    manifest = _manifest_from_cli(manifest_module, _write_valid_inputs(tmp_path), capsys)
+    mutate(manifest["rows"][0])
+
+    with pytest.raises(manifest_module.ManifestError, match="formal schema|drawdown"):
+        manifest_module.validate_manifest_schema(manifest)

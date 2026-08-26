@@ -548,7 +548,7 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
             size_bytes=len(staged_bytes),
             as_of_date=AS_OF,
             schema_name="account-strategy-manifest",
-            schema_version="6",
+            schema_version="7",
         ),
         SourceArtifact(
             artifact_id="panel/data/dashboard_data.json",

@@ -16,7 +16,7 @@
     "rows"
   ],
   "properties": {
-    "schema_version": {"const": 6},
+    "schema_version": {"const": 7},
     "artifact": {"const": "account-strategy-manifest"},
     "accounting_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
     "authority_readiness": {
@@ -58,6 +58,7 @@
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "date": {"type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
     "decimal": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"},
+    "nonnegative_decimal": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"},
     "source_artifact": {
       "type": "object",
       "additionalProperties": false,
@@ -217,7 +218,7 @@
               "factor": {"$ref": "#/$defs/decimal"},
               "cumulative_index": {"$ref": "#/$defs/decimal"},
               "running_hwm_index": {"$ref": "#/$defs/decimal"},
-              "drawdown": {"$ref": "#/$defs/decimal"}
+              "drawdown": {"$ref": "#/$defs/nonnegative_decimal"}
             }
           }
         }
@@ -327,7 +328,7 @@
         "xirr_diagnostic": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
         "observation_linked_return": {"$ref": "#/$defs/decimal"},
         "observed_hwm_index": {"$ref": "#/$defs/decimal"},
-        "observed_max_drawdown": {"$ref": "#/$defs/decimal"},
+        "observed_max_drawdown": {"$ref": "#/$defs/nonnegative_decimal"},
         "opening_basis": {"enum": ["FIRST_AVAILABLE_NAV", "PREDECESSOR_CLOSING_NAV"]},
         "observation_trace": {"$ref": "#/$defs/observation_trace"},
         "capital_flow_trace": {"$ref": "#/$defs/capital_flow_trace"},
