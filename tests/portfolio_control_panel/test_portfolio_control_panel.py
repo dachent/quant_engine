@@ -3425,13 +3425,13 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     assert schema["properties"]["panel_schema_version"]["const"] == (
         panel.PANEL_SCHEMA_VERSION
     )
-    manifest_schema = schema["$defs"]["account_manifest_v4"]
+    manifest_schema = schema["$defs"]["account_manifest_v5"]
     strict_manifest_schema = json.loads(
         panel.ACCOUNT_MANIFEST_SCHEMA.read_text(encoding="utf-8")
     )
     assert manifest_schema == {"$ref": strict_manifest_schema["$id"]}
     assert strict_manifest_schema["additionalProperties"] is False
-    assert strict_manifest_schema["properties"]["schema_version"] == {"const": 4}
+    assert strict_manifest_schema["properties"]["schema_version"] == {"const": 5}
     assert "authority_readiness" in strict_manifest_schema["required"]
     assert "authority_status" not in strict_manifest_schema["required"]
     assert strict_manifest_schema["properties"]["authority_readiness"]["properties"][
