@@ -22,6 +22,8 @@ from typing import Any, Final, Mapping, Sequence
 from xml.etree import ElementTree as ET
 import zipfile
 
+from openpyxl import load_workbook  # type: ignore[import-untyped]
+from openpyxl.utils.cell import range_boundaries  # type: ignore[import-untyped]
 import xlsxwriter  # type: ignore[import-untyped]
 
 from quant_engine.core import (
@@ -113,6 +115,74 @@ TABLE_NAMES: Final = (
 )
 WORKBOOK_CANONICALIZATION_VERSION: Final = "1"
 XLSX_RESULT_CANONICALIZATION_VERSION: Final = "1"
+WORKBOOK_EVIDENCE_BINDING_VERSION: Final = 1
+WORKBOOK_PARITY_VERSION: Final = 1
+WORKBOOK_TOTAL_FORMULA: Final = (
+    "=IF(ABS(SUM(tblStrategies[Current Value Usd])+"
+    'SUMIFS(tblAllocations[Current Value Usd],tblAllocations[Scope],"RESERVE")'
+    '-D8)<0.02,"PASS","FAIL")'
+)
+WORKBOOK_TABLE_SPECS: Final = (
+    (
+        "Portfolio Summary",
+        "portfolio_summary",
+        "tblPortfolioSummary",
+        ("metric", "status", "unit", "value"),
+    ),
+    ("Account Summary", "account_summary", "tblAccounts", ("account_id",)),
+    (
+        "Strategy Summary",
+        "strategy_summary",
+        "tblStrategies",
+        ("strategy_id",),
+    ),
+    ("Positions", "positions", "tblPositions", ("status",)),
+    (
+        "Transactions and Flows",
+        "transactions_and_flows",
+        "tblTransactionsFlows",
+        ("record_id",),
+    ),
+    (
+        "TWR MWR",
+        "twr_mwr",
+        "tblTwrMwr",
+        ("account_id", "strategy_id", "twr_status"),
+    ),
+    (
+        "Allocation History",
+        "allocation_history",
+        "tblAllocations",
+        ("allocation_id",),
+    ),
+    (
+        "Flow Reconciliation",
+        "flow_reconciliation",
+        "tblFlowRecon",
+        ("provider",),
+    ),
+    (
+        "Source Reconciliation",
+        "reconciliation_checks",
+        "tblSourceRecon",
+        ("check_id", "status"),
+    ),
+    (
+        "Coverage Data Quality",
+        "coverage_data_quality",
+        "tblCoverage",
+        ("category", "item", "status"),
+    ),
+    ("Corrections", "corrections", "tblCorrections", ("correction_id",)),
+    (
+        "Dependence",
+        "dependence_rows",
+        "tblDependence",
+        ("evidence_mode", "left", "right", "status"),
+    ),
+    ("Methodology", "methodology", "tblMethodology", ("item", "value")),
+    ("Provenance", "provenance", "tblProvenance", ("artifact", "sha256")),
+)
 _CANONICAL_ZIP_TIMESTAMP: Final = (1980, 1, 1, 0, 0, 0)
 _CORE_CREATED = re.compile(
     rb"(<(?:[A-Za-z_][\w.-]*:)?created\b[^>]*>)([^<]+)"
@@ -2415,8 +2485,10 @@ def _freshness_assessments(
     return assessments, as_of, sha256
 
 
-def _hwm_policy(evaluation_date: date) -> tuple[dict[str, Any], str]:
-    policy = _load_json(HWM_POLICY, "HWM policy")
+def _hwm_policy(
+    evaluation_date: date, policy_path: Path = HWM_POLICY
+) -> tuple[dict[str, Any], str]:
+    policy = _load_json(policy_path, "HWM policy")
     if policy.get("schema_version") != 2 or policy.get("policy_id") != "PORT-HWM-3":
         raise ReportValidationError("HWM policy identity is unsupported")
     perimeter = _object(policy.get("material_perimeter"), "material_perimeter")
@@ -2443,7 +2515,7 @@ def _hwm_policy(evaluation_date: date) -> tuple[dict[str, Any], str]:
         raise ReportValidationError("HWM provider-live allowlist differs")
     policy["excluded_strategy_ids"] = sorted(excluded_ids)
     policy["evaluation_date"] = evaluation_date.isoformat()
-    sha256, _size = hash_file(HWM_POLICY)
+    sha256, _size = hash_file(policy_path)
     return policy, sha256
 
 
@@ -2472,6 +2544,7 @@ _HWM_CONTRACT_REASON_MAP: Final = {
 
 def _hwm_numerical_from_envelope(
     catalog: Mapping[str, Any],
+    policy_path: Path = HWM_POLICY,
 ) -> dict[str, Any]:
     """Compute the numerical full-systematic HWM from the governed envelope.
 
@@ -2552,7 +2625,7 @@ def _hwm_numerical_from_envelope(
             crosswalk=_objects(catalog.get("strategy_returns", []), "strategy_returns"),
             artifact_roles=artifact_roles,
             policy_exclusions=hwm_policy_exclusions(
-                _load_json(HWM_POLICY, "HWM policy")
+                _load_json(policy_path, "HWM policy")
             ),
             allocations=_objects(hwm_allocations, "allocations"),
             acceptance_record=hwm_acceptance_record,
@@ -2971,6 +3044,8 @@ def build_report_data(
     hwm_governed_generation_bytes: bytes | None = None,
     hwm_governed_calendar_bytes: bytes | None = None,
     hwm_governed_receipt_bytes: bytes | None = None,
+    *,
+    _hwm_policy_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -3111,7 +3186,8 @@ def build_report_data(
         if hwm_governed_result is not None
         else None
     )
-    hwm_numerical = _hwm_numerical_from_envelope(catalog)
+    hwm_policy_path = HWM_POLICY if _hwm_policy_path is None else _hwm_policy_path
+    hwm_numerical = _hwm_numerical_from_envelope(catalog, hwm_policy_path)
     hwm_summary: dict[str, Any]
     hwm_provenance: list[dict[str, Any]] = []
     if freshness_health_path is not None:
@@ -3122,7 +3198,7 @@ def build_report_data(
             provider_ledger_root,
             catalog,
         )
-        hwm_policy, hwm_policy_sha256 = _hwm_policy(evaluation_date)
+        hwm_policy, hwm_policy_sha256 = _hwm_policy(evaluation_date, hwm_policy_path)
         try:
             strategy_summary, coverage_summary = governed_hwm_coverage(
                 strategy_summary,
@@ -3395,7 +3471,7 @@ def _excel_value(value: object, *, header: str | None = None) -> object:
 def _headers(rows: Sequence[Mapping[str, Any]], fallback: Sequence[str]) -> list[str]:
     if not rows:
         return list(fallback)
-    return list(rows[0])
+    return sorted(rows[0])
 
 
 def _source_format(header: str, formats: Mapping[str, Any]) -> Any:
@@ -3562,52 +3638,6 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
             {"bold": True, "font_name": "Arial", "font_size": 12, "border": 1}
         ),
     }
-    table_specs = [
-        ("Account Summary", "account_summary", "tblAccounts", ("account_id",)),
-        ("Strategy Summary", "strategy_summary", "tblStrategies", ("strategy_id",)),
-        ("Positions", "positions", "tblPositions", ("status",)),
-        (
-            "Transactions and Flows",
-            "transactions_and_flows",
-            "tblTransactionsFlows",
-            ("record_id",),
-        ),
-        (
-            "TWR MWR",
-            "twr_mwr",
-            "tblTwrMwr",
-            ("account_id", "strategy_id", "twr_status"),
-        ),
-        (
-            "Allocation History",
-            "allocation_history",
-            "tblAllocations",
-            ("allocation_id",),
-        ),
-        ("Flow Reconciliation", "flow_reconciliation", "tblFlowRecon", ("provider",)),
-        (
-            "Source Reconciliation",
-            "reconciliation_checks",
-            "tblSourceRecon",
-            ("check_id", "status"),
-        ),
-        (
-            "Coverage Data Quality",
-            "coverage_data_quality",
-            "tblCoverage",
-            ("category", "item", "status"),
-        ),
-        ("Corrections", "corrections", "tblCorrections", ("correction_id",)),
-        (
-            "Dependence",
-            "dependence_rows",
-            "tblDependence",
-            ("evidence_mode", "left", "right", "status"),
-        ),
-        ("Methodology", "methodology", "tblMethodology", ("item", "value")),
-        ("Provenance", "provenance", "tblProvenance", ("artifact", "sha256")),
-    ]
-
     summary = workbook.add_worksheet("Portfolio Summary")
     summary.hide_gridlines(2)
     summary.set_tab_color("#C69214")
@@ -3628,13 +3658,16 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
     summary.write("D4", "Workbook total check", formats["kpi_label"])
     summary.write_formula(
         "E4",
-        '=IF(ABS(SUM(tblStrategies[Current Value Usd])+SUMIFS(tblAllocations[Current Value Usd],tblAllocations[Scope],"RESERVE")-D8)<0.02,"PASS","FAIL")',
+        WORKBOOK_TOTAL_FORMULA,
         formats["formula"],
         "PASS",
     )
     summary_rows = list(report["portfolio_summary"])
-    headers = list(summary_rows[0])
-    data = [[_excel_value(row[header]) for header in headers] for row in summary_rows]
+    headers = _headers(summary_rows, WORKBOOK_TABLE_SPECS[0][3])
+    data = [
+        [_excel_value(row[header], header=header) for header in headers]
+        for row in summary_rows
+    ]
     summary.add_table(
         5,
         0,
@@ -3669,7 +3702,7 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
     for index, sheet_name in enumerate(SHEET_NAMES[1:], start=navigation_start_row):
         summary.write_url(index, 0, f"internal:'{sheet_name}'!A1", string=sheet_name)
 
-    for sheet_name, key, table_name, fallback in table_specs:
+    for sheet_name, key, table_name, fallback in WORKBOOK_TABLE_SPECS[1:]:
         worksheet = workbook.add_worksheet(sheet_name)
         _write_table(
             workbook,
@@ -3687,12 +3720,27 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
 
     strategy_sheet = workbook.get_worksheet_by_name("Strategy Summary")
     strategy_rows = list(report["strategy_summary"])
+    strategy_headers = _headers(strategy_rows, ("strategy_id",))
+    strategy_name_column = strategy_headers.index("strategy_name")
+    strategy_value_column = strategy_headers.index("current_value_usd")
     chart = workbook.add_chart({"type": "bar"})
     chart.add_series(
         {
             "name": "Current value (USD)",
-            "categories": ["Strategy Summary", 5, 1, 4 + len(strategy_rows), 1],
-            "values": ["Strategy Summary", 5, 3, 4 + len(strategy_rows), 3],
+            "categories": [
+                "Strategy Summary",
+                5,
+                strategy_name_column,
+                4 + len(strategy_rows),
+                strategy_name_column,
+            ],
+            "values": [
+                "Strategy Summary",
+                5,
+                strategy_value_column,
+                4 + len(strategy_rows),
+                strategy_value_column,
+            ],
             "fill": {"color": "#5B9BD5"},
         }
     )
@@ -3900,6 +3948,181 @@ def verify_workbook(path: Path) -> dict[str, Any]:
     }
 
 
+def _parity_cell_value(value: object, *, header: str) -> object:
+    converted = _excel_value(value, header=header)
+    return None if converted == "" else converted
+
+
+def _workbook_parity_receipt(
+    report_bytes: bytes, workbook_bytes: bytes
+) -> dict[str, Any]:
+    """Verify every governed workbook table cell against canonical report JSON."""
+
+    try:
+        report = json.loads(report_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportValidationError("workbook parity report JSON is invalid") from exc
+    if not isinstance(report, dict) or report.get("report_schema_version") != 1:
+        raise ReportValidationError("workbook parity report contract differs")
+    try:
+        formula_workbook = load_workbook(
+            io.BytesIO(workbook_bytes),
+            read_only=False,
+            data_only=False,
+            keep_links=False,
+        )
+        cached_workbook = load_workbook(
+            io.BytesIO(workbook_bytes),
+            read_only=True,
+            data_only=True,
+            keep_links=False,
+        )
+    except Exception as exc:
+        raise ReportValidationError("workbook parity workbook is unreadable") from exc
+    try:
+        if formula_workbook.sheetnames != list(SHEET_NAMES):
+            raise ReportValidationError("workbook parity sheet order differs")
+        formula_cells = [
+            (worksheet.title, cell.coordinate, cell.value)
+            for worksheet in formula_workbook.worksheets
+            for row in worksheet.iter_rows()
+            for cell in row
+            if cell.data_type == "f"
+            or (isinstance(cell.value, str) and cell.value.startswith("="))
+        ]
+        if formula_cells != [("Portfolio Summary", "E4", WORKBOOK_TOTAL_FORMULA)]:
+            raise ReportValidationError("workbook parity formula inventory differs")
+        if cached_workbook["Portfolio Summary"]["E4"].value != "PASS":
+            raise ReportValidationError("workbook parity cached E4 value differs")
+        readiness_rows = [
+            row
+            for row in report.get("portfolio_summary", [])
+            if isinstance(row, dict) and row.get("metric") == "Advisory readiness"
+        ]
+        if len(readiness_rows) != 1 or not isinstance(
+            readiness_rows[0].get("value"), str
+        ):
+            raise ReportValidationError("workbook parity readiness source differs")
+        if (
+            formula_workbook["Portfolio Summary"]["B4"].value
+            != readiness_rows[0]["value"]
+        ):
+            raise ReportValidationError("workbook parity readiness differs")
+        if (
+            formula_workbook["Methodology"]["A6"].value != "Policy"
+            or formula_workbook["Methodology"]["B6"].value != POLICY_VERSION
+        ):
+            raise ReportValidationError("workbook parity methodology sentinel differs")
+
+        observed_table_names: list[str] = []
+        table_receipts: list[dict[str, Any]] = []
+        report_row_count = 0
+        workbook_row_count = 0
+        header_cell_count = 0
+        data_cell_count = 0
+        canonical_data_cell_count = 0
+        for sheet_name, report_key, table_name, fallback in WORKBOOK_TABLE_SPECS:
+            worksheet = formula_workbook[sheet_name]
+            if table_name not in worksheet.tables or len(worksheet.tables) != 1:
+                raise ReportValidationError(
+                    f"workbook parity table boundary differs: {sheet_name}"
+                )
+            table = worksheet.tables[table_name]
+            observed_table_names.append(table.displayName)
+            min_column, min_row, max_column, max_row = range_boundaries(table.ref)
+            raw_rows = report.get(report_key)
+            if not isinstance(raw_rows, list) or not all(
+                isinstance(row, dict) for row in raw_rows
+            ):
+                raise ReportValidationError(
+                    f"workbook parity report rows differ: {report_key}"
+                )
+            rows = [dict(row) for row in raw_rows]
+            headers = _headers(rows, fallback)
+            displayed_headers = [header.replace("_", " ").title() for header in headers]
+            if max_column - min_column + 1 != len(headers):
+                raise ReportValidationError(
+                    f"workbook parity column count differs: {table_name}"
+                )
+            physical_row_count = max(1, len(rows))
+            if max_row - min_row != physical_row_count:
+                raise ReportValidationError(
+                    f"workbook parity row count differs: {table_name}"
+                )
+            actual_headers = [
+                worksheet.cell(row=min_row, column=column).value
+                for column in range(min_column, max_column + 1)
+            ]
+            if actual_headers != displayed_headers:
+                raise ReportValidationError(
+                    f"workbook parity headers differ: {table_name}"
+                )
+            expected_rows = [
+                [
+                    _parity_cell_value(row.get(header), header=header)
+                    for header in headers
+                ]
+                for row in rows
+            ]
+            if not expected_rows:
+                expected_rows = [[None] * len(headers)]
+            for row_offset, expected_row in enumerate(expected_rows, start=1):
+                actual_row = [
+                    worksheet.cell(row=min_row + row_offset, column=column).value
+                    for column in range(min_column, max_column + 1)
+                ]
+                if actual_row != expected_row:
+                    mismatch = next(
+                        index
+                        for index, (actual, expected) in enumerate(
+                            zip(actual_row, expected_row, strict=True)
+                        )
+                        if actual != expected
+                    )
+                    raise ReportValidationError(
+                        "workbook parity values differ: "
+                        f"{table_name} row {row_offset} field {headers[mismatch]}"
+                    )
+            report_row_count += len(rows)
+            workbook_row_count += physical_row_count
+            header_cell_count += len(headers)
+            data_cell_count += physical_row_count * len(headers)
+            canonical_data_cell_count += len(rows) * len(headers)
+            table_receipts.append(
+                {
+                    "canonical_row_count": len(rows),
+                    "data_cell_count": physical_row_count * len(headers),
+                    "header_count": len(headers),
+                    "physical_row_count": physical_row_count,
+                    "report_key": report_key,
+                    "sheet": sheet_name,
+                    "table": table_name,
+                }
+            )
+        if observed_table_names != list(TABLE_NAMES):
+            raise ReportValidationError("workbook parity table order differs")
+    finally:
+        formula_workbook.close()
+        cached_workbook.close()
+    return {
+        "cached_formula_value_count": 1,
+        "canonical_data_cell_count": canonical_data_cell_count,
+        "data_cell_count": data_cell_count,
+        "formula_cell_count": len(formula_cells),
+        "formula_count": len(formula_cells),
+        "header_cell_count": header_cell_count,
+        "non_table_cell_count": 4,
+        "parity_schema_version": WORKBOOK_PARITY_VERSION,
+        "report_row_count": report_row_count,
+        "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+        "sheet_count": len(SHEET_NAMES),
+        "table_count": len(TABLE_NAMES),
+        "tables": table_receipts,
+        "workbook_row_count": workbook_row_count,
+        "workbook_sha256": hashlib.sha256(workbook_bytes).hexdigest(),
+    }
+
+
 def _canonical_guid(scope: str, index: int, *, zero_prefix: bool = False) -> bytes:
     digest = hashlib.sha256(f"{scope}:{index}".encode("utf-8")).hexdigest().upper()
     if zero_prefix:
@@ -4062,13 +4285,11 @@ def canonicalize_workbook(
 def canonicalize_xlsx_result(
     path: Path, evidence_path: Path | None = None
 ) -> dict[str, Any]:
-    """Normalize random xlsx-win run telemetry while retaining every outcome."""
+    """Normalize volatile xlsx-win messages without changing the real run ID."""
     payload = _load_json(path, "xlsx-win result")
     if payload.get("schema_version") != "2.0":
         raise ReportValidationError("xlsx-win result schema differs")
-    idempotency_key = _text(
-        payload.get("idempotency_key"), "xlsx-win result idempotency_key"
-    )
+    _text(payload.get("idempotency_key"), "xlsx-win result idempotency_key")
     run_id = _text(payload.get("run_id"), "xlsx-win result run_id")
     if re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
         raise ReportValidationError("xlsx-win result run_id is invalid")
@@ -4095,7 +4316,6 @@ def canonicalize_xlsx_result(
     invariants = payload.get("invariants")
     if not isinstance(invariants, list):
         raise ReportValidationError("xlsx-win result invariants are invalid")
-    payload["run_id"] = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
     content = canonical_json_bytes(payload)
     if path.read_bytes() != content:
         descriptor, temporary_name = tempfile.mkstemp(
@@ -4113,7 +4333,6 @@ def canonicalize_xlsx_result(
     result = {
         "canonicalization_version": XLSX_RESULT_CANONICALIZATION_VERSION,
         "normalized_message_count": 2,
-        "normalized_run_id": True,
         "xlsx_result_sha256": hashlib.sha256(content).hexdigest(),
     }
     if evidence_path is not None:
@@ -4134,6 +4353,238 @@ def _validate_canonicalization_evidence(candidate_dir: Path, workbook: Path) -> 
     fields = evidence.get("normalized_fields")
     if not isinstance(fields, dict) or fields.get("modified_timestamp") != 1:
         raise ReportValidationError("workbook canonicalization evidence is incomplete")
+
+
+def _regular_file_bytes(path: Path, field: str) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise ReportValidationError(f"{field} is missing or linked")
+    return path.read_bytes()
+
+
+def _successful_workbook_evidence(
+    run: Mapping[str, Any], validation: Mapping[str, Any], job: Mapping[str, Any]
+) -> dict[str, Any]:
+    steps = run.get("steps")
+    job_steps = job.get("steps")
+    expected_types = ["open", "recalc", "save_as"]
+    if (
+        run.get("schema_version") != "2.0"
+        or run.get("final_state") != "SUCCEEDED"
+        or run.get("ok") is not True
+        or not isinstance(steps, list)
+        or len(steps) != 3
+        or not all(isinstance(step, dict) for step in steps)
+        or not isinstance(job_steps, list)
+        or len(job_steps) != 3
+        or not all(isinstance(step, dict) for step in job_steps)
+        or [step.get("type") for step in steps] != expected_types
+        or [step.get("type") for step in job_steps] != expected_types
+        or [step.get("step_index") for step in steps] != [0, 1, 2]
+        or [step.get("status") for step in steps]
+        != ["succeeded", "succeeded", "succeeded"]
+    ):
+        raise ReportValidationError("xlsx-win calculation evidence is not successful")
+    invariants = validation.get("invariants")
+    if (
+        validation.get("all_passed") is not True
+        or not isinstance(invariants, list)
+        or not invariants
+        or not all(
+            isinstance(item, dict) and item.get("passed") is True for item in invariants
+        )
+    ):
+        raise ReportValidationError("xlsx-win workbook invariants did not all pass")
+    return {
+        "final_state": "SUCCEEDED",
+        "ok": True,
+        "recalc_step_status": "succeeded",
+        "recalc_step_type": "recalc",
+    }
+
+
+def _workbook_evidence_binding_from_snapshots(
+    snapshots: Mapping[str, bytes],
+    *,
+    candidate_dir: Path,
+    final_workbook: Path,
+) -> dict[str, Any]:
+    """Associate repository sidecars without claiming native Excel execution."""
+    try:
+        job = json.loads(snapshots["xlsx_job"])
+        parity = json.loads(snapshots["workbook_parity"])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportValidationError("workbook evidence is not valid JSON") from exc
+    if not isinstance(job, dict) or not isinstance(parity, dict):
+        raise ReportValidationError("workbook evidence root differs")
+    report_sha256 = hashlib.sha256(snapshots["report_data"]).hexdigest()
+    if candidate_dir.name != report_sha256:
+        raise ReportValidationError("candidate report identity differs")
+    expected_parity = _repo_bound_workbook_parity_receipt(
+        snapshots["report_data"], snapshots["workbook"]
+    )
+    if parity != expected_parity:
+        raise ReportValidationError("workbook parity receipt differs")
+    if (
+        job.get("schema_version") != "2.0"
+        or not isinstance(job.get("steps"), list)
+        or len(job["steps"]) != 3
+        or not all(isinstance(item, dict) for item in job["steps"])
+        or [item.get("type") for item in job["steps"] if isinstance(item, dict)]
+        != ["open", "recalc", "save_as"]
+        or not isinstance(job["steps"][0].get("workbook_path"), str)
+        or Path(job["steps"][0]["workbook_path"]).resolve()
+        != (candidate_dir / WORKBOOK_NAME).resolve()
+        or not isinstance(job["steps"][2].get("output_path"), str)
+        or Path(job["steps"][2]["output_path"]).resolve() != final_workbook.resolve()
+    ):
+        raise ReportValidationError("xlsx-win job binding differs")
+    binding: dict[str, Any] = {
+        "binding_schema_version": WORKBOOK_EVIDENCE_BINDING_VERSION,
+        "publication_disposition": "INCOMPLETE_STAGING_ONLY",
+        "workbook_evidence_status": "REPO_BOUND_POSTRUN_ONLY",
+    }
+    for name, content in snapshots.items():
+        binding[f"{name}_sha256"] = hashlib.sha256(content).hexdigest()
+        binding[f"{name}_size_bytes"] = len(content)
+    return binding
+
+
+def _repo_bound_workbook_parity_receipt(
+    report_bytes: bytes, workbook_bytes: bytes
+) -> dict[str, Any]:
+    """Record only the byte association of a workbook and report sidecar."""
+    return {
+        "parity_schema_version": WORKBOOK_PARITY_VERSION,
+        "parity_status": "REPO_BOUND_POSTRUN_ONLY",
+        "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+        "workbook_sha256": hashlib.sha256(workbook_bytes).hexdigest(),
+    }
+
+
+def bind_workbook_evidence(
+    candidate_dir: Path,
+    workbook: Path,
+    xlsx_result: Path,
+    validation_result: Path,
+    evidence_path: Path | None = None,
+) -> dict[str, Any]:
+    """Bind repository sidecar bytes to the exact final workbook for staging."""
+    paths = {
+        "initial_workbook": candidate_dir / WORKBOOK_NAME,
+        "workbook": workbook,
+        "report_data": candidate_dir / REPORT_DATA_NAME,
+        "xlsx_result": xlsx_result,
+        "validation_result": validation_result,
+        "workbook_contract": candidate_dir / "workbook-contract.json",
+        "xlsx_job": candidate_dir / "xlsx-job.json",
+        "workbook_canonicalization": candidate_dir / "workbook-canonicalization.json",
+        "xlsx_result_canonicalization": candidate_dir
+        / "xlsx-result-canonicalization.json",
+    }
+    snapshots = {
+        name: _regular_file_bytes(path, name.replace("_", " "))
+        for name, path in paths.items()
+    }
+    parity = _repo_bound_workbook_parity_receipt(
+        snapshots["report_data"], snapshots["workbook"]
+    )
+    parity_content = canonical_json_bytes(parity)
+    parity_path = candidate_dir / "workbook-parity.json"
+    _write_exact(parity_path, parity_content)
+    snapshots["workbook_parity"] = parity_content
+    binding = _workbook_evidence_binding_from_snapshots(
+        snapshots,
+        candidate_dir=candidate_dir,
+        final_workbook=workbook,
+    )
+    if evidence_path is not None:
+        _write_exact(evidence_path, canonical_json_bytes(binding))
+    return binding
+
+
+def _validated_workbook_evidence_snapshots(
+    candidate_dir: Path,
+    workbook: Path,
+    xlsx_result: Path,
+    validation_result: Path,
+    binding_path: Path,
+) -> dict[str, tuple[Path, bytes]]:
+    paths = {
+        "initial_workbook": candidate_dir / WORKBOOK_NAME,
+        "workbook": workbook,
+        "report_data": candidate_dir / REPORT_DATA_NAME,
+        "xlsx_result": xlsx_result,
+        "validation_result": validation_result,
+        "workbook_contract": candidate_dir / "workbook-contract.json",
+        "xlsx_job": candidate_dir / "xlsx-job.json",
+        "workbook_canonicalization": candidate_dir / "workbook-canonicalization.json",
+        "xlsx_result_canonicalization": candidate_dir
+        / "xlsx-result-canonicalization.json",
+        "workbook_parity": candidate_dir / "workbook-parity.json",
+    }
+    snapshots = {
+        name: (path, _regular_file_bytes(path, name.replace("_", " ")))
+        for name, path in paths.items()
+    }
+    binding_content = _regular_file_bytes(binding_path, "workbook evidence binding")
+    try:
+        binding = json.loads(binding_content)
+        run = json.loads(snapshots["xlsx_result"][1])
+        validation = json.loads(snapshots["validation_result"][1])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportValidationError("workbook evidence binding is invalid") from exc
+    if not all(isinstance(value, dict) for value in (binding, run, validation)):
+        raise ReportValidationError("workbook evidence binding differs")
+    try:
+        expected = _workbook_evidence_binding_from_snapshots(
+            {name: content for name, (_path, content) in snapshots.items()},
+            candidate_dir=candidate_dir,
+            final_workbook=workbook,
+        )
+    except ReportValidationError as exc:
+        raise ReportValidationError("workbook evidence binding differs") from exc
+    if binding != expected:
+        raise ReportValidationError("workbook evidence binding differs")
+    job = json.loads(snapshots["xlsx_job"][1])
+    if not isinstance(job, dict):
+        raise ReportValidationError("workbook evidence binding differs")
+    _successful_workbook_evidence(run, validation, job)
+    snapshots["workbook_evidence_binding"] = (binding_path, binding_content)
+    return snapshots
+
+
+def _verification_from_snapshots(
+    report: Mapping[str, Any],
+    report_bytes: bytes,
+    candidate_dir: Path,
+    candidate_report_bytes: bytes,
+    workbook_path: Path,
+    workbook_bytes: bytes,
+) -> dict[str, Any]:
+    report_id = hashlib.sha256(report_bytes).hexdigest()
+    if candidate_dir.name != report_id:
+        raise ReportValidationError("candidate directory identity differs")
+    if candidate_report_bytes != report_bytes:
+        raise ReportValidationError(
+            "candidate report data differs from current baseline"
+        )
+    if _regular_file_bytes(workbook_path, "Excel workbook") != workbook_bytes:
+        raise ReportValidationError("Excel workbook snapshot differs")
+    workbook_evidence = verify_workbook(workbook_path)
+    return {
+        "account_count": len(report["account_summary"]),
+        "baseline_generation_id": report["baseline"]["generation_id"],
+        "report_data_sha256": report_id,
+        "report_id": report_id,
+        "strategy_count": len(report["strategy_summary"]),
+        "twr_available_count": sum(
+            1
+            for item in report["twr_mwr"]
+            if str(item["twr_status"]).startswith("AVAILABLE")
+        ),
+        "twr_row_count": len(report["twr_mwr"]),
+        **workbook_evidence,
+    }
 
 
 def verify_candidate(
@@ -4172,29 +4623,17 @@ def verify_candidate(
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
     )
-    report_id = hashlib.sha256(report_bytes).hexdigest()
-    if candidate_dir.name != report_id:
-        raise ReportValidationError("candidate directory identity differs")
     data_path = candidate_dir / REPORT_DATA_NAME
-    if data_path.is_symlink() or data_path.read_bytes() != report_bytes:
-        raise ReportValidationError(
-            "candidate report data differs from current baseline"
-        )
-    workbook_evidence = verify_workbook(excel_workbook)
-    return {
-        "account_count": len(report["account_summary"]),
-        "baseline_generation_id": report["baseline"]["generation_id"],
-        "report_data_sha256": report_id,
-        "report_id": report_id,
-        "strategy_count": len(report["strategy_summary"]),
-        "twr_available_count": sum(
-            1
-            for item in report["twr_mwr"]
-            if str(item["twr_status"]).startswith("AVAILABLE")
-        ),
-        "twr_row_count": len(report["twr_mwr"]),
-        **workbook_evidence,
-    }
+    candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
+    workbook_bytes = _regular_file_bytes(excel_workbook, "Excel workbook")
+    return _verification_from_snapshots(
+        report,
+        report_bytes,
+        candidate_dir,
+        candidate_report_bytes,
+        excel_workbook,
+        workbook_bytes,
+    )
 
 
 def _copy_exact(source: Path, destination: Path) -> None:
@@ -4219,6 +4658,125 @@ def _copy_exact(source: Path, destination: Path) -> None:
         os.fsync(output_handle.fileno())
 
 
+def _tree_file_names(root: Path) -> tuple[str, ...]:
+    if root.is_symlink() or not root.is_dir():
+        raise ReportValidationError("publication source tree is missing or linked")
+    names: list[str] = []
+    for directory_name, directory_names, file_names in os.walk(root, followlinks=False):
+        directory = Path(directory_name)
+        for name in directory_names:
+            if (directory / name).is_symlink():
+                raise ReportValidationError(
+                    "publication source tree contains a linked directory"
+                )
+        for name in file_names:
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                raise ReportValidationError(
+                    "publication source tree contains a linked or irregular file"
+                )
+            names.append(path.relative_to(root).as_posix())
+    return tuple(sorted(names))
+
+
+def _remember_snapshot(
+    originals: dict[Path, bytes], source: Path, content: bytes
+) -> None:
+    resolved = source.resolve()
+    prior = originals.get(resolved)
+    if prior is not None and prior != content:
+        raise ReportValidationError("publication source changed while snapshotting")
+    originals[resolved] = content
+
+
+def _snapshot_file(
+    source: Path,
+    destination: Path,
+    originals: dict[Path, bytes],
+    field: str,
+) -> Path:
+    content = _regular_file_bytes(source, field)
+    _remember_snapshot(originals, source, content)
+    _write_exact(destination, content)
+    return destination
+
+
+def _snapshot_tree(
+    source: Path,
+    destination: Path,
+    originals: dict[Path, bytes],
+    inventories: dict[Path, tuple[str, ...]],
+) -> Path:
+    names = _tree_file_names(source)
+    inventories[source.resolve()] = names
+    for relative in names:
+        _snapshot_file(
+            source / Path(relative),
+            destination / Path(relative),
+            originals,
+            "publication source file",
+        )
+    return destination
+
+
+def _snapshot_current_root(
+    source: Path,
+    destination: Path,
+    originals: dict[Path, bytes],
+    inventories: dict[Path, tuple[str, ...]],
+) -> Path:
+    pointer_content = _regular_file_bytes(source / "CURRENT.json", "current pointer")
+    try:
+        pointer = json.loads(pointer_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportValidationError("current pointer is not readable JSON") from exc
+    generation_id = pointer.get("generation_id") if isinstance(pointer, dict) else None
+    if (
+        not isinstance(generation_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", generation_id) is None
+    ):
+        raise ReportValidationError("current pointer generation identity differs")
+    _remember_snapshot(originals, source / "CURRENT.json", pointer_content)
+    _write_exact(destination / "CURRENT.json", pointer_content)
+    _snapshot_tree(
+        source / "generations" / generation_id,
+        destination / "generations" / generation_id,
+        originals,
+        inventories,
+    )
+    try:
+        read_current(destination)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ReportValidationError(
+            "snapshotted current source is not accepted"
+        ) from exc
+    return destination
+
+
+def _recheck_snapshot_identities(
+    originals: Mapping[Path, bytes],
+    inventories: Mapping[Path, tuple[str, ...]],
+) -> None:
+    for source, expected_names in inventories.items():
+        try:
+            observed_names = _tree_file_names(source)
+        except ReportValidationError as exc:
+            raise ReportValidationError(
+                "source identity drift before publication"
+            ) from exc
+        if observed_names != expected_names:
+            raise ReportValidationError("source identity drift before publication")
+    for source, expected_content in originals.items():
+        try:
+            observed_content = _regular_file_bytes(source, "publication source")
+        except ReportValidationError as exc:
+            raise ReportValidationError(
+                "source identity drift before publication"
+            ) from exc
+        if observed_content != expected_content:
+            raise ReportValidationError("source identity drift before publication")
+
+
 def publish_report(
     baseline_root: Path,
     candidate_dir: Path,
@@ -4233,41 +4791,132 @@ def publish_report(
     implementation_reconciliation_path: Path | None = None,
     implementation_return_attribution_path: Path | None = None,
     correlation_root: Path | None = None,
+    workbook_evidence_binding: Path | None = None,
 ) -> dict[str, Any]:
-    _validate_canonicalization_evidence(candidate_dir, excel_workbook)
-    verification = verify_candidate(
-        baseline_root,
+    raise ReportValidationError("NATIVE_EXCEL_RECEIPT_REQUIRED")
+
+    evidence_snapshots = _validated_workbook_evidence_snapshots(
         candidate_dir,
         excel_workbook,
-        freshness_health_path,
-        provider_ledger_root,
-        attribution_root,
-        history_contract_path,
-        implementation_reconciliation_path,
-        implementation_return_attribution_path,
-        None,
-        correlation_root,
+        xlsx_result,
+        validation_result,
+        workbook_evidence_binding,
     )
-    run = _load_json(xlsx_result, "xlsx-win run result")
-    validation = _load_json(validation_result, "xlsx-win validation result")
-    if run.get("ok") is not True:
-        raise ReportValidationError("xlsx-win top-level result is not ok")
-    if validation.get("all_passed") is not True:
-        raise ReportValidationError("xlsx-win workbook invariants did not all pass")
-    report, report_bytes, baseline_catalog_path = build_report_data(
+    # Keep the temporary root beneath the task workspace, but short enough that
+    # deeply nested generation artifacts remain below legacy Windows MAX_PATH.
+    snapshot_context = tempfile.TemporaryDirectory(
+        prefix=".p-", dir=candidate_dir.parent.parent
+    )
+    snapshot_root = Path(snapshot_context.name)
+    originals: dict[Path, bytes] = {}
+    inventories: dict[Path, tuple[str, ...]] = {}
+    for path, content in evidence_snapshots.values():
+        _remember_snapshot(originals, path, content)
+    snapshot_baseline_root = _snapshot_current_root(
         baseline_root,
-        freshness_health_path,
-        provider_ledger_root,
-        attribution_root,
-        history_contract_path,
-        implementation_reconciliation_path,
-        implementation_return_attribution_path,
+        snapshot_root / "baseline",
+        originals,
+        inventories,
+    )
+    snapshot_provider_ledger_root = (
+        _snapshot_tree(
+            provider_ledger_root,
+            snapshot_root / "provider-ledger",
+            originals,
+            inventories,
+        )
+        if provider_ledger_root is not None
+        else None
+    )
+    snapshot_attribution_root = (
+        _snapshot_current_root(
+            attribution_root,
+            snapshot_root / "attribution",
+            originals,
+            inventories,
+        )
+        if attribution_root is not None
+        else None
+    )
+    snapshot_correlation_root = (
+        _snapshot_current_root(
+            correlation_root,
+            snapshot_root / "correlation",
+            originals,
+            inventories,
+        )
+        if correlation_root is not None
+        else None
+    )
+    snapshot_freshness_path = (
+        _snapshot_file(
+            freshness_health_path,
+            snapshot_root / "freshness-health.json",
+            originals,
+            "freshness health",
+        )
+        if freshness_health_path is not None
+        else None
+    )
+    snapshot_history_path: Path | None = None
+    if history_contract_path is not None:
+        history_snapshot_root = _snapshot_tree(
+            history_contract_path.parent,
+            snapshot_root / "history",
+            originals,
+            inventories,
+        )
+        snapshot_history_path = history_snapshot_root / history_contract_path.name
+    snapshot_implementation_path = (
+        _snapshot_file(
+            implementation_reconciliation_path,
+            snapshot_root / "implementation-reconciliation.json",
+            originals,
+            "implementation reconciliation",
+        )
+        if implementation_reconciliation_path is not None
+        else None
+    )
+    snapshot_return_attribution_path = (
+        _snapshot_file(
+            implementation_return_attribution_path,
+            snapshot_root / "implementation-return-attribution.json",
+            originals,
+            "implementation return attribution",
+        )
+        if implementation_return_attribution_path is not None
+        else None
+    )
+    snapshot_hwm_policy = _snapshot_file(
+        HWM_POLICY,
+        snapshot_root / HWM_POLICY.name,
+        originals,
+        "HWM policy",
+    )
+    report, report_bytes, baseline_catalog_path = build_report_data(
+        snapshot_baseline_root,
+        snapshot_freshness_path,
+        snapshot_provider_ledger_root,
+        snapshot_attribution_root,
+        snapshot_history_path,
+        snapshot_implementation_path,
+        snapshot_return_attribution_path,
         None,
-        correlation_root,
+        snapshot_correlation_root,
+        _hwm_policy_path=snapshot_hwm_policy,
+    )
+    snapshot_workbook = snapshot_root / WORKBOOK_NAME
+    _write_exact(snapshot_workbook, evidence_snapshots["workbook"][1])
+    verification = _verification_from_snapshots(
+        report,
+        report_bytes,
+        candidate_dir,
+        evidence_snapshots["report_data"][1],
+        snapshot_workbook,
+        evidence_snapshots["workbook"][1],
     )
     as_of = _date(report.get("as_of_date"), "report.as_of_date")
     verification_bytes = canonical_json_bytes(verification)
-    contract_path = candidate_dir / "workbook-contract.json"
     artifacts = []
     artifact_specs = [
         (
@@ -4283,40 +4932,69 @@ def publish_report(
             "1",
         ),
         (
-            excel_workbook,
+            evidence_snapshots["initial_workbook"][0],
+            "evidence/portfolio-report-initial.xlsx",
+            "portfolio-report-initial-workbook",
+            "1",
+        ),
+        (
+            evidence_snapshots["workbook"][0],
             "report/portfolio-report.xlsx",
             "portfolio-report-workbook",
             "1",
         ),
-        (xlsx_result, "evidence/xlsx-win-result.json", "xlsx-win-result", "2.0"),
         (
-            validation_result,
+            evidence_snapshots["xlsx_result"][0],
+            "evidence/xlsx-win-result.json",
+            "xlsx-win-result",
+            "2.0",
+        ),
+        (
+            evidence_snapshots["validation_result"][0],
             "evidence/workbook-validation.json",
             "xlsx-win-validation",
             "1",
         ),
         (
-            candidate_dir / "workbook-canonicalization.json",
+            evidence_snapshots["workbook_canonicalization"][0],
             "evidence/workbook-canonicalization.json",
             "portfolio-report-workbook-canonicalization",
             WORKBOOK_CANONICALIZATION_VERSION,
         ),
         (
-            candidate_dir / "xlsx-result-canonicalization.json",
+            evidence_snapshots["xlsx_result_canonicalization"][0],
             "evidence/xlsx-result-canonicalization.json",
             "xlsx-win-result-canonicalization",
             XLSX_RESULT_CANONICALIZATION_VERSION,
         ),
         (
-            contract_path,
+            evidence_snapshots["workbook_contract"][0],
             "evidence/workbook-contract.json",
             "xlsx-win-validation-contract",
             "1",
         ),
+        (
+            evidence_snapshots["xlsx_job"][0],
+            "evidence/xlsx-job.json",
+            "xlsx-win-job",
+            "2.0",
+        ),
+        (
+            evidence_snapshots["workbook_evidence_binding"][0],
+            "evidence/workbook-evidence-binding.json",
+            "portfolio-report-workbook-evidence-binding",
+            str(WORKBOOK_EVIDENCE_BINDING_VERSION),
+        ),
+        (
+            evidence_snapshots["workbook_parity"][0],
+            "evidence/workbook-parity.json",
+            "portfolio-report-workbook-parity",
+            str(WORKBOOK_PARITY_VERSION),
+        ),
     ]
-    if attribution_root is not None:
+    if snapshot_attribution_root is not None:
         _attribution_catalog, _attribution_ref, attribution_catalog_path = _attribution(
-            attribution_root, report["baseline"]
+            snapshot_attribution_root, report["baseline"]
         )
         artifact_specs.append(
             (
@@ -4326,9 +5004,9 @@ def publish_report(
                 "1",
             )
         )
-    if correlation_root is not None:
+    if snapshot_correlation_root is not None:
         _projection, _rows, _identity, correlation_path = _dependence_report(
-            correlation_root
+            snapshot_correlation_root
         )
         artifact_specs.append(
             (
@@ -4338,9 +5016,9 @@ def publish_report(
                 "2",
             )
         )
-    if history_contract_path is not None:
+    if snapshot_history_path is not None:
         history_payload = _load_json(
-            history_contract_path, "strategy history compatibility contract"
+            snapshot_history_path, "strategy history compatibility contract"
         )
         history_schema_name = (
             "portfolio-current-dependence-source"
@@ -4349,57 +5027,71 @@ def publish_report(
         )
         artifact_specs.append(
             (
-                history_contract_path,
+                snapshot_history_path,
                 "input/strategy-history-compatibility-contract.json",
                 history_schema_name,
                 "1",
             )
         )
-    if implementation_reconciliation_path is not None:
+    if snapshot_implementation_path is not None:
         artifact_specs.append(
             (
-                implementation_reconciliation_path,
+                snapshot_implementation_path,
                 "input/strategy-implementation-reconciliation.json",
                 "portfolio-implementation-reconciliation",
                 "1",
             )
         )
-    if implementation_return_attribution_path is not None:
+    if snapshot_return_attribution_path is not None:
         artifact_specs.append(
             (
-                implementation_return_attribution_path,
+                snapshot_return_attribution_path,
                 "input/strategy-implementation-return-attribution.json",
                 "portfolio-implementation-return-attribution",
                 "1",
             )
         )
-    if freshness_health_path is not None:
+    if snapshot_freshness_path is not None:
         artifact_specs.extend(
             [
                 (
-                    freshness_health_path,
+                    snapshot_freshness_path,
                     "input/freshness-health.json",
                     "freshness-assessment",
                     "3",
                 ),
                 (
-                    HWM_POLICY,
+                    snapshot_hwm_policy,
                     "input/portfolio-hwm-policy.json",
                     "portfolio-hwm-policy",
                     "2",
                 ),
             ]
         )
+    snapshots_by_path = {path: content for path, content in evidence_snapshots.values()}
     for path, artifact_id, schema_name, schema_version in artifact_specs:
-        artifacts.append(
-            SourceArtifact.from_path(
-                path,
-                artifact_id=artifact_id,
-                as_of_date=as_of,
-                schema_name=schema_name,
-                schema_version=schema_version,
+        snapshot = snapshots_by_path.get(path)
+        if snapshot is None:
+            artifacts.append(
+                SourceArtifact.from_path(
+                    path,
+                    artifact_id=artifact_id,
+                    as_of_date=as_of,
+                    schema_name=schema_name,
+                    schema_version=schema_version,
+                )
             )
-        )
+        else:
+            artifacts.append(
+                SourceArtifact(
+                    artifact_id=artifact_id,
+                    sha256=hashlib.sha256(snapshot).hexdigest(),
+                    size_bytes=len(snapshot),
+                    as_of_date=as_of,
+                    schema_name=schema_name,
+                    schema_version=schema_version,
+                )
+            )
     artifacts.append(
         SourceArtifact(
             artifact_id="evidence/report-verification.json",
@@ -4430,21 +5122,51 @@ def publish_report(
     )
     manifest_path = stage_generation(output_root, manifest)
     generation_dir = manifest_path.parent
-    _copy_exact(candidate_dir / REPORT_DATA_NAME, generation_dir / REPORT_DATA_NAME)
-    _copy_exact(excel_workbook, generation_dir / WORKBOOK_NAME)
-    _copy_exact(xlsx_result, generation_dir / "xlsx-win-result.json")
-    _copy_exact(validation_result, generation_dir / "workbook-validation.json")
-    _copy_exact(
-        candidate_dir / "workbook-canonicalization.json",
+    _write_exact(
+        generation_dir / REPORT_DATA_NAME,
+        evidence_snapshots["report_data"][1],
+    )
+    _write_exact(
+        generation_dir / "portfolio-report-initial.xlsx",
+        evidence_snapshots["initial_workbook"][1],
+    )
+    _write_exact(generation_dir / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
+    _write_exact(
+        generation_dir / "xlsx-win-result.json",
+        evidence_snapshots["xlsx_result"][1],
+    )
+    _write_exact(
+        generation_dir / "workbook-validation.json",
+        evidence_snapshots["validation_result"][1],
+    )
+    _write_exact(
         generation_dir / "workbook-canonicalization.json",
+        evidence_snapshots["workbook_canonicalization"][1],
     )
-    _copy_exact(
-        candidate_dir / "xlsx-result-canonicalization.json",
+    _write_exact(
         generation_dir / "xlsx-result-canonicalization.json",
+        evidence_snapshots["xlsx_result_canonicalization"][1],
     )
-    _copy_exact(contract_path, generation_dir / "workbook-contract.json")
+    _write_exact(
+        generation_dir / "workbook-contract.json",
+        evidence_snapshots["workbook_contract"][1],
+    )
+    _write_exact(
+        generation_dir / "xlsx-job.json",
+        evidence_snapshots["xlsx_job"][1],
+    )
+    _write_exact(
+        generation_dir / "workbook-evidence-binding.json",
+        evidence_snapshots["workbook_evidence_binding"][1],
+    )
+    _write_exact(
+        generation_dir / "workbook-parity.json",
+        evidence_snapshots["workbook_parity"][1],
+    )
     _write_exact(generation_dir / "report-verification.json", verification_bytes)
+    _recheck_snapshot_identities(originals, inventories)
     pointer = publish_generation(output_root, manifest.generation_id)
+    snapshot_context.cleanup()
     return {
         "generation_id": manifest.generation_id,
         "publication_state": pointer.state.value,
@@ -4486,12 +5208,19 @@ def _parser() -> argparse.ArgumentParser:
     canonicalize_result = commands.add_parser("canonicalize-xlsx-result")
     canonicalize_result.add_argument("--result", type=Path, required=True)
     canonicalize_result.add_argument("--evidence", type=Path, required=True)
+    bind_evidence = commands.add_parser("bind-workbook-evidence")
+    bind_evidence.add_argument("--candidate-dir", type=Path, required=True)
+    bind_evidence.add_argument("--excel-workbook", type=Path, required=True)
+    bind_evidence.add_argument("--xlsx-result", type=Path, required=True)
+    bind_evidence.add_argument("--validation-result", type=Path, required=True)
+    bind_evidence.add_argument("--evidence", type=Path, required=True)
     publish = commands.add_parser("publish")
     publish.add_argument("--baseline-root", type=Path, required=True)
     publish.add_argument("--candidate-dir", type=Path, required=True)
     publish.add_argument("--excel-workbook", type=Path, required=True)
     publish.add_argument("--xlsx-result", type=Path, required=True)
     publish.add_argument("--validation-result", type=Path, required=True)
+    publish.add_argument("--workbook-evidence-binding", type=Path, required=True)
     publish.add_argument("--output-root", type=Path, required=True)
     publish.add_argument("--freshness-health", type=Path)
     publish.add_argument("--provider-ledger-root", type=Path)
@@ -4537,6 +5266,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = canonicalize_workbook(args.workbook, args.evidence)
         elif args.command == "canonicalize-xlsx-result":
             result = canonicalize_xlsx_result(args.result, args.evidence)
+        elif args.command == "bind-workbook-evidence":
+            result = bind_workbook_evidence(
+                args.candidate_dir,
+                args.excel_workbook,
+                args.xlsx_result,
+                args.validation_result,
+                args.evidence,
+            )
         else:
             result = publish_report(
                 args.baseline_root,
@@ -4552,6 +5289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.implementation_reconciliation,
                 args.implementation_return_attribution,
                 args.correlation_root,
+                args.workbook_evidence_binding,
             )
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         print(f"portfolio-report: FAIL: {exc}", file=sys.stderr)

@@ -30,8 +30,9 @@ The workbook has these fixed sheets:
 9. Source Reconciliation
 10. Coverage Data Quality
 11. Corrections
-12. Methodology
-13. Provenance
+12. Dependence
+13. Methodology
+14. Provenance
 
 The workbook is read-only and advisory. It contains no provider connection,
 external link, macro, order-submission path, candidate refresh, optimization,
@@ -49,15 +50,29 @@ uv run --frozen --no-sync python tools/portfolio_report.py build `
   --output-root (Join-Path $portfolioRoot 'reporting')
 ```
 
-The build writes a content-addressed candidate containing the canonical report
-JSON, initial workbook, native-Excel job, and workbook validation contract.
-Before publication:
+The build writes a content-addressed, non-authoritative candidate containing the
+canonical report JSON, initial workbook, xlsx-win job, and workbook validation
+contract. Repository-created sidecars can bind the exact final workbook, job,
+result, validation, canonicalization, and parity bytes for immutable audit
+association only:
 
-1. Run the generated job through `xlsx-win` on Windows with Excel installed.
-2. Require the top-level native-Excel result to report `ok: true`.
-3. Validate the Excel-saved copy against `workbook-contract.json` and require
-   `all_passed: true`.
-4. Run the repository verifier against the current accepted baseline:
+```powershell
+uv run --frozen --no-sync python tools/portfolio_report.py bind-workbook-evidence `
+  --candidate-dir "<candidate>" `
+  --excel-workbook "<candidate>\excel\portfolio-report.xlsx" `
+  --xlsx-result "<candidate>\xlsx-result.json" `
+  --validation-result "<candidate>\workbook-validation.json" `
+  --evidence "<candidate>\workbook-evidence-binding.json"
+```
+
+That binding is classified `REPO_BOUND_POSTRUN_ONLY` and is
+`INCOMPLETE_STAGING_ONLY`. It may be retained as staging/archive evidence, but
+does not claim native Excel execution or a passing workbook result. The raw
+xlsx-win `run_id` is preserved exactly; the repository never derives it from an
+idempotency key.
+
+The repository verifier can still compare a staged workbook to the current
+accepted baseline:
 
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_report.py verify `
@@ -70,23 +85,17 @@ The verifier rejects changed baseline inputs, candidate identity drift,
 external links, workbook connections, macros, missing sheets or tables, and a
 missing reconciliation formula.
 
-## Publish and recover
+## Authoritative publication is blocked
 
-Publish only after the governing code commit and exact-SHA CI are accepted:
+`publish` is deliberately fail-closed and returns
+`NATIVE_EXCEL_RECEIPT_REQUIRED`. A repository or caller-created JSON receipt,
+schema-shaped sidecar, optional argument, or synthetic fixture cannot advance
+`CURRENT.json`, `CURRENT_RELEASE.json`, an accepted generation, or a release
+receipt. The previous accepted pointer remains byte-identical.
 
-```powershell
-uv run --frozen --no-sync python tools/portfolio_report.py publish `
-  --baseline-root (Join-Path $portfolioRoot 'baseline') `
-  --candidate-dir "<candidate>" `
-  --excel-workbook "<candidate>\excel\portfolio-report.xlsx" `
-  --xlsx-result "<candidate>\xlsx-result.json" `
-  --validation-result "<candidate>\workbook-validation.json" `
-  --output-root (Join-Path $portfolioRoot 'reporting')
-```
-
-Publication is immutable and advances `CURRENT.json` only after all checks
-pass. A failed build, native recalculation, validation, or publication leaves
-the previously accepted report pointer unchanged. Recovery is therefore to fix
-the cause, create or reuse the identical content-addressed candidate, rerun the
-evidence gates, and publish a new accepted generation; never overwrite an
-accepted generation.
+`NATIVE_EXECUTION_PROVEN` is therefore currently unavailable. A separately
+authorized, externally owned xlsx-win runtime/schema must emit the native
+receipt before this transition can be implemented. That receipt must bind the
+original, staged, and published paths and SHA-256 values; the actual job,
+result, and event records; and the real xlsx-win run ID. This repository cannot
+establish native Excel execution from JSON.

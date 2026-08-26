@@ -15,7 +15,8 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 import pytest
-from openpyxl import load_workbook
+from openpyxl import load_workbook  # type: ignore[import-untyped]
+from openpyxl.utils.cell import range_boundaries  # type: ignore[import-untyped]
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -216,7 +217,124 @@ def _xlsx_result(run_id: str, temporary_root: str) -> dict[str, Any]:
     }
 
 
-def test_xlsx_result_canonicalization_removes_only_random_telemetry(
+def _candidate_xlsx_result(
+    candidate: Path, run_id: str, temporary_root: str
+) -> dict[str, Any]:
+    result = _xlsx_result(run_id, temporary_root)
+    job = json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8"))
+    result["idempotency_key"] = job["idempotency_key"]
+    return result
+
+
+def _prepare_workbook_evidence(
+    candidate: Path,
+    *,
+    run_id: str = "e" * 32,
+    temporary_root: str = r"C:\Temp\xlsx-binding",
+) -> tuple[Path, Path, Path, Path]:
+    """Create synthetic native-Excel output before binding its evidence."""
+
+    initial_workbook = candidate / reporter.WORKBOOK_NAME
+    final_workbook = candidate / "excel" / reporter.WORKBOOK_NAME
+    final_workbook.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(initial_workbook, final_workbook)
+    run_result = candidate / "xlsx-result.json"
+    validation = candidate / "validation.json"
+    run_result.write_text(
+        json.dumps(_candidate_xlsx_result(candidate, run_id, temporary_root)),
+        encoding="utf-8",
+    )
+    validation.write_text(
+        json.dumps(
+            {
+                "all_passed": True,
+                "invariants": [{"name": "sentinel", "passed": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    reporter.canonicalize_workbook(
+        final_workbook, candidate / "workbook-canonicalization.json"
+    )
+    reporter.canonicalize_xlsx_result(
+        run_result, candidate / "xlsx-result-canonicalization.json"
+    )
+    return (
+        final_workbook,
+        run_result,
+        validation,
+        candidate / "workbook-evidence-binding.json",
+    )
+
+
+def _rewrite_xlsx_cell(
+    path: Path,
+    *,
+    sheet_name: str,
+    cell_reference: str,
+    value: str | None = None,
+    formula: str | None = None,
+    cached_value: str | None = None,
+) -> None:
+    """Mutate one OOXML cell while preserving every unrelated cached value."""
+
+    sheet_index = reporter.SHEET_NAMES.index(sheet_name) + 1
+    part_name = f"xl/worksheets/sheet{sheet_index}.xml"
+    temporary = path.with_name(f".{path.name}.mutated")
+    with (
+        zipfile.ZipFile(path) as source,
+        zipfile.ZipFile(
+            temporary, "w", compression=zipfile.ZIP_DEFLATED
+        ) as destination,
+    ):
+        for item in source.infolist():
+            content = source.read(item.filename)
+            if item.filename == part_name:
+                root = ET.fromstring(content)
+                cell = next(
+                    element
+                    for element in root.iter()
+                    if reporter._local_name(element.tag) == "c"
+                    and element.attrib.get("r") == cell_reference
+                )
+                namespace = cell.tag.rsplit("}", 1)[0].lstrip("{")
+                if value is not None:
+                    for child in list(cell):
+                        cell.remove(child)
+                    cell.set("t", "inlineStr")
+                    inline = ET.SubElement(cell, f"{{{namespace}}}is")
+                    text = ET.SubElement(inline, f"{{{namespace}}}t")
+                    text.text = value
+                if formula is not None:
+                    formula_node = next(
+                        child
+                        for child in cell
+                        if reporter._local_name(child.tag) == "f"
+                    )
+                    formula_node.text = formula
+                if cached_value is not None:
+                    value_node = next(
+                        child
+                        for child in cell
+                        if reporter._local_name(child.tag) == "v"
+                    )
+                    value_node.text = cached_value
+                content = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+            destination.writestr(item, content)
+    temporary.replace(path)
+
+
+def _first_table_data_cell(path: Path, sheet_name: str, table_name: str) -> str:
+    workbook = load_workbook(path, read_only=False, data_only=False, keep_links=False)
+    try:
+        table = workbook[sheet_name].tables[table_name]
+        min_column, min_row, _max_column, _max_row = range_boundaries(table.ref)
+        return f"{workbook[sheet_name].cell(row=min_row + 1, column=min_column).column_letter}{min_row + 1}"
+    finally:
+        workbook.close()
+
+
+def test_xlsx_result_canonicalization_preserves_distinct_raw_run_ids(
     tmp_path: Path,
 ) -> None:
     first = tmp_path / "first-result.json"
@@ -236,8 +354,10 @@ def test_xlsx_result_canonicalization_removes_only_random_telemetry(
         second, tmp_path / "second-result-evidence.json"
     )
 
-    assert first.read_bytes() == second.read_bytes()
-    assert first_result == second_result
+    assert first.read_bytes() != second.read_bytes()
+    assert json.loads(first.read_text(encoding="utf-8"))["run_id"] == "a" * 32
+    assert json.loads(second.read_text(encoding="utf-8"))["run_id"] == "b" * 32
+    assert first_result != second_result
     assert reporter.canonicalize_xlsx_result(first) == first_result
     failed = tmp_path / "failed-result.json"
     payload = _xlsx_result("c" * 32, r"C:\Temp\xlsx-failed")
@@ -540,7 +660,7 @@ def _baseline_catalog() -> dict[str, Any]:
             "source_key": "synthetic-nav",
         },
     ]
-    allocations = [
+    allocations: list[dict[str, Any]] = [
         {
             "allocation_id": f"allocation-{index}",
             "as_of_date": "2026-01-03",
@@ -1232,7 +1352,7 @@ def test_workbook_is_deterministic_structured_and_has_no_external_surface(
     assert evidence["macro_parts"] == 0
     assert evidence["formula_count"] >= 1
     with zipfile.ZipFile(workbook) as archive:
-        widths = []
+        widths: list[float] = []
         for name in archive.namelist():
             if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"):
                 root = ET.fromstring(archive.read(name))
@@ -1282,11 +1402,21 @@ def test_candidate_drift_and_failed_excel_evidence_block_publication(
     run_result = candidate / "xlsx-result.json"
     validation = candidate / "validation.json"
     run_result.write_text(json.dumps({"ok": False}), encoding="utf-8")
-    validation.write_text(json.dumps({"all_passed": True}), encoding="utf-8")
+    validation.write_text(
+        json.dumps(
+            {
+                "all_passed": True,
+                "invariants": [{"name": "synthetic", "passed": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
     reporter.canonicalize_workbook(
         workbook, candidate / "workbook-canonicalization.json"
     )
-    with pytest.raises(reporter.ReportValidationError, match="not ok"):
+    with pytest.raises(
+        reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
+    ):
         reporter.publish_report(
             baseline_root,
             candidate,
@@ -1297,51 +1427,519 @@ def test_candidate_drift_and_failed_excel_evidence_block_publication(
         )
 
 
-def test_publish_creates_immutable_generation_and_pointer(tmp_path: Path) -> None:
+def test_workbook_evidence_binding_pins_exact_final_workbook_and_sidecars(
+    tmp_path: Path,
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    initial_workbook = Path(built["workbook_path"])
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
+
+    binding = reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+
+    assert binding["binding_schema_version"] == 1
+    assert (
+        binding["initial_workbook_sha256"]
+        == hashlib.sha256(initial_workbook.read_bytes()).hexdigest()
+    )
+    assert (
+        binding["workbook_sha256"] == hashlib.sha256(workbook.read_bytes()).hexdigest()
+    )
+    assert (
+        binding["xlsx_result_sha256"]
+        == hashlib.sha256(run_result.read_bytes()).hexdigest()
+    )
+    assert (
+        binding["validation_result_sha256"]
+        == hashlib.sha256(validation.read_bytes()).hexdigest()
+    )
+    assert (
+        binding["workbook_contract_sha256"]
+        == hashlib.sha256(
+            (candidate / "workbook-contract.json").read_bytes()
+        ).hexdigest()
+    )
+    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+    assert binding["publication_disposition"] == "INCOMPLETE_STAGING_ONLY"
+    rendered = json.dumps(binding, sort_keys=True).lower()
+    assert "native" not in rendered
+    assert "pass" not in rendered
+    assert (
+        binding["workbook_parity_sha256"]
+        == hashlib.sha256((candidate / "workbook-parity.json").read_bytes()).hexdigest()
+    )
+    parity = json.loads(
+        (candidate / "workbook-parity.json").read_text(encoding="utf-8")
+    )
+    assert parity == {
+        "parity_schema_version": reporter.WORKBOOK_PARITY_VERSION,
+        "parity_status": "REPO_BOUND_POSTRUN_ONLY",
+        "report_sha256": built["report_data_sha256"],
+        "workbook_sha256": binding["workbook_sha256"],
+    }
+    assert json.loads(binding_path.read_text(encoding="utf-8")) == binding
+
+
+def test_workbook_evidence_binding_rejects_pre_excel_input_even_when_bytes_match(
+    tmp_path: Path,
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    final_workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
+    initial_workbook = candidate / reporter.WORKBOOK_NAME
+    initial_workbook.write_bytes(final_workbook.read_bytes())
+
+    with pytest.raises(reporter.ReportValidationError, match="xlsx-win job binding"):
+        reporter.bind_workbook_evidence(
+            candidate,
+            initial_workbook,
+            run_result,
+            validation,
+            binding_path,
+        )
+
+
+@pytest.mark.parametrize("job_step", ("open", "save_as"))
+def test_workbook_evidence_binding_rejects_wrong_excel_job_path(
+    tmp_path: Path, job_step: str
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    final_workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
+    job_path = candidate / "xlsx-job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    if job_step == "open":
+        job["steps"][0]["workbook_path"] = str(final_workbook)
+    else:
+        job["steps"][2]["output_path"] = str(candidate / reporter.WORKBOOK_NAME)
+    job_path.write_bytes(canonical_json_bytes(job))
+
+    with pytest.raises(reporter.ReportValidationError, match="xlsx-win job binding"):
+        reporter.bind_workbook_evidence(
+            candidate,
+            final_workbook,
+            run_result,
+            validation,
+            binding_path,
+        )
+
+
+_WORKBOOK_TABLE_CASES = (
+    ("Portfolio Summary", "tblPortfolioSummary"),
+    ("Account Summary", "tblAccounts"),
+    ("Strategy Summary", "tblStrategies"),
+    ("Positions", "tblPositions"),
+    ("Transactions and Flows", "tblTransactionsFlows"),
+    ("TWR MWR", "tblTwrMwr"),
+    ("Allocation History", "tblAllocations"),
+    ("Flow Reconciliation", "tblFlowRecon"),
+    ("Source Reconciliation", "tblSourceRecon"),
+    ("Coverage Data Quality", "tblCoverage"),
+    ("Corrections", "tblCorrections"),
+    ("Dependence", "tblDependence"),
+    ("Methodology", "tblMethodology"),
+    ("Provenance", "tblProvenance"),
+)
+
+
+@pytest.mark.parametrize(("sheet_name", "table_name"), _WORKBOOK_TABLE_CASES)
+def test_every_governed_table_mutation_can_only_be_repo_bound(
+    tmp_path: Path, sheet_name: str, table_name: str
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    final_workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
+    cell_reference = _first_table_data_cell(final_workbook, sheet_name, table_name)
+    _rewrite_xlsx_cell(
+        final_workbook,
+        sheet_name=sheet_name,
+        cell_reference=cell_reference,
+        value="PARITY_MUTATION",
+    )
+    canonicalization_path = candidate / "workbook-canonicalization.json"
+    canonicalization_path.unlink()
+    reporter.canonicalize_workbook(final_workbook, canonicalization_path)
+
+    binding = reporter.bind_workbook_evidence(
+        candidate,
+        final_workbook,
+        run_result,
+        validation,
+        binding_path,
+    )
+
+    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+
+
+def test_workbook_header_mutation_can_only_be_repo_bound(
+    tmp_path: Path,
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    final_workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
+    _rewrite_xlsx_cell(
+        final_workbook,
+        sheet_name="Strategy Summary",
+        cell_reference="A5",
+        value="Wrong Header",
+    )
+    canonicalization_path = candidate / "workbook-canonicalization.json"
+    canonicalization_path.unlink()
+    reporter.canonicalize_workbook(final_workbook, canonicalization_path)
+
+    binding = reporter.bind_workbook_evidence(
+        candidate,
+        final_workbook,
+        run_result,
+        validation,
+        binding_path,
+    )
+
+    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+
+
+def test_workbook_parity_does_not_round_expected_floats() -> None:
+    value = 1.2345678901234567
+
+    assert float(f"{value:.16G}") != value
+    assert reporter._parity_cell_value(value, header="numeric_probe") == value
+
+
+@pytest.mark.parametrize("mutation", ("formula", "cached_value"))
+def test_workbook_formula_mutation_can_only_be_repo_bound(
+    tmp_path: Path, mutation: str
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    final_workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
+    _rewrite_xlsx_cell(
+        final_workbook,
+        sheet_name="Portfolio Summary",
+        cell_reference="E4",
+        formula="1+1" if mutation == "formula" else None,
+        cached_value="FAIL" if mutation == "cached_value" else None,
+    )
+    canonicalization_path = candidate / "workbook-canonicalization.json"
+    canonicalization_path.unlink()
+    reporter.canonicalize_workbook(final_workbook, canonicalization_path)
+
+    binding = reporter.bind_workbook_evidence(
+        candidate,
+        final_workbook,
+        run_result,
+        validation,
+        binding_path,
+    )
+
+    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+
+
+def test_workbook_readiness_mutation_can_only_be_repo_bound(
+    tmp_path: Path,
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    final_workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
+    _rewrite_xlsx_cell(
+        final_workbook,
+        sheet_name="Portfolio Summary",
+        cell_reference="B4",
+        value="FORGED_READY",
+    )
+    canonicalization_path = candidate / "workbook-canonicalization.json"
+    canonicalization_path.unlink()
+    reporter.canonicalize_workbook(final_workbook, canonicalization_path)
+
+    binding = reporter.bind_workbook_evidence(
+        candidate,
+        final_workbook,
+        run_result,
+        validation,
+        binding_path,
+    )
+
+    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+
+
+def test_canonical_report_mutation_is_rejected_before_binding(tmp_path: Path) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    final_workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
+    report_path = candidate / reporter.REPORT_DATA_NAME
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["provenance"][0]["sha256"] = "0" * 64
+    report_path.write_bytes(canonical_json_bytes(report))
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="candidate report|workbook parity values differ",
+    ):
+        reporter.bind_workbook_evidence(
+            candidate,
+            final_workbook,
+            run_result,
+            validation,
+            binding_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "target_name",
+    (
+        "workbook",
+        "initial-workbook",
+        "xlsx-result.json",
+        "validation.json",
+        "workbook-contract.json",
+        "xlsx-job.json",
+        "workbook-canonicalization.json",
+        "xlsx-result-canonicalization.json",
+        "workbook-parity.json",
+        "workbook-evidence-binding.json",
+    ),
+)
+def test_any_bound_workbook_evidence_byte_change_cannot_bypass_native_gate(
+    tmp_path: Path, target_name: str
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="f" * 32,
+        temporary_root=r"C:\Temp\xlsx-drift",
+    )
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    target = (
+        workbook
+        if target_name == "workbook"
+        else candidate / reporter.WORKBOOK_NAME
+        if target_name == "initial-workbook"
+        else candidate / target_name
+    )
+    target.write_bytes(target.read_bytes() + b"drift")
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
+    ):
+        reporter.publish_report(
+            baseline_root,
+            candidate,
+            workbook,
+            run_result,
+            validation,
+            tmp_path / "published",
+            workbook_evidence_binding=binding_path,
+        )
+
+
+def test_synthetic_workbook_publish_is_rejected_without_advancing_pointer(
+    tmp_path: Path,
+) -> None:
     baseline_root = _published_baseline(tmp_path)
     candidate_root = tmp_path / "reporting-candidates"
     built = reporter.build_candidate(baseline_root, candidate_root)
     candidate = Path(built["candidate_dir"])
-    workbook = Path(built["workbook_path"])
-    run_result = candidate / "xlsx-result.json"
-    validation = candidate / "validation.json"
-    run_result.write_text(
-        json.dumps(_xlsx_result("d" * 32, r"C:\Temp\xlsx-publish")),
-        encoding="utf-8",
-    )
-    validation.write_text(json.dumps({"all_passed": True}), encoding="utf-8")
-    reporter.canonicalize_workbook(
-        workbook, candidate / "workbook-canonicalization.json"
-    )
-    reporter.canonicalize_xlsx_result(
-        run_result, candidate / "xlsx-result-canonicalization.json"
-    )
-    published_root = tmp_path / "published"
-
-    result = reporter.publish_report(
-        baseline_root,
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate,
-        workbook,
-        run_result,
-        validation,
-        published_root,
+        run_id="d" * 32,
+        temporary_root=r"C:\Temp\xlsx-publish",
     )
-    repeated = reporter.publish_report(
-        baseline_root,
-        candidate,
-        workbook,
-        run_result,
-        validation,
-        published_root,
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    published_root = _published_baseline(tmp_path / "published")
+    pointer_before = (published_root / "CURRENT.json").read_bytes()
+    generations_before = sorted((published_root / "generations").iterdir())
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
+    ):
+        reporter.publish_report(
+            baseline_root,
+            candidate,
+            workbook,
+            run_result,
+            validation,
+            published_root,
+            workbook_evidence_binding=binding_path,
+        )
+
+    assert (published_root / "CURRENT.json").read_bytes() == pointer_before
+    assert sorted((published_root / "generations").iterdir()) == generations_before
+    assert not (published_root / "CURRENT_RELEASE.json").exists()
+    assert not list(published_root.rglob("report-verification.json"))
+
+
+@pytest.mark.parametrize("receipt_kind", ("missing", "malformed", "caller_created"))
+def test_publish_requires_external_native_receipt_for_every_caller_input(
+    tmp_path: Path, receipt_kind: str
+) -> None:
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(candidate)
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    published_root = _published_baseline(tmp_path / "published")
+    pointer_before = (published_root / "CURRENT.json").read_bytes()
+    receipt: Path | None = binding_path
+    if receipt_kind == "missing":
+        receipt = None
+    elif receipt_kind == "malformed":
+        receipt = candidate / "fake-native-receipt.json"
+        receipt.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
+    ):
+        reporter.publish_report(
+            baseline_root,
+            candidate,
+            workbook,
+            run_result,
+            validation,
+            published_root,
+            workbook_evidence_binding=receipt,
+        )
+
+    assert (published_root / "CURRENT.json").read_bytes() == pointer_before
+    assert not (published_root / "CURRENT_RELEASE.json").exists()
+
+
+def test_publish_cli_rejects_synthetic_sidecars_without_a_release_receipt(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(candidate)
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    published_root = _published_baseline(tmp_path / "published")
+    pointer_before = (published_root / "CURRENT.json").read_bytes()
+
+    exit_code = reporter.main(
+        [
+            "publish",
+            "--baseline-root",
+            str(baseline_root),
+            "--candidate-dir",
+            str(candidate),
+            "--excel-workbook",
+            str(workbook),
+            "--xlsx-result",
+            str(run_result),
+            "--validation-result",
+            str(validation),
+            "--workbook-evidence-binding",
+            str(binding_path),
+            "--output-root",
+            str(published_root),
+        ]
     )
 
-    assert result == repeated
-    assert result["publication_state"] == "PUBLISHED"
-    assert read_current(published_root).generation_id == result["generation_id"]
-    generation = published_root / "generations" / result["generation_id"]
-    assert (generation / reporter.WORKBOOK_NAME).is_file()
-    assert (generation / reporter.REPORT_DATA_NAME).is_file()
-    assert (generation / "report-verification.json").is_file()
+    assert exit_code == 1
+    assert capsys.readouterr().err == (
+        "portfolio-report: FAIL: NATIVE_EXCEL_RECEIPT_REQUIRED\n"
+    )
+    assert (published_root / "CURRENT.json").read_bytes() == pointer_before
+    assert not (published_root / "CURRENT_RELEASE.json").exists()
+
+
+def test_repo_bound_workbook_stages_without_current_or_release_pointer(
+    tmp_path: Path,
+) -> None:
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    built = reporter.build_candidate(baseline_root, tmp_path / "staging")
+    candidate = Path(built["candidate_dir"])
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(candidate)
+
+    binding = reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+
+    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+    assert (candidate / reporter.WORKBOOK_NAME).is_file()
+    assert (candidate / "workbook-evidence-binding.json").is_file()
+    assert not (candidate / "CURRENT.json").exists()
+    assert not (candidate / "CURRENT_RELEASE.json").exists()
+
+
+def test_publication_rejects_source_rollover_without_bypassing_native_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="a" * 32,
+        temporary_root=r"C:\Temp\xlsx-source-rollover",
+    )
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    original_build_report_data = reporter.build_report_data
+    calls = 0
+
+    def build_then_roll_source(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        result = original_build_report_data(*args, **kwargs)
+        calls += 1
+        if calls == 1:
+            changed = _baseline_catalog()
+            changed["replay"]["total_liquid_usd"] = "101"
+            _published_baseline(tmp_path, changed)
+        return result
+
+    monkeypatch.setattr(reporter, "build_report_data", build_then_roll_source)
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
+    ):
+        reporter.publish_report(
+            baseline_root,
+            candidate,
+            workbook,
+            run_result,
+            validation,
+            tmp_path / "published",
+            workbook_evidence_binding=binding_path,
+        )
 
 
 def test_report_schema_is_closed_and_keeps_mwr_unavailable() -> None:
