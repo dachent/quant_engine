@@ -9,7 +9,7 @@ from quant_engine.web_contracts import evidence
 
 
 def test_public_api_is_the_generalized_lossless_extractor_surface() -> None:
-    assert web_contracts.__version__ == "0.2.0"
+    assert web_contracts.__version__ == "0.3.0"
     assert web_contracts.extract_har is evidence.extract_har
     assert web_contracts.HarExtractionReceipt is evidence.HarExtractionReceipt
     assert web_contracts.HarParseStatus is evidence.HarParseStatus

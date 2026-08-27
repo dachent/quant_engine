@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import quant_engine.web_contracts as web_contracts
 from quant_engine.web_contracts import extract_har
 from quant_engine.web_contracts import evidence
 
@@ -65,6 +66,12 @@ def test_distribution_registers_the_web_contract_command() -> None:
 
     assert commands["quant-engine-web-contract"] == (
         "quant_engine.web_contracts.cli:main"
+    )
+
+
+def test_package_and_distribution_versions_match() -> None:
+    assert web_contracts.__version__ == metadata.version(
+        "quant-engine-web-contract-harvester"
     )
 
 
