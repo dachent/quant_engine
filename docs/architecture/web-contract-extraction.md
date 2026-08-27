@@ -67,7 +67,7 @@ Diagnostics use codes, source indexes, and the fixed body side (`request` or `re
 
 The output is create-only. Existing paths fail before a source write, so an earlier extraction cannot be overwritten. Once `source.har` is complete, later parse, structure, or body-decoding failures do not remove it. Files already written are not deleted on a later failure.
 
-Every source and manifest file is flushed and file-synced before the next phase. On POSIX, the extractor also syncs metadata for newly created destination directories, source creation, and each manifest rename. On Windows it performs the portable file syncs but does not claim directory-metadata or sudden-power-loss durability because Windows exposes no portable directory-fsync equivalent; the caller remains responsible for the destination filesystem's durability guarantees.
+Every source, entry, body, and manifest file is flushed and file-synced before the next phase. On POSIX, the extractor also syncs metadata for newly created destination and numeric-entry directories, every created file, source creation, and each manifest rename, so the final manifest is not published before its listed derivative directory entries have been synced. On Windows it performs the portable file syncs but does not claim directory-metadata or sudden-power-loss durability because Windows exposes no portable directory-fsync equivalent; the caller remains responsible for the destination filesystem's durability guarantees.
 
 The extractor performs no network or browser operation. There are no fixed body, entry, or file-size caps and no silent truncation. Operational I/O failures surface to the caller while leaving the create-only directory available for reconciliation.
 

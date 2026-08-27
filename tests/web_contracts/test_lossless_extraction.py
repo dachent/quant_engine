@@ -646,6 +646,36 @@ def test_existing_output_directory_is_rejected_before_evidence_is_written(
     assert list(output_dir.iterdir()) == []
 
 
+@pytest.mark.parametrize("lexeme", ["1١", "1.١", "1e١"])
+def test_non_ascii_digits_are_not_valid_json_numbers(
+    tmp_path: Path, lexeme: str
+) -> None:
+    receipt = extract_har(
+        _raw_har_entries('{"number":' + lexeme + "}"), tmp_path / lexeme.encode().hex()
+    )
+
+    assert receipt.parse_status is HarParseStatus.INVALID_JSON
+
+
+def test_parent_chain_terminates_at_an_unavailable_root() -> None:
+    with pytest.raises(FileNotFoundError):
+        evidence._missing_parent_chain(Path("X"), lambda _: False)
+
+
+def test_entry_directories_and_files_are_synced_before_final_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = tmp_path / "derivative-sync"
+    sync_calls: list[Path] = []
+    monkeypatch.setattr(evidence, "_sync_directory", sync_calls.append)
+
+    extract_har(_raw_har_entries('{"request":{},"response":{}}'), output_dir)
+
+    entry_dir = output_dir / "entries" / "000000"
+    assert entry_dir in sync_calls
+    assert output_dir in sync_calls
+
+
 def test_deep_valid_entry_is_parsed_and_serialized_without_recursion_limit(
     tmp_path: Path,
 ) -> None:
