@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
-from importlib.metadata import version
 import json
 from pathlib import Path
 import sys
 from typing import NoReturn
 
+from quant_engine.web_contracts._version import VERSION
 from quant_engine.web_contracts.evidence import HarParseStatus, extract_har
 
 
@@ -31,7 +31,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {version('quant-engine-web-contract-harvester')}",
+        version=f"%(prog)s {VERSION}",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
     extract = subcommands.add_parser(
@@ -65,19 +65,16 @@ def _error(code: str, exit_code: int = 1) -> int:
     return exit_code
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the generalized web-contract command group."""
-
+def _run(argv: Sequence[str] | None) -> int:
     try:
         args = _parser().parse_args(argv)
     except _UsageError:
         return _error("CLI_USAGE", 64)
     try:
         receipt = extract_har(args.source, args.output_dir)
-    except KeyboardInterrupt:
-        return _error("INTERRUPTED", 130)
     except FileNotFoundError:
-        return _error("SOURCE_READ_FAILED")
+        code = "IO_ERROR" if args.source.exists() else "SOURCE_READ_FAILED"
+        return _error(code)
     except FileExistsError:
         return _error("OUTPUT_EXISTS")
     except OSError:
@@ -96,3 +93,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     return 0 if receipt.parse_status is HarParseStatus.COMPLETE else 2
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the generalized web-contract command group."""
+
+    try:
+        return _run(argv)
+    except KeyboardInterrupt:
+        return _error("INTERRUPTED", 130)

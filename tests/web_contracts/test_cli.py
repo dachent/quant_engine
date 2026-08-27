@@ -4,7 +4,10 @@ import importlib
 from importlib import metadata
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -89,6 +92,30 @@ def test_version_reports_the_cli_surface_release(
     assert output.err == ""
 
 
+def test_help_works_from_source_without_installed_distribution_metadata() -> None:
+    source_root = (
+        Path(__file__).resolve().parents[2] / "packages" / "web-contracts" / "src"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(source_root)
+    command = (
+        "from quant_engine.web_contracts.cli import main; "
+        "raise SystemExit(main(['--help']))"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-S", "-c", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0
+    assert "{extract}" in result.stdout
+    assert result.stderr == ""
+
+
 def test_help_exposes_only_the_accepted_offline_extract_command(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -141,6 +168,45 @@ def test_extract_matches_direct_api_and_never_prints_captured_values(
     assert sentinel not in output.err
 
 
+def test_installed_launcher_preserves_values_and_stream_contract(
+    tmp_path: Path,
+) -> None:
+    source, sentinel = _complete_source()
+    source_path = tmp_path / "input.har"
+    source_path.write_bytes(source)
+    output_dir = tmp_path / "launcher-output"
+    executable = Path(sys.executable).with_name(
+        "quant-engine-web-contract.exe"
+        if os.name == "nt"
+        else "quant-engine-web-contract"
+    )
+
+    result = subprocess.run(
+        [
+            str(executable),
+            "extract",
+            "--har-file",
+            str(source_path),
+            "--output-dir",
+            str(output_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["parse_status"] == "COMPLETE"
+    assert result.stderr == ""
+    assert (output_dir / "source.har").read_bytes() == source
+    assert (
+        sentinel.encode()
+        in (output_dir / "entries" / "000000" / "entry.json").read_bytes()
+    )
+    assert sentinel not in result.stdout
+    assert sentinel not in result.stderr
+
+
 def test_invalid_input_is_preserved_and_returns_noncomplete_status(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -167,6 +233,42 @@ def test_invalid_input_is_preserved_and_returns_noncomplete_status(
     }
     assert sentinel not in output.out
     assert sentinel not in output.err
+
+
+def test_partial_input_is_preserved_and_returns_noncomplete_status(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = _cli_module()
+    sentinel = _join("partial", "-private-value")
+    document = {
+        _join("l", "og"): {
+            _join("entr", "ies"): [
+                {
+                    "response": {
+                        "content": {
+                            "text": f"not-base64-{sentinel}",
+                            "encoding": "base64",
+                        }
+                    }
+                }
+            ]
+        }
+    }
+    source = json.dumps(document, separators=(",", ":")).encode()
+    source_path = tmp_path / "partial.har"
+    source_path.write_bytes(source)
+    output_dir = tmp_path / "partial-output"
+
+    exit_code = cli.main(
+        ["extract", "--har-file", str(source_path), "--output-dir", str(output_dir)]
+    )
+
+    assert exit_code == 2
+    assert (output_dir / "source.har").read_bytes() == source
+    output = capsys.readouterr()
+    assert json.loads(output.out)["parse_status"] == "PARTIAL"
+    assert output.err == ""
+    assert sentinel not in output.out
 
 
 @pytest.mark.parametrize(
@@ -255,6 +357,37 @@ def test_missing_source_reports_only_a_value_safe_error(
     assert sentinel not in output.err
 
 
+def test_output_side_file_not_found_is_classified_as_io_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = _cli_module()
+    source_path = tmp_path / "input.har"
+    source_path.write_bytes(b"{}")
+
+    def fail_output(source: Path, output_dir: Path) -> None:
+        del source, output_dir
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli, "extract_har", fail_output)
+
+    exit_code = cli.main(
+        [
+            "extract",
+            "--har-file",
+            str(source_path),
+            "--output-dir",
+            str(tmp_path / "output"),
+        ]
+    )
+
+    assert exit_code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err) == {"error": "IO_ERROR", "ok": False}
+
+
 def test_existing_output_is_not_modified_and_its_path_is_not_echoed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -322,6 +455,55 @@ def test_interruption_keeps_source_and_checkpoint_without_echoing_values(
     assert manifest["parse_status"] == "PARSED"
     assert manifest["completeness"] == "DERIVATIVES_NOT_FINALIZED"
     assert manifest["source_entry_count"] == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err) == {"error": "INTERRUPTED", "ok": False}
+    assert sentinel not in output.err
+
+
+def test_interruption_during_argument_parsing_is_value_safe(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = _cli_module()
+
+    def interrupt_parser() -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_parser", interrupt_parser)
+
+    exit_code = cli.main([])
+
+    assert exit_code == 130
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err) == {"error": "INTERRUPTED", "ok": False}
+
+
+def test_interruption_during_receipt_output_is_value_safe(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = _cli_module()
+    source, sentinel = _complete_source()
+    source_path = tmp_path / "input.har"
+    source_path.write_bytes(source)
+    output_dir = tmp_path / "output"
+    original_json_line = cli._json_line
+
+    def interrupt_receipt(value: object) -> str:
+        if isinstance(value, dict) and "parse_status" in value:
+            raise KeyboardInterrupt
+        return original_json_line(value)
+
+    monkeypatch.setattr(cli, "_json_line", interrupt_receipt)
+
+    exit_code = cli.main(
+        ["extract", "--har-file", str(source_path), "--output-dir", str(output_dir)]
+    )
+
+    assert exit_code == 130
+    assert (output_dir / "source.har").read_bytes() == source
     output = capsys.readouterr()
     assert output.out == ""
     assert json.loads(output.err) == {"error": "INTERRUPTED", "ok": False}

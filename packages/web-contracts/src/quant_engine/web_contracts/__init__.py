@@ -15,8 +15,9 @@ from quant_engine.web_contracts.provenance import RECOVERED_SOURCE_ANCHORS
 from quant_engine.web_contracts.portfolio123 import PORTFOLIO123_CONTRACT
 from quant_engine.web_contracts.quantbase import QUANTBASE_CONTRACT
 from quant_engine.web_contracts.schwab import SCHWAB_CONTRACT
+from quant_engine.web_contracts._version import VERSION
 
-__version__ = "0.3.0"
+__version__ = VERSION
 
 __all__ = [
     "EndpointContract",
