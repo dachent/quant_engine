@@ -3431,7 +3431,7 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     )
     assert manifest_schema == {"$ref": strict_manifest_schema["$id"]}
     assert strict_manifest_schema["additionalProperties"] is False
-    assert strict_manifest_schema["properties"]["schema_version"] == {"const": 7}
+    assert strict_manifest_schema["properties"]["schema_version"] == {"enum": [7, 8]}
     assert "authority_readiness" in strict_manifest_schema["required"]
     assert "authority_status" not in strict_manifest_schema["required"]
     assert strict_manifest_schema["properties"]["authority_readiness"]["properties"][

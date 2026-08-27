@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import re
@@ -18,7 +19,13 @@ from quant_engine.core.contracts import (
     VerificationStatus,
     canonical_json_bytes,
 )
-from tools.account_strategy_manifest import ManifestError, partition_assignments
+from tools.account_strategy_manifest import (
+    ManifestError,
+    json_ready,
+    load_flow_classification_policy,
+    load_flow_coverage,
+    partition_assignments,
+)
 
 
 _ARTIFACT_ID = "account-assignment-perimeter"
@@ -39,6 +46,20 @@ _DISPOSITIONS = (
     "RESERVE_NOT_APPLICABLE",
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_CURRENCY = re.compile(r"^[A-Z]{3}$")
+_INTERNAL_ACCOUNT_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_CANONICAL_CENT = re.compile(r"^-?(0|[1-9][0-9]*)(?:\.[0-9]{1,2})?$")
+_NINE_BLOCKED_PATHS = (
+    "authority/selected-input-identities.json",
+    "authority/account-assignment-perimeter.json",
+    "authority/calculation-inputs.json",
+    "authority/flow-classification-policy.json",
+    "authority/classified-flows.json",
+    "authority/account-flow-coverage.json",
+    "authority/mapped-epoch-admission.json",
+    "authority/code-identities.json",
+    "outputs/account-strategy-manifest.json",
+)
 
 
 class AccountAssignmentPerimeterError(ValueError):
@@ -761,3 +782,325 @@ def validate_account_assignment_perimeter(
     )
     if dict(payload) != expected:
         raise AccountAssignmentPerimeterError("payload differs from expected perimeter")
+
+
+def _c3_artifact(
+    snapshot: InputSnapshot,
+    artifact_id: str,
+    schema_name: str,
+    as_of_date: str,
+    schema_version: str = "1",
+) -> dict[str, object]:
+    return {
+        "artifact_id": artifact_id,
+        "as_of_date": as_of_date,
+        "schema": {"name": schema_name, "version": schema_version},
+        **_snapshot_identity(snapshot),
+    }
+
+
+def _c3_money(
+    value: object, field_name: str, *, allow_unavailable_reason: bool = False
+) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise AccountAssignmentPerimeterError(f"{field_name} money contract is invalid")
+    keys = set(value)
+    base_keys = {"currency", "status", "value"}
+    if keys != base_keys and not (
+        allow_unavailable_reason
+        and keys == base_keys | {"reason"}
+        and value.get("status") == "UNAVAILABLE"
+    ):
+        raise AccountAssignmentPerimeterError(f"{field_name} money contract is invalid")
+    currency, status, amount = value["currency"], value["status"], value["value"]
+    if not isinstance(currency, str) or _CURRENCY.fullmatch(currency) is None:
+        raise AccountAssignmentPerimeterError(f"{field_name} currency is invalid")
+    if status == "UNAVAILABLE":
+        if amount is not None:
+            raise AccountAssignmentPerimeterError(f"{field_name} unavailable value must be null")
+        normalized = {"currency": currency, "status": status, "value": None}
+        if "reason" in value:
+            reason = value["reason"]
+            if not isinstance(reason, str) or not reason.strip():
+                raise AccountAssignmentPerimeterError(f"{field_name} unavailable reason is invalid")
+            normalized["reason"] = reason.strip()
+        return normalized
+    if status != "AVAILABLE" or not isinstance(amount, str):
+        raise AccountAssignmentPerimeterError(f"{field_name} money status is invalid")
+    try:
+        decimal = Decimal(amount)
+    except (InvalidOperation, ValueError):
+        raise AccountAssignmentPerimeterError(f"{field_name} value is invalid") from None
+    if not decimal.is_finite() or decimal.quantize(Decimal("0.01")) != decimal:
+        raise AccountAssignmentPerimeterError(f"{field_name} value is invalid")
+    if _CANONICAL_CENT.fullmatch(amount) is None or (
+        amount.startswith("-") and decimal.is_zero()
+    ):
+        raise AccountAssignmentPerimeterError(f"{field_name} value is not canonical")
+    return {"currency": currency, "status": status, "value": amount}
+
+
+def _c3_account_id(value: object, field_name: str) -> str:
+    account_id = _nonempty_text(value, field_name)
+    if _INTERNAL_ACCOUNT_ID.fullmatch(account_id) is None:
+        raise AccountAssignmentPerimeterError(f"{field_name} is invalid")
+    return account_id
+
+
+def _c3_ledger(selected_inputs: AccountManifestSelectedInputs) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]], str]:
+    try:
+        ledger = selected_inputs.provider_ledger.json_object("selected provider ledger")
+    except ValueError:
+        raise AccountAssignmentPerimeterError("selected provider ledger is invalid") from None
+    _selected_top_level_date(selected_inputs.provider_ledger)
+    if not isinstance(ledger.get("catalog_schema_version"), int):
+        raise AccountAssignmentPerimeterError("provider ledger catalog schema version is invalid")
+    navs, flows = ledger.get("nav_observations"), ledger.get("flows")
+    if not isinstance(navs, list) or not isinstance(flows, list):
+        raise AccountAssignmentPerimeterError("provider ledger facts must be lists")
+    normalized_navs: list[dict[str, object]] = []
+    available_currencies: set[str] = set()
+    nav_ids: set[str] = set()
+    for index, row in enumerate(navs):
+        if not isinstance(row, Mapping) or not {
+            "record_id", "account_id", "as_of_date", "nav"
+        } <= set(row):
+            raise AccountAssignmentPerimeterError("provider ledger NAV shape is invalid")
+        record_id = _nonempty_text(row.get("record_id"), "NAV record_id")
+        if record_id in nav_ids:
+            raise AccountAssignmentPerimeterError("duplicate provider ledger NAV record_id")
+        nav_ids.add(record_id)
+        account_id = _c3_account_id(row.get("account_id"), "NAV account_id")
+        as_of_date = _iso_date(row.get("as_of_date"), "NAV as_of_date")
+        nav = _c3_money(
+            row.get("nav"), f"NAV {index}", allow_unavailable_reason=True
+        )
+        if nav["status"] == "AVAILABLE":
+            available_currencies.add(str(nav["currency"]))
+        normalized_navs.append({"record_id": record_id, "account_id": account_id, "as_of_date": as_of_date, "nav": nav})
+    if len(available_currencies) != 1:
+        raise AccountAssignmentPerimeterError("AVAILABLE NAV facts must use one accounting currency")
+    accounting_currency = next(iter(available_currencies))
+    normalized_flows: list[dict[str, object]] = []
+    flow_ids: set[str] = set()
+    for index, row in enumerate(flows):
+        if not isinstance(row, Mapping) or not {
+            "record_id", "account_id", "event_date", "flow_type", "amount"
+        } <= set(row):
+            raise AccountAssignmentPerimeterError("provider ledger flow shape is invalid")
+        record_id = _nonempty_text(row.get("record_id"), "flow record_id")
+        if record_id in flow_ids or any(ord(item) < 32 or ord(item) == 127 for item in record_id):
+            raise AccountAssignmentPerimeterError("provider ledger flow record_id is invalid")
+        flow_ids.add(record_id)
+        account_id = _c3_account_id(row.get("account_id"), "flow account_id")
+        event_date = _iso_date(row.get("event_date"), "flow event_date")
+        flow_type = _nonempty_text(row.get("flow_type"), "flow type")
+        amount = _c3_money(row.get("amount"), f"flow {index}")
+        if amount["status"] == "AVAILABLE" and amount["currency"] != accounting_currency:
+            raise AccountAssignmentPerimeterError("AVAILABLE flow currency differs from accounting currency")
+        normalized_flows.append({"record_id": record_id, "account_id": account_id, "event_date": event_date, "flow_type": flow_type, "amount": amount})
+    return ledger, normalized_navs, normalized_flows, accounting_currency
+
+
+def _c3_mapped_assignments(selected_inputs: AccountManifestSelectedInputs) -> tuple[list[dict[str, object]], dict[str, str]]:
+    baseline, providers, assignments = _baseline_payload(selected_inputs.baseline)
+    for account_id in providers:
+        _c3_account_id(account_id, "baseline account_id")
+    for assignment in assignments:
+        if not isinstance(assignment, Mapping):
+            raise AccountAssignmentPerimeterError("baseline assignment is invalid")
+        _c3_account_id(assignment.get("account_id"), "baseline assignment account_id")
+    try:
+        perimeter = partition_assignments(assignments)
+    except ManifestError as exc:
+        raise AccountAssignmentPerimeterError("baseline assignments are invalid") from exc
+    mapped = [dict(item) for chain in perimeter.mapped_chains.values() for item in chain]
+    for assignment in mapped:
+        assignment["account_id"] = _c3_account_id(
+            assignment["account_id"], "mapped assignment account_id"
+        )
+    mapped.sort(key=lambda item: (str(item["account_id"]), str(item["strategy_id"]), str(item["effective_start"]), str(item["effective_end"])))
+    if not mapped:
+        raise AccountAssignmentPerimeterError("baseline has no mapped assignments")
+    return mapped, providers
+
+
+def _c3_assignment_record(assignment: Mapping[str, object]) -> dict[str, object]:
+    return {key: assignment[key] for key in ("account_id", "strategy_id", "effective_start", "effective_end")}
+
+
+def _c3_assignment_identity(mapped: list[dict[str, object]]) -> dict[str, object]:
+    records = [_c3_assignment_record(item) for item in mapped]
+    encoded = json.dumps(records, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return {"sha256": hashlib.sha256(encoded).hexdigest(), "count": len(records)}
+
+
+def _c3_in_interval(value: str, assignment: Mapping[str, object]) -> bool:
+    end = assignment["effective_end"]
+    return value >= str(assignment["effective_start"]) and (end is None or value <= str(end))
+
+
+def _c3_rule(
+    rules: Mapping[str, object], flow_type: str
+) -> Mapping[str, object]:
+    exact = rules["exact"]
+    assert isinstance(exact, Mapping)
+    rule = exact.get(flow_type)
+    if rule is not None:
+        assert isinstance(rule, Mapping)
+        return rule
+    prefixes = rules["prefix"]
+    assert isinstance(prefixes, list)
+    matches = [
+        item
+        for item in prefixes
+        if isinstance(item, Mapping)
+        and flow_type.startswith(str(item["flow_type_prefix"]))
+    ]
+    if len(matches) != 1:
+        raise AccountAssignmentPerimeterError(
+            "flow classification rule is unresolved or ambiguous"
+        )
+    return matches[0]
+
+
+def _c3_classified_flows(
+    selected_inputs: AccountManifestSelectedInputs,
+    ledger_identity: Mapping[str, object],
+    flows: list[dict[str, object]],
+) -> tuple[dict[str, object], InputSnapshot, dict[str, object], dict[str, object]]:
+    try:
+        policy_payload = selected_inputs.flow_classification_policy.json_object("selected flow policy")
+    except ValueError:
+        raise AccountAssignmentPerimeterError("selected flow policy is invalid") from None
+    policy_bytes = canonical_json_bytes(policy_payload)
+    policy_snapshot = InputSnapshot.from_bytes("generated policy", policy_bytes)
+    try:
+        rules, policy_identity = load_flow_classification_policy(policy_payload, policy_snapshot)
+    except ManifestError as exc:
+        raise AccountAssignmentPerimeterError("selected flow policy is invalid") from exc
+    events: list[dict[str, object]] = []
+    for flow in flows:
+        flow_type = str(flow["flow_type"])
+        rule = _c3_rule(rules, flow_type)
+        amount = flow["amount"]
+        assert isinstance(amount, Mapping)
+        if amount["status"] == "UNAVAILABLE":
+            event = {"event_id": f"classified-flow:{flow['record_id']}", "source_record_id": flow["record_id"], "account_id": flow["account_id"], "event_date": flow["event_date"], "flow_type": flow_type, "amount": amount, "classification_status": "BLOCKED", "disposition": None, "blocker_code": "AMOUNT_UNAVAILABLE"}
+        else:
+            value = Decimal(str(amount["value"]))
+            sign = rule["amount_sign"]
+            if (sign == "POSITIVE" and value <= 0) or (sign == "NEGATIVE" and value >= 0) or (sign == "NONZERO" and value == 0):
+                raise AccountAssignmentPerimeterError("flow amount violates policy sign")
+            event = {"event_id": f"classified-flow:{flow['record_id']}", "source_record_id": flow["record_id"], "account_id": flow["account_id"], "event_date": flow["event_date"], "flow_type": flow_type, "amount": amount, "classification_status": "CLASSIFIED", "disposition": rule["disposition"], "blocker_code": None}
+            if rule["disposition"] == "INTERNAL":
+                counterparts = [
+                    item
+                    for item in flows
+                    if item["record_id"] != flow["record_id"]
+                    and item["event_date"] == flow["event_date"]
+                    and item["account_id"] != flow["account_id"]
+                    and isinstance(item["amount"], Mapping)
+                    and item["amount"].get("status") == "AVAILABLE"
+                    and item["amount"].get("currency") == amount["currency"]
+                    and Decimal(str(item["amount"].get("value"))) == -value
+                    and _c3_rule(rules, str(item["flow_type"])).get("disposition")
+                    == "INTERNAL"
+                    and _c3_rule(rules, str(item["flow_type"])).get(
+                        "counterparty_rule"
+                    )
+                    == "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+                ]
+                if len(counterparts) != 1:
+                    raise AccountAssignmentPerimeterError(
+                        "internal flow must have exactly one reciprocal counterparty"
+                    )
+                event["counterparty_source_record_id"] = counterparts[0]["record_id"]
+        events.append(event)
+    events.sort(key=lambda item: str(item["source_record_id"]))
+    events_by_source_id = {str(item["source_record_id"]): item for item in events}
+    for event in events:
+        if event["classification_status"] != "CLASSIFIED":
+            continue
+        if event["disposition"] == "EXTERNAL":
+            if "counterparty_source_record_id" in event:
+                raise AccountAssignmentPerimeterError(
+                    "external flow cannot have a counterparty"
+                )
+            continue
+        counterparty_id = event.get("counterparty_source_record_id")
+        counterpart = events_by_source_id.get(str(counterparty_id))
+        if (
+            not isinstance(counterpart, Mapping)
+            or counterpart.get("classification_status") != "CLASSIFIED"
+            or counterpart.get("disposition") != "INTERNAL"
+            or counterpart.get("counterparty_source_record_id")
+            != event["source_record_id"]
+        ):
+            raise AccountAssignmentPerimeterError(
+                "internal flow must have exactly one reciprocal counterparty"
+            )
+    payload = {"schema_version": 4, "artifact_id": "authority/classified-flows.json", "as_of_date": selected_inputs.generation_as_of_date.isoformat(), "ledger_identity": ledger_identity, "classification_policy": {"policy_id": policy_identity["policy_id"], "policy_version": policy_identity["policy_version"], "policy_as_of_date": policy_payload["as_of_date"], "policy_sha256": policy_snapshot.sha256}, "events": events}
+    snapshot = InputSnapshot.from_bytes("generated classified flows", canonical_json_bytes(payload))
+    return payload, snapshot, _c3_artifact(snapshot, "authority/classified-flows.json", "classified-flows", selected_inputs.generation_as_of_date.isoformat(), "4"), policy_identity
+
+
+def build_blocked_account_manifest_payloads(selected_inputs: AccountManifestSelectedInputs) -> Mapping[str, bytes]:
+    """Derive the closed, all-blocked nine-subject authority candidate."""
+    if type(selected_inputs) is not AccountManifestSelectedInputs:
+        raise AccountAssignmentPerimeterError("selected_inputs must be an AccountManifestSelectedInputs")
+    _, navs, flows, accounting_currency = _c3_ledger(selected_inputs)
+    mapped, providers = _c3_mapped_assignments(selected_inputs)
+    assignment_identity = _c3_assignment_identity(mapped)
+    selected_payload = json.loads(build_selected_input_identities(selected_inputs))
+    ledger_source = {"generation_id": selected_payload["provider_ledger"]["generation_id"], "artifact": selected_payload["provider_ledger"]["artifact"], "identity_artifact": selected_payload["provider_ledger"]["generation_manifest"]}
+    ledger_pair = {"generation_id": ledger_source["generation_id"], "artifact": ledger_source["artifact"]}
+    baseline_source = {"generation_id": selected_payload["baseline"]["generation_id"], "artifact": selected_payload["baseline"]["artifact"]}
+    classified, classified_snapshot, classified_artifact, policy_identity = _c3_classified_flows(selected_inputs, ledger_pair, flows)
+    nav_facts = [{"record_id": item["record_id"], "account_id": item["account_id"], "as_of_date": item["as_of_date"], "nav": {"status": item["nav"]["status"]}} for item in navs]
+    raw_facts = [{"record_id": item["record_id"], "account_id": item["account_id"], "event_date": item["event_date"]} for item in flows]
+    classified_facts = [{"event_id": item["event_id"], "source_record_id": item["source_record_id"], "account_id": item["account_id"], "event_date": item["event_date"]} for item in classified["events"]]
+    perimeter_bytes = build_account_assignment_perimeter(selected_inputs=selected_inputs, nav_facts=nav_facts, raw_flow_facts=raw_facts, classified_flow_facts=classified_facts)
+    perimeter_snapshot = InputSnapshot.from_bytes("generated perimeter", perimeter_bytes)
+    policy_projection = canonical_json_bytes(selected_inputs.flow_classification_policy.json_object("selected flow policy"))
+    policy_snapshot = InputSnapshot.from_bytes("generated policy projection", policy_projection)
+    policy_artifact = _c3_artifact(
+        policy_snapshot,
+        "authority/flow-classification-policy.json",
+        "flow-classification-policy",
+        str(selected_inputs.flow_classification_policy.json_object("selected flow policy")["as_of_date"]),
+    )
+    coverage_rows: list[dict[str, object]] = []
+    generated_date = selected_inputs.generation_as_of_date.isoformat()
+    for assignment in mapped:
+        end = assignment["effective_end"] or generated_date
+        if str(assignment["effective_start"]) > generated_date or (assignment["effective_end"] is not None and str(assignment["effective_end"]) > generated_date):
+            raise AccountAssignmentPerimeterError("mapped assignment lies outside generation date")
+        coverage_rows.append({"assignment": _c3_assignment_record(assignment), "requested_start": assignment["effective_start"], "requested_end": end, "status": "BLOCKED", "authority_kind": "NONE", "receipt_artifact_id": None, "blocker_code": "NO_ADMISSIBLE_V2_RECEIPT", "blocker_detail": "No admissible retained receipt issuer."})
+    coverage_payload = {"schema_version": 2, "artifact_id": "authority/account-flow-coverage.json", "as_of_date": generated_date, "ledger_identity": ledger_pair, "classified_flows_artifact": classified_artifact, "mapped_assignments_identity": assignment_identity, "receipt_artifacts": [], "rows": coverage_rows}
+    coverage_snapshot = InputSnapshot.from_bytes("generated blocked coverage", canonical_json_bytes(coverage_payload))
+    try:
+        load_flow_coverage(coverage_snapshot, ledger_pair, classified_artifact, {}, mapped)
+    except ManifestError as exc:
+        raise AccountAssignmentPerimeterError("generated blocked coverage is invalid") from exc
+    coverage_artifact = _c3_artifact(coverage_snapshot, "authority/account-flow-coverage.json", "account-flow-coverage", generated_date, "2")
+    calculation_rows = [{"epoch": _c3_assignment_record(assignment), "provider": providers[str(assignment["account_id"])], "nav_observations": [item for item in navs if item["account_id"] == assignment["account_id"] and _c3_in_interval(str(item["as_of_date"]), assignment)], "classified_flows": [item for item in classified["events"] if item["account_id"] == assignment["account_id"] and _c3_in_interval(str(item["event_date"]), assignment)]} for assignment in mapped]
+    calculation_payload = {"schema_version": 1, "artifact_id": "authority/calculation-inputs.json", "as_of_date": generated_date, "accounting_currency": accounting_currency, "ledger_identity": ledger_source, "baseline_identity": baseline_source, "mapped_assignments_identity": assignment_identity, "rows": calculation_rows}
+    calculation_snapshot = InputSnapshot.from_bytes("generated calculation inputs", canonical_json_bytes(json_ready(calculation_payload)))
+    calculation_artifact = _c3_artifact(calculation_snapshot, "authority/calculation-inputs.json", "account-manifest-calculation-inputs", generated_date)
+    admission_rows = [{"assignment": _c3_assignment_record(assignment), "status": "BLOCKED", "authority_kind": "NONE", "funded_nav_record_ids": [], "continuity_to_successor": False, "blocker_code": "FLOW_COMPLETENESS_NOT_PROVEN"} for assignment in mapped]
+    admission_payload = {"schema_version": 1, "artifact_id": "authority/mapped-epoch-admission.json", "as_of_date": generated_date, "ledger_identity": ledger_pair, "coverage_artifact": coverage_artifact, "mapped_assignments_identity": assignment_identity, "rows": admission_rows}
+    admission_snapshot = InputSnapshot.from_bytes("generated admission", canonical_json_bytes(admission_payload))
+    admission_artifact = _c3_artifact(admission_snapshot, "authority/mapped-epoch-admission.json", "mapped-epoch-admission", generated_date)
+    code_payload = {"schema_version": 1, "artifact_id": "authority/code-identities.json", "as_of_date": generated_date, "code_sources": selected_payload["code_sources"]}
+    code_snapshot = InputSnapshot.from_bytes("generated code identities", canonical_json_bytes(code_payload))
+    code_artifact = _c3_artifact(code_snapshot, "authority/code-identities.json", "account-manifest-code-identities", generated_date)
+    output_rows = [{"account_id": assignment["account_id"], "provider": providers[str(assignment["account_id"])], "strategy_id": assignment["strategy_id"], "effective_start": assignment["effective_start"], "effective_end": assignment["effective_end"], "admission_status": "BLOCKED", "admission_policy_reference": "NONE", "admission_authority_kind": "NONE", "funded_nav_record_ids": [], "continuity_to_successor": False, "status": "BLOCKED_ADMISSION", "blocking_reason": "FLOW_COMPLETENESS_NOT_PROVEN"} for assignment in mapped]
+    output_payload = {"schema_version": 8, "artifact": "account-strategy-manifest", "accounting_currency": accounting_currency, "authority_readiness": {"authority_status": "SOURCE_BOUND_CANDIDATE", "independent_authority_verification": "NOT_PERFORMED", "publication_readiness": "NOT_READY"}, "source_identities": {"ledger": ledger_source, "baseline": baseline_source, "classified_flows": {"artifact": classified_artifact, "schema_version": 4, "ledger_identity": ledger_source, "classification_policy": {"policy_id": policy_identity["policy_id"], "policy_version": policy_identity["policy_version"], "policy_as_of_date": selected_inputs.flow_classification_policy.json_object("selected flow policy")["as_of_date"], "policy_sha256": policy_snapshot.sha256}}, "flow_classification_policy": {**policy_identity, "artifact": policy_artifact}, "flow_coverage": {"artifact": coverage_artifact, "ledger_identity": ledger_source, "classified_flows_artifact": classified_artifact}, "admission_policy": {"policy_id": "MAPPED_EPOCH_ADMISSION_V1", "policy_version": "1", "artifact": admission_artifact, "assignment": assignment_identity}, "assignment": assignment_identity, "calculation_code": selected_payload["code_sources"]["epoch_producer"], "selected_inputs": _c3_artifact(InputSnapshot.from_bytes("selected identities", canonical_json_bytes(selected_payload)), "authority/selected-input-identities.json", "selected-input-identities", generated_date), "account_assignment_perimeter": _c3_artifact(perimeter_snapshot, "authority/account-assignment-perimeter.json", "account-assignment-perimeter", generated_date), "calculation_inputs": calculation_artifact, "code_identities": code_artifact}, "epoch_continuity": {"rule_id": "EXPLICIT_FUNDED_EPOCH_CONTINUITY_V1", "status": "POLICY_BOUND_ONLY", "rule": "Blocked candidates do not establish funded continuity."}, "flow_reconciliation": {"status": "ONE_TO_ONE_VERIFIED", "method": "EXACT_RAW_RECORD_TO_CLASSIFIED_EVENT_BINDING"}, "rows": output_rows}
+    payloads = {"authority/selected-input-identities.json": canonical_json_bytes(selected_payload), "authority/account-assignment-perimeter.json": perimeter_bytes, "authority/calculation-inputs.json": calculation_snapshot.contents, "authority/flow-classification-policy.json": policy_projection, "authority/classified-flows.json": classified_snapshot.contents, "authority/account-flow-coverage.json": coverage_snapshot.contents, "authority/mapped-epoch-admission.json": admission_snapshot.contents, "authority/code-identities.json": code_snapshot.contents, "outputs/account-strategy-manifest.json": canonical_json_bytes(output_payload)}
+    return MappingProxyType(dict(payloads))
+
+
+def validate_blocked_account_manifest_payloads(payloads: Mapping[str, bytes], selected_inputs: AccountManifestSelectedInputs) -> None:
+    if not isinstance(payloads, Mapping) or dict(payloads) != dict(build_blocked_account_manifest_payloads(selected_inputs)):
+        raise AccountAssignmentPerimeterError("blocked account manifest payloads differ from expected derivation")
