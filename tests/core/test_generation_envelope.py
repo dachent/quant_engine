@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from datetime import date
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+from types import MappingProxyType
+from types import SimpleNamespace
 
 import pytest
 
@@ -94,6 +97,454 @@ def _envelope_manifest_and_payloads() -> tuple[GenerationManifest, dict[str, byt
     }
 
 
+def _stage_envelope(
+    tmp_path: Path,
+) -> tuple[Path, GenerationManifest, dict[str, bytes]]:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    final = publication.stage_generation_bundle(tmp_path, manifest, payloads)
+    return final, manifest, payloads
+
+
+def test_generation_bundle_verifier_public_round_trip_is_exact_and_immutable(
+    tmp_path: Path,
+) -> None:
+    final, manifest, payloads = _stage_envelope(tmp_path)
+
+    bundle = publication.verify_generation_bundle(tmp_path, manifest.generation_id)
+    read_back = publication.read_generation_bundle(tmp_path, manifest.generation_id)
+
+    assert read_back == bundle
+    assert isinstance(bundle, publication.GenerationBundle)
+    assert isinstance(bundle.payloads, MappingProxyType)
+    assert tuple(bundle.payloads) == (
+        "authority/selected-input-identities.json",
+        "verification/independent-verification.json",
+    )
+    assert dict(bundle.payloads) == payloads
+    assert bundle.manifest == manifest
+    assert bundle.inventory == publication.GenerationInventory.from_json_bytes(
+        (final / "generation-inventory.json").read_bytes()
+    )
+    assert bundle.receipt == publication.GenerationReceipt.from_json_bytes(
+        (final / "generation-receipt.json").read_bytes()
+    )
+    assert bundle.inventory_bytes == (final / "generation-inventory.json").read_bytes()
+    assert bundle.receipt_bytes == (final / "generation-receipt.json").read_bytes()
+    assert bundle.full_directory_inventory_sha256 == generation_inventory_sha256(
+        tmp_path, manifest.generation_id
+    )
+    assert all(
+        bundle.full_directory_inventory_sha256.encode("ascii") not in path.read_bytes()
+        for path in final.rglob("*")
+        if path.is_file()
+    )
+    assert isinstance(bundle.inventory.files, tuple)
+    with pytest.raises(TypeError):
+        bundle.payloads["extra"] = b"nope"  # type: ignore[index]
+    with pytest.raises(FrozenInstanceError):
+        bundle.inventory.generation_id = "0" * 64  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        bundle.inventory.files[0].sha256 = "0" * 64  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        bundle.receipt.manifest.size_bytes = 0  # type: ignore[misc]
+
+    import quant_engine.core as public_core
+
+    assert public_core.GenerationFileIdentity is publication.GenerationFileIdentity
+    assert public_core.GenerationInventory is publication.GenerationInventory
+    assert public_core.GenerationReceipt is publication.GenerationReceipt
+    assert public_core.GenerationBundle is publication.GenerationBundle
+    assert public_core.stage_generation_bundle is publication.stage_generation_bundle
+    assert public_core.verify_generation_bundle is publication.verify_generation_bundle
+    assert public_core.read_generation_bundle is publication.read_generation_bundle
+
+
+@pytest.mark.parametrize(
+    ("mutation", "mutate"),
+    [
+        ("manifest-type", lambda value: replace(value, manifest=object())),
+        ("payload-key", lambda value: replace(value, payloads={"extra.json": b"{}\n"})),
+        (
+            "payload-bytes",
+            lambda value: replace(
+                value,
+                payloads={**value.payloads, next(iter(value.payloads)): b"{}\n"},
+            ),
+        ),
+        ("inventory-type", lambda value: replace(value, inventory=object())),
+        ("inventory-bytes", lambda value: replace(value, inventory_bytes=b"{}\n")),
+        ("receipt-type", lambda value: replace(value, receipt=object())),
+        ("receipt-bytes", lambda value: replace(value, receipt_bytes=b"{}\n")),
+        (
+            "digest",
+            lambda value: replace(value, full_directory_inventory_sha256="0" * 64),
+        ),
+    ],
+)
+def test_generation_bundle_verifier_constructor_rejects_forged_values(
+    tmp_path: Path, mutation: str, mutate: object
+) -> None:
+    _, manifest, _ = _stage_envelope(tmp_path)
+    bundle = publication.verify_generation_bundle(tmp_path, manifest.generation_id)
+
+    with pytest.raises(ManifestValidationError, match="bundle"):
+        mutate(bundle)  # type: ignore[operator]
+
+
+def test_generation_bundle_verifier_validates_id_before_root_access() -> None:
+    class RootTrap:
+        def __fspath__(self) -> str:
+            raise AssertionError(
+                "root must not be accessed for an invalid generation ID"
+            )
+
+    with pytest.raises(ManifestValidationError, match="64 lower-case hex"):
+        publication.verify_generation_bundle(RootTrap(), "INVALID")  # type: ignore[arg-type]
+    with pytest.raises(ManifestValidationError, match="64 lower-case hex"):
+        publication.read_generation_bundle(RootTrap(), "INVALID")  # type: ignore[arg-type]
+    with pytest.raises(ManifestValidationError, match="64 lower-case hex"):
+        publication.verify_generation_bundle(RootTrap(), 7)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: publication.GenerationFileIdentity("generation.json", 7, 1),
+        lambda: publication.GenerationInventory(7, ()),
+        lambda: publication.GenerationReceipt(
+            7,
+            _artifact("verification/independent-verification.json"),
+            publication.GenerationFileIdentity(
+                "generation-inventory.json", "0" * 64, 1
+            ),
+            publication.GenerationFileIdentity("generation.json", "0" * 64, 1),
+            4,
+        ),
+    ],
+)
+def test_generation_bundle_verifier_typed_controls_normalize_invalid_text_types(
+    factory: object,
+) -> None:
+    with pytest.raises(ManifestValidationError):
+        factory()  # type: ignore[operator]
+
+
+def test_generation_bundle_verifier_rejects_bare_legacy_without_changing_legacy_read(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest()
+    publication.stage_generation(tmp_path, manifest)
+
+    assert publication.read_generation(tmp_path, manifest.generation_id) == manifest
+    with pytest.raises(GenerationConflictError):
+        publication.verify_generation_bundle(tmp_path, manifest.generation_id)
+    with pytest.raises(GenerationConflictError):
+        publication.read_generation_bundle(tmp_path, manifest.generation_id)
+    assert publication.read_generation(tmp_path, manifest.generation_id) == manifest
+
+
+def _persisted_files(final: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(final).as_posix(): path.read_bytes()
+        for path in final.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError("C:/private/account/denied"),
+        FileNotFoundError("C:/private/account/stale"),
+        NotADirectoryError("C:/private/account/not-a-directory"),
+        IsADirectoryError("C:/private/account/is-a-directory"),
+    ],
+)
+def test_generation_bundle_verifier_normalizes_filesystem_errors_without_leakage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: OSError
+) -> None:
+    final, manifest, _ = _stage_envelope(tmp_path)
+    before = _persisted_files(final)
+
+    def fail_capture(*_: object, **__: object) -> object:
+        raise error
+
+    monkeypatch.setattr(publication, "_capture_generation_directory", fail_capture)
+
+    with pytest.raises(GenerationConflictError) as raised:
+        publication.verify_generation_bundle(tmp_path, manifest.generation_id)
+
+    assert str(raised.value) == "generation bundle failed immutable verification"
+    assert "private" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__ is True
+    assert _persisted_files(final) == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows held-handle drift contract")
+@pytest.mark.parametrize(
+    "relative_path", ["authority", "authority/selected-input-identities.json"]
+)
+def test_generation_bundle_verifier_rejects_identity_drift_and_closes_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+) -> None:
+    final, manifest, _ = _stage_envelope(tmp_path)
+    target = final.joinpath(*relative_path.split("/"))
+    before = _persisted_files(final)
+    original_lstat = Path.lstat
+    original_open = publication._open_windows_nofollow
+    target_stats = 0
+    descriptors: list[int] = []
+
+    def drifting_lstat(path: Path) -> object:
+        nonlocal target_stats
+        observed = original_lstat(path)
+        if path != target:
+            return observed
+        target_stats += 1
+        if target_stats == 2:
+            values = {
+                name: getattr(observed, name)
+                for name in (
+                    "st_dev",
+                    "st_ino",
+                    "st_mode",
+                    "st_nlink",
+                    "st_size",
+                    "st_mtime_ns",
+                    "st_ctime_ns",
+                    "st_file_attributes",
+                )
+            }
+            values["st_mtime_ns"] += 1
+            return SimpleNamespace(**values)
+        return observed
+
+    def recording_open(path: Path, *, directory: bool) -> int:
+        descriptor = original_open(path, directory=directory)
+        descriptors.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(Path, "lstat", drifting_lstat)
+    monkeypatch.setattr(publication, "_open_windows_nofollow", recording_open)
+
+    with pytest.raises(GenerationConflictError, match="identity changed"):
+        publication.verify_generation_bundle(tmp_path, manifest.generation_id)
+
+    assert target_stats == 2
+    assert descriptors
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    assert _persisted_files(final) == before
+
+
+def test_generation_bundle_verifier_rejects_short_read_and_closes_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    final, manifest, _ = _stage_envelope(tmp_path)
+    before = _persisted_files(final)
+    reads = 0
+    descriptors: list[int] = []
+    if os.name == "nt":
+        original_open = publication._open_windows_nofollow
+
+        def recording_open(path: Path, *, directory: bool) -> int:
+            descriptor = original_open(path, directory=directory)
+            descriptors.append(descriptor)
+            return descriptor
+
+        monkeypatch.setattr(publication, "_open_windows_nofollow", recording_open)
+
+    def short_read(_: int, __: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        return b""
+
+    monkeypatch.setattr(publication.os, "read", short_read)
+
+    with pytest.raises(GenerationConflictError, match="read was incomplete") as raised:
+        publication.verify_generation_bundle(tmp_path, manifest.generation_id)
+
+    assert reads == 1
+    assert raised.value.__cause__ is None
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    assert _persisted_files(final) == before
+
+
+def test_generation_bundle_verifier_uses_only_captured_bytes_after_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, manifest, payloads = _stage_envelope(tmp_path)
+    captured = publication._capture_generation_directory(
+        tmp_path, manifest.generation_id
+    )
+    captures = 0
+
+    def one_snapshot(*_: object, **__: object) -> object:
+        nonlocal captures
+        captures += 1
+        return captured
+
+    def forbidden(*_: object, **__: object) -> object:
+        raise AssertionError(
+            "verified construction must not reopen paths or use legacy digest"
+        )
+
+    monkeypatch.setattr(publication, "_capture_generation_directory", one_snapshot)
+    monkeypatch.setattr(publication, "generation_inventory_sha256", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+
+    bundle = publication.verify_generation_bundle(tmp_path, manifest.generation_id)
+
+    assert captures == 1
+    assert dict(bundle.payloads) == payloads
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-payload",
+        "extra-file",
+        "empty-directory",
+        "payload-byte",
+        "payload-noncanonical",
+        "manifest-noncanonical",
+        "inventory-noncanonical",
+        "inventory-duplicate-key",
+        "inventory-unknown-field",
+        "inventory-reordered",
+        "receipt-noncanonical",
+        "receipt-duplicate-key",
+        "receipt-wrong-path-count",
+        "receipt-wrong-generation",
+        "receipt-wrong-manifest",
+        "receipt-wrong-inventory",
+        "receipt-wrong-report",
+        "case-path",
+        "prefix-path",
+    ],
+)
+def test_generation_bundle_verifier_rejects_mutated_evidence_without_repair(
+    tmp_path: Path, mutation: str
+) -> None:
+    final, manifest, _ = _stage_envelope(tmp_path)
+    if mutation == "missing-payload":
+        target = final / "authority" / "selected-input-identities.json"
+        target.unlink()
+    elif mutation == "extra-file":
+        target = final / "extra.bin"
+        target.write_bytes(b"extra\n")
+    elif mutation == "empty-directory":
+        target = final / "empty-extra-directory"
+        target.mkdir()
+    elif mutation in {"payload-byte", "payload-noncanonical"}:
+        target = final / "authority" / "selected-input-identities.json"
+        if mutation == "payload-byte":
+            target.write_bytes(target.read_bytes()[:-2] + b"X\n")
+        else:
+            target.write_bytes(json.dumps(json.loads(target.read_bytes())).encode())
+    elif mutation == "manifest-noncanonical":
+        target = final / "generation.json"
+        target.write_bytes(json.dumps(json.loads(target.read_bytes())).encode())
+    elif mutation.startswith("inventory-"):
+        target = final / "generation-inventory.json"
+        original = target.read_bytes()
+        if mutation == "inventory-noncanonical":
+            target.write_bytes(json.dumps(json.loads(original)).encode("utf-8"))
+        elif mutation == "inventory-duplicate-key":
+            target.write_bytes(
+                original.replace(b'{"files":', b'{"files":[],"files":', 1)
+            )
+        else:
+            value = json.loads(original)
+            if mutation == "inventory-unknown-field":
+                value["unknown"] = True
+            else:
+                value["files"] = list(reversed(value["files"]))
+            target.write_bytes(publication.canonical_json_bytes(value))
+    elif mutation.startswith("receipt-"):
+        target = final / "generation-receipt.json"
+        original = target.read_bytes()
+        if mutation == "receipt-noncanonical":
+            target.write_bytes(json.dumps(json.loads(original)).encode())
+        elif mutation == "receipt-duplicate-key":
+            target.write_bytes(
+                original.replace(
+                    b'{"envelope_schema_version":',
+                    b'{"envelope_schema_version":1,"envelope_schema_version":',
+                    1,
+                )
+            )
+        else:
+            value = json.loads(original)
+            if mutation == "receipt-wrong-path-count":
+                value["final_path_count"] += 1
+            elif mutation == "receipt-wrong-generation":
+                value["generation_id"] = "0" * 64
+            elif mutation == "receipt-wrong-manifest":
+                value["manifest"]["sha256"] = "0" * 64
+            elif mutation == "receipt-wrong-inventory":
+                value["inventory"]["size_bytes"] += 1
+            else:
+                value["independent_report"]["sha256"] = "0" * 64
+            target.write_bytes(publication.canonical_json_bytes(value))
+    elif mutation == "case-path":
+        source = final / "authority" / "selected-input-identities.json"
+        target = source.with_name("SELECTED-INPUT-IDENTITIES.JSON")
+        source.rename(target)
+    else:
+        target = final / "authority" / "selected-input-identities.json"
+        original = target.read_bytes()
+        target.unlink()
+        target.mkdir()
+        target = target / "nested.json"
+        target.write_bytes(original)
+    before = target.read_bytes() if target.is_file() else None
+
+    with pytest.raises(GenerationConflictError):
+        publication.verify_generation_bundle(tmp_path, manifest.generation_id)
+
+    assert target.exists() is (mutation != "missing-payload")
+    if before is not None:
+        assert target.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "generation.json",
+        "authority/selected-input-identities.json",
+        "verification/independent-verification.json",
+        "generation-inventory.json",
+        "generation-receipt.json",
+    ],
+)
+def test_generation_bundle_verifier_and_stage_idempotence_reject_hard_links(
+    tmp_path: Path, relative_path: str
+) -> None:
+    final, manifest, payloads = _stage_envelope(tmp_path)
+    target = final.joinpath(*relative_path.split("/"))
+    original = target.read_bytes()
+    external = tmp_path / f"external-{target.name}"
+    target.replace(external)
+    try:
+        os.link(external, target)
+    except OSError as exc:
+        pytest.skip(f"hard-link creation unavailable: {exc}")
+
+    with pytest.raises(GenerationConflictError):
+        publication.verify_generation_bundle(tmp_path, manifest.generation_id)
+    with pytest.raises(GenerationConflictError, match="different or irregular"):
+        publication.stage_generation_bundle(tmp_path, manifest, payloads)
+    assert target.read_bytes() == original
+    assert external.read_bytes() == original
+
+
 def test_prepare_generation_bundle_is_deterministic_non_circular_and_pure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -128,12 +579,16 @@ def test_prepare_generation_bundle_is_deterministic_non_circular_and_pure(
         "verification/independent-verification.json",
     )
     assert prepared.final_files["generation.json"] == manifest.to_json_bytes()
-    assert prepared.final_files["authority/selected-input-identities.json"] == payloads[
-        "authority/selected-input-identities.json"
-    ]
+    assert (
+        prepared.final_files["authority/selected-input-identities.json"]
+        == payloads["authority/selected-input-identities.json"]
+    )
     prepared_payload = prepared.final_files["authority/selected-input-identities.json"]
     payloads["authority/selected-input-identities.json"] = b'{"changed":true}\n'
-    assert prepared.final_files["authority/selected-input-identities.json"] == prepared_payload
+    assert (
+        prepared.final_files["authority/selected-input-identities.json"]
+        == prepared_payload
+    )
     with pytest.raises(TypeError):
         prepared.final_files["later.json"] = b"{}\n"  # type: ignore[index]
 
@@ -174,15 +629,17 @@ def test_prepare_generation_bundle_is_deterministic_non_circular_and_pure(
     assert receipt["independent_report"] == report_artifact.to_dict()
     assert receipt["inventory"]["relative_path"] == "generation-inventory.json"
     assert receipt["manifest"]["relative_path"] == "generation.json"
-    assert receipt["inventory"]["sha256"] == hashlib.sha256(
-        prepared.final_files["generation-inventory.json"]
-    ).hexdigest()
+    assert (
+        receipt["inventory"]["sha256"]
+        == hashlib.sha256(prepared.final_files["generation-inventory.json"]).hexdigest()
+    )
     assert receipt["inventory"]["size_bytes"] == len(
         prepared.final_files["generation-inventory.json"]
     )
-    assert receipt["manifest"]["sha256"] == hashlib.sha256(
-        manifest.to_json_bytes()
-    ).hexdigest()
+    assert (
+        receipt["manifest"]["sha256"]
+        == hashlib.sha256(manifest.to_json_bytes()).hexdigest()
+    )
     assert receipt["manifest"]["size_bytes"] == len(manifest.to_json_bytes())
     assert "generation-receipt.json" not in receipt
 
@@ -196,7 +653,10 @@ def test_prepare_generation_bundle_is_deterministic_non_circular_and_pure(
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
-        (lambda payloads: payloads.pop("authority/selected-input-identities.json"), "keys"),
+        (
+            lambda payloads: payloads.pop("authority/selected-input-identities.json"),
+            "keys",
+        ),
         (lambda payloads: payloads.__setitem__("extra.json", b"{}\n"), "keys"),
         (
             lambda payloads: payloads.__setitem__(
@@ -206,31 +666,36 @@ def test_prepare_generation_bundle_is_deterministic_non_circular_and_pure(
         ),
         (
             lambda payloads: payloads.__setitem__(
-                "authority/selected-input-identities.json", b'{"account_count":19,"status":"BLOCKED"}\n'
+                "authority/selected-input-identities.json",
+                b'{"account_count":19,"status":"BLOCKED"}\n',
             ),
             "sha256",
         ),
         (
             lambda payloads: payloads.__setitem__(
-                "authority/selected-input-identities.json", b'{"account_count":180,"status":"BLOCKED"}\n'
+                "authority/selected-input-identities.json",
+                b'{"account_count":180,"status":"BLOCKED"}\n',
             ),
             "size_bytes",
         ),
         (
             lambda payloads: payloads.__setitem__(
-                "authority/selected-input-identities.json", b'{"status":"BLOCKED", "account_count":18}\n'
+                "authority/selected-input-identities.json",
+                b'{"status":"BLOCKED", "account_count":18}\n',
             ),
             "canonical",
         ),
         (
             lambda payloads: payloads.__setitem__(
-                "authority/selected-input-identities.json", b'{"account_count":18,"account_count":18,"status":"BLOCKED"}\n'
+                "authority/selected-input-identities.json",
+                b'{"account_count":18,"account_count":18,"status":"BLOCKED"}\n',
             ),
             "JSON",
         ),
         (
             lambda payloads: payloads.__setitem__(
-                "authority/selected-input-identities.json", b'{"account_count":NaN,"status":"BLOCKED"}\n'
+                "authority/selected-input-identities.json",
+                b'{"account_count":NaN,"status":"BLOCKED"}\n',
             ),
             "JSON",
         ),
@@ -314,13 +779,25 @@ def test_prepare_generation_bundle_rejects_unsafe_raw_artifact_paths(path: str) 
         publication._prepare_generation_bundle(manifest, payloads)
 
 
-def test_prepare_generation_bundle_rejects_case_aliases_and_report_substitutes() -> None:
+def test_prepare_generation_bundle_rejects_case_aliases_and_report_substitutes() -> (
+    None
+):
     manifest, payloads = _envelope_manifest_and_payloads()
-    report = next(artifact for artifact in manifest.artifacts if artifact.artifact_id.startswith("verification/"))
-    case_alias = _artifact("VERIFICATION/independent-verification.json", payloads[report.artifact_id])
+    report = next(
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id.startswith("verification/")
+    )
+    case_alias = _artifact(
+        "VERIFICATION/independent-verification.json", payloads[report.artifact_id]
+    )
     object.__setattr__(manifest, "artifacts", (manifest.artifacts[0], case_alias))
     payloads.pop(report.artifact_id)
-    payloads[case_alias.artifact_id] = payloads["verification/independent-verification.json"] if "verification/independent-verification.json" in payloads else b"{}\n"
+    payloads[case_alias.artifact_id] = (
+        payloads["verification/independent-verification.json"]
+        if "verification/independent-verification.json" in payloads
+        else b"{}\n"
+    )
 
     with pytest.raises(ManifestValidationError, match="independent report"):
         publication._prepare_generation_bundle(manifest, payloads)
@@ -446,9 +923,12 @@ def test_stage_generation_bundle_uses_identity_from_prepared_manifest_bytes(
     final = publication.stage_generation_bundle(tmp_path, manifest, payloads)
 
     assert final.name == expected_generation_id
-    assert GenerationManifest.from_json_bytes(
-        (final / "generation.json").read_bytes()
-    ).generation_id == expected_generation_id
+    assert (
+        GenerationManifest.from_json_bytes(
+            (final / "generation.json").read_bytes()
+        ).generation_id
+        == expected_generation_id
+    )
 
 
 def test_bundle_native_commit_does_not_replace_an_empty_destination(
@@ -525,7 +1005,9 @@ def test_stage_generation_bundle_orders_durable_writes_before_one_commit(
     )
     assert len(file_fsyncs) == len(prepared.final_files)
     assert len([event for event in events if event[0] == "commit"]) == 1
-    commit_index = next(index for index, event in enumerate(events) if event[0] == "commit")
+    commit_index = next(
+        index for index, event in enumerate(events) if event[0] == "commit"
+    )
     assert all(
         index < commit_index
         for index, event in enumerate(events)
@@ -539,9 +1021,7 @@ def test_stage_generation_bundle_orders_durable_writes_before_one_commit(
     assert stage_syncs, "the populated stage root must be synced before commit"
     stage_root = stage_syncs[-1]
     sync_indices = {
-        path: index
-        for index, (action, path) in enumerate(events)
-        if action == "sync"
+        path: index for index, (action, path) in enumerate(events) if action == "sync"
     }
     assert (
         sync_indices[stage_root / "nested" / "deep"]
@@ -566,7 +1046,9 @@ def test_stage_generation_bundle_rejects_readback_drift_and_preserves_stale_orph
     original_write = publication._write_and_sync
 
     def corrupt_one_write(path: Path, content: bytes) -> None:
-        original_write(path, b"corrupt\n" if path.name == "generation.json" else content)
+        original_write(
+            path, b"corrupt\n" if path.name == "generation.json" else content
+        )
 
     monkeypatch.setattr(publication, "_write_and_sync", corrupt_one_write)
 
@@ -908,7 +1390,9 @@ def test_bundle_link_detection_rejects_windows_reparse_attribute() -> None:
     assert publication._stat_is_link_like(ReparseDirectoryStat())  # type: ignore[arg-type]
 
 
-def test_generation_envelope_schemas_are_closed_and_validate_prepared_controls() -> None:
+def test_generation_envelope_schemas_are_closed_and_validate_prepared_controls() -> (
+    None
+):
     try:
         import jsonschema
     except ImportError as exc:
@@ -958,9 +1442,7 @@ def test_generation_envelope_schemas_are_closed_and_validate_prepared_controls()
         ),
         (
             "inventory",
-            lambda value: value["files"][0].__setitem__(
-                "relative_path", "authority/"
-            ),
+            lambda value: value["files"][0].__setitem__("relative_path", "authority/"),
         ),
         (
             "inventory",
@@ -1038,7 +1520,9 @@ def test_generation_envelope_schemas_reject_closed_contract_mutations(
     manifest, payloads = _envelope_manifest_and_payloads()
     prepared = publication._prepare_generation_bundle(manifest, payloads)
     schema_root = Path(__file__).parents[2] / "schemas" / "core"
-    schema = json.loads((schema_root / f"generation-{control_name}.schema.json").read_bytes())
+    schema = json.loads(
+        (schema_root / f"generation-{control_name}.schema.json").read_bytes()
+    )
     value = json.loads(prepared.final_files[f"generation-{control_name}.json"])
     mutate(value)  # type: ignore[operator]
 
@@ -1082,8 +1566,8 @@ def test_generation_identity_and_bytes_are_deterministic() -> None:
         b'{"value":-Infinity}',
         b'{"value":1e999999}',
         b'{"value":1} trailing',
-        b'[]',
-        b'\xff',
+        b"[]",
+        b"\xff",
     ],
 )
 def test_generation_manifest_uses_the_strict_json_boundary(contents: bytes) -> None:

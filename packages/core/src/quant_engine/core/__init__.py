@@ -35,11 +35,19 @@ from quant_engine.core.contracts import (
     hash_file,
 )
 from quant_engine.core.snapshots import InputSnapshot
-from quant_engine.core.strict_json import StrictJSONError, strict_json_loads, strict_json_object
+from quant_engine.core.strict_json import (
+    StrictJSONError,
+    strict_json_loads,
+    strict_json_object,
+)
 from quant_engine.core.filesystem import rename_directory_with_retry
 from quant_engine.core.publication import (
     CurrentPointer,
+    GenerationBundle,
     GenerationConflictError,
+    GenerationFileIdentity,
+    GenerationInventory,
+    GenerationReceipt,
     PointerIntegrityError,
     PublicationRejectedError,
     PublicationState,
@@ -48,7 +56,10 @@ from quant_engine.core.publication import (
     publish_generation,
     read_current,
     read_generation,
+    read_generation_bundle,
     stage_generation,
+    stage_generation_bundle,
+    verify_generation_bundle,
 )
 from quant_engine.core.pipeline import (
     ArtifactNode,
@@ -124,8 +135,12 @@ __all__ = [
     "FreshnessPolicy",
     "FreshnessState",
     "GenerationConflictError",
+    "GenerationBundle",
     "GenerationEvidence",
+    "GenerationFileIdentity",
+    "GenerationInventory",
     "GenerationManifest",
+    "GenerationReceipt",
     "GateEvidence",
     "ManifestValidationError",
     "InputSnapshot",
@@ -183,6 +198,7 @@ __all__ = [
     "read_current",
     "read_current_release",
     "read_generation",
+    "read_generation_bundle",
     "read_release",
     "rename_directory_with_retry",
     "recover_release",
@@ -191,4 +207,6 @@ __all__ = [
     "rollback_release",
     "run_recovery_rehearsal",
     "stage_generation",
+    "stage_generation_bundle",
+    "verify_generation_bundle",
 ]

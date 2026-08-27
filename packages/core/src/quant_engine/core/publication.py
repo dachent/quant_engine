@@ -22,6 +22,7 @@ from quant_engine.core.contracts import (
     CoverageStatus,
     GenerationManifest,
     ManifestValidationError,
+    SourceArtifact,
     VerificationStatus,
     canonical_json_bytes,
 )
@@ -79,6 +80,325 @@ class PointerIntegrityError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class GenerationFileIdentity:
+    relative_path: str
+    sha256: str
+    size_bytes: int
+
+    def __post_init__(self) -> None:
+        _validate_raw_artifact_path(
+            self.relative_path, seen_casefolded=set(), allow_control=True
+        )
+        if (
+            not isinstance(self.sha256, str)
+            or _GENERATION_ID.fullmatch(self.sha256) is None
+        ):
+            raise ManifestValidationError("generation file sha256 is invalid")
+        if (
+            isinstance(self.size_bytes, bool)
+            or not isinstance(self.size_bytes, int)
+            or self.size_bytes < 0
+        ):
+            raise ManifestValidationError(
+                "generation file size_bytes must be a non-negative integer"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "relative_path": self.relative_path,
+            "sha256": self.sha256,
+            "size_bytes": self.size_bytes,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> GenerationFileIdentity:
+        if not isinstance(value, dict) or set(value) != {
+            "relative_path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise ManifestValidationError(
+                "generation file identity keys differ from the contract"
+            )
+        relative_path = value["relative_path"]
+        sha256 = value["sha256"]
+        size_bytes = value["size_bytes"]
+        if not isinstance(relative_path, str) or not isinstance(sha256, str):
+            raise ManifestValidationError(
+                "generation file identity text fields must be strings"
+            )
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int):
+            raise ManifestValidationError(
+                "generation file size_bytes must be an integer"
+            )
+        return cls(relative_path, sha256, size_bytes)
+
+
+@dataclass(frozen=True)
+class GenerationInventory:
+    generation_id: str
+    files: tuple[GenerationFileIdentity, ...]
+    inventory_schema_version: int = _BUNDLE_INVENTORY_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.generation_id, str)
+            or _GENERATION_ID.fullmatch(self.generation_id) is None
+        ):
+            raise ManifestValidationError("inventory generation_id is invalid")
+        if (
+            isinstance(self.inventory_schema_version, bool)
+            or self.inventory_schema_version != _BUNDLE_INVENTORY_SCHEMA_VERSION
+        ):
+            raise ManifestValidationError("inventory schema version is unsupported")
+        if type(self.files) is not tuple or not all(
+            isinstance(item, GenerationFileIdentity) for item in self.files
+        ):
+            raise ManifestValidationError(
+                "inventory files must be a tuple of generation file identities"
+            )
+        paths = tuple(item.relative_path for item in self.files)
+        if len(paths) < 2:
+            raise ManifestValidationError("inventory must contain at least two files")
+        if paths != tuple(sorted(paths)) or len(set(paths)) != len(paths):
+            raise ManifestValidationError(
+                "inventory file identities must be sorted and unique"
+            )
+        if len({path.casefold() for path in paths}) != len(paths):
+            raise ManifestValidationError(
+                "inventory paths must be unique case-insensitively"
+            )
+        if (
+            _GENERATION_MANIFEST_PATH not in paths
+            or _INDEPENDENT_REPORT_PATH not in paths
+        ):
+            raise ManifestValidationError(
+                "inventory lacks a required manifest or independent report"
+            )
+        if _GENERATION_INVENTORY_PATH in paths or _GENERATION_RECEIPT_PATH in paths:
+            raise ManifestValidationError("inventory contains a detached control path")
+        _validate_file_path_prefixes(paths)
+
+    def to_json_bytes(self) -> bytes:
+        return canonical_json_bytes(
+            {
+                "files": [item.to_dict() for item in self.files],
+                "generation_id": self.generation_id,
+                "inventory_schema_version": self.inventory_schema_version,
+            }
+        )
+
+    @classmethod
+    def from_json_bytes(cls, value: bytes) -> GenerationInventory:
+        if type(value) is not bytes:
+            raise ManifestValidationError("inventory source must have exact type bytes")
+        try:
+            decoded = strict_json_loads(value, label="generation inventory")
+        except StrictJSONError as exc:
+            raise ManifestValidationError(
+                "generation inventory is not strict JSON"
+            ) from exc
+        if not isinstance(decoded, dict) or set(decoded) != {
+            "files",
+            "generation_id",
+            "inventory_schema_version",
+        }:
+            raise ManifestValidationError("inventory keys differ from the contract")
+        generation_id = decoded["generation_id"]
+        schema_version = decoded["inventory_schema_version"]
+        files = decoded["files"]
+        if not isinstance(generation_id, str):
+            raise ManifestValidationError("inventory generation_id must be a string")
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise ManifestValidationError("inventory schema version must be an integer")
+        if not isinstance(files, list):
+            raise ManifestValidationError("inventory files must be an array")
+        result = cls(
+            generation_id=generation_id,
+            files=tuple(GenerationFileIdentity.from_dict(item) for item in files),
+            inventory_schema_version=schema_version,
+        )
+        if result.to_json_bytes() != value:
+            raise ManifestValidationError(
+                "generation inventory bytes are not canonical"
+            )
+        return result
+
+
+@dataclass(frozen=True)
+class GenerationReceipt:
+    generation_id: str
+    independent_report: SourceArtifact
+    inventory: GenerationFileIdentity
+    manifest: GenerationFileIdentity
+    final_path_count: int
+    envelope_schema_version: int = _ENVELOPE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.generation_id, str)
+            or _GENERATION_ID.fullmatch(self.generation_id) is None
+        ):
+            raise ManifestValidationError("receipt generation_id is invalid")
+        if not isinstance(self.independent_report, SourceArtifact):
+            raise ManifestValidationError("receipt independent_report is invalid")
+        if self.independent_report.artifact_id != _INDEPENDENT_REPORT_PATH:
+            raise ManifestValidationError("receipt independent_report path is invalid")
+        if not isinstance(self.inventory, GenerationFileIdentity) or (
+            self.inventory.relative_path != _GENERATION_INVENTORY_PATH
+        ):
+            raise ManifestValidationError("receipt inventory identity is invalid")
+        if not isinstance(self.manifest, GenerationFileIdentity) or (
+            self.manifest.relative_path != _GENERATION_MANIFEST_PATH
+        ):
+            raise ManifestValidationError("receipt manifest identity is invalid")
+        if (
+            isinstance(self.final_path_count, bool)
+            or not isinstance(self.final_path_count, int)
+            or self.final_path_count < 4
+        ):
+            raise ManifestValidationError(
+                "receipt final_path_count must be an integer of at least four"
+            )
+        if (
+            isinstance(self.envelope_schema_version, bool)
+            or self.envelope_schema_version != _ENVELOPE_SCHEMA_VERSION
+        ):
+            raise ManifestValidationError("receipt schema version is unsupported")
+
+    def to_json_bytes(self) -> bytes:
+        return canonical_json_bytes(
+            {
+                "envelope_schema_version": self.envelope_schema_version,
+                "final_path_count": self.final_path_count,
+                "generation_id": self.generation_id,
+                "independent_report": self.independent_report.to_dict(),
+                "inventory": self.inventory.to_dict(),
+                "manifest": self.manifest.to_dict(),
+            }
+        )
+
+    @classmethod
+    def from_json_bytes(cls, value: bytes) -> GenerationReceipt:
+        if type(value) is not bytes:
+            raise ManifestValidationError("receipt source must have exact type bytes")
+        try:
+            decoded = strict_json_loads(value, label="generation receipt")
+        except StrictJSONError as exc:
+            raise ManifestValidationError(
+                "generation receipt is not strict JSON"
+            ) from exc
+        if not isinstance(decoded, dict) or set(decoded) != {
+            "envelope_schema_version",
+            "final_path_count",
+            "generation_id",
+            "independent_report",
+            "inventory",
+            "manifest",
+        }:
+            raise ManifestValidationError("receipt keys differ from the contract")
+        generation_id = decoded["generation_id"]
+        final_path_count = decoded["final_path_count"]
+        schema_version = decoded["envelope_schema_version"]
+        if not isinstance(generation_id, str):
+            raise ManifestValidationError("receipt generation_id must be a string")
+        if isinstance(final_path_count, bool) or not isinstance(final_path_count, int):
+            raise ManifestValidationError("receipt final_path_count must be an integer")
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise ManifestValidationError("receipt schema version must be an integer")
+        try:
+            report = SourceArtifact.from_dict(decoded["independent_report"])  # type: ignore[arg-type]
+        except (KeyError, TypeError, ManifestValidationError) as exc:
+            raise ManifestValidationError(
+                "receipt independent_report is invalid"
+            ) from exc
+        result = cls(
+            generation_id=generation_id,
+            independent_report=report,
+            inventory=GenerationFileIdentity.from_dict(decoded["inventory"]),
+            manifest=GenerationFileIdentity.from_dict(decoded["manifest"]),
+            final_path_count=final_path_count,
+            envelope_schema_version=schema_version,
+        )
+        if result.to_json_bytes() != value:
+            raise ManifestValidationError("generation receipt bytes are not canonical")
+        return result
+
+
+@dataclass(frozen=True)
+class GenerationBundle:
+    manifest: GenerationManifest
+    payloads: Mapping[str, bytes]
+    inventory: GenerationInventory
+    inventory_bytes: bytes
+    receipt: GenerationReceipt
+    receipt_bytes: bytes
+    full_directory_inventory_sha256: str
+
+    def __post_init__(self) -> None:
+        if type(self.manifest) is not GenerationManifest:
+            raise ManifestValidationError("bundle manifest type is invalid")
+        if not isinstance(self.payloads, Mapping) or not all(
+            isinstance(path, str) and type(value) is bytes
+            for path, value in self.payloads.items()
+        ):
+            raise ManifestValidationError(
+                "bundle payloads must map paths to exact bytes"
+            )
+        payloads = dict(sorted(self.payloads.items()))
+        if type(self.inventory) is not GenerationInventory:
+            raise ManifestValidationError("bundle inventory type is invalid")
+        if type(self.receipt) is not GenerationReceipt:
+            raise ManifestValidationError("bundle receipt type is invalid")
+        if (
+            type(self.inventory_bytes) is not bytes
+            or type(self.receipt_bytes) is not bytes
+        ):
+            raise ManifestValidationError(
+                "bundle control bytes must have exact type bytes"
+            )
+        if (
+            not isinstance(self.full_directory_inventory_sha256, str)
+            or _GENERATION_ID.fullmatch(self.full_directory_inventory_sha256) is None
+        ):
+            raise ManifestValidationError(
+                "bundle directory inventory sha256 is invalid"
+            )
+        try:
+            prepared = _prepare_generation_bundle(self.manifest, payloads)
+            expected_inventory_bytes = prepared.final_files[_GENERATION_INVENTORY_PATH]
+            expected_receipt_bytes = prepared.final_files[_GENERATION_RECEIPT_PATH]
+            expected_inventory = GenerationInventory.from_json_bytes(
+                expected_inventory_bytes
+            )
+            expected_receipt = GenerationReceipt.from_json_bytes(expected_receipt_bytes)
+            expected_digest = _snapshot_inventory_sha256(prepared.final_files)
+        except (KeyError, ManifestValidationError, TypeError):
+            raise ManifestValidationError(
+                "bundle payload contract is invalid"
+            ) from None
+        if (
+            self.inventory_bytes != expected_inventory_bytes
+            or self.inventory != expected_inventory
+        ):
+            raise ManifestValidationError("bundle inventory binding is invalid")
+        if (
+            self.receipt_bytes != expected_receipt_bytes
+            or self.receipt != expected_receipt
+        ):
+            raise ManifestValidationError("bundle receipt binding is invalid")
+        if self.full_directory_inventory_sha256 != expected_digest:
+            raise ManifestValidationError(
+                "bundle directory inventory digest is invalid"
+            )
+        object.__setattr__(
+            self,
+            "payloads",
+            MappingProxyType(payloads),
+        )
+
+
+@dataclass(frozen=True)
 class _PreparedGenerationBundle:
     """Exact, portable generation bytes validated before any staging operation."""
 
@@ -89,7 +409,9 @@ def _sha256_and_size(value: bytes) -> tuple[str, int]:
     return hashlib.sha256(value).hexdigest(), len(value)
 
 
-def _validate_raw_artifact_path(path: object, *, seen_casefolded: set[str]) -> str:
+def _validate_raw_artifact_path(
+    path: object, *, seen_casefolded: set[str], allow_control: bool = False
+) -> str:
     """Reject unsafe raw strings before any path construction or normalization."""
 
     if not isinstance(path, str) or not path:
@@ -117,9 +439,15 @@ def _validate_raw_artifact_path(path: object, *, seen_casefolded: set[str]) -> s
         raise ManifestValidationError("artifact path has a reserved Windows component")
     folded = path.casefold()
     if folded in seen_casefolded:
-        raise ManifestValidationError("artifact paths must be unique case-insensitively")
-    if folded in {control.casefold() for control in _CONTROL_PATHS}:
-        raise ManifestValidationError("artifact path collides with a generation control path")
+        raise ManifestValidationError(
+            "artifact paths must be unique case-insensitively"
+        )
+    if not allow_control and folded in {
+        control.casefold() for control in _CONTROL_PATHS
+    }:
+        raise ManifestValidationError(
+            "artifact path collides with a generation control path"
+        )
     seen_casefolded.add(folded)
     return path
 
@@ -162,7 +490,9 @@ def _prepare_generation_bundle(
     artifacts = tuple(manifest.artifacts)
     seen_casefolded: set[str] = set()
     artifact_ids = tuple(
-        _validate_raw_artifact_path(artifact.artifact_id, seen_casefolded=seen_casefolded)
+        _validate_raw_artifact_path(
+            artifact.artifact_id, seen_casefolded=seen_casefolded
+        )
         for artifact in artifacts
     )
     _validate_file_path_prefixes((*artifact_ids, *sorted(_CONTROL_PATHS)))
@@ -274,6 +604,334 @@ def _stat_is_link_like(value: os.stat_result) -> bool:
     )
 
 
+def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    identity = (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+    if hasattr(value, "st_file_attributes"):
+        return (*identity, value.st_file_attributes)
+    return identity
+
+
+def _require_directory_stat(value: os.stat_result) -> None:
+    if _stat_is_link_like(value) or not stat.S_ISDIR(value.st_mode):
+        raise GenerationConflictError(
+            "generation bundle boundary is linked or irregular"
+        )
+
+
+def _require_file_stat(value: os.stat_result) -> None:
+    if (
+        _stat_is_link_like(value)
+        or not stat.S_ISREG(value.st_mode)
+        or value.st_nlink != 1
+    ):
+        raise GenerationConflictError("generation bundle file is linked or irregular")
+
+
+def _read_open_file(descriptor: int, expected: os.stat_result) -> bytes:
+    chunks: list[bytes] = []
+    while chunk := os.read(descriptor, 1024 * 1024):
+        chunks.append(chunk)
+    value = b"".join(chunks)
+    if len(value) != expected.st_size:
+        raise GenerationConflictError("generation bundle file read was incomplete")
+    if _stat_identity(os.fstat(descriptor)) != _stat_identity(expected):
+        raise GenerationConflictError("generation bundle file identity changed")
+    return value
+
+
+@dataclass(frozen=True)
+class _CapturedGeneration:
+    files: Mapping[str, bytes]
+    directories: frozenset[str]
+
+
+def _capture_posix_directory(
+    descriptor: int,
+    *,
+    prefix: str,
+    files: dict[str, bytes],
+    directories: set[str],
+) -> None:
+    nofollow = os.O_NOFOLLOW
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow
+    file_flags = os.O_RDONLY | nofollow
+    for name in sorted(os.listdir(descriptor)):
+        relative = f"{prefix}/{name}" if prefix else name
+        observed = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if stat.S_ISDIR(observed.st_mode):
+            _require_directory_stat(observed)
+            child = os.open(name, directory_flags, dir_fd=descriptor)
+            try:
+                if _stat_identity(os.fstat(child)) != _stat_identity(observed):
+                    raise GenerationConflictError(
+                        "generation bundle directory identity changed"
+                    )
+                directories.add(relative)
+                _capture_posix_directory(
+                    child,
+                    prefix=relative,
+                    files=files,
+                    directories=directories,
+                )
+                after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if _stat_identity(os.fstat(child)) != _stat_identity(
+                    observed
+                ) or _stat_identity(after) != _stat_identity(observed):
+                    raise GenerationConflictError(
+                        "generation bundle directory identity changed"
+                    )
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(observed.st_mode):
+            _require_file_stat(observed)
+            child = os.open(name, file_flags, dir_fd=descriptor)
+            try:
+                if _stat_identity(os.fstat(child)) != _stat_identity(observed):
+                    raise GenerationConflictError(
+                        "generation bundle file identity changed"
+                    )
+                files[relative] = _read_open_file(child, observed)
+                after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if _stat_identity(after) != _stat_identity(observed):
+                    raise GenerationConflictError(
+                        "generation bundle file identity changed"
+                    )
+            finally:
+                os.close(child)
+        else:
+            raise GenerationConflictError("generation bundle entry is irregular")
+
+
+def _open_windows_nofollow(path: Path, *, directory: bool) -> int:
+    import msvcrt
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    )
+    create_file.restype = ctypes.c_void_p
+    flags = 0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
+    if directory:
+        flags |= 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
+    handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+        None,
+        3,  # OPEN_EXISTING
+        flags,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except OSError:
+        ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(handle)
+        raise
+
+
+def _capture_windows_directory(
+    path: Path,
+    descriptor: int,
+    *,
+    prefix: str,
+    files: dict[str, bytes],
+    directories: set[str],
+) -> None:
+    with os.scandir(path) as entries:
+        ordered = sorted(entries, key=lambda item: item.name)
+    for entry in ordered:
+        relative = f"{prefix}/{entry.name}" if prefix else entry.name
+        child_path = path / entry.name
+        observed = child_path.lstat()
+        if stat.S_ISDIR(observed.st_mode):
+            _require_directory_stat(observed)
+            child = _open_windows_nofollow(child_path, directory=True)
+            try:
+                if _stat_identity(os.fstat(child)) != _stat_identity(observed):
+                    raise GenerationConflictError(
+                        "generation bundle directory identity changed"
+                    )
+                directories.add(relative)
+                _capture_windows_directory(
+                    child_path,
+                    child,
+                    prefix=relative,
+                    files=files,
+                    directories=directories,
+                )
+                after = child_path.lstat()
+                if _stat_identity(os.fstat(child)) != _stat_identity(
+                    observed
+                ) or _stat_identity(after) != _stat_identity(observed):
+                    raise GenerationConflictError(
+                        "generation bundle directory identity changed"
+                    )
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(observed.st_mode):
+            _require_file_stat(observed)
+            child = _open_windows_nofollow(child_path, directory=False)
+            try:
+                if _stat_identity(os.fstat(child)) != _stat_identity(observed):
+                    raise GenerationConflictError(
+                        "generation bundle file identity changed"
+                    )
+                files[relative] = _read_open_file(child, observed)
+                if _stat_identity(child_path.lstat()) != _stat_identity(observed):
+                    raise GenerationConflictError(
+                        "generation bundle file identity changed"
+                    )
+            finally:
+                os.close(child)
+        else:
+            raise GenerationConflictError("generation bundle entry is irregular")
+    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+        raise GenerationConflictError("generation bundle directory became irregular")
+
+
+def _capture_generation_directory(
+    root: Path, generation_id: str
+) -> _CapturedGeneration:
+    root = Path(root).absolute()
+    files: dict[str, bytes] = {}
+    directories: set[str] = set()
+    if os.name == "nt":
+        root_stat = root.lstat()
+        _require_directory_stat(root_stat)
+        root_descriptor = _open_windows_nofollow(root, directory=True)
+        generations_descriptor: int | None = None
+        final_descriptor: int | None = None
+        try:
+            if _stat_identity(os.fstat(root_descriptor)) != _stat_identity(root_stat):
+                raise GenerationConflictError("publication root identity changed")
+            generations = root / "generations"
+            generations_stat = generations.lstat()
+            _require_directory_stat(generations_stat)
+            generations_descriptor = _open_windows_nofollow(generations, directory=True)
+            if _stat_identity(os.fstat(generations_descriptor)) != _stat_identity(
+                generations_stat
+            ):
+                raise GenerationConflictError("generations root identity changed")
+            final = generations / generation_id
+            final_stat = final.lstat()
+            _require_directory_stat(final_stat)
+            final_descriptor = _open_windows_nofollow(final, directory=True)
+            if _stat_identity(os.fstat(final_descriptor)) != _stat_identity(final_stat):
+                raise GenerationConflictError("generation directory identity changed")
+            _capture_windows_directory(
+                final,
+                final_descriptor,
+                prefix="",
+                files=files,
+                directories=directories,
+            )
+            for path, descriptor, observed, label in (
+                (final, final_descriptor, final_stat, "generation directory"),
+                (
+                    generations,
+                    generations_descriptor,
+                    generations_stat,
+                    "generations root",
+                ),
+                (root, root_descriptor, root_stat, "publication root"),
+            ):
+                if _stat_identity(os.fstat(descriptor)) != _stat_identity(
+                    observed
+                ) or _stat_identity(path.lstat()) != _stat_identity(observed):
+                    raise GenerationConflictError(f"{label} identity changed")
+        finally:
+            if final_descriptor is not None:
+                os.close(final_descriptor)
+            if generations_descriptor is not None:
+                os.close(generations_descriptor)
+            os.close(root_descriptor)
+    else:
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_stat = root.lstat()
+        _require_directory_stat(root_stat)
+        root_descriptor = os.open(root, directory_flags)
+        generations_descriptor = None
+        final_descriptor = None
+        try:
+            if _stat_identity(os.fstat(root_descriptor)) != _stat_identity(root_stat):
+                raise GenerationConflictError("publication root identity changed")
+            generations_stat = os.stat(
+                "generations", dir_fd=root_descriptor, follow_symlinks=False
+            )
+            _require_directory_stat(generations_stat)
+            generations_descriptor = os.open(
+                "generations", directory_flags, dir_fd=root_descriptor
+            )
+            if _stat_identity(os.fstat(generations_descriptor)) != _stat_identity(
+                generations_stat
+            ):
+                raise GenerationConflictError("generations root identity changed")
+            final_stat = os.stat(
+                generation_id,
+                dir_fd=generations_descriptor,
+                follow_symlinks=False,
+            )
+            _require_directory_stat(final_stat)
+            final_descriptor = os.open(
+                generation_id, directory_flags, dir_fd=generations_descriptor
+            )
+            if _stat_identity(os.fstat(final_descriptor)) != _stat_identity(final_stat):
+                raise GenerationConflictError("generation directory identity changed")
+            _capture_posix_directory(
+                final_descriptor,
+                prefix="",
+                files=files,
+                directories=directories,
+            )
+            final_after = os.stat(
+                generation_id,
+                dir_fd=generations_descriptor,
+                follow_symlinks=False,
+            )
+            generations_after = os.stat(
+                "generations", dir_fd=root_descriptor, follow_symlinks=False
+            )
+            if _stat_identity(os.fstat(final_descriptor)) != _stat_identity(
+                final_stat
+            ) or _stat_identity(final_after) != _stat_identity(final_stat):
+                raise GenerationConflictError("generation directory identity changed")
+            if _stat_identity(os.fstat(generations_descriptor)) != _stat_identity(
+                generations_stat
+            ) or _stat_identity(generations_after) != _stat_identity(generations_stat):
+                raise GenerationConflictError("generations root identity changed")
+            if _stat_identity(os.fstat(root_descriptor)) != _stat_identity(
+                root_stat
+            ) or _stat_identity(root.lstat()) != _stat_identity(root_stat):
+                raise GenerationConflictError("publication root identity changed")
+        finally:
+            if final_descriptor is not None:
+                os.close(final_descriptor)
+            if generations_descriptor is not None:
+                os.close(generations_descriptor)
+            os.close(root_descriptor)
+    return _CapturedGeneration(
+        files=MappingProxyType(dict(sorted(files.items()))),
+        directories=frozenset(directories),
+    )
+
+
 def _expected_bundle_directories(paths: Mapping[str, bytes]) -> set[str]:
     directories: set[str] = set()
     for path in paths:
@@ -304,7 +962,7 @@ def _directory_matches_exact_files(
             with os.scandir(current) as entries:
                 for entry in entries:
                     relative = f"{prefix}/{entry.name}" if prefix else entry.name
-                    entry_stat = entry.stat(follow_symlinks=False)
+                    entry_stat = Path(entry.path).lstat()
                     if _stat_is_link_like(entry_stat):
                         return False
                     if stat.S_ISDIR(entry_stat.st_mode):
@@ -314,14 +972,21 @@ def _directory_matches_exact_files(
                         pending.append((Path(entry.path), relative))
                     elif stat.S_ISREG(entry_stat.st_mode):
                         expected = expected_files.get(relative)
-                        if expected is None or Path(entry.path).read_bytes() != expected:
+                        if (
+                            entry_stat.st_nlink != 1
+                            or expected is None
+                            or Path(entry.path).read_bytes() != expected
+                        ):
                             return False
                         actual_files.add(relative)
                     else:
                         return False
     except OSError:
         return False
-    return actual_files == set(expected_files) and actual_directories == expected_directories
+    return (
+        actual_files == set(expected_files)
+        and actual_directories == expected_directories
+    )
 
 
 def _tree_contains_only_regular_entries(directory: Path) -> bool:
@@ -472,9 +1137,7 @@ def _sync_prepared_bundle_directories(
     temporary: Path, expected_files: Mapping[str, bytes]
 ) -> None:
     directories = _expected_bundle_directories(expected_files)
-    for relative in sorted(
-        directories, key=lambda value: (-value.count("/"), value)
-    ):
+    for relative in sorted(directories, key=lambda value: (-value.count("/"), value)):
         _sync_bundle_directory(temporary.joinpath(*relative.split("/")))
     _sync_bundle_directory(temporary)
 
@@ -492,9 +1155,7 @@ def stage_generation_bundle(
         prepared.final_files[_GENERATION_MANIFEST_PATH]
     ).generation_id
     root = Path(root).absolute()
-    root_created = _ensure_durable_bundle_directory_tree(
-        root, label="publication root"
-    )
+    root_created = _ensure_durable_bundle_directory_tree(root, label="publication root")
     generations = root / "generations"
     generations_created = _ensure_bundle_directory(
         generations, label="generations root", parents=False
@@ -558,6 +1219,90 @@ def stage_generation_bundle(
     finally:
         if cleanup_permitted and _lstat_or_none(temporary) is not None:
             _remove_owned_stage(temporary, generations)
+
+
+def _snapshot_inventory_sha256(files: Mapping[str, bytes]) -> str:
+    identities = [
+        GenerationFileIdentity(
+            relative_path=relative_path,
+            sha256=hashlib.sha256(value).hexdigest(),
+            size_bytes=len(value),
+        ).to_dict()
+        for relative_path, value in sorted(files.items())
+    ]
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "files": identities,
+                "inventory_schema_version": _INVENTORY_SCHEMA_VERSION,
+            }
+        )
+    ).hexdigest()
+
+
+def verify_generation_bundle(root: Path, generation_id: str) -> GenerationBundle:
+    """Return one exact immutable snapshot after full bundle verification."""
+
+    if (
+        not isinstance(generation_id, str)
+        or _GENERATION_ID.fullmatch(generation_id) is None
+    ):
+        raise ManifestValidationError("generation_id must be 64 lower-case hex")
+    try:
+        captured = _capture_generation_directory(root, generation_id)
+        manifest_bytes = captured.files[_GENERATION_MANIFEST_PATH]
+        inventory_bytes = captured.files[_GENERATION_INVENTORY_PATH]
+        receipt_bytes = captured.files[_GENERATION_RECEIPT_PATH]
+        manifest = GenerationManifest.from_json_bytes(manifest_bytes)
+        if manifest.generation_id != generation_id:
+            raise GenerationConflictError(
+                "generation manifest identity differs from the requested generation"
+            )
+        payload_paths = tuple(artifact.artifact_id for artifact in manifest.artifacts)
+        payloads = {path: captured.files[path] for path in payload_paths}
+        prepared = _prepare_generation_bundle(manifest, payloads)
+        expected_directories = _expected_bundle_directories(prepared.final_files)
+        if (
+            dict(captured.files) != dict(prepared.final_files)
+            or set(captured.directories) != expected_directories
+        ):
+            raise GenerationConflictError(
+                "generation bundle path set or bytes differ from the contract"
+            )
+
+        inventory = GenerationInventory.from_json_bytes(inventory_bytes)
+        receipt = GenerationReceipt.from_json_bytes(receipt_bytes)
+        expected_inventory = GenerationInventory.from_json_bytes(
+            prepared.final_files[_GENERATION_INVENTORY_PATH]
+        )
+        expected_receipt = GenerationReceipt.from_json_bytes(
+            prepared.final_files[_GENERATION_RECEIPT_PATH]
+        )
+        if inventory != expected_inventory or receipt != expected_receipt:
+            raise GenerationConflictError(
+                "generation bundle detached controls differ from the contract"
+            )
+        return GenerationBundle(
+            manifest=manifest,
+            payloads=payloads,
+            inventory=inventory,
+            inventory_bytes=inventory_bytes,
+            receipt=receipt,
+            receipt_bytes=receipt_bytes,
+            full_directory_inventory_sha256=_snapshot_inventory_sha256(captured.files),
+        )
+    except GenerationConflictError:
+        raise
+    except (KeyError, ManifestValidationError, OSError, StrictJSONError, TypeError):
+        raise GenerationConflictError(
+            "generation bundle failed immutable verification"
+        ) from None
+
+
+def read_generation_bundle(root: Path, generation_id: str) -> GenerationBundle:
+    """Read a generation only through the complete immutable verifier."""
+
+    return verify_generation_bundle(root, generation_id)
 
 
 class PublicationState(StrEnum):
