@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Callable
 
 
 _MANIFEST_SCHEMA = "quant-engine.web-contract-extraction.v1"
@@ -75,6 +75,7 @@ def _write_flushed(path: Path, value: bytes) -> None:
         handle.write(value)
         handle.flush()
         os.fsync(handle.fileno())
+    _sync_directory(path.parent)
 
 
 def _sync_directory(path: Path) -> None:
@@ -89,12 +90,22 @@ def _sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _create_destination(destination: Path) -> None:
+def _missing_parent_chain(
+    destination: Path, exists: Callable[[Path], bool] = Path.exists
+) -> list[Path]:
     created: list[Path] = []
     cursor = destination
-    while not cursor.exists():
+    while not exists(cursor):
         created.append(cursor)
-        cursor = cursor.parent
+        parent = cursor.parent
+        if parent == cursor:
+            raise FileNotFoundError(f"no existing parent for {destination}")
+        cursor = parent
+    return created
+
+
+def _create_destination(destination: Path) -> None:
+    created = _missing_parent_chain(destination)
     destination.mkdir(parents=True, exist_ok=False)
     for path in reversed(created):
         _sync_directory(path.parent)
@@ -150,8 +161,8 @@ def _manifest(
     }
 
 
-def _reject_non_finite_constant(value: str) -> NoReturn:
-    raise ValueError(f"non-finite JSON constant: {value}")
+def _is_ascii_digit(value: str) -> bool:
+    return "0" <= value <= "9"
 
 
 def _parse_string(text: str, index: int) -> tuple[str, int]:
@@ -226,14 +237,14 @@ def _parse_number(text: str, index: int) -> tuple[_RawJsonNumber, int]:
         index += 1
     elif "1" <= text[index] <= "9":
         index += 1
-        while index < len(text) and text[index].isdigit():
+        while index < len(text) and _is_ascii_digit(text[index]):
             index += 1
     else:
         raise _JsonSyntaxError("invalid number")
     if index < len(text) and text[index] == ".":
         index += 1
         fraction_start = index
-        while index < len(text) and text[index].isdigit():
+        while index < len(text) and _is_ascii_digit(text[index]):
             index += 1
         if index == fraction_start:
             raise _JsonSyntaxError("invalid fraction")
@@ -242,7 +253,7 @@ def _parse_number(text: str, index: int) -> tuple[_RawJsonNumber, int]:
         if index < len(text) and text[index] in "+-":
             index += 1
         exponent_start = index
-        while index < len(text) and text[index].isdigit():
+        while index < len(text) and _is_ascii_digit(text[index]):
             index += 1
         if index == exponent_start:
             raise _JsonSyntaxError("invalid exponent")
@@ -313,7 +324,7 @@ def _parse_json(text: str) -> Any:
         if character == "n" and text[position : position + 4] == "null":
             attach(None)
             return position + 4
-        if character == "-" or character.isdigit():
+        if character == "-" or _is_ascii_digit(character):
             parsed_number, next_index = _parse_number(text, position)
             attach(parsed_number)
             return next_index
@@ -542,7 +553,7 @@ def _materialize_entry(
     diagnostics: list[dict[str, str | int]],
 ) -> None:
     entry_dir = destination / "entries" / f"{source_index:06d}"
-    entry_dir.mkdir(parents=True)
+    _create_destination(entry_dir)
     artifacts.append(
         _artifact_record(
             destination=destination,
