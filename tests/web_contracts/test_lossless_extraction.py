@@ -42,6 +42,10 @@ def _raw_har_number(number: str) -> bytes:
     ).encode()
 
 
+def _deep_entry(depth: int) -> bytes:
+    return (('{"nested":' * depth) + "null" + ("}" * depth)).encode()
+
+
 def _synthetic_value() -> str:
     return _join("SYNTHETIC_", "SECRET")
 
@@ -525,7 +529,7 @@ def test_invalid_input_keeps_exact_bytes_and_emits_a_value_safe_receipt(
     assert manifest["completeness"] == "INCOMPLETE"
     assert manifest["artifacts"] == []
     assert manifest["diagnostics"] == [{"code": status.value}]
-    assert manifest["source_entry_count"] == 0
+    assert manifest["source_entry_count"] is None
     assert manifest["materialized_entry_count"] == 0
     assert _synthetic_value().encode() not in manifest_bytes
 
@@ -541,19 +545,30 @@ def test_utf8_bom_har_is_parsed_as_complete(
     assert (receipt.output_dir / "source.har").read_bytes() == source
 
 
-def test_source_and_initial_manifest_exist_before_parsing_interruption(
+def test_source_and_initial_manifest_are_durable_before_parser_invocation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = _har_bytes([])
     output_dir = tmp_path / "interrupted"
 
-    def interrupt_after_preservation(value: bytes) -> tuple[object, int, list[str]]:
+    sync_calls: list[Path] = []
+
+    def record_directory_sync(path: Path) -> None:
+        sync_calls.append(path)
+
+    def interrupt_after_preservation(value: bytes) -> object:
         assert value == source
         assert (output_dir / "source.har").read_bytes() == source
         assert _manifest(output_dir)["parse_status"] == "SOURCE_PRESERVED"
+        assert sync_calls.count(output_dir) >= 2
         raise RuntimeError("synthetic parser interruption")
 
-    monkeypatch.setattr(evidence, "_parse_status", interrupt_after_preservation)
+    monkeypatch.setattr(
+        evidence, "_sync_directory", record_directory_sync, raising=False
+    )
+    monkeypatch.setattr(
+        evidence, "_parse_har", interrupt_after_preservation, raising=False
+    )
 
     with pytest.raises(RuntimeError, match="synthetic parser interruption"):
         extract_har(source, output_dir)
@@ -562,7 +577,7 @@ def test_source_and_initial_manifest_exist_before_parsing_interruption(
     assert _manifest(output_dir)["parse_status"] == "SOURCE_PRESERVED"
 
 
-def test_materialization_interruption_keeps_source_initial_manifest_and_prior_artifacts(
+def test_materialization_interruption_keeps_parsed_manifest_and_prior_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = _har_bytes(
@@ -585,7 +600,10 @@ def test_materialization_interruption_keeps_source_initial_manifest_and_prior_ar
         extract_har(source, output_dir)
 
     assert (output_dir / "source.har").read_bytes() == source
-    assert _manifest(output_dir)["parse_status"] == "SOURCE_PRESERVED"
+    assert _manifest(output_dir)["parse_status"] == "PARSED"
+    assert _manifest(output_dir)["source_entry_count"] == 2
+    assert _manifest(output_dir)["materialized_entry_count"] == 0
+    assert _manifest(output_dir)["completeness"] == "DERIVATIVES_NOT_FINALIZED"
     assert json.loads(
         (output_dir / "entries" / "000000" / "entry.json").read_text(encoding="utf-8")
     ) == {"request": {"postData": {"text": "first"}}, "response": {}}
@@ -626,3 +644,34 @@ def test_existing_output_directory_is_rejected_before_evidence_is_written(
         extract_har(_har_bytes([]), output_dir)
 
     assert list(output_dir.iterdir()) == []
+
+
+def test_deep_valid_entry_is_parsed_and_serialized_without_recursion_limit(
+    tmp_path: Path,
+) -> None:
+    entry = _deep_entry(1_600)
+
+    receipt = extract_har(_raw_har_entries(entry.decode()), tmp_path / "deep")
+
+    assert receipt.parse_status is HarParseStatus.COMPLETE
+    assert receipt.materialized_entry_count == 1
+    assert (
+        receipt.output_dir / "entries" / "000000" / "entry.json"
+    ).read_bytes() == entry
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        _raw_har_entries('{"missing":}'),
+        _raw_har_entries('{"trailing":1,}'),
+        b'{"log":{"entries":["unterminated]}}',
+    ],
+)
+def test_malformed_json_grammar_is_invalid_without_a_recursion_error(
+    tmp_path: Path, source: bytes
+) -> None:
+    receipt = extract_har(source, tmp_path / hashlib.sha256(source).hexdigest())
+
+    assert receipt.parse_status is HarParseStatus.INVALID_JSON
+    assert _manifest(receipt.output_dir)["source_entry_count"] is None
