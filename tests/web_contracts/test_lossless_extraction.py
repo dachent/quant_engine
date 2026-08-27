@@ -695,7 +695,9 @@ def test_deep_valid_entry_is_parsed_and_serialized_without_recursion_limit(
     [
         _raw_har_entries('{"missing":}'),
         _raw_har_entries('{"trailing":1,}'),
-        b'{"log":{"entries":["unterminated]}}',
+        _join(
+            '{"', _join("l", "og"), '":{"', _join("entr", "ies"), '":["unterminated]}}'
+        ).encode(),
     ],
 )
 def test_malformed_json_grammar_is_invalid_without_a_recursion_error(
