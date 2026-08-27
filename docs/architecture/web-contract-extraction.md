@@ -37,9 +37,9 @@ This version intentionally removes the earlier redacted API contract: `Extracted
 
 Only files justified by the source fields are emitted. A present empty body produces a zero-byte text file. Numeric entry directories prevent captured values from becoming paths.
 
-`source.har` is byte-for-byte identical to the supplied artifact. It is created and flushed before decoding or parsing begins. `entry.json` contains the entire parsed entry without field selection, sorting, redaction, truncation, or status filtering. Header and cookie arrays therefore retain their source order and duplicate records. The source file remains the authority for whitespace, encoding, duplicate JSON object keys, malformed JSON, and all other byte-level details that parsing cannot represent.
+`source.har` is byte-for-byte identical to the supplied artifact. It is created and flushed before decoding or parsing begins. `entry.json` contains the entire parsed entry without field selection, sorting, redaction, truncation, or status filtering. It uses ASCII JSON escapes so every parsed value, including a lone Unicode surrogate, is representable in valid UTF-8. Header and cookie arrays therefore retain their source order and duplicate records. The source file remains the authority for whitespace, encoding, duplicate JSON object keys, malformed JSON, and all other byte-level details that parsing cannot represent.
 
-For any request `postData.text` or response `content.text`, the extractor writes `<side>.body.har-text` as the exact Python string encoded as UTF-8. When `encoding` is `base64`, the same string is also written as `<side>.body.base64`; successful strict base64 decoding creates `<side>.body.decoded`. Invalid base64 is a per-body disposition, not an extraction failure. The extractor never follows captured external-file locators.
+For any request `postData.text` or response `content.text`, the extractor writes `<side>.body.har-text` as the exact Python string encoded as UTF-8. A body text containing a Unicode surrogate is reversibly encoded with UTF-8 `surrogatepass`, recorded as representation `HAR_TEXT_SURROGATEPASS`, and produces a value-free indexed, side-specific diagnostic and `PARTIAL` receipt. When `encoding` is `base64`, the same string is also written as `<side>.body.base64`; successful strict base64 decoding creates `<side>.body.decoded`. Invalid base64 and malformed present body values are per-body dispositions, not extraction failures. The extractor never follows captured external-file locators.
 
 ## Manifest
 
@@ -59,9 +59,9 @@ Final parse statuses are:
 - `INVALID_UTF8`: source is not strict UTF-8;
 - `INVALID_JSON`: source is UTF-8 but not valid JSON;
 - `INVALID_HAR`: JSON lacks the required object/array shape;
-- `PARTIAL`: the entries array was available and every value was preserved, but one or more entries was not a HAR object or a body representation was invalid.
+- `PARTIAL`: the entries array was available and every value was preserved, but one or more entries was not a HAR object, a present body structure was malformed, a body representation was invalid, or a body text required surrogate-pass encoding.
 
-Diagnostics use codes and source indexes only. They never copy captured values into logs, exceptions, receipts, or the manifest.
+Diagnostics use codes, source indexes, and the fixed body side (`request` or `response`) when applicable. They never copy captured values into logs, exceptions, receipts, or the manifest.
 
 ## Failure and recovery
 

@@ -164,27 +164,37 @@ def _materialize_body(
     destination: Path,
     entry_dir: Path,
     side: str,
+    body_present: bool,
     body: object,
     artifacts: list[dict[str, str | int]],
-) -> bool:
+) -> list[str]:
+    if not body_present:
+        return []
     if not isinstance(body, dict):
-        return False
-    text = body.get("text")
+        return ["BODY_NOT_OBJECT"]
+    if "text" not in body:
+        if body.get("encoding") == "base64":
+            return ["BASE64_BODY_TEXT_MISSING"]
+        return []
+    text = body["text"]
     if not isinstance(text, str):
-        return False
+        return ["BODY_TEXT_NOT_STRING"]
 
-    text_bytes = text.encode("utf-8")
+    has_surrogate = any(0xD800 <= ord(character) <= 0xDFFF for character in text)
+    text_bytes = text.encode(
+        "utf-8", errors="surrogatepass" if has_surrogate else "strict"
+    )
     artifacts.append(
         _artifact_record(
             destination=destination,
             path=entry_dir / f"{side}.body.har-text",
             value=text_bytes,
-            representation="HAR_TEXT",
+            representation=("HAR_TEXT_SURROGATEPASS" if has_surrogate else "HAR_TEXT"),
             decode="NOT_APPLICABLE",
         )
     )
     if body.get("encoding") != "base64":
-        return False
+        return ["BODY_TEXT_SURROGATE"] if has_surrogate else []
 
     base64_path = entry_dir / f"{side}.body.base64"
     try:
@@ -199,7 +209,10 @@ def _materialize_body(
                 decode="INVALID",
             )
         )
-        return True
+        diagnostics = ["INVALID_BASE64_BODY"]
+        if has_surrogate:
+            diagnostics.insert(0, "BODY_TEXT_SURROGATE")
+        return diagnostics
 
     artifacts.append(
         _artifact_record(
@@ -219,7 +232,7 @@ def _materialize_body(
             decode="DECODED",
         )
     )
-    return False
+    return ["BODY_TEXT_SURROGATE"] if has_surrogate else []
 
 
 def _materialize_entry(
@@ -236,9 +249,9 @@ def _materialize_entry(
         _artifact_record(
             destination=destination,
             path=entry_dir / "entry.json",
-            value=json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode(
-                "utf-8"
-            ),
+            value=json.dumps(
+                entry, ensure_ascii=True, allow_nan=False, separators=(",", ":")
+            ).encode("utf-8"),
             representation="ENTRY_JSON",
             decode="NOT_APPLICABLE",
         )
@@ -248,27 +261,31 @@ def _materialize_entry(
         return
 
     request = entry.get("request")
-    if isinstance(request, dict) and _materialize_body(
-        destination=destination,
-        entry_dir=entry_dir,
-        side="request",
-        body=request.get("postData"),
-        artifacts=artifacts,
-    ):
-        diagnostics.append(
-            {"code": "INVALID_BASE64_BODY", "source_index": source_index}
-        )
+    if isinstance(request, dict):
+        for code in _materialize_body(
+            destination=destination,
+            entry_dir=entry_dir,
+            side="request",
+            body_present="postData" in request,
+            body=request.get("postData"),
+            artifacts=artifacts,
+        ):
+            diagnostics.append(
+                {"code": code, "source_index": source_index, "side": "request"}
+            )
     response = entry.get("response")
-    if isinstance(response, dict) and _materialize_body(
-        destination=destination,
-        entry_dir=entry_dir,
-        side="response",
-        body=response.get("content"),
-        artifacts=artifacts,
-    ):
-        diagnostics.append(
-            {"code": "INVALID_BASE64_BODY", "source_index": source_index}
-        )
+    if isinstance(response, dict):
+        for code in _materialize_body(
+            destination=destination,
+            entry_dir=entry_dir,
+            side="response",
+            body_present="content" in response,
+            body=response.get("content"),
+            artifacts=artifacts,
+        ):
+            diagnostics.append(
+                {"code": code, "source_index": source_index, "side": "response"}
+            )
 
 
 def extract_har(
@@ -277,8 +294,8 @@ def extract_har(
 ) -> HarExtractionReceipt:
     """Preserve source bytes and return a safe receipt without provider semantics.
 
-    Slice 1 establishes source preservation and parse receipts only; it does not
-    yet materialize parsed entries or their body derivatives.
+    Parsed entries and body text are materialized in a create-only local output
+    directory; the receipt and manifest retain no captured values.
     """
 
     source_bytes, source_filename = _source_bytes(source)
