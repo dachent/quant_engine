@@ -324,6 +324,35 @@ def test_deterministic_outputs_preserve_huge_integers_without_value_leakage(
     assert left_files == right_files
 
 
+def test_entry_numeric_lexemes_bypass_python_number_limits_without_mutation(
+    tmp_path: Path,
+) -> None:
+    huge_integer_digits = "7" * 5001
+    high_precision_decimal = "0.123456789012345678901234567890123456789e-123456"
+    source = (
+        '{"log":{"entries":[{"ordinary":42,"large_exponent":1e1000000,'
+        + '"huge_integer":'
+        + huge_integer_digits
+        + ',"high_precision_decimal":'
+        + high_precision_decimal
+        + "}]}}"
+    ).encode("utf-8")
+
+    receipt = extract_har(source, tmp_path / "numeric-lexemes")
+
+    assert receipt.parse_status is HarParseStatus.COMPLETE
+    assert receipt.materialized_entry_count == 1
+    entry_bytes = (
+        receipt.output_dir / "entries" / "000000" / "entry.json"
+    ).read_bytes()
+    assert b'"ordinary":42' in entry_bytes
+    assert b'"large_exponent":1e1000000' in entry_bytes
+    assert b'"huge_integer":' + huge_integer_digits.encode("ascii") in entry_bytes
+    assert b'"high_precision_decimal":' + high_precision_decimal.encode(
+        "ascii"
+    ) in entry_bytes
+
+
 def test_non_object_entries_are_preserved_and_mark_the_receipt_partial(
     tmp_path: Path,
 ) -> None:
