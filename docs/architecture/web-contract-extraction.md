@@ -14,7 +14,7 @@ from quant_engine.web_contracts import HarExtractionReceipt, HarParseStatus, ext
 receipt = extract_har(source, output_dir)
 ```
 
-`source` is either a filesystem path or a bytes-like value. `output_dir` must not already exist. The function returns an immutable `HarExtractionReceipt` containing only the output paths, source SHA-256 and size, final parse status, and number of materialized entries. Captured URLs, keys, headers, cookies, bodies, and exception values do not appear in the receipt.
+`source` is a filesystem path, `bytes`, `bytearray`, or `memoryview`. `output_dir` must not already exist. The function returns an immutable `HarExtractionReceipt` containing only the output paths, source SHA-256 and size, final parse status, and number of materialized entries. Captured URLs, keys, headers, cookies, bodies, and exception values do not appear in the receipt.
 
 This version intentionally removes the earlier redacted API contract: `ExtractedResponse`, `SessionEnvelope`, `REDACTION`, and `canonical_extraction` are no longer public. The package-local `extract_quantbase_har` wrapper is also removed. Provider contract declarations remain available and unchanged for separately governed provider work.
 
