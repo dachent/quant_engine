@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import importlib
+
+import pytest
+
 import quant_engine.web_contracts as web_contracts
 from quant_engine.web_contracts import evidence
 
@@ -31,7 +35,11 @@ def test_public_api_is_the_generalized_lossless_extractor_surface() -> None:
         "ExtractedResponse",
         "SessionEnvelope",
         "REDACTION",
+        "SOURCE_ANCHORS",
         "canonical_extraction",
         "extract_quantbase_har",
     ):
         assert not hasattr(web_contracts, removed)
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("quant_engine.web_contracts.extract")
