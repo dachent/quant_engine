@@ -1,175 +1,53 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-import json
-
 import pytest
 
-from quant_engine.web_contracts import (
-    QUANTBASE_CONTRACT,
-    REDACTION,
-    SessionEnvelope,
-    WebContractError,
-    canonical_extraction,
-    extract_quantbase_har,
-)
-
-
-NOW = datetime(2026, 7, 29, 19, tzinfo=timezone.utc)
-
-
-def _entry(
-    url: str,
-    *,
-    method: str = "GET",
-    status: int = 200,
-    body: object | None = None,
-    auth: bool = True,
-) -> dict[str, object]:
-    headers: list[dict[str, str]] = []
-    if auth:
-        headers.append({"name": "j" + "wt", "value": "SYNTHETIC_SESSION_VALUE_123456"})
-    return {
-        "request": {"headers": headers, "method": method, "url": url},
-        "response": {
-            "content": {"text": json.dumps({} if body is None else body)},
-            "status": status,
-        },
-    }
-
-
-def _session(*, expired: bool = False) -> SessionEnvelope:
-    return SessionEnvelope(
-        captured_at=NOW,
-        expires_at=NOW - timedelta(seconds=1)
-        if expired
-        else NOW + timedelta(minutes=30),
-    )
-
-
-def _document(*entries: object) -> dict[str, object]:
-    return {"log": {"entries": list(entries)}}
-
-
-def test_har_only_contract_extracts_api_and_ssg_without_api_fallback() -> None:
-    document = _document(
-        _entry(
-            "https://qbapi3.com/api/users/123/accounts/activity/",
-            body={"records": [{"id": 44, "symbol": "TEST", "amount": 12.5}]},
-        ),
-        _entry(
-            "https://app.getquantbase.com/_next/data/BUILD/invest.json",
-            body={"pageProps": {"funds": [{"id": 9, "title": "SYNTHETIC"}]}},
-            auth=False,
-        ),
-    )
-    first = extract_quantbase_har(document, session=_session())
-    second = extract_quantbase_har(document, session=_session())
-    assert canonical_extraction(first) == canonical_extraction(second)
-    assert QUANTBASE_CONTRACT.api_fallback is False
-    assert {item.capability for item in first} == {
-        "accounts.activity",
-        "funds.invest",
-    }
-    assert first[0].response == {
-        "records": [{"amount": 12.5, "id": REDACTION, "symbol": "TEST"}]
-    }
-    assert b"SYNTHETIC_SESSION_VALUE" not in canonical_extraction(first)
-
-
-def test_preflight_analytics_and_static_assets_are_explicitly_disposed() -> None:
-    empty = _entry("https://qbapi3.com/api/users/123/dashboard_data/")
-    empty["response"]["content"]["text"] = ""  # type: ignore[index]
-    document = _document(
-        _entry(
-            "https://qbapi3.com/api/users/123/track-event/",
-            method="POST",
-        ),
-        _entry(
-            "https://qbapi3.com/api/users/123/accounts/activity/",
-            method="OPTIONS",
-            auth=False,
-        ),
-        _entry("https://app.getquantbase.com/_next/static/chunks/app.js", auth=False),
-        _entry(
-            "https://qbapi3.com/api/partners/users/456/",
-            status=404,
-            body={"detail": "not found"},
-        ),
-        empty,
-        _entry(
-            "https://qbapi3.com/api/users/123/dashboard_data/",
-            body={"id": 7, "value": 100.0},
-        ),
-    )
-    records = extract_quantbase_har(document, session=_session())
-    assert len(records) == 1
-    assert records[0].capability == "portfolio.dashboard"
-
-
-def test_duplicate_browser_noise_is_tolerated_but_duplicate_auth_fails() -> None:
-    entry = _entry(
-        "https://qbapi3.com/api/users/123/dashboard_data/", body={"value": 1}
-    )
-    headers = entry["request"]["headers"]  # type: ignore[index]
-    assert isinstance(headers, list)
-    headers.extend(
-        [
-            {"name": "Accept", "value": "application/json"},
-            {"name": "accept", "value": "*/*"},
-        ]
-    )
-    assert len(extract_quantbase_har(_document(entry), session=_session())) == 1
-
-    headers.append({"name": "JWT", "value": "SECOND_SYNTHETIC_SESSION_VALUE"})
-    with pytest.raises(WebContractError, match="duplicate sensitive"):
-        extract_quantbase_har(_document(entry), session=_session())
+from quant_engine.web_contracts import QUANTBASE_CONTRACT, WebContractError
 
 
 @pytest.mark.parametrize(
-    "document,session,match",
+    ("url", "capability"),
     [
         (
-            _document(
-                _entry(
-                    "https://qbapi3.com/api/users/123/accounts/activity/",
-                    auth=False,
-                )
-            ),
-            _session(),
-            "authenticated session",
+            "https://qbapi3.com/api/users/123/accounts/activity/",
+            "accounts.activity",
         ),
         (
-            _document(_entry("https://qbapi3.com/api/users/123/accounts/activity/")),
-            _session(expired=True),
-            "expired",
+            "https://qbapi3.com/api/funds/stats/"
+            "?end_day=2026-07-31&fund=SYNTHETIC&start_day=2026-01-01",
+            "funds.statistics",
         ),
         (
-            _document(_entry("https://qbapi3.com/api/users/123/orders/")),
-            _session(),
-            "allowlisted",
-        ),
-        (
-            _document(
-                _entry("https://qbapi3.com/api/users/?platform=mobile&u=SYNTHETIC")
-            ),
-            _session(),
-            "user lookup query",
-        ),
-        (
-            _document(
-                _entry(
-                    "https://qbapi3.com/api/users/123/accounts/activity/",
-                    method="DELETE",
-                )
-            ),
-            _session(),
-            "allowlisted",
+            "https://app.getquantbase.com/_next/data/BUILD/invest.json",
+            "funds.invest",
         ),
     ],
 )
-def test_missing_expired_unknown_or_drifted_requests_fail_closed(
-    document: dict[str, object], session: SessionEnvelope, match: str
+def test_quantbase_declarations_route_reviewed_read_only_endpoints(
+    url: str, capability: str
 ) -> None:
-    with pytest.raises(WebContractError, match=match):
-        extract_quantbase_har(document, session=session)
+    endpoint = QUANTBASE_CONTRACT.route("GET", url)
+    if endpoint.validate_query is not None:
+        endpoint.validate_query(endpoint.query(url))
+
+    assert endpoint.capability == capability
+    assert endpoint.semantic_effect.value == "READ_ONLY"
+    assert QUANTBASE_CONTRACT.api_fallback is False
+
+
+@pytest.mark.parametrize(
+    "method,url",
+    [
+        ("POST", "https://qbapi3.com/api/users/123/accounts/activity/"),
+        ("GET", "https://qbapi3.com/api/users/123/orders/"),
+        ("GET", "https://qbapi3.com/api/funds/stats/?fund=SYNTHETIC"),
+        ("GET", "https://app.getquantbase.com/_next/static/chunks/app.js"),
+    ],
+)
+def test_quantbase_declarations_reject_unreviewed_or_drifted_routes(
+    method: str, url: str
+) -> None:
+    with pytest.raises(WebContractError):
+        endpoint = QUANTBASE_CONTRACT.route(method, url)
+        if endpoint.validate_query is not None:
+            endpoint.validate_query(endpoint.query(url))

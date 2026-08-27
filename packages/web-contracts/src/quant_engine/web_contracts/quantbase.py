@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-import re
 from typing import Any
-from urllib.parse import urlsplit
 
 from quant_engine.web_contracts.contracts import (
     EndpointContract,
@@ -13,13 +11,6 @@ from quant_engine.web_contracts.contracts import (
     SemanticEffect,
     WebContractError,
 )
-from quant_engine.web_contracts.extract import (
-    ExtractedResponse,
-    SessionEnvelope,
-    extract_har,
-)
-
-
 _API_ORIGIN = "https://qbapi3.com"
 _APP_ORIGIN = "https://app.getquantbase.com"
 _USER_PATH = r"[0-9]+"
@@ -140,59 +131,3 @@ QUANTBASE_CONTRACT = ProviderContract(
     ),
     api_fallback=False,
 )
-
-
-def _object(value: object, name: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
-        raise WebContractError(f"{name} must be an object")
-    return value
-
-
-def extract_quantbase_har(
-    document: Mapping[str, Any], *, session: SessionEnvelope
-) -> tuple[ExtractedResponse, ...]:
-    """Extract reviewed data routes while disposing preflight and analytics noise."""
-
-    log = _object(document.get("log"), "log")
-    entries = log.get("entries")
-    if not isinstance(entries, list):
-        raise WebContractError("log.entries must be an array")
-    selected: list[object] = []
-    for value in entries:
-        entry = _object(value, "log.entries[]")
-        request = _object(entry.get("request"), "request")
-        method = request.get("method")
-        url = request.get("url")
-        if not isinstance(method, str) or not isinstance(url, str):
-            raise WebContractError("request method and URL must be text")
-        parsed = urlsplit(url)
-        origin = f"{parsed.scheme}://{parsed.netloc}"
-        if origin == _APP_ORIGIN and parsed.path.startswith("/_next/data/"):
-            if method.upper() != "GET":
-                raise WebContractError("unexpected method on Quantbase SSG data")
-            QUANTBASE_CONTRACT.route(method, url)
-            response = _object(entry.get("response"), "response")
-            content = _object(response.get("content"), "response.content")
-            if content.get("text"):
-                selected.append(entry)
-        elif origin == _API_ORIGIN and parsed.path.startswith("/api/"):
-            if method.upper() == "OPTIONS":
-                continue
-            if method.upper() == "POST" and parsed.path.endswith("/track-event/"):
-                continue
-            response = _object(entry.get("response"), "response")
-            if (
-                method.upper() == "GET"
-                and re.fullmatch(r"/api/partners/users/[0-9]+/", parsed.path)
-                and response.get("status") == 404
-            ):
-                continue
-            QUANTBASE_CONTRACT.route(method, url)
-            content = _object(response.get("content"), "response.content")
-            if content.get("text"):
-                selected.append(entry)
-    if not selected:
-        raise WebContractError("capture contains no reviewed Quantbase data routes")
-    return extract_har(
-        {"log": {"entries": selected}}, provider=QUANTBASE_CONTRACT, session=session
-    )

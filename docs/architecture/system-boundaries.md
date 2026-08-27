@@ -162,9 +162,10 @@ and companion-file hashes. Partial commit failure restores the complete
 predecessor graph rather than leaving individually valid but mutually
 inconsistent `CURRENT.json` authorities.
 
-## Public interaction surfaces
+## Target interaction surfaces
 
-The target CLI is one `quant-engine` command family:
+The following CLI and protocol shapes are target architecture, not an
+implemented WCH command surface:
 
 ```text
 quant-engine source <provider> plan|capture|ingest|reconcile|publish|status
@@ -188,26 +189,31 @@ shared lifecycle, coverage, evidence, or broker-manifest contracts.
 
 ## Web Contract Harvester boundary
 
-Web Contract Harvester (WCH) is the generalized framework for reconstructing
-stable contracts from allowed browser traffic:
+The implemented Web Contract Harvester (WCH) surface is the provider-neutral,
+offline `quant_engine.web_contracts.evidence.extract_har` function:
 
 - Distribution: `quant-engine-web-contract-harvester`
 - Python namespace: `quant_engine.web_contracts`
-- CLI: `quant-engine web-contract ...`
-- Initial plugins: Portfolio123, Quantbase, and Schwab history
+- Input: an existing HAR path or bytes-like value
+- Output: create-only `source.har`, source-ordered entry/body derivatives, and
+  a value-safe manifest
 
-WCH owns capture contracts, matchers, redaction, schemas, deterministic replay,
-and verification. Provider plugins own provider semantics. Captured credentials
-or sessions are never public interfaces. Portfolio123 transport selection is a
-provider policy: HAR-first, with API use only for a capability explicitly marked
-unsupported by HAR or an explicit user-selected API path. A HAR failure is not
-permission to fall back.
+The extractor does not require a provider contract, a session envelope, an
+allowlist, a successful status, JSON body content, or a browser. It does not
+redact raw evidence and makes no provider decision. Provider contract
+declarations remain separately owned metadata; their presence does not make
+provider capture or extraction implemented.
 
-The generalized legacy tool source was retired after its curated anchors and
-behavior were accepted in this package. Its complete five-file, 148,235-byte
-original is retained read-only in the local `xBin/cutover-recovery` boundary;
-the legacy source location is absent. The pre/post-move SHA-256 parity proof
-identity is
+CLI commands, browser/CDP capture, authenticated traffic, provider routing and
+schema semantics, replay, crawling, verification, and promotion are separately
+tracked work. A HAR failure is not permission to fall back to an API or any
+other transport.
+
+The generalized recovered-source baseline is three human-authored files totaling
+69,813 bytes, bound by the three generalized `RECOVERED_SOURCE_ANCHORS` hashes. The
+historical five-file, 148,235-byte count is pyc-inclusive and is not the source
+baseline. Its read-only historical recovery boundary and pre/post-move SHA-256
+parity proof identity are
 `acc02a53860429882bdc6c5f0cfc18b42068c8248a8e6518f7f2b067090f4f1f`.
 
 ## Portfolio domain boundary
