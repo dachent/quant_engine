@@ -173,12 +173,16 @@ def _entry_json(value: Any) -> str:
     if isinstance(value, list):
         return "[" + ",".join(_entry_json(item) for item in value) + "]"
     if isinstance(value, dict):
-        return "{" + ",".join(
-            json.dumps(key, ensure_ascii=True, allow_nan=False)
-            + ":"
-            + _entry_json(item)
-            for key, item in value.items()
-        ) + "}"
+        return (
+            "{"
+            + ",".join(
+                json.dumps(key, ensure_ascii=True, allow_nan=False)
+                + ":"
+                + _entry_json(item)
+                for key, item in value.items()
+            )
+            + "}"
+        )
     raise TypeError("entry contains a value outside the parsed JSON domain")
 
 

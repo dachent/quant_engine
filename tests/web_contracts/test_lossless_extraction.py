@@ -89,7 +89,9 @@ def test_materializes_every_entry_in_source_order_without_filtering_or_redaction
             "request": {
                 "url": "https://synthetic.invalid/route?token=SYNTHETIC_SECRET",
                 "headers": [{"name": "Cookie", "value": "SYNTHETIC_SECRET"}],
-                "cookies": [{"name": "token", "value": "SYNTHETIC_SECRET", "httpOnly": True}],
+                "cookies": [
+                    {"name": "token", "value": "SYNTHETIC_SECRET", "httpOnly": True}
+                ],
                 "postData": {"mimeType": "application/json", "text": ""},
             },
             "timings": {"wait": -1},
@@ -103,16 +105,22 @@ def test_materializes_every_entry_in_source_order_without_filtering_or_redaction
 
     assert receipt.parse_status is HarParseStatus.COMPLETE
     assert receipt.materialized_entry_count == 2
-    assert json.loads(
-        (receipt.output_dir / "entries" / "000000" / "entry.json").read_text(
-            encoding="utf-8"
+    assert (
+        json.loads(
+            (receipt.output_dir / "entries" / "000000" / "entry.json").read_text(
+                encoding="utf-8"
+            )
         )
-    ) == entries[0]
-    assert json.loads(
-        (receipt.output_dir / "entries" / "000001" / "entry.json").read_text(
-            encoding="utf-8"
+        == entries[0]
+    )
+    assert (
+        json.loads(
+            (receipt.output_dir / "entries" / "000001" / "entry.json").read_text(
+                encoding="utf-8"
+            )
         )
-    ) == entries[1]
+        == entries[1]
+    )
     materialized_first_entry = json.loads(
         (receipt.output_dir / "entries" / "000000" / "entry.json").read_text(
             encoding="utf-8"
@@ -185,7 +193,9 @@ def test_materializes_base64_body_representations_and_preserves_invalid_text(
         {"code": "INVALID_BASE64_BODY", "source_index": 0, "side": "response"}
     ]
     artifacts = _artifact_by_path(receipt.output_dir)
-    assert artifacts["entries/000000/request.body.har-text"]["decode"] == "NOT_APPLICABLE"
+    assert (
+        artifacts["entries/000000/request.body.har-text"]["decode"] == "NOT_APPLICABLE"
+    )
     assert artifacts["entries/000000/request.body.base64"]["decode"] == "VALID"
     assert artifacts["entries/000000/request.body.decoded"]["decode"] == "DECODED"
     assert artifacts["entries/000000/response.body.base64"]["decode"] == "INVALID"
@@ -240,9 +250,9 @@ def test_surrogate_body_text_is_reversible_and_marks_the_receipt_partial(
         "utf-8", errors="surrogatepass"
     )
     assert (
-        _artifact_by_path(receipt.output_dir)[
-            "entries/000000/request.body.har-text"
-        ]["representation"]
+        _artifact_by_path(receipt.output_dir)["entries/000000/request.body.har-text"][
+            "representation"
+        ]
         == "HAR_TEXT_SURROGATEPASS"
     )
     assert _manifest(receipt.output_dir)["diagnostics"] == [
@@ -283,11 +293,14 @@ def test_malformed_present_bodies_are_diagnosed_without_creating_body_files(
         path.name.endswith(".body.har-text")
         for path in (receipt.output_dir / "entries").rglob("*")
     )
-    assert json.loads(
-        (receipt.output_dir / "entries" / "000000" / "entry.json").read_text(
-            encoding="utf-8"
+    assert (
+        json.loads(
+            (receipt.output_dir / "entries" / "000000" / "entry.json").read_text(
+                encoding="utf-8"
+            )
         )
-    ) == entries[0]
+        == entries[0]
+    )
 
 
 def test_deterministic_outputs_preserve_huge_integers_without_value_leakage(
@@ -306,11 +319,14 @@ def test_deterministic_outputs_preserve_huge_integers_without_value_leakage(
     left = extract_har(source, tmp_path / "left")
     right = extract_har(source, tmp_path / "right")
 
-    assert json.loads(
-        (left.output_dir / "entries" / "000000" / "entry.json").read_text(
-            encoding="utf-8"
-        )
-    )["huge_integer"] == huge_integer
+    assert (
+        json.loads(
+            (left.output_dir / "entries" / "000000" / "entry.json").read_text(
+                encoding="utf-8"
+            )
+        )["huge_integer"]
+        == huge_integer
+    )
     left_files = {
         path.relative_to(left.output_dir).as_posix(): path.read_bytes()
         for path in left.output_dir.rglob("*")
@@ -348,15 +364,20 @@ def test_entry_numeric_lexemes_bypass_python_number_limits_without_mutation(
     assert b'"ordinary":42' in entry_bytes
     assert b'"large_exponent":1e1000000' in entry_bytes
     assert b'"huge_integer":' + huge_integer_digits.encode("ascii") in entry_bytes
-    assert b'"high_precision_decimal":' + high_precision_decimal.encode(
-        "ascii"
-    ) in entry_bytes
+    assert (
+        b'"high_precision_decimal":' + high_precision_decimal.encode("ascii")
+        in entry_bytes
+    )
 
 
 def test_non_object_entries_are_preserved_and_mark_the_receipt_partial(
     tmp_path: Path,
 ) -> None:
-    entries: list[object] = [None, ["SYNTHETIC_SECRET"], {"request": {}, "response": {}}]
+    entries: list[object] = [
+        None,
+        ["SYNTHETIC_SECRET"],
+        {"request": {}, "response": {}},
+    ]
     receipt = extract_har(
         json.dumps({"log": {"entries": entries}}, separators=(",", ":")).encode(),
         tmp_path / "structural",
@@ -364,11 +385,14 @@ def test_non_object_entries_are_preserved_and_mark_the_receipt_partial(
 
     assert receipt.parse_status is HarParseStatus.PARTIAL
     assert receipt.materialized_entry_count == 3
-    assert json.loads(
-        (receipt.output_dir / "entries" / "000000" / "entry.json").read_text(
-            encoding="utf-8"
+    assert (
+        json.loads(
+            (receipt.output_dir / "entries" / "000000" / "entry.json").read_text(
+                encoding="utf-8"
+            )
         )
-    ) is None
+        is None
+    )
     assert json.loads(
         (receipt.output_dir / "entries" / "000001" / "entry.json").read_text(
             encoding="utf-8"

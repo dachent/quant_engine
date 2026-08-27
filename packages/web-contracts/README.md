@@ -42,9 +42,12 @@ for the exact preservation and recovery contract.
 The public API is now `HarExtractionReceipt`, `HarParseStatus`, and
 `extract_har` from `quant_engine.web_contracts.evidence`. The redacting legacy
 symbols `ExtractedResponse`, `SessionEnvelope`, `REDACTION`,
-`canonical_extraction`, and `extract_quantbase_har` are removed. Provider
-contracts remain declarations only; provider-specific capture, CLI, and replay
-work is separately governed.
+`canonical_extraction`, and `extract_quantbase_har` are removed. The former
+public `SOURCE_ANCHORS` is removed; use generalized
+`RECOVERED_SOURCE_ANCHORS` instead. The
+`quant_engine.web_contracts.extract` import path is deleted. Provider contracts
+remain declarations only; provider-specific capture, CLI, and replay work is
+separately governed.
 
 Migration tracking: [#375](https://github.com/dachent/quant_engine/issues/375),
 [#376](https://github.com/dachent/quant_engine/issues/376),

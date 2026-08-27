@@ -11,6 +11,7 @@ from quant_engine.web_contracts.contracts import (
     SemanticEffect,
     WebContractError,
 )
+
 _API_ORIGIN = "https://qbapi3.com"
 _APP_ORIGIN = "https://app.getquantbase.com"
 _USER_PATH = r"[0-9]+"

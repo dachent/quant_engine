@@ -234,7 +234,7 @@ def test_web_contract_package_is_private_and_read_side_only() -> None:
     project = member["project"]
     assert isinstance(project, dict)
     assert project["requires-python"] == ">=3.11,<3.14"
-    assert project["dependencies"] == ["quant-engine-core"]
+    assert project["dependencies"] == []
     assert project["classifiers"] == ["Private :: Do Not Upload"]
     assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
         "quant_engine.web_contracts"
