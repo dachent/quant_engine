@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
@@ -10,6 +11,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
+import sys
 import tempfile
 import time
 from types import MappingProxyType
@@ -58,6 +61,9 @@ _WINDOWS_RESERVED_COMPONENT_STEMS = frozenset(
         *(f"lpt{suffix}" for suffix in ("¹", "²", "³")),
     }
 )
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 1
+_MOVEFILE_WRITE_THROUGH = 0x00000008
 
 
 class GenerationConflictError(RuntimeError):
@@ -127,6 +133,25 @@ def _canonical_json_payload(value: bytes, *, artifact_id: str) -> None:
         raise ManifestValidationError("payload JSON bytes are not canonical")
 
 
+def _validate_file_path_prefixes(paths: tuple[str, ...]) -> None:
+    """Reject one final file path serving as another file's parent directory."""
+
+    component_paths = tuple(
+        (path, tuple(component.casefold() for component in path.split("/")))
+        for path in paths
+    )
+    for left_path, left_components in component_paths:
+        for right_path, right_components in component_paths:
+            if (
+                len(left_components) < len(right_components)
+                and right_components[: len(left_components)] == left_components
+            ):
+                raise ManifestValidationError(
+                    "generation file paths have a file/directory prefix collision: "
+                    f"{left_path!r} and {right_path!r}"
+                )
+
+
 def _prepare_generation_bundle(
     manifest: GenerationManifest, payloads: Mapping[str, bytes]
 ) -> _PreparedGenerationBundle:
@@ -140,6 +165,7 @@ def _prepare_generation_bundle(
         _validate_raw_artifact_path(artifact.artifact_id, seen_casefolded=seen_casefolded)
         for artifact in artifacts
     )
+    _validate_file_path_prefixes((*artifact_ids, *sorted(_CONTROL_PATHS)))
     report_artifacts = [
         artifact
         for artifact in artifacts
@@ -232,6 +258,306 @@ def _prepare_generation_bundle(
     return _PreparedGenerationBundle(
         final_files=MappingProxyType(dict(sorted(final_files.items())))
     )
+
+
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _stat_is_link_like(value: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(value.st_mode) or bool(
+        getattr(value, "st_file_attributes", 0) & reparse_flag
+    )
+
+
+def _expected_bundle_directories(paths: Mapping[str, bytes]) -> set[str]:
+    directories: set[str] = set()
+    for path in paths:
+        components = path.split("/")
+        directories.update(
+            "/".join(components[:index]) for index in range(1, len(components))
+        )
+    return directories
+
+
+def _directory_matches_exact_files(
+    directory: Path, expected_files: Mapping[str, bytes]
+) -> bool:
+    root_stat = _lstat_or_none(directory)
+    if (
+        root_stat is None
+        or _stat_is_link_like(root_stat)
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
+        return False
+    expected_directories = _expected_bundle_directories(expected_files)
+    actual_directories: set[str] = set()
+    actual_files: set[str] = set()
+    pending = [(directory, "")]
+    try:
+        while pending:
+            current, prefix = pending.pop()
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    relative = f"{prefix}/{entry.name}" if prefix else entry.name
+                    entry_stat = entry.stat(follow_symlinks=False)
+                    if _stat_is_link_like(entry_stat):
+                        return False
+                    if stat.S_ISDIR(entry_stat.st_mode):
+                        if relative not in expected_directories:
+                            return False
+                        actual_directories.add(relative)
+                        pending.append((Path(entry.path), relative))
+                    elif stat.S_ISREG(entry_stat.st_mode):
+                        expected = expected_files.get(relative)
+                        if expected is None or Path(entry.path).read_bytes() != expected:
+                            return False
+                        actual_files.add(relative)
+                    else:
+                        return False
+    except OSError:
+        return False
+    return actual_files == set(expected_files) and actual_directories == expected_directories
+
+
+def _tree_contains_only_regular_entries(directory: Path) -> bool:
+    root_stat = _lstat_or_none(directory)
+    if (
+        root_stat is None
+        or _stat_is_link_like(root_stat)
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
+        return False
+    pending = [directory]
+    try:
+        while pending:
+            current = pending.pop()
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                    if _stat_is_link_like(entry_stat):
+                        return False
+                    if stat.S_ISDIR(entry_stat.st_mode):
+                        pending.append(Path(entry.path))
+                    elif not stat.S_ISREG(entry_stat.st_mode):
+                        return False
+    except OSError:
+        return False
+    return True
+
+
+def _ensure_bundle_directory(path: Path, *, label: str, parents: bool) -> bool:
+    entry_stat = _lstat_or_none(path)
+    created = False
+    if entry_stat is None:
+        try:
+            path.mkdir(parents=parents, exist_ok=False)
+            created = True
+        except FileExistsError:
+            pass
+        entry_stat = _lstat_or_none(path)
+    if entry_stat is None:
+        raise PublicationRejectedError(f"{label} could not be created")
+    if _stat_is_link_like(entry_stat):
+        raise PublicationRejectedError(f"{label} must not be linked or reparse-backed")
+    if not stat.S_ISDIR(entry_stat.st_mode):
+        raise PublicationRejectedError(f"{label} must be a regular directory")
+    return created
+
+
+def _ensure_durable_bundle_directory_tree(path: Path, *, label: str) -> bool:
+    """Create each missing directory level and durably record it in its parent."""
+
+    missing: list[Path] = []
+    current = path
+    while _lstat_or_none(current) is None:
+        missing.append(current)
+        parent = current.parent
+        if parent == current:
+            raise PublicationRejectedError(f"{label} has no existing directory anchor")
+        current = parent
+    _ensure_bundle_directory(current, label=f"{label} anchor", parents=False)
+    for directory in reversed(missing):
+        _ensure_bundle_directory(directory, label=label, parents=False)
+        _sync_bundle_directory(directory.parent)
+    return bool(missing)
+
+
+def _rename_directory_noreplace(source: Path, target: Path) -> None:
+    """Commit one same-filesystem directory without replacing a destination."""
+
+    if os.name == "nt":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        move_file = kernel32.MoveFileExW
+        move_file.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
+        move_file.restype = ctypes.c_int
+        if not move_file(str(source), str(target), _MOVEFILE_WRITE_THROUGH):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return
+    if sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise PublicationRejectedError(
+                "atomic no-replace directory commit is unavailable"
+            )
+        renameat2.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameat2.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        if (
+            renameat2(
+                _AT_FDCWD,
+                os.fsencode(source),
+                _AT_FDCWD,
+                os.fsencode(target),
+                _RENAME_NOREPLACE,
+            )
+            != 0
+        ):
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), str(source), str(target))
+        return
+    raise PublicationRejectedError("atomic no-replace directory commit is unavailable")
+
+
+def _require_atomic_noreplace_support() -> None:
+    if os.name == "nt":
+        return
+    if sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        if getattr(libc, "renameat2", None) is not None:
+            return
+    raise PublicationRejectedError("atomic no-replace directory commit is unavailable")
+
+
+def _remove_owned_stage(temporary: Path, generations: Path) -> None:
+    if (
+        temporary.parent == generations
+        and temporary.name.startswith(".stage-")
+        and _tree_contains_only_regular_entries(temporary)
+    ):
+        shutil.rmtree(temporary)
+
+
+def _sync_bundle_directory(path: Path) -> None:
+    """Durably sync a bundle directory, failing closed where POSIX supports it."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        if os.name == "nt":
+            return
+        raise
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        if os.name != "nt":
+            raise
+    finally:
+        os.close(descriptor)
+
+
+def _sync_prepared_bundle_directories(
+    temporary: Path, expected_files: Mapping[str, bytes]
+) -> None:
+    directories = _expected_bundle_directories(expected_files)
+    for relative in sorted(
+        directories, key=lambda value: (-value.count("/"), value)
+    ):
+        _sync_bundle_directory(temporary.joinpath(*relative.split("/")))
+    _sync_bundle_directory(temporary)
+
+
+def stage_generation_bundle(
+    root: Path,
+    manifest: GenerationManifest,
+    payloads: Mapping[str, bytes],
+) -> Path:
+    """Durably stage one exact bundle through an atomic no-replace commit."""
+
+    prepared = _prepare_generation_bundle(manifest, payloads)
+    _require_atomic_noreplace_support()
+    generation_id = GenerationManifest.from_json_bytes(
+        prepared.final_files[_GENERATION_MANIFEST_PATH]
+    ).generation_id
+    root = Path(root).absolute()
+    root_created = _ensure_durable_bundle_directory_tree(
+        root, label="publication root"
+    )
+    generations = root / "generations"
+    generations_created = _ensure_bundle_directory(
+        generations, label="generations root", parents=False
+    )
+    if root_created or generations_created:
+        _sync_bundle_directory(root)
+    final_directory = generations / generation_id
+    if _lstat_or_none(final_directory) is not None:
+        if _directory_matches_exact_files(final_directory, prepared.final_files):
+            _sync_bundle_directory(generations)
+            return final_directory
+        raise GenerationConflictError(
+            "generation bundle path already contains different or irregular evidence"
+        )
+
+    temporary = Path(tempfile.mkdtemp(prefix=".stage-", dir=generations))
+    cleanup_permitted = True
+    try:
+        for relative, content in prepared.final_files.items():
+            destination = temporary.joinpath(*relative.split("/"))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _write_and_sync(destination, content)
+        if not _directory_matches_exact_files(temporary, prepared.final_files):
+            raise GenerationConflictError(
+                "temporary generation bundle differs from prepared bytes"
+            )
+        _sync_prepared_bundle_directories(temporary, prepared.final_files)
+
+        for attempt in range(len(_STAGE_RENAME_RETRY_DELAYS) + 1):
+            cleanup_permitted = False
+            try:
+                _rename_directory_noreplace(temporary, final_directory)
+            except (OSError, PublicationRejectedError) as exc:
+                source_stat = _lstat_or_none(temporary)
+                source_present = source_stat is not None
+                final_exact = _directory_matches_exact_files(
+                    final_directory, prepared.final_files
+                )
+                if final_exact:
+                    cleanup_permitted = source_present
+                    _sync_bundle_directory(generations)
+                    return final_directory
+                if not source_present:
+                    raise GenerationConflictError(
+                        "generation bundle commit outcome is ambiguous"
+                    ) from exc
+                cleanup_permitted = True
+                if _lstat_or_none(final_directory) is not None:
+                    raise GenerationConflictError(
+                        "generation bundle path appeared with different evidence"
+                    ) from exc
+                if isinstance(exc, PermissionError):
+                    if attempt == len(_STAGE_RENAME_RETRY_DELAYS):
+                        raise
+                    time.sleep(_STAGE_RENAME_RETRY_DELAYS[attempt])
+                    continue
+                raise
+            _sync_bundle_directory(generations)
+            return final_directory
+        raise AssertionError("bundle rename retry loop did not terminate")
+    finally:
+        if cleanup_permitted and _lstat_or_none(temporary) is not None:
+            _remove_owned_stage(temporary, generations)
 
 
 class PublicationState(StrEnum):

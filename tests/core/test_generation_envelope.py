@@ -5,6 +5,7 @@ from datetime import date
 import hashlib
 import json
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -330,6 +331,581 @@ def test_prepare_generation_bundle_rejects_case_aliases_and_report_substitutes()
     payloads[duplicate.artifact_id] = b"{}\n"
     with pytest.raises(ManifestValidationError, match="case-insensitive"):
         publication._prepare_generation_bundle(manifest, payloads)
+
+
+@pytest.mark.parametrize(
+    "conflicting_path",
+    ["authority", "AUTHORITY", "generation.json/child"],
+)
+def test_prepare_generation_bundle_rejects_file_directory_prefix_collisions(
+    conflicting_path: str,
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    content = b"prefix-conflict\n"
+    conflict = _artifact(conflicting_path, content)
+    manifest = _manifest(artifacts=(*manifest.artifacts, conflict))
+    payloads[conflicting_path] = content
+
+    with pytest.raises(ManifestValidationError, match="file/directory prefix"):
+        publication._prepare_generation_bundle(manifest, payloads)
+
+
+def test_stage_generation_bundle_creates_one_exact_final_directory(
+    tmp_path: Path,
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    root = tmp_path / "bundle-root"
+    prepared = publication._prepare_generation_bundle(manifest, payloads)
+
+    final = publication.stage_generation_bundle(root, manifest, payloads)
+
+    assert final == root / "generations" / manifest.generation_id
+    assert final.is_dir()
+    actual = {
+        path.relative_to(final).as_posix(): path.read_bytes()
+        for path in final.rglob("*")
+        if path.is_file()
+    }
+    assert actual == dict(prepared.final_files)
+    assert not list((root / "generations").glob(".stage-*"))
+
+
+def test_stage_generation_bundle_durably_creates_each_missing_root_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    root = tmp_path / "outer" / "inner" / "bundle-root"
+    synced: list[Path] = []
+    original_sync = publication._sync_bundle_directory
+
+    def recording_sync(path: Path) -> None:
+        synced.append(path)
+        original_sync(path)
+
+    monkeypatch.setattr(publication, "_sync_bundle_directory", recording_sync)
+
+    publication.stage_generation_bundle(root, manifest, payloads)
+
+    assert synced[:4] == [
+        tmp_path,
+        tmp_path / "outer",
+        tmp_path / "outer" / "inner",
+        root,
+    ]
+
+
+def test_stage_generation_bundle_rejects_prefix_collision_before_filesystem(
+    tmp_path: Path,
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    content = b"prefix-conflict\n"
+    conflict = _artifact("authority", content)
+    manifest = _manifest(artifacts=(*manifest.artifacts, conflict))
+    payloads[conflict.artifact_id] = content
+    root = tmp_path / "must-not-exist"
+
+    with pytest.raises(ManifestValidationError, match="file/directory prefix"):
+        publication.stage_generation_bundle(root, manifest, payloads)
+
+    assert not root.exists()
+
+
+def test_stage_generation_bundle_rejects_unsupported_commit_before_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    root = tmp_path / "must-not-exist"
+
+    def unsupported() -> None:
+        raise PublicationRejectedError("atomic no-replace unavailable")
+
+    monkeypatch.setattr(publication, "_require_atomic_noreplace_support", unsupported)
+
+    with pytest.raises(PublicationRejectedError, match="no-replace"):
+        publication.stage_generation_bundle(root, manifest, payloads)
+
+    assert not root.exists()
+
+
+def test_stage_generation_bundle_uses_identity_from_prepared_manifest_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    expected_generation_id = manifest.generation_id
+    original_prepare = publication._prepare_generation_bundle
+
+    def prepare_then_mutate(
+        candidate: GenerationManifest, candidate_payloads: dict[str, bytes]
+    ) -> object:
+        prepared = original_prepare(candidate, candidate_payloads)
+        object.__setattr__(candidate, "generation_id", "0" * 64)
+        return prepared
+
+    monkeypatch.setattr(publication, "_prepare_generation_bundle", prepare_then_mutate)
+
+    final = publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    assert final.name == expected_generation_id
+    assert GenerationManifest.from_json_bytes(
+        (final / "generation.json").read_bytes()
+    ).generation_id == expected_generation_id
+
+
+def test_bundle_native_commit_does_not_replace_an_empty_destination(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    marker = source / "source-marker"
+    marker.write_bytes(b"source\n")
+
+    with pytest.raises(OSError):
+        publication._rename_directory_noreplace(source, target)
+
+    assert marker.read_bytes() == b"source\n"
+    assert target.is_dir()
+    assert not list(target.iterdir())
+
+
+def test_bundle_directory_sync_fails_closed_when_posix_open_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def denied(*_: object, **__: object) -> int:
+        raise OSError("synthetic directory sync failure")
+
+    monkeypatch.setattr(publication.os, "name", "posix")
+    monkeypatch.setattr(publication.os, "open", denied)
+
+    with pytest.raises(OSError, match="sync failure"):
+        publication._sync_bundle_directory(tmp_path)
+
+
+def test_stage_generation_bundle_orders_durable_writes_before_one_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    deep_content = publication.canonical_json_bytes({"depth": 2})
+    deep_artifact = _artifact("nested/deep/evidence.json", deep_content)
+    manifest = _manifest(artifacts=(*manifest.artifacts, deep_artifact))
+    payloads[deep_artifact.artifact_id] = deep_content
+    root = tmp_path / "bundle-root"
+    prepared = publication._prepare_generation_bundle(manifest, payloads)
+    original_write = publication._write_and_sync
+    original_commit = publication._rename_directory_noreplace
+    events: list[tuple[str, Path]] = []
+    file_fsyncs: list[int] = []
+    committed = False
+
+    def recording_write(path: Path, content: bytes) -> None:
+        assert not committed, "bundle files must not be written after commit"
+        events.append(("write", path))
+        original_write(path, content)
+
+    def recording_sync(path: Path) -> None:
+        events.append(("sync", path))
+
+    def recording_commit(source: Path, target: Path) -> None:
+        nonlocal committed
+        assert not committed
+        events.append(("commit", target))
+        original_commit(source, target)
+        committed = True
+
+    monkeypatch.setattr(publication, "_write_and_sync", recording_write)
+    monkeypatch.setattr(publication, "_sync_bundle_directory", recording_sync)
+    monkeypatch.setattr(publication, "_rename_directory_noreplace", recording_commit)
+    monkeypatch.setattr(publication.os, "fsync", file_fsyncs.append)
+
+    final = publication.stage_generation_bundle(root, manifest, payloads)
+
+    assert len([event for event in events if event[0] == "write"]) == len(
+        prepared.final_files
+    )
+    assert len(file_fsyncs) == len(prepared.final_files)
+    assert len([event for event in events if event[0] == "commit"]) == 1
+    commit_index = next(index for index, event in enumerate(events) if event[0] == "commit")
+    assert all(
+        index < commit_index
+        for index, event in enumerate(events)
+        if event[0] == "write"
+    )
+    stage_syncs = [
+        path
+        for action, path in events[:commit_index]
+        if action == "sync" and path.name.startswith(".stage-")
+    ]
+    assert stage_syncs, "the populated stage root must be synced before commit"
+    stage_root = stage_syncs[-1]
+    sync_indices = {
+        path: index
+        for index, (action, path) in enumerate(events)
+        if action == "sync"
+    }
+    assert (
+        sync_indices[stage_root / "nested" / "deep"]
+        < sync_indices[stage_root / "nested"]
+        < sync_indices[stage_root]
+        < commit_index
+    )
+    assert events[-1] == ("sync", root / "generations")
+    assert final.is_dir()
+
+
+def test_stage_generation_bundle_rejects_readback_drift_and_preserves_stale_orphan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    root = tmp_path / "bundle-root"
+    generations = root / "generations"
+    stale = generations / ".stage-stale"
+    stale.mkdir(parents=True)
+    marker = stale / "marker"
+    marker.write_bytes(b"stale\n")
+    original_write = publication._write_and_sync
+
+    def corrupt_one_write(path: Path, content: bytes) -> None:
+        original_write(path, b"corrupt\n" if path.name == "generation.json" else content)
+
+    monkeypatch.setattr(publication, "_write_and_sync", corrupt_one_write)
+
+    with pytest.raises(GenerationConflictError, match="temporary"):
+        publication.stage_generation_bundle(root, manifest, payloads)
+
+    assert not (generations / manifest.generation_id).exists()
+    assert marker.read_bytes() == b"stale\n"
+    assert [path.name for path in generations.glob(".stage-*")] == [".stage-stale"]
+
+
+def test_stage_generation_bundle_cleans_only_its_partial_failed_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    root = tmp_path / "bundle-root"
+    generations = root / "generations"
+    stale = generations / ".stage-stale"
+    stale.mkdir(parents=True)
+    marker = stale / "marker"
+    marker.write_bytes(b"stale\n")
+    original_write = publication._write_and_sync
+    writes = 0
+
+    def interrupted_write(path: Path, content: bytes) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("synthetic interrupted write")
+        original_write(path, content)
+
+    monkeypatch.setattr(publication, "_write_and_sync", interrupted_write)
+
+    with pytest.raises(OSError, match="interrupted write"):
+        publication.stage_generation_bundle(root, manifest, payloads)
+
+    assert not (generations / manifest.generation_id).exists()
+    assert marker.read_bytes() == b"stale\n"
+    assert [path.name for path in generations.glob(".stage-*")] == [".stage-stale"]
+
+
+def test_stage_generation_bundle_never_removes_stale_orphan_on_success(
+    tmp_path: Path,
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    generations = tmp_path / "generations"
+    stale = generations / ".stage-stale"
+    stale.mkdir(parents=True)
+    marker = stale / "marker"
+    marker.write_bytes(b"stale\n")
+
+    final = publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    assert final.is_dir()
+    assert marker.read_bytes() == b"stale\n"
+    assert [path.name for path in generations.glob(".stage-*")] == [".stage-stale"]
+
+
+def test_stage_generation_bundle_is_idempotent_without_a_second_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    first = publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    def unexpected_commit(*_: object) -> None:
+        raise AssertionError("an exact existing bundle must not be committed again")
+
+    monkeypatch.setattr(publication, "_rename_directory_noreplace", unexpected_commit)
+    second = publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    assert second == first
+
+
+def test_stage_generation_bundle_retry_resyncs_exact_preexisting_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    generations = tmp_path / "generations"
+    original_sync = publication._sync_bundle_directory
+    generations_syncs = 0
+
+    def fail_first_generations_sync(path: Path) -> None:
+        nonlocal generations_syncs
+        if path == generations:
+            generations_syncs += 1
+            if generations_syncs == 1:
+                raise OSError("synthetic post-commit parent sync failure")
+        original_sync(path)
+
+    monkeypatch.setattr(
+        publication, "_sync_bundle_directory", fail_first_generations_sync
+    )
+
+    with pytest.raises(OSError, match="post-commit parent sync failure"):
+        publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    final = publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    assert final == generations / manifest.generation_id
+    assert generations_syncs == 2
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["empty", "missing", "extra", "extra-directory", "different", "irregular"],
+)
+def test_stage_generation_bundle_preserves_inexact_existing_final(
+    tmp_path: Path, mutation: str
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    generations = tmp_path / "generations"
+    final = generations / manifest.generation_id
+    if mutation == "empty":
+        final.mkdir(parents=True)
+    elif mutation == "irregular":
+        generations.mkdir(parents=True)
+        final.write_bytes(b"not-a-directory\n")
+    else:
+        publication.stage_generation_bundle(tmp_path, manifest, payloads)
+        if mutation == "missing":
+            (final / "authority" / "selected-input-identities.json").unlink()
+        elif mutation == "extra":
+            (final / "extra.bin").write_bytes(b"extra\n")
+        elif mutation == "extra-directory":
+            (final / "empty-extra-directory").mkdir()
+        else:
+            (final / "generation.json").write_bytes(b"different\n")
+    before_is_file = final.is_file()
+    before_files = (
+        {
+            path.relative_to(final).as_posix(): path.read_bytes()
+            for path in final.rglob("*")
+            if path.is_file()
+        }
+        if final.is_dir()
+        else {"<irregular>": final.read_bytes()}
+    )
+
+    with pytest.raises(GenerationConflictError, match="different or irregular"):
+        publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    assert final.is_file() is before_is_file
+    after_files = (
+        {
+            path.relative_to(final).as_posix(): path.read_bytes()
+            for path in final.rglob("*")
+            if path.is_file()
+        }
+        if final.is_dir()
+        else {"<irregular>": final.read_bytes()}
+    )
+    assert after_files == before_files
+    if mutation == "extra-directory":
+        assert (final / "empty-extra-directory").is_dir()
+
+
+def test_stage_generation_bundle_accepts_exact_final_that_appears_at_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+
+    def competing_exact_commit(source: Path, target: Path) -> None:
+        shutil.copytree(source, target)
+        raise FileExistsError("synthetic exact competing commit")
+
+    monkeypatch.setattr(
+        publication, "_rename_directory_noreplace", competing_exact_commit
+    )
+
+    final = publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    assert final.is_dir()
+    assert not list((tmp_path / "generations").glob(".stage-*"))
+
+
+def test_stage_generation_bundle_rejects_different_final_that_appears_at_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    marker_content = b"competing\n"
+
+    def competing_different_commit(source: Path, target: Path) -> None:
+        target.mkdir()
+        (target / "marker").write_bytes(marker_content)
+        raise FileExistsError("synthetic different competing commit")
+
+    monkeypatch.setattr(
+        publication, "_rename_directory_noreplace", competing_different_commit
+    )
+
+    with pytest.raises(GenerationConflictError, match="appeared"):
+        publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    final = tmp_path / "generations" / manifest.generation_id
+    assert (final / "marker").read_bytes() == marker_content
+    assert not list((tmp_path / "generations").glob(".stage-*"))
+
+
+def test_stage_generation_bundle_recovers_exact_commit_after_reported_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    original_commit = publication._rename_directory_noreplace
+
+    def commit_then_error(source: Path, target: Path) -> None:
+        original_commit(source, target)
+        raise OSError("synthetic post-commit error")
+
+    monkeypatch.setattr(publication, "_rename_directory_noreplace", commit_then_error)
+
+    final = publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    assert final.is_dir()
+    assert not list((tmp_path / "generations").glob(".stage-*"))
+
+
+def test_stage_generation_bundle_leaves_inexact_ambiguous_commit_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    original_commit = publication._rename_directory_noreplace
+    changed = b"changed-after-move\n"
+
+    def commit_mutate_then_error(source: Path, target: Path) -> None:
+        original_commit(source, target)
+        (target / "generation.json").write_bytes(changed)
+        raise OSError("synthetic ambiguous post-commit error")
+
+    monkeypatch.setattr(
+        publication, "_rename_directory_noreplace", commit_mutate_then_error
+    )
+
+    with pytest.raises(GenerationConflictError, match="ambiguous"):
+        publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    final = tmp_path / "generations" / manifest.generation_id
+    assert (final / "generation.json").read_bytes() == changed
+
+
+def test_stage_generation_bundle_retries_only_bounded_permission_denials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    original_commit = publication._rename_directory_noreplace
+    attempts = 0
+    sleeps: list[float] = []
+
+    def transient_denial(source: Path, target: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("synthetic transient denial")
+        original_commit(source, target)
+
+    monkeypatch.setattr(publication, "_rename_directory_noreplace", transient_denial)
+    monkeypatch.setattr(publication.time, "sleep", sleeps.append)
+
+    final = publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    assert final.is_dir()
+    assert attempts == 2
+    assert sleeps == [publication._STAGE_RENAME_RETRY_DELAYS[0]]
+
+
+def test_stage_generation_bundle_exhausts_denials_without_touching_stale_orphan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    generations = tmp_path / "generations"
+    stale = generations / ".stage-stale"
+    stale.mkdir(parents=True)
+    marker = stale / "marker"
+    marker.write_bytes(b"stale\n")
+    attempts = 0
+    sleeps: list[float] = []
+
+    def persistent_denial(source: Path, target: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError("synthetic persistent denial")
+
+    monkeypatch.setattr(publication, "_rename_directory_noreplace", persistent_denial)
+    monkeypatch.setattr(publication.time, "sleep", sleeps.append)
+
+    with pytest.raises(PermissionError, match="persistent"):
+        publication.stage_generation_bundle(tmp_path, manifest, payloads)
+
+    assert attempts == len(publication._STAGE_RENAME_RETRY_DELAYS) + 1
+    assert sleeps == list(publication._STAGE_RENAME_RETRY_DELAYS)
+    assert not (generations / manifest.generation_id).exists()
+    assert marker.read_bytes() == b"stale\n"
+    assert [path.name for path in generations.glob(".stage-*")] == [".stage-stale"]
+
+
+@pytest.mark.parametrize("boundary", ["root", "generations"])
+def test_stage_generation_bundle_rejects_irregular_directory_boundaries(
+    tmp_path: Path, boundary: str
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    root = tmp_path / "bundle-root"
+    if boundary == "root":
+        root.write_bytes(b"irregular-root\n")
+    else:
+        root.mkdir()
+        (root / "generations").write_bytes(b"irregular-generations\n")
+
+    with pytest.raises(PublicationRejectedError, match="regular directory"):
+        publication.stage_generation_bundle(root, manifest, payloads)
+
+
+@pytest.mark.parametrize("boundary", ["root", "generations"])
+def test_stage_generation_bundle_rejects_linked_directory_boundaries(
+    tmp_path: Path, boundary: str
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    root = tmp_path / "bundle-root"
+    target = tmp_path / "linked-target"
+    target.mkdir()
+    try:
+        if boundary == "root":
+            root.symlink_to(target, target_is_directory=True)
+        else:
+            root.mkdir()
+            (root / "generations").symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(PublicationRejectedError, match="linked or reparse"):
+        publication.stage_generation_bundle(root, manifest, payloads)
+
+    assert not list(target.iterdir())
+
+
+def test_bundle_link_detection_rejects_windows_reparse_attribute() -> None:
+    class ReparseDirectoryStat:
+        st_mode = publication.stat.S_IFDIR
+        st_file_attributes = publication.stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+    assert publication._stat_is_link_like(ReparseDirectoryStat())  # type: ignore[arg-type]
 
 
 def test_generation_envelope_schemas_are_closed_and_validate_prepared_controls() -> None:
