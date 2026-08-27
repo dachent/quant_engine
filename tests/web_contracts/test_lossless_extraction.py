@@ -80,7 +80,8 @@ def test_materializes_every_entry_in_source_order_without_filtering_or_redaction
                     {"name": "Set-Cookie", "value": "duplicate"},
                 ],
                 "cookies": [
-                    {"name": "session", "value": "SYNTHETIC_SECRET", "httpOnly": True}
+                    {"name": "session", "value": "first", "httpOnly": True},
+                    {"name": "session", "value": "second", "httpOnly": True},
                 ],
                 "content": {"text": "response body", "mimeType": "unknown/x"},
                 "redirectURL": "https://synthetic.invalid/redirect",
@@ -112,6 +113,14 @@ def test_materializes_every_entry_in_source_order_without_filtering_or_redaction
             encoding="utf-8"
         )
     ) == entries[1]
+    materialized_first_entry = json.loads(
+        (receipt.output_dir / "entries" / "000000" / "entry.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [
+        cookie["value"] for cookie in materialized_first_entry["response"]["cookies"]
+    ] == ["first", "second"]
     assert (
         receipt.output_dir / "entries" / "000000" / "request.body.har-text"
     ).read_bytes() == b""
@@ -173,13 +182,146 @@ def test_materializes_base64_body_representations_and_preserves_invalid_text(
     assert receipt.materialized_entry_count == 1
     manifest = _manifest(receipt.output_dir)
     assert manifest["diagnostics"] == [
-        {"code": "INVALID_BASE64_BODY", "source_index": 0}
+        {"code": "INVALID_BASE64_BODY", "source_index": 0, "side": "response"}
     ]
     artifacts = _artifact_by_path(receipt.output_dir)
     assert artifacts["entries/000000/request.body.har-text"]["decode"] == "NOT_APPLICABLE"
     assert artifacts["entries/000000/request.body.base64"]["decode"] == "VALID"
     assert artifacts["entries/000000/request.body.decoded"]["decode"] == "DECODED"
     assert artifacts["entries/000000/response.body.base64"]["decode"] == "INVALID"
+
+
+def test_invalid_base64_diagnostics_are_side_specific_and_source_ordered(
+    tmp_path: Path,
+) -> None:
+    entries = [
+        {
+            "request": {"postData": {"text": "invalid request!", "encoding": "base64"}},
+            "response": {
+                "content": {"text": "invalid response!", "encoding": "base64"}
+            },
+        }
+    ]
+
+    receipt = extract_har(
+        json.dumps({"log": {"entries": entries}}, separators=(",", ":")).encode(),
+        tmp_path / "invalid-base64-sides",
+    )
+
+    entry_dir = receipt.output_dir / "entries" / "000000"
+    assert receipt.parse_status is HarParseStatus.PARTIAL
+    assert _manifest(receipt.output_dir)["diagnostics"] == [
+        {"code": "INVALID_BASE64_BODY", "source_index": 0, "side": "request"},
+        {"code": "INVALID_BASE64_BODY", "source_index": 0, "side": "response"},
+    ]
+    assert (entry_dir / "request.body.base64").read_bytes() == b"invalid request!"
+    assert (entry_dir / "response.body.base64").read_bytes() == b"invalid response!"
+    assert not (entry_dir / "request.body.decoded").exists()
+    assert not (entry_dir / "response.body.decoded").exists()
+
+
+def test_surrogate_body_text_is_reversible_and_marks_the_receipt_partial(
+    tmp_path: Path,
+) -> None:
+    surrogate_text = "prefix\ud800suffix"
+    entries = [{"request": {"postData": {"text": surrogate_text}}, "response": {}}]
+    source = json.dumps(
+        {"log": {"entries": entries}}, ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+
+    receipt = extract_har(source, tmp_path / "surrogate")
+
+    entry_dir = receipt.output_dir / "entries" / "000000"
+    assert receipt.parse_status is HarParseStatus.PARTIAL
+    assert (entry_dir / "entry.json").read_bytes() == json.dumps(
+        entries[0], ensure_ascii=True, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert (entry_dir / "request.body.har-text").read_bytes() == surrogate_text.encode(
+        "utf-8", errors="surrogatepass"
+    )
+    assert (
+        _artifact_by_path(receipt.output_dir)[
+            "entries/000000/request.body.har-text"
+        ]["representation"]
+        == "HAR_TEXT_SURROGATEPASS"
+    )
+    assert _manifest(receipt.output_dir)["diagnostics"] == [
+        {"code": "BODY_TEXT_SURROGATE", "source_index": 0, "side": "request"}
+    ]
+
+
+def test_malformed_present_bodies_are_diagnosed_without_creating_body_files(
+    tmp_path: Path,
+) -> None:
+    entries = [
+        {
+            "request": {"postData": ["not an object"]},
+            "response": {"content": {"text": 7}},
+        },
+        {
+            "request": {"postData": {"encoding": "base64"}},
+            "response": {"content": {}},
+        },
+    ]
+    receipt = extract_har(
+        json.dumps({"log": {"entries": entries}}, separators=(",", ":")).encode(),
+        tmp_path / "malformed-bodies",
+    )
+
+    assert receipt.parse_status is HarParseStatus.PARTIAL
+    assert receipt.materialized_entry_count == 2
+    assert _manifest(receipt.output_dir)["diagnostics"] == [
+        {"code": "BODY_NOT_OBJECT", "source_index": 0, "side": "request"},
+        {"code": "BODY_TEXT_NOT_STRING", "source_index": 0, "side": "response"},
+        {
+            "code": "BASE64_BODY_TEXT_MISSING",
+            "source_index": 1,
+            "side": "request",
+        },
+    ]
+    assert not any(
+        path.name.endswith(".body.har-text")
+        for path in (receipt.output_dir / "entries").rglob("*")
+    )
+    assert json.loads(
+        (receipt.output_dir / "entries" / "000000" / "entry.json").read_text(
+            encoding="utf-8"
+        )
+    ) == entries[0]
+
+
+def test_deterministic_outputs_preserve_huge_integers_without_value_leakage(
+    tmp_path: Path,
+) -> None:
+    huge_integer = 10**1000
+    entries = [
+        {
+            "request": {"postData": {"text": "body"}},
+            "response": {"content": {"text": "response"}},
+            "huge_integer": huge_integer,
+        }
+    ]
+    source = json.dumps({"log": {"entries": entries}}, separators=(",", ":")).encode()
+
+    left = extract_har(source, tmp_path / "left")
+    right = extract_har(source, tmp_path / "right")
+
+    assert json.loads(
+        (left.output_dir / "entries" / "000000" / "entry.json").read_text(
+            encoding="utf-8"
+        )
+    )["huge_integer"] == huge_integer
+    left_files = {
+        path.relative_to(left.output_dir).as_posix(): path.read_bytes()
+        for path in left.output_dir.rglob("*")
+        if path.is_file()
+    }
+    right_files = {
+        path.relative_to(right.output_dir).as_posix(): path.read_bytes()
+        for path in right.output_dir.rglob("*")
+        if path.is_file()
+    }
+    assert left_files == right_files
 
 
 def test_non_object_entries_are_preserved_and_mark_the_receipt_partial(
