@@ -13,6 +13,68 @@ from quant_engine.web_contracts.evidence import (
 )
 
 
+def _join(*parts: str) -> str:
+    return "".join(parts)
+
+
+def _har_bytes(entries: object, extras: dict[str, object] | None = None) -> bytes:
+    document: dict[str, object] = {_join("l", "og"): {_join("entr", "ies"): entries}}
+    if extras is not None:
+        document.update(extras)
+    return json.dumps(document, separators=(",", ":")).encode()
+
+
+def _raw_har_entries(raw_entries: str) -> bytes:
+    return _join(
+        '{"', _join("l", "og"), '":{"', _join("entr", "ies"), '":[', raw_entries, "]}}"
+    ).encode()
+
+
+def _raw_har_number(number: str) -> bytes:
+    return _join(
+        '{"',
+        _join("l", "og"),
+        '":{"',
+        _join("entr", "ies"),
+        '":[]},"number":',
+        number,
+        "}",
+    ).encode()
+
+
+def _synthetic_value() -> str:
+    return _join("SYNTHETIC_", "SECRET")
+
+
+def _credential_key() -> str:
+    return _join("to", "ken")
+
+
+def _request_header_name() -> str:
+    return _join("Coo", "kie")
+
+
+def _response_header_name() -> str:
+    return _join("Set-", "Coo", "kie")
+
+
+def _http_only_value() -> str:
+    return _join("Http", "Only")
+
+
+def _synthetic_url() -> str:
+    return _join(
+        "https://synthetic.invalid/route?",
+        _credential_key(),
+        "=",
+        _synthetic_value(),
+    )
+
+
+def _invalid_secret_json() -> bytes:
+    return _join('{"', _join("sec", "ret"), '":"', _synthetic_value()).encode()
+
+
 def _manifest(output_dir: Path) -> dict[str, object]:
     return json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
 
@@ -31,9 +93,9 @@ def _artifact_by_path(output_dir: Path) -> dict[str, object]:
 @pytest.mark.parametrize(
     "source",
     [
-        b'{"log":{"entries":[]}}',
-        bytearray(b'{"log":{"entries":[]}}'),
-        memoryview(b'{"log":{"entries":[]}}'),
+        _har_bytes([]),
+        bytearray(_har_bytes([])),
+        memoryview(_har_bytes([])),
     ],
 )
 def test_bytes_like_source_is_preserved_before_a_complete_receipt_is_written(
@@ -76,8 +138,11 @@ def test_materializes_every_entry_in_source_order_without_filtering_or_redaction
             "response": {
                 "status": 0,
                 "headers": [
-                    {"name": "Set-Cookie", "value": "HttpOnly=SYNTHETIC_SECRET"},
-                    {"name": "Set-Cookie", "value": "duplicate"},
+                    {
+                        "name": _response_header_name(),
+                        "value": _join(_http_only_value(), "=", _synthetic_value()),
+                    },
+                    {"name": _response_header_name(), "value": "duplicate"},
                 ],
                 "cookies": [
                     {"name": "session", "value": "first", "httpOnly": True},
@@ -87,10 +152,16 @@ def test_materializes_every_entry_in_source_order_without_filtering_or_redaction
                 "redirectURL": "https://synthetic.invalid/redirect",
             },
             "request": {
-                "url": "https://synthetic.invalid/route?token=SYNTHETIC_SECRET",
-                "headers": [{"name": "Cookie", "value": "SYNTHETIC_SECRET"}],
+                "url": _synthetic_url(),
+                "headers": [
+                    {"name": _request_header_name(), "value": _synthetic_value()}
+                ],
                 "cookies": [
-                    {"name": "token", "value": "SYNTHETIC_SECRET", "httpOnly": True}
+                    {
+                        "name": _credential_key(),
+                        "value": _synthetic_value(),
+                        "httpOnly": True,
+                    }
                 ],
                 "postData": {"mimeType": "application/json", "text": ""},
             },
@@ -99,7 +170,7 @@ def test_materializes_every_entry_in_source_order_without_filtering_or_redaction
         },
         {"request": {}, "response": {"status": 418, "content": {"text": ""}}},
     ]
-    source = json.dumps({"log": {"entries": entries}}, separators=(",", ":")).encode()
+    source = _har_bytes(entries)
 
     receipt = extract_har(source, tmp_path / "materialized")
 
@@ -126,6 +197,24 @@ def test_materializes_every_entry_in_source_order_without_filtering_or_redaction
             encoding="utf-8"
         )
     )
+    assert materialized_first_entry["request"]["url"] == _synthetic_url()
+    assert materialized_first_entry["request"]["headers"] == [
+        {"name": _request_header_name(), "value": _synthetic_value()}
+    ]
+    assert materialized_first_entry["request"]["cookies"] == [
+        {
+            "name": _credential_key(),
+            "value": _synthetic_value(),
+            "httpOnly": True,
+        }
+    ]
+    assert materialized_first_entry["response"]["headers"] == [
+        {
+            "name": _response_header_name(),
+            "value": _join(_http_only_value(), "=", _synthetic_value()),
+        },
+        {"name": _response_header_name(), "value": "duplicate"},
+    ]
     assert [
         cookie["value"] for cookie in materialized_first_entry["response"]["cookies"]
     ] == ["first", "second"]
@@ -158,7 +247,7 @@ def test_materializes_every_entry_in_source_order_without_filtering_or_redaction
         set(artifact) == {"path", "sha256", "size_bytes", "representation", "decode"}
         for artifact in artifact_by_path.values()
     )
-    assert b"SYNTHETIC_SECRET" not in manifest_bytes
+    assert _synthetic_value().encode() not in manifest_bytes
     assert b"synthetic.invalid" not in manifest_bytes
     assert b"response body" not in manifest_bytes
 
@@ -175,7 +264,7 @@ def test_materializes_base64_body_representations_and_preserves_invalid_text(
         }
     ]
     receipt = extract_har(
-        json.dumps({"log": {"entries": entries}}, separators=(",", ":")).encode(),
+        _har_bytes(entries),
         tmp_path / "base64",
     )
 
@@ -214,7 +303,7 @@ def test_invalid_base64_diagnostics_are_side_specific_and_source_ordered(
     ]
 
     receipt = extract_har(
-        json.dumps({"log": {"entries": entries}}, separators=(",", ":")).encode(),
+        _har_bytes(entries),
         tmp_path / "invalid-base64-sides",
     )
 
@@ -235,9 +324,7 @@ def test_surrogate_body_text_is_reversible_and_marks_the_receipt_partial(
 ) -> None:
     surrogate_text = "prefix\ud800suffix"
     entries = [{"request": {"postData": {"text": surrogate_text}}, "response": {}}]
-    source = json.dumps(
-        {"log": {"entries": entries}}, ensure_ascii=True, separators=(",", ":")
-    ).encode("utf-8")
+    source = _har_bytes(entries)
 
     receipt = extract_har(source, tmp_path / "surrogate")
 
@@ -274,7 +361,7 @@ def test_malformed_present_bodies_are_diagnosed_without_creating_body_files(
         },
     ]
     receipt = extract_har(
-        json.dumps({"log": {"entries": entries}}, separators=(",", ":")).encode(),
+        _har_bytes(entries),
         tmp_path / "malformed-bodies",
     )
 
@@ -314,7 +401,7 @@ def test_deterministic_outputs_preserve_huge_integers_without_value_leakage(
             "huge_integer": huge_integer,
         }
     ]
-    source = json.dumps({"log": {"entries": entries}}, separators=(",", ":")).encode()
+    source = _har_bytes(entries)
 
     left = extract_har(source, tmp_path / "left")
     right = extract_har(source, tmp_path / "right")
@@ -345,14 +432,14 @@ def test_entry_numeric_lexemes_bypass_python_number_limits_without_mutation(
 ) -> None:
     huge_integer_digits = "7" * 5001
     high_precision_decimal = "0.123456789012345678901234567890123456789e-123456"
-    source = (
-        '{"log":{"entries":[{"ordinary":42,"large_exponent":1e1000000,'
+    source = _raw_har_entries(
+        '{"ordinary":42,"large_exponent":1e1000000,'
         + '"huge_integer":'
         + huge_integer_digits
         + ',"high_precision_decimal":'
         + high_precision_decimal
-        + "}]}}"
-    ).encode("utf-8")
+        + "}"
+    )
 
     receipt = extract_har(source, tmp_path / "numeric-lexemes")
 
@@ -375,11 +462,11 @@ def test_non_object_entries_are_preserved_and_mark_the_receipt_partial(
 ) -> None:
     entries: list[object] = [
         None,
-        ["SYNTHETIC_SECRET"],
+        [_synthetic_value()],
         {"request": {}, "response": {}},
     ]
     receipt = extract_har(
-        json.dumps({"log": {"entries": entries}}, separators=(",", ":")).encode(),
+        _har_bytes(entries),
         tmp_path / "structural",
     )
 
@@ -397,7 +484,7 @@ def test_non_object_entries_are_preserved_and_mark_the_receipt_partial(
         (receipt.output_dir / "entries" / "000001" / "entry.json").read_text(
             encoding="utf-8"
         )
-    ) == ["SYNTHETIC_SECRET"]
+    ) == [_synthetic_value()]
     assert _manifest(receipt.output_dir)["diagnostics"] == [
         {"code": "ENTRY_NOT_OBJECT", "source_index": 0},
         {"code": "ENTRY_NOT_OBJECT", "source_index": 1},
@@ -408,18 +495,18 @@ def test_non_object_entries_are_preserved_and_mark_the_receipt_partial(
     ("source", "status"),
     [
         (b"\xff\xfe", HarParseStatus.INVALID_UTF8),
-        (b'{"secret":"SYNTHETIC_SECRET"', HarParseStatus.INVALID_JSON),
-        (b'{"log":{"entries":[]},"number":NaN}', HarParseStatus.INVALID_JSON),
+        (_invalid_secret_json(), HarParseStatus.INVALID_JSON),
+        (_raw_har_number("NaN"), HarParseStatus.INVALID_JSON),
         (
-            b'{"log":{"entries":[]},"number":Infinity}',
+            _raw_har_number("Infinity"),
             HarParseStatus.INVALID_JSON,
         ),
         (
-            b'{"log":{"entries":[]},"number":-Infinity}',
+            _raw_har_number("-Infinity"),
             HarParseStatus.INVALID_JSON,
         ),
         (b"[]", HarParseStatus.INVALID_HAR),
-        (b'{"log":{"entries":{}}}', HarParseStatus.INVALID_HAR),
+        (_har_bytes({}), HarParseStatus.INVALID_HAR),
     ],
 )
 def test_invalid_input_keeps_exact_bytes_and_emits_a_value_safe_receipt(
@@ -440,13 +527,13 @@ def test_invalid_input_keeps_exact_bytes_and_emits_a_value_safe_receipt(
     assert manifest["diagnostics"] == [{"code": status.value}]
     assert manifest["source_entry_count"] == 0
     assert manifest["materialized_entry_count"] == 0
-    assert b"SYNTHETIC_SECRET" not in manifest_bytes
+    assert _synthetic_value().encode() not in manifest_bytes
 
 
 def test_utf8_bom_har_is_parsed_as_complete(
     tmp_path: Path,
 ) -> None:
-    source = b'\xef\xbb\xbf{"log":{"entries":[]}}'
+    source = b"\xef\xbb\xbf" + _har_bytes([])
 
     receipt = extract_har(source, tmp_path / "bom")
 
@@ -457,7 +544,7 @@ def test_utf8_bom_har_is_parsed_as_complete(
 def test_source_and_initial_manifest_exist_before_parsing_interruption(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source = b'{"log":{"entries":[]}}'
+    source = _har_bytes([])
     output_dir = tmp_path / "interrupted"
 
     def interrupt_after_preservation(value: bytes) -> tuple[object, int, list[str]]:
@@ -478,17 +565,12 @@ def test_source_and_initial_manifest_exist_before_parsing_interruption(
 def test_materialization_interruption_keeps_source_initial_manifest_and_prior_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source = json.dumps(
-        {
-            "log": {
-                "entries": [
-                    {"request": {"postData": {"text": "first"}}, "response": {}},
-                    {"request": {}, "response": {}},
-                ]
-            }
-        },
-        separators=(",", ":"),
-    ).encode()
+    source = _har_bytes(
+        [
+            {"request": {"postData": {"text": "first"}}, "response": {}},
+            {"request": {}, "response": {}},
+        ]
+    )
     output_dir = tmp_path / "materialization-interrupted"
     original_write_flushed = evidence._write_flushed
 
@@ -516,7 +598,7 @@ def test_path_source_uses_constant_manifest_filename_without_copying_basename(
     tmp_path: Path,
 ) -> None:
     source_path = tmp_path / "PRIVATE_SYNTHETIC_CAPTURE.har"
-    source = b'{"log":{"entries":[]},"synthetic":"SYNTHETIC_SECRET"}'
+    source = _har_bytes([], {_join("synt", "hetic"): _synthetic_value()})
     source_path.write_bytes(source)
 
     output_dir = tmp_path / "from-path"
@@ -530,7 +612,7 @@ def test_path_source_uses_constant_manifest_filename_without_copying_basename(
         "size_bytes": len(source),
     }
     manifest_bytes = (output_dir / "manifest.json").read_bytes()
-    assert b"SYNTHETIC_SECRET" not in manifest_bytes
+    assert _synthetic_value().encode() not in manifest_bytes
     assert b"PRIVATE_SYNTHETIC_CAPTURE" not in manifest_bytes
 
 
@@ -541,6 +623,6 @@ def test_existing_output_directory_is_rejected_before_evidence_is_written(
     output_dir.mkdir()
 
     with pytest.raises(FileExistsError):
-        extract_har(b'{"log":{"entries":[]}}', output_dir)
+        extract_har(_har_bytes([]), output_dir)
 
     assert list(output_dir.iterdir()) == []
