@@ -16,6 +16,13 @@ from typing import Any, NoReturn
 _MANIFEST_SCHEMA = "quant-engine.web-contract-extraction.v1"
 
 
+@dataclass(frozen=True)
+class _RawJsonNumber:
+    """A JSON numeric lexeme validated by the standard-library decoder."""
+
+    value: str
+
+
 class HarParseStatus(StrEnum):
     """The parse state reported after a HAR source has been preserved."""
 
@@ -108,13 +115,27 @@ def _reject_non_finite_constant(value: str) -> NoReturn:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
+def _load_json(source: bytes) -> Any:
+    return json.loads(
+        source.decode("utf-8-sig", errors="strict"),
+        parse_int=_RawJsonNumber,
+        parse_float=_RawJsonNumber,
+        parse_constant=_reject_non_finite_constant,
+    )
+
+
 def _parse_status(source: bytes) -> tuple[HarParseStatus, int, list[str]]:
     try:
         text = source.decode("utf-8-sig", errors="strict")
     except UnicodeDecodeError:
         return HarParseStatus.INVALID_UTF8, 0, [HarParseStatus.INVALID_UTF8.value]
     try:
-        document = json.loads(text, parse_constant=_reject_non_finite_constant)
+        document = json.loads(
+            text,
+            parse_int=_RawJsonNumber,
+            parse_float=_RawJsonNumber,
+            parse_constant=_reject_non_finite_constant,
+        )
     except (json.JSONDecodeError, ValueError):
         return HarParseStatus.INVALID_JSON, 0, [HarParseStatus.INVALID_JSON.value]
     if not isinstance(document, dict):
@@ -129,16 +150,36 @@ def _parse_status(source: bytes) -> tuple[HarParseStatus, int, list[str]]:
 
 
 def _parsed_entries(source: bytes) -> list[Any]:
-    document = json.loads(
-        source.decode("utf-8-sig", errors="strict"),
-        parse_constant=_reject_non_finite_constant,
-    )
+    document = _load_json(source)
     assert isinstance(document, dict)
     log = document["log"]
     assert isinstance(log, dict)
     entries = log["entries"]
     assert isinstance(entries, list)
     return entries
+
+
+def _entry_json(value: Any) -> str:
+    if isinstance(value, _RawJsonNumber):
+        return value.value
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=True, allow_nan=False)
+    if isinstance(value, list):
+        return "[" + ",".join(_entry_json(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ",".join(
+            json.dumps(key, ensure_ascii=True, allow_nan=False)
+            + ":"
+            + _entry_json(item)
+            for key, item in value.items()
+        ) + "}"
+    raise TypeError("entry contains a value outside the parsed JSON domain")
 
 
 def _artifact_record(
@@ -249,9 +290,7 @@ def _materialize_entry(
         _artifact_record(
             destination=destination,
             path=entry_dir / "entry.json",
-            value=json.dumps(
-                entry, ensure_ascii=True, allow_nan=False, separators=(",", ":")
-            ).encode("utf-8"),
+            value=_entry_json(entry).encode("utf-8"),
             representation="ENTRY_JSON",
             decode="NOT_APPLICABLE",
         )
