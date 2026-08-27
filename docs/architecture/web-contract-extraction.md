@@ -51,7 +51,7 @@ For any request `postData.text` or response `content.text`, the extractor writes
 - source-indexed relative paths, sizes, SHA-256 digests, representations, and decode dispositions for emitted derivative files;
 - value-free structural diagnostic codes.
 
-An initial manifest with `SOURCE_PRESERVED` state is atomically published immediately after the source write. The final manifest replaces it atomically. If execution stops after preservation but before finalization, the directory still states that only source preservation completed.
+An initial manifest with `SOURCE_PRESERVED` state is atomically published immediately after the source write. Its `source_entry_count` is `null` because no HAR shape has yet been validated. Once `log.entries` is validated, a `PARSED` manifest publishes the known source count and `DERIVATIVES_NOT_FINALIZED` completeness before any entry derivative is written. The final manifest replaces it only after materialization finishes. An interruption therefore retains either the source-only state or the known count with an explicit unfinished-derivatives state.
 
 Final parse statuses are:
 
@@ -66,6 +66,8 @@ Diagnostics use codes, source indexes, and the fixed body side (`request` or `re
 ## Failure and recovery
 
 The output is create-only. Existing paths fail before a source write, so an earlier extraction cannot be overwritten. Once `source.har` is complete, later parse, structure, or body-decoding failures do not remove it. Files already written are not deleted on a later failure.
+
+Every source and manifest file is flushed and file-synced before the next phase. On POSIX, the extractor also syncs metadata for newly created destination directories, source creation, and each manifest rename. On Windows it performs the portable file syncs but does not claim directory-metadata or sudden-power-loss durability because Windows exposes no portable directory-fsync equivalent; the caller remains responsible for the destination filesystem's durability guarantees.
 
 The extractor performs no network or browser operation. There are no fixed body, entry, or file-size caps and no silent truncation. Operational I/O failures surface to the caller while leaving the create-only directory available for reconciliation.
 
