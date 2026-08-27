@@ -79,4 +79,6 @@ Safe diagnostics do not mean the extraction is sanitized: `source.har`, `entry.j
 
 ## Excluded surfaces
 
-This design does not implement CLI commands, browser/CDP capture, navigation, screenshots, provider semantics, authenticated traffic, API fallback, replay, crawling/frontier coverage, DOM exploration, verification/promotion, code generation, or provider contract corrections. Those are independently governed surfaces.
+The extraction module does not parse command-line arguments. Version 0.3 provides a separate thin `quant-engine-web-contract extract` adapter that calls this API without changing its artifacts; see [the CLI decision](web-contract-cli.md).
+
+Browser/CDP capture, navigation, screenshots, provider semantics, authenticated traffic, API fallback, replay, crawling/frontier coverage, DOM exploration, verification/promotion, code generation, provider contract corrections, CSV flattening, and HTML interpretation remain excluded and independently governed surfaces.

@@ -164,8 +164,8 @@ inconsistent `CURRENT.json` authorities.
 
 ## Target interaction surfaces
 
-The following CLI and protocol shapes are target architecture, not an
-implemented WCH command surface:
+The following unified CLI and protocol shapes remain target architecture, not
+the name of the installed WCH command:
 
 ```text
 quant-engine source <provider> plan|capture|ingest|reconcile|publish|status
@@ -190,10 +190,12 @@ shared lifecycle, coverage, evidence, or broker-manifest contracts.
 ## Web Contract Harvester boundary
 
 The implemented Web Contract Harvester (WCH) surface is the provider-neutral,
-offline `quant_engine.web_contracts.evidence.extract_har` function:
+offline `quant_engine.web_contracts.evidence.extract_har` function plus its thin
+CLI adapter:
 
 - Distribution: `quant-engine-web-contract-harvester`
 - Python namespace: `quant_engine.web_contracts`
+- Installed command: `quant-engine-web-contract extract`
 - Input: an existing HAR path or bytes-like value
 - Output: create-only `source.har`, source-ordered entry/body derivatives, and
   a value-safe manifest
@@ -204,10 +206,11 @@ redact raw evidence and makes no provider decision. Provider contract
 declarations remain separately owned metadata; their presence does not make
 provider capture or extraction implemented.
 
-CLI commands, browser/CDP capture, authenticated traffic, provider routing and
-schema semantics, replay, crawling, verification, and promotion are separately
-tracked work. A HAR failure is not permission to fall back to an API or any
-other transport.
+The CLI accepts an explicit HAR path and new output directory, calls the package
+API, and emits only value-safe status JSON. Browser/CDP capture, authenticated
+traffic, provider routing and schema semantics, replay, crawling, verification,
+and promotion remain separately tracked work. A HAR failure is not permission
+to fall back to an API or any other transport.
 
 The generalized recovered-source baseline is three human-authored files totaling
 69,813 bytes, bound by the three generalized `RECOVERED_SOURCE_ANCHORS` hashes. The

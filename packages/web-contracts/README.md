@@ -37,7 +37,28 @@ diagnostics; it does not contain captured values. See
 [the extraction architecture](../../docs/architecture/web-contract-extraction.md)
 for the exact preservation and recovery contract.
 
-## 0.2 migration
+## CLI
+
+Version 0.3 installs a thin offline wrapper over the same API:
+
+```powershell
+quant-engine-web-contract extract `
+  --har-file C:\restricted\capture.har `
+  --output-dir C:\restricted\capture-extraction
+```
+
+`--input` is an alias for `--har-file`. Both paths are required; the output must
+not already exist. Exit status is 0 for `COMPLETE`, 2 when the source is preserved
+but parsing/materialization is noncomplete, 1 for an operational error, 64 for
+usage, and 130 for interruption. Console JSON contains only value-safe status,
+digest, size, and count fields. It never prints captured values or argument paths.
+
+Capture, verification, latest-HAR discovery, domain filtering, CSV flattening,
+and HTML table extraction are not hidden inside this command. Their recovered
+dispositions and migration details are recorded in
+[the CLI architecture](../../docs/architecture/web-contract-cli.md).
+
+## 0.2 and 0.3 migration
 
 The public API is now `HarExtractionReceipt`, `HarParseStatus`, and
 `extract_har` from `quant_engine.web_contracts.evidence`. The redacting legacy
@@ -48,6 +69,9 @@ public `SOURCE_ANCHORS` is removed; use generalized
 `quant_engine.web_contracts.extract` import path is deleted. Provider contracts
 remain declarations only; provider-specific capture, CLI, and replay work is
 separately governed.
+
+Version 0.3 adds `quant-engine-web-contract extract`. It keeps the complete v0.2
+artifact contract unchanged and adds no browser or provider dependency.
 
 Migration tracking: [#375](https://github.com/dachent/quant_engine/issues/375),
 [#376](https://github.com/dachent/quant_engine/issues/376),
