@@ -18,7 +18,7 @@ _MANIFEST_SCHEMA = "quant-engine.web-contract-extraction.v1"
 
 @dataclass(frozen=True)
 class _RawJsonNumber:
-    """A JSON numeric lexeme validated by the standard-library decoder."""
+    """A JSON numeric lexeme validated by the iterative grammar parser."""
 
     value: str
 
