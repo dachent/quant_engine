@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
@@ -77,7 +79,8 @@ def _manifest(
     parse_status: HarParseStatus,
     source_entry_count: int,
     materialized_entry_count: int,
-    diagnostic_codes: list[str],
+    artifacts: list[dict[str, str | int]],
+    diagnostics: list[dict[str, str | int]],
 ) -> dict[str, Any]:
     return {
         "completeness": (
@@ -87,7 +90,8 @@ def _manifest(
             if parse_status is HarParseStatus.COMPLETE
             else "INCOMPLETE"
         ),
-        "diagnostic_codes": diagnostic_codes,
+        "artifacts": artifacts,
+        "diagnostics": diagnostics,
         "materialized_entry_count": materialized_entry_count,
         "parse_status": parse_status.value,
         "schema": _MANIFEST_SCHEMA,
@@ -121,9 +125,150 @@ def _parse_status(source: bytes) -> tuple[HarParseStatus, int, list[str]]:
     entries = log.get("entries")
     if not isinstance(entries, list):
         return HarParseStatus.INVALID_HAR, 0, [HarParseStatus.INVALID_HAR.value]
-    if entries:
-        return HarParseStatus.PARTIAL, len(entries), ["ENTRIES_NOT_MATERIALIZED"]
     return HarParseStatus.COMPLETE, len(entries), []
+
+
+def _parsed_entries(source: bytes) -> list[Any]:
+    document = json.loads(
+        source.decode("utf-8-sig", errors="strict"),
+        parse_constant=_reject_non_finite_constant,
+    )
+    assert isinstance(document, dict)
+    log = document["log"]
+    assert isinstance(log, dict)
+    entries = log["entries"]
+    assert isinstance(entries, list)
+    return entries
+
+
+def _artifact_record(
+    *,
+    destination: Path,
+    path: Path,
+    value: bytes,
+    representation: str,
+    decode: str,
+) -> dict[str, str | int]:
+    _write_flushed(path, value)
+    return {
+        "path": path.relative_to(destination).as_posix(),
+        "sha256": hashlib.sha256(value).hexdigest(),
+        "size_bytes": len(value),
+        "representation": representation,
+        "decode": decode,
+    }
+
+
+def _materialize_body(
+    *,
+    destination: Path,
+    entry_dir: Path,
+    side: str,
+    body: object,
+    artifacts: list[dict[str, str | int]],
+) -> bool:
+    if not isinstance(body, dict):
+        return False
+    text = body.get("text")
+    if not isinstance(text, str):
+        return False
+
+    text_bytes = text.encode("utf-8")
+    artifacts.append(
+        _artifact_record(
+            destination=destination,
+            path=entry_dir / f"{side}.body.har-text",
+            value=text_bytes,
+            representation="HAR_TEXT",
+            decode="NOT_APPLICABLE",
+        )
+    )
+    if body.get("encoding") != "base64":
+        return False
+
+    base64_path = entry_dir / f"{side}.body.base64"
+    try:
+        decoded = base64.b64decode(text.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error):
+        artifacts.append(
+            _artifact_record(
+                destination=destination,
+                path=base64_path,
+                value=text_bytes,
+                representation="BASE64",
+                decode="INVALID",
+            )
+        )
+        return True
+
+    artifacts.append(
+        _artifact_record(
+            destination=destination,
+            path=base64_path,
+            value=text_bytes,
+            representation="BASE64",
+            decode="VALID",
+        )
+    )
+    artifacts.append(
+        _artifact_record(
+            destination=destination,
+            path=entry_dir / f"{side}.body.decoded",
+            value=decoded,
+            representation="DECODED",
+            decode="DECODED",
+        )
+    )
+    return False
+
+
+def _materialize_entry(
+    *,
+    destination: Path,
+    source_index: int,
+    entry: Any,
+    artifacts: list[dict[str, str | int]],
+    diagnostics: list[dict[str, str | int]],
+) -> None:
+    entry_dir = destination / "entries" / f"{source_index:06d}"
+    entry_dir.mkdir(parents=True)
+    artifacts.append(
+        _artifact_record(
+            destination=destination,
+            path=entry_dir / "entry.json",
+            value=json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            ),
+            representation="ENTRY_JSON",
+            decode="NOT_APPLICABLE",
+        )
+    )
+    if not isinstance(entry, dict):
+        diagnostics.append({"code": "ENTRY_NOT_OBJECT", "source_index": source_index})
+        return
+
+    request = entry.get("request")
+    if isinstance(request, dict) and _materialize_body(
+        destination=destination,
+        entry_dir=entry_dir,
+        side="request",
+        body=request.get("postData"),
+        artifacts=artifacts,
+    ):
+        diagnostics.append(
+            {"code": "INVALID_BASE64_BODY", "source_index": source_index}
+        )
+    response = entry.get("response")
+    if isinstance(response, dict) and _materialize_body(
+        destination=destination,
+        entry_dir=entry_dir,
+        side="response",
+        body=response.get("content"),
+        artifacts=artifacts,
+    ):
+        diagnostics.append(
+            {"code": "INVALID_BASE64_BODY", "source_index": source_index}
+        )
 
 
 def extract_har(
@@ -154,10 +299,28 @@ def extract_har(
             parse_status=HarParseStatus.SOURCE_PRESERVED,
             source_entry_count=0,
             materialized_entry_count=0,
-            diagnostic_codes=[],
+            artifacts=[],
+            diagnostics=[],
         ),
     )
     parse_status, source_entry_count, diagnostic_codes = _parse_status(source_bytes)
+    artifacts: list[dict[str, str | int]] = []
+    diagnostics: list[dict[str, str | int]] = [
+        {"code": diagnostic_code} for diagnostic_code in diagnostic_codes
+    ]
+    materialized_entry_count = 0
+    if parse_status is HarParseStatus.COMPLETE:
+        for source_index, entry in enumerate(_parsed_entries(source_bytes)):
+            _materialize_entry(
+                destination=destination,
+                source_index=source_index,
+                entry=entry,
+                artifacts=artifacts,
+                diagnostics=diagnostics,
+            )
+            materialized_entry_count += 1
+        if diagnostics:
+            parse_status = HarParseStatus.PARTIAL
     _publish_manifest(
         manifest_path,
         _manifest(
@@ -166,8 +329,9 @@ def extract_har(
             source_size_bytes=source_size_bytes,
             parse_status=parse_status,
             source_entry_count=source_entry_count,
-            materialized_entry_count=0,
-            diagnostic_codes=diagnostic_codes,
+            materialized_entry_count=materialized_entry_count,
+            artifacts=artifacts,
+            diagnostics=diagnostics,
         ),
     )
     return HarExtractionReceipt(
@@ -177,5 +341,5 @@ def extract_har(
         source_sha256=source_sha256,
         source_size_bytes=source_size_bytes,
         parse_status=parse_status,
-        materialized_entry_count=0,
+        materialized_entry_count=materialized_entry_count,
     )
