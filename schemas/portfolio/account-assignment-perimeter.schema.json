@@ -35,7 +35,7 @@
           "additionalProperties": false,
           "required": ["name", "version"],
           "properties": {
-            "name": {"const": "portfolio-baseline"},
+            "name": {"const": "portfolio-baseline-catalog"},
             "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"}
           }
         },

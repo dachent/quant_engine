@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
+import ast
+import builtins
 from copy import deepcopy
+from datetime import date
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
+import traceback
 from typing import Any
 
 import pytest
 from quant_engine.core import InputSnapshot
-from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core.contracts import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+    canonical_json_bytes,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +77,86 @@ def _assignment(
         "strategy_mapping_disposition": disposition,
         "effective_start": start,
         "effective_end": end,
+    }
+
+
+def _generation_manifest_snapshot(
+    *,
+    catalog: InputSnapshot,
+    catalog_artifact_id: str,
+    catalog_schema_name: str,
+    catalog_schema_version: str,
+    as_of_date: str,
+) -> InputSnapshot:
+    source_date = date.fromisoformat(as_of_date)
+    manifest = GenerationManifest.build(
+        as_of_date=source_date,
+        adapter=AdapterIdentity("synthetic-selected-input", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic selected input",
+            fact_types=("synthetic",),
+            observed_start=source_date,
+            observed_end=source_date,
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id=catalog_artifact_id,
+                sha256=catalog.sha256,
+                size_bytes=catalog.size_bytes,
+                as_of_date=source_date,
+                schema_name=catalog_schema_name,
+                schema_version=catalog_schema_version,
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    return InputSnapshot.from_bytes("synthetic generation manifest", manifest.to_json_bytes())
+
+
+def _selected_inputs(module: Any, baseline: InputSnapshot | None = None) -> object:
+    provider_ledger = InputSnapshot.from_bytes(
+        "synthetic provider ledger",
+        canonical_json_bytes({"as_of_date": "2026-01-31", "catalog_schema_version": 1}),
+    )
+    baseline = _fixture_inputs()["baseline"] if baseline is None else baseline
+    assert isinstance(baseline, InputSnapshot)
+    return module.AccountManifestSelectedInputs(
+        provider_ledger=provider_ledger,
+        provider_ledger_manifest=_generation_manifest_snapshot(
+            catalog=provider_ledger,
+            catalog_artifact_id="normalized/provider-ledger.json",
+            catalog_schema_name="provider-ledger-catalog",
+            catalog_schema_version="1",
+            as_of_date="2026-01-31",
+        ),
+        baseline=baseline,
+        baseline_manifest=_generation_manifest_snapshot(
+            catalog=baseline,
+            catalog_artifact_id="normalized/portfolio-baseline.json",
+            catalog_schema_name="portfolio-baseline-catalog",
+            catalog_schema_version="1",
+            as_of_date="2026-02-01",
+        ),
+        flow_classification_policy=InputSnapshot.from_bytes("policy", b"policy"),
+        retrieval_receipts={"synthetic-receipt": InputSnapshot.from_bytes("receipt", b"receipt")},
+        epoch_producer_source=InputSnapshot.from_bytes("epoch", b"epoch"),
+        generation_builder_source=InputSnapshot.from_bytes("builder", b"builder"),
+        independent_verifier_source=InputSnapshot.from_bytes("verifier", b"verifier"),
+    )
+
+
+def _selected_input_kwargs(selected_inputs: object) -> dict[str, object]:
+    return {
+        "provider_ledger": selected_inputs.provider_ledger,
+        "provider_ledger_manifest": selected_inputs.provider_ledger_manifest,
+        "baseline": selected_inputs.baseline,
+        "baseline_manifest": selected_inputs.baseline_manifest,
+        "flow_classification_policy": selected_inputs.flow_classification_policy,
+        "retrieval_receipts": selected_inputs.retrieval_receipts,
+        "epoch_producer_source": selected_inputs.epoch_producer_source,
+        "generation_builder_source": selected_inputs.generation_builder_source,
+        "independent_verifier_source": selected_inputs.independent_verifier_source,
     }
 
 
@@ -226,25 +319,25 @@ def _fixture_inputs() -> dict[str, object]:
 
 
 def _build(module: Any, inputs: dict[str, object]) -> bytes:
+    baseline = inputs["baseline"]
+    assert isinstance(baseline, InputSnapshot)
     return module.build_account_assignment_perimeter(
-        baseline_generation_id=BASELINE_GENERATION_ID,
-        baseline=inputs["baseline"],
+        selected_inputs=_selected_inputs(module, baseline),
         nav_facts=inputs["nav_facts"],
         raw_flow_facts=inputs["raw_flow_facts"],
         classified_flow_facts=inputs["classified_flow_facts"],
-        as_of_date=inputs["as_of_date"],
     )
 
 
 def _validate(module: Any, payload: dict[str, object], inputs: dict[str, object]) -> None:
+    baseline = inputs["baseline"]
+    assert isinstance(baseline, InputSnapshot)
     module.validate_account_assignment_perimeter(
         payload,
-        baseline_generation_id=BASELINE_GENERATION_ID,
-        baseline=inputs["baseline"],
+        selected_inputs=_selected_inputs(module, baseline),
         nav_facts=inputs["nav_facts"],
         raw_flow_facts=inputs["raw_flow_facts"],
         classified_flow_facts=inputs["classified_flow_facts"],
-        as_of_date=inputs["as_of_date"],
     )
 
 
@@ -268,6 +361,679 @@ def test_red_contract_requires_new_producer_and_schema() -> None:
     """This deliberately fails before 5C.1 creates its two production artifacts."""
     assert MODULE_PATH.is_file(), "5C.1 producer module has not been created"
     assert SCHEMA_PATH.is_file(), "5C.1 perimeter schema has not been created"
+
+
+def test_red_selected_inputs_own_the_generation_date_and_close_caller_injection(
+    perimeter_module: Any,
+) -> None:
+    inputs = _fixture_inputs()
+    selected_inputs = _selected_inputs(perimeter_module)
+
+    assert selected_inputs.generation_as_of_date == date(2026, 2, 1)
+    payload = perimeter_module.build_account_assignment_perimeter(
+        selected_inputs=selected_inputs,
+        nav_facts=inputs["nav_facts"],
+        raw_flow_facts=inputs["raw_flow_facts"],
+        classified_flow_facts=inputs["classified_flow_facts"],
+    )
+    assert json.loads(payload)["as_of_date"] == "2026-02-01"
+    with pytest.raises(TypeError):
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=selected_inputs,
+            nav_facts=inputs["nav_facts"],
+            raw_flow_facts=inputs["raw_flow_facts"],
+            classified_flow_facts=inputs["classified_flow_facts"],
+            as_of_date="2026-12-31",
+        )
+
+
+@pytest.mark.parametrize(
+    ("ledger_date", "baseline_date", "expected"),
+    [
+        ("2026-01-31", "2026-02-01", "2026-02-01"),
+        ("2026-03-01", "2026-02-28", "2026-03-01"),
+        ("2026-02-01", "2026-02-01", "2026-02-01"),
+        ("2026-10-01", "2026-09-30", "2026-10-01"),
+    ],
+)
+def test_derived_generation_date_is_the_later_selected_catalog_date(
+    perimeter_module: Any, ledger_date: str, baseline_date: str, expected: str
+) -> None:
+    provider_ledger = InputSnapshot.from_bytes(
+        "ledger diagnostic label",
+        canonical_json_bytes({"as_of_date": ledger_date, "catalog_schema_version": 1}),
+    )
+    baseline_payload = _fixture_inputs()["baseline"].json_object()
+    baseline_payload["as_of_date"] = baseline_date
+    baseline = InputSnapshot.from_bytes(
+        "baseline diagnostic label", canonical_json_bytes(baseline_payload)
+    )
+
+    assert perimeter_module.derive_generation_as_of_date(provider_ledger, baseline) == date.fromisoformat(expected)
+
+
+def test_unequal_selected_source_dates_preserve_source_dates_but_use_stored_max(
+    perimeter_module: Any,
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    ledger = InputSnapshot.from_bytes(
+        "later ledger",
+        canonical_json_bytes({"as_of_date": "2026-03-01", "catalog_schema_version": 1}),
+    )
+    constructor_inputs = _selected_input_kwargs(selected_inputs)
+    constructor_inputs["provider_ledger"] = ledger
+    constructor_inputs["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-03-01",
+    )
+    later_selected_inputs = perimeter_module.AccountManifestSelectedInputs(
+        **constructor_inputs
+    )
+    identities = json.loads(
+        perimeter_module.build_selected_input_identities(later_selected_inputs)
+    )
+    facts = _fixture_inputs()
+    perimeter = json.loads(
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=later_selected_inputs,
+            nav_facts=facts["nav_facts"],
+            raw_flow_facts=facts["raw_flow_facts"],
+            classified_flow_facts=facts["classified_flow_facts"],
+        )
+    )
+
+    assert later_selected_inputs.generation_as_of_date == date(2026, 3, 1)
+    assert identities["as_of_date"] == perimeter["as_of_date"] == "2026-03-01"
+    assert identities["provider_ledger"]["artifact"]["as_of_date"] == "2026-03-01"
+    assert identities["provider_ledger"]["generation_manifest"]["as_of_date"] == "2026-03-01"
+    assert identities["baseline"]["artifact"]["as_of_date"] == "2026-02-01"
+    assert identities["baseline"]["generation_manifest"]["as_of_date"] == "2026-02-01"
+
+
+@pytest.mark.parametrize(
+    "invalid_date",
+    [
+        None,
+        True,
+        20260201,
+        20260201.0,
+        " 2026-02-01",
+        "2026-2-1",
+        "2026-02-01T00:00:00",
+        "2026-W05-7",
+        "2026-032",
+        "0000-01-01",
+        "2026-02-30",
+    ],
+)
+@pytest.mark.parametrize("source", ["provider_ledger", "baseline"])
+def test_date_derivation_rejects_every_noncanonical_selected_input_date(
+    perimeter_module: Any, source: str, invalid_date: object
+) -> None:
+    valid_ledger = InputSnapshot.from_bytes(
+        "ledger", canonical_json_bytes({"as_of_date": "2026-02-01"})
+    )
+    valid_baseline = InputSnapshot.from_bytes(
+        "baseline", canonical_json_bytes({"as_of_date": "2026-02-01"})
+    )
+    invalid = InputSnapshot.from_bytes(
+        "invalid", canonical_json_bytes({"as_of_date": invalid_date})
+    )
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="selected input as_of_date must be a canonical ISO date",
+    ):
+        perimeter_module.derive_generation_as_of_date(
+            invalid if source == "provider_ledger" else valid_ledger,
+            invalid if source == "baseline" else valid_baseline,
+        )
+
+
+def test_selected_input_identities_are_frozen_and_validate_exactly(
+    perimeter_module: Any,
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    payload = json.loads(perimeter_module.build_selected_input_identities(selected_inputs))
+
+    assert payload["as_of_date"] == "2026-02-01"
+    assert payload["provider_ledger"]["generation_id"] == selected_inputs.provider_ledger_generation_id
+    assert payload["baseline"]["generation_id"] == selected_inputs.baseline_generation_id
+    assert [row["receipt_id"] for row in payload["retrieval_receipts"]] == ["synthetic-receipt"]
+    perimeter_module.validate_selected_input_identities(payload, selected_inputs)
+
+    payload["as_of_date"] = "2026-12-31"
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="payload differs from expected selected inputs",
+    ):
+        perimeter_module.validate_selected_input_identities(payload, selected_inputs)
+    with pytest.raises((AttributeError, TypeError)):
+        selected_inputs.generation_as_of_date = date(2026, 12, 31)
+    with pytest.raises(TypeError):
+        selected_inputs.retrieval_receipts["different"] = InputSnapshot.from_bytes("x", b"x")
+    with pytest.raises(TypeError):
+        perimeter_module.AccountManifestSelectedInputs(
+            provider_ledger=selected_inputs.provider_ledger,
+            provider_ledger_manifest=selected_inputs.provider_ledger_manifest,
+            baseline=selected_inputs.baseline,
+            baseline_manifest=selected_inputs.baseline_manifest,
+            flow_classification_policy=selected_inputs.flow_classification_policy,
+            retrieval_receipts=selected_inputs.retrieval_receipts,
+            epoch_producer_source=selected_inputs.epoch_producer_source,
+            generation_builder_source=selected_inputs.generation_builder_source,
+            independent_verifier_source=selected_inputs.independent_verifier_source,
+            generation_as_of_date=date(2026, 2, 1),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider_ledger_generation_id", "0" * 64),
+        ("baseline_generation_id", "0" * 64),
+        ("generation_as_of_date", date(2026, 2, 1)),
+    ],
+)
+def test_selected_input_constructor_rejects_derived_field_injection(
+    perimeter_module: Any, field: str, value: object
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    constructor_inputs = {
+        "provider_ledger": selected_inputs.provider_ledger,
+        "provider_ledger_manifest": selected_inputs.provider_ledger_manifest,
+        "baseline": selected_inputs.baseline,
+        "baseline_manifest": selected_inputs.baseline_manifest,
+        "flow_classification_policy": selected_inputs.flow_classification_policy,
+        "retrieval_receipts": selected_inputs.retrieval_receipts,
+        "epoch_producer_source": selected_inputs.epoch_producer_source,
+        "generation_builder_source": selected_inputs.generation_builder_source,
+        "independent_verifier_source": selected_inputs.independent_verifier_source,
+        field: value,
+    }
+    with pytest.raises(TypeError):
+        perimeter_module.AccountManifestSelectedInputs(**constructor_inputs)
+
+
+def test_selected_inputs_reject_manifest_bytes_or_catalog_binding_mutation(
+    perimeter_module: Any,
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    mutated_manifest = InputSnapshot.from_bytes(
+        "diagnostic-only",
+        selected_inputs.baseline_manifest.contents.rstrip() + b" ",
+    )
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="selected manifest must use canonical bytes",
+    ):
+        perimeter_module.AccountManifestSelectedInputs(
+            provider_ledger=selected_inputs.provider_ledger,
+            provider_ledger_manifest=selected_inputs.provider_ledger_manifest,
+            baseline=selected_inputs.baseline,
+            baseline_manifest=mutated_manifest,
+            flow_classification_policy=selected_inputs.flow_classification_policy,
+            retrieval_receipts=selected_inputs.retrieval_receipts,
+            epoch_producer_source=selected_inputs.epoch_producer_source,
+            generation_builder_source=selected_inputs.generation_builder_source,
+            independent_verifier_source=selected_inputs.independent_verifier_source,
+        )
+
+    altered_baseline = InputSnapshot.from_bytes(
+        "different path and label are irrelevant",
+        selected_inputs.baseline.contents + b" ",
+    )
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="selected manifest catalog artifact differs from frozen catalog",
+    ):
+        perimeter_module.AccountManifestSelectedInputs(
+            provider_ledger=selected_inputs.provider_ledger,
+            provider_ledger_manifest=selected_inputs.provider_ledger_manifest,
+            baseline=altered_baseline,
+            baseline_manifest=selected_inputs.baseline_manifest,
+            flow_classification_policy=selected_inputs.flow_classification_policy,
+            retrieval_receipts=selected_inputs.retrieval_receipts,
+            epoch_producer_source=selected_inputs.epoch_producer_source,
+            generation_builder_source=selected_inputs.generation_builder_source,
+            independent_verifier_source=selected_inputs.independent_verifier_source,
+        )
+
+
+def test_selected_identity_bytes_ignore_labels_paths_and_environment(
+    perimeter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    alternate_inputs = _selected_input_kwargs(selected_inputs)
+    alternate_inputs["provider_ledger"] = InputSnapshot(
+        label="other ledger diagnostic label",
+        contents=selected_inputs.provider_ledger.contents,
+        path=Path("C:/not-an-authority/ledger.json"),
+    )
+    alternate_inputs["provider_ledger_manifest"] = InputSnapshot(
+        label="other ledger manifest diagnostic label",
+        contents=selected_inputs.provider_ledger_manifest.contents,
+        path=Path("C:/not-an-authority/generation.json"),
+    )
+    alternate_inputs["baseline"] = InputSnapshot(
+        label="other baseline diagnostic label",
+        contents=selected_inputs.baseline.contents,
+        path=Path("C:/not-an-authority/baseline.json"),
+    )
+    alternate_inputs["baseline_manifest"] = InputSnapshot(
+        label="other baseline manifest diagnostic label",
+        contents=selected_inputs.baseline_manifest.contents,
+        path=Path("C:/not-an-authority/generation.json"),
+    )
+    alternate = perimeter_module.AccountManifestSelectedInputs(**alternate_inputs)
+    expected = perimeter_module.build_selected_input_identities(selected_inputs)
+
+    monkeypatch.setenv("TZ", "Pacific/Auckland")
+    monkeypatch.setenv("LC_ALL", "C")
+    monkeypatch.setenv("LANG", "C")
+    monkeypatch.setenv("LANGUAGE", "C")
+    assert perimeter_module.build_selected_input_identities(alternate) == expected
+    assert os.environ["TZ"] == "Pacific/Auckland"
+
+
+def test_selected_input_path_has_no_runtime_access_after_capture(
+    perimeter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    expected = perimeter_module.build_selected_input_identities(selected_inputs)
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise AssertionError("selected-input construction accessed the filesystem")
+
+    monkeypatch.setattr(Path, "read_bytes", fail)
+    monkeypatch.setattr(Path, "open", fail)
+    monkeypatch.setattr(Path, "resolve", fail)
+    monkeypatch.setattr(Path, "stat", fail)
+    monkeypatch.setattr(os, "stat", fail)
+    monkeypatch.setattr(os, "lstat", fail)
+    assert perimeter_module.build_selected_input_identities(selected_inputs) == expected
+
+
+def test_selected_input_errors_do_not_expose_snapshot_diagnostics(
+    perimeter_module: Any,
+) -> None:
+    secret_label = "SECRET-SNAPSHOT-LABEL"
+    secret_path = "C:/secret/selected-input.json"
+    secret_bytes = b"SECRET-SNAPSHOT-BYTES"
+    invalid_json = InputSnapshot(
+        label=secret_label,
+        contents=secret_bytes,
+        path=Path(secret_path),
+    )
+    invalid_date = InputSnapshot(
+        label=secret_label,
+        contents=canonical_json_bytes({"as_of_date": "not-a-date"}),
+        path=Path(secret_path),
+    )
+
+    for snapshot in (invalid_json, invalid_date):
+        with pytest.raises(perimeter_module.AccountAssignmentPerimeterError) as raised:
+            perimeter_module.derive_generation_as_of_date(
+                snapshot,
+                InputSnapshot.from_bytes(
+                    "safe", canonical_json_bytes({"as_of_date": "2026-02-01"})
+                ),
+            )
+        details = "".join(traceback.format_exception(raised.type, raised.value, raised.tb))
+        assert secret_label not in details
+        assert secret_path not in details
+        assert secret_bytes.decode("ascii") not in details
+        assert raised.value.__cause__ is None
+        assert raised.value.__suppress_context__ is True
+
+
+def test_selected_inputs_reject_noncanonical_receipt_ids(perimeter_module: Any) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    constructor_inputs = _selected_input_kwargs(selected_inputs)
+    constructor_inputs["retrieval_receipts"] = {
+        " receipt ": InputSnapshot.from_bytes("receipt", b"receipt")
+    }
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="retrieval receipt ID must be a portable canonical artifact identifier",
+    ):
+        perimeter_module.AccountManifestSelectedInputs(**constructor_inputs)
+
+
+@pytest.mark.parametrize(
+    "receipt_id",
+    [
+        "receipt/embedded\nnewline.json",
+        "receipt/embedded\x01control.json",
+        "/absolute/receipt.json",
+        "C:/drive/receipt.json",
+        "receipt\\backslash.json",
+        "receipt//empty-component.json",
+        "receipt/../traversal.json",
+        "receipt/trailing-dot.",
+        "receipt/trailing-space ",
+        "CON/receipt.json",
+        "receipt/r\u00e9ceipt.json",
+    ],
+)
+def test_selected_inputs_reject_nonportable_receipt_identifiers(
+    perimeter_module: Any, receipt_id: str
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    constructor_inputs = _selected_input_kwargs(selected_inputs)
+    constructor_inputs["retrieval_receipts"] = {
+        receipt_id: InputSnapshot.from_bytes("receipt", b"receipt")
+    }
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="retrieval receipt ID must be a portable canonical artifact identifier",
+    ):
+        perimeter_module.AccountManifestSelectedInputs(**constructor_inputs)
+
+
+def test_selected_inputs_reject_casefold_colliding_receipt_identifiers(
+    perimeter_module: Any,
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    constructor_inputs = _selected_input_kwargs(selected_inputs)
+    receipt = InputSnapshot.from_bytes("receipt", b"receipt")
+    constructor_inputs["retrieval_receipts"] = {
+        "receipt/synthetic.json": receipt,
+        "RECEIPT/SYNTHETIC.JSON": receipt,
+    }
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="retrieval receipt IDs must be unique case-insensitively",
+    ):
+        perimeter_module.AccountManifestSelectedInputs(**constructor_inputs)
+
+
+def test_selected_inputs_accept_portable_canonical_receipt_identifier(
+    perimeter_module: Any,
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    constructor_inputs = _selected_input_kwargs(selected_inputs)
+    receipt = InputSnapshot.from_bytes("receipt", b"receipt")
+    constructor_inputs["retrieval_receipts"] = {
+        "receipt/synthetic-2026-01-01-2026-01-03.json": receipt
+    }
+    accepted = perimeter_module.AccountManifestSelectedInputs(**constructor_inputs)
+    assert list(accepted.retrieval_receipts) == [
+        "receipt/synthetic-2026-01-01-2026-01-03.json"
+    ]
+
+
+def test_selected_input_public_seams_exclude_forbidden_time_and_filesystem_dependencies(
+    perimeter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    selected_inputs_class = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "AccountManifestSelectedInputs"
+    )
+    assert any(
+        isinstance(node, ast.FunctionDef) and node.name == "__post_init__"
+        for node in selected_inputs_class.body
+    )
+    reachable = {
+        "__post_init__",
+        "derive_generation_as_of_date",
+        "build_selected_input_identities",
+        "validate_selected_input_identities",
+        "build_account_assignment_perimeter",
+        "validate_account_assignment_perimeter",
+    }
+    pending = list(reachable)
+    while pending:
+        function = functions[pending.pop()]
+        for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
+            if isinstance(call.func, ast.Name) and call.func.id in functions:
+                if call.func.id not in reachable:
+                    reachable.add(call.func.id)
+                    pending.append(call.func.id)
+    assert {
+        "__post_init__",
+        "_canonical_receipt_id",
+        "_require_snapshot",
+        "_bound_catalog_identity",
+        "_selected_top_level_date",
+        "_nonnegative_schema_version",
+    } <= reachable
+
+    forbidden_imports = {
+        "datetime",
+        "time",
+        "locale",
+        "zoneinfo",
+        "platform",
+        "os",
+        "pathlib",
+        "importlib",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert not (
+                {name.name.split(".")[0] for name in node.names} & forbidden_imports
+            )
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "datetime":
+                assert [name.name for name in node.names] == ["date"]
+            else:
+                assert node.module not in forbidden_imports
+
+    forbidden_call_names = {"__import__", "eval", "exec", "import_module"}
+    forbidden_attributes = {
+        "environ",
+        "getenv",
+        "getenvb",
+        "lstat",
+        "now",
+        "open",
+        "read_bytes",
+        "read_text",
+        "resolve",
+        "stat",
+        "today",
+        "fromtimestamp",
+        "timestamp",
+    }
+    for function_name in reachable:
+        for node in ast.walk(functions[function_name]):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                assert node.func.id not in forbidden_call_names
+            if isinstance(node, ast.Attribute):
+                assert node.attr not in forbidden_attributes
+
+    class GuardedDate:
+        @staticmethod
+        def fromisoformat(value: str) -> date:
+            return date.fromisoformat(value)
+
+        @staticmethod
+        def today() -> date:
+            raise AssertionError("clock access is forbidden")
+
+        @staticmethod
+        def now() -> date:
+            raise AssertionError("clock access is forbidden")
+
+        @staticmethod
+        def fromtimestamp(value: float) -> date:
+            raise AssertionError("timestamp conversion is forbidden")
+
+        @staticmethod
+        def timestamp() -> float:
+            raise AssertionError("timestamp conversion is forbidden")
+
+    monkeypatch.setattr(perimeter_module, "date", GuardedDate)
+    original_import = builtins.__import__
+
+    def guarded_import(
+        name: str,
+        globals_: object = None,
+        locals_: object = None,
+        fromlist: object = (),
+        level: int = 0,
+    ) -> object:
+        if name.split(".")[0] in forbidden_imports:
+            raise AssertionError(f"forbidden import: {name}")
+        return original_import(name, globals_, locals_, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    selected_inputs = _selected_inputs(perimeter_module)
+    identities = json.loads(
+        perimeter_module.build_selected_input_identities(selected_inputs)
+    )
+    perimeter_module.validate_selected_input_identities(identities, selected_inputs)
+    inputs = _fixture_inputs()
+    perimeter = json.loads(
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=selected_inputs,
+            nav_facts=inputs["nav_facts"],
+            raw_flow_facts=inputs["raw_flow_facts"],
+            classified_flow_facts=inputs["classified_flow_facts"],
+        )
+    )
+    perimeter_module.validate_account_assignment_perimeter(
+        perimeter,
+        selected_inputs=selected_inputs,
+        nav_facts=inputs["nav_facts"],
+        raw_flow_facts=inputs["raw_flow_facts"],
+        classified_flow_facts=inputs["classified_flow_facts"],
+    )
+
+
+def test_captured_snapshots_ignore_post_capture_filesystem_changes(
+    perimeter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def capture(filename: str, label: str, contents: bytes) -> tuple[Path, InputSnapshot]:
+        path = tmp_path / filename
+        path.write_bytes(contents)
+        return path, InputSnapshot.capture(path, label)
+
+    baseline_bytes = _fixture_inputs()["baseline"].contents
+    ledger_path, provider_ledger = capture(
+        "ledger.json",
+        "captured ledger",
+        canonical_json_bytes({"as_of_date": "2026-01-31", "catalog_schema_version": 1}),
+    )
+    baseline_path, baseline = capture("baseline.json", "captured baseline", baseline_bytes)
+    ledger_manifest_path, provider_ledger_manifest = capture(
+        "ledger-generation.json",
+        "captured ledger manifest",
+        _generation_manifest_snapshot(
+            catalog=provider_ledger,
+            catalog_artifact_id="normalized/provider-ledger.json",
+            catalog_schema_name="provider-ledger-catalog",
+            catalog_schema_version="1",
+            as_of_date="2026-01-31",
+        ).contents,
+    )
+    baseline_manifest_path, baseline_manifest = capture(
+        "baseline-generation.json",
+        "captured baseline manifest",
+        _generation_manifest_snapshot(
+            catalog=baseline,
+            catalog_artifact_id="normalized/portfolio-baseline.json",
+            catalog_schema_name="portfolio-baseline-catalog",
+            catalog_schema_version="1",
+            as_of_date="2026-02-01",
+        ).contents,
+    )
+    _, policy = capture("policy.json", "captured policy", b"policy")
+    _, receipt = capture("receipt.json", "captured receipt", b"receipt")
+    _, epoch = capture("epoch.py", "captured epoch", b"epoch")
+    _, builder = capture("builder.py", "captured builder", b"builder")
+    _, verifier = capture("verifier.py", "captured verifier", b"verifier")
+    selected_inputs = perimeter_module.AccountManifestSelectedInputs(
+        provider_ledger=provider_ledger,
+        provider_ledger_manifest=provider_ledger_manifest,
+        baseline=baseline,
+        baseline_manifest=baseline_manifest,
+        flow_classification_policy=policy,
+        retrieval_receipts={"receipt": receipt},
+        epoch_producer_source=epoch,
+        generation_builder_source=builder,
+        independent_verifier_source=verifier,
+    )
+    facts = _fixture_inputs()
+    expected_identities = perimeter_module.build_selected_input_identities(selected_inputs)
+    expected_perimeter = perimeter_module.build_account_assignment_perimeter(
+        selected_inputs=selected_inputs,
+        nav_facts=facts["nav_facts"],
+        raw_flow_facts=facts["raw_flow_facts"],
+        classified_flow_facts=facts["classified_flow_facts"],
+    )
+    changed_ledger = canonical_json_bytes(
+        {"as_of_date": "2026-03-01", "catalog_schema_version": 1}
+    )
+    ledger_path.write_bytes(changed_ledger)
+    baseline_path.write_bytes(b"changed baseline bytes")
+    ledger_manifest_path.write_bytes(b"changed ledger manifest bytes")
+    baseline_manifest_path.write_bytes(b"changed baseline manifest bytes")
+    os.utime(ledger_path, (1, 1))
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise AssertionError("post-capture selected-input access touched the filesystem")
+
+    with monkeypatch.context() as trapped:
+        trapped.setattr(Path, "read_bytes", fail)
+        trapped.setattr(Path, "open", fail)
+        trapped.setattr(Path, "resolve", fail)
+        trapped.setattr(Path, "stat", fail)
+        trapped.setattr(os, "stat", fail)
+        trapped.setattr(os, "lstat", fail)
+        assert perimeter_module.build_selected_input_identities(selected_inputs) == expected_identities
+        assert perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=selected_inputs,
+            nav_facts=facts["nav_facts"],
+            raw_flow_facts=facts["raw_flow_facts"],
+            classified_flow_facts=facts["classified_flow_facts"],
+        ) == expected_perimeter
+
+    fresh_ledger = InputSnapshot.capture(ledger_path, "fresh ledger")
+    ledger_manifest_path.write_bytes(
+        _generation_manifest_snapshot(
+            catalog=fresh_ledger,
+            catalog_artifact_id="normalized/provider-ledger.json",
+            catalog_schema_name="provider-ledger-catalog",
+            catalog_schema_version="1",
+            as_of_date="2026-03-01",
+        ).contents
+    )
+    fresh_inputs = perimeter_module.AccountManifestSelectedInputs(
+        **{
+            "provider_ledger": fresh_ledger,
+            "provider_ledger_manifest": InputSnapshot.capture(
+                ledger_manifest_path, "fresh ledger manifest"
+            ),
+            "baseline": baseline,
+            "baseline_manifest": baseline_manifest,
+            "flow_classification_policy": policy,
+            "retrieval_receipts": {"receipt": receipt},
+            "epoch_producer_source": epoch,
+            "generation_builder_source": builder,
+            "independent_verifier_source": verifier,
+        }
+    )
+    assert fresh_inputs.generation_as_of_date == date(2026, 3, 1)
+    assert perimeter_module.build_selected_input_identities(fresh_inputs) != expected_identities
+    assert json.loads(
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=fresh_inputs,
+            nav_facts=facts["nav_facts"],
+            raw_flow_facts=facts["raw_flow_facts"],
+            classified_flow_facts=facts["classified_flow_facts"],
+        )
+    )["as_of_date"] == "2026-03-01"
 
 
 def test_builds_schema_valid_complete_partition_and_counts_non_strategy_facts(
@@ -385,12 +1151,15 @@ def test_pins_assignment_perimeter_and_selected_baseline_digest_vectors(
     assert payload["full_perimeter_identity"]["sha256"] == (
         "4421ad809a972746e7044b5dac4e7d2e0916018bbdea7cc321ea747459468d54"
     )
+    baseline = inputs["baseline"]
+    assert isinstance(baseline, InputSnapshot)
+    selected_inputs = _selected_inputs(perimeter_module, baseline)
     assert payload["selected_baseline_identity"] == {
-        "generation_id": BASELINE_GENERATION_ID,
+        "generation_id": selected_inputs.baseline_generation_id,
         "artifact": {
             "artifact_id": "normalized/portfolio-baseline.json",
             "as_of_date": "2026-02-01",
-            "schema": {"name": "portfolio-baseline", "version": "1"},
+            "schema": {"name": "portfolio-baseline-catalog", "version": "1"},
             "sha256": "35d757b23dfd079c4dab3f3ffd201cad0a8e9f494dd8619b9ccfbba4f4cd7049",
             "size_bytes": 5703,
         },
