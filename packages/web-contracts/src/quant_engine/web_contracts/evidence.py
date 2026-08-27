@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 
 _MANIFEST_SCHEMA = "quant-engine.web-contract-extraction.v1"
@@ -19,6 +19,7 @@ class HarParseStatus(StrEnum):
 
     SOURCE_PRESERVED = "SOURCE_PRESERVED"
     COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
     INVALID_UTF8 = "INVALID_UTF8"
     INVALID_JSON = "INVALID_JSON"
     INVALID_HAR = "INVALID_HAR"
@@ -44,7 +45,7 @@ def _source_bytes(source: object) -> tuple[bytes, str]:
         return source.tobytes(), "source.har"
     if isinstance(source, (str, os.PathLike)):
         source_path = Path(source)
-        return source_path.read_bytes(), source_path.name
+        return source_path.read_bytes(), "source.har"
     raise TypeError("source must be a filesystem path or bytes-like value")
 
 
@@ -80,7 +81,11 @@ def _manifest(
 ) -> dict[str, Any]:
     return {
         "completeness": (
-            "COMPLETE" if parse_status is HarParseStatus.COMPLETE else "INCOMPLETE"
+            "SOURCE_PRESERVED"
+            if parse_status is HarParseStatus.SOURCE_PRESERVED
+            else "COMPLETE"
+            if parse_status is HarParseStatus.COMPLETE
+            else "INCOMPLETE"
         ),
         "diagnostic_codes": diagnostic_codes,
         "materialized_entry_count": materialized_entry_count,
@@ -95,14 +100,18 @@ def _manifest(
     }
 
 
+def _reject_non_finite_constant(value: str) -> NoReturn:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
 def _parse_status(source: bytes) -> tuple[HarParseStatus, int, list[str]]:
     try:
-        text = source.decode("utf-8", errors="strict")
+        text = source.decode("utf-8-sig", errors="strict")
     except UnicodeDecodeError:
         return HarParseStatus.INVALID_UTF8, 0, [HarParseStatus.INVALID_UTF8.value]
     try:
-        document = json.loads(text)
-    except json.JSONDecodeError:
+        document = json.loads(text, parse_constant=_reject_non_finite_constant)
+    except (json.JSONDecodeError, ValueError):
         return HarParseStatus.INVALID_JSON, 0, [HarParseStatus.INVALID_JSON.value]
     if not isinstance(document, dict):
         return HarParseStatus.INVALID_HAR, 0, [HarParseStatus.INVALID_HAR.value]
@@ -112,6 +121,8 @@ def _parse_status(source: bytes) -> tuple[HarParseStatus, int, list[str]]:
     entries = log.get("entries")
     if not isinstance(entries, list):
         return HarParseStatus.INVALID_HAR, 0, [HarParseStatus.INVALID_HAR.value]
+    if entries:
+        return HarParseStatus.PARTIAL, len(entries), ["ENTRIES_NOT_MATERIALIZED"]
     return HarParseStatus.COMPLETE, len(entries), []
 
 

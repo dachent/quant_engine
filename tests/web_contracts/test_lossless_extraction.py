@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from quant_engine.web_contracts import evidence
 from quant_engine.web_contracts.evidence import (
     HarParseStatus,
     extract_har,
@@ -55,11 +56,33 @@ def test_bytes_like_source_is_preserved_before_a_complete_receipt_is_written(
     }
 
 
+def test_nonempty_har_is_partial_until_every_entry_is_materialized(
+    tmp_path: Path,
+) -> None:
+    source = b'{"log":{"entries":[{"request":{},"response":{}}]}}'
+
+    receipt = extract_har(source, tmp_path / "partial")
+
+    assert receipt.parse_status is HarParseStatus.PARTIAL
+    assert receipt.materialized_entry_count == 0
+    assert _manifest(receipt.output_dir)["parse_status"] == "PARTIAL"
+    assert _manifest(receipt.output_dir)["completeness"] == "INCOMPLETE"
+
+
 @pytest.mark.parametrize(
     ("source", "status"),
     [
         (b"\xff\xfe", HarParseStatus.INVALID_UTF8),
         (b'{"secret":"SYNTHETIC_SECRET"', HarParseStatus.INVALID_JSON),
+        (b'{"log":{"entries":[]},"number":NaN}', HarParseStatus.INVALID_JSON),
+        (
+            b'{"log":{"entries":[]},"number":Infinity}',
+            HarParseStatus.INVALID_JSON,
+        ),
+        (
+            b'{"log":{"entries":[]},"number":-Infinity}',
+            HarParseStatus.INVALID_JSON,
+        ),
         (b"[]", HarParseStatus.INVALID_HAR),
         (b'{"log":{"entries":{}}}', HarParseStatus.INVALID_HAR),
     ],
@@ -83,10 +106,42 @@ def test_invalid_input_keeps_exact_bytes_and_emits_a_value_safe_receipt(
     assert b"SYNTHETIC_SECRET" not in manifest_bytes
 
 
-def test_path_source_retains_its_basename_without_copying_source_values_to_manifest(
+def test_utf8_bom_har_is_parsed_as_complete(
     tmp_path: Path,
 ) -> None:
-    source_path = tmp_path / "captured.har"
+    source = b'\xef\xbb\xbf{"log":{"entries":[]}}'
+
+    receipt = extract_har(source, tmp_path / "bom")
+
+    assert receipt.parse_status is HarParseStatus.COMPLETE
+    assert (receipt.output_dir / "source.har").read_bytes() == source
+
+
+def test_source_and_initial_manifest_exist_before_parsing_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = b'{"log":{"entries":[]}}'
+    output_dir = tmp_path / "interrupted"
+
+    def interrupt_after_preservation(value: bytes) -> tuple[object, int, list[str]]:
+        assert value == source
+        assert (output_dir / "source.har").read_bytes() == source
+        assert _manifest(output_dir)["parse_status"] == "SOURCE_PRESERVED"
+        raise RuntimeError("synthetic parser interruption")
+
+    monkeypatch.setattr(evidence, "_parse_status", interrupt_after_preservation)
+
+    with pytest.raises(RuntimeError, match="synthetic parser interruption"):
+        extract_har(source, output_dir)
+
+    assert (output_dir / "source.har").read_bytes() == source
+    assert _manifest(output_dir)["parse_status"] == "SOURCE_PRESERVED"
+
+
+def test_path_source_uses_constant_manifest_filename_without_copying_basename(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "PRIVATE_SYNTHETIC_CAPTURE.har"
     source = b'{"log":{"entries":[]},"synthetic":"SYNTHETIC_SECRET"}'
     source_path.write_bytes(source)
 
@@ -96,11 +151,13 @@ def test_path_source_retains_its_basename_without_copying_source_values_to_manif
     assert receipt.parse_status is HarParseStatus.COMPLETE
     assert (output_dir / "source.har").read_bytes() == source
     assert _manifest(output_dir)["source"] == {
-        "filename": "captured.har",
+        "filename": "source.har",
         "sha256": hashlib.sha256(source).hexdigest(),
         "size_bytes": len(source),
     }
-    assert b"SYNTHETIC_SECRET" not in (output_dir / "manifest.json").read_bytes()
+    manifest_bytes = (output_dir / "manifest.json").read_bytes()
+    assert b"SYNTHETIC_SECRET" not in manifest_bytes
+    assert b"PRIVATE_SYNTHETIC_CAPTURE" not in manifest_bytes
 
 
 def test_existing_output_directory_is_rejected_before_evidence_is_written(
