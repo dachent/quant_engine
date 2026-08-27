@@ -102,3 +102,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run(argv)
     except KeyboardInterrupt:
         return _error("INTERRUPTED", 130)
+    except OSError:
+        return _error("IO_ERROR")
+    except Exception:
+        return _error("INTERNAL_ERROR")

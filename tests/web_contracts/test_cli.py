@@ -510,6 +510,37 @@ def test_interruption_during_receipt_output_is_value_safe(
     assert sentinel not in output.err
 
 
+def test_operational_failure_during_receipt_output_is_value_safe(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = _cli_module()
+    source, sentinel = _complete_source()
+    source_path = tmp_path / "input.har"
+    source_path.write_bytes(source)
+    output_dir = tmp_path / "output"
+    original_json_line = cli._json_line
+
+    def fail_receipt(value: object) -> str:
+        if isinstance(value, dict) and "parse_status" in value:
+            raise BrokenPipeError(sentinel)
+        return original_json_line(value)
+
+    monkeypatch.setattr(cli, "_json_line", fail_receipt)
+
+    exit_code = cli.main(
+        ["extract", "--har-file", str(source_path), "--output-dir", str(output_dir)]
+    )
+
+    assert exit_code == 1
+    assert (output_dir / "source.har").read_bytes() == source
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err) == {"error": "IO_ERROR", "ok": False}
+    assert sentinel not in output.err
+
+
 def test_unexpected_exception_text_is_not_echoed(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
