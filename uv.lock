@@ -1273,7 +1273,7 @@ requires-dist = [
 
 [[package]]
 name = "quant-engine-web-contract-harvester"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/web-contracts" }
 dependencies = [
     { name = "quant-engine-core" },
