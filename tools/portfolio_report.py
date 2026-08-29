@@ -34,10 +34,12 @@ from quant_engine.core import (
     GenerationManifest,
     SourceArtifact,
     VerificationStatus,
+    generation_inventory_sha256,
     hash_file,
     publish_generation,
     read_current,
     read_generation,
+    read_generation_bundle,
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -62,6 +64,9 @@ BUILDER_VERSION: Final = "1.5.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
+REPORT_DELIVERY_NAME: Final = "report-delivery.json"
+REPORT_DELIVERY_SCHEMA_VERSION: Final = 1
+NON_AUTHORITY_HUMAN_DELIVERY: Final = "NON_AUTHORITY_HUMAN_DELIVERY"
 HWM_POLICY: Final = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
 )
@@ -117,6 +122,11 @@ WORKBOOK_CANONICALIZATION_VERSION: Final = "1"
 XLSX_RESULT_CANONICALIZATION_VERSION: Final = "1"
 WORKBOOK_EVIDENCE_BINDING_VERSION: Final = 1
 WORKBOOK_PARITY_VERSION: Final = 1
+WORKBOOK_DELIVERY_EVIDENCE_STATUS: Final = "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
+WORKBOOK_NON_AUTHORITY_DELIVERY: Final = "ELIGIBLE_FOR_NON_AUTHORITY_DELIVERY"
+WORKBOOK_DELIVERY_EVIDENCE_VERSION: Final = 1
+EPOCH_MANIFEST_WORKBOOK_NAME: Final = "account-strategy-manifest.json"
+EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME: Final = "epoch-manifest-source.json"
 WORKBOOK_TOTAL_FORMULA: Final = (
     "=IF(ABS(SUM(tblStrategies[Current Value Usd])+"
     'SUMIFS(tblAllocations[Current Value Usd],tblAllocations[Scope],"RESERVE")'
@@ -1137,7 +1147,85 @@ def _cagr(cumulative_return: str, observed_start: str, observed_end: str) -> str
     return decimal_text(annualized)
 
 
-def _strategy_provider_evidence(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _report_product_controls(
+    catalog: Mapping[str, Any],
+    path: Path | None = None,
+) -> tuple[dict[str, dict[str, str]], dict[str, str] | None]:
+    """Load lifecycle controls when this catalog belongs to the product contract."""
+
+    if path is None:
+        path = _PORTABLE_HWM_PRODUCT_CONTRACT
+    payload = _load_json(path, "financial MVP contract")
+    schema_version = payload.get("contract_schema_version")
+    product = _object(payload.get("product"), "financial MVP product")
+    if schema_version not in {6, 7} or product.get("product_id") != "FINANCIAL_MVP":
+        raise ReportValidationError("financial MVP contract identity differs")
+    controls: dict[str, dict[str, str]] = {}
+    for item in _objects(payload.get("strategies"), "financial MVP strategies"):
+        strategy_id = _text(item.get("strategy_id"), "financial MVP strategy_id")
+        if strategy_id in controls:
+            raise ReportValidationError("financial MVP strategy is duplicated")
+        lifecycle = _text(
+            item.get("lifecycle_status"), "financial MVP lifecycle_status"
+        )
+        requirement = _text(
+            item.get("product_requirement"), "financial MVP product_requirement"
+        )
+        funded = _text(
+            _object(
+                item.get("funded_membership"), "financial MVP funded_membership"
+            ).get("status"),
+            "financial MVP funded_membership.status",
+        )
+        if requirement == "REQUIRED":
+            if lifecycle != "ACTIVE" or funded != "EVIDENCED":
+                raise ReportValidationError(
+                    "required financial MVP strategy lifecycle differs"
+                )
+        elif requirement == "EXCLUDED":
+            if lifecycle not in {
+                "DEPRECATED_HISTORY_ONLY",
+                "IMMATERIAL_EXCLUDED",
+            } or funded != "EXCLUDED":
+                raise ReportValidationError(
+                    "excluded financial MVP strategy lifecycle differs"
+                )
+        else:
+            raise ReportValidationError("financial MVP strategy requirement differs")
+        controls[strategy_id] = {
+            "funded_membership_status": funded,
+            "lifecycle_status": lifecycle,
+            "product_requirement": requirement,
+        }
+    if len(controls) != 9:
+        raise ReportValidationError("financial MVP contract must contain 9 strategies")
+
+    catalog_ids = {
+        _text(item.get("strategy_id"), "strategy.strategy_id")
+        for item in _objects(catalog.get("strategies"), "strategies")
+    }
+    overlap = catalog_ids & set(controls)
+    if not overlap:
+        # Compatibility for self-contained non-product fixtures. Any partial
+        # overlap is rejected below; production cannot silently mix perimeters.
+        return {}, None
+    if catalog_ids != set(controls):
+        raise ReportValidationError("financial MVP strategy perimeter differs")
+    census = _object(payload.get("current_census"), "financial MVP current_census")
+    census_as_of = _date(census.get("as_of"), "financial MVP current_census.as_of")
+    sha256, _size = hash_file(path)
+    return controls, {
+        "artifact": "financial-mvp-contract",
+        "as_of_date": census_as_of.isoformat(),
+        "schema": f"portfolio-financial-mvp-source/{schema_version}",
+        "sha256": sha256,
+    }
+
+
+def _strategy_provider_evidence(
+    catalog: Mapping[str, Any],
+    strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
+) -> list[dict[str, Any]]:
     series = _account_live_return_series(catalog)
     # Resolve the effective-dated strategy version for each strategy from the
     # governed catalog so the panel can verify series identity downstream.
@@ -1161,9 +1249,33 @@ def _strategy_provider_evidence(catalog: Mapping[str, Any]) -> list[dict[str, An
         row = dict(original)
         strategy_id = _text(row.get("strategy_id"), "provider evidence.strategy_id")
         row["strategy_version"] = strategy_versions.get(strategy_id)
+        product_control = (
+            strategy_product_controls.get(strategy_id)
+            if strategy_product_controls is not None
+            else None
+        )
+        if product_control is not None:
+            row.update(product_control)
+            lifecycle = product_control["lifecycle_status"]
+            if lifecycle == "DEPRECATED_HISTORY_ONLY":
+                row["product_evidence_disposition"] = (
+                    "HISTORICAL_ONLY_EXCLUDED_FROM_CURRENT_PRODUCT"
+                )
+            elif lifecycle == "IMMATERIAL_EXCLUDED":
+                row["product_evidence_disposition"] = (
+                    "IMMATERIAL_EXCLUDED_FROM_CURRENT_PRODUCT"
+                )
+            else:
+                row["product_evidence_disposition"] = "REQUIRED_CURRENT_PRODUCT"
         if row.get("evidence_layer") == "ACCOUNT_LIVE":
             canonical = series.get(strategy_id)
             if canonical is None:
+                if (
+                    product_control is not None
+                    and product_control["product_requirement"] == "EXCLUDED"
+                ):
+                    rows.append(row)
+                    continue
                 raise ReportValidationError(
                     f"account-live evidence has no canonical return series for {strategy_id}"
                 )
@@ -1361,6 +1473,48 @@ def _history_contract(
     }
 
 
+def _validate_implementation_observed_intervals(
+    value: object,
+    *,
+    boundary: date,
+    field_path: str,
+) -> None:
+    if isinstance(value, Mapping):
+        start = (
+            _date(value["observed_start"], f"{field_path}.observed_start")
+            if "observed_start" in value
+            else None
+        )
+        end = (
+            _date(value["observed_end"], f"{field_path}.observed_end")
+            if "observed_end" in value
+            else None
+        )
+        if (start is not None and start > boundary) or (
+            end is not None and end > boundary
+        ):
+            raise ReportValidationError(
+                "implementation reconciliation observed interval is future-dated"
+            )
+        if start is not None and end is not None and end < start:
+            raise ReportValidationError(
+                "implementation reconciliation observed interval is reversed"
+            )
+        for key, child in value.items():
+            _validate_implementation_observed_intervals(
+                child,
+                boundary=boundary,
+                field_path=f"{field_path}.{key}",
+            )
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _validate_implementation_observed_intervals(
+                child,
+                boundary=boundary,
+                field_path=f"{field_path}[{index}]",
+            )
+
+
 def _implementation_reconciliation_contract(
     path: Path,
     *,
@@ -1376,8 +1530,10 @@ def _implementation_reconciliation_contract(
     contract_as_of = _date(
         payload.get("as_of_date"), "implementation reconciliation as_of_date"
     )
-    if contract_as_of > _date(portfolio_as_of, "portfolio as_of_date"):
+    portfolio_boundary = _date(portfolio_as_of, "portfolio as_of_date")
+    if contract_as_of > portfolio_boundary:
         raise ReportValidationError("implementation reconciliation is future-dated")
+    observed_boundary = min(contract_as_of, portfolio_boundary)
     rows = _objects(
         payload.get("strategies"), "implementation reconciliation strategies"
     )
@@ -1395,6 +1551,11 @@ def _implementation_reconciliation_contract(
             raise ReportValidationError(
                 "implementation reconciliation strategy is not verified"
             )
+        _validate_implementation_observed_intervals(
+            row,
+            boundary=observed_boundary,
+            field_path=f"implementation reconciliation strategy {strategy_id}",
+        )
         metrics = _object(
             row.get("return_reconciliation"),
             f"implementation return reconciliation {strategy_id}",
@@ -1552,6 +1713,8 @@ def _strategies(
     implementation_contract: Mapping[str, Mapping[str, Any]] | None = None,
     implementation_return_attribution_contract: Mapping[str, Mapping[str, Any]]
     | None = None,
+    strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
+    strategy_provider_evidence: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     raw_version_catalog = catalog.get("strategy_version_catalog")
     strategy_versions: dict[str, dict[str, Any]] = {}
@@ -1602,7 +1765,12 @@ def _strategies(
         if item.get("strategy_id") is not None
     }
     provider_evidence = {
-        str(item["strategy_id"]): item for item in _strategy_provider_evidence(catalog)
+        str(item["strategy_id"]): item
+        for item in (
+            strategy_provider_evidence
+            if strategy_provider_evidence is not None
+            else _strategy_provider_evidence(catalog, strategy_product_controls)
+        )
     }
     live_source = next(
         (
@@ -1629,6 +1797,20 @@ def _strategies(
     for strategy in _objects(catalog.get("strategies"), "strategies"):
         strategy_id = _text(strategy.get("strategy_id"), "strategy.strategy_id")
         allocation = allocations[strategy_id]
+        product_control = (
+            strategy_product_controls.get(strategy_id)
+            if strategy_product_controls is not None
+            else None
+        )
+        product_required = (
+            product_control is None
+            or product_control.get("product_requirement") == "REQUIRED"
+        )
+        historical_only = bool(
+            product_control
+            and product_control.get("lifecycle_status")
+            == "DEPRECATED_HISTORY_ONLY"
+        )
         live_row = live.get(strategy_id)
         metrics = _object(live_row.get("metrics"), "live.metrics") if live_row else {}
         provider_row = provider_evidence.get(strategy_id)
@@ -1643,7 +1825,8 @@ def _strategies(
             else {}
         )
         admitted_account_nav = bool(
-            provider_row
+            product_required
+            and provider_row
             and provider_row.get("evidence_layer") == "ACCOUNT_LIVE"
             and account_path.get("observed_start") is not None
             and account_path.get("observed_end") is not None
@@ -1657,16 +1840,19 @@ def _strategies(
             and provider_path.get("return_observations") is not None
         )
         canonical_account = account_path if admitted_account_nav else {}
+        historical_account = account_path if historical_only and account_path else {}
         legacy_account = metrics if provider_row is None and live_row else {}
         account_authority = (
             "CANONICAL_STRATEGY_RETURNS"
             if canonical_account
+            else "HISTORICAL_ACCOUNT_LIVE_EVIDENCE"
+            if historical_account
             else "AUDIT_STRATEGY_LIVE_METRICS"
             if legacy_account
             else None
         )
-        account_metrics = canonical_account or legacy_account
-        strategy_path = canonical_account if canonical_account else provider_path
+        account_metrics = canonical_account or historical_account or legacy_account
+        strategy_path = canonical_account or historical_account or provider_path
         observed_start = account_metrics.get("observed_start") or account_metrics.get(
             "first_date"
         )
@@ -1820,12 +2006,31 @@ def _strategies(
                 "strategy_id": strategy_id,
                 "strategy_name": strategy.get("name"),
                 "economic_family": strategy.get("economic_family"),
+                "lifecycle_status": (
+                    product_control.get("lifecycle_status")
+                    if product_control is not None
+                    else None
+                ),
+                "product_requirement": (
+                    product_control.get("product_requirement")
+                    if product_control is not None
+                    else None
+                ),
+                "funded_membership_status": (
+                    product_control.get("funded_membership_status")
+                    if product_control is not None
+                    else None
+                ),
                 "current_value_usd": decimal_text(_amount(allocation, "current_value")),
                 "systematic_weight": allocation.get("systematic_weight"),
                 "available_twr_segments": available_segments,
                 "total_assignment_segments": total_segments,
                 "account_live_status": (
-                    "AVAILABLE" if account_metrics else "UNAVAILABLE"
+                    "HISTORICAL_ONLY"
+                    if historical_account
+                    else "AVAILABLE"
+                    if account_metrics
+                    else "UNAVAILABLE"
                 ),
                 "account_live_cagr": account_cagr,
                 "account_live_cagr_status": (
@@ -1833,6 +2038,8 @@ def _strategies(
                     if canonical_account and account_cagr is not None
                     else "AVAILABLE_SOURCE_REPORTED_SAME_AUDIT_VINTAGE"
                     if legacy_account and account_cagr is not None
+                    else "UNAVAILABLE_HISTORICAL_ONLY"
+                    if historical_account
                     else "UNAVAILABLE"
                 ),
                 "account_live_cumulative_return": cumulative_return,
@@ -1851,21 +2058,27 @@ def _strategies(
                     "return_series_sha256"
                 ),
                 "account_live_source_generation": (
-                    account_path.get("generation_id") if canonical_account else None
+                    account_path.get("generation_id")
+                    if canonical_account or historical_account
+                    else None
                 ),
                 "account_live_source_generation_as_of_date": (
                     account_path.get("generation_as_of_date")
-                    if canonical_account
+                    if canonical_account or historical_account
                     else live_source.get("as_of_date")
                 ),
                 "account_live_source_provider": (
-                    account_path.get("provider_id") if canonical_account else None
+                    account_path.get("provider_id")
+                    if canonical_account or historical_account
+                    else None
                 ),
                 "account_live_source_sha256": (
                     None if canonical_account else live_source.get("sha256")
                 ),
                 "nav_status": (
-                    "AVAILABLE"
+                    "HISTORICAL_ONLY"
+                    if historical_account
+                    else "AVAILABLE"
                     if admitted_account_nav or admitted_provider_nav
                     else coverage_row.get("status", "UNAVAILABLE")
                 ),
@@ -3050,8 +3263,13 @@ def build_report_data(
     """Build canonical report data from the currently accepted baseline."""
 
     catalog, baseline_ref, baseline_catalog_path = _baseline(baseline_root)
+    strategy_product_controls, product_contract_provenance = (
+        _report_product_controls(catalog)
+    )
     performance = _account_strategy_performance(catalog)
-    strategy_provider_evidence = _strategy_provider_evidence(catalog)
+    strategy_provider_evidence = _strategy_provider_evidence(
+        catalog, strategy_product_controls
+    )
     strategy_names = {
         _text(item.get("name"), "strategy.name")
         for item in _objects(catalog.get("strategies"), "strategies")
@@ -3091,6 +3309,8 @@ def build_report_data(
         history_contract,
         implementation_contract,
         implementation_return_attribution_contract,
+        strategy_product_controls,
+        strategy_provider_evidence,
     )
     attribution_catalog: dict[str, Any] | None = None
     attribution_ref: dict[str, str] | None = None
@@ -3320,6 +3540,11 @@ def build_report_data(
                     catalog.get("source_artifacts"), "source_artifacts"
                 )
             ],
+            *(
+                [product_contract_provenance]
+                if product_contract_provenance is not None
+                else []
+            ),
             *hwm_provenance,
             *(
                 [
@@ -3778,6 +4003,7 @@ def _build_workbook_exact(report: Mapping[str, Any], path: Path) -> dict[str, An
     temporary = Path(temporary_name)
     try:
         evidence = _workbook(report, temporary)
+        canonicalize_workbook(temporary)
         content = temporary.read_bytes()
         _write_exact(path, content)
         return {**evidence, "workbook_sha256": hashlib.sha256(content).hexdigest()}
@@ -4408,7 +4634,7 @@ def _workbook_evidence_binding_from_snapshots(
     candidate_dir: Path,
     final_workbook: Path,
 ) -> dict[str, Any]:
-    """Associate repository sidecars without claiming native Excel execution."""
+    """Associate repository sidecars for non-authority workbook delivery."""
     try:
         job = json.loads(snapshots["xlsx_job"])
         parity = json.loads(snapshots["workbook_parity"])
@@ -4440,13 +4666,91 @@ def _workbook_evidence_binding_from_snapshots(
         raise ReportValidationError("xlsx-win job binding differs")
     binding: dict[str, Any] = {
         "binding_schema_version": WORKBOOK_EVIDENCE_BINDING_VERSION,
-        "publication_disposition": "INCOMPLETE_STAGING_ONLY",
-        "workbook_evidence_status": "REPO_BOUND_POSTRUN_ONLY",
+        "publication_disposition": WORKBOOK_NON_AUTHORITY_DELIVERY,
+        "workbook_evidence_status": WORKBOOK_DELIVERY_EVIDENCE_STATUS,
     }
     for name, content in snapshots.items():
         binding[f"{name}_sha256"] = hashlib.sha256(content).hexdigest()
         binding[f"{name}_size_bytes"] = len(content)
     return binding
+
+
+def _epoch_manifest_workbook_snapshots(
+    candidate_dir: Path,
+    epoch_manifest_path: Path | None,
+    epoch_manifest_source_path: Path | None,
+) -> dict[str, tuple[Path, bytes]]:
+    if (epoch_manifest_path is None) != (epoch_manifest_source_path is None):
+        raise ReportValidationError(
+            "epoch manifest and source evidence must be supplied together"
+        )
+    if epoch_manifest_path is None:
+        return {}
+    assert epoch_manifest_source_path is not None
+    expected_manifest = candidate_dir / EPOCH_MANIFEST_WORKBOOK_NAME
+    expected_source = candidate_dir / EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME
+    if (
+        epoch_manifest_path.resolve() != expected_manifest.resolve()
+        or epoch_manifest_source_path.resolve() != expected_source.resolve()
+    ):
+        raise ReportValidationError("epoch manifest workbook evidence path differs")
+    manifest_bytes = _regular_file_bytes(
+        epoch_manifest_path, "epoch manifest workbook evidence"
+    )
+    source_bytes = _regular_file_bytes(
+        epoch_manifest_source_path, "epoch manifest source workbook evidence"
+    )
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        source = json.loads(source_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportValidationError(
+            "epoch manifest workbook evidence is invalid JSON"
+        ) from exc
+    if not isinstance(manifest, dict) or not isinstance(source, dict):
+        raise ReportValidationError("epoch manifest workbook evidence root differs")
+    if (
+        canonical_json_bytes(manifest) != manifest_bytes
+        or canonical_json_bytes(source) != source_bytes
+    ):
+        raise ReportValidationError("epoch manifest workbook evidence is not canonical")
+    if set(source) != {
+        "generation_id",
+        "generation_manifest_sha256",
+        "generation_receipt_sha256",
+        "full_directory_inventory_sha256",
+        "artifact",
+    }:
+        raise ReportValidationError("epoch manifest source workbook evidence differs")
+    for key in (
+        "generation_id",
+        "generation_manifest_sha256",
+        "generation_receipt_sha256",
+        "full_directory_inventory_sha256",
+    ):
+        value = source[key]
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ReportValidationError(
+                f"epoch manifest source workbook evidence {key} differs"
+            )
+    artifact = source.get("artifact")
+    expected_schema_version = str(manifest.get("schema_version"))
+    if (
+        not isinstance(artifact, dict)
+        or set(artifact) != {"path", "sha256", "size_bytes", "schema"}
+        or artifact.get("path") != "outputs/account-strategy-manifest.json"
+        or artifact.get("sha256") != hashlib.sha256(manifest_bytes).hexdigest()
+        or artifact.get("size_bytes") != len(manifest_bytes)
+        or artifact.get("schema")
+        != {"name": "account-strategy-manifest", "version": expected_schema_version}
+    ):
+        raise ReportValidationError(
+            "epoch manifest source artifact differs from workbook evidence"
+        )
+    return {
+        "epoch_manifest": (epoch_manifest_path, manifest_bytes),
+        "epoch_manifest_source": (epoch_manifest_source_path, source_bytes),
+    }
 
 
 def _repo_bound_workbook_parity_receipt(
@@ -4467,8 +4771,10 @@ def bind_workbook_evidence(
     xlsx_result: Path,
     validation_result: Path,
     evidence_path: Path | None = None,
+    epoch_manifest_path: Path | None = None,
+    epoch_manifest_source_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Bind repository sidecar bytes to the exact final workbook for staging."""
+    """Bind validated workbook QA evidence for non-authority XLSX delivery."""
     paths = {
         "initial_workbook": candidate_dir / WORKBOOK_NAME,
         "workbook": workbook,
@@ -4485,6 +4791,16 @@ def bind_workbook_evidence(
         name: _regular_file_bytes(path, name.replace("_", " "))
         for name, path in paths.items()
     }
+    snapshots.update(
+        {
+            name: content
+            for name, (_path, content) in _epoch_manifest_workbook_snapshots(
+                candidate_dir,
+                epoch_manifest_path,
+                epoch_manifest_source_path,
+            ).items()
+        }
+    )
     parity = _repo_bound_workbook_parity_receipt(
         snapshots["report_data"], snapshots["workbook"]
     )
@@ -4497,9 +4813,75 @@ def bind_workbook_evidence(
         candidate_dir=candidate_dir,
         final_workbook=workbook,
     )
+    binding["workbook_delivery"] = _workbook_delivery_evidence(snapshots)
     if evidence_path is not None:
         _write_exact(evidence_path, canonical_json_bytes(binding))
     return binding
+
+
+def _workbook_delivery_evidence(snapshots: Mapping[str, bytes]) -> dict[str, Any]:
+    """Derive closed, non-authority delivery evidence from supplied QA artifacts."""
+
+    try:
+        run = json.loads(snapshots["xlsx_result"])
+        validation = json.loads(snapshots["validation_result"])
+        job = json.loads(snapshots["xlsx_job"])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportValidationError("workbook delivery evidence is invalid") from exc
+    if not all(isinstance(value, dict) for value in (run, validation, job)):
+        raise ReportValidationError("workbook delivery evidence differs")
+    _successful_workbook_evidence(run, validation, job)
+    run_id = run.get("run_id")
+    result_schema_version = run.get("schema_version")
+    idempotency_key = run.get("idempotency_key")
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or not isinstance(result_schema_version, str)
+        or not result_schema_version
+        or not isinstance(idempotency_key, str)
+        or not idempotency_key
+        or idempotency_key != job.get("idempotency_key")
+    ):
+        raise ReportValidationError("workbook delivery run identity differs")
+    invariants = validation["invariants"]
+    assert isinstance(invariants, list)
+    steps = run["steps"]
+    assert isinstance(steps, list)
+    return {
+        "delivery_evidence_schema_version": WORKBOOK_DELIVERY_EVIDENCE_VERSION,
+        "engine": {
+            "idempotency_key": idempotency_key,
+            "result_schema_version": result_schema_version,
+            "run_id": run_id,
+        },
+        "final_workbook": {
+            "sha256": hashlib.sha256(snapshots["workbook"]).hexdigest(),
+            "size_bytes": len(snapshots["workbook"]),
+        },
+        "steps": [
+            {
+                "status": step["status"],
+                "step_index": step["step_index"],
+                "type": step["type"],
+            }
+            for step in steps
+            if isinstance(step, dict)
+        ],
+        "validation": {
+            "all_passed": True,
+            "invariant_count": len(invariants),
+            "passed_invariant_count": len(invariants),
+        },
+        "validation_result": {
+            "sha256": hashlib.sha256(snapshots["validation_result"]).hexdigest(),
+            "size_bytes": len(snapshots["validation_result"]),
+        },
+        "xlsx_result": {
+            "sha256": hashlib.sha256(snapshots["xlsx_result"]).hexdigest(),
+            "size_bytes": len(snapshots["xlsx_result"]),
+        },
+    }
 
 
 def _validated_workbook_evidence_snapshots(
@@ -4507,8 +4889,12 @@ def _validated_workbook_evidence_snapshots(
     workbook: Path,
     xlsx_result: Path,
     validation_result: Path,
-    binding_path: Path,
+    binding_path: Path | None,
+    epoch_manifest_path: Path | None = None,
+    epoch_manifest_source_path: Path | None = None,
 ) -> dict[str, tuple[Path, bytes]]:
+    if binding_path is None:
+        raise ReportValidationError("workbook evidence binding is required")
     paths = {
         "initial_workbook": candidate_dir / WORKBOOK_NAME,
         "workbook": workbook,
@@ -4526,6 +4912,13 @@ def _validated_workbook_evidence_snapshots(
         name: (path, _regular_file_bytes(path, name.replace("_", " ")))
         for name, path in paths.items()
     }
+    snapshots.update(
+        _epoch_manifest_workbook_snapshots(
+            candidate_dir,
+            epoch_manifest_path,
+            epoch_manifest_source_path,
+        )
+    )
     binding_content = _regular_file_bytes(binding_path, "workbook evidence binding")
     try:
         binding = json.loads(binding_content)
@@ -4543,12 +4936,11 @@ def _validated_workbook_evidence_snapshots(
         )
     except ReportValidationError as exc:
         raise ReportValidationError("workbook evidence binding differs") from exc
+    expected["workbook_delivery"] = _workbook_delivery_evidence(
+        {name: content for name, (_path, content) in snapshots.items()}
+    )
     if binding != expected:
         raise ReportValidationError("workbook evidence binding differs")
-    job = json.loads(snapshots["xlsx_job"][1])
-    if not isinstance(job, dict):
-        raise ReportValidationError("workbook evidence binding differs")
-    _successful_workbook_evidence(run, validation, job)
     snapshots["workbook_evidence_binding"] = (binding_path, binding_content)
     return snapshots
 
@@ -4605,6 +4997,8 @@ def verify_candidate(
     hwm_governed_generation_bytes: bytes | None = None,
     hwm_governed_calendar_bytes: bytes | None = None,
     hwm_governed_receipt_bytes: bytes | None = None,
+    epoch_manifest_path: Path | None = None,
+    epoch_manifest_source_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -4626,7 +5020,7 @@ def verify_candidate(
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
     workbook_bytes = _regular_file_bytes(excel_workbook, "Excel workbook")
-    return _verification_from_snapshots(
+    verification = _verification_from_snapshots(
         report,
         report_bytes,
         candidate_dir,
@@ -4634,6 +5028,24 @@ def verify_candidate(
         excel_workbook,
         workbook_bytes,
     )
+    epoch_snapshots = _epoch_manifest_workbook_snapshots(
+        candidate_dir,
+        epoch_manifest_path,
+        epoch_manifest_source_path,
+    )
+    if epoch_snapshots:
+        verification.update(
+            {
+                "epoch_manifest_sha256": hashlib.sha256(
+                    epoch_snapshots["epoch_manifest"][1]
+                ).hexdigest(),
+                "epoch_manifest_size_bytes": len(epoch_snapshots["epoch_manifest"][1]),
+                "epoch_manifest_source_sha256": hashlib.sha256(
+                    epoch_snapshots["epoch_manifest_source"][1]
+                ).hexdigest(),
+            }
+        )
+    return verification
 
 
 def _copy_exact(source: Path, destination: Path) -> None:
@@ -4656,6 +5068,152 @@ def _copy_exact(source: Path, destination: Path) -> None:
         shutil.copyfileobj(input_handle, output_handle)
         output_handle.flush()
         os.fsync(output_handle.fileno())
+
+
+def _report_delivery_receipt(
+    *,
+    generation_id: str,
+    generation_manifest_bytes: bytes,
+    generation_inventory_sha256_value: str,
+    report_data_bytes: bytes,
+    workbook_bytes: bytes,
+) -> dict[str, Any]:
+    """Bind a mutable human workbook delivery to immutable report JSON authority."""
+
+    return {
+        "authority": {
+            "generation_id": generation_id,
+            "generation_inventory_sha256": generation_inventory_sha256_value,
+            "generation_manifest_sha256": hashlib.sha256(
+                generation_manifest_bytes
+            ).hexdigest(),
+            "generation_manifest_size_bytes": len(generation_manifest_bytes),
+            "payload": {
+                "relative_path": REPORT_DATA_NAME,
+                "sha256": hashlib.sha256(report_data_bytes).hexdigest(),
+                "size_bytes": len(report_data_bytes),
+            },
+        },
+        "delivery_classification": NON_AUTHORITY_HUMAN_DELIVERY,
+        "schema_version": REPORT_DELIVERY_SCHEMA_VERSION,
+        "workbook": {
+            "relative_path": WORKBOOK_NAME,
+            "sha256": hashlib.sha256(workbook_bytes).hexdigest(),
+            "size_bytes": len(workbook_bytes),
+        },
+    }
+
+
+def inspect_report_delivery(
+    authority_root: Path, generation_id: str, delivery_dir: Path
+) -> dict[str, Any]:
+    """Report delivery-workbook drift without treating the workbook as authority."""
+
+    receipt_bytes = _regular_file_bytes(
+        delivery_dir / REPORT_DELIVERY_NAME, "report delivery receipt"
+    )
+    try:
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportValidationError("report delivery receipt is invalid JSON") from exc
+    if not isinstance(receipt, dict) or canonical_json_bytes(receipt) != receipt_bytes:
+        raise ReportValidationError("report delivery receipt root differs")
+    if set(receipt) != {
+        "authority",
+        "delivery_classification",
+        "schema_version",
+        "workbook",
+    }:
+        raise ReportValidationError("report delivery receipt structure differs")
+    authority = receipt.get("authority")
+    workbook = receipt.get("workbook")
+    if (
+        receipt.get("schema_version") != REPORT_DELIVERY_SCHEMA_VERSION
+        or receipt.get("delivery_classification") != NON_AUTHORITY_HUMAN_DELIVERY
+        or not isinstance(authority, dict)
+        or not isinstance(workbook, dict)
+        or set(workbook) != {"relative_path", "sha256", "size_bytes"}
+        or workbook.get("relative_path") != WORKBOOK_NAME
+        or not isinstance(workbook.get("sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", workbook["sha256"]) is None
+        or isinstance(workbook.get("size_bytes"), bool)
+        or not isinstance(workbook.get("size_bytes"), int)
+        or workbook["size_bytes"] < 0
+    ):
+        raise ReportValidationError("report delivery receipt structure differs")
+    manifest = read_generation(authority_root, generation_id)
+    manifest_path = authority_root / "generations" / generation_id / "generation.json"
+    manifest_bytes = _regular_file_bytes(manifest_path, "report generation manifest")
+    if manifest.to_json_bytes() != manifest_bytes:
+        raise ReportValidationError("report generation manifest differs")
+    report_data_bytes = _regular_file_bytes(
+        authority_root / "generations" / generation_id / REPORT_DATA_NAME,
+        "report authority payload",
+    )
+    expected_authority = {
+        "generation_id": generation_id,
+        "generation_inventory_sha256": generation_inventory_sha256(
+            authority_root, generation_id
+        ),
+        "generation_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "generation_manifest_size_bytes": len(manifest_bytes),
+        "payload": {
+            "relative_path": REPORT_DATA_NAME,
+            "sha256": hashlib.sha256(report_data_bytes).hexdigest(),
+            "size_bytes": len(report_data_bytes),
+        },
+    }
+    if authority != expected_authority:
+        raise ReportValidationError("report delivery receipt authority binding differs")
+    actual_workbook = _regular_file_bytes(
+        delivery_dir / WORKBOOK_NAME, "report delivery workbook"
+    )
+    actual_sha256 = hashlib.sha256(actual_workbook).hexdigest()
+    return {
+        "actual_workbook_sha256": actual_sha256,
+        "actual_workbook_size_bytes": len(actual_workbook),
+        "delivery_classification": NON_AUTHORITY_HUMAN_DELIVERY,
+        "expected_workbook_sha256": workbook["sha256"],
+        "expected_workbook_size_bytes": workbook["size_bytes"],
+        "generation_inventory_sha256": expected_authority[
+            "generation_inventory_sha256"
+        ],
+        "generation_manifest_sha256": expected_authority["generation_manifest_sha256"],
+        "generation_manifest_size_bytes": expected_authority[
+            "generation_manifest_size_bytes"
+        ],
+        "generation_id": generation_id,
+        "report_data_sha256": expected_authority["payload"]["sha256"],
+        "report_data_size_bytes": expected_authority["payload"]["size_bytes"],
+        "workbook_status": (
+            "EXACT_NON_AUTHORITY"
+            if (
+                actual_sha256 == workbook["sha256"]
+                and len(actual_workbook) == workbook["size_bytes"]
+            )
+            else "DRIFTED_NON_AUTHORITY"
+        ),
+    }
+
+
+def _preflight_report_delivery(
+    delivery_dir: Path, workbook_bytes: bytes, receipt_bytes: bytes
+) -> None:
+    """Reject known delivery conflicts before creating either delivery file."""
+
+    states: list[str] = []
+    for path, expected in (
+        (delivery_dir / WORKBOOK_NAME, workbook_bytes),
+        (delivery_dir / REPORT_DELIVERY_NAME, receipt_bytes),
+    ):
+        if not path.exists():
+            states.append("absent")
+        elif path.is_symlink() or not path.is_file() or path.read_bytes() != expected:
+            states.append("different")
+        else:
+            states.append("exact")
+    if "different" in states:
+        raise GenerationConflictError("report delivery target differs")
 
 
 def _tree_file_names(root: Path) -> tuple[str, ...]:
@@ -4753,6 +5311,75 @@ def _snapshot_current_root(
     return destination
 
 
+def _epoch_source_generation_id(source_bytes: bytes) -> str:
+    try:
+        source = json.loads(source_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportValidationError("epoch manifest source history is invalid") from exc
+    if not isinstance(source, dict):
+        raise ReportValidationError("epoch manifest source history differs")
+    generation_id = source.get("generation_id")
+    if (
+        not isinstance(generation_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", generation_id) is None
+    ):
+        raise ReportValidationError("epoch manifest source history differs")
+    return generation_id
+
+
+def _epoch_history_snapshot_evidence(
+    epoch_root: Path,
+    source_bytes: bytes,
+    expected_manifest_bytes: bytes,
+) -> tuple[Path, bytes, str]:
+    """Read the exact independent verifier from an explicit epoch bundle root."""
+
+    source = json.loads(source_bytes)
+    assert isinstance(source, dict)
+    generation_id = _epoch_source_generation_id(source_bytes)
+    try:
+        bundle = read_generation_bundle(epoch_root, generation_id)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ReportValidationError("epoch history bundle is not verified") from exc
+    manifest_bytes = bundle.manifest.to_json_bytes()
+    if (
+        bundle.payloads.get("outputs/account-strategy-manifest.json")
+        != expected_manifest_bytes
+        or hashlib.sha256(manifest_bytes).hexdigest()
+        != source.get("generation_manifest_sha256")
+        or hashlib.sha256(bundle.receipt_bytes).hexdigest()
+        != source.get("generation_receipt_sha256")
+        or bundle.full_directory_inventory_sha256
+        != source.get("full_directory_inventory_sha256")
+    ):
+        raise ReportValidationError("epoch history bundle authority differs")
+    artifact = next(
+        (
+            item
+            for item in bundle.manifest.artifacts
+            if item.artifact_id == "verification/independent-verification.json"
+        ),
+        None,
+    )
+    payload = bundle.payloads.get("verification/independent-verification.json")
+    if (
+        artifact is None
+        or type(payload) is not bytes
+        or artifact.schema_name != "independent-verification"
+        or hashlib.sha256(payload).hexdigest() != artifact.sha256
+        or len(payload) != artifact.size_bytes
+    ):
+        raise ReportValidationError("epoch history verification artifact differs")
+    snapshot_path = (
+        epoch_root
+        / "generations"
+        / generation_id
+        / "verification"
+        / "independent-verification.json"
+    )
+    return snapshot_path, payload, artifact.schema_version
+
+
 def _recheck_snapshot_identities(
     originals: Mapping[Path, bytes],
     inventories: Mapping[Path, tuple[str, ...]],
@@ -4792,21 +5419,24 @@ def publish_report(
     implementation_return_attribution_path: Path | None = None,
     correlation_root: Path | None = None,
     workbook_evidence_binding: Path | None = None,
+    epoch_manifest_path: Path | None = None,
+    epoch_manifest_source_path: Path | None = None,
+    epoch_manifest_generation_root: Path | None = None,
 ) -> dict[str, Any]:
-    raise ReportValidationError("NATIVE_EXCEL_RECEIPT_REQUIRED")
-
     evidence_snapshots = _validated_workbook_evidence_snapshots(
         candidate_dir,
         excel_workbook,
         xlsx_result,
         validation_result,
         workbook_evidence_binding,
+        epoch_manifest_path,
+        epoch_manifest_source_path,
     )
-    # Keep the temporary root beneath the task workspace, but short enough that
-    # deeply nested generation artifacts remain below legacy Windows MAX_PATH.
-    snapshot_context = tempfile.TemporaryDirectory(
-        prefix=".p-", dir=candidate_dir.parent.parent
-    )
+    # Use the platform's deliberately short temporary root. Nesting this copy
+    # below an operator-selected output path can exceed legacy Windows MAX_PATH
+    # even though every source and final authority path is valid. These files
+    # are disposable read-validation snapshots, never publication authority.
+    snapshot_context = tempfile.TemporaryDirectory(prefix=".p-")
     snapshot_root = Path(snapshot_context.name)
     originals: dict[Path, bytes] = {}
     inventories: dict[Path, tuple[str, ...]] = {}
@@ -4867,6 +5497,24 @@ def publish_report(
             inventories,
         )
         snapshot_history_path = history_snapshot_root / history_contract_path.name
+    epoch_history_verification: tuple[Path, bytes, str] | None = None
+    if "epoch_manifest" in evidence_snapshots:
+        if epoch_manifest_generation_root is None:
+            raise ReportValidationError("epoch manifest generation root is required")
+        epoch_history_verification = _epoch_history_snapshot_evidence(
+            epoch_manifest_generation_root,
+            evidence_snapshots["epoch_manifest_source"][1],
+            evidence_snapshots["epoch_manifest"][1],
+        )
+        epoch_verification_snapshot = snapshot_root / "epoch-independent-verification.json"
+        _write_exact(epoch_verification_snapshot, epoch_history_verification[1])
+        epoch_history_verification = (
+            epoch_verification_snapshot,
+            epoch_history_verification[1],
+            epoch_history_verification[2],
+        )
+    elif epoch_manifest_generation_root is not None:
+        raise ReportValidationError("epoch manifest generation root is unexpected")
     snapshot_implementation_path = (
         _snapshot_file(
             implementation_reconciliation_path,
@@ -4932,18 +5580,6 @@ def publish_report(
             "1",
         ),
         (
-            evidence_snapshots["initial_workbook"][0],
-            "evidence/portfolio-report-initial.xlsx",
-            "portfolio-report-initial-workbook",
-            "1",
-        ),
-        (
-            evidence_snapshots["workbook"][0],
-            "report/portfolio-report.xlsx",
-            "portfolio-report-workbook",
-            "1",
-        ),
-        (
             evidence_snapshots["xlsx_result"][0],
             "evidence/xlsx-win-result.json",
             "xlsx-win-result",
@@ -4992,6 +5628,33 @@ def publish_report(
             str(WORKBOOK_PARITY_VERSION),
         ),
     ]
+    if "epoch_manifest" in evidence_snapshots:
+        epoch_payload = json.loads(evidence_snapshots["epoch_manifest"][1])
+        artifact_specs.extend(
+            [
+                (
+                    evidence_snapshots["epoch_manifest"][0],
+                    "input/account-strategy-manifest.json",
+                    "account-strategy-manifest",
+                    str(epoch_payload["schema_version"]),
+                ),
+                (
+                    evidence_snapshots["epoch_manifest_source"][0],
+                    "input/epoch-manifest-source.json",
+                    "epoch-manifest-source",
+                    "1",
+                ),
+            ]
+        )
+        assert epoch_history_verification is not None
+        artifact_specs.append(
+            (
+                epoch_history_verification[0],
+                "input/epoch-independent-verification.json",
+                "independent-verification",
+                epoch_history_verification[2],
+            )
+        )
     if snapshot_attribution_root is not None:
         _attribution_catalog, _attribution_ref, attribution_catalog_path = _attribution(
             snapshot_attribution_root, report["baseline"]
@@ -5127,11 +5790,6 @@ def publish_report(
         evidence_snapshots["report_data"][1],
     )
     _write_exact(
-        generation_dir / "portfolio-report-initial.xlsx",
-        evidence_snapshots["initial_workbook"][1],
-    )
-    _write_exact(generation_dir / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
-    _write_exact(
         generation_dir / "xlsx-win-result.json",
         evidence_snapshots["xlsx_result"][1],
     )
@@ -5163,8 +5821,39 @@ def publish_report(
         generation_dir / "workbook-parity.json",
         evidence_snapshots["workbook_parity"][1],
     )
+    if "epoch_manifest" in evidence_snapshots:
+        _write_exact(
+            generation_dir / EPOCH_MANIFEST_WORKBOOK_NAME,
+            evidence_snapshots["epoch_manifest"][1],
+        )
+        _write_exact(
+            generation_dir / EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
+            evidence_snapshots["epoch_manifest_source"][1],
+        )
+        assert epoch_history_verification is not None
+        _write_exact(
+            generation_dir / "epoch-independent-verification.json",
+            epoch_history_verification[1],
+        )
     _write_exact(generation_dir / "report-verification.json", verification_bytes)
     _recheck_snapshot_identities(originals, inventories)
+    generation_manifest_bytes = manifest.to_json_bytes()
+    delivery_dir = output_root / "deliveries" / manifest.generation_id
+    delivery_receipt = _report_delivery_receipt(
+        generation_id=manifest.generation_id,
+        generation_manifest_bytes=generation_manifest_bytes,
+        generation_inventory_sha256_value=generation_inventory_sha256(
+            output_root, manifest.generation_id
+        ),
+        report_data_bytes=evidence_snapshots["report_data"][1],
+        workbook_bytes=evidence_snapshots["workbook"][1],
+    )
+    delivery_receipt_bytes = canonical_json_bytes(delivery_receipt)
+    _preflight_report_delivery(
+        delivery_dir, evidence_snapshots["workbook"][1], delivery_receipt_bytes
+    )
+    _write_exact(delivery_dir / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
+    _write_exact(delivery_dir / REPORT_DELIVERY_NAME, delivery_receipt_bytes)
     pointer = publish_generation(output_root, manifest.generation_id)
     snapshot_context.cleanup()
     return {
@@ -5174,6 +5863,8 @@ def publish_report(
         "strategy_count": verification["strategy_count"],
         "twr_available_count": verification["twr_available_count"],
         "twr_row_count": verification["twr_row_count"],
+        "delivery_dir": str(delivery_dir),
+        "delivery_receipt": str(delivery_dir / REPORT_DELIVERY_NAME),
         "workbook_sha256": verification["workbook_sha256"],
     }
 
@@ -5202,6 +5893,8 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--implementation-reconciliation", type=Path)
     verify.add_argument("--implementation-return-attribution", type=Path)
     verify.add_argument("--correlation-root", type=Path)
+    verify.add_argument("--epoch-manifest", type=Path)
+    verify.add_argument("--epoch-manifest-source", type=Path)
     canonicalize = commands.add_parser("canonicalize")
     canonicalize.add_argument("--workbook", type=Path, required=True)
     canonicalize.add_argument("--evidence", type=Path, required=True)
@@ -5214,6 +5907,8 @@ def _parser() -> argparse.ArgumentParser:
     bind_evidence.add_argument("--xlsx-result", type=Path, required=True)
     bind_evidence.add_argument("--validation-result", type=Path, required=True)
     bind_evidence.add_argument("--evidence", type=Path, required=True)
+    bind_evidence.add_argument("--epoch-manifest", type=Path)
+    bind_evidence.add_argument("--epoch-manifest-source", type=Path)
     publish = commands.add_parser("publish")
     publish.add_argument("--baseline-root", type=Path, required=True)
     publish.add_argument("--candidate-dir", type=Path, required=True)
@@ -5229,6 +5924,9 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--implementation-reconciliation", type=Path)
     publish.add_argument("--implementation-return-attribution", type=Path)
     publish.add_argument("--correlation-root", type=Path)
+    publish.add_argument("--epoch-manifest", type=Path)
+    publish.add_argument("--epoch-manifest-source", type=Path)
+    publish.add_argument("--epoch-manifest-generation-root", type=Path)
     return parser
 
 
@@ -5273,6 +5971,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.xlsx_result,
                 args.validation_result,
                 args.evidence,
+                args.epoch_manifest,
+                args.epoch_manifest_source,
             )
         else:
             result = publish_report(
@@ -5290,6 +5990,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.implementation_return_attribution,
                 args.correlation_root,
                 args.workbook_evidence_binding,
+                args.epoch_manifest,
+                args.epoch_manifest_source,
+                args.epoch_manifest_generation_root,
             )
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         print(f"portfolio-report: FAIL: {exc}", file=sys.stderr)

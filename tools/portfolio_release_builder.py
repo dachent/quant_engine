@@ -3814,7 +3814,7 @@ def build_report_candidate(
     history_contract: Path,
     implementation_reconciliation: Path,
     implementation_return_attribution: Path,
-    attribution_root: Path,
+    attribution_root: Path | None,
     output_root: Path,
     correlation_root: Path | None = None,
 ) -> dict[str, Any]:
@@ -3833,8 +3833,11 @@ def build_report_candidate(
         str(implementation_reconciliation),
         "--implementation-return-attribution",
         str(implementation_return_attribution),
-        "--attribution-root",
-        str(attribution_root),
+        *(
+            ("--attribution-root", str(attribution_root))
+            if attribution_root is not None
+            else ()
+        ),
         *(
             ("--correlation-root", str(correlation_root))
             if correlation_root is not None
@@ -3855,7 +3858,7 @@ def build_workbook(
     history_contract: Path,
     implementation_reconciliation: Path,
     implementation_return_attribution: Path,
-    attribution_root: Path,
+    attribution_root: Path | None,
     candidate: Path,
     output_root: Path,
     correlation_root: Path | None = None,
@@ -3888,6 +3891,15 @@ def build_workbook(
             "--epoch-manifest-source",
             str(epoch_source_path),
         )
+    epoch_publish_arguments = (
+        (
+            *epoch_arguments,
+            "--epoch-manifest-generation-root",
+            str(epoch_manifest_generation_root),
+        )
+        if epoch_manifest_generation_root is not None
+        else ()
+    )
     if not XLSX_RUNTIME.is_file() or not XLSX_CLI.is_file():
         raise VerticalBuildError("xlsx-win durable runtime is unavailable")
     result_path = candidate / "xlsx-result.json"
@@ -3980,8 +3992,11 @@ def build_workbook(
         str(implementation_reconciliation),
         "--implementation-return-attribution",
         str(implementation_return_attribution),
-        "--attribution-root",
-        str(attribution_root),
+        *(
+            ("--attribution-root", str(attribution_root))
+            if attribution_root is not None
+            else ()
+        ),
         *(
             ("--correlation-root", str(correlation_root))
             if correlation_root is not None
@@ -4016,14 +4031,17 @@ def build_workbook(
         str(implementation_reconciliation),
         "--implementation-return-attribution",
         str(implementation_return_attribution),
-        "--attribution-root",
-        str(attribution_root),
+        *(
+            ("--attribution-root", str(attribution_root))
+            if attribution_root is not None
+            else ()
+        ),
         *(
             ("--correlation-root", str(correlation_root))
             if correlation_root is not None
             else ()
         ),
-        *epoch_arguments,
+        *epoch_publish_arguments,
         timeout=7200,
     )
     generation_id = _generation_id(
@@ -4062,7 +4080,7 @@ def build_report(
     history_contract: Path,
     implementation_reconciliation: Path,
     implementation_return_attribution: Path,
-    attribution_root: Path,
+    attribution_root: Path | None,
     output_root: Path,
     correlation_root: Path | None = None,
     *,

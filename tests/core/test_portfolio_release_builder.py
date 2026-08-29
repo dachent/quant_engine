@@ -3684,8 +3684,79 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
     ):
         assert call[call.index("--epoch-manifest") + 1] == str(manifest_path)
         assert call[call.index("--epoch-manifest-source") + 1] == str(source_path)
+    publish_call = next(
+        call
+        for call in calls
+        if call[0] == "portfolio_report.py" and call[1] == "publish"
+    )
+    assert publish_call[
+        publish_call.index("--epoch-manifest-generation-root") + 1
+    ] == str(generation_root)
     assert result["epoch_manifest_generation_id"] == manifest.generation_id
     assert result["epoch_manifest_artifact"]["sha256"] == PREWIRE_MANIFEST_SHA256
+
+
+def test_report_wrapper_omits_unavailable_optional_attribution_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "report-candidate"
+    candidate.mkdir()
+    runtime = tmp_path / "xlsx-runtime.exe"
+    cli = tmp_path / "xlsx-cli.py"
+    runtime.write_bytes(b"runtime")
+    cli.write_bytes(b"cli")
+    monkeypatch.setattr(builder, "XLSX_RUNTIME", runtime)
+    monkeypatch.setattr(builder, "XLSX_CLI", cli)
+    monkeypatch.setattr(builder, "_accepted_xlsx_evidence", lambda _path: True)
+    monkeypatch.setattr(
+        builder,
+        "_accepted_workbook_validation",
+        lambda _path, _candidate: {"all_passed": True},
+    )
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        if args[1] == "build":
+            return {"candidate_dir": str(candidate)}
+        if args[1] == "publish":
+            return {"generation_id": "f" * 64}
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    monkeypatch.setattr(
+        builder,
+        "_require_exact_report_delivery",
+        lambda _root, generation_id, _delivery: {
+            "delivery_classification": "NON_AUTHORITY_HUMAN_DELIVERY",
+            "generation_id": generation_id,
+            "workbook_status": "EXACT_NON_AUTHORITY",
+        },
+    )
+
+    built = builder.build_report(
+        tmp_path / "baseline",
+        tmp_path / "ledger",
+        tmp_path / "freshness.json",
+        tmp_path / "history.json",
+        tmp_path / "implementation.json",
+        tmp_path / "return-attribution.json",
+        None,
+        tmp_path / "report-output",
+    )
+
+    report_calls = [call for call in calls if call[0] == "portfolio_report.py"]
+    assert [call[1] for call in report_calls] == [
+        "build",
+        "canonicalize-xlsx-result",
+        "canonicalize",
+        "bind-workbook-evidence",
+        "verify",
+        "publish",
+    ]
+    assert all("--attribution-root" not in call for call in report_calls)
+    assert built["generation_id"] == "f" * 64
 
 
 def test_build_report_routes_schema10_epoch_binding_only_to_workbook(

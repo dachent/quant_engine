@@ -168,6 +168,45 @@ def test_native_excel_workbook_canonicalization_is_deterministic_and_bounded(
     assert reporter.canonicalize_workbook(first) == first_result
 
 
+def test_initial_workbook_build_is_stable_across_volatile_package_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def volatile_workbook(_report: object, path: Path) -> dict[str, int]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            _excel_saved_package(
+                path,
+                modified="2026-08-29T10:00:00Z",
+                chart_guid="10000000-CC01-4263-A5C9-803DDF0C079C",
+                temporary_root=r"C:\Temp\first-build",
+                revision_guid="178E45FB-7799-4293-81FE-29F635965A3D",
+            )
+        else:
+            _excel_saved_package(
+                path,
+                modified="2026-08-29T10:00:04Z",
+                chart_guid="20000000-DD23-47F6-8C5E-35307AE221C8",
+                temporary_root=r"C:\Temp\second-build",
+                revision_guid="290E8A27-6EEF-4295-BB7E-DD3062E36063",
+                zip_second=4,
+            )
+        return {"formula_count": 1}
+
+    monkeypatch.setattr(reporter, "_workbook", volatile_workbook)
+    path = tmp_path / "portfolio-report.xlsx"
+
+    first = reporter._build_workbook_exact({}, path)
+    first_bytes = path.read_bytes()
+    second = reporter._build_workbook_exact({}, path)
+
+    assert second == first
+    assert path.read_bytes() == first_bytes
+    assert first["workbook_sha256"] == hashlib.sha256(first_bytes).hexdigest()
+
+
 def test_canonicalization_fails_closed_on_unrecognized_volatile_field(
     tmp_path: Path,
 ) -> None:
@@ -264,6 +303,40 @@ def _prepare_workbook_evidence(
         run_result,
         validation,
         candidate / "workbook-evidence-binding.json",
+    )
+
+
+def _published_report_delivery(
+    tmp_path: Path, *, run_id: str
+) -> tuple[Path, str, Path]:
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id=run_id,
+        temporary_root=r"C:\\Temp\\xlsx-receipt-mutation",
+    )
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    published_root = tmp_path / "published"
+    published = reporter.publish_report(
+        baseline_root,
+        candidate,
+        workbook,
+        run_result,
+        validation,
+        published_root,
+        workbook_evidence_binding=binding_path,
+    )
+    generation_id = published["generation_id"]
+    assert isinstance(generation_id, str)
+    return (
+        published_root,
+        generation_id,
+        published_root / "deliveries" / generation_id,
     )
 
 
@@ -1414,9 +1487,7 @@ def test_candidate_drift_and_failed_excel_evidence_block_publication(
     reporter.canonicalize_workbook(
         workbook, candidate / "workbook-canonicalization.json"
     )
-    with pytest.raises(
-        reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
-    ):
+    with pytest.raises(reporter.ReportValidationError):
         reporter.publish_report(
             baseline_root,
             candidate,
@@ -1464,11 +1535,11 @@ def test_workbook_evidence_binding_pins_exact_final_workbook_and_sidecars(
             (candidate / "workbook-contract.json").read_bytes()
         ).hexdigest()
     )
-    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
-    assert binding["publication_disposition"] == "INCOMPLETE_STAGING_ONLY"
+    assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
+    assert binding["publication_disposition"] == "ELIGIBLE_FOR_NON_AUTHORITY_DELIVERY"
+    assert binding["workbook_delivery"]["delivery_evidence_schema_version"] == 1
     rendered = json.dumps(binding, sort_keys=True).lower()
     assert "native" not in rendered
-    assert "pass" not in rendered
     assert (
         binding["workbook_parity_sha256"]
         == hashlib.sha256((candidate / "workbook-parity.json").read_bytes()).hexdigest()
@@ -1582,7 +1653,7 @@ def test_every_governed_table_mutation_can_only_be_repo_bound(
         binding_path,
     )
 
-    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+    assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
 
 
 def test_workbook_header_mutation_can_only_be_repo_bound(
@@ -1612,7 +1683,7 @@ def test_workbook_header_mutation_can_only_be_repo_bound(
         binding_path,
     )
 
-    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+    assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
 
 
 def test_workbook_parity_does_not_round_expected_floats() -> None:
@@ -1651,7 +1722,7 @@ def test_workbook_formula_mutation_can_only_be_repo_bound(
         binding_path,
     )
 
-    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+    assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
 
 
 def test_workbook_readiness_mutation_can_only_be_repo_bound(
@@ -1681,7 +1752,7 @@ def test_workbook_readiness_mutation_can_only_be_repo_bound(
         binding_path,
     )
 
-    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+    assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
 
 
 def test_canonical_report_mutation_is_rejected_before_binding(tmp_path: Path) -> None:
@@ -1710,22 +1781,22 @@ def test_canonical_report_mutation_is_rejected_before_binding(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize(
-    "target_name",
+    ("target_name", "error_category"),
     (
-        "workbook",
-        "initial-workbook",
-        "xlsx-result.json",
-        "validation.json",
-        "workbook-contract.json",
-        "xlsx-job.json",
-        "workbook-canonicalization.json",
-        "xlsx-result-canonicalization.json",
-        "workbook-parity.json",
-        "workbook-evidence-binding.json",
+        ("workbook", "workbook evidence binding differs"),
+        ("initial-workbook", "workbook evidence binding differs"),
+        ("xlsx-result.json", "workbook evidence binding is invalid"),
+        ("validation.json", "workbook evidence binding is invalid"),
+        ("workbook-contract.json", "workbook evidence binding differs"),
+        ("xlsx-job.json", "workbook evidence binding differs"),
+        ("workbook-canonicalization.json", "workbook evidence binding differs"),
+        ("xlsx-result-canonicalization.json", "workbook evidence binding differs"),
+        ("workbook-parity.json", "workbook evidence binding differs"),
+        ("workbook-evidence-binding.json", "workbook evidence binding is invalid"),
     ),
 )
-def test_any_bound_workbook_evidence_byte_change_cannot_bypass_native_gate(
-    tmp_path: Path, target_name: str
+def test_any_bound_workbook_evidence_byte_change_blocks_publication(
+    tmp_path: Path, target_name: str, error_category: str
 ) -> None:
     baseline_root = _published_baseline(tmp_path)
     built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
@@ -1743,12 +1814,15 @@ def test_any_bound_workbook_evidence_byte_change_cannot_bypass_native_gate(
         if target_name == "workbook"
         else candidate / reporter.WORKBOOK_NAME
         if target_name == "initial-workbook"
+        else binding_path
+        if target_name == "workbook-evidence-binding.json"
         else candidate / target_name
     )
     target.write_bytes(target.read_bytes() + b"drift")
 
+    published_root = tmp_path / "published"
     with pytest.raises(
-        reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
+        reporter.ReportValidationError, match=f"^{error_category}$"
     ):
         reporter.publish_report(
             baseline_root,
@@ -1756,12 +1830,15 @@ def test_any_bound_workbook_evidence_byte_change_cannot_bypass_native_gate(
             workbook,
             run_result,
             validation,
-            tmp_path / "published",
+            published_root,
             workbook_evidence_binding=binding_path,
         )
+    assert not (published_root / "CURRENT.json").exists()
+    assert not (published_root / "generations").exists()
+    assert not (published_root / "deliveries").exists()
 
 
-def test_synthetic_workbook_publish_is_rejected_without_advancing_pointer(
+def test_validated_workbook_evidence_publishes_authority_and_delivery(
     tmp_path: Path,
 ) -> None:
     baseline_root = _published_baseline(tmp_path)
@@ -1777,11 +1854,136 @@ def test_synthetic_workbook_publish_is_rejected_without_advancing_pointer(
         candidate, workbook, run_result, validation, binding_path
     )
     published_root = _published_baseline(tmp_path / "published")
+    published = reporter.publish_report(
+        baseline_root,
+        candidate,
+        workbook,
+        run_result,
+        validation,
+        published_root,
+        workbook_evidence_binding=binding_path,
+    )
+
+    pointer = read_current(published_root)
+    assert pointer.generation_id == published["generation_id"]
+    assert (
+        published_root / "deliveries" / pointer.generation_id / reporter.WORKBOOK_NAME
+    ).is_file()
+
+
+def test_accepted_delivery_evidence_publishes_without_authority_upgrade(
+    tmp_path: Path,
+) -> None:
+    """Workbook QA evidence gates delivery without becoming report authority."""
+
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="4" * 32,
+        temporary_root=r"C:\\Temp\\xlsx-delivery-evidence",
+    )
+    binding = reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
+    assert binding["publication_disposition"] == "ELIGIBLE_FOR_NON_AUTHORITY_DELIVERY"
+    assert "native_execution" not in binding
+    assert "workbook_delivery" in binding
+
+    published_root = tmp_path / "published"
+    published = reporter.publish_report(
+        baseline_root,
+        candidate,
+        workbook,
+        run_result,
+        validation,
+        published_root,
+        workbook_evidence_binding=binding_path,
+    )
+
+    pointer = read_current(published_root)
+    assert published["generation_id"] == pointer.generation_id
+    assert not hasattr(reporter, "complete_workbook_evidence")
+
+
+@pytest.mark.parametrize(
+    ("target", "error_category"),
+    (
+        ("xlsx_result", "xlsx-win calculation evidence is not successful"),
+        ("validation", "xlsx-win workbook invariants did not all pass"),
+    ),
+)
+def test_failed_or_incomplete_workbook_evidence_cannot_create_delivery_binding(
+    tmp_path: Path, target: str, error_category: str
+) -> None:
+    """The binder admits only the complete supplied QA-evidence shape."""
+
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="1" * 32,
+        temporary_root=r"C:\\Temp\\xlsx-evidence-admission",
+    )
+    evidence_path = run_result if target == "xlsx_result" else validation
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if target == "xlsx_result":
+        evidence["final_state"] = "FAILED"
+        evidence["ok"] = False
+    else:
+        evidence["all_passed"] = False
+        evidence["invariants"][0]["passed"] = False
+    evidence_path.write_bytes(canonical_json_bytes(evidence))
+
+    with pytest.raises(reporter.ReportValidationError, match=f"^{error_category}$"):
+        reporter.bind_workbook_evidence(
+            candidate,
+            workbook,
+            run_result,
+            validation,
+            binding_path,
+        )
+
+    assert not binding_path.exists()
+
+
+@pytest.mark.parametrize("mutation", ("relabel", "extra", "missing"))
+def test_noncanonical_delivery_binding_cannot_advance_authority(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Manual labels and closed-structure changes never alter delivery admission."""
+
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="1" * 32,
+        temporary_root=r"C:\\Temp\\xlsx-relabel-rejection",
+    )
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    mutated = json.loads(binding_path.read_text(encoding="utf-8"))
+    if mutation == "relabel":
+        mutated["workbook_evidence_status"] = "MANUALLY_RELABELLED"
+    elif mutation == "extra":
+        mutated["unbound"] = True
+    else:
+        del mutated["workbook_delivery"]
+    binding_path.write_bytes(canonical_json_bytes(mutated))
+    published_root = _published_baseline(tmp_path / "published")
     pointer_before = (published_root / "CURRENT.json").read_bytes()
     generations_before = sorted((published_root / "generations").iterdir())
 
     with pytest.raises(
-        reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
+        reporter.ReportValidationError, match="^workbook evidence binding differs$"
     ):
         reporter.publish_report(
             baseline_root,
@@ -1795,12 +1997,516 @@ def test_synthetic_workbook_publish_is_rejected_without_advancing_pointer(
 
     assert (published_root / "CURRENT.json").read_bytes() == pointer_before
     assert sorted((published_root / "generations").iterdir()) == generations_before
-    assert not (published_root / "CURRENT_RELEASE.json").exists()
-    assert not list(published_root.rglob("report-verification.json"))
+    assert not (published_root / "deliveries").exists()
+
+
+@pytest.mark.parametrize(
+    ("field_path", "replacement"),
+    (
+        (("xlsx_result", "sha256"), "0" * 64),
+        (("xlsx_result", "size_bytes"), 0),
+        (("validation_result", "sha256"), "0" * 64),
+        (("validation_result", "size_bytes"), 0),
+        (("final_workbook", "sha256"), "0" * 64),
+        (("final_workbook", "size_bytes"), 0),
+        (("engine", "run_id"), "wrong-run-id"),
+        (("engine", "idempotency_key"), "wrong-idempotency-key"),
+        (("engine", "result_schema_version"), "0.0"),
+        (("steps", 1, "status"), "failed"),
+        (("validation", "invariant_count"), 0),
+        (("validation", "passed_invariant_count"), 0),
+    ),
+)
+def test_delivery_evidence_binding_mutation_cannot_advance_authority(
+    tmp_path: Path, field_path: tuple[str | int, ...], replacement: str | int
+) -> None:
+    """Every delivery-evidence field is rederived from bound QA artifacts."""
+
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="2" * 32,
+        temporary_root=r"C:\\Temp\\xlsx-delivery-evidence-mutation",
+    )
+    binding = reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    assert binding == json.loads(binding_path.read_text(encoding="utf-8"))
+    mutated = json.loads(binding_path.read_text(encoding="utf-8"))
+    target: Any = mutated["workbook_delivery"]
+    for key in field_path[:-1]:
+        target = target[key]
+    target[field_path[-1]] = replacement
+    binding_path.write_bytes(canonical_json_bytes(mutated))
+    published_root = _published_baseline(tmp_path / "published")
+    pointer_before = (published_root / "CURRENT.json").read_bytes()
+    generations_before = sorted((published_root / "generations").iterdir())
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="^workbook evidence binding differs$"
+    ):
+        reporter.publish_report(
+            baseline_root,
+            candidate,
+            workbook,
+            run_result,
+            validation,
+            published_root,
+            workbook_evidence_binding=binding_path,
+        )
+
+    assert (published_root / "CURRENT.json").read_bytes() == pointer_before
+    assert sorted((published_root / "generations").iterdir()) == generations_before
+    assert not (published_root / "deliveries").exists()
+
+
+def test_validated_local_workbook_evidence_publishes_an_immutable_report(
+    tmp_path: Path,
+) -> None:
+    """A closed delivery-evidence binding permits the producer path."""
+
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
+    candidate = Path(built["candidate_dir"])
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="9" * 32,
+        temporary_root=r"C:\Temp\xlsx-local-publication",
+    )
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    expected_workbook = workbook.read_bytes()
+    expected_report = (candidate / reporter.REPORT_DATA_NAME).read_bytes()
+    published_root = tmp_path / "published"
+
+    published = reporter.publish_report(
+        baseline_root,
+        candidate,
+        workbook,
+        run_result,
+        validation,
+        published_root,
+        workbook_evidence_binding=binding_path,
+    )
+
+    pointer = read_current(published_root)
+    generation = published_root / "generations" / pointer.generation_id
+    delivery = published_root / "deliveries" / pointer.generation_id
+    assert published["generation_id"] == pointer.generation_id
+    assert not (generation / reporter.WORKBOOK_NAME).exists()
+    assert (delivery / reporter.WORKBOOK_NAME).read_bytes() == expected_workbook
+    assert (generation / reporter.REPORT_DATA_NAME).read_bytes() == expected_report
+    assert (generation / "report-verification.json").is_file()
+
+
+def test_publish_keeps_authority_json_immutable_when_delivery_workbook_drifts(
+    tmp_path: Path,
+) -> None:
+    """Putting an XLSX in the authority generation must break this contract."""
+
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="a" * 32,
+        temporary_root=r"C:\\Temp\\xlsx-authority-delivery",
+    )
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    expected_report = (candidate / "portfolio-report-data.json").read_bytes()
+    expected_report_sha256 = hashlib.sha256(expected_report).hexdigest()
+    published_root = tmp_path / "published"
+
+    published = reporter.publish_report(
+        baseline_root,
+        candidate,
+        workbook,
+        run_result,
+        validation,
+        published_root,
+        workbook_evidence_binding=binding_path,
+    )
+
+    pointer = read_current(published_root)
+    generation = published_root / "generations" / pointer.generation_id
+    delivery = published_root / "deliveries" / pointer.generation_id
+    receipt_path = delivery / "report-delivery.json"
+    workbook_path = delivery / "portfolio-report.xlsx"
+    assert published["generation_id"] == pointer.generation_id
+    assert (generation / "portfolio-report-data.json").read_bytes() == expected_report
+    assert (generation / "portfolio-report.xlsx").exists() is False
+    assert not list(generation.rglob("*.xlsx"))
+    authority_paths = sorted(
+        path.relative_to(generation).as_posix()
+        for path in generation.rglob("*")
+        if path.is_file()
+    )
+    assert authority_paths == [
+        "generation.json",
+        "portfolio-report-data.json",
+        "report-verification.json",
+        "workbook-canonicalization.json",
+        "workbook-contract.json",
+        "workbook-evidence-binding.json",
+        "workbook-parity.json",
+        "workbook-validation.json",
+        "xlsx-job.json",
+        "xlsx-result-canonicalization.json",
+        "xlsx-win-result.json",
+    ]
+    expected_inventory_sha256 = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "files": [
+                    {
+                        "relative_path": relative_path,
+                        "sha256": hashlib.sha256(
+                            (generation / relative_path).read_bytes()
+                        ).hexdigest(),
+                        "size_bytes": len((generation / relative_path).read_bytes()),
+                    }
+                    for relative_path in authority_paths
+                ],
+                "inventory_schema_version": 1,
+            }
+        )
+    ).hexdigest()
+    expected_manifest = (generation / "generation.json").read_bytes()
+    assert workbook_path.is_file()
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["delivery_classification"] == "NON_AUTHORITY_HUMAN_DELIVERY"
+    assert receipt["authority"] == {
+        "generation_id": pointer.generation_id,
+        "generation_inventory_sha256": expected_inventory_sha256,
+        "generation_manifest_sha256": hashlib.sha256(expected_manifest).hexdigest(),
+        "generation_manifest_size_bytes": len(expected_manifest),
+        "payload": {
+            "relative_path": "portfolio-report-data.json",
+            "sha256": expected_report_sha256,
+            "size_bytes": len(expected_report),
+        },
+    }
+    assert pointer.artifact_inventory_sha256 == expected_inventory_sha256
+    assert pointer.manifest_sha256 == hashlib.sha256(expected_manifest).hexdigest()
+    assert receipt["workbook"]["relative_path"] == "portfolio-report.xlsx"
+    from jsonschema import Draft202012Validator
+
+    delivery_schema = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "schemas"
+            / "portfolio"
+            / "report-delivery.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(delivery_schema)
+    Draft202012Validator(delivery_schema).validate(receipt)
+
+    assert (
+        reporter.publish_report(
+            baseline_root,
+            candidate,
+            workbook,
+            run_result,
+            validation,
+            published_root,
+            workbook_evidence_binding=binding_path,
+        )
+        == published
+    )
+
+    with zipfile.ZipFile(workbook_path, "a") as archive:
+        archive.writestr("customXml/item1.xml", b"<sharepoint-metadata/>")
+
+    delivery_status = reporter.inspect_report_delivery(
+        published_root, pointer.generation_id, delivery
+    )
+    assert delivery_status["workbook_status"] == "DRIFTED_NON_AUTHORITY"
+    assert delivery_status["expected_workbook_sha256"] == receipt["workbook"]["sha256"]
+    assert delivery_status["actual_workbook_sha256"] == hashlib.sha256(
+        workbook_path.read_bytes()
+    ).hexdigest()
+    assert read_current(published_root) == pointer
+
+    with pytest.raises(reporter.GenerationConflictError):
+        reporter.publish_report(
+            baseline_root,
+            candidate,
+            workbook,
+            run_result,
+            validation,
+            published_root,
+            workbook_evidence_binding=binding_path,
+        )
+
+
+def test_delivery_inspection_requires_closed_receipt_and_exact_authority_binding(
+    tmp_path: Path,
+) -> None:
+    """Dropping a receipt field or rebinding it to another authority must fail."""
+
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="c" * 32,
+        temporary_root=r"C:\\Temp\\xlsx-delivery-inspection",
+    )
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    published_root = tmp_path / "published"
+    published = reporter.publish_report(
+        baseline_root,
+        candidate,
+        workbook,
+        run_result,
+        validation,
+        published_root,
+        workbook_evidence_binding=binding_path,
+    )
+    generation_id = published["generation_id"]
+    delivery = published_root / "deliveries" / generation_id
+    receipt_path = delivery / "report-delivery.json"
+    original_receipt = receipt_path.read_bytes()
+    manifest_bytes = (
+        published_root / "generations" / generation_id / "generation.json"
+    ).read_bytes()
+    report_bytes = (
+        published_root / "generations" / generation_id / "portfolio-report-data.json"
+    ).read_bytes()
+
+    exact = reporter.inspect_report_delivery(published_root, generation_id, delivery)
+    assert exact["workbook_status"] == "EXACT_NON_AUTHORITY"
+    assert exact["generation_manifest_sha256"] == hashlib.sha256(
+        manifest_bytes
+    ).hexdigest()
+    assert exact["report_data_sha256"] == hashlib.sha256(report_bytes).hexdigest()
+
+    size_only = json.loads(original_receipt)
+    size_only["workbook"]["size_bytes"] -= 1
+    receipt_path.write_bytes(canonical_json_bytes(size_only))
+    assert (
+        reporter.inspect_report_delivery(published_root, generation_id, delivery)[
+            "workbook_status"
+        ]
+        == "DRIFTED_NON_AUTHORITY"
+    )
+
+    malformed = json.loads(original_receipt)
+    malformed["unexpected"] = True
+    receipt_path.write_bytes(canonical_json_bytes(malformed))
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="^report delivery receipt structure differs$",
+    ):
+        reporter.inspect_report_delivery(published_root, generation_id, delivery)
+
+    rebound = json.loads(original_receipt)
+    rebound["authority"]["payload"]["sha256"] = "0" * 64
+    receipt_path.write_bytes(canonical_json_bytes(rebound))
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="^report delivery receipt authority binding differs$",
+    ):
+        reporter.inspect_report_delivery(published_root, generation_id, delivery)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    (
+        (("authority", "generation_id"), "authority"),
+        (("authority", "generation_manifest_sha256"), "authority"),
+        (("authority", "generation_manifest_size_bytes"), "authority"),
+        (("authority", "generation_inventory_sha256"), "authority"),
+        (("authority", "payload", "relative_path"), "authority"),
+        (("authority", "payload", "sha256"), "authority"),
+        (("authority", "payload", "size_bytes"), "authority"),
+        (("workbook", "relative_path"), "structure"),
+        (("workbook", "sha256"), "drift"),
+        (("workbook", "size_bytes"), "drift"),
+        (("missing_authority",), "structure"),
+        (("missing_payload",), "authority"),
+        (("extra",), "structure"),
+    ),
+)
+def test_delivery_inspection_receipt_mutations_are_closed_or_non_authority_drift(
+    tmp_path: Path, mutation: tuple[str, ...], expected: str
+) -> None:
+    """Every required receipt binding is either exact or a named non-authority drift."""
+
+    published_root, generation_id, delivery = _published_report_delivery(
+        tmp_path, run_id="3" * 32
+    )
+    receipt_path = delivery / "report-delivery.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if mutation == ("missing_authority",):
+        del receipt["authority"]
+    elif mutation == ("missing_payload",):
+        del receipt["authority"]["payload"]
+    elif mutation == ("extra",):
+        receipt["unexpected"] = True
+    else:
+        target: Any = receipt
+        for key in mutation[:-1]:
+            target = target[key]
+        key = mutation[-1]
+        value = target[key]
+        target[key] = value + 1 if isinstance(value, int) else "0" * 64
+    receipt_path.write_bytes(canonical_json_bytes(receipt))
+
+    if expected == "authority":
+        with pytest.raises(
+            reporter.ReportValidationError,
+            match="^report delivery receipt authority binding differs$",
+        ):
+            reporter.inspect_report_delivery(published_root, generation_id, delivery)
+    elif expected == "structure":
+        with pytest.raises(
+            reporter.ReportValidationError,
+            match="^report delivery receipt structure differs$",
+        ):
+            reporter.inspect_report_delivery(published_root, generation_id, delivery)
+    else:
+        assert (
+            reporter.inspect_report_delivery(published_root, generation_id, delivery)[
+                "workbook_status"
+            ]
+            == "DRIFTED_NON_AUTHORITY"
+        )
+
+
+@pytest.mark.parametrize("conflicting_target", ("receipt", "workbook"))
+def test_delivery_preflight_does_not_create_other_target_on_conflict(
+    tmp_path: Path, conflicting_target: str
+) -> None:
+    """A conflicting existing delivery target must be found before either write."""
+
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="e" * 32,
+        temporary_root=r"C:\\Temp\\xlsx-delivery-preflight",
+    )
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    published_root = tmp_path / "published"
+    published = reporter.publish_report(
+        baseline_root,
+        candidate,
+        workbook,
+        run_result,
+        validation,
+        published_root,
+        workbook_evidence_binding=binding_path,
+    )
+    generation_id = published["generation_id"]
+    delivery = published_root / "deliveries" / generation_id
+    receipt_path = delivery / "report-delivery.json"
+    workbook_path = delivery / "portfolio-report.xlsx"
+    pointer_before = (published_root / "CURRENT.json").read_bytes()
+    if conflicting_target == "receipt":
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["workbook"]["sha256"] = "0" * 64
+        conflicting_bytes = canonical_json_bytes(receipt)
+        receipt_path.write_bytes(conflicting_bytes)
+        workbook_path.unlink()
+        missing_path = workbook_path
+        conflicting_path = receipt_path
+    else:
+        conflicting_bytes = workbook_path.read_bytes() + b"sharepoint-drift"
+        workbook_path.write_bytes(conflicting_bytes)
+        receipt_path.unlink()
+        missing_path = receipt_path
+        conflicting_path = workbook_path
+
+    with pytest.raises(
+        reporter.GenerationConflictError,
+        match="^report delivery target differs$",
+    ):
+        reporter.publish_report(
+            baseline_root,
+            candidate,
+            workbook,
+            run_result,
+            validation,
+            published_root,
+            workbook_evidence_binding=binding_path,
+        )
+
+    assert missing_path.exists() is False
+    assert conflicting_path.read_bytes() == conflicting_bytes
+    assert (published_root / "CURRENT.json").read_bytes() == pointer_before
+
+
+@pytest.mark.parametrize("missing_target", ("receipt", "workbook"))
+def test_delivery_preflight_recovers_exact_partial_delivery(
+    tmp_path: Path, missing_target: str
+) -> None:
+    """An exact surviving delivery file may be paired with its missing sibling."""
+
+    baseline_root = _published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+    )
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate,
+        run_id="f" * 32,
+        temporary_root=r"C:\\Temp\\xlsx-delivery-partial",
+    )
+    reporter.bind_workbook_evidence(
+        candidate, workbook, run_result, validation, binding_path
+    )
+    published_root = tmp_path / "published"
+    published = reporter.publish_report(
+        baseline_root,
+        candidate,
+        workbook,
+        run_result,
+        validation,
+        published_root,
+        workbook_evidence_binding=binding_path,
+    )
+    delivery = published_root / "deliveries" / published["generation_id"]
+    receipt_path = delivery / "report-delivery.json"
+    workbook_path = delivery / "portfolio-report.xlsx"
+    expected_receipt = receipt_path.read_bytes()
+    expected_workbook = workbook_path.read_bytes()
+    pointer_before = (published_root / "CURRENT.json").read_bytes()
+    (receipt_path if missing_target == "receipt" else workbook_path).unlink()
+
+    assert (
+        reporter.publish_report(
+            baseline_root,
+            candidate,
+            workbook,
+            run_result,
+            validation,
+            published_root,
+            workbook_evidence_binding=binding_path,
+        )
+        == published
+    )
+    assert receipt_path.read_bytes() == expected_receipt
+    assert workbook_path.read_bytes() == expected_workbook
+    assert (published_root / "CURRENT.json").read_bytes() == pointer_before
 
 
 @pytest.mark.parametrize("receipt_kind", ("missing", "malformed", "caller_created"))
-def test_publish_requires_external_native_receipt_for_every_caller_input(
+def test_publish_requires_exact_bound_workbook_evidence_for_every_caller_input(
     tmp_path: Path, receipt_kind: str
 ) -> None:
     baseline_root = _published_baseline(tmp_path / "baseline")
@@ -1859,9 +2565,7 @@ def test_publish_requires_external_native_receipt_for_every_caller_input(
             )
         )
 
-    with pytest.raises(
-        reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
-    ):
+    with pytest.raises(reporter.ReportValidationError):
         reporter.publish_report(
             baseline_root,
             candidate,
@@ -1878,7 +2582,7 @@ def test_publish_requires_external_native_receipt_for_every_caller_input(
     assert not list(published_root.rglob("report-verification.json"))
 
 
-def test_publish_cli_rejects_synthetic_sidecars_without_a_release_receipt(
+def test_publish_cli_accepts_exact_bound_workbook_evidence(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1913,15 +2617,14 @@ def test_publish_cli_rejects_synthetic_sidecars_without_a_release_receipt(
         ]
     )
 
-    assert exit_code == 1
-    assert capsys.readouterr().err == (
-        "portfolio-report: FAIL: NATIVE_EXCEL_RECEIPT_REQUIRED\n"
-    )
-    assert (published_root / "CURRENT.json").read_bytes() == pointer_before
-    assert not (published_root / "CURRENT_RELEASE.json").exists()
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert (published_root / "CURRENT.json").read_bytes() != pointer_before
+    assert read_current(published_root).generation_id in captured.out
 
 
-def test_repo_bound_workbook_stages_without_current_or_release_pointer(
+def test_delivery_evidence_stages_without_current_or_release_pointer(
     tmp_path: Path,
 ) -> None:
     baseline_root = _published_baseline(tmp_path / "baseline")
@@ -1933,14 +2636,14 @@ def test_repo_bound_workbook_stages_without_current_or_release_pointer(
         candidate, workbook, run_result, validation, binding_path
     )
 
-    assert binding["workbook_evidence_status"] == "REPO_BOUND_POSTRUN_ONLY"
+    assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
     assert (candidate / reporter.WORKBOOK_NAME).is_file()
     assert (candidate / "workbook-evidence-binding.json").is_file()
     assert not (candidate / "CURRENT.json").exists()
     assert not (candidate / "CURRENT_RELEASE.json").exists()
 
 
-def test_publication_rejects_source_rollover_without_bypassing_native_gate(
+def test_publication_rejects_source_rollover_before_delivery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     baseline_root = _published_baseline(tmp_path)
@@ -1969,9 +2672,7 @@ def test_publication_rejects_source_rollover_without_bypassing_native_gate(
 
     monkeypatch.setattr(reporter, "build_report_data", build_then_roll_source)
 
-    with pytest.raises(
-        reporter.ReportValidationError, match="^NATIVE_EXCEL_RECEIPT_REQUIRED$"
-    ):
+    with pytest.raises(reporter.ReportValidationError, match="source identity drift"):
         reporter.publish_report(
             baseline_root,
             candidate,
@@ -2165,7 +2866,7 @@ def test_freshness_assessments_reject_different_selected_ledger(
         reporter._freshness_assessments(freshness, date(2026, 8, 3), provider_root)
 
 
-def test_cli_output_contains_only_sanitized_counts(
+def test_build_cli_creates_real_candidate_and_outputs_only_sanitized_counts(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     baseline_root = _published_baseline(tmp_path)
@@ -2388,6 +3089,139 @@ def test_account_live_evidence_rejects_return_series_vintage_mismatch() -> None:
         match="return_observations differs from canonical return series",
     ):
         reporter._strategy_provider_evidence(catalog)
+
+
+def _write_report_product_contract(
+    path: Path,
+    *,
+    first_lifecycle: str,
+    first_requirement: str,
+    first_funded_status: str,
+) -> bytes:
+    content = canonical_json_bytes(
+        {
+            "contract_schema_version": 6,
+            "current_census": {"as_of": "2026-01-03"},
+            "product": {"product_id": "FINANCIAL_MVP"},
+            "strategies": [
+                {
+                    "funded_membership": {"status": first_funded_status},
+                    "lifecycle_status": first_lifecycle,
+                    "product_requirement": first_requirement,
+                    "strategy_id": "strategy-1",
+                },
+                *[
+                    {
+                        "funded_membership": {"status": "EVIDENCED"},
+                        "lifecycle_status": "ACTIVE",
+                        "product_requirement": "REQUIRED",
+                        "strategy_id": f"strategy-{index}",
+                    }
+                    for index in range(2, 10)
+                ],
+            ],
+        }
+    )
+    path.write_bytes(content)
+    return content
+
+
+def _historical_only_provider_catalog() -> dict[str, Any]:
+    catalog = _baseline_catalog()
+    catalog["strategy_live_metrics"] = []
+    catalog["strategy_provider_evidence"] = [
+        {
+            "account": {
+                "cumulative_return": "-0.05",
+                "current_drawdown": "-0.06",
+                "generation_as_of_date": "2025-11-24",
+                "generation_id": "a" * 64,
+                "maximum_drawdown": "-0.07",
+                "observed_end": "2025-11-24",
+                "observed_start": "2025-10-01",
+                "provider_id": "synthetic-broker",
+                "return_observations": 13,
+            },
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_as_of_date": "2025-11-24",
+            "generation_id": "a" * 64,
+            "provider_id": "synthetic-broker",
+            "strategy_id": "strategy-1",
+        }
+    ]
+    catalog["strategy_returns"] = []
+    return catalog
+
+
+def test_deprecated_strategy_retains_history_without_current_series_requirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract_path = tmp_path / "financial-mvp.json"
+    contract_bytes = _write_report_product_contract(
+        contract_path,
+        first_lifecycle="DEPRECATED_HISTORY_ONLY",
+        first_requirement="EXCLUDED",
+        first_funded_status="EXCLUDED",
+    )
+    monkeypatch.setattr(reporter, "_PORTABLE_HWM_PRODUCT_CONTRACT", contract_path)
+    baseline_root = _published_baseline(
+        tmp_path, _historical_only_provider_catalog()
+    )
+
+    report, _content, _baseline_path = reporter.build_report_data(baseline_root)
+
+    evidence = report["strategy_provider_evidence"][0]
+    assert evidence["lifecycle_status"] == "DEPRECATED_HISTORY_ONLY"
+    assert evidence["product_requirement"] == "EXCLUDED"
+    assert evidence["product_evidence_disposition"] == (
+        "HISTORICAL_ONLY_EXCLUDED_FROM_CURRENT_PRODUCT"
+    )
+    summary = next(
+        row for row in report["strategy_summary"] if row["strategy_id"] == "strategy-1"
+    )
+    assert summary["lifecycle_status"] == "DEPRECATED_HISTORY_ONLY"
+    assert summary["product_requirement"] == "EXCLUDED"
+    assert summary["account_live_status"] == "HISTORICAL_ONLY"
+    assert summary["account_live_return_authority"] == (
+        "HISTORICAL_ACCOUNT_LIVE_EVIDENCE"
+    )
+    assert summary["account_live_cumulative_return"] == "-0.05"
+    assert summary["account_live_observed_end"] == "2025-11-24"
+    assert summary["account_live_return_series_sha256"] is None
+    assert summary["nav_status"] == "HISTORICAL_ONLY"
+    product_provenance = next(
+        row
+        for row in report["provenance"]
+        if row["artifact"] == "financial-mvp-contract"
+    )
+    assert product_provenance == {
+        "artifact": "financial-mvp-contract",
+        "as_of_date": "2026-01-03",
+        "schema": "portfolio-financial-mvp-source/6",
+        "sha256": hashlib.sha256(contract_bytes).hexdigest(),
+    }
+
+
+def test_active_strategy_still_requires_current_canonical_return_series(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract_path = tmp_path / "financial-mvp.json"
+    _write_report_product_contract(
+        contract_path,
+        first_lifecycle="ACTIVE",
+        first_requirement="REQUIRED",
+        first_funded_status="EVIDENCED",
+    )
+    monkeypatch.setattr(reporter, "_PORTABLE_HWM_PRODUCT_CONTRACT", contract_path)
+    baseline_root = _published_baseline(
+        tmp_path, _historical_only_provider_catalog()
+    )
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="account-live evidence has no canonical return series for strategy-1",
+    ):
+        reporter.build_report_data(baseline_root)
 
 
 def test_legacy_account_metrics_remain_one_explicit_audit_vintage() -> None:
