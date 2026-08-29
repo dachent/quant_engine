@@ -2,14 +2,27 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import csv
+from decimal import Decimal
+import hashlib
+import io
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 from typing import Any
 
+from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +35,31 @@ if SPEC is None or SPEC.loader is None:
 current = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = current
 SPEC.loader.exec_module(current)
+
+
+_SYNTHETIC_LAYERED_HISTORY_SEGMENT_FIELDS = (
+    "strategy_id",
+    "series_id",
+    "date",
+    "return",
+    "evidence_layer",
+    "strategy_version",
+    "segment_id",
+    "source_id",
+    "source_generation_id",
+    "mode_admission",
+    "return_basis",
+    "return_type",
+    "calendar",
+    "frequency",
+)
+_SYNTHETIC_LAYERED_HISTORY_RETURN_FIELDS = (
+    "series_id",
+    "date",
+    "return",
+    "evidence_layer",
+    "strategy_version",
+)
 
 
 def _rows() -> list[dict[str, str]]:
@@ -447,3 +485,517 @@ def test_current_policy_encodes_owner_approved_seven_strategy_perimeter() -> Non
     assert (
         sum(current.Decimal(row["allocation_weight"]) for row in policy["series"]) < 1
     )
+
+
+def _canonical_csv(
+    fields: tuple[str, ...], rows: list[dict[str, str]]
+) -> bytes:
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=fields, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows({field: row[field] for field in fields} for row in rows)
+    return buffer.getvalue().encode("utf-8")
+
+
+def _sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _unmocked_fixture(tmp_path: Path, *, return_shift: str = "0") -> dict[str, Any]:
+    authority_root = tmp_path / "authority"
+    contracts = authority_root / "contracts"
+    schemas = authority_root / "schemas" / "portfolio"
+    contracts.mkdir(parents=True)
+    schemas.mkdir(parents=True)
+    for name in (
+        "financial-mvp-source-contract.schema.json",
+        "dependence-policy.schema.json",
+        "layered-history-generation.schema.json",
+    ):
+        (schemas / name).write_bytes(
+            (REPOSITORY_ROOT / "schemas" / "portfolio" / name).read_bytes()
+        )
+
+    contract = json.loads(
+        (REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    policy = json.loads(
+        (REPOSITORY_ROOT / "contracts" / "portfolio-dependence-policy-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    strategy_series = {
+        row["strategy_id"]: row["history_series_id"]
+        for row in contract["strategies"]
+    }
+    base_identities = contract["history_corrections"][
+        "materialized_segment_identities"
+    ]
+    rows: list[dict[str, str]] = []
+    identities: list[dict[str, object]] = []
+    for index, base in enumerate(base_identities, start=1):
+        selected = []
+        for day, value in (("2026-01-01", f"0.00{index}"), ("2026-01-02", f"-0.00{index}")):
+            row = {
+                "strategy_id": base["strategy_id"],
+                "series_id": strategy_series[base["strategy_id"]],
+                "date": day,
+                "return": str(Decimal(value) + Decimal(return_shift)),
+                "evidence_layer": base["evidence_layer"],
+                "strategy_version": base["strategy_version"],
+                "segment_id": base["segment_id"],
+                "source_id": base["source_id"],
+                "source_generation_id": base["source_generation_id"],
+                "mode_admission": base["mode_admission"],
+                "return_basis": base["return_basis"],
+                "return_type": base["return_type"],
+                "calendar": base["calendar"],
+                "frequency": base["frequency"],
+            }
+            rows.append(row)
+            selected.append(row)
+        return_rows = [
+            {field: row[field] for field in _SYNTHETIC_LAYERED_HISTORY_RETURN_FIELDS}
+            for row in selected
+        ]
+        identities.append(
+            {
+                "calendar": base["calendar"],
+                "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+                "evidence_layer": base["evidence_layer"],
+                "frequency": base["frequency"],
+                "mode_admission": base["mode_admission"],
+                "observed_end": "2026-01-02",
+                "observed_start": "2026-01-01",
+                "return_basis": base["return_basis"],
+                "return_observations": 2,
+                "return_type": base["return_type"],
+                "segment_id": base["segment_id"],
+                "sha256": _sha256(
+                    _canonical_csv(
+                        _SYNTHETIC_LAYERED_HISTORY_RETURN_FIELDS, return_rows
+                    )
+                ),
+                "source_generation_id": base["source_generation_id"],
+                "source_generation_sha256": base["source_generation_sha256"],
+                "source_id": base["source_id"],
+                "strategy_id": base["strategy_id"],
+                "strategy_version": base["strategy_version"],
+            }
+        )
+    contract["history_corrections"]["materialized_segment_identities"] = sorted(
+        identities, key=lambda row: str(row["segment_id"])
+    )
+    selected_by_strategy = {
+        str(row["strategy_id"]): row
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+        if row["evidence_layer"] == "ACCOUNT_LIVE"
+        and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    }
+    for strategy in contract["strategies"]:
+        live_identity = strategy["live_implementation_identity"]
+        if live_identity["status"] != "EVIDENCED":
+            continue
+        selected = selected_by_strategy[strategy["strategy_id"]]
+        strategy["live_implementation_identity"] = {
+            "status": "EVIDENCED",
+            "version_ref": f"account-live-segment:{selected['sha256']}",
+            "generation_id": selected["source_generation_id"],
+            "receipt_sha256": selected["source_generation_sha256"],
+        }
+
+    history_files: dict[str, bytes] = {}
+    history_files["segments.csv"] = _canonical_csv(
+        _SYNTHETIC_LAYERED_HISTORY_SEGMENT_FIELDS, rows
+    )
+    live_rows = [
+        {field: row[field] for field in _SYNTHETIC_LAYERED_HISTORY_RETURN_FIELDS}
+        for row in rows
+        if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    ]
+    live_rows.sort(key=lambda row: (row["series_id"], row["date"]))
+    history_files["live-only.csv"] = _canonical_csv(
+        _SYNTHETIC_LAYERED_HISTORY_RETURN_FIELDS, live_rows
+    )
+    history_files["live-plus-backtest.csv"] = _canonical_csv(
+        _SYNTHETIC_LAYERED_HISTORY_RETURN_FIELDS, live_rows
+    )
+    history_files["returns.csv"] = history_files["live-plus-backtest.csv"]
+    history_files["excluded.csv"] = _canonical_csv(
+        _SYNTHETIC_LAYERED_HISTORY_RETURN_FIELDS, []
+    )
+    history_files["coverage.json"] = canonical_json_bytes(
+        {"fixture": "synthetic-current-dependence"}
+    )
+    output_authority = {
+        name: {"sha256": _sha256(content), "size_bytes": len(content)}
+        for name, content in history_files.items()
+    }
+    output_row_counts = {
+        "segments.csv": len(rows),
+        "excluded.csv": 0,
+        "returns.csv": len(live_rows),
+        "live-only.csv": len(live_rows),
+        "live-plus-backtest.csv": len(live_rows),
+        "coverage.json": 1,
+    }
+    output_schemas = {
+        "segments.csv": ("portfolio-layered-history-segments", "1"),
+        "excluded.csv": ("portfolio-layered-history-excluded-targets", "1"),
+        "returns.csv": ("portfolio-layered-strategy-returns", "2"),
+        "live-only.csv": ("portfolio-layered-strategy-returns", "2"),
+        "live-plus-backtest.csv": ("portfolio-layered-strategy-returns", "2"),
+        "coverage.json": ("portfolio-layered-history-coverage", "1"),
+    }
+    receipt_outputs = {
+        name: {
+            "artifact_id": f"layered-history/{name}",
+            "row_count": output_row_counts[name],
+            "schema_name": output_schemas[name][0],
+            "schema_version": output_schemas[name][1],
+            **output_authority[name],
+        }
+        for name in history_files
+    }
+    history_manifest_without_id = {
+        "$schema": "https://quant-engine.local/schemas/portfolio/layered-history-generation.schema.json",
+        "as_of_date": "2026-01-02",
+        "builder": "portfolio-target-series/layered-history-1",
+        # Literal policy-pinned producer version from the accepted c36b80c...
+        # history receipt.  Do not derive this from the consumer constant.
+        "builder_version": "1.13.0",
+        "inputs": [
+            {
+                "artifact_id": "synthetic/current-dependence-input",
+                "artifact_role": "GENERATION_ARTIFACT",
+                "as_of_date": "2026-01-02",
+                "generation_id": "0" * 64,
+                "input_id": "synthetic-current-dependence-input",
+                "sha256": "1" * 64,
+                "size_bytes": 1,
+            }
+        ],
+        "mode_status": {
+            "LIVE_ONLY": {
+                "required_not_ready_strategy_ids": [],
+                "status": "AVAILABLE",
+            },
+            "LIVE_PLUS_BACKTEST": {
+                "required_not_ready_strategy_ids": [],
+                "status": "AVAILABLE",
+            },
+        },
+        "outputs": receipt_outputs,
+        "product": {
+            "contract_sha256": _sha256(canonical_json_bytes(contract)),
+            "history_policy_id": "PORT-HISTORY-TRUTH-1",
+            "history_policy_version": 1,
+            "product_id": "FINANCIAL_MVP",
+            "product_version": "1",
+        },
+        "repository_sha": "2" * 40,
+        "schema_version": 1,
+        "source_manifests": {
+            "matrixport": "{}",
+            "portfolio123": "{}",
+            "provider-ledger": "{}",
+            "quantbase": "{}",
+        },
+        "source_pointers": {
+            "matrixport": "{}",
+            "portfolio123": "{}",
+            "provider-ledger": "{}",
+            "quantbase": "{}",
+        },
+        "tool_sha256": "3" * 64,
+        "verification": "VERIFIED",
+    }
+    history_generation_id = _sha256(canonical_json_bytes(history_manifest_without_id))
+    history_manifest = {
+        **history_manifest_without_id,
+        "generation_id": history_generation_id,
+    }
+    history_schema = json.loads(
+        (schemas / "layered-history-generation.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    Draft202012Validator(
+        history_schema, format_checker=FormatChecker()
+    ).validate(history_manifest)
+    history_content = canonical_json_bytes(history_manifest)
+    history_root = authority_root / "history" / history_generation_id
+    history_root.mkdir(parents=True)
+    for name, content in history_files.items():
+        (history_root / name).write_bytes(content)
+    (history_root / "generation.json").write_bytes(history_content)
+    policy["history_authority"] = {
+        "generation_id": history_generation_id,
+        "receipt_sha256": _sha256(history_content),
+        "outputs": output_authority,
+    }
+
+    catalog = {
+        "allocations": [
+            {
+                "scope": "SYSTEMATIC",
+                "strategy_id": row["strategy_id"],
+                "systematic_weight": row["allocation_weight"],
+            }
+            for row in policy["series"]
+        ]
+    }
+    catalog_content = canonical_json_bytes(catalog)
+    as_of = current.date(2026, 1, 2)
+    allocation_manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-current-dependence", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic systematic allocation perimeter",
+            fact_types=("SYSTEMATIC_ALLOCATION",),
+            observed_start=as_of,
+            observed_end=as_of,
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/portfolio-baseline.json",
+                as_of_date=as_of,
+                schema_name="portfolio-baseline-catalog",
+                schema_version="1",
+                sha256=_sha256(catalog_content),
+                size_bytes=len(catalog_content),
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    allocation_content = allocation_manifest.to_json_bytes()
+    allocation_root = authority_root / "allocations" / allocation_manifest.generation_id
+    allocation_root.mkdir(parents=True)
+    (allocation_root / "generation.json").write_bytes(allocation_content)
+    (allocation_root / "portfolio-baseline.json").write_bytes(catalog_content)
+    allocation_identity = {
+        "as_of_date": "2026-01-02",
+        "catalog_sha256": _sha256(catalog_content),
+        "generation_id": allocation_manifest.generation_id,
+        "manifest_sha256": _sha256(allocation_content),
+    }
+    policy["allocation_authority"] = allocation_identity
+
+    contract_path = contracts / "portfolio-financial-mvp-source-v1.json"
+    policy_path = contracts / "portfolio-dependence-policy-v1.json"
+    contract_path.write_bytes(canonical_json_bytes(contract))
+    policy_path.write_bytes(canonical_json_bytes(policy))
+    return {
+        "allocation_identity": allocation_identity,
+        "allocation_root": allocation_root,
+        "contract_path": contract_path,
+        "history_generation_id": history_generation_id,
+        "history_root": history_root,
+        "policy_path": policy_path,
+    }
+
+
+def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
+    tmp_path: Path,
+) -> None:
+    fixture = _unmocked_fixture(tmp_path)
+
+    built = current.build_source(
+        contract_path=fixture["contract_path"],
+        policy_path=fixture["policy_path"],
+        history_generation_root=fixture["history_root"],
+        allocation_generation_root=fixture["allocation_root"],
+        evaluated_on=current.date(2026, 1, 3),
+    )
+    receipt = built["receipt"]
+    assert isinstance(receipt, dict)
+    source = tmp_path / str(receipt["bundle_id"])
+    source.mkdir()
+    for name in ("dependence-source.json", "returns.csv", "segments.csv", "spec.json"):
+        value = built[name]
+        assert isinstance(value, bytes)
+        (source / name).write_bytes(value)
+
+    assert current.verify_packaged_source(
+        source,
+        contract_path=fixture["contract_path"],
+        policy_path=fixture["policy_path"],
+    ) == {
+        "bundle_id": source.name,
+        "complete_through": "2026-01-02",
+        "pair_count": 21,
+        "pair_mode_count": 42,
+        "verification": "VALID",
+    }
+    assert receipt["required_strategy_ids"] == [
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "tt-portfolio",
+        "volatis-strategy",
+        "grizzlybears-vtma",
+        "robuxio-crypto",
+    ]
+    assert (
+        receipt["returns_sha256"]
+        == "0f7bce49464ae8844079403b521fcbb9ff46414c668244c0cae51cc0e4afa6b7"
+    )
+    assert receipt["allocation_authority"] == {
+        "as_of_date": "2026-01-02",
+        "catalog_sha256": "b57948a7ee838616ec697dce5168db88a63106b7cc834c7824c44d0ff3ad07b9",
+        "generation_id": "1f090daf866656fbb43c9a6f0077668e9cdd85d825481c1809a206098f990467",
+        "manifest_sha256": "b7fda826a4ad224352e1690d44d4579ee0841a5b5c0b5c4e0fc1c7111c9c7a11",
+    }
+    assert receipt["history_authority"]["generation_id"] == (
+        "50292a82916a1f5e8e51e11fb62fc23ac6ce0881387e746592438f8b710b5b00"
+    )
+
+
+def test_current_dependence_policy_pinned_producer_seam_kills_newer_version_mutant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _unmocked_fixture(tmp_path)
+
+    with monkeypatch.context() as probe:
+        probe.setattr(current, "LAYERED_HISTORY_BUILDER_VERSION", "1.14.0")
+        with pytest.raises(current.CurrentDependenceError) as exc:
+            _build_from_unmocked_fixture(fixture)
+    assert exc.value.args == ("layered history receipt contract differs",)
+
+
+def _build_from_unmocked_fixture(fixture: dict[str, Any]) -> dict[str, bytes | dict[str, Any]]:
+    return current.build_source(
+        contract_path=fixture["contract_path"],
+        policy_path=fixture["policy_path"],
+        history_generation_root=fixture["history_root"],
+        allocation_generation_root=fixture["allocation_root"],
+        evaluated_on=current.date(2026, 1, 3),
+    )
+
+
+def _assert_build_rejected(fixture: dict[str, Any], message: str) -> None:
+    with pytest.raises(current.CurrentDependenceError) as exc:
+        _build_from_unmocked_fixture(fixture)
+    assert exc.value.args == (message,)
+
+
+def test_current_dependence_rejects_unbound_policy_perimeter(
+    tmp_path: Path,
+) -> None:
+    fixture = _unmocked_fixture(tmp_path)
+    policy = json.loads(fixture["policy_path"].read_text(encoding="utf-8"))
+    policy["series"][0]["series_id"] = "FORGED SERIES"
+    fixture["policy_path"].write_bytes(canonical_json_bytes(policy))
+
+    _assert_build_rejected(
+        fixture, "dependence series differs from product authority: p123-ai-factor"
+    )
+
+
+def test_current_dependence_rejects_changed_layered_history_bytes(
+    tmp_path: Path,
+) -> None:
+    fixture = _unmocked_fixture(tmp_path)
+    segments_path = fixture["history_root"] / "segments.csv"
+    segments_path.write_bytes(
+        segments_path.read_bytes().replace(b"-0.001", b"-0.101", 1)
+    )
+
+    _assert_build_rejected(fixture, "layered history authority differs: segments.csv")
+
+
+def test_current_dependence_rejects_changed_allocation_catalog_bytes(
+    tmp_path: Path,
+) -> None:
+    fixture = _unmocked_fixture(tmp_path)
+    catalog_path = fixture["allocation_root"] / "portfolio-baseline.json"
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    catalog["allocations"][0]["systematic_weight"] = "0.999"
+    catalog_path.write_bytes(canonical_json_bytes(catalog))
+
+    _assert_build_rejected(fixture, "allocation catalog identity differs")
+
+
+def test_current_dependence_rejects_mixed_valid_history_generations(
+    tmp_path: Path,
+) -> None:
+    first = _unmocked_fixture(tmp_path / "first")
+    second = _unmocked_fixture(tmp_path / "second", return_shift="0.1")
+    (first["history_root"] / "segments.csv").write_bytes(
+        (second["history_root"] / "segments.csv").read_bytes()
+    )
+
+    _assert_build_rejected(first, "layered history authority differs: segments.csv")
+
+
+def test_current_dependence_unmocked_reader_negative_cases_kill_bypass_mutants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_fixture = _unmocked_fixture(tmp_path / "policy")
+    contract, policy, identities = current._load_authorities(
+        policy_fixture["contract_path"], policy_fixture["policy_path"]
+    )
+    rewritten_policy = json.loads(
+        policy_fixture["policy_path"].read_text(encoding="utf-8")
+    )
+    rewritten_policy["series"][0]["series_id"] = "FORGED SERIES"
+    policy_fixture["policy_path"].write_bytes(canonical_json_bytes(rewritten_policy))
+    _assert_build_rejected(
+        policy_fixture, "dependence series differs from product authority: p123-ai-factor"
+    )
+    with monkeypatch.context() as probe:
+        probe.setattr(
+            current, "_load_authorities", lambda _contract, _policy: (contract, policy, identities)
+        )
+        with pytest.raises(pytest.fail.Exception):
+            _assert_build_rejected(
+                policy_fixture,
+                "dependence series differs from product authority: p123-ai-factor",
+            )
+
+    history_fixture = _unmocked_fixture(tmp_path / "history")
+    history_contract, history_policy, _ = current._load_authorities(
+        history_fixture["contract_path"], history_fixture["policy_path"]
+    )
+    history_snapshot = current._verified_history(
+        history_fixture["history_root"],
+        history_policy,
+        history_contract,
+        current.date(2026, 1, 3),
+    )
+    history_path = history_fixture["history_root"] / "segments.csv"
+    history_path.write_bytes(history_path.read_bytes().replace(b"-0.001", b"-0.101", 1))
+    _assert_build_rejected(
+        history_fixture, "layered history authority differs: segments.csv"
+    )
+    with monkeypatch.context() as probe:
+        probe.setattr(current, "_verified_history", lambda *_args: history_snapshot)
+        with pytest.raises(pytest.fail.Exception):
+            _assert_build_rejected(
+                history_fixture, "layered history authority differs: segments.csv"
+            )
+
+    allocation_fixture = _unmocked_fixture(tmp_path / "allocation")
+    _, allocation_policy, _ = current._load_authorities(
+        allocation_fixture["contract_path"], allocation_fixture["policy_path"]
+    )
+    allocation_snapshot = current._verified_allocations(
+        allocation_fixture["allocation_root"],
+        allocation_policy,
+        tuple(row["strategy_id"] for row in allocation_policy["series"]),
+        current.date(2026, 1, 3),
+    )
+    allocation_path = allocation_fixture["allocation_root"] / "portfolio-baseline.json"
+    allocation = json.loads(allocation_path.read_text(encoding="utf-8"))
+    allocation["allocations"][0]["systematic_weight"] = "0.999"
+    allocation_path.write_bytes(canonical_json_bytes(allocation))
+    _assert_build_rejected(allocation_fixture, "allocation catalog identity differs")
+    with monkeypatch.context() as probe:
+        probe.setattr(current, "_verified_allocations", lambda *_args: allocation_snapshot)
+        with pytest.raises(pytest.fail.Exception):
+            _assert_build_rejected(
+                allocation_fixture, "allocation catalog identity differs"
+            )

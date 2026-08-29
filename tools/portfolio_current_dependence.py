@@ -25,6 +25,11 @@ BUILDER: Final = "portfolio-current-dependence-source"
 BUILDER_VERSION: Final = "1.1.0"
 SCHEMA_VERSION: Final = 1
 POLICY_ID: Final = "PORT-DEPENDENCE-1"
+LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
+# The dependence policy pins the accepted c36b80c... receipt produced by 1.13.0.
+# This consumer validates that exact historical authority; it does not follow
+# the version of whichever layered-history producer happens to be installed.
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.13.0"
 REQUIRED_HISTORY_FILES: Final = frozenset(
     {
         "coverage.json",
@@ -256,8 +261,8 @@ def _verified_history(
     if _sha256(canonical_json_bytes(without_id)) != generation_id:
         raise CurrentDependenceError("layered history receipt content identity differs")
     if (
-        manifest.get("builder") != "portfolio-target-series/layered-history-1"
-        or manifest.get("builder_version") != "1.12.0"
+        manifest.get("builder") != LAYERED_HISTORY_BUILDER
+        or manifest.get("builder_version") != LAYERED_HISTORY_BUILDER_VERSION
         or manifest.get("schema_version") != 1
         or manifest.get("verification") != "VERIFIED"
     ):
