@@ -5277,6 +5277,22 @@ def _snapshot_tree(
     return destination
 
 
+def _snapshot_tree_preserving_root_identity(
+    source: Path,
+    destination_parent: Path,
+    originals: dict[Path, bytes],
+    inventories: dict[Path, tuple[str, ...]],
+) -> Path:
+    """Copy a bundle without changing its identity-bearing root directory name."""
+
+    return _snapshot_tree(
+        source,
+        destination_parent / source.name,
+        originals,
+        inventories,
+    )
+
+
 def _snapshot_current_root(
     source: Path,
     destination: Path,
@@ -5491,7 +5507,7 @@ def publish_report(
     )
     snapshot_history_path: Path | None = None
     if history_contract_path is not None:
-        history_snapshot_root = _snapshot_tree(
+        history_snapshot_root = _snapshot_tree_preserving_root_identity(
             history_contract_path.parent,
             snapshot_root / "history",
             originals,

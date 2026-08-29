@@ -207,6 +207,32 @@ def test_initial_workbook_build_is_stable_across_volatile_package_metadata(
     assert first["workbook_sha256"] == hashlib.sha256(first_bytes).hexdigest()
 
 
+def test_publication_snapshot_preserves_bundle_root_identity(tmp_path: Path) -> None:
+    bundle_id = "a" * 64
+    source = tmp_path / "source" / bundle_id
+    source.mkdir(parents=True)
+    expected = {
+        "dependence-source.json": b"receipt\n",
+        "returns.csv": b"date,return\n",
+        "segments.csv": b"segment,date,return\n",
+        "spec.json": b"{}\n",
+    }
+    for name, content in expected.items():
+        (source / name).write_bytes(content)
+
+    snapshot = reporter._snapshot_tree_preserving_root_identity(
+        source,
+        tmp_path / "snapshots",
+        {},
+        {},
+    )
+
+    assert snapshot.name == bundle_id
+    assert {
+        path.name: path.read_bytes() for path in snapshot.iterdir() if path.is_file()
+    } == expected
+
+
 def test_canonicalization_fails_closed_on_unrecognized_volatile_field(
     tmp_path: Path,
 ) -> None:

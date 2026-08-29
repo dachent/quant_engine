@@ -173,9 +173,9 @@ def test_epoch_history_verification_uses_explicit_independent_generation_root(
 
     path, observed, schema_name, schema_version = (
         reporter._epoch_history_snapshot_evidence(
-        epoch_root,
-        source_bytes,
-        manifest_bytes,
+            epoch_root,
+            source_bytes,
+            manifest_bytes,
         )
     )
 
