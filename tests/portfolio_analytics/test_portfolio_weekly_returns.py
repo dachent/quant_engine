@@ -58,10 +58,12 @@ def _correlation_fixture(
     tmp_path: Path,
     *,
     source_artifact_id: str = "provider-rollforward/layered-strategy-returns.csv",
+    strategy_count: int = 9,
 ) -> tuple[Path, Path]:
     strategy_returns = tmp_path / "strategy-returns.csv"
+    selected_strategies = STRATEGIES[:strategy_count]
     rows: list[dict[str, str]] = []
-    for index, strategy in enumerate(STRATEGIES):
+    for index, strategy in enumerate(selected_strategies):
         version = f"version-{index}"
         rows.extend(
             [
@@ -98,7 +100,7 @@ def _correlation_fixture(
     )
     live = {}
     combined = {}
-    for index, strategy in enumerate(STRATEGIES):
+    for index, strategy in enumerate(selected_strategies):
         base = {
             "backtest_observations_used": 0,
             "live_inception": "2026-07-27",
@@ -363,6 +365,7 @@ def test_weekly_generation_accepts_current_dependence_source_identity(
     correlation_root, strategy_returns = _correlation_fixture(
         tmp_path,
         source_artifact_id="current-dependence/returns.csv",
+        strategy_count=7,
     )
     plan_bundle = _plan_fixture(tmp_path)
 
@@ -370,7 +373,7 @@ def test_weekly_generation_accepts_current_dependence_source_identity(
         correlation_root, strategy_returns, plan_bundle
     )
 
-    assert payload["series"]
+    assert sum(row["primary_group"] == "STRATEGY" for row in payload["series"]) == 7
     assert payload["default_evidence_mode"] == "LIVE_ONLY"
 
 

@@ -332,8 +332,8 @@ def _strategy_rows(
         }
     if set(compositions["LIVE_ONLY"]) != set(compositions["LIVE_PLUS_BACKTEST"]):
         raise WeeklyReturnError("strategy mode boundaries differ")
-    if len(compositions["LIVE_ONLY"]) != 9:
-        raise WeeklyReturnError("weekly strategy boundary must contain nine strategies")
+    if not compositions["LIVE_ONLY"]:
+        raise WeeklyReturnError("weekly strategy boundary is empty")
 
     indexed: dict[tuple[str, str, str], list[tuple[date, Decimal]]] = {}
     for row in raw:
