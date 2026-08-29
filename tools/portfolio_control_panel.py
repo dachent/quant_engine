@@ -479,6 +479,8 @@ def _filesystem_path(path: Path) -> Path:
     if os.name != "nt":
         return path
     value = str(path.absolute())
+    if len(value) < 248:
+        return path
     if value.startswith("\\\\?\\"):
         return Path(value)
     if value.startswith("\\\\"):
@@ -1048,10 +1050,6 @@ def _baseline_catalog_snapshot_for_report(
     catalog_path = (
         baseline_root / "generations" / generation_id / "portfolio-baseline.json"
     )
-    if catalog_path.is_symlink() or not catalog_path.is_file():
-        raise ControlPanelValidationError(
-            "governed baseline generation is missing or linked"
-        )
     # Read the catalog bytes exactly once: hash and decode the same bytes so
     # no swap is possible between verification and parsing.
     content, catalog_sha256 = _read_snapshot(catalog_path, "baseline catalog")
@@ -6561,16 +6559,9 @@ def _verified_bundle_account_manifest(
             "verified epoch-manifest generation payload must be exact bytes"
         )
 
-    if staged_manifest_path.is_symlink() or not staged_manifest_path.is_file():
-        raise ControlPanelValidationError(
-            "staged account manifest is missing or linked"
-        )
-    try:
-        staged_bytes = staged_manifest_path.read_bytes()
-    except OSError as exc:
-        raise ControlPanelValidationError(
-            "staged account manifest is not readable"
-        ) from exc
+    staged_bytes, _staged_sha256 = _read_snapshot(
+        staged_manifest_path, "staged account manifest"
+    )
     if staged_bytes != payload:
         raise ControlPanelValidationError(
             "staged account manifest differs from verified generation bundle"
@@ -6700,10 +6691,8 @@ def _account_manifest(
                 "financial mode requires the repository-governed flow classification policy"
             )
     assert path is not None
-    if path.is_symlink() or not path.is_file():
-        raise ControlPanelValidationError("account manifest is missing or linked")
     try:
-        manifest_bytes = path.read_bytes()
+        manifest_bytes, _manifest_sha256 = _read_snapshot(path, "account manifest")
         value = json.loads(manifest_bytes.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ControlPanelValidationError(
@@ -7375,13 +7364,14 @@ def _candidate_record(
 
 
 def _write_exact(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if path.is_symlink() or path.read_bytes() != content:
+    candidate = _filesystem_path(path)
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    if candidate.exists():
+        if candidate.is_symlink() or candidate.read_bytes() != content:
             raise GenerationConflictError(f"candidate file differs: {path}")
         return
     descriptor = os.open(
-        path,
+        candidate,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
         0o600,
     )
@@ -7602,9 +7592,12 @@ def verify_candidate(
     exact = True
     for relative, content in expected.items():
         path = candidate_dir / relative
-        matches = (
-            path.is_file() and not path.is_symlink() and path.read_bytes() == content
-        )
+        try:
+            observed, _sha256 = _read_snapshot(path, f"candidate {relative}")
+        except ControlPanelValidationError:
+            matches = False
+        else:
+            matches = observed == content
         exact = exact and matches
     checks.append(_check("Candidate files are deterministic", exact, sorted(expected)))
     resources_closed, resource_evidence = _closed_frontend_resources(candidate_dir)
@@ -8380,10 +8373,9 @@ def verify_candidate(
 
 
 def _json_array(path: Path, field_name: str) -> list[object]:
-    if path.is_symlink() or not path.is_file():
-        raise ControlPanelValidationError(f"{field_name} is missing or linked")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        content, _sha256 = _read_snapshot(path, field_name)
+        value = json.loads(content.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ControlPanelValidationError(f"{field_name} is invalid JSON") from exc
     if not isinstance(value, list):
@@ -8927,11 +8919,9 @@ def publish_panel(
     published_panel_bytes: dict[str, bytes] = {}
     for relative in published_panel_files:
         path = candidate_dir / relative
-        if path.is_symlink() or not path.is_file():
-            raise ControlPanelValidationError(
-                f"published candidate artifact is missing or linked: {relative}"
-            )
-        snapshot = path.read_bytes()
+        snapshot, _snapshot_sha256 = _read_snapshot(
+            path, f"published candidate artifact: {relative}"
+        )
         expected_snapshot = (
             reproduced_candidate_record
             if relative == "candidate.json"
@@ -8956,11 +8946,9 @@ def publish_panel(
     _validate_panel_data_schema(data)
     input_snapshots: dict[str, bytes] = {}
     for name, (path, expected_sha256) in input_paths.items():
-        if path.is_symlink() or not path.is_file():
-            raise ControlPanelValidationError(
-                f"bound publication input is missing or linked: {name}"
-            )
-        snapshot = path.read_bytes()
+        snapshot, _snapshot_sha256 = _read_snapshot(
+            path, f"bound publication input: {name}"
+        )
         if hashlib.sha256(snapshot).hexdigest() != expected_sha256:
             raise ControlPanelValidationError(
                 f"publication input changed after final render: {name}"
@@ -9190,11 +9178,10 @@ def publish_panel(
     # authority after validating the private QA snapshot so publication cannot
     # combine fresh QA with stale or swapped financial inputs.
     for name, (path, _expected_sha256) in input_paths.items():
-        if path.is_symlink() or not path.is_file():
-            raise ControlPanelValidationError(
-                f"bound publication input is missing or linked: {name}"
-            )
-        if path.read_bytes() != input_snapshots[name]:
+        snapshot, _snapshot_sha256 = _read_snapshot(
+            path, f"bound publication input: {name}"
+        )
+        if snapshot != input_snapshots[name]:
             raise ControlPanelValidationError(
                 f"publication input changed after QA snapshot: {name}"
             )

@@ -5803,6 +5803,48 @@ def test_verified_bundle_panel_manifest_reads_binds_and_preserves_literal_values
         "status": "BLOCKED_ADMISSION",
         "strategy_id": "synthetic-strategy-02",
     }
+
+
+def test_verified_bundle_panel_manifest_reads_its_long_finalized_path(
+    tmp_path: Path,
+) -> None:
+    subject_payloads, independent_report = _schema8_panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    generation_root = tmp_path
+    while len(
+        str(
+            (
+                generation_root
+                / "generations"
+                / ("a" * 64)
+                / _PANEL_EPOCH_ARTIFACT
+            ).absolute()
+        )
+    ) <= 270:
+        generation_root /= "long-epoch-component"
+    manifest = _stage_schema8_panel_bundle(
+        generation_root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+    finalized = (
+        generation_root
+        / "generations"
+        / manifest.generation_id
+        / _PANEL_EPOCH_ARTIFACT
+    )
+    if sys.platform == "win32":
+        assert len(str(finalized.absolute())) > 260
+
+    decoded, identity = panel._verified_bundle_account_manifest(
+        finalized,
+        generation_root,
+        manifest.generation_id,
+    )
+
+    assert decoded["rows"]
+    assert identity["sha256"] == hashlib.sha256(payload).hexdigest()
     assert identity == {
         "authority_profile": "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES",
         "sha256": ("58e4c6fcf34af57e3d628cf55901a9c8a97a59277eaaecb5cb9bf5a6c8105c10"),
