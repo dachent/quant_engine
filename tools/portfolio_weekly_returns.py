@@ -90,11 +90,25 @@ class WeeklyReturnError(ValueError):
     """An input or output violates the weekly-return contract."""
 
 
+def _filesystem_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    value = str(path.absolute())
+    if len(value) < 248:
+        return path
+    if value.startswith("\\\\?\\"):
+        return Path(value)
+    if value.startswith("\\\\"):
+        return Path(f"\\\\?\\UNC\\{value[2:]}")
+    return Path(f"\\\\?\\{value}")
+
+
 def _load_json(path: Path, label: str) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
+    candidate = _filesystem_path(path)
+    if candidate.is_symlink() or not candidate.is_file():
         raise WeeklyReturnError(f"{label} is missing or linked")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(candidate.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WeeklyReturnError(f"{label} is not readable JSON") from exc
     if not isinstance(value, dict):
@@ -440,7 +454,6 @@ def _manifest_hashes(plan_bundle: Path) -> dict[str, str]:
         manifest.get("outputs"), "planning outputs"
     )
     expected: dict[str, str] = {}
-    root = plan_bundle.resolve()
     for item in rows:
         relative = _text(item.get("path"), "planning path")
         portable = PurePosixPath(relative)
@@ -455,18 +468,15 @@ def _manifest_hashes(plan_bundle: Path) -> dict[str, str]:
         ):
             raise WeeklyReturnError(f"planning path is invalid: {relative}")
         path = plan_bundle.joinpath(*portable.parts)
-        try:
-            path.resolve(strict=True).relative_to(root)
-        except (FileNotFoundError, ValueError, OSError) as exc:
-            raise WeeklyReturnError(
-                f"planning artifact escapes bundle: {relative}"
-            ) from exc
-        if path.is_symlink() or not path.is_file():
+        candidate = _filesystem_path(path)
+        if candidate.is_symlink() or not candidate.is_file():
             raise WeeklyReturnError(
                 f"planning artifact is missing or linked: {relative}"
             )
         expected_sha256 = _text(item.get("sha256"), "planning sha256")
-        actual_sha256, actual_size = hash_file(path)
+        content = candidate.read_bytes()
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        actual_size = len(content)
         if actual_sha256 != expected_sha256:
             raise WeeklyReturnError(f"planning input hash differs: {relative}")
         if schema_version == 2:

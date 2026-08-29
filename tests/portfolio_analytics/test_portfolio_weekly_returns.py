@@ -23,6 +23,7 @@ from quant_engine.core import (
     read_generation,
     stage_generation,
 )
+from quant_engine.core.contracts import canonical_json_bytes
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -375,6 +376,40 @@ def test_weekly_generation_accepts_current_dependence_source_identity(
 
     assert sum(row["primary_group"] == "STRATEGY" for row in payload["series"]) == 7
     assert payload["default_evidence_mode"] == "LIVE_ONLY"
+
+
+def test_weekly_plan_binding_reads_an_artifact_beyond_windows_max_path(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path
+    relative = "inputs/base/provenance/provider-ledger-generation.json"
+    while len(str((base / ("b" * 64) / relative).absolute())) <= 270:
+        base /= "long-weekly-plan-component"
+    bundle = base / ("b" * 64)
+    payload = canonical_json_bytes({"generation_id": "a" * 64})
+    manifest = {
+        "bundle_id": bundle.name,
+        "inputs": [
+            {
+                "path": relative,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        ],
+        "outputs": [],
+        "schema_version": 1,
+    }
+
+    for path, content in (
+        (bundle / relative, payload),
+        (bundle / "plan-manifest.json", canonical_json_bytes(manifest)),
+    ):
+        storage = Path(f"\\\\?\\{path.absolute()}") if sys.platform == "win32" else path
+        storage.parent.mkdir(parents=True, exist_ok=True)
+        storage.write_bytes(content)
+
+    assert weekly._manifest_hashes(bundle) == {
+        relative: hashlib.sha256(payload).hexdigest()
+    }
 
 
 def test_weekly_rejects_public_observation_after_correlation_as_of(
