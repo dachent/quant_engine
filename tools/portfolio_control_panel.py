@@ -4059,11 +4059,8 @@ def _canonical_strategy_series_contracts(
             raise ControlPanelValidationError(
                 f"dependence canonical-series origin parity failed: {series_id}"
             )
-        # The evidence row describes the full accepted live path; the
-        # dependence composition describes the factor-limited canonical
-        # evaluation window. Their ENDS legitimately diverge (the window lags
-        # for factor publication), but the window can never extend beyond the
-        # evidenced path.
+        # The evidence row may extend beyond the current dependence window, but
+        # the dependence window can never extend beyond the evidenced path.
         evidence_observed_end = _text(
             expected["observed_end"], f"evidence observed_end {series_id}"
         )
@@ -4082,34 +4079,49 @@ def _canonical_strategy_series_contracts(
             factor_coverage.get("canonical_live_series_sha256"),
             f"factor canonical series sha256 {series_id}",
         )
-        if factor_series_sha256 != dependence_series_sha256:
-            raise ControlPanelValidationError(
-                f"factor/dependence canonical-series value parity failed: {series_id}"
-            )
-        factor_observed = {
-            "observed_end": factor_coverage.get(
+        factor_observed_end = _text(
+            factor_coverage.get(
                 "canonical_live_observed_end",
                 factor_coverage.get("target_observed_end"),
             ),
-            "observed_start": factor_coverage.get(
+            f"factor canonical observed_end {series_id}",
+        )
+        factor_observed_start = _text(
+            factor_coverage.get(
                 "canonical_live_observed_start",
                 factor_coverage.get("target_observed_start"),
             ),
-            "return_observations": factor_coverage.get(
-                "canonical_live_observations",
-                factor_coverage.get("target_observations"),
-            ),
-        }
-        # Factor coverage and the dependence composition both describe the
-        # canonical evaluation window, so their dates and counts are the same
-        # quantity and must be equal.
-        if factor_observed != {
-            "observed_end": dependence_observed_end,
-            "observed_start": dependence_observed["observed_start"],
-            "return_observations": dependence.get("live_observations"),
+            f"factor canonical observed_start {series_id}",
+        )
+        factor_observations = factor_coverage.get(
+            "canonical_live_observations",
+            factor_coverage.get("target_observations"),
+        )
+        if (
+            isinstance(factor_observations, bool)
+            or not isinstance(factor_observations, int)
+            or factor_observations <= 0
+            or factor_observed_start < dependence_observed_start
+            or factor_observed_end > dependence_observed_end
+        ):
+            raise ControlPanelValidationError(
+                f"factor canonical-series window differs: {series_id}"
+            )
+        factor_report_window = _report_return_window(
+            report_strategy_returns,
+            strategy_id=strategy_id,
+            evidence_layer=layer,
+            observed_start=factor_observed_start,
+            observed_end=factor_observed_end,
+        )
+        if factor_report_window != {
+            "canonical_live_series_sha256": factor_series_sha256,
+            "observed_end": factor_observed_end,
+            "observed_start": factor_observed_start,
+            "return_observations": factor_observations,
         }:
             raise ControlPanelValidationError(
-                f"factor canonical-series parity failed: {series_id}"
+                f"report/factor canonical-series value parity failed: {series_id}"
             )
 
         weekly = weekly_by_name.get(series_id)
@@ -4148,7 +4160,7 @@ def _canonical_strategy_series_contracts(
             "strategy_version": mode_coverage.get("strategy_version"),
         }
         if weekly_observed != {
-            "canonical_live_series_sha256": factor_series_sha256,
+            "canonical_live_series_sha256": dependence_series_sha256,
             "observed_end": dependence_observed_end,
             "observed_start": dependence_observed["observed_start"],
             "strategy_version": strategy_version,
@@ -4159,7 +4171,11 @@ def _canonical_strategy_series_contracts(
         contracts.append(
             {
                 **expected,
-                "canonical_live_series_sha256": factor_series_sha256,
+                "canonical_live_series_sha256": dependence_series_sha256,
+                "factor_window_observed_end": factor_observed_end,
+                "factor_window_observed_start": factor_observed_start,
+                "factor_window_return_observations": factor_observations,
+                "factor_window_series_sha256": factor_series_sha256,
             }
         )
     return contracts

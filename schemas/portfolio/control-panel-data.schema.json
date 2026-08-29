@@ -213,10 +213,14 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["canonical_live_series_sha256", "evidence_layer", "generation_id", "live_version_ref", "observed_end", "observed_start", "report_catalog_version_ref", "return_observations", "series_id", "strategy_id", "strategy_version"],
+        "required": ["canonical_live_series_sha256", "evidence_layer", "factor_window_observed_end", "factor_window_observed_start", "factor_window_return_observations", "factor_window_series_sha256", "generation_id", "live_version_ref", "observed_end", "observed_start", "report_catalog_version_ref", "return_observations", "series_id", "strategy_id", "strategy_version"],
         "properties": {
           "canonical_live_series_sha256": { "$ref": "#/$defs/hash" },
           "evidence_layer": { "enum": ["ACCOUNT_LIVE", "PROVIDER_LIVE"] },
+          "factor_window_observed_end": { "type": "string", "format": "date" },
+          "factor_window_observed_start": { "type": "string", "format": "date" },
+          "factor_window_return_observations": { "type": "integer", "minimum": 1 },
+          "factor_window_series_sha256": { "$ref": "#/$defs/hash" },
           "generation_id": { "$ref": "#/$defs/hash" },
           "live_version_ref": { "type": "string", "minLength": 1 },
           "observed_end": { "type": "string", "format": "date" },

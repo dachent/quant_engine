@@ -3601,6 +3601,10 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     assert set(canonical["required"]) == {
         "canonical_live_series_sha256",
         "evidence_layer",
+        "factor_window_observed_end",
+        "factor_window_observed_start",
+        "factor_window_return_observations",
+        "factor_window_series_sha256",
         "generation_id",
         "live_version_ref",
         "observed_end",
@@ -5084,6 +5088,7 @@ def test_panel_valid_envelope_with_full_context_passes(
 
 _VERSION = "abc123def4567890abcdef0123456789abcdef01"
 _SERIES_SHA = "d17937bb4803cde13954de0fe35cde1e7ca76d7fb06c426b5c1954d7a45b28ca"
+_FACTOR_PREFIX_SHA = "a9fa330746ec2794d1f631492e1135e2f0271dd4d86026d4e1744d061bc21729"
 
 
 def _parity_dependence(
@@ -5223,6 +5228,40 @@ def test_canonical_series_identity_same_version_passes() -> None:
     assert contracts[0]["strategy_version"] == _VERSION
     # Observation counts are still present in the contract (display-only).
     assert contracts[0]["return_observations"] == 223
+
+
+def test_canonical_series_factor_prefix_is_checked_on_its_own_window() -> None:
+    """An older factor lens may be an exact prefix of current dependence data."""
+
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}
+    names = {"strategy-0": "test-series"}
+    dependence = {
+        "series_composition": {
+            "test-series": _parity_dependence("test-series", version=_VERSION)
+        }
+    }
+    factor = _parity_factor()
+    factor["series"][0]["coverage"].update(
+        {
+            "canonical_live_observations": 1,
+            "canonical_live_observed_end": "2026-01-02",
+            "canonical_live_series_sha256": _FACTOR_PREFIX_SHA,
+        }
+    )
+
+    contracts = panel._canonical_strategy_series_contracts(
+        evidence,
+        names,
+        factor,
+        dependence,
+        _parity_weekly(),
+        _parity_report_returns(),
+    )
+
+    assert contracts[0]["canonical_live_series_sha256"] == _SERIES_SHA
+    assert contracts[0]["factor_window_series_sha256"] == _FACTOR_PREFIX_SHA
+    assert contracts[0]["factor_window_observed_end"] == "2026-01-02"
+    assert contracts[0]["factor_window_return_observations"] == 1
 
 
 def test_canonical_series_identity_mutated_report_value_fails() -> None:
