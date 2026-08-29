@@ -3170,7 +3170,7 @@ def _weekly_return_analysis(
         "INDUSTRY",
         "CORE_BENCHMARK",
     }
-    if strategy_count != 9 or benchmark_count != 9:
+    if strategy_count == 0 or benchmark_count != 9:
         raise ControlPanelValidationError(
             "weekly strategy or benchmark boundary differs"
         )
@@ -7693,6 +7693,10 @@ def verify_candidate(
     weekly_payload = _object(data.get("weekly_returns"), "weekly returns")
     weekly_series = _objects(weekly_payload.get("series"), "weekly series")
     weekly_expected = weekly_returns_root is not None
+    expected_weekly_strategy_count = sum(
+        row.get("product_requirement") != "EXCLUDED"
+        for row in _objects(data.get("strategies"), "strategies")
+    )
     checks.append(
         _check(
             "Weekly return monitor is governed or explicitly unavailable",
@@ -7700,7 +7704,7 @@ def verify_candidate(
                 weekly_expected
                 and weekly_payload.get("generation_id") is not None
                 and sum(row.get("primary_group") == "STRATEGY" for row in weekly_series)
-                == 9
+                == expected_weekly_strategy_count
                 and sum(
                     "CORE_BENCHMARK" in row.get("display_groups", [])
                     for row in weekly_series

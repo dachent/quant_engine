@@ -104,6 +104,71 @@ def test_json_snapshot_reads_an_ordinary_file_beyond_legacy_windows_max_path(
     assert sha256 == hashlib.sha256(expected).hexdigest()
 
 
+def test_weekly_parser_accepts_seven_source_bound_current_strategies() -> None:
+    strategy_rows = [
+        {
+            "display_groups": ["STRATEGY"],
+            "display_name": f"Strategy {index}",
+            "observation_meta_by_mode": {
+                "LIVE_ONLY": {},
+                "LIVE_PLUS_BACKTEST": {},
+            },
+            "primary_group": "STRATEGY",
+            "series_id": f"strategy:Strategy {index}",
+            "values_by_mode": {"LIVE_ONLY": {}, "LIVE_PLUS_BACKTEST": {}},
+        }
+        for index in range(7)
+    ]
+    benchmark_rows = [
+        {
+            "display_groups": ["CORE_BENCHMARK"],
+            "observation_meta": {},
+            "primary_group": "STYLE_MULTI_ASSET",
+            "series_id": f"market:Benchmark {index}",
+            "values": {},
+        }
+        for index in range(9)
+    ]
+    weekly = {
+        "analytics_schema_version": 1,
+        "current_week": {"default_visible": False},
+        "default_evidence_mode": "LIVE_ONLY",
+        "display_groups": [
+            "STRATEGY",
+            "ECONOMIC_FACTOR_US",
+            "ECONOMIC_FACTOR_EUROPE",
+            "STYLE_US_EQUITY",
+            "STYLE_MULTI_ASSET",
+            "SECTOR",
+            "INDUSTRY",
+            "CORE_BENCHMARK",
+        ],
+        "observation_meta_fields": [
+            "daily_observation_count",
+            "actual_observed_start",
+            "actual_observed_end",
+            "coverage_status",
+            "boundary_reasons",
+        ],
+        "series": [*strategy_rows, *benchmark_rows],
+        "strategy_evidence_modes": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+        "week_policy": {
+            "absent_value": "UNAVAILABLE_NOT_ZERO",
+            "aggregation": "PRODUCT_OF_ONE_PLUS_DAILY_RETURN_MINUS_ONE",
+        },
+        "weeks": ["2026-08-10"],
+    }
+
+    accepted = panel._weekly_return_analysis(
+        weekly,
+        {"generation_id": "a" * 64, "sha256": "b" * 64},
+    )
+
+    assert sum(
+        row["primary_group"] == "STRATEGY" for row in accepted["series"]
+    ) == 7
+
+
 def test_report_panel_expectations_follow_accepted_rollforward() -> None:
     report = {
         "account_summary": [{}, {}],
