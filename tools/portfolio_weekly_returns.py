@@ -25,6 +25,7 @@ from quant_engine.core import (
     hash_file,
     publish_generation,
     read_current,
+    read_generation,
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -145,6 +146,8 @@ def _weekly_series(
 ) -> tuple[dict[str, str], dict[str, list[Any]], str]:
     daily: dict[date, Decimal] = {}
     for observed_date, observed_return in observations:
+        if observed_date > as_of:
+            raise WeeklyReturnError("weekly observation is after correlation as_of")
         if observed_date in daily:
             raise WeeklyReturnError(f"duplicate daily observation: {observed_date}")
         daily[observed_date] = observed_return
@@ -239,39 +242,63 @@ def _coverage(values: Mapping[str, str]) -> dict[str, Any]:
 
 def _correlation_inputs(
     correlation_root: Path,
-) -> tuple[dict[str, Any], dict[str, Any], Path, Path]:
+) -> tuple[dict[str, Any], GenerationManifest, Path, Path]:
     try:
         pointer = read_current(correlation_root)
+        manifest = read_generation(correlation_root, pointer.generation_id)
     except (OSError, ValueError, RuntimeError) as exc:
         raise WeeklyReturnError("correlation pointer is not accepted") from exc
     generation = correlation_root / "generations" / pointer.generation_id
     correlation_path = generation / "correlation.json"
     manifest_path = generation / "generation.json"
+    expected = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == "normalized/correlation.json"
+    ]
+    if correlation_path.is_symlink() or not correlation_path.is_file():
+        raise WeeklyReturnError("correlation artifact binding differs")
+    actual_hash, actual_size = hash_file(correlation_path)
+    if (
+        len(expected) != 1
+        or expected[0].sha256 != actual_hash
+        or expected[0].size_bytes != actual_size
+    ):
+        raise WeeklyReturnError("correlation artifact binding differs")
     correlation = _load_json(correlation_path, "correlation analytics")
-    manifest = _load_json(manifest_path, "correlation generation manifest")
     if correlation.get("analytics_schema_version") != 2:
         raise WeeklyReturnError("layered correlation schema version 2 is required")
     if correlation.get("default_evidence_mode") != "LIVE_ONLY":
         raise WeeklyReturnError("weekly strategy authority must default to LIVE_ONLY")
-    if manifest.get("generation_id") != pointer.generation_id:
-        raise WeeklyReturnError("correlation generation identity differs")
     return correlation, manifest, correlation_path, manifest_path
 
 
 def _strategy_rows(
     strategy_returns: Path,
     correlation: Mapping[str, Any],
-    generation_manifest: Mapping[str, Any],
+    generation_manifest: GenerationManifest,
     as_of: date,
 ) -> list[dict[str, Any]]:
+    raw_source = correlation.get("source")
+    if not isinstance(raw_source, dict) or not all(
+        isinstance(key, str) for key in raw_source
+    ):
+        raise WeeklyReturnError("correlation source must be an object")
+    source = raw_source
+    artifact_id = _text(source.get("artifact_id"), "correlation source artifact_id")
     expected = [
         item
-        for item in _objects(generation_manifest.get("artifacts"), "artifacts")
-        if item.get("artifact_id")
-        == "provider-rollforward/layered-strategy-returns.csv"
+        for item in generation_manifest.artifacts
+        if item.artifact_id == artifact_id
     ]
-    actual_hash = hash_file(strategy_returns)[0]
-    if len(expected) != 1 or expected[0].get("sha256") != actual_hash:
+    actual_hash, actual_size = hash_file(strategy_returns)
+    if (
+        len(expected) != 1
+        or expected[0].sha256 != actual_hash
+        or expected[0].size_bytes != actual_size
+        or source.get("sha256") != actual_hash
+        or source.get("size_bytes") != actual_size
+    ):
         raise WeeklyReturnError("strategy return source hash differs from correlation")
     with strategy_returns.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -558,9 +585,7 @@ def build_weekly_returns(
     correlation, generation_manifest, correlation_path, manifest_path = (
         _correlation_inputs(correlation_root)
     )
-    as_of = date.fromisoformat(
-        _text(generation_manifest.get("as_of_date"), "correlation as_of_date")
-    )
+    as_of = generation_manifest.as_of_date
     strategy_rows = _strategy_rows(
         strategy_returns, correlation, generation_manifest, as_of
     )

@@ -20,6 +20,7 @@ from quant_engine.core import (
     VerificationStatus,
     publish_generation,
     read_current,
+    read_generation,
     stage_generation,
 )
 
@@ -53,7 +54,11 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _correlation_fixture(tmp_path: Path) -> tuple[Path, Path]:
+def _correlation_fixture(
+    tmp_path: Path,
+    *,
+    source_artifact_id: str = "provider-rollforward/layered-strategy-returns.csv",
+) -> tuple[Path, Path]:
     strategy_returns = tmp_path / "strategy-returns.csv"
     rows: list[dict[str, str]] = []
     for index, strategy in enumerate(STRATEGIES):
@@ -112,6 +117,11 @@ def _correlation_fixture(tmp_path: Path) -> tuple[Path, Path]:
             "LIVE_ONLY": {"series_composition": live},
             "LIVE_PLUS_BACKTEST": {"series_composition": combined},
         },
+        "source": {
+            "artifact_id": source_artifact_id,
+            "sha256": _sha(strategy_returns),
+            "size_bytes": strategy_returns.stat().st_size,
+        },
     }
     correlation_source = tmp_path / "correlation.json"
     _write_json(correlation_source, correlation)
@@ -129,9 +139,16 @@ def _correlation_fixture(tmp_path: Path) -> tuple[Path, Path]:
         artifacts=(
             SourceArtifact.from_path(
                 strategy_returns,
-                artifact_id="provider-rollforward/layered-strategy-returns.csv",
+                artifact_id=source_artifact_id,
                 as_of_date=date(2026, 7, 31),
                 schema_name="portfolio-layered-strategy-returns",
+                schema_version="2",
+            ),
+            SourceArtifact.from_path(
+                correlation_source,
+                artifact_id="normalized/correlation.json",
+                as_of_date=date(2026, 7, 31),
+                schema_name="portfolio-correlation-analytics",
                 schema_version="2",
             ),
         ),
@@ -145,7 +162,11 @@ def _correlation_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return correlation_root, strategy_returns
 
 
-def _plan_fixture(tmp_path: Path) -> Path:
+def _plan_fixture(
+    tmp_path: Path,
+    *,
+    observation_dates: tuple[str, ...] = ("2026-07-27", "2026-07-28"),
+) -> Path:
     bundle = tmp_path / ("b" * 64)
     sources = {
         "inputs/lenses/us-economic-factors.csv": (
@@ -186,10 +207,7 @@ def _plan_fixture(tmp_path: Path) -> Path:
     manifest_inputs = []
     for relative, (columns, values) in sources.items():
         path = bundle / relative
-        rows = [
-            {"date": "2026-07-27", **values},
-            {"date": "2026-07-28", **values},
-        ]
+        rows = [{"date": observed_date, **values} for observed_date in observation_dates]
         _write_csv(path, columns, rows)
         manifest_inputs.append({"path": relative, "sha256": _sha(path)})
     _write_json(
@@ -248,6 +266,34 @@ def _rebind_current_plan(
     destination = bundle.parent / str(manifest["bundle_id"])
     bundle.rename(destination)
     return destination, manifest
+
+
+def _publish_correlation_generation(
+    correlation_root: Path,
+    *,
+    correlation_bytes: bytes,
+    declared_correlation: SourceArtifact | None,
+) -> None:
+    current = read_generation(
+        correlation_root, read_current(correlation_root).generation_id
+    )
+    artifacts = [
+        artifact
+        for artifact in current.artifacts
+        if artifact.artifact_id != "normalized/correlation.json"
+    ]
+    if declared_correlation is not None:
+        artifacts.append(declared_correlation)
+    manifest = GenerationManifest.build(
+        as_of_date=current.as_of_date,
+        adapter=current.adapter,
+        coverage=current.coverage,
+        artifacts=tuple(artifacts),
+        verification=current.verification,
+    )
+    manifest_path = stage_generation(correlation_root, manifest)
+    (manifest_path.parent / "correlation.json").write_bytes(correlation_bytes)
+    publish_generation(correlation_root, manifest.generation_id)
 
 
 def test_weekly_generation_compounds_and_keeps_evidence_modes_separate(
@@ -309,6 +355,155 @@ def test_weekly_generation_accepts_exact_current_plan_bundle(tmp_path: Path) -> 
     assert payload["analytics_schema_version"] == 1
     assert plan_bundle / "plan-manifest.json" in inputs
     assert len(payload["series"]) > len(STRATEGIES)
+
+
+def test_weekly_generation_accepts_current_dependence_source_identity(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(
+        tmp_path,
+        source_artifact_id="current-dependence/returns.csv",
+    )
+    plan_bundle = _plan_fixture(tmp_path)
+
+    payload, _inputs = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+
+    assert payload["series"]
+    assert payload["default_evidence_mode"] == "LIVE_ONLY"
+
+
+def test_weekly_rejects_public_observation_after_correlation_as_of(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(
+        tmp_path,
+        observation_dates=("2026-07-31", "2026-08-03"),
+    )
+
+    with pytest.raises(
+        weekly.WeeklyReturnError,
+        match="weekly observation is after correlation as_of",
+    ):
+        weekly.build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+
+
+def test_weekly_accepts_public_observation_exactly_at_correlation_as_of(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path, observation_dates=("2026-07-31",))
+
+    payload, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+
+    assert payload["as_of_date"] == "2026-07-31"
+
+
+@pytest.mark.parametrize(
+    ("artifact_id", "sha256", "size_bytes"),
+    (
+        ("normalized/not-correlation.json", None, None),
+        (None, "0" * 64, None),
+        (None, None, 0),
+    ),
+)
+def test_weekly_rejects_declared_correlation_artifact_binding_drift(
+    tmp_path: Path,
+    artifact_id: str | None,
+    sha256: str | None,
+    size_bytes: int | None,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    current = read_generation(
+        correlation_root, read_current(correlation_root).generation_id
+    )
+    declared = next(
+        artifact
+        for artifact in current.artifacts
+        if artifact.artifact_id == "normalized/correlation.json"
+    )
+    source_path = (
+        correlation_root / "generations" / current.generation_id / "correlation.json"
+    )
+    _publish_correlation_generation(
+        correlation_root,
+        correlation_bytes=source_path.read_bytes(),
+        declared_correlation=SourceArtifact(
+            artifact_id=artifact_id or declared.artifact_id,
+            sha256=sha256 or declared.sha256,
+            size_bytes=size_bytes if size_bytes is not None else declared.size_bytes,
+            as_of_date=declared.as_of_date,
+            schema_name=declared.schema_name,
+            schema_version=declared.schema_version,
+        ),
+    )
+
+    with pytest.raises(
+        weekly.WeeklyReturnError,
+        match="correlation artifact binding differs",
+    ):
+        weekly.build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+
+
+def test_weekly_rejects_missing_declared_correlation_artifact(tmp_path: Path) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    current = read_generation(
+        correlation_root, read_current(correlation_root).generation_id
+    )
+    source_path = (
+        correlation_root / "generations" / current.generation_id / "correlation.json"
+    )
+    _publish_correlation_generation(
+        correlation_root,
+        correlation_bytes=source_path.read_bytes(),
+        declared_correlation=None,
+    )
+
+    with pytest.raises(
+        weekly.WeeklyReturnError,
+        match="correlation artifact binding differs",
+    ):
+        weekly.build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+
+
+def test_weekly_rejects_correlation_artifact_from_another_generation(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    current = read_generation(
+        correlation_root, read_current(correlation_root).generation_id
+    )
+    source_path = (
+        correlation_root / "generations" / current.generation_id / "correlation.json"
+    )
+    alternate_path = tmp_path / "alternate-correlation.json"
+    alternate = json.loads(source_path.read_text(encoding="utf-8"))
+    alternate["synthetic_generation"] = "alternate"
+    _write_json(alternate_path, alternate)
+    _publish_correlation_generation(
+        correlation_root,
+        correlation_bytes=source_path.read_bytes(),
+        declared_correlation=SourceArtifact.from_path(
+            alternate_path,
+            artifact_id="normalized/correlation.json",
+            as_of_date=current.as_of_date,
+            schema_name="portfolio-correlation-analytics",
+            schema_version="2",
+        ),
+    )
+
+    with pytest.raises(
+        weekly.WeeklyReturnError,
+        match="correlation artifact binding differs",
+    ):
+        weekly.build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
 
 
 @pytest.mark.parametrize(
