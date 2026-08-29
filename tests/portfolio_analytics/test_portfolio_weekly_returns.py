@@ -369,13 +369,24 @@ def test_weekly_generation_accepts_current_dependence_source_identity(
         strategy_count=7,
     )
     plan_bundle = _plan_fixture(tmp_path)
+    output_root = tmp_path / "weekly"
 
     payload, _inputs = weekly.build_weekly_returns(
         correlation_root, strategy_returns, plan_bundle
     )
+    built = weekly.build_candidate(
+        correlation_root, strategy_returns, plan_bundle, output_root
+    )
+    verification = weekly.verify_candidate(
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        Path(built["candidate_dir"]),
+    )
 
     assert sum(row["primary_group"] == "STRATEGY" for row in payload["series"]) == 7
     assert payload["default_evidence_mode"] == "LIVE_ONLY"
+    assert verification["checks"]["strategy_boundary"] is True
 
 
 def test_weekly_plan_binding_reads_an_artifact_beyond_windows_max_path(

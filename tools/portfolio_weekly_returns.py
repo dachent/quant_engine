@@ -703,6 +703,28 @@ def verify_candidate(
     candidate_dir: Path,
 ) -> dict[str, Any]:
     payload, _ = build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+    correlation, _manifest, _correlation_path, _manifest_path = _correlation_inputs(
+        correlation_root
+    )
+    dependence_modes = correlation.get("dependence_modes")
+    live_dependence = (
+        dependence_modes.get("LIVE_ONLY")
+        if isinstance(dependence_modes, dict)
+        else None
+    )
+    live_composition = (
+        live_dependence.get("series_composition")
+        if isinstance(live_dependence, dict)
+        else None
+    )
+    expected_strategies = (
+        set(live_composition) if isinstance(live_composition, dict) else set()
+    )
+    observed_strategies = {
+        str(row.get("display_name"))
+        for row in payload["series"]
+        if row.get("primary_group") == "STRATEGY"
+    }
     expected = canonical_json_bytes(payload)
     expected_id = hashlib.sha256(expected).hexdigest()
     path = candidate_dir / "weekly-returns.json"
@@ -715,10 +737,8 @@ def verify_candidate(
         is False,
         "evidence_modes_exact": payload["strategy_evidence_modes"]
         == list(STRATEGY_MODES),
-        "nine_strategies": sum(
-            row["primary_group"] == "STRATEGY" for row in payload["series"]
-        )
-        == 9,
+        "strategy_boundary": bool(expected_strategies)
+        and observed_strategies == expected_strategies,
         "nine_core_benchmarks": sum(
             "CORE_BENCHMARK" in row["display_groups"] for row in payload["series"]
         )
