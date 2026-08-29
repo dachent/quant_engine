@@ -611,10 +611,10 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
-    # Digest includes the approved P123 admitted-set correction while retaining
-    # the owner-approved deprecated Echo history boundary.
+    # Digest binds the corrected P123 admitted set and refreshed provider-ledger
+    # generation while retaining the owner-approved deprecated Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "89c69cfafb4208be85852d068b503c6ce81487b42e7cc6fa4c18736bd53ef9fe"
+        "b2c87ac16cbaec7f51b57aef2a14a8732188bbf982c1205878fdbd153ec5dcda"
     )
 
 
@@ -940,6 +940,7 @@ def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
 
 def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     baseline = _contract()
+    assert contract_tool._verify_strategy_version_history_evidence(baseline) == 3
     approved_digest = baseline["current_census"]["decision_payload_sha256"]
     projection = contract_tool.census_owner_decision_projection(
         baseline["current_census"], baseline["strategies"]
@@ -2858,7 +2859,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "c055c678ec2d1acc4a7be91cf840575edbaab95e1f8aa9a4bc7a3b48492cdb6a"
+        "b8a59b179d2e0a01561fc1362a479d82ab26245e14d4afecae30ea57fab25e8e"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -2895,7 +2896,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "c055c678ec2d1acc4a7be91cf840575edbaab95e1f8aa9a4bc7a3b48492cdb6a"
+        "b8a59b179d2e0a01561fc1362a479d82ab26245e14d4afecae30ea57fab25e8e"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

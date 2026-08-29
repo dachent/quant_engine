@@ -634,7 +634,7 @@ def _verify_strategy_version_history_evidence(
                 f"history authority: {source_id}"
             )
 
-    def correction_projection(row: Mapping[str, Any]) -> dict[str, object]:
+    def receipt_projection(receipt: Mapping[str, Any]) -> dict[str, object]:
         receipt_keys = (
             "artifact_role",
             "authority_root",
@@ -644,8 +644,28 @@ def _verify_strategy_version_history_evidence(
             "manifest_artifact_id",
             "sha256",
         )
+        projected = {key: receipt.get(key) for key in receipt_keys}
+        if projected["authority_root"] != "PROVIDER_LEDGER":
+            return projected
+
+        generation_id = str(projected["generation_id"] or "")
+        selector = str(projected["artifact_selector"] or "")
+        generation_prefix = f"generations/{generation_id}/"
+        if not generation_id or not selector.startswith(generation_prefix):
+            raise FinancialMvpContractError(
+                "provider-ledger history receipt selector differs"
+            )
+        projected["generation_id"] = "<CURRENT_PROVIDER_LEDGER_GENERATION>"
+        projected["artifact_selector"] = (
+            "generations/<CURRENT_PROVIDER_LEDGER_GENERATION>/"
+            + selector.removeprefix(generation_prefix)
+        )
+        projected["sha256"] = "<CURRENT_PROVIDER_LEDGER_RECEIPT>"
+        return projected
+
+    def correction_projection(row: Mapping[str, Any]) -> dict[str, object]:
         receipts = [
-            {key: receipt.get(key) for key in receipt_keys}
+            receipt_projection(receipt)
             for receipt in _objects(
                 row.get("source_receipts"), "history correction source_receipts"
             )
@@ -696,7 +716,15 @@ def _verify_strategy_version_history_evidence(
         # segment hash and the derived live identity while retaining a real
         # generation receipt.  #302 does not authorize any change to the
         # accepted #319 materialized rows, so bind the complete row.
-        return dict(row)
+        projected = dict(row)
+        if projected.get("source_id") == "owner-account-live-history":
+            projected["source_generation_id"] = (
+                "<CURRENT_PROVIDER_LEDGER_GENERATION>"
+            )
+            projected["source_generation_sha256"] = (
+                "<CURRENT_PROVIDER_LEDGER_RECEIPT>"
+            )
+        return projected
 
     accepted_segments = {
         _text(row.get("segment_id"), "accepted history segment_id"): segment_projection(
