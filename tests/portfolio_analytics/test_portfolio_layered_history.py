@@ -100,6 +100,144 @@ def _pointer(path: Path, generation_id: str, manifest_path: Path) -> None:
     )
 
 
+def test_provider_ledger_inventory_binds_admission_receipt() -> None:
+    manifest = {
+        "artifacts": [
+            {
+                "artifact_id": "normalized/provider-ledger.json",
+                "sha256": "1" * 64,
+                "size_bytes": 101,
+            },
+            {
+                "artifact_id": "normalized/admit-or-declare-receipt.json",
+                "sha256": "2" * 64,
+                "size_bytes": 202,
+            },
+        ]
+    }
+    manifest_bytes = canonical_json_bytes(manifest)
+    files = sorted(
+        [
+            {
+                "relative_path": "generation.json",
+                "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                "size_bytes": len(manifest_bytes),
+            },
+            {
+                "relative_path": "provider-ledger.json",
+                "sha256": "1" * 64,
+                "size_bytes": 101,
+            },
+            {
+                "relative_path": "admit-or-declare-receipt.json",
+                "sha256": "2" * 64,
+                "size_bytes": 202,
+            },
+        ],
+        key=lambda item: item["relative_path"],
+    )
+    expected = hashlib.sha256(
+        canonical_json_bytes({"files": files, "inventory_schema_version": 1})
+    ).hexdigest()
+
+    actual = target_series._source_generation_inventory_sha256(
+        "provider-ledger", manifest_bytes, manifest
+    )
+    assert actual == expected
+
+    changed = copy.deepcopy(manifest)
+    changed["artifacts"][1]["sha256"] = "3" * 64
+    assert (
+        target_series._source_generation_inventory_sha256(
+            "provider-ledger", canonical_json_bytes(changed), changed
+        )
+        != actual
+    )
+
+
+def test_provider_ledger_schema2_does_not_promote_provider_live_returns(
+    tmp_path: Path,
+) -> None:
+    generation_id = "a" * 64
+    catalog_path = tmp_path / "provider-ledger.json"
+    account_return = {
+        "cost": None,
+        "date": "2026-08-12",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "return": "0.0025",
+        "return_basis": "NET",
+        "return_type": "TOTAL",
+        "strategy_id": "account-strategy",
+        "strategy_name": "Account Strategy",
+    }
+    provider_return = {
+        "cost": None,
+        "date": "2026-08-13",
+        "evidence_layer": "PROVIDER_LIVE",
+        "generation_id": "b" * 64,
+        "provider_id": "portfolio123",
+        "return": "0.01",
+        "return_basis": "OBSERVED",
+        "return_type": "TOTAL",
+        "strategy_id": "p123-eu",
+        "strategy_name": "EU [P123]",
+    }
+    _write_json(
+        catalog_path,
+        {
+            "as_of_date": "2026-08-16",
+            "catalog_schema_version": 2,
+            "provider_strategy_returns": [provider_return],
+            "strategy_evidence": [
+                {
+                    "account": {
+                        "observed_end": "2026-08-12",
+                        "observed_start": "2026-08-12",
+                        "return_observations": 1,
+                    },
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "generation_id": generation_id,
+                    "provider_id": "synthetic",
+                    "strategy_id": "account-strategy",
+                    "strategy_name": "Account Strategy",
+                },
+                {
+                    "evidence_layer": "PROVIDER_LIVE",
+                    "generation_id": "b" * 64,
+                    "provider": {
+                        "observed_end": "2026-08-13",
+                        "observed_start": "2026-08-13",
+                        "return_observations": 1,
+                    },
+                    "provider_id": "portfolio123",
+                    "strategy_id": "p123-eu",
+                    "strategy_name": "EU [P123]",
+                },
+            ],
+            "strategy_returns": [account_return],
+        },
+    )
+    manifest_path = tmp_path / "generation.json"
+    _manifest(
+        manifest_path,
+        generation_id,
+        "2026-08-16",
+        [_artifact(catalog_path, "normalized/provider-ledger.json")],
+    )
+
+    target_content, _evidence, proof_content, _manifest_content = (
+        target_series.build_provider_ledger_targets(manifest_path, catalog_path)
+    )
+    rows = list(csv.DictReader(io.StringIO(target_content.decode("utf-8"))))
+    assert [(row["series_id"], row["date"], row["return"]) for row in rows] == [
+        ("Account Strategy", "2026-08-12", "0.0025")
+    ]
+    proof = json.loads(proof_content)
+    assert [row["series_id"] for row in proof["series_contracts"]] == [
+        "Account Strategy"
+    ]
+
+
 def _update_source_generation(
     contract: dict[str, Any], source_id: str, manifest: Path, as_of: str
 ) -> None:
@@ -1091,7 +1229,9 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert generation_schema["properties"]["builder_version"] == {"const": "1.13.0"}
+    assert generation_schema["properties"]["builder_version"] == {
+        "enum": ["1.12.0", "1.13.0"]
+    }
     assert (
         "strategy-history"
         in generation_schema["properties"]["source_manifests"]["properties"]

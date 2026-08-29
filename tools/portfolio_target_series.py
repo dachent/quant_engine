@@ -324,7 +324,12 @@ def _source_generation_inventory_sha256(
 
     artifacts = _manifest_artifacts(manifest.get("artifacts"))
     production_inventory_artifacts: dict[str, dict[str, str]] = {
-        "provider-ledger": {"normalized/provider-ledger.json": "provider-ledger.json"},
+        "provider-ledger": {
+            "normalized/admit-or-declare-receipt.json": (
+                "admit-or-declare-receipt.json"
+            ),
+            "normalized/provider-ledger.json": "provider-ledger.json",
+        },
         "matrixport": {"normalized/generation-catalog.json": "catalog.json"},
         "quantbase": {
             "normalized/quantbase-generation.json": "quantbase-generation.json"
@@ -1450,8 +1455,15 @@ def build_provider_ledger_targets(
         catalog_path, artifacts, "normalized/provider-ledger.json"
     )
     catalog = _load_json(catalog_path, "provider-ledger catalog")
-    if catalog.get("catalog_schema_version") != 1:
+    catalog_schema_version = catalog.get("catalog_schema_version")
+    if catalog_schema_version not in {1, 2}:
         raise TargetSeriesError("provider-ledger catalog schema differs")
+    if catalog_schema_version == 2 and not isinstance(
+        catalog.get("provider_strategy_returns"), list
+    ):
+        raise TargetSeriesError(
+            "provider-ledger provider strategy returns are unavailable"
+        )
     as_of_date = str(catalog.get("as_of_date", ""))
     try:
         accepted_as_of = date.fromisoformat(as_of_date)
