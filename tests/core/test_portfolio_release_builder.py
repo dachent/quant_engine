@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
+import shutil
 from collections.abc import Callable
 from pathlib import Path
+import sys
+import zipfile
 
 import pytest
 
@@ -13,8 +18,14 @@ from quant_engine.core import (
     CoverageClaim,
     CoverageStatus,
     GenerationManifest,
+    PointerIntegrityError,
     SourceArtifact,
     VerificationStatus,
+    inventory_generation,
+    publish_generation,
+    read_generation_bundle,
+    stage_generation,
+    stage_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
 
@@ -25,6 +36,98 @@ SPEC = importlib.util.spec_from_file_location("portfolio_release_builder", MODUL
 assert SPEC is not None and SPEC.loader is not None
 builder = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(builder)
+
+PREWIRE_MANIFEST_BYTES = b'{"fixture":"synthetic-task-6","version":8}\n'
+PREWIRE_REPORT_BYTES = b'{"fixture":"synthetic-task-6-report"}\n'
+PREWIRE_MANIFEST_SHA256 = (
+    "810eb288a0d472414c805824cf91283fb3fa5b3c394ce5edec685ab9c3c64834"
+)
+PREWIRE_REPORT_SHA256 = (
+    "eee8288e0f9ac185d75cf3c7d36947cf1521bf0561e39d178649ba69b865829e"
+)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path contract")
+def test_create_only_writer_supports_windows_extended_length_paths(
+    tmp_path: Path,
+) -> None:
+    """A valid release root must remain writable beyond legacy MAX_PATH."""
+
+    destination = tmp_path
+    for index in range(5):
+        destination /= f"bounded-release-component-{index:02d}-abcdefghijk"
+    destination /= "artifact.json"
+    assert len(str(destination.resolve())) > 260
+
+    builder._write_exact(destination, b'{"authority":"bound"}\n')
+
+    api_path = Path(f"\\\\?\\{destination.resolve()}")
+    assert api_path.read_bytes() == b'{"authority":"bound"}\n'
+    builder._write_exact(destination, b'{"authority":"bound"}\n')
+    with pytest.raises(builder.VerticalBuildError, match="create-only output differs"):
+        builder._write_exact(destination, b'{"authority":"forged"}\n')
+
+
+def _stage_verified_epoch_generation(
+    root: Path,
+) -> tuple[GenerationManifest, object]:
+    """Build the real detached-control envelope around hand-authored bytes."""
+
+    as_of = builder.date.fromisoformat("2026-08-24")
+    manifest_artifact = SourceArtifact(
+        artifact_id="outputs/account-strategy-manifest.json",
+        sha256=PREWIRE_MANIFEST_SHA256,
+        size_bytes=43,
+        as_of_date=as_of,
+        schema_name="account-strategy-manifest",
+        schema_version="8",
+    )
+    report_artifact = SourceArtifact(
+        artifact_id="verification/independent-verification.json",
+        sha256=PREWIRE_REPORT_SHA256,
+        size_bytes=38,
+        as_of_date=as_of,
+        schema_name="independent-verification",
+        schema_version="1",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-task-6-prewire", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic Task-6 prewire fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=(manifest_artifact, report_artifact),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        root,
+        manifest,
+        {
+            "outputs/account-strategy-manifest.json": PREWIRE_MANIFEST_BYTES,
+            "verification/independent-verification.json": PREWIRE_REPORT_BYTES,
+        },
+    )
+    return manifest, read_generation_bundle(root, manifest.generation_id)
+
+
+def _real_financial_contract_module() -> object:
+    module_name = "_portfolio_financial_mvp_contract_for_release_builder_test"
+    spec = importlib.util.spec_from_file_location(
+        module_name, ROOT / "tools" / "portfolio_financial_mvp_contract.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(module_name, None)
+    return module
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +186,7 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
     )
     manifest = GenerationManifest.build(
         as_of_date=builder.date.fromisoformat("2026-08-03"),
-        adapter=AdapterIdentity("quant-engine-provider-ledger", "2"),
+        adapter=AdapterIdentity("quant-engine-provider-ledger", "3"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="synthetic provider ledger",
@@ -201,6 +304,272 @@ def _recipe(tmp_path: Path) -> Path:
     return recipe
 
 
+_LITERAL_EPOCH_MANIFEST_SOURCE = {
+    "generation_id": "b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8",
+    "generation_manifest_sha256": (
+        "2d88627c2283c31aa3c5a9333bc6ee423a1fcdd22d7df495a69c1768d384bb3d"
+    ),
+    "generation_receipt_sha256": (
+        "041b1343070f24c99488b27e227264bf6ff9d8d9a0047f8732c7bcc3887bb25f"
+    ),
+    "full_directory_inventory_sha256": (
+        "50769d0200857b7fe43c67cc814a21dea8e2564f916ab65ebfcb635b0910cfb1"
+    ),
+    "artifact": {
+        "path": "outputs/account-strategy-manifest.json",
+        "sha256": PREWIRE_MANIFEST_SHA256,
+        "size_bytes": 43,
+        "schema": {"name": "account-strategy-manifest", "version": "8"},
+    },
+}
+
+
+def _schema10_recipe(tmp_path: Path) -> tuple[Path, Path, str]:
+    """Build a recipe whose financial authority is a real closed bundle."""
+
+    recipe = _recipe(tmp_path)
+    payload = json.loads(recipe.read_text(encoding="utf-8"))
+    provider_generation = _provider_ledger_generation(tmp_path)
+    generation_root = tmp_path / "epoch-manifest-generations"
+    manifest, _bundle = _stage_verified_epoch_generation(generation_root)
+    payload.pop("provider_ledger_spec")
+    payload.update(
+        {
+            "schema_version": 10,
+            "provider_ledger_generation": {
+                "path": str(provider_generation),
+                **builder._directory_inventory(provider_generation),
+            },
+            "epoch_manifest_generation": {
+                "runtime_root": str(generation_root),
+                "generation_id": manifest.generation_id,
+                "source": _LITERAL_EPOCH_MANIFEST_SOURCE,
+            },
+        }
+    )
+    recipe.write_bytes(canonical_json_bytes(payload))
+    return recipe, generation_root, manifest.generation_id
+
+
+@pytest.fixture
+def _schema10_history_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep schema-10 tests focused on epoch authority, not legacy history migration."""
+
+    monkeypatch.setattr(
+        builder,
+        "_history_contract_path",
+        lambda _recipe: Path("synthetic-history-contract.json"),
+    )
+
+
+def test_schema10_recipe_binds_a_literal_verified_epoch_bundle(
+    tmp_path: Path, _schema10_history_contract: None
+) -> None:
+    """Replacing a closed generation source with raw-five data would admit drift."""
+
+    recipe, generation_root, generation_id = _schema10_recipe(tmp_path)
+
+    accepted = builder._recipe(recipe)
+
+    assert accepted["schema_version"] == 10
+    assert accepted["epoch_manifest_generation"] == {
+        "runtime_root": str(generation_root.resolve()),
+        "generation_id": generation_id,
+        "source": _LITERAL_EPOCH_MANIFEST_SOURCE,
+    }
+
+
+def test_schema10_recipe_revalidation_is_deterministic(
+    tmp_path: Path, _schema10_history_contract: None
+) -> None:
+    """A second load must re-read the retained bundle rather than trust recipe bytes."""
+
+    recipe, _generation_root, _generation_id = _schema10_recipe(tmp_path)
+
+    assert builder._recipe(recipe) == builder._recipe(recipe)
+
+
+def test_create_recipe_schema10_binds_the_operator_epoch_root_and_id(
+    tmp_path: Path, _schema10_history_contract: None
+) -> None:
+    """Omitting a validated bundle bind at creation would persist a bare operator claim."""
+
+    seed = _recipe(tmp_path)
+    source = json.loads(seed.read_text(encoding="utf-8"))
+    generation_root = tmp_path / "operator-epoch-root"
+    manifest, _bundle = _stage_verified_epoch_generation(generation_root)
+    provider_generation = _provider_ledger_generation(tmp_path)
+    output = tmp_path / "schema10-recipe.json"
+
+    builder.create_recipe(
+        provider_ledger_spec=None,
+        provider_ledger_generation=provider_generation,
+        baseline_spec=Path(source["baseline_spec"]["path"]),
+        base_factor_file=Path(source["base_factor_file"]["path"]),
+        implementation_reconciliation=Path(
+            source["implementation_reconciliation"]["path"]
+        ),
+        implementation_return_attribution=Path(
+            source["implementation_return_attribution"]["path"]
+        ),
+        strategy_attribution_root=Path(source["strategy_attribution_root"]["path"]),
+        decomposition_plan_bundle=Path(source["decomposition_plan_bundle"]["path"]),
+        correlation_source_root=Path(source["correlation_source_root"]["path"]),
+        legacy_panel=Path(source["legacy_panel"]["path"]),
+        as_of_date="2026-08-03",
+        pipeline_id="synthetic-source-to-panel",
+        release_commit="a" * 40,
+        output=output,
+        epoch_manifest_generation_root=generation_root,
+        epoch_manifest_generation_id=manifest.generation_id,
+    )
+
+    created = builder._recipe(output)
+    assert created["schema_version"] == 10
+    assert created["epoch_manifest_generation"] == {
+        "runtime_root": str(generation_root.resolve()),
+        "generation_id": manifest.generation_id,
+        "source": _LITERAL_EPOCH_MANIFEST_SOURCE,
+    }
+
+
+@pytest.mark.parametrize("mutation", ("payload", "receipt"))
+def test_schema10_recipe_rejects_one_byte_epoch_bundle_mutation(
+    tmp_path: Path, mutation: str, _schema10_history_contract: None
+) -> None:
+    """Trusting the stored source identity would overlook a mutated detached control."""
+
+    recipe, generation_root, generation_id = _schema10_recipe(tmp_path)
+    generation = generation_root / "generations" / generation_id
+    target = (
+        generation / "outputs" / "account-strategy-manifest.json"
+        if mutation == "payload"
+        else generation / "generation-receipt.json"
+    )
+    changed = bytearray(target.read_bytes())
+    changed[-1] = ord(" ") if changed[-1] != ord(" ") else ord("\n")
+    target.write_bytes(changed)
+
+    with pytest.raises(builder.VerticalBuildError, match="epoch-manifest generation"):
+        builder._recipe(recipe)
+
+
+@pytest.mark.parametrize("mismatch", ("root", "generation_id"))
+def test_schema10_recipe_rejects_epoch_bundle_root_or_id_mismatch(
+    tmp_path: Path, mismatch: str, _schema10_history_contract: None
+) -> None:
+    """An operator must name the exact root-and-content-addressed generation pair."""
+
+    recipe, generation_root, generation_id = _schema10_recipe(tmp_path)
+    payload = json.loads(recipe.read_text(encoding="utf-8"))
+    epoch = payload["epoch_manifest_generation"]
+    assert isinstance(epoch, dict)
+    if mismatch == "root":
+        epoch["runtime_root"] = str(generation_root / "wrong-root")
+    else:
+        epoch["generation_id"] = "f" * 64
+    recipe.write_bytes(canonical_json_bytes(payload))
+
+    with pytest.raises(builder.VerticalBuildError, match="epoch-manifest generation"):
+        builder._recipe(recipe)
+
+
+def test_schema10_recipe_rejects_a_bare_generation_manifest(
+    tmp_path: Path, _schema10_history_contract: None
+) -> None:
+    """A recipe cannot substitute a bare generation manifest for detached controls."""
+
+    recipe, generation_root, generation_id = _schema10_recipe(tmp_path)
+    source_generation = generation_root / "generations" / generation_id
+    bare_root = tmp_path / "bare-generation-root"
+    bare_generation = bare_root / "generations" / generation_id
+    bare_generation.mkdir(parents=True)
+    (bare_generation / "generation.json").write_bytes(
+        (source_generation / "generation.json").read_bytes()
+    )
+    payload = json.loads(recipe.read_text(encoding="utf-8"))
+    payload["epoch_manifest_generation"]["runtime_root"] = str(bare_root)
+    recipe.write_bytes(canonical_json_bytes(payload))
+
+    with pytest.raises(builder.VerticalBuildError, match="bundle verification failed"):
+        builder._recipe(recipe)
+
+
+def test_schema10_recipe_rejects_an_unverified_epoch_bundle(
+    tmp_path: Path, _schema10_history_contract: None
+) -> None:
+    """A generation with otherwise valid bytes must still carry VERIFIED authority."""
+
+    recipe, _generation_root, _generation_id = _schema10_recipe(tmp_path)
+    unverified_root = tmp_path / "unverified-epoch-root"
+    as_of = builder.date.fromisoformat("2026-08-24")
+    manifest_bytes = PREWIRE_MANIFEST_BYTES
+    report_bytes = PREWIRE_REPORT_BYTES
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-task-6-prewire", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic Task-6 prewire fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="outputs/account-strategy-manifest.json",
+                sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+                size_bytes=len(manifest_bytes),
+                as_of_date=as_of,
+                schema_name="account-strategy-manifest",
+                schema_version="8",
+            ),
+            SourceArtifact(
+                artifact_id="verification/independent-verification.json",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                size_bytes=len(report_bytes),
+                as_of_date=as_of,
+                schema_name="independent-verification",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.PENDING,
+    )
+    stage_generation_bundle(
+        unverified_root,
+        manifest,
+        {
+            "outputs/account-strategy-manifest.json": manifest_bytes,
+            "verification/independent-verification.json": report_bytes,
+        },
+    )
+    payload = json.loads(recipe.read_text(encoding="utf-8"))
+    epoch = payload["epoch_manifest_generation"]
+    epoch["runtime_root"] = str(unverified_root)
+    epoch["generation_id"] = manifest.generation_id
+    recipe.write_bytes(canonical_json_bytes(payload))
+
+    with pytest.raises(builder.VerticalBuildError, match="binding failed"):
+        builder._recipe(recipe)
+
+
+def test_schema10_recipe_rejects_raw_five_fields(
+    tmp_path: Path, _schema10_history_contract: None
+) -> None:
+    """A schema-10 profile must not retain the raw-five financial ingestion route."""
+
+    recipe, _generation_root, _generation_id = _schema10_recipe(tmp_path)
+    payload = json.loads(recipe.read_text(encoding="utf-8"))
+    raw_five = tmp_path / "account-strategy-ledger.json"
+    raw_five.write_text("{}", encoding="utf-8")
+    payload["account_strategy_ledger"] = _file_definition(raw_five)
+    recipe.write_bytes(canonical_json_bytes(payload))
+
+    with pytest.raises(builder.VerticalBuildError, match="recipe keys differ"):
+        builder._recipe(recipe)
+
+
 def test_recipe_binds_file_and_directory_inputs(tmp_path: Path) -> None:
     recipe = _recipe(tmp_path)
 
@@ -255,7 +624,10 @@ def test_directory_inventory_rejects_nested_links(tmp_path: Path, kind: str) -> 
     (target / "evidence.txt").write_text("outside", encoding="utf-8")
     link = nested / "linked" if kind == "directory" else nested / "linked.txt"
     try:
-        link.symlink_to(target if kind == "directory" else target / "evidence.txt", target_is_directory=kind == "directory")
+        link.symlink_to(
+            target if kind == "directory" else target / "evidence.txt",
+            target_is_directory=kind == "directory",
+        )
     except OSError as exc:
         pytest.skip(f"symlink creation unavailable: {exc}")
 
@@ -344,8 +716,8 @@ def test_panel_candidate_checkpoint_rejects_foreign_or_stale_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Reuse fails closed before panel publication for every bound identity."""
-    recipe_path, output_root, candidate_file, published = _panel_checkpoint_stage_fixture(
-        tmp_path, monkeypatch
+    recipe_path, output_root, candidate_file, published = (
+        _panel_checkpoint_stage_fixture(tmp_path, monkeypatch)
     )
     candidate_result = builder.build_stage(recipe_path, output_root, "panel-candidate")
     checkpoint_path = output_root / "stage-results" / "panel-candidate.json"
@@ -364,8 +736,12 @@ def test_panel_candidate_checkpoint_rejects_foreign_or_stale_provenance(
     # result shape allowed foreign checkpoints to reach publication.
     if set(checkpoint) != expected_keys:
         checkpoint_path.write_bytes(canonical_json_bytes(candidate_result))
-        with pytest.raises(builder.VerticalBuildError, match="panel candidate checkpoint"):
-            builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
+        with pytest.raises(
+            builder.VerticalBuildError, match="panel candidate checkpoint"
+        ):
+            builder.build_stage(
+                recipe_path, output_root, "panel", qa_dir=tmp_path / "qa"
+            )
         assert published == []
         return
 
@@ -382,8 +758,12 @@ def test_panel_candidate_checkpoint_rejects_foreign_or_stale_provenance(
         mutated = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         mutate(mutated)
         checkpoint_path.write_bytes(canonical_json_bytes(mutated))
-        with pytest.raises(builder.VerticalBuildError, match="panel candidate checkpoint"):
-            builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
+        with pytest.raises(
+            builder.VerticalBuildError, match="panel candidate checkpoint"
+        ):
+            builder.build_stage(
+                recipe_path, output_root, "panel", qa_dir=tmp_path / "qa"
+            )
         assert published == [], label
 
     reject(
@@ -432,9 +812,7 @@ def test_panel_candidate_checkpoint_rejects_foreign_or_stale_provenance(
     )
     reject(
         "float predecessor size",
-        lambda value: value["predecessors"]["ledger"].__setitem__(
-            "size_bytes", 1.0
-        ),
+        lambda value: value["predecessors"]["ledger"].__setitem__("size_bytes", 1.0),
     )
     reject(
         "wrong scalar candidate path",
@@ -453,7 +831,12 @@ def test_panel_candidate_checkpoint_rejects_foreign_or_stale_provenance(
         "predecessor nested keys",
         lambda value: value["predecessors"]["ledger"].__setitem__("extra", True),
     )
-    reject("nested candidate", lambda value: value["result"].__setitem__("candidate_dir", str(tmp_path / "other")))
+    reject(
+        "nested candidate",
+        lambda value: value["result"].__setitem__(
+            "candidate_dir", str(tmp_path / "other")
+        ),
+    )
 
     checkpoint_path.write_bytes(canonical_json_bytes(candidate_result))
     with pytest.raises(builder.VerticalBuildError, match="panel candidate checkpoint"):
@@ -465,8 +848,8 @@ def test_panel_candidate_checkpoint_reuses_unchanged_candidate_for_panel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A validated checkpoint passes its nested result to publication unchanged."""
-    recipe_path, output_root, candidate_file, published = _panel_checkpoint_stage_fixture(
-        tmp_path, monkeypatch
+    recipe_path, output_root, candidate_file, published = (
+        _panel_checkpoint_stage_fixture(tmp_path, monkeypatch)
     )
     candidate_result = builder.build_stage(recipe_path, output_root, "panel-candidate")
     checkpoint_path = output_root / "stage-results" / "panel-candidate.json"
@@ -483,13 +866,19 @@ def test_panel_candidate_checkpoint_reuses_unchanged_candidate_for_panel(
     assert published == [candidate_file.parent.resolve()]
 
 
-@pytest.mark.parametrize("payload", (b'{"schema_version":1,"schema_version":1}', b'{"candidate":{"path":"a","path":"b"}}'))
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b'{"schema_version":1,"schema_version":1}',
+        b'{"candidate":{"path":"a","path":"b"}}',
+    ),
+)
 def test_panel_candidate_checkpoint_rejects_duplicate_json_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: bytes
 ) -> None:
     """Duplicate keys are rejected before a checkpoint can be interpreted."""
-    recipe_path, output_root, _candidate_file, published = _panel_checkpoint_stage_fixture(
-        tmp_path, monkeypatch
+    recipe_path, output_root, _candidate_file, published = (
+        _panel_checkpoint_stage_fixture(tmp_path, monkeypatch)
     )
     builder.build_stage(recipe_path, output_root, "panel-candidate")
     checkpoint_path = output_root / "stage-results" / "panel-candidate.json"
@@ -505,8 +894,8 @@ def test_panel_candidate_checkpoint_rejects_noncanonical_json_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A semantically equal but noncanonical checkpoint is not reusable."""
-    recipe_path, output_root, _candidate_file, published = _panel_checkpoint_stage_fixture(
-        tmp_path, monkeypatch
+    recipe_path, output_root, _candidate_file, published = (
+        _panel_checkpoint_stage_fixture(tmp_path, monkeypatch)
     )
     builder.build_stage(recipe_path, output_root, "panel-candidate")
     checkpoint_path = output_root / "stage-results" / "panel-candidate.json"
@@ -523,8 +912,8 @@ def test_panel_revalidates_checkpoint_immediately_before_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
     """Post-load recipe or candidate drift blocks publication at the last gate."""
-    recipe_path, output_root, candidate_file, published = _panel_checkpoint_stage_fixture(
-        tmp_path, monkeypatch
+    recipe_path, output_root, candidate_file, published = (
+        _panel_checkpoint_stage_fixture(tmp_path, monkeypatch)
     )
     builder.build_stage(recipe_path, output_root, "panel-candidate")
     original_load = builder._load_panel_candidate_checkpoint
@@ -2571,7 +2960,9 @@ def test_panel_publication_validates_browser_qa_before_authorizing_receipt(
         if args[1] == "qa":
             assert (qa / "semantic-validation.json").is_file()
         if args[1] == "publish":
-            receipt_path = Path(str(args[args.index("--coordinated-release-receipt") + 1]))
+            receipt_path = Path(
+                str(args[args.index("--coordinated-release-receipt") + 1])
+            )
             receipt_bytes = receipt_path.read_bytes()
             qa_bytes_at_receipt = {
                 item.relative_to(qa).as_posix(): item.read_bytes()
@@ -2617,9 +3008,10 @@ def test_panel_publication_validates_browser_qa_before_authorizing_receipt(
         if item.is_file()
     }
     assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
-    assert result["coordinated_release_receipt_sha256"] == panel_result[
-        "coordinated_release_receipt_sha256"
-    ]
+    assert (
+        result["coordinated_release_receipt_sha256"]
+        == panel_result["coordinated_release_receipt_sha256"]
+    )
     assert result["release_id"] == panel_result["release_id"]
 
 
@@ -2647,9 +3039,10 @@ def test_panel_publication_receipt_uses_exact_canonical_release_id_preimage(
         },
         "release_commit": recipe["release_commit"],
     }
-    assert receipt["release_id"] == hashlib.sha256(
-        canonical_json_bytes(preimage)
-    ).hexdigest()
+    assert (
+        receipt["release_id"]
+        == hashlib.sha256(canonical_json_bytes(preimage)).hexdigest()
+    )
 
 
 def test_panel_publication_receipt_is_create_only_byte_idempotent(
@@ -2680,6 +3073,244 @@ def test_panel_publication_receipt_is_create_only_byte_idempotent(
     candidate_file.write_text("candidate-v2", encoding="utf-8")
     with pytest.raises(builder.VerticalBuildError, match="create-only output differs"):
         builder._panel_publication_receipt(recipe_path, recipe, output, candidate, qa)
+
+
+def test_verified_epoch_bundle_stage_reads_binds_once_and_writes_exact_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raw-five rebuild, duplicate read, alias, or re-encoding breaks this seam."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, expected_bundle = _stage_verified_epoch_generation(generation_root)
+    real_reader = read_generation_bundle
+    reader_calls: list[tuple[Path, str]] = []
+    reader_results: list[object] = []
+
+    def read_once(root: Path, generation_id: str) -> object:
+        reader_calls.append((root, generation_id))
+        result = real_reader(root, generation_id)
+        reader_results.append(result)
+        return result
+
+    real_financial_module = _real_financial_contract_module()
+    binder_calls: list[object] = []
+
+    class ExactBinder:
+        def epoch_manifest_source_from_bundle(self, bundle: object) -> object:
+            binder_calls.append(bundle)
+            return real_financial_module.epoch_manifest_source_from_bundle(bundle)
+
+    producer_calls: list[tuple[object, ...]] = []
+
+    def forbidden_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        producer_calls.append(args)
+        raise AssertionError("raw-five epoch producer must be unreachable")
+
+    def forbidden_raw_five(*_args: object, **_kwargs: object) -> object:
+        producer_calls.append(("_stage_account_strategy_manifest",))
+        raise AssertionError("raw-five epoch builder must be unreachable")
+
+    monkeypatch.setattr(builder, "read_generation_bundle", read_once, raising=False)
+    monkeypatch.setattr(builder, "_financial_mvp_module", ExactBinder, raising=False)
+    monkeypatch.setattr(builder, "_tool", forbidden_tool)
+    monkeypatch.setattr(
+        builder,
+        "_stage_account_strategy_manifest",
+        forbidden_raw_five,
+    )
+    output_root = tmp_path / "release"
+
+    staged_path, source, staged_identity = (
+        builder._stage_verified_epoch_manifest_bundle(
+            generation_root,
+            manifest.generation_id,
+            output_root,
+        )
+    )
+
+    literal_source = {
+        "generation_id": (
+            "b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8"
+        ),
+        "generation_manifest_sha256": (
+            "2d88627c2283c31aa3c5a9333bc6ee423a1fcdd22d7df495a69c1768d384bb3d"
+        ),
+        "generation_receipt_sha256": (
+            "041b1343070f24c99488b27e227264bf6ff9d8d9a0047f8732c7bcc3887bb25f"
+        ),
+        "full_directory_inventory_sha256": (
+            "50769d0200857b7fe43c67cc814a21dea8e2564f916ab65ebfcb635b0910cfb1"
+        ),
+        "artifact": {
+            "path": "outputs/account-strategy-manifest.json",
+            "sha256": PREWIRE_MANIFEST_SHA256,
+            "size_bytes": 43,
+            "schema": {"name": "account-strategy-manifest", "version": "8"},
+        },
+    }
+    expected_staged_path = output_root / "account-strategy-manifest.json"
+    assert reader_calls == [(generation_root, manifest.generation_id)]
+    assert len(binder_calls) == 1
+    assert binder_calls[0] is reader_results[0]
+    assert binder_calls[0] == expected_bundle
+    assert type(binder_calls[0]) is type(expected_bundle)
+    assert producer_calls == []
+    assert staged_path == expected_staged_path
+    assert staged_path.read_bytes() == PREWIRE_MANIFEST_BYTES
+    assert source == literal_source
+    assert staged_identity == {
+        "path": str(expected_staged_path.resolve()),
+        "sha256": PREWIRE_MANIFEST_SHA256,
+        "size_bytes": 43,
+    }
+
+
+@pytest.mark.parametrize("include_raw_five", [False, True])
+def test_verified_epoch_bundle_stage_rejects_missing_detached_controls(
+    tmp_path: Path, include_raw_five: bool
+) -> None:
+    """A manifest, even beside historical raw-five inputs, is not a bundle."""
+
+    manifest, _bundle = _stage_verified_epoch_generation(tmp_path / "valid")
+    generation_root = tmp_path / "broken"
+    generation = generation_root / "generations" / manifest.generation_id
+    generation.mkdir(parents=True)
+    (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+    if include_raw_five:
+        for filename in (
+            "account-strategy-ledger.json",
+            "account-strategy-ledger-identity.json",
+            "account-strategy-classified-flows.json",
+            "account-strategy-flow-coverage.json",
+            "account-strategy-admission-policy.json",
+        ):
+            (generation / filename).write_bytes(b"{}\n")
+    output_root = tmp_path / "release"
+
+    with pytest.raises(builder.VerticalBuildError, match="bundle"):
+        builder._stage_verified_epoch_manifest_bundle(
+            generation_root,
+            manifest.generation_id,
+            output_root,
+        )
+
+    assert not output_root.exists()
+
+
+def test_verified_epoch_bundle_stage_rejects_bare_generation_manifest(
+    tmp_path: Path,
+) -> None:
+    """Accepting a GenerationManifest where a generation ID belongs breaks authority."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_verified_epoch_generation(generation_root)
+    output_root = tmp_path / "release"
+
+    with pytest.raises(builder.VerticalBuildError, match="bundle"):
+        builder._stage_verified_epoch_manifest_bundle(
+            generation_root,
+            manifest,
+            output_root,
+        )
+
+    assert not output_root.exists()
+
+
+@pytest.mark.parametrize("mutation", ["payload", "receipt"])
+def test_verified_epoch_bundle_stage_rejects_one_byte_mutation_before_output(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Trusting manifest metadata without immutable readback would stage drift."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_verified_epoch_generation(generation_root)
+    generation = generation_root / "generations" / manifest.generation_id
+    if mutation == "payload":
+        target = generation / "outputs" / "account-strategy-manifest.json"
+        changed = bytearray(target.read_bytes())
+        changed[-3] = ord("9")
+    else:
+        target = generation / "generation-receipt.json"
+        changed = bytearray(target.read_bytes())
+        changed[0] = ord("[")
+    target.write_bytes(changed)
+    output_root = tmp_path / "release"
+
+    with pytest.raises(builder.VerticalBuildError, match="bundle"):
+        builder._stage_verified_epoch_manifest_bundle(
+            generation_root,
+            manifest.generation_id,
+            output_root,
+        )
+
+    assert not output_root.exists()
+
+
+def test_verified_epoch_bundle_stage_wraps_binder_failure_without_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected bundle-to-contract binding must not emit panel bytes."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_verified_epoch_generation(generation_root)
+
+    class RejectingBinder:
+        @staticmethod
+        def epoch_manifest_source_from_bundle(_bundle: object) -> object:
+            raise ValueError("synthetic binder rejection")
+
+    monkeypatch.setattr(
+        builder, "_financial_mvp_module", RejectingBinder, raising=False
+    )
+    output_root = tmp_path / "release"
+
+    with pytest.raises(builder.VerticalBuildError, match="binding"):
+        builder._stage_verified_epoch_manifest_bundle(
+            generation_root,
+            manifest.generation_id,
+            output_root,
+        )
+
+    assert not output_root.exists()
+
+
+def test_verified_epoch_bundle_stage_preserves_different_existing_output(
+    tmp_path: Path,
+) -> None:
+    """Replacing create-only staging with overwrite would destroy prior evidence."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_verified_epoch_generation(generation_root)
+    staged_path = tmp_path / "release" / "account-strategy-manifest.json"
+    staged_path.parent.mkdir(parents=True)
+    prior_bytes = b'{"different":true}\n'
+    staged_path.write_bytes(prior_bytes)
+
+    with pytest.raises(builder.VerticalBuildError, match="create-only"):
+        builder._stage_verified_epoch_manifest_bundle(
+            generation_root,
+            manifest.generation_id,
+            tmp_path / "release",
+        )
+
+    assert staged_path.read_bytes() == prior_bytes
+
+
+def test_nonfinancial_manifest_stage_remains_a_noop(tmp_path: Path) -> None:
+    """The verified-bundle seam must not alter the legacy nonfinancial route."""
+
+    output_root = tmp_path / "release"
+
+    assert (
+        builder._stage_account_strategy_manifest(
+            {"schema_version": 7},
+            tmp_path / "report",
+            tmp_path / "baseline",
+            output_root,
+        )
+        is None
+    )
+    assert not output_root.exists()
 
 
 def test_schema9_stages_one_manifest_and_uses_it_for_every_panel_gate(
@@ -2718,7 +3349,7 @@ def test_schema9_stages_one_manifest_and_uses_it_for_every_panel_gate(
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
         calls.append(args)
         if args[0] == "account_strategy_manifest.py":
-            return {"schema_version": 6}
+            return {"schema_version": 7}
         return {"candidate_dir": str(tmp_path / "candidate")}
 
     monkeypatch.setattr(builder, "_tool", fake_tool)
@@ -2780,9 +3411,7 @@ def test_schema9_stages_one_manifest_and_uses_it_for_every_panel_gate(
         )
     staged_manifest.write_bytes(staged_bytes)
     (tmp_path / "candidate").mkdir()
-    (tmp_path / "candidate" / "panel.html").write_text(
-        "candidate", encoding="utf-8"
-    )
+    (tmp_path / "candidate" / "panel.html").write_text("candidate", encoding="utf-8")
     (tmp_path / "qa").mkdir()
     (tmp_path / "qa" / "browser.json").write_text("{}", encoding="utf-8")
     builder.publish_panel(
@@ -2813,7 +3442,11 @@ def test_schema9_stages_one_manifest_and_uses_it_for_every_panel_gate(
         "portfolio_control_panel.py",
     ]
     assert [call[1] for call in calls[1:]] == [
-        "build", "verify", "verify", "qa", "publish"
+        "build",
+        "verify",
+        "verify",
+        "qa",
+        "publish",
     ]
     for call in (call for call in calls[1:] if call[1] != "qa"):
         assert "--financial-mode" in call
@@ -2857,10 +3490,1014 @@ def test_schema9_stages_one_manifest_and_uses_it_for_every_panel_gate(
             manifest_classified_flows=financial_paths[
                 "account_strategy_classified_flows"
             ],
-            manifest_flow_coverage=financial_paths[
-                "account_strategy_flow_coverage"
-            ],
+            manifest_flow_coverage=financial_paths["account_strategy_flow_coverage"],
             manifest_admission_policy=financial_paths[
                 "account_strategy_admission_policy"
             ],
+        )
+
+
+def test_schema10_panel_build_publish_routes_one_verified_epoch_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _schema10_history_contract: None,
+) -> None:
+    """Schema-10 panel gates must consume one staged, verified epoch bundle."""
+
+    recipe, generation_root, generation_id = _schema10_recipe(tmp_path)
+    panel_root = tmp_path / "stages" / "panel"
+    candidate_dir = tmp_path / "candidate"
+    qa_dir = tmp_path / "qa"
+    calls: list[tuple[object, ...]] = []
+    real_stage = builder._stage_verified_epoch_manifest_bundle
+    stage_calls: list[tuple[object, ...]] = []
+
+    def stage_once(*args: object) -> tuple[Path, dict[str, object], dict[str, object]]:
+        stage_calls.append(args)
+        return real_stage(*args)
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        command = str(args[1])
+        if command == "build":
+            candidate_dir.mkdir()
+            (candidate_dir / "panel.html").write_text("candidate", encoding="utf-8")
+            return {"candidate_dir": str(candidate_dir)}
+        if command == "qa":
+            qa_dir.mkdir(exist_ok=True)
+            (qa_dir / "browser.json").write_text("{}", encoding="utf-8")
+        return {"published": command == "publish"}
+
+    monkeypatch.setattr(builder, "_stage_verified_epoch_manifest_bundle", stage_once)
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    analytics = {
+        "decomposition_root": str(tmp_path / "decomposition"),
+        "decomposition_lenses_root": str(tmp_path / "lenses"),
+        "correlation_root": str(tmp_path / "correlation"),
+        "weekly_root": str(tmp_path / "weekly"),
+    }
+
+    candidate = builder.build_panel_candidate(
+        recipe,
+        tmp_path / "report",
+        tmp_path / "baseline",
+        tmp_path / "attribution",
+        analytics,
+        tmp_path / "freshness.json",
+        panel_root,
+    )
+    staged_manifest = Path(str(candidate["account_strategy_manifest"]))
+    assert stage_calls == [(generation_root, generation_id, panel_root)]
+    assert staged_manifest.read_bytes() == PREWIRE_MANIFEST_BYTES
+    assert candidate["epoch_manifest_generation_root"] == str(generation_root.resolve())
+    assert candidate["epoch_manifest_generation_id"] == generation_id
+    assert candidate["epoch_manifest_source"] == _LITERAL_EPOCH_MANIFEST_SOURCE
+    assert candidate["account_strategy_manifest_sha256"] == PREWIRE_MANIFEST_SHA256
+    assert candidate["account_strategy_manifest_size_bytes"] == len(
+        PREWIRE_MANIFEST_BYTES
+    )
+
+    published = builder.publish_panel(
+        recipe,
+        tmp_path / "report",
+        tmp_path / "baseline",
+        tmp_path / "attribution",
+        analytics,
+        tmp_path / "freshness.json",
+        candidate_dir,
+        qa_dir,
+        panel_root,
+        account_strategy_manifest=staged_manifest,
+        expected_account_strategy_manifest_sha256=str(
+            candidate["account_strategy_manifest_sha256"]
+        ),
+        expected_account_strategy_manifest_size_bytes=int(
+            candidate["account_strategy_manifest_size_bytes"]
+        ),
+        expected_epoch_manifest_generation_root=str(
+            candidate["epoch_manifest_generation_root"]
+        ),
+        expected_epoch_manifest_generation_id=str(
+            candidate["epoch_manifest_generation_id"]
+        ),
+        expected_epoch_manifest_source=candidate["epoch_manifest_source"],
+    )
+
+    assert published["epoch_manifest_generation_root"] == str(generation_root.resolve())
+    assert published["epoch_manifest_generation_id"] == generation_id
+    assert published["epoch_manifest_source"] == _LITERAL_EPOCH_MANIFEST_SOURCE
+    assert published["account_strategy_manifest_sha256"] == PREWIRE_MANIFEST_SHA256
+    assert published["account_strategy_manifest_size_bytes"] == len(
+        PREWIRE_MANIFEST_BYTES
+    )
+    assert stage_calls == [(generation_root, generation_id, panel_root)]
+    panel_calls = [call for call in calls if call[0] == "portfolio_control_panel.py"]
+    assert [call[1] for call in panel_calls] == [
+        "build",
+        "verify",
+        "verify",
+        "qa",
+        "publish",
+    ]
+    for call in (call for call in panel_calls if call[1] != "qa"):
+        assert call[call.index("--account-manifest-generation-root") + 1] == str(
+            generation_root.resolve()
+        )
+        assert call[call.index("--account-manifest-generation-id") + 1] == generation_id
+        assert "--financial-mode" not in call
+        assert "--account-manifest" not in call
+        assert not any(str(argument).startswith("--manifest-") for argument in call)
+
+
+def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_verified_epoch_generation(generation_root)
+    candidate = tmp_path / "report-candidate"
+    candidate.mkdir()
+    runtime = tmp_path / "xlsx-runtime.exe"
+    cli = tmp_path / "xlsx-cli.py"
+    runtime.write_bytes(b"runtime")
+    cli.write_bytes(b"cli")
+    monkeypatch.setattr(builder, "XLSX_RUNTIME", runtime)
+    monkeypatch.setattr(builder, "XLSX_CLI", cli)
+    monkeypatch.setattr(builder, "_accepted_xlsx_evidence", lambda _path: True)
+    monkeypatch.setattr(
+        builder,
+        "_accepted_workbook_validation",
+        lambda _path, _candidate: {"all_passed": True},
+    )
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        if args[1] == "publish":
+            return {"generation_id": "f" * 64}
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    monkeypatch.setattr(
+        builder,
+        "_require_exact_report_delivery",
+        lambda _root, generation_id, _delivery: {
+            "delivery_classification": "NON_AUTHORITY_HUMAN_DELIVERY",
+            "generation_id": generation_id,
+            "workbook_status": "EXACT_NON_AUTHORITY",
+        },
+    )
+
+    result = builder.build_workbook(
+        tmp_path / "baseline",
+        tmp_path / "ledger",
+        tmp_path / "freshness.json",
+        tmp_path / "history.json",
+        tmp_path / "implementation.json",
+        tmp_path / "return-attribution.json",
+        tmp_path / "attribution",
+        candidate,
+        tmp_path / "report-output",
+        tmp_path / "correlation",
+        epoch_manifest_generation_root=generation_root,
+        epoch_manifest_generation_id=manifest.generation_id,
+    )
+
+    manifest_path = candidate / "account-strategy-manifest.json"
+    source_path = candidate / "epoch-manifest-source.json"
+    assert manifest_path.read_bytes() == PREWIRE_MANIFEST_BYTES
+    assert json.loads(source_path.read_text(encoding="utf-8")) == (
+        _LITERAL_EPOCH_MANIFEST_SOURCE
+    )
+    for call in (
+        call
+        for call in calls
+        if call[0] == "portfolio_report.py"
+        and call[1] in {"bind-workbook-evidence", "verify", "publish"}
+    ):
+        assert call[call.index("--epoch-manifest") + 1] == str(manifest_path)
+        assert call[call.index("--epoch-manifest-source") + 1] == str(source_path)
+    assert result["epoch_manifest_generation_id"] == manifest.generation_id
+    assert result["epoch_manifest_artifact"]["sha256"] == PREWIRE_MANIFEST_SHA256
+
+
+def test_build_report_routes_schema10_epoch_binding_only_to_workbook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wrapper must not send workbook-only authority into candidate build."""
+
+    candidate = tmp_path / "candidate"
+    calls: dict[str, object] = {}
+
+    def fake_candidate(*args: object, **kwargs: object) -> dict[str, object]:
+        calls["candidate_args"] = args
+        calls["candidate_kwargs"] = kwargs
+        return {"candidate_dir": str(candidate)}
+
+    def fake_workbook(*args: object, **kwargs: object) -> dict[str, object]:
+        calls["workbook_args"] = args
+        calls["workbook_kwargs"] = kwargs
+        return {"generation_id": "a" * 64}
+
+    monkeypatch.setattr(builder, "build_report_candidate", fake_candidate)
+    monkeypatch.setattr(builder, "build_workbook", fake_workbook)
+    generation_root = tmp_path / "epoch-generation"
+    result = builder.build_report(
+        tmp_path / "baseline",
+        tmp_path / "ledger",
+        tmp_path / "freshness.json",
+        tmp_path / "history.json",
+        tmp_path / "implementation.json",
+        tmp_path / "return-attribution.json",
+        tmp_path / "attribution",
+        tmp_path / "report",
+        tmp_path / "correlation",
+        epoch_manifest_generation_root=generation_root,
+        epoch_manifest_generation_id="b" * 64,
+    )
+
+    assert result == {"generation_id": "a" * 64}
+    assert calls["candidate_kwargs"] == {}
+    assert calls["workbook_kwargs"] == {
+        "epoch_manifest_generation_root": generation_root,
+        "epoch_manifest_generation_id": "b" * 64,
+    }
+
+
+def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wrapper consumes a real producer CLI candidate before workbook binding."""
+
+    producer_spec = importlib.util.spec_from_file_location(
+        "_report_build_cli_producer_for_release_builder",
+        ROOT / "tools" / "portfolio_report.py",
+    )
+    assert producer_spec is not None and producer_spec.loader is not None
+    producer = importlib.util.module_from_spec(producer_spec)
+    sys.modules[producer_spec.name] = producer
+    try:
+        producer_spec.loader.exec_module(producer)
+        fixture_source = (
+            ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py"
+        ).read_text(encoding="utf-8")
+        start = fixture_source.index("def _amount(")
+        end = fixture_source.index("\ndef _published_dependence(")
+        namespace = {
+            "AdapterIdentity": AdapterIdentity,
+            "Any": object,
+            "CoverageClaim": CoverageClaim,
+            "CoverageStatus": CoverageStatus,
+            "Decimal": __import__("decimal").Decimal,
+            "GenerationManifest": GenerationManifest,
+            "SourceArtifact": SourceArtifact,
+            "VerificationStatus": VerificationStatus,
+            "canonical_json_bytes": canonical_json_bytes,
+            "date": __import__("datetime").date,
+            "hashlib": hashlib,
+            "publish_generation": __import__(
+                "quant_engine.core", fromlist=["publish_generation"]
+            ).publish_generation,
+            "stage_generation": __import__(
+                "quant_engine.core", fromlist=["stage_generation"]
+            ).stage_generation,
+        }
+        exec(compile(fixture_source[start:end], "producer-fixture", "exec"), namespace)
+        baseline_root = namespace["_published_baseline"](tmp_path / "baseline")
+        candidate_output = io.StringIO()
+        with contextlib.redirect_stdout(candidate_output):
+            assert (
+                producer.main(
+                    [
+                        "build",
+                        "--baseline-root",
+                        str(baseline_root),
+                        "--output-root",
+                        str(tmp_path / "candidate-output"),
+                    ]
+                )
+                == 0
+            )
+        real_candidate = json.loads(candidate_output.getvalue())
+    finally:
+        sys.modules.pop(producer_spec.name, None)
+
+    candidate_path = Path(real_candidate["candidate_dir"])
+    calls: dict[str, object] = {}
+
+    def real_candidate_boundary(*_args: object, **kwargs: object) -> dict[str, object]:
+        assert kwargs == {}
+        return real_candidate
+
+    def workbook_boundary(*args: object, **kwargs: object) -> dict[str, object]:
+        calls["candidate"] = args[7]
+        calls["epoch"] = kwargs
+        return {"generation_id": "c" * 64}
+
+    monkeypatch.setattr(builder, "build_report_candidate", real_candidate_boundary)
+    monkeypatch.setattr(builder, "build_workbook", workbook_boundary)
+    epoch_root = tmp_path / "epoch-generation"
+    result = builder.build_report(
+        baseline_root,
+        tmp_path / "ledger",
+        tmp_path / "freshness.json",
+        tmp_path / "history.json",
+        tmp_path / "implementation.json",
+        tmp_path / "return-attribution.json",
+        tmp_path / "attribution",
+        tmp_path / "report",
+        epoch_manifest_generation_root=epoch_root,
+        epoch_manifest_generation_id="d" * 64,
+    )
+
+    assert result == {"generation_id": "c" * 64}
+    assert Path(str(calls["candidate"])).resolve() == candidate_path.resolve()
+    assert (candidate_path / "portfolio-report-data.json").is_file()
+    assert calls["epoch"] == {
+        "epoch_manifest_generation_root": epoch_root,
+        "epoch_manifest_generation_id": "d" * 64,
+    }
+
+
+def test_build_report_runs_real_candidate_workbook_and_delivery_with_epoch_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the external xlsx command is stubbed in the complete report wrapper seam."""
+
+    fixture_source = (
+        ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py"
+    ).read_text(encoding="utf-8")
+    start = fixture_source.index("def _amount(")
+    end = fixture_source.index("\ndef _published_dependence(")
+    namespace = {
+        "AdapterIdentity": AdapterIdentity,
+        "Any": object,
+        "CoverageClaim": CoverageClaim,
+        "CoverageStatus": CoverageStatus,
+        "Decimal": __import__("decimal").Decimal,
+        "GenerationManifest": GenerationManifest,
+        "SourceArtifact": SourceArtifact,
+        "VerificationStatus": VerificationStatus,
+        "canonical_json_bytes": canonical_json_bytes,
+        "date": __import__("datetime").date,
+        "hashlib": hashlib,
+        "publish_generation": publish_generation,
+        "stage_generation": __import__(
+            "quant_engine.core", fromlist=["stage_generation"]
+        ).stage_generation,
+    }
+    exec(compile(fixture_source[start:end], "producer-fixture", "exec"), namespace)
+
+    provider_root = tmp_path / "provider-ledger"
+    provider_catalog = canonical_json_bytes({"reconciliation_checks": []})
+    provider_artifact = SourceArtifact(
+        artifact_id="normalized/provider-ledger.json",
+        sha256=hashlib.sha256(provider_catalog).hexdigest(),
+        size_bytes=len(provider_catalog),
+        as_of_date=builder.date(2026, 1, 3),
+        schema_name="provider-ledger-catalog",
+        schema_version="1",
+    )
+    provider_manifest = GenerationManifest.build(
+        as_of_date=builder.date(2026, 1, 3),
+        adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic report wrapper provider ledger",
+            fact_types=("provider-ledger",),
+            observed_start=builder.date(2026, 1, 3),
+            observed_end=builder.date(2026, 1, 3),
+        ),
+        artifacts=(provider_artifact,),
+        verification=VerificationStatus.VERIFIED,
+    )
+    provider_generation_path = stage_generation(provider_root, provider_manifest)
+    (provider_generation_path.parent / "provider-ledger.json").write_bytes(
+        provider_catalog
+    )
+    publish_generation(provider_root, provider_manifest.generation_id)
+    provider_generation = (
+        provider_root / "generations" / provider_manifest.generation_id
+    )
+    provider_identity = {
+        "as_of_date": "2026-01-03",
+        "catalog_sha256": provider_artifact.sha256,
+        "catalog_size_bytes": provider_artifact.size_bytes,
+        "generation_id": provider_manifest.generation_id,
+        "manifest_sha256": hashlib.sha256(
+            (provider_generation / "generation.json").read_bytes()
+        ).hexdigest(),
+        "manifest_size_bytes": (provider_generation / "generation.json").stat().st_size,
+    }
+    catalog = namespace["_baseline_catalog"]()
+    catalog["source_artifacts"].extend(
+        [
+            {
+                "artifact_id": "providers/provider-ledger/generation.json",
+                "as_of_date": "2026-01-03",
+                "schema_name": "generation-manifest",
+                "schema_version": "1",
+                "sha256": provider_identity["manifest_sha256"],
+                "source_key": "provider-ledger-generation",
+            },
+            {
+                "artifact_id": "providers/provider-ledger/provider-ledger.json",
+                "as_of_date": "2026-01-03",
+                "schema_name": "provider-ledger-catalog",
+                "schema_version": "1",
+                "sha256": provider_artifact.sha256,
+                "source_key": "provider-ledger-generation",
+            },
+        ]
+    )
+    baseline_root = namespace["_published_baseline"](tmp_path / "baseline", catalog)
+    freshness = tmp_path / "freshness.json"
+    freshness.write_bytes(
+        canonical_json_bytes(
+            {
+                "assessment_schema_version": 3,
+                "as_of_date": "2026-01-03",
+                "assessments": [{"evaluated_on": "2026-01-03"}],
+                "policies": [],
+                "provider_ledger": provider_identity,
+            }
+        )
+    )
+    strategy_names = [row["name"] for row in catalog["strategies"]]
+    history_root = tmp_path / "history-tree"
+    history_root.mkdir()
+    history = history_root / "history.json"
+    history.write_bytes(
+        canonical_json_bytes(
+            {
+                "as_of_date": "2026-01-03",
+                "builder": "portfolio-target-series/layered-correlation-1",
+                "evidence_mode_policy": {
+                    "default": "LIVE_ONLY",
+                    "hybrid": "BACKTEST_STRICTLY_BEFORE_FIRST_LIVE_THEN_LIVE",
+                    "post_inception_backtest_fill": False,
+                },
+                "series_mappings": [
+                    {
+                        "backtest_observations": 0,
+                        "history_status": "UNAVAILABLE_SYNTHETIC",
+                        "implementation_reconciliation_status": "NOT_APPLICABLE",
+                        "series_id": name,
+                        "strategy_version": "UNRESOLVED",
+                    }
+                    for name in strategy_names
+                ],
+                "target_sha256": "a" * 64,
+                "target_size_bytes": 1,
+            }
+        )
+    )
+    implementation_ids = ("grizzlybears-vtma", "p123-ai-factor", "tt-portfolio")
+    implementation = tmp_path / "implementation.json"
+    implementation.write_bytes(
+        canonical_json_bytes(
+            {
+                "as_of_date": "2026-01-03",
+                "builder": "portfolio-implementation-reconciliation",
+                "reconciliation_id": "synthetic-implementation",
+                "schema_version": 1,
+                "strategies": [
+                    {
+                        "return_reconciliation": {
+                            "observations": 2,
+                            "observed_end": "2026-01-03",
+                            "observed_start": "2026-01-01",
+                        },
+                        "root_causes": [{"status": "SYNTHETIC"}],
+                        "strategy_id": strategy_id,
+                        "verification": "VERIFIED",
+                    }
+                    for strategy_id in implementation_ids
+                ],
+                "verification": "VERIFIED",
+            }
+        )
+    )
+    return_attribution = tmp_path / "return-attribution.json"
+    return_attribution.write_bytes(
+        canonical_json_bytes(
+            {
+                "as_of_date": "2026-01-03",
+                "attribution_id": "synthetic-return-attribution",
+                "builder": "portfolio-implementation-return-attribution",
+                "schema_version": 1,
+                "strategies": [
+                    {
+                        "bridge": {
+                            "account_return": 0.0,
+                            "categories": [{"effect_pp": 0.0}],
+                            "gap_pp": 0.0,
+                            "model_return": 0.0,
+                        },
+                        "observed_end": "2026-01-03",
+                        "observed_start": "2026-01-01",
+                        "strategy_id": strategy_id,
+                        "verification": "VERIFIED_WITH_DECLARED_PROXY",
+                    }
+                    for strategy_id in implementation_ids
+                ],
+                "verification": "VERIFIED_WITH_DECLARED_PARTIAL_CAUSAL_BOUNDARIES",
+            }
+        )
+    )
+    attribution_root = tmp_path / "attribution"
+    baseline_pointer = builder.read_current(baseline_root)
+    attribution = canonical_json_bytes(
+        {
+            "baseline": {
+                "catalog_sha256": hashlib.sha256(
+                    (
+                        baseline_root
+                        / "generations"
+                        / baseline_pointer.generation_id
+                        / "portfolio-baseline.json"
+                    ).read_bytes()
+                ).hexdigest(),
+                "generation_id": baseline_pointer.generation_id,
+            },
+            "benchmark_assignments": [
+                {"strategy_id": row["strategy_id"]} for row in catalog["strategies"]
+            ],
+            "catalog_schema_version": 1,
+            "comparisons": [
+                {"strategy_id": row["strategy_id"]} for row in catalog["strategies"]
+            ],
+            "costs": [
+                {"strategy_id": row["strategy_id"]} for row in catalog["strategies"]
+            ],
+        }
+    )
+    attribution_manifest = GenerationManifest.build(
+        as_of_date=builder.date(2026, 1, 3),
+        adapter=AdapterIdentity("synthetic-attribution", "1"),
+        coverage=provider_manifest.coverage,
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/strategy-attribution.json",
+                sha256=hashlib.sha256(attribution).hexdigest(),
+                size_bytes=len(attribution),
+                as_of_date=builder.date(2026, 1, 3),
+                schema_name="strategy-attribution-catalog",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    attribution_generation_path = stage_generation(
+        attribution_root, attribution_manifest
+    )
+    (attribution_generation_path.parent / "strategy-attribution.json").write_bytes(
+        attribution
+    )
+    publish_generation(attribution_root, attribution_manifest.generation_id)
+    epoch_root = history_root / "epoch"
+    epoch_payload = canonical_json_bytes({"schema_version": 8})
+    epoch_verification = canonical_json_bytes({"status": "VERIFIED"})
+    epoch_manifest = GenerationManifest.build(
+        as_of_date=builder.date(2026, 1, 3),
+        adapter=AdapterIdentity("synthetic-epoch-manifest", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic report wrapper epoch manifest",
+            fact_types=("account-strategy-manifest",),
+            observed_start=builder.date(2026, 1, 3),
+            observed_end=builder.date(2026, 1, 3),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="outputs/account-strategy-manifest.json",
+                sha256=hashlib.sha256(epoch_payload).hexdigest(),
+                size_bytes=len(epoch_payload),
+                as_of_date=builder.date(2026, 1, 3),
+                schema_name="account-strategy-manifest",
+                schema_version="8",
+            ),
+            SourceArtifact(
+                artifact_id="verification/independent-verification.json",
+                sha256=hashlib.sha256(epoch_verification).hexdigest(),
+                size_bytes=len(epoch_verification),
+                as_of_date=builder.date(2026, 1, 3),
+                schema_name="independent-verification",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        epoch_root,
+        epoch_manifest,
+        {
+            "outputs/account-strategy-manifest.json": epoch_payload,
+            "verification/independent-verification.json": epoch_verification,
+        },
+    )
+    runtime = tmp_path / "xlsx-runtime.exe"
+    cli = tmp_path / "xlsx-cli.py"
+    runtime.write_bytes(b"synthetic-runtime")
+    cli.write_bytes(b"synthetic-cli")
+    monkeypatch.setattr(builder, "XLSX_RUNTIME", runtime)
+    monkeypatch.setattr(builder, "XLSX_CLI", cli)
+    real_run = builder._run
+
+    def xlsx_command_boundary(command: object, **kwargs: object) -> dict[str, object]:
+        assert isinstance(command, tuple)
+        if command[:3] == (str(runtime), str(cli), "run"):
+            job_path = Path(command[3])
+            result_path = Path(command[command.index("--result") + 1])
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            candidate = job_path.parent
+            workbook = candidate / "excel" / "portfolio-report.xlsx"
+            workbook.parent.mkdir(exist_ok=True)
+            shutil.copyfile(candidate / "portfolio-report.xlsx", workbook)
+            result_path.write_bytes(
+                canonical_json_bytes(
+                    {
+                        "final_state": "SUCCEEDED",
+                        "idempotency_key": job["idempotency_key"],
+                        "invariants": [],
+                        "ok": True,
+                        "run_id": "b" * 32,
+                        "schema_version": "2.0",
+                        "steps": [
+                            {"status": "succeeded", "step_index": 0, "type": "open"},
+                            {"status": "succeeded", "step_index": 1, "type": "recalc"},
+                            {"status": "succeeded", "step_index": 2, "type": "save_as"},
+                        ],
+                    }
+                )
+            )
+            return {}
+        if command[:3] == (str(runtime), str(cli), "validate-contract"):
+            return {"all_passed": True, "invariants": [{"passed": True}]}
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(builder, "_run", xlsx_command_boundary)
+    output_root = tmp_path / "nested-output-root" / "report"
+    result = builder.build_report(
+        baseline_root,
+        provider_root,
+        freshness,
+        history,
+        implementation,
+        return_attribution,
+        attribution_root,
+        output_root,
+        epoch_manifest_generation_root=epoch_root,
+        epoch_manifest_generation_id=epoch_manifest.generation_id,
+    )
+
+    generation_id = str(result["generation_id"])
+    authority = output_root / "generations" / generation_id
+    delivery = output_root / "deliveries" / generation_id
+    assert result["epoch_manifest_generation_id"] == epoch_manifest.generation_id
+    assert (
+        result["epoch_manifest_artifact"]["sha256"]
+        == hashlib.sha256(epoch_payload).hexdigest()
+    )
+    assert (authority / "portfolio-report-data.json").read_bytes() == (
+        Path(str(result["candidate_dir"])) / "portfolio-report-data.json"
+    ).read_bytes()
+    assert not any(path.suffix.lower() == ".xlsx" for path in authority.rglob("*"))
+    assert (delivery / "portfolio-report.xlsx").is_file()
+    assert result["report_delivery"]["workbook_status"] == "EXACT_NON_AUTHORITY"
+
+
+@pytest.mark.parametrize(
+    "smuggled_path",
+    (
+        "deliveries/smuggled.json",
+        "nested/deliveries/smuggled.json",
+        "Deliveries/smuggled.json",
+        "nested/portfolio-report.XLSX",
+    ),
+)
+def test_report_delivery_drift_is_non_authority_and_exact_acceptance_refuses_it(
+    tmp_path: Path, smuggled_path: str
+) -> None:
+    """The consumer reads real producer output without inventing workbook authority."""
+
+    producer_spec = importlib.util.spec_from_file_location(
+        "_report_delivery_producer_for_release_builder",
+        ROOT / "tools" / "portfolio_report.py",
+    )
+    assert producer_spec is not None and producer_spec.loader is not None
+    producer = importlib.util.module_from_spec(producer_spec)
+    sys.modules[producer_spec.name] = producer
+    try:
+        producer_spec.loader.exec_module(producer)
+        fixture_source = (
+            ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py"
+        ).read_text(encoding="utf-8")
+        start = fixture_source.index("def _amount(")
+        end = fixture_source.index("\ndef _published_dependence(")
+        namespace = {
+            "AdapterIdentity": AdapterIdentity,
+            "Any": object,
+            "CoverageClaim": CoverageClaim,
+            "CoverageStatus": CoverageStatus,
+            "Decimal": __import__("decimal").Decimal,
+            "GenerationManifest": GenerationManifest,
+            "SourceArtifact": SourceArtifact,
+            "VerificationStatus": VerificationStatus,
+            "canonical_json_bytes": canonical_json_bytes,
+            "date": __import__("datetime").date,
+            "hashlib": hashlib,
+            "publish_generation": __import__(
+                "quant_engine.core", fromlist=["publish_generation"]
+            ).publish_generation,
+            "stage_generation": __import__(
+                "quant_engine.core", fromlist=["stage_generation"]
+            ).stage_generation,
+        }
+        exec(compile(fixture_source[start:end], "producer-fixture", "exec"), namespace)
+        baseline_root = namespace["_published_baseline"](tmp_path / "baseline")
+        candidate = Path(
+            producer.build_candidate(baseline_root, tmp_path / "candidates")[
+                "candidate_dir"
+            ]
+        )
+        initial_workbook = candidate / producer.WORKBOOK_NAME
+        workbook = candidate / "excel" / producer.WORKBOOK_NAME
+        workbook.parent.mkdir(parents=True)
+        shutil.copyfile(initial_workbook, workbook)
+        job = json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8"))
+        xlsx_result = candidate / "xlsx-result.json"
+        xlsx_result.write_text(
+            json.dumps(
+                {
+                    "final_state": "SUCCEEDED",
+                    "idempotency_key": job["idempotency_key"],
+                    "invariants": [],
+                    "ok": True,
+                    "run_id": "a" * 32,
+                    "schema_version": "2.0",
+                    "steps": [
+                        {
+                            "message": "Opened canonical staged workbook.",
+                            "status": "succeeded",
+                            "step_index": 0,
+                            "type": "open",
+                        },
+                        {
+                            "message": "Calculation reached xlDone.",
+                            "status": "succeeded",
+                            "step_index": 1,
+                            "type": "recalc",
+                        },
+                        {
+                            "message": "Saved canonical staged workbook.",
+                            "status": "succeeded",
+                            "step_index": 2,
+                            "type": "save_as",
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        validation = candidate / "workbook-validation.json"
+        validation.write_text(
+            json.dumps({"all_passed": True, "invariants": [{"passed": True}]}),
+            encoding="utf-8",
+        )
+        producer.canonicalize_workbook(
+            workbook, candidate / "workbook-canonicalization.json"
+        )
+        producer.canonicalize_xlsx_result(
+            xlsx_result, candidate / "xlsx-result-canonicalization.json"
+        )
+        binding = candidate / "workbook-evidence-binding.json"
+        producer.bind_workbook_evidence(
+            candidate, workbook, xlsx_result, validation, binding
+        )
+        authority_root = tmp_path / "published"
+        published = producer.publish_report(
+            baseline_root,
+            candidate,
+            workbook,
+            xlsx_result,
+            validation,
+            authority_root,
+            workbook_evidence_binding=binding,
+        )
+        generation_id = str(published["generation_id"])
+        delivery_dir = authority_root / "deliveries" / generation_id
+    finally:
+        sys.modules.pop(producer_spec.name, None)
+
+    authority_generation = authority_root / "generations" / generation_id
+    authority_report = (
+        authority_generation / "portfolio-report-data.json"
+    ).read_bytes()
+    authority_manifest = (authority_generation / "generation.json").read_bytes()
+    expected_report_sha256 = hashlib.sha256(authority_report).hexdigest()
+    expected_manifest_sha256 = hashlib.sha256(authority_manifest).hexdigest()
+
+    materializer_spec = importlib.util.spec_from_file_location(
+        "_report_delivery_materializer_for_release_builder",
+        ROOT / "tools" / "portfolio_pipeline_materialize.py",
+    )
+    assert materializer_spec is not None and materializer_spec.loader is not None
+    materializer = importlib.util.module_from_spec(materializer_spec)
+    sys.modules[materializer_spec.name] = materializer
+    try:
+        materializer_spec.loader.exec_module(materializer)
+        producer_inventory = inventory_generation(authority_generation)
+        assert materializer._generation_expectation(
+            {
+                "files": producer_inventory["files"],
+                "generation_id": producer_inventory["generation_id"],
+                "manifest_sha256": producer_inventory["manifest_sha256"],
+            },
+            "report",
+        ) == {
+            "files": producer_inventory["files"],
+            "generation_id": producer_inventory["generation_id"],
+            "manifest_sha256": producer_inventory["manifest_sha256"],
+        }
+    finally:
+        sys.modules.pop(materializer_spec.name, None)
+
+    inspection = builder._inspect_report_delivery(
+        authority_root, generation_id, delivery_dir
+    )
+    assert inspection["delivery_classification"] == "NON_AUTHORITY_HUMAN_DELIVERY"
+    assert inspection["workbook_status"] == "EXACT_NON_AUTHORITY"
+    assert inspection["report_data_sha256"] == expected_report_sha256
+    assert inspection["generation_manifest_sha256"] == expected_manifest_sha256
+    assert not list(authority_generation.rglob("*.xlsx"))
+
+    receipt_path = delivery_dir / "report-delivery.json"
+    receipt_bytes = receipt_path.read_bytes()
+    trusted_authority = json.loads(receipt_bytes)["authority"]
+    trusted_manifest_sha256 = trusted_authority["generation_manifest_sha256"]
+    trusted_inventory_sha256 = trusted_authority["generation_inventory_sha256"]
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="explicit report authority identity is incomplete",
+    ):
+        builder._inspect_report_delivery(
+            authority_root,
+            generation_id,
+            delivery_dir,
+            expected_manifest_sha256=trusted_manifest_sha256,
+        )
+    explicit = builder._require_exact_report_delivery(
+        authority_root,
+        generation_id,
+        delivery_dir,
+        expected_manifest_sha256=trusted_manifest_sha256,
+        expected_inventory_sha256=trusted_inventory_sha256,
+    )
+    assert explicit["workbook_status"] == "EXACT_NON_AUTHORITY"
+    receipt_path.unlink()
+    with pytest.raises(builder.VerticalBuildError, match="delivery is unavailable"):
+        builder._require_exact_report_delivery(
+            authority_root, generation_id, delivery_dir
+        )
+    receipt_path.write_bytes(receipt_bytes)
+    receipt_path.write_bytes(b"{")
+    with pytest.raises(builder.VerticalBuildError, match="receipt is unreadable"):
+        builder._require_exact_report_delivery(
+            authority_root, generation_id, delivery_dir
+        )
+    receipt_path.write_bytes(receipt_bytes)
+    rebound = json.loads(receipt_bytes)
+    rebound["authority"]["generation_id"] = "0" * 64
+    receipt_path.write_bytes(canonical_json_bytes(rebound))
+    with pytest.raises(builder.VerticalBuildError, match="authority binding differs"):
+        builder._require_exact_report_delivery(
+            authority_root, generation_id, delivery_dir
+        )
+    receipt_path.write_bytes(receipt_bytes)
+    assert (
+        authority_generation / "portfolio-report-data.json"
+    ).read_bytes() == authority_report
+    assert builder.read_current(authority_root).generation_id == generation_id
+
+    with zipfile.ZipFile(delivery_dir / "portfolio-report.xlsx", "a") as archive:
+        archive.writestr("customXml/item1.xml", b"<sharepoint-rewrite/>")
+
+    drifted = builder._inspect_report_delivery(
+        authority_root, generation_id, delivery_dir
+    )
+    assert drifted["workbook_status"] == "DRIFTED_NON_AUTHORITY"
+    assert (
+        authority_generation / "portfolio-report-data.json"
+    ).read_bytes() == authority_report
+    assert (authority_generation / "generation.json").read_bytes() == authority_manifest
+    with pytest.raises(builder.VerticalBuildError, match="exact non-authority"):
+        builder._require_exact_report_delivery(
+            authority_root, generation_id, delivery_dir
+        )
+
+    smuggled = authority_generation / smuggled_path
+    smuggled.parent.mkdir(parents=True)
+    smuggled.write_bytes(canonical_json_bytes({"smuggled": True}))
+    rebound = json.loads(receipt_bytes)
+    rebound["authority"]["generation_inventory_sha256"] = (
+        builder.generation_inventory_sha256(authority_root, generation_id)
+    )
+    receipt_path.write_bytes(canonical_json_bytes(rebound))
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="inventories workbook delivery",
+    ):
+        builder._inspect_report_delivery(
+            authority_root,
+            generation_id,
+            delivery_dir,
+            expected_manifest_sha256=trusted_manifest_sha256,
+            expected_inventory_sha256=trusted_inventory_sha256,
+        )
+    with pytest.raises(
+        builder.VerticalBuildError, match="current report generation differs"
+    ):
+        builder._inspect_report_delivery(authority_root, generation_id, delivery_dir)
+    with pytest.raises(PointerIntegrityError, match="artifact inventory"):
+        builder.read_current(authority_root)
+
+
+@pytest.mark.parametrize("mutation", ("root", "generation_id", "source", "bytes"))
+def test_schema10_publish_rejects_mutated_epoch_candidate_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _schema10_history_contract: None,
+    mutation: str,
+) -> None:
+    """A publish must reject a substituted bundle identity or staged byte stream."""
+
+    recipe, _generation_root, _generation_id = _schema10_recipe(tmp_path)
+    panel_root = tmp_path / "stages" / "panel"
+    candidate_dir = tmp_path / "candidate"
+    qa_dir = tmp_path / "qa"
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        command = str(args[1])
+        if command == "build":
+            candidate_dir.mkdir()
+            (candidate_dir / "panel.html").write_text("candidate", encoding="utf-8")
+            return {"candidate_dir": str(candidate_dir)}
+        if command == "qa":
+            qa_dir.mkdir(exist_ok=True)
+            (qa_dir / "browser.json").write_text("{}", encoding="utf-8")
+        return {}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    analytics = {
+        "decomposition_root": str(tmp_path / "decomposition"),
+        "decomposition_lenses_root": str(tmp_path / "lenses"),
+        "correlation_root": str(tmp_path / "correlation"),
+        "weekly_root": str(tmp_path / "weekly"),
+    }
+    candidate = builder.build_panel_candidate(
+        recipe,
+        tmp_path / "report",
+        tmp_path / "baseline",
+        tmp_path / "attribution",
+        analytics,
+        tmp_path / "freshness.json",
+        panel_root,
+    )
+    staged_manifest = Path(str(candidate["account_strategy_manifest"]))
+    expected_root = str(candidate["epoch_manifest_generation_root"])
+    expected_generation_id = str(candidate["epoch_manifest_generation_id"])
+    expected_source = candidate["epoch_manifest_source"]
+    if mutation == "root":
+        expected_root = str(tmp_path / "alternate-generation-root")
+    elif mutation == "generation_id":
+        expected_generation_id = "f" * 64
+    elif mutation == "source":
+        expected_source = {**expected_source, "generation_id": "f" * 64}
+    else:
+        staged_manifest.write_bytes(staged_manifest.read_bytes() + b" ")
+
+    with pytest.raises(
+        builder.VerticalBuildError, match="epoch-manifest|staged account"
+    ):
+        builder.publish_panel(
+            recipe,
+            tmp_path / "report",
+            tmp_path / "baseline",
+            tmp_path / "attribution",
+            analytics,
+            tmp_path / "freshness.json",
+            candidate_dir,
+            qa_dir,
+            panel_root,
+            account_strategy_manifest=staged_manifest,
+            expected_account_strategy_manifest_sha256=str(
+                candidate["account_strategy_manifest_sha256"]
+            ),
+            expected_account_strategy_manifest_size_bytes=int(
+                candidate["account_strategy_manifest_size_bytes"]
+            ),
+            expected_epoch_manifest_generation_root=expected_root,
+            expected_epoch_manifest_generation_id=expected_generation_id,
+            expected_epoch_manifest_source=expected_source,
         )

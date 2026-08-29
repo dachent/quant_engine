@@ -22,9 +22,12 @@ from typing import Any, Mapping, Sequence
 from quant_engine.core import (
     GenerationManifest,
     VerificationStatus,
+    generation_inventory_sha256,
     hash_file,
     publish_generation,
     read_current,
+    read_generation,
+    read_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
 
@@ -35,6 +38,7 @@ class VerticalBuildError(ValueError):
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_ROOT = REPOSITORY_ROOT / "tools"
+FINANCIAL_MVP_TOOL = TOOLS_ROOT / "portfolio_financial_mvp_contract.py"
 ACCOUNT_STRATEGY_CLASSIFICATION_POLICY = (
     REPOSITORY_ROOT
     / "contracts"
@@ -99,13 +103,25 @@ def _path(value: object, label: str) -> Path:
     return path
 
 
+def _windows_api_path(path: Path) -> Path:
+    """Return an absolute extended-length path for Windows filesystem calls."""
+
+    value = str(Path(path).absolute())
+    if value.startswith("\\\\?\\"):
+        return Path(value)
+    if value.startswith("\\\\"):
+        return Path(f"\\\\?\\UNC\\{value[2:]}")
+    return Path(f"\\\\?\\{value}")
+
+
 def _write_exact(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if path.is_symlink() or path.read_bytes() != content:
+    target = _windows_api_path(path) if os.name == "nt" else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        if target.is_symlink() or target.read_bytes() != content:
             raise VerticalBuildError(f"create-only output differs: {path}")
         return
-    with path.open("xb") as handle:
+    with target.open("xb") as handle:
         handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())
@@ -155,7 +171,11 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
 
 
 def _panel_publication_receipt(
-    recipe_path: Path, recipe: Mapping[str, Any], output_root: Path, candidate: Path, qa_dir: Path
+    recipe_path: Path,
+    recipe: Mapping[str, Any],
+    output_root: Path,
+    candidate: Path,
+    qa_dir: Path,
 ) -> tuple[Path, dict[str, Any]]:
     recipe_sha256, recipe_size_bytes = _sha(recipe_path)
     release_commit = _text(recipe.get("release_commit"), "release_commit")
@@ -176,7 +196,10 @@ def _panel_publication_receipt(
         "release_id": release_id,
         "release_commit": release_commit,
         "output_root": str(output_root.resolve()),
-        "candidate": {"path": str(candidate.resolve()), **_directory_inventory(candidate)},
+        "candidate": {
+            "path": str(candidate.resolve()),
+            **_directory_inventory(candidate),
+        },
         "qa": {"path": str(qa_dir.resolve()), **_directory_inventory(qa_dir)},
     }
     path = output_root / "stage-results" / "panel-publication-authorization.json"
@@ -218,7 +241,7 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
         raise VerticalBuildError("reusable provider-ledger is not verified")
     if (
         manifest.adapter.name != "quant-engine-provider-ledger"
-        or manifest.adapter.version != "2"
+        or manifest.adapter.version != "3"
     ):
         raise VerticalBuildError("reusable provider-ledger adapter differs")
     required_artifacts = {
@@ -375,7 +398,7 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
 def _recipe(path: Path) -> dict[str, Any]:
     recipe = _load(path, "vertical-build recipe")
     schema_version = recipe.get("schema_version")
-    if schema_version not in {6, 7, 9}:
+    if schema_version not in {6, 7, 9, 10}:
         raise VerticalBuildError("vertical-build recipe schema is unsupported")
     required = {
         "as_of_date",
@@ -404,6 +427,8 @@ def _recipe(path: Path) -> dict[str, Any]:
                 "account_strategy_admission_policy",
             }
         )
+    if schema_version == 10:
+        required.add("epoch_manifest_generation")
     if set(recipe) != required:
         raise VerticalBuildError("vertical-build recipe keys differ")
     date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
@@ -455,7 +480,7 @@ def _recipe(path: Path) -> dict[str, Any]:
             "inventory_sha256": definition["inventory_sha256"],
         }:
             raise VerticalBuildError(f"{key} inventory differs")
-    if schema_version in {7, 9}:
+    if schema_version in {7, 9, 10}:
         definition = recipe["provider_ledger_generation"]
         if not isinstance(definition, dict) or set(definition) != {
             "file_count",
@@ -496,6 +521,8 @@ def _recipe(path: Path) -> dict[str, Any]:
         ):
             if path.is_symlink() or not path.exists():
                 raise VerticalBuildError(f"repository-governed {label} is unavailable")
+    if schema_version == 10:
+        _epoch_manifest_generation_definition(recipe["epoch_manifest_generation"])
     _history_contract_path(recipe)
     return recipe
 
@@ -506,6 +533,40 @@ def _file_definition(path: Path) -> dict[str, object]:
         "path": str(path.resolve()),
         "sha256": sha256,
         "size_bytes": size,
+    }
+
+
+def _epoch_manifest_generation_definition(definition: object) -> dict[str, object]:
+    """Read and bind one operator-selected verified epoch-manifest generation."""
+
+    if not isinstance(definition, dict) or set(definition) != {
+        "runtime_root",
+        "generation_id",
+        "source",
+    }:
+        raise VerticalBuildError("epoch-manifest generation definition differs")
+    runtime_root = _path(
+        definition["runtime_root"], "epoch_manifest_generation.runtime_root"
+    )
+    generation_id = _generation_id(
+        definition["generation_id"], "epoch_manifest_generation.generation_id"
+    )
+    try:
+        bundle = read_generation_bundle(runtime_root, generation_id)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise VerticalBuildError(
+            "epoch-manifest generation bundle verification failed"
+        ) from exc
+    try:
+        source = _financial_mvp_module().epoch_manifest_source_from_bundle(bundle)
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise VerticalBuildError("epoch-manifest generation binding failed") from exc
+    if not isinstance(source, dict) or definition["source"] != source:
+        raise VerticalBuildError("epoch-manifest generation source identity differs")
+    return {
+        "runtime_root": str(runtime_root),
+        "generation_id": generation_id,
+        "source": source,
     }
 
 
@@ -530,6 +591,8 @@ def create_recipe(
     account_strategy_classified_flows: Path | None = None,
     account_strategy_flow_coverage: Path | None = None,
     account_strategy_admission_policy: Path | None = None,
+    epoch_manifest_generation_root: Path | None = None,
+    epoch_manifest_generation_id: str | None = None,
 ) -> dict[str, Any]:
     date.fromisoformat(as_of_date)
     if len(release_commit) != 40:
@@ -555,6 +618,23 @@ def create_recipe(
     if supplied_financial_sources and provider_ledger_generation is None:
         raise VerticalBuildError(
             "financial epoch-manifest recipes require a reusable provider-ledger generation"
+        )
+    if (epoch_manifest_generation_root is None) != (
+        epoch_manifest_generation_id is None
+    ):
+        raise VerticalBuildError(
+            "epoch-manifest generation root and id must be supplied together"
+        )
+    if supplied_financial_sources and epoch_manifest_generation_root is not None:
+        raise VerticalBuildError(
+            "raw-five and verified epoch-manifest recipe profiles are mutually exclusive"
+        )
+    if (
+        epoch_manifest_generation_root is not None
+        and provider_ledger_generation is None
+    ):
+        raise VerticalBuildError(
+            "verified epoch-manifest recipes require a reusable provider-ledger generation"
         )
     payload: dict[str, Any] = {
         "as_of_date": as_of_date,
@@ -608,6 +688,32 @@ def create_recipe(
             }
         )
         payload["schema_version"] = 9
+    if epoch_manifest_generation_root is not None:
+        assert epoch_manifest_generation_id is not None
+        runtime_root = epoch_manifest_generation_root.resolve()
+        generation_id = _generation_id(
+            epoch_manifest_generation_id, "epoch_manifest_generation_id"
+        )
+        try:
+            bundle = read_generation_bundle(runtime_root, generation_id)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise VerticalBuildError(
+                "epoch-manifest generation bundle verification failed"
+            ) from exc
+        try:
+            source = _financial_mvp_module().epoch_manifest_source_from_bundle(bundle)
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise VerticalBuildError(
+                "epoch-manifest generation binding failed"
+            ) from exc
+        if not isinstance(source, dict):
+            raise VerticalBuildError("epoch-manifest generation binding failed")
+        payload["epoch_manifest_generation"] = {
+            "runtime_root": str(runtime_root),
+            "generation_id": generation_id,
+            "source": source,
+        }
+        payload["schema_version"] = 10
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
     return {"pipeline_id": pipeline_id, "recipe": str(output)}
@@ -813,6 +919,157 @@ def _published_generation(root: Path) -> tuple[str, Path]:
     if generation.is_symlink() or not generation.is_dir():
         raise VerticalBuildError("published generation directory is unavailable")
     return pointer.generation_id, generation
+
+
+def _inspect_report_delivery(
+    authority_root: Path,
+    generation_id: str,
+    delivery_dir: Path,
+    *,
+    expected_manifest_sha256: str | None = None,
+    expected_inventory_sha256: str | None = None,
+) -> dict[str, object]:
+    """Validate a routed human workbook receipt without making it authority."""
+
+    if (expected_manifest_sha256 is None) != (expected_inventory_sha256 is None):
+        raise VerticalBuildError("explicit report authority identity is incomplete")
+    if expected_manifest_sha256 is None:
+        try:
+            current = read_current(authority_root)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise VerticalBuildError("current report generation differs") from exc
+        if current.generation_id != generation_id:
+            raise VerticalBuildError("current report generation differs")
+        expected_manifest_sha256 = current.manifest_sha256
+        expected_inventory_sha256 = current.artifact_inventory_sha256
+    assert expected_inventory_sha256 is not None
+    assert expected_manifest_sha256 is not None
+    expected_delivery_dir = authority_root / "deliveries" / generation_id
+    if delivery_dir.resolve() != expected_delivery_dir.resolve():
+        raise VerticalBuildError("report delivery directory differs from authority route")
+    try:
+        manifest = read_generation(authority_root, generation_id)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise VerticalBuildError("report authority generation is not verified") from exc
+    generation_dir = authority_root / "generations" / generation_id
+    if any(
+        path.is_file()
+        and (
+            path.suffix.lower() == ".xlsx"
+            or any(
+                part.lower() == "deliveries"
+                for part in path.relative_to(generation_dir).parts
+            )
+        )
+        for path in generation_dir.rglob("*")
+    ):
+        raise VerticalBuildError("report authority generation inventories workbook delivery")
+    report_data_path = generation_dir / "portfolio-report-data.json"
+    manifest_path = generation_dir / "generation.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise VerticalBuildError("report authority manifest is unavailable")
+    manifest_bytes = manifest_path.read_bytes()
+    if (
+        manifest.to_json_bytes() != manifest_bytes
+        or hashlib.sha256(manifest_bytes).hexdigest() != expected_manifest_sha256
+    ):
+        raise VerticalBuildError("report authority manifest differs")
+    try:
+        inventory_sha256 = generation_inventory_sha256(authority_root, generation_id)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise VerticalBuildError("report authority inventory is unavailable") from exc
+    if inventory_sha256 != expected_inventory_sha256:
+        raise VerticalBuildError("current report generation differs")
+    if report_data_path.is_symlink() or not report_data_path.is_file():
+        raise VerticalBuildError("report authority payload is unavailable")
+    report_data = report_data_path.read_bytes()
+    report_artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "normalized/portfolio-report-data.json"
+        ),
+        None,
+    )
+    if report_artifact is None or (
+        report_artifact.sha256,
+        report_artifact.size_bytes,
+    ) != (hashlib.sha256(report_data).hexdigest(), len(report_data)):
+        raise VerticalBuildError("report authority payload differs from manifest")
+    receipt_path = delivery_dir / "report-delivery.json"
+    workbook_path = delivery_dir / "portfolio-report.xlsx"
+    if any(path.is_symlink() or not path.is_file() for path in (receipt_path, workbook_path)):
+        raise VerticalBuildError("report delivery is unavailable")
+    receipt_bytes = receipt_path.read_bytes()
+    try:
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise VerticalBuildError("report delivery receipt is unreadable") from exc
+    if not isinstance(receipt, dict) or canonical_json_bytes(receipt) != receipt_bytes:
+        raise VerticalBuildError("report delivery receipt differs")
+    expected_authority = {
+        "generation_id": generation_id,
+        "generation_inventory_sha256": inventory_sha256,
+        "generation_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "generation_manifest_size_bytes": len(manifest_bytes),
+        "payload": {
+            "relative_path": "portfolio-report-data.json",
+            "sha256": hashlib.sha256(report_data).hexdigest(),
+            "size_bytes": len(report_data),
+        },
+    }
+    workbook = receipt.get("workbook")
+    if (
+        set(receipt) != {
+            "authority",
+            "delivery_classification",
+            "schema_version",
+            "workbook",
+        }
+        or receipt.get("schema_version") != 1
+        or receipt.get("delivery_classification") != "NON_AUTHORITY_HUMAN_DELIVERY"
+        or receipt.get("authority") != expected_authority
+        or not isinstance(workbook, dict)
+        or set(workbook) != {"relative_path", "sha256", "size_bytes"}
+        or workbook.get("relative_path") != "portfolio-report.xlsx"
+        or type(workbook.get("sha256")) is not str
+        or type(workbook.get("size_bytes")) is not int
+    ):
+        raise VerticalBuildError("report delivery receipt authority binding differs")
+    workbook_bytes = workbook_path.read_bytes()
+    actual_sha256 = hashlib.sha256(workbook_bytes).hexdigest()
+    return {
+        "delivery_classification": "NON_AUTHORITY_HUMAN_DELIVERY",
+        "generation_id": generation_id,
+        "generation_manifest_sha256": expected_authority["generation_manifest_sha256"],
+        "report_data_sha256": expected_authority["payload"]["sha256"],
+        "workbook_status": (
+            "EXACT_NON_AUTHORITY"
+            if actual_sha256 == workbook["sha256"]
+            and len(workbook_bytes) == workbook["size_bytes"]
+            else "DRIFTED_NON_AUTHORITY"
+        ),
+    }
+
+
+def _require_exact_report_delivery(
+    authority_root: Path,
+    generation_id: str,
+    delivery_dir: Path,
+    *,
+    expected_manifest_sha256: str | None = None,
+    expected_inventory_sha256: str | None = None,
+) -> dict[str, object]:
+    inspection = _inspect_report_delivery(
+        authority_root,
+        generation_id,
+        delivery_dir,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_inventory_sha256=expected_inventory_sha256,
+    )
+    if inspection["workbook_status"] != "EXACT_NON_AUTHORITY":
+        raise VerticalBuildError("report delivery is not exact non-authority evidence")
+    return inspection
 
 
 def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
@@ -3601,7 +3858,35 @@ def build_workbook(
     candidate: Path,
     output_root: Path,
     correlation_root: Path | None = None,
+    *,
+    epoch_manifest_generation_root: Path | None = None,
+    epoch_manifest_generation_id: str | None = None,
 ) -> dict[str, Any]:
+    if (epoch_manifest_generation_root is None) != (
+        epoch_manifest_generation_id is None
+    ):
+        raise VerticalBuildError(
+            "epoch-manifest generation root and id must be supplied together"
+        )
+    epoch_arguments: tuple[str, ...] = ()
+    epoch_source: dict[str, object] | None = None
+    epoch_manifest_identity: dict[str, object] | None = None
+    if epoch_manifest_generation_root is not None:
+        assert epoch_manifest_generation_id is not None
+        epoch_source, epoch_payload = _verified_epoch_manifest_bundle_payload(
+            epoch_manifest_generation_root, epoch_manifest_generation_id
+        )
+        epoch_manifest_path = candidate / "account-strategy-manifest.json"
+        epoch_source_path = candidate / "epoch-manifest-source.json"
+        _write_exact(epoch_manifest_path, epoch_payload)
+        _write_exact(epoch_source_path, canonical_json_bytes(epoch_source))
+        epoch_manifest_identity = _file_definition(epoch_manifest_path)
+        epoch_arguments = (
+            "--epoch-manifest",
+            str(epoch_manifest_path),
+            "--epoch-manifest-source",
+            str(epoch_source_path),
+        )
     if not XLSX_RUNTIME.is_file() or not XLSX_CLI.is_file():
         raise VerticalBuildError("xlsx-win durable runtime is unavailable")
     result_path = candidate / "xlsx-result.json"
@@ -3671,6 +3956,7 @@ def build_workbook(
         str(result_path),
         "--validation-result",
         str(validation_path),
+        *epoch_arguments,
         "--evidence",
         str(binding_path),
     )
@@ -3700,6 +3986,7 @@ def build_workbook(
             if correlation_root is not None
             else ()
         ),
+        *epoch_arguments,
     )
     published = _tool(
         "portfolio_report.py",
@@ -3735,7 +4022,14 @@ def build_workbook(
             if correlation_root is not None
             else ()
         ),
+        *epoch_arguments,
         timeout=7200,
+    )
+    generation_id = _generation_id(
+        published.get("generation_id"), "published report generation_id"
+    )
+    report_delivery = _require_exact_report_delivery(
+        output_root, generation_id, output_root / "deliveries" / generation_id
     )
     return {
         **published,
@@ -3743,7 +4037,20 @@ def build_workbook(
         "root": str(output_root),
         "workbook_canonicalization": canonicalization,
         "workbook_evidence_binding": workbook_evidence_binding,
+        "report_delivery": report_delivery,
         "xlsx_result_canonicalization": result_canonicalization,
+        **(
+            {
+                "epoch_manifest_generation_root": str(
+                    epoch_manifest_generation_root.resolve()
+                ),
+                "epoch_manifest_generation_id": epoch_manifest_generation_id,
+                "epoch_manifest_source": epoch_source,
+                "epoch_manifest_artifact": epoch_manifest_identity,
+            }
+            if epoch_manifest_generation_root is not None
+            else {}
+        ),
     }
 
 
@@ -3757,6 +4064,9 @@ def build_report(
     attribution_root: Path,
     output_root: Path,
     correlation_root: Path | None = None,
+    *,
+    epoch_manifest_generation_root: Path | None = None,
+    epoch_manifest_generation_id: str | None = None,
 ) -> dict[str, Any]:
     candidate = build_report_candidate(
         baseline_root,
@@ -3780,6 +4090,8 @@ def build_report(
         Path(_text(candidate.get("candidate_dir"), "report candidate")),
         output_root,
         correlation_root,
+        epoch_manifest_generation_root=epoch_manifest_generation_root,
+        epoch_manifest_generation_id=epoch_manifest_generation_id,
     )
 
 
@@ -3828,6 +4140,119 @@ def _report_baseline_generation_id(report_root: Path) -> str:
     return _generation_id(
         baseline.get("generation_id"),
         "published portfolio report baseline generation_id",
+    )
+
+
+def _financial_mvp_module() -> Any:
+    """Load the exact repository financial-source binder."""
+
+    module_name = "_portfolio_financial_mvp_contract_for_release_builder"
+    spec = importlib.util.spec_from_file_location(module_name, FINANCIAL_MVP_TOOL)
+    if spec is None or spec.loader is None:
+        raise VerticalBuildError("financial MVP contract binder is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise VerticalBuildError("financial MVP contract binder failed") from exc
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+    if (
+        Path(str(getattr(module, "__file__", ""))).resolve()
+        != FINANCIAL_MVP_TOOL.resolve()
+    ):
+        raise VerticalBuildError("financial MVP contract binder origin differs")
+    return module
+
+
+def _stage_verified_epoch_manifest_bundle(
+    generation_root: Path,
+    generation_id: str,
+    output_root: Path,
+) -> tuple[Path, dict[str, object], dict[str, object]]:
+    """Verify, bind, and create-only stage one accepted epoch manifest."""
+
+    source, payload = _verified_epoch_manifest_bundle_payload(
+        generation_root, generation_id
+    )
+    staged = output_root / "account-strategy-manifest.json"
+    _write_exact(staged, payload)
+    return staged, source, _file_definition(staged)
+
+
+def _verified_epoch_manifest_bundle_payload(
+    generation_root: Path,
+    generation_id: str,
+) -> tuple[dict[str, object], bytes]:
+    """Return the exact manifest bytes and source bound by one verified bundle."""
+
+    try:
+        bundle = read_generation_bundle(generation_root, generation_id)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise VerticalBuildError(
+            "epoch-manifest generation bundle verification failed"
+        ) from exc
+    try:
+        source = _financial_mvp_module().epoch_manifest_source_from_bundle(bundle)
+        payload = bundle.payloads["outputs/account-strategy-manifest.json"]
+    except VerticalBuildError:
+        raise
+    except (
+        AttributeError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise VerticalBuildError("epoch-manifest bundle binding failed") from exc
+    if not isinstance(source, dict) or type(payload) is not bytes:
+        raise VerticalBuildError("epoch-manifest bundle binding failed")
+    return source, payload
+
+
+def _epoch_manifest_panel_identity(
+    recipe: Mapping[str, Any],
+) -> tuple[Path, str, dict[str, object]] | None:
+    """Return the recipe-bound verified epoch authority for schema-10 panel gates."""
+
+    if recipe["schema_version"] != 10:
+        return None
+    definition = recipe["epoch_manifest_generation"]
+    if not isinstance(definition, dict):
+        raise VerticalBuildError("epoch-manifest generation definition differs")
+    source = definition.get("source")
+    if not isinstance(source, dict):
+        raise VerticalBuildError("epoch-manifest generation source identity differs")
+    return (
+        _path(
+            definition.get("runtime_root"),
+            "epoch_manifest_generation.runtime_root",
+        ),
+        _generation_id(
+            definition.get("generation_id"),
+            "epoch_manifest_generation.generation_id",
+        ),
+        source,
+    )
+
+
+def _verified_epoch_manifest_panel_arguments(
+    identity: tuple[Path, str, dict[str, object]] | None,
+) -> tuple[str, ...]:
+    if identity is None:
+        return ()
+    generation_root, generation_id, _source = identity
+    return (
+        "--account-manifest-generation-root",
+        str(generation_root),
+        "--account-manifest-generation-id",
+        generation_id,
     )
 
 
@@ -3919,17 +4344,41 @@ def build_panel_candidate(
 ) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     legacy_panel = _path(recipe["legacy_panel"]["path"], "legacy panel")
-    account_strategy_manifest = _stage_account_strategy_manifest(
-        recipe,
-        report_root,
-        baseline_root,
-        output_root,
-    )
+    epoch_identity = _epoch_manifest_panel_identity(recipe)
+    if epoch_identity is None:
+        account_strategy_manifest = _stage_account_strategy_manifest(
+            recipe,
+            report_root,
+            baseline_root,
+            output_root,
+        )
+        epoch_source = None
+        account_manifest_identity = (
+            _file_definition(account_strategy_manifest)
+            if account_strategy_manifest is not None
+            else None
+        )
+    else:
+        generation_root, generation_id, recipe_source = epoch_identity
+        (
+            account_strategy_manifest,
+            epoch_source,
+            account_manifest_identity,
+        ) = _stage_verified_epoch_manifest_bundle(
+            generation_root,
+            generation_id,
+            output_root,
+        )
+        if epoch_source != recipe_source:
+            raise VerticalBuildError(
+                "epoch-manifest generation source identity differs"
+            )
     financial_arguments = _panel_financial_arguments(
         recipe,
         baseline_root,
         account_strategy_manifest,
     )
+    epoch_arguments = _verified_epoch_manifest_panel_arguments(epoch_identity)
     result = _tool(
         "portfolio_control_panel.py",
         "build",
@@ -3953,6 +4402,7 @@ def build_panel_candidate(
         "--weekly-returns-root",
         _text(analytics.get("weekly_root"), "weekly_root"),
         *financial_arguments,
+        *epoch_arguments,
         "--freshness-health",
         str(freshness_health),
         "--output-root",
@@ -3983,16 +4433,12 @@ def build_panel_candidate(
         "--weekly-returns-root",
         _text(analytics.get("weekly_root"), "weekly_root"),
         *financial_arguments,
+        *epoch_arguments,
         "--freshness-health",
         str(freshness_health),
         "--candidate-dir",
         str(candidate),
         timeout=7200,
-    )
-    account_manifest_identity = (
-        _file_definition(account_strategy_manifest)
-        if account_strategy_manifest is not None
-        else None
     )
     return {
         **result,
@@ -4005,6 +4451,15 @@ def build_panel_candidate(
                 ],
             }
             if account_manifest_identity is not None
+            else {}
+        ),
+        **(
+            {
+                "epoch_manifest_generation_root": str(epoch_identity[0]),
+                "epoch_manifest_generation_id": epoch_identity[1],
+                "epoch_manifest_source": epoch_source,
+            }
+            if epoch_identity is not None
             else {}
         ),
         "candidate_dir": str(candidate),
@@ -4026,9 +4481,13 @@ def publish_panel(
     account_strategy_manifest: Path | None = None,
     expected_account_strategy_manifest_sha256: str | None = None,
     expected_account_strategy_manifest_size_bytes: int | None = None,
+    expected_epoch_manifest_generation_root: str | None = None,
+    expected_epoch_manifest_generation_id: str | None = None,
+    expected_epoch_manifest_source: object | None = None,
 ) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     legacy_panel = _path(recipe["legacy_panel"]["path"], "legacy panel")
+    epoch_identity = _epoch_manifest_panel_identity(recipe)
     if recipe["schema_version"] == 9 and account_strategy_manifest is None:
         account_strategy_manifest = _stage_account_strategy_manifest(
             recipe,
@@ -4041,6 +4500,35 @@ def publish_panel(
         baseline_root,
         account_strategy_manifest,
     )
+    epoch_arguments = _verified_epoch_manifest_panel_arguments(epoch_identity)
+    epoch_source: dict[str, object] | None = None
+    if epoch_identity is not None:
+        generation_root, generation_id, recipe_source = epoch_identity
+        if (
+            account_strategy_manifest is None
+            or expected_epoch_manifest_generation_root != str(generation_root)
+            or expected_epoch_manifest_generation_id != generation_id
+            or expected_epoch_manifest_source != recipe_source
+        ):
+            raise VerticalBuildError("epoch-manifest candidate identity differs")
+        expected_staged = output_root / "account-strategy-manifest.json"
+        if account_strategy_manifest.resolve() != expected_staged.resolve():
+            raise VerticalBuildError("epoch-manifest staged manifest path differs")
+        epoch_source, epoch_payload = _verified_epoch_manifest_bundle_payload(
+            generation_root, generation_id
+        )
+        if epoch_source != recipe_source:
+            raise VerticalBuildError(
+                "epoch-manifest generation source identity differs"
+            )
+        try:
+            staged_bytes = account_strategy_manifest.read_bytes()
+        except OSError as exc:
+            raise VerticalBuildError(
+                "staged account-strategy manifest is unavailable"
+            ) from exc
+        if staged_bytes != epoch_payload:
+            raise VerticalBuildError("staged account-strategy manifest bytes differ")
     if account_strategy_manifest is not None:
         actual_sha256, actual_size_bytes = _sha(account_strategy_manifest)
         if (
@@ -4055,16 +4543,28 @@ def publish_panel(
     semantic_validation = _tool(
         "portfolio_control_panel.py",
         "verify",
-        "--report-root", str(report_root), "--baseline-root", str(baseline_root),
-        "--legacy-panel", str(legacy_panel),
-        "--decomposition-root", _text(analytics.get("decomposition_root"), "decomposition_root"),
-        "--decomposition-lenses-root", _text(analytics.get("decomposition_lenses_root"), "decomposition_lenses_root"),
-        "--decomposition-plan-bundle", str(attribution_bundle),
-        "--correlation-root", _text(analytics.get("correlation_root"), "correlation_root"),
-        "--weekly-returns-root", _text(analytics.get("weekly_root"), "weekly_root"),
+        "--report-root",
+        str(report_root),
+        "--baseline-root",
+        str(baseline_root),
+        "--legacy-panel",
+        str(legacy_panel),
+        "--decomposition-root",
+        _text(analytics.get("decomposition_root"), "decomposition_root"),
+        "--decomposition-lenses-root",
+        _text(analytics.get("decomposition_lenses_root"), "decomposition_lenses_root"),
+        "--decomposition-plan-bundle",
+        str(attribution_bundle),
+        "--correlation-root",
+        _text(analytics.get("correlation_root"), "correlation_root"),
+        "--weekly-returns-root",
+        _text(analytics.get("weekly_root"), "weekly_root"),
         *financial_arguments,
-        "--freshness-health", str(freshness_health),
-        "--candidate-dir", str(candidate),
+        *epoch_arguments,
+        "--freshness-health",
+        str(freshness_health),
+        "--candidate-dir",
+        str(candidate),
         timeout=7200,
     )
     _write_exact(
@@ -4105,6 +4605,7 @@ def publish_panel(
         "--weekly-returns-root",
         _text(analytics.get("weekly_root"), "weekly_root"),
         *financial_arguments,
+        *epoch_arguments,
         "--freshness-health",
         str(freshness_health),
         "--candidate-dir",
@@ -4128,6 +4629,15 @@ def publish_panel(
             if account_strategy_manifest is not None
             else {}
         ),
+        **(
+            {
+                "epoch_manifest_generation_root": str(epoch_identity[0]),
+                "epoch_manifest_generation_id": epoch_identity[1],
+                "epoch_manifest_source": epoch_source,
+            }
+            if epoch_identity is not None
+            else {}
+        ),
         "candidate_dir": str(candidate),
         "coordinated_release_receipt": str(receipt_path),
         "coordinated_release_receipt_sha256": hashlib.sha256(
@@ -4148,7 +4658,9 @@ def _stage_result(output_root: Path, role: str) -> dict[str, Any]:
 
 def _record_stage(output_root: Path, role: str, result: Mapping[str, Any]) -> None:
     if role == "panel-candidate":
-        raise VerticalBuildError("panel candidate checkpoint requires provenance envelope")
+        raise VerticalBuildError(
+            "panel candidate checkpoint requires provenance envelope"
+        )
     _write_exact(_stage_path(output_root, role), canonical_json_bytes(dict(result)))
 
 
@@ -4268,7 +4780,11 @@ def _validate_panel_candidate_checkpoint_shape(envelope: Mapping[str, Any]) -> N
         raise _panel_candidate_checkpoint_error("release_commit differs")
     for label, definition, keys in (
         ("recipe", envelope["recipe"], {"sha256", "size_bytes"}),
-        ("candidate", envelope["candidate"], {"path", "file_count", "inventory_sha256"}),
+        (
+            "candidate",
+            envelope["candidate"],
+            {"path", "file_count", "inventory_sha256"},
+        ),
     ):
         if type(definition) is not dict or set(definition) != keys:
             raise _panel_candidate_checkpoint_error(f"{label} shape differs")
@@ -4438,6 +4954,7 @@ def build_stage(
         ledger = _stage_result(output_root, "ledger")
         report = _stage_result(output_root, "report")
         analytics = _stage_result(output_root, "analytics")
+        epoch_identity = _epoch_manifest_panel_identity(recipe)
         result = build_workbook(
             stages / "baseline",
             stages / "ledger",
@@ -4449,6 +4966,12 @@ def build_stage(
             _path(report.get("candidate_dir"), "report candidate"),
             stages / "report",
             _path(analytics.get("correlation_root"), "correlation root"),
+            epoch_manifest_generation_root=(
+                epoch_identity[0] if epoch_identity is not None else None
+            ),
+            epoch_manifest_generation_id=(
+                epoch_identity[1] if epoch_identity is not None else None
+            ),
         )
     elif role in {"panel-candidate", "panel"}:
         ledger = _stage_result(output_root, "ledger")
@@ -4516,6 +5039,27 @@ def build_stage(
                     and isinstance(
                         panel.get("account_strategy_manifest_size_bytes"), int
                     )
+                    else None
+                ),
+                expected_epoch_manifest_generation_root=(
+                    _text(
+                        panel.get("epoch_manifest_generation_root"),
+                        "staged epoch manifest generation root",
+                    )
+                    if recipe.get("schema_version") == 10
+                    else None
+                ),
+                expected_epoch_manifest_generation_id=(
+                    _generation_id(
+                        panel.get("epoch_manifest_generation_id"),
+                        "staged epoch manifest generation id",
+                    )
+                    if recipe.get("schema_version") == 10
+                    else None
+                ),
+                expected_epoch_manifest_source=(
+                    panel.get("epoch_manifest_source")
+                    if recipe.get("schema_version") == 10
                     else None
                 ),
             )
@@ -4602,6 +5146,8 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--account-strategy-classified-flows", type=Path)
     recipe.add_argument("--account-strategy-flow-coverage", type=Path)
     recipe.add_argument("--account-strategy-admission-policy", type=Path)
+    recipe.add_argument("--epoch-manifest-generation-root", type=Path)
+    recipe.add_argument("--epoch-manifest-generation-id")
     recipe.add_argument("--output", type=Path, required=True)
     stage = commands.add_parser("stage")
     stage.add_argument("--recipe", type=Path, required=True)
@@ -4659,6 +5205,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 account_strategy_classified_flows=args.account_strategy_classified_flows,
                 account_strategy_flow_coverage=args.account_strategy_flow_coverage,
                 account_strategy_admission_policy=args.account_strategy_admission_policy,
+                epoch_manifest_generation_root=args.epoch_manifest_generation_root,
+                epoch_manifest_generation_id=args.epoch_manifest_generation_id,
             )
         else:
             result = build_stage(
