@@ -21,7 +21,7 @@
   "material_perimeter_authority": {
     "source": "PRODUCT_AUTHORITY_HWM_REQUIREMENT_AND_ACCEPTED_HWM_EXCLUSIONS",
     "legacy_policy_path": "contracts/portfolio-hwm-policy-v3.json",
-    "legacy_policy_sha256": "483486e7342958bcbd55b6c5abb1763aff2ec3543cc6d30e1cef32bb89a8c302"
+    "legacy_policy_sha256": "713799967883f6940a5effeca8e6b879c0d62a41eeb6c6b843e836fa5dbec79b"
   },
   "calculation": {
     "method": "GEOMETRIC_BEGINNING_CAPITAL_WEIGHTED_AS_HELD",
