@@ -213,13 +213,15 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["canonical_live_series_sha256", "evidence_layer", "generation_id", "observed_end", "observed_start", "return_observations", "series_id", "strategy_id", "strategy_version"],
+        "required": ["canonical_live_series_sha256", "evidence_layer", "generation_id", "live_version_ref", "observed_end", "observed_start", "report_catalog_version_ref", "return_observations", "series_id", "strategy_id", "strategy_version"],
         "properties": {
           "canonical_live_series_sha256": { "$ref": "#/$defs/hash" },
           "evidence_layer": { "enum": ["ACCOUNT_LIVE", "PROVIDER_LIVE"] },
           "generation_id": { "$ref": "#/$defs/hash" },
+          "live_version_ref": { "type": "string", "minLength": 1 },
           "observed_end": { "type": "string", "format": "date" },
           "observed_start": { "type": "string", "format": "date" },
+          "report_catalog_version_ref": { "type": "string", "minLength": 1 },
           "return_observations": { "type": "integer", "minimum": 1 },
           "series_id": { "type": "string", "minLength": 1 },
           "strategy_id": { "type": "string", "minLength": 1 },

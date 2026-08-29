@@ -3994,6 +3994,26 @@ def _write_exact(path: Path, content: bytes) -> None:
         os.fsync(handle.fileno())
 
 
+def _replace_disposable(path: Path, content: bytes) -> None:
+    """Atomically reset a writable, non-authority staging file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.is_symlink():
+        raise GenerationConflictError(f"disposable workbook input is linked: {path.name}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".excel-input-", suffix=".xlsx", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _build_workbook_exact(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -4050,9 +4070,13 @@ def build_candidate(
     candidate = output_root / "candidates" / report_id
     data_path = candidate / REPORT_DATA_NAME
     workbook_path = candidate / WORKBOOK_NAME
+    excel_input_path = candidate / "excel-input" / WORKBOOK_NAME
     excel_path = candidate / "excel" / WORKBOOK_NAME
     _write_exact(data_path, report_bytes)
     workbook_evidence = _build_workbook_exact(report, workbook_path)
+    # Excel is allowed to rewrite the file it opens. Keep the canonical initial
+    # workbook immutable and reset only this explicit non-authority copy.
+    _replace_disposable(excel_input_path, workbook_path.read_bytes())
     contract = {
         "min_row_counts": {
             "tblAccounts": 1,
@@ -4092,7 +4116,7 @@ def build_candidate(
                 "type": "open",
                 "read_only": False,
                 "update_links": False,
-                "workbook_path": str(workbook_path),
+                "workbook_path": str(excel_input_path),
             },
             {"type": "recalc", "mode": "full_rebuild", "timeout_seconds": 120},
             {"type": "save_as", "output_path": str(excel_path), "overwrite": True},
@@ -4659,7 +4683,7 @@ def _workbook_evidence_binding_from_snapshots(
         != ["open", "recalc", "save_as"]
         or not isinstance(job["steps"][0].get("workbook_path"), str)
         or Path(job["steps"][0]["workbook_path"]).resolve()
-        != (candidate_dir / WORKBOOK_NAME).resolve()
+        != (candidate_dir / "excel-input" / WORKBOOK_NAME).resolve()
         or not isinstance(job["steps"][2].get("output_path"), str)
         or Path(job["steps"][2]["output_path"]).resolve() != final_workbook.resolve()
     ):

@@ -3857,12 +3857,74 @@ def _dependence_analysis(
     }
 
 
+def _report_return_window(
+    report_strategy_returns: Sequence[Mapping[str, Any]],
+    *,
+    strategy_id: str,
+    evidence_layer: str,
+    observed_start: str,
+    observed_end: str,
+) -> dict[str, Any]:
+    """Independently hash the report's normalized values for one analysis window."""
+
+    rows: list[dict[str, str]] = []
+    for raw in report_strategy_returns:
+        row = _object(raw, "report strategy return")
+        if (
+            row.get("strategy_id") != strategy_id
+            or row.get("evidence_layer") != evidence_layer
+        ):
+            continue
+        raw_day = _text(row.get("date"), "report strategy return date")
+        try:
+            day = date.fromisoformat(raw_day).isoformat()
+        except ValueError as exc:
+            raise ControlPanelValidationError(
+                "report strategy return date is invalid"
+            ) from exc
+        if day != raw_day:
+            raise ControlPanelValidationError(
+                "report strategy return date is not canonical"
+            )
+        if day < observed_start or day > observed_end:
+            continue
+        raw_return = _text(row.get("return"), "report strategy return value")
+        try:
+            return_value = Decimal(raw_return)
+        except InvalidOperation as exc:
+            raise ControlPanelValidationError(
+                "report strategy return value is invalid"
+            ) from exc
+        if not return_value.is_finite():
+            raise ControlPanelValidationError(
+                "report strategy return value is not finite"
+            )
+        rows.append({"date": day, "return": decimal_text(return_value)})
+    rows.sort(key=lambda item: item["date"])
+    dates = [row["date"] for row in rows]
+    if not rows or len(dates) != len(set(dates)):
+        raise ControlPanelValidationError(
+            f"report canonical-series window is absent or duplicated: {strategy_id}"
+        )
+    content = (
+        json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
+    return {
+        "canonical_live_series_sha256": hashlib.sha256(content).hexdigest(),
+        "observed_end": rows[-1]["date"],
+        "observed_start": rows[0]["date"],
+        "return_observations": len(rows),
+    }
+
+
 def _canonical_strategy_series_contracts(
     evidence_by_strategy: Mapping[str, Mapping[str, Any]],
     strategy_names: Mapping[str, str],
     factor_analysis: Mapping[str, Any],
     dependence_analysis: Mapping[str, Any],
     weekly_returns: Mapping[str, Any],
+    report_strategy_returns: Sequence[Mapping[str, Any]],
     dependence_strategy_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Prove that every analytical view consumed the canonical live path."""
@@ -3934,6 +3996,41 @@ def _canonical_strategy_series_contracts(
             raise ControlPanelValidationError(
                 f"dependence live version is absent: {series_id}"
             )
+        dependence_observed_end = _text(
+            dependence.get("observed_end"), f"dependence observed_end {series_id}"
+        )
+        dependence_observed_start = _text(
+            dependence.get("observed_start"), f"dependence observed_start {series_id}"
+        )
+        dependence_observations = dependence.get("live_observations")
+        if (
+            isinstance(dependence_observations, bool)
+            or not isinstance(dependence_observations, int)
+            or dependence_observations <= 0
+        ):
+            raise ControlPanelValidationError(
+                f"dependence live observations are invalid: {series_id}"
+            )
+        dependence_series_sha256 = _text(
+            dependence.get("canonical_live_series_sha256"),
+            f"dependence canonical series sha256 {series_id}",
+        )
+        report_window = _report_return_window(
+            report_strategy_returns,
+            strategy_id=strategy_id,
+            evidence_layer=layer,
+            observed_start=dependence_observed_start,
+            observed_end=dependence_observed_end,
+        )
+        if report_window != {
+            "canonical_live_series_sha256": dependence_series_sha256,
+            "observed_end": dependence_observed_end,
+            "observed_start": dependence_observed_start,
+            "return_observations": dependence_observations,
+        }:
+            raise ControlPanelValidationError(
+                f"report/dependence canonical-series value parity failed: {series_id}"
+            )
         expected = {
             "evidence_layer": layer,
             "generation_id": _text(
@@ -3948,12 +4045,10 @@ def _canonical_strategy_series_contracts(
             "return_observations": observation_count,
             "series_id": series_id,
             "strategy_id": strategy_id,
-            "strategy_version": live_version_ref,
+            "live_version_ref": live_version_ref,
+            "report_catalog_version_ref": evidence_version,
+            "strategy_version": strategy_version,
         }
-        if evidence_version != live_version_ref:
-            raise ControlPanelValidationError(
-                f"dependence canonical-series version parity failed: {series_id}"
-            )
         dependence_observed = {
             "evidence_layer": dependence.get("live_evidence_layer"),
             "observed_start": dependence.get("observed_start"),
@@ -3969,9 +4064,6 @@ def _canonical_strategy_series_contracts(
         # evaluation window. Their ENDS legitimately diverge (the window lags
         # for factor publication), but the window can never extend beyond the
         # evidenced path.
-        dependence_observed_end = _text(
-            dependence.get("observed_end"), f"dependence observed_end {series_id}"
-        )
         evidence_observed_end = _text(
             expected["observed_end"], f"evidence observed_end {series_id}"
         )
@@ -3989,10 +4081,6 @@ def _canonical_strategy_series_contracts(
         factor_series_sha256 = _text(
             factor_coverage.get("canonical_live_series_sha256"),
             f"factor canonical series sha256 {series_id}",
-        )
-        dependence_series_sha256 = _text(
-            dependence.get("canonical_live_series_sha256"),
-            f"dependence canonical series sha256 {series_id}",
         )
         if factor_series_sha256 != dependence_series_sha256:
             raise ControlPanelValidationError(
@@ -5429,6 +5517,7 @@ def _panel_data(
         factor_analysis,
         dependence_analysis,
         accepted_weekly_returns,
+        _objects(report.get("strategy_returns"), "report strategy returns"),
         dependence_strategy_names,
     )
     freshness_dates = {

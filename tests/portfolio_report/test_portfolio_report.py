@@ -1481,6 +1481,31 @@ def test_workbook_is_deterministic_structured_and_has_no_external_surface(
     assert job_text.index('{"type":"save_as"') < job_text.index("output_path")
 
 
+def test_excel_recalc_uses_resettable_copy_and_cannot_mutate_initial(
+    tmp_path: Path,
+) -> None:
+    baseline_root = _published_baseline(tmp_path)
+    output_root = tmp_path / "reporting"
+    first = reporter.build_candidate(baseline_root, output_root)
+    candidate = Path(first["candidate_dir"])
+    initial = Path(first["workbook_path"])
+    canonical_bytes = initial.read_bytes()
+    job = json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8"))
+    excel_input = Path(job["steps"][0]["workbook_path"])
+
+    assert excel_input == candidate / "excel-input" / reporter.WORKBOOK_NAME
+    assert excel_input.read_bytes() == canonical_bytes
+
+    # Native Excel may rewrite its writable input even when SaveAs targets a
+    # different path. A retry must reset only that disposable copy.
+    excel_input.write_bytes(b"native-excel-mutated-input")
+    second = reporter.build_candidate(baseline_root, output_root)
+
+    assert first == second
+    assert initial.read_bytes() == canonical_bytes
+    assert excel_input.read_bytes() == canonical_bytes
+
+
 def test_candidate_drift_and_failed_excel_evidence_block_publication(
     tmp_path: Path,
 ) -> None:
