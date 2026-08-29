@@ -208,15 +208,16 @@ def _panel_publication_receipt(
 
 
 def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
-    if path.is_symlink() or not path.is_dir():
+    target = _windows_api_path(path) if os.name == "nt" else path
+    if target.is_symlink() or not target.is_dir():
         raise VerticalBuildError("reusable provider-ledger generation is unavailable")
     if len(path.name) != 64 or any(
         character not in "0123456789abcdef" for character in path.name
     ):
         raise VerticalBuildError("reusable provider-ledger generation id is invalid")
     files = {
-        item.relative_to(path).as_posix(): item
-        for item in path.rglob("*")
+        item.relative_to(target).as_posix(): item
+        for item in target.rglob("*")
         if item.is_file()
     }
     if set(files) != {
@@ -319,7 +320,7 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
         raise VerticalBuildError(
             "reusable provider-ledger admission receipt contract differs"
         )
-    return manifest.generation_id, files["provider-ledger.json"]
+    return manifest.generation_id, path / "provider-ledger.json"
 
 
 def _history_contract_path(recipe: Mapping[str, Any]) -> Path:

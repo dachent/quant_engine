@@ -67,6 +67,14 @@ def test_create_only_writer_supports_windows_extended_length_paths(
     with pytest.raises(builder.VerticalBuildError, match="create-only output differs"):
         builder._write_exact(destination, b'{"authority":"forged"}\n')
 
+    ledger_root = tmp_path
+    for index in range(5):
+        ledger_root /= f"bounded-ledger-component-{index:02d}-abcdefghijkl"
+    generation = _provider_ledger_generation(ledger_root)
+    generation_id, accepted = builder._validated_reusable_provider_ledger(generation)
+    assert generation_id == generation.name
+    assert accepted == generation / "provider-ledger.json"
+
 
 def _stage_verified_epoch_generation(
     root: Path,
@@ -215,10 +223,9 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
         verification=VerificationStatus.VERIFIED,
     )
     generation = tmp_path / manifest.generation_id
-    generation.mkdir()
-    (generation / "generation.json").write_bytes(manifest.to_json_bytes())
-    (generation / "admit-or-declare-receipt.json").write_bytes(receipt)
-    (generation / "provider-ledger.json").write_bytes(catalog)
+    builder._write_exact(generation / "generation.json", manifest.to_json_bytes())
+    builder._write_exact(generation / "admit-or-declare-receipt.json", receipt)
+    builder._write_exact(generation / "provider-ledger.json", catalog)
     return generation
 
 
