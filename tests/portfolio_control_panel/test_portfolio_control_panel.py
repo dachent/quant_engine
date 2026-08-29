@@ -25,6 +25,7 @@ from quant_engine.core import (
     publish_generation,
     read_current,
     stage_generation,
+    stage_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
@@ -78,6 +79,29 @@ STRATEGY_NAMES = (
     "Strategy 7",
     "Strategy 8",
 )
+
+
+def test_json_snapshot_reads_an_ordinary_file_beyond_legacy_windows_max_path(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path
+    while len(str((path / "current-strategy-decomposition-plan.json").absolute())) <= 270:
+        path /= "long-decomposition-component"
+    path /= "current-strategy-decomposition-plan.json"
+    storage_path = (
+        Path(f"\\\\?\\{path.absolute()}") if sys.platform == "win32" else path
+    )
+    storage_path.parent.mkdir(parents=True)
+    expected = canonical_json_bytes({"schema_version": 3})
+    storage_path.write_bytes(expected)
+
+    payload, content, sha256 = panel._json_snapshot(
+        path, "current decomposition plan"
+    )
+
+    assert payload == {"schema_version": 3}
+    assert content == expected
+    assert sha256 == hashlib.sha256(expected).hexdigest()
 
 
 def test_report_panel_expectations_follow_accepted_rollforward() -> None:
@@ -144,7 +168,10 @@ def _coordinated_release_receipt(
         "release_id": "test-release-id",
         "release_commit": "a" * 40,
         "output_root": str(output_root.resolve()),
-        "candidate": {"path": str(candidate.resolve()), **_directory_identity(candidate)},
+        "candidate": {
+            "path": str(candidate.resolve()),
+            **_directory_identity(candidate),
+        },
         "qa": {"path": str(qa_dir.resolve()), **_directory_identity(qa_dir)},
     }
     path = tmp_path / "panel-publication-authorization.json"
@@ -172,9 +199,7 @@ def _frozen_financial_receipt(
         canonical_json_bytes(verification)
     )
     panel.validate_qa(candidate, qa_dir)
-    return _coordinated_release_receipt(
-        tmp_path, inputs["output"], candidate, qa_dir
-    )
+    return _coordinated_release_receipt(tmp_path, inputs["output"], candidate, qa_dir)
 
 
 def _report() -> dict[str, object]:
@@ -2992,13 +3017,15 @@ def test_governed_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
 
 
 def test_hwm_policy_enforces_exclusion_effective_date() -> None:
-    before, _ = panel._hwm_policy(date(2026, 7, 31))
-    effective, _ = panel._hwm_policy(date(2026, 8, 1))
-    echo_effective, _ = panel._hwm_policy(date(2026, 8, 6))
+    before_echo_close, _ = panel._hwm_policy(date(2025, 11, 24))
+    after_echo_close, _ = panel._hwm_policy(date(2025, 11, 25))
+    composer_effective, _ = panel._hwm_policy(date(2026, 8, 1))
 
-    assert before["excluded_strategy_ids"] == []
-    assert effective["excluded_strategy_ids"] == ["composer-holy-grail"]
-    assert echo_effective["excluded_strategy_ids"] == [
+    assert before_echo_close["excluded_strategy_ids"] == []
+    assert after_echo_close["excluded_strategy_ids"] == [
+        "echotrade-growth-pivots"
+    ]
+    assert composer_effective["excluded_strategy_ids"] == [
         "composer-holy-grail",
         "echotrade-growth-pivots",
     ]
@@ -5399,7 +5426,1224 @@ def _write_manifest(path: Path, rows: list[dict[str, Any]]) -> Path:
     return path
 
 
-def test_account_manifest_flows_through_build_and_verify(
+_PANEL_EPOCH_ARTIFACT = "outputs/account-strategy-manifest.json"
+_PANEL_EPOCH_REPORT_PATH = "verification/independent-verification.json"
+_PANEL_EPOCH_FAKE_REPORT = b'{"fixture":"panel-schema-8"}\n'
+_PANEL_EPOCH_VERIFIED_CACHE: tuple[tuple[tuple[str, bytes], ...], bytes] | None = None
+
+
+def _schema8_panel_verified_payloads() -> tuple[dict[str, bytes], bytes]:
+    """Build the established mixed subjects and their genuine independent report."""
+
+    global _PANEL_EPOCH_VERIFIED_CACHE
+    if _PANEL_EPOCH_VERIFIED_CACHE is not None:
+        cached_payloads, cached_report = _PANEL_EPOCH_VERIFIED_CACHE
+        return dict(cached_payloads), cached_report
+
+    fixture_name = "_panel_schema8_manifest_fixture_module"
+    fixture_module = sys.modules.get(fixture_name)
+    if fixture_module is None:
+        fixture_path = (
+            REPOSITORY_ROOT
+            / "tests"
+            / "portfolio_control_panel"
+            / "test_account_manifest_generation.py"
+        )
+        fixture_spec = importlib.util.spec_from_file_location(
+            fixture_name, fixture_path
+        )
+        assert fixture_spec is not None and fixture_spec.loader is not None
+        fixture_module = importlib.util.module_from_spec(fixture_spec)
+        sys.modules[fixture_name] = fixture_module
+        fixture_spec.loader.exec_module(fixture_module)
+
+    producer_name = "_panel_schema8_manifest_fixture_producer"
+    producer = sys.modules.get(producer_name)
+    if producer is None:
+        producer_spec = importlib.util.spec_from_file_location(
+            producer_name, fixture_module.MODULE_PATH
+        )
+        assert producer_spec is not None and producer_spec.loader is not None
+        producer = importlib.util.module_from_spec(producer_spec)
+        sys.modules[producer_name] = producer
+        producer_spec.loader.exec_module(producer)
+
+    selected = fixture_module._mixed_composer_selected_inputs(producer)
+    payloads = dict(producer.build_account_manifest_payloads(selected))
+    payload = payloads[_PANEL_EPOCH_ARTIFACT]
+    decoded = json.loads(payload)
+    validate_manifest_schema(decoded)
+    assert decoded["schema_version"] == 8
+
+    verifier_name = "_panel_schema8_manifest_fixture_verifier"
+    verifier = sys.modules.get(verifier_name)
+    if verifier is None:
+        verifier_spec = importlib.util.spec_from_file_location(
+            verifier_name, fixture_module.VERIFIER_MODULE_PATH
+        )
+        assert verifier_spec is not None and verifier_spec.loader is not None
+        verifier = importlib.util.module_from_spec(verifier_spec)
+        sys.modules[verifier_name] = verifier
+        verifier_spec.loader.exec_module(verifier)
+    report = verifier.IndependentAccountManifestVerifier().verify(
+        fixture_module._mixed_verifier_inputs(verifier, selected), payloads
+    )
+    _PANEL_EPOCH_VERIFIED_CACHE = tuple(sorted(payloads.items())), report
+    return dict(payloads), report
+
+
+def _schema8_panel_manifest_bytes() -> bytes:
+    return _schema8_panel_verified_payloads()[0][_PANEL_EPOCH_ARTIFACT]
+
+
+def _schema8_panel_forged_report() -> bytes:
+    """Keep a report schema-valid while forging its account-manifest subject."""
+
+    _payloads, report_bytes = _schema8_panel_verified_payloads()
+    report = json.loads(report_bytes)
+    subject = next(
+        item for item in report["subjects"] if item["path"] == _PANEL_EPOCH_ARTIFACT
+    )
+    subject["sha256"] = "0" * 64
+    report["subjects_semantic_sha256"] = hashlib.sha256(
+        canonical_json_bytes({"subjects": report["subjects"]})
+    ).hexdigest()
+    return canonical_json_bytes(report)
+
+
+def _schema8_panel_renamed_receipt() -> tuple[dict[str, bytes], bytes]:
+    """Refresh report subject hashes while substituting its receipt path."""
+
+    payloads, report_bytes = _schema8_panel_verified_payloads()
+    report = json.loads(report_bytes)
+    fixed_paths = {
+        _PANEL_EPOCH_ARTIFACT,
+        "authority/account-assignment-perimeter.json",
+        "authority/account-flow-coverage.json",
+        "authority/account-interval-retrieval-receipt-authority.json",
+        "authority/calculation-inputs.json",
+        "authority/classified-flows.json",
+        "authority/code-identities.json",
+        "authority/flow-classification-policy.json",
+        "authority/mapped-epoch-admission.json",
+        "authority/selected-input-identities.json",
+    }
+    receipt_subject = next(
+        subject for subject in report["subjects"] if subject["path"] not in fixed_paths
+    )
+    old_path = receipt_subject["path"]
+    replacement_path = "evidence/forged-receipt.json"
+    payloads[replacement_path] = payloads.pop(old_path)
+    receipt_subject["path"] = replacement_path
+    report["subjects_semantic_sha256"] = hashlib.sha256(
+        canonical_json_bytes({"subjects": report["subjects"]})
+    ).hexdigest()
+    return payloads, canonical_json_bytes(report)
+
+
+def _schema8_panel_mixed_case_receipts() -> tuple[dict[str, bytes], bytes]:
+    """Build two exact receipt identities whose two contract orders differ."""
+
+    payloads, report_bytes = _schema8_panel_verified_payloads()
+    report = json.loads(report_bytes)
+    selected_path = "authority/selected-input-identities.json"
+    authority_path = "authority/account-interval-retrieval-receipt-authority.json"
+    output_path = _PANEL_EPOCH_ARTIFACT
+    old_receipt_path = next(
+        item["receipt_id"]
+        for item in report["selected_source_identities"]["retrieval_receipts"]
+    )
+    receipt_bytes = payloads.pop(old_receipt_path)
+    receipt_paths = ("receipt/Z.json", "receipt/a.json")
+    for path in receipt_paths:
+        payloads[path] = receipt_bytes
+    receipt_identity = {
+        "sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+        "size_bytes": len(receipt_bytes),
+    }
+
+    authority = json.loads(payloads[authority_path])
+    authority_receipt = authority["receipts"][0]
+    authority["receipts"] = [
+        {**authority_receipt, "artifact_id": path}
+        for path in ("receipt/a.json", "receipt/Z.json")
+    ]
+    payloads[authority_path] = canonical_json_bytes(authority)
+
+    selected = json.loads(payloads[selected_path])
+    selected["retrieval_receipts"] = [
+        {"receipt_id": path, **receipt_identity} for path in receipt_paths
+    ]
+    selected["receipt_authority"] = {
+        "sha256": hashlib.sha256(payloads[authority_path]).hexdigest(),
+        "size_bytes": len(payloads[authority_path]),
+    }
+    payloads[selected_path] = canonical_json_bytes(selected)
+
+    manifest = json.loads(payloads[output_path])
+    manifest["source_identities"]["flow_coverage"]["receipt_authority"].update(
+        selected["receipt_authority"]
+    )
+    manifest["source_identities"]["selected_inputs"].update(
+        {
+            "sha256": hashlib.sha256(payloads[selected_path]).hexdigest(),
+            "size_bytes": len(payloads[selected_path]),
+        }
+    )
+    payloads[output_path] = canonical_json_bytes(manifest)
+    validate_manifest_schema(manifest)
+
+    report["selected_source_identities"] = selected
+    fixed_subjects = report["subjects"][:10]
+    for subject in fixed_subjects:
+        path = subject["path"]
+        subject.update(
+            {
+                "sha256": hashlib.sha256(payloads[path]).hexdigest(),
+                "size_bytes": len(payloads[path]),
+            }
+        )
+    report["subjects"] = [
+        *fixed_subjects,
+        *(
+            {"path": path, **receipt_identity}
+            for path in ("receipt/a.json", "receipt/Z.json")
+        ),
+    ]
+    report["subjects_semantic_sha256"] = hashlib.sha256(
+        canonical_json_bytes({"subjects": report["subjects"]})
+    ).hexdigest()
+    return payloads, canonical_json_bytes(report)
+
+
+def _schema8_panel_contradictory_counts_report() -> bytes:
+    """Keep the report schema-valid while contradicting exact chain counts."""
+
+    _payloads, report_bytes = _schema8_panel_verified_payloads()
+    report = json.loads(report_bytes)
+    report["counts"]["complete_coverage_row_count"] += 1
+    report["counts"]["blocked_coverage_row_count"] -= 1
+    return canonical_json_bytes(report)
+
+
+def _stage_schema8_panel_bundle(
+    root: Path,
+    payload: bytes,
+    *,
+    subject_payloads: dict[str, bytes] | None = None,
+    independent_report: bytes = _PANEL_EPOCH_FAKE_REPORT,
+    report_schema_name: str = "account-manifest-independent-verification",
+    report_schema_version: str | None = None,
+) -> GenerationManifest:
+    as_of = date(2026, 2, 1)
+    report_object = json.loads(independent_report)
+    report_version = report_object.get("schema_version")
+    if type(report_version) is not int:
+        report_version = 3
+    bundle_payloads = (
+        {_PANEL_EPOCH_ARTIFACT: payload}
+        if subject_payloads is None
+        else dict(subject_payloads)
+    )
+    assert bundle_payloads[_PANEL_EPOCH_ARTIFACT] == payload
+    bundle_payloads[_PANEL_EPOCH_REPORT_PATH] = independent_report
+    artifacts = tuple(
+        SourceArtifact(
+            artifact_id=artifact_id,
+            sha256=hashlib.sha256(contents).hexdigest(),
+            size_bytes=len(contents),
+            as_of_date=as_of,
+            schema_name=(
+                "account-strategy-manifest"
+                if artifact_id == _PANEL_EPOCH_ARTIFACT
+                else (
+                    report_schema_name
+                    if artifact_id == _PANEL_EPOCH_REPORT_PATH
+                    else "account-manifest-subject"
+                )
+            ),
+            schema_version=(
+                "8"
+                if artifact_id == _PANEL_EPOCH_ARTIFACT
+                else (
+                    report_schema_version or str(report_version)
+                    if artifact_id == _PANEL_EPOCH_REPORT_PATH
+                    else "1"
+                )
+            ),
+        )
+        for artifact_id, contents in sorted(bundle_payloads.items())
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-panel-schema-8", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic verified-bundle panel fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=artifacts,
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        root,
+        manifest,
+        bundle_payloads,
+    )
+    return manifest
+
+
+def test_verified_bundle_panel_manifest_reads_binds_and_preserves_literal_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing the bundle seam with raw-five reconstruction loses exact lineage."""
+
+    subject_payloads, independent_report = _schema8_panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    generation_root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        generation_root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+    staged_path = tmp_path / "staged-account-strategy-manifest.json"
+    staged_path.write_bytes(payload)
+
+    real_reader = panel.read_generation_bundle
+    real_binder = panel._financial_mvp_module()
+    read_bundles: list[object] = []
+    binder_bundles: list[object] = []
+    staged_reads = 0
+    real_path_read_bytes = Path.read_bytes
+
+    def read_once(root: Path, generation_id: str) -> object:
+        assert root == generation_root
+        assert generation_id == manifest.generation_id
+        bundle = real_reader(root, generation_id)
+        read_bundles.append(bundle)
+        return bundle
+
+    class ExactObjectBinder:
+        @staticmethod
+        def epoch_manifest_source_from_bundle(bundle: object) -> object:
+            binder_bundles.append(bundle)
+            assert read_bundles == [bundle]
+            assert bundle is read_bundles[0]
+            return real_binder.epoch_manifest_source_from_bundle(bundle)
+
+    def counted_read_bytes(path: Path) -> bytes:
+        nonlocal staged_reads
+        if path == staged_path:
+            staged_reads += 1
+        return real_path_read_bytes(path)
+
+    def producer_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("legacy raw-five producer was invoked")
+
+    monkeypatch.setattr(panel, "read_generation_bundle", read_once)
+    monkeypatch.setattr(panel, "_financial_mvp_module", ExactObjectBinder)
+    monkeypatch.setattr(panel, "build_manifest_candidate", producer_must_not_run)
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+
+    decoded, identity = panel._verified_bundle_account_manifest(
+        staged_path,
+        generation_root,
+        manifest.generation_id,
+    )
+
+    assert len(read_bundles) == 1
+    assert binder_bundles == read_bundles
+    assert staged_reads == 1
+    assert hashlib.sha256(payload).hexdigest() == (
+        "58e4c6fcf34af57e3d628cf55901a9c8a97a59277eaaecb5cb9bf5a6c8105c10"
+    )
+    assert len(payload) == 13305
+    assert manifest.generation_id == (
+        "db12109e0df56ac1f7c2c552a9beadd232873ea8629606f3b09d434702939a3a"
+    )
+    ok_row = next(row for row in decoded["rows"] if row["status"] == "OK")
+    assert {
+        key: ok_row[key]
+        for key in (
+            "opening_capital",
+            "deposits",
+            "invested",
+            "net_capital",
+            "current_value",
+            "gain",
+            "nav_observations",
+        )
+    } == {
+        "opening_capital": "50",
+        "deposits": "10",
+        "invested": "60",
+        "net_capital": "60",
+        "current_value": "70",
+        "gain": "10",
+        "nav_observations": 3,
+    }
+    blocked_row = next(
+        row for row in decoded["rows"] if row["account_id"] == "synthetic-account-02"
+    )
+    assert blocked_row == {
+        "account_id": "synthetic-account-02",
+        "admission_authority_kind": "NONE",
+        "admission_policy_reference": "NONE",
+        "admission_status": "BLOCKED",
+        "blocking_reason": "SYNTHETIC_BLOCKED",
+        "continuity_to_successor": False,
+        "effective_end": None,
+        "effective_start": "2025-01-01",
+        "funded_nav_record_ids": [],
+        "provider": "SYNTHETIC",
+        "status": "BLOCKED_ADMISSION",
+        "strategy_id": "synthetic-strategy-02",
+    }
+    assert identity == {
+        "authority_profile": "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES",
+        "sha256": ("58e4c6fcf34af57e3d628cf55901a9c8a97a59277eaaecb5cb9bf5a6c8105c10"),
+        "size_bytes": 13305,
+        "epoch_manifest_source": {
+            "generation_id": (
+                "db12109e0df56ac1f7c2c552a9beadd232873ea8629606f3b09d434702939a3a"
+            ),
+            "generation_manifest_sha256": (
+                "3897b333aad53aabeaeabf8d701da0d40e2d6e32de3343662109b350141c07d3"
+            ),
+            "generation_receipt_sha256": (
+                "913a6a8114a15bd3f987eb600bf635012586819b3acff1ed7f3934ee10fd1139"
+            ),
+            "full_directory_inventory_sha256": (
+                "585f246a243bb0d00445a5cb3308ad38bd9bdc5148e843ecf29355248c9d6021"
+            ),
+            "artifact": {
+                "path": "outputs/account-strategy-manifest.json",
+                "sha256": (
+                    "58e4c6fcf34af57e3d628cf55901a9c8a97a59277eaaecb5cb9bf5a6c8105c10"
+                ),
+                "size_bytes": 13305,
+                "schema": {"name": "account-strategy-manifest", "version": "8"},
+            },
+        },
+        "verification": {
+            "status": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES",
+            "method": "READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER",
+            "producer_readiness": {
+                "authority_status": "SOURCE_BOUND_CANDIDATE",
+                "independent_authority_verification": "NOT_PERFORMED",
+                "publication_readiness": "NOT_READY",
+            },
+            "publication_readiness": "NOT_READY",
+            "independent_report": {
+                "artifact_id": "verification/independent-verification.json",
+                "sha256": (
+                    "3eb3cb300ea5b3fdd0f4cb818f50f9bc3d8a8dc4de9bb7f084712693650cca0a"
+                ),
+                "size_bytes": 11583,
+                "schema": {
+                    "name": "account-manifest-independent-verification",
+                    "version": "3",
+                },
+                "report_schema_version": 3,
+                "status": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES",
+                "subjects_semantic_sha256": (
+                    "cf9fbdca749c51f1d86284f694ccfd91fe347df66865345998f3ca223440d234"
+                ),
+                "numeric_verification": {
+                    "candidate_count": 1,
+                    "comparison_count": 1,
+                    "discrepancy_count": 0,
+                    "disposition": ("INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"),
+                },
+            },
+        },
+    }
+
+
+def test_verified_bundle_panel_manifest_rejects_legacy_manifest_only_generation(
+    tmp_path: Path,
+) -> None:
+    """A schema label in generation.json cannot replace detached bundle controls."""
+
+    payload = _schema8_panel_manifest_bytes()
+    root = tmp_path / "legacy"
+    manifest = _stage_schema8_panel_bundle(tmp_path / "source", payload)
+    stage_generation(root, manifest)
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="verified epoch-manifest generation bundle",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_verified_bundle_panel_manifest_rejects_valid_alternate_bundle(
+    tmp_path: Path,
+) -> None:
+    """Selecting another valid generation must not substitute its manifest bytes."""
+
+    payload = _schema8_panel_manifest_bytes()
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+    alternate = json.loads(payload)
+    blocked = next(
+        row for row in alternate["rows"] if row["account_id"] == "synthetic-account-02"
+    )
+    blocked["blocking_reason"] = "SYNTHETIC_BLOCKED_ALTERNATE"
+    alternate_payload = canonical_json_bytes(alternate)
+    validate_manifest_schema(alternate)
+    manifest = _stage_schema8_panel_bundle(tmp_path / "alternate", alternate_payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="staged account manifest differs from verified generation bundle",
+    ):
+        panel._verified_bundle_account_manifest(
+            staged, tmp_path / "alternate", manifest.generation_id
+        )
+
+
+def test_verified_bundle_panel_manifest_wraps_binder_loading_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binder import failure must not escape the panel validation boundary."""
+
+    payload = _schema8_panel_manifest_bytes()
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(root, payload)
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    def binder_import_failure() -> object:
+        raise ImportError("synthetic binder import failure")
+
+    monkeypatch.setattr(panel, "_financial_mvp_module", binder_import_failure)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="generation bundle binding failed",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_verified_bundle_panel_manifest_does_not_promote_not_ready_payload(
+    tmp_path: Path,
+) -> None:
+    """Envelope verification and a report-shaped file cannot assert product readiness."""
+
+    subject_payloads, _genuine_report = _schema8_panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=_schema8_panel_forged_report(),
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independent verification report subjects differ",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_verified_bundle_panel_manifest_never_elevates_copied_self_consistent_report(
+    tmp_path: Path,
+) -> None:
+    """Unsigned report bytes can be replayed, so attestation is not publication proof."""
+
+    subject_payloads, genuine_report = _schema8_panel_verified_payloads()
+    copied_report = bytes(bytearray(genuine_report))
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=copied_report,
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    _decoded, identity = panel._verified_bundle_account_manifest(
+        staged, root, manifest.generation_id
+    )
+
+    assert hashlib.sha256(copied_report).hexdigest() == (
+        "3eb3cb300ea5b3fdd0f4cb818f50f9bc3d8a8dc4de9bb7f084712693650cca0a"
+    )
+    assert identity["verification"]["status"] == (
+        "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+    )
+    assert identity["verification"]["publication_readiness"] == "NOT_READY"
+
+
+def test_verified_bundle_panel_manifest_rejects_refreshed_receipt_substitution(
+    tmp_path: Path,
+) -> None:
+    """Outer hashes cannot conceal a receipt path absent from selected identities."""
+
+    subject_payloads, forged_report = _schema8_panel_renamed_receipt()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=forged_report,
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independent verification report receipt identities differ",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_verified_bundle_panel_manifest_accepts_distinct_mixed_case_receipt_orders(
+    tmp_path: Path,
+) -> None:
+    """Selected-identity order must not override casefold subject order."""
+
+    subject_payloads, report = _schema8_panel_mixed_case_receipts()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    selected = json.loads(subject_payloads["authority/selected-input-identities.json"])
+    report_object = json.loads(report)
+    assert [item["receipt_id"] for item in selected["retrieval_receipts"]] == [
+        "receipt/Z.json",
+        "receipt/a.json",
+    ]
+    assert [item["path"] for item in report_object["subjects"][-2:]] == [
+        "receipt/a.json",
+        "receipt/Z.json",
+    ]
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=report,
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    decoded, identity = panel._verified_bundle_account_manifest(
+        staged, root, manifest.generation_id
+    )
+
+    assert decoded["authority_readiness"]["publication_readiness"] == "NOT_READY"
+    assert identity["verification"]["status"] == (
+        "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+    )
+    assert identity["verification"]["publication_readiness"] == "NOT_READY"
+
+
+def test_verified_bundle_panel_manifest_rejects_schema_valid_count_contradiction(
+    tmp_path: Path,
+) -> None:
+    """Schema-valid count partitions must still equal the exact report chains."""
+
+    subject_payloads, _report = _schema8_panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=_schema8_panel_contradictory_counts_report(),
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independent verification report coverage or admission counts differ",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+@pytest.mark.parametrize(
+    ("schema_name", "schema_version"),
+    (
+        ("independent-verification", "3"),
+        ("account-manifest-independent-verification", "2"),
+    ),
+)
+def test_verified_bundle_panel_manifest_rejects_report_artifact_schema_mismatch(
+    tmp_path: Path,
+    schema_name: str,
+    schema_version: str,
+) -> None:
+    """Receipt binding cannot replace the report artifact's semantic schema."""
+
+    subject_payloads, report = _schema8_panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=report,
+        report_schema_name=schema_name,
+        report_schema_version=schema_version,
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match=(
+            "independent verification report "
+            "(artifact identity differs|authority fields differ)"
+        ),
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+@pytest.mark.parametrize("mutation", ("bundle", "staged"))
+def test_verified_bundle_panel_manifest_rejects_one_byte_mutation(
+    tmp_path: Path, mutation: str
+) -> None:
+    """A byte changed at either side of the boundary must never reach the panel."""
+
+    payload = _schema8_panel_manifest_bytes()
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(root, payload)
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+    target = (
+        root
+        / "generations"
+        / manifest.generation_id
+        / "outputs"
+        / "account-strategy-manifest.json"
+        if mutation == "bundle"
+        else staged
+    )
+    changed = bytearray(target.read_bytes())
+    changed[0] = ord("[")
+    target.write_bytes(changed)
+
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_verified_bundle_panel_manifest_rejects_schema_invalid_bundled_bytes(
+    tmp_path: Path,
+) -> None:
+    """A generic verified envelope must not promote an invalid manifest payload."""
+
+    payload = _schema8_panel_manifest_bytes()
+    invalid = json.loads(payload)
+    invalid["rows"][0]["status"] = "FABRICATED"
+    invalid_payload = canonical_json_bytes(invalid)
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(root, invalid_payload)
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(invalid_payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="account manifest is invalid",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_account_manifest_generation_pair_is_atomic_and_exclusive(
+    tmp_path: Path,
+) -> None:
+    """The exact bundle route cannot be partially or jointly selected."""
+
+    payload = _schema8_panel_manifest_bytes()
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(root, payload)
+    legacy_path = tmp_path / "legacy-manifest.json"
+    legacy_path.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="generation root and generation id must be supplied together",
+    ):
+        panel._account_manifest(
+            None,
+            financial_mode=False,
+            ledger_path=None,
+            ledger_identity_path=None,
+            baseline_root=None,
+            baseline_generation_id=None,
+            classified_flows_path=None,
+            flow_coverage_path=None,
+            classification_policy_path=None,
+            admission_policy_path=None,
+            account_manifest_generation_root=root,
+            account_manifest_generation_id=None,
+        )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="generation root and generation id must be supplied together",
+    ):
+        panel._account_manifest(
+            None,
+            financial_mode=False,
+            ledger_path=None,
+            ledger_identity_path=None,
+            baseline_root=None,
+            baseline_generation_id=None,
+            classified_flows_path=None,
+            flow_coverage_path=None,
+            classification_policy_path=None,
+            admission_policy_path=None,
+            account_manifest_generation_root=None,
+            account_manifest_generation_id=manifest.generation_id,
+        )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="cannot be combined with legacy account-manifest inputs",
+    ):
+        panel._account_manifest(
+            legacy_path,
+            financial_mode=False,
+            ledger_path=None,
+            ledger_identity_path=None,
+            baseline_root=None,
+            baseline_generation_id=None,
+            classified_flows_path=None,
+            flow_coverage_path=None,
+            classification_policy_path=None,
+            admission_policy_path=None,
+            account_manifest_generation_root=root,
+            account_manifest_generation_id=manifest.generation_id,
+        )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="cannot be combined with legacy account-manifest inputs",
+    ):
+        panel._account_manifest(
+            None,
+            financial_mode=True,
+            ledger_path=None,
+            ledger_identity_path=None,
+            baseline_root=None,
+            baseline_generation_id=None,
+            classified_flows_path=None,
+            flow_coverage_path=None,
+            classification_policy_path=None,
+            admission_policy_path=None,
+            account_manifest_generation_root=root,
+            account_manifest_generation_id=manifest.generation_id,
+        )
+
+
+def test_verified_bundle_route_builds_and_verifies_without_legacy_producer(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ordinary panel APIs retain report-attested NOT_READY bundle lineage."""
+
+    subject_payloads, independent_report = _schema8_panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+
+    def legacy_producer_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("legacy raw-five producer was invoked")
+
+    monkeypatch.setattr(panel, "build_manifest_candidate", legacy_producer_must_not_run)
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        account_manifest_generation_root=root,
+        account_manifest_generation_id=manifest.generation_id,
+    )
+    assert built["account_manifest_authority_profile"] == (
+        "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
+    )
+    data = _candidate_data(built)
+    verification = data["meta"]["account_manifest_verification"]
+    assert verification["status"] == "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+    assert verification["publication_readiness"] == "NOT_READY"
+    assert (
+        panel.verify_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            Path(built["candidate_dir"]),
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_generation_root=root,
+            account_manifest_generation_id=manifest.generation_id,
+        )["all_passed"]
+        is True
+    )
+
+
+def test_verified_bundle_route_publishes_static_panel_from_attested_bundle(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A report-attested exact bundle can publish without raw-five authority."""
+
+    subject_payloads, independent_report = _schema8_panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        account_manifest_generation_root=root,
+        account_manifest_generation_id=manifest.generation_id,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    verification = panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        account_manifest_generation_root=root,
+        account_manifest_generation_id=manifest.generation_id,
+    )
+    assert verification["all_passed"] is True
+    (qa / "semantic-validation.json").write_bytes(canonical_json_bytes(verification))
+    assert panel.validate_qa(candidate, qa)["all_passed"] is True
+    receipt = _coordinated_release_receipt(tmp_path, inputs["output"], candidate, qa)
+
+    published = panel.publish_panel(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        qa,
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        account_manifest_generation_root=root,
+        account_manifest_generation_id=manifest.generation_id,
+        coordinated_release_receipt=receipt,
+    )
+
+    assert published["publication_state"] == "PUBLISHED"
+    published_data = json.loads(
+        (
+            inputs["output"]
+            / "generations"
+            / published["generation_id"]
+            / "data"
+            / "dashboard_data.json"
+        ).read_text(encoding="utf-8")
+    )
+    account_meta = published_data["meta"]
+    verification_meta = account_meta["account_manifest_verification"]
+    assert account_meta["account_manifest_authority_profile"] == (
+        "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
+    )
+    assert verification_meta["epoch_manifest_source"]["generation_id"] == (
+        manifest.generation_id
+    )
+    assert verification_meta["status"] == "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+    assert verification_meta["producer_readiness"][
+        "independent_authority_verification"
+    ] == ("NOT_PERFORMED")
+    assert verification_meta["publication_readiness"] == "NOT_READY"
+    assert verification_meta["independent_report"]["status"] == (
+        "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+    )
+    published_manifest = json.loads(
+        (
+            inputs["output"]
+            / "generations"
+            / published["generation_id"]
+            / "generation.json"
+        ).read_text(encoding="utf-8")
+    )
+    account_artifact = next(
+        artifact
+        for artifact in published_manifest["artifacts"]
+        if artifact["artifact_id"] == "input/account-strategy-manifest.json"
+    )
+    assert account_artifact["schema"]["version"] == "8"
+
+
+def test_verified_bundle_publication_rejects_non_atomic_mixed_and_changed_authority(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """Publication cannot substitute, weaken, or combine exact-bundle authority."""
+
+    subject_payloads, independent_report = _schema8_panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        account_manifest_generation_root=root,
+        account_manifest_generation_id=manifest.generation_id,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = tmp_path / "qa"
+    common = {
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+    }
+
+    with pytest.raises(panel.ControlPanelValidationError, match="supplied together"):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            account_manifest_generation_root=root,
+            **common,
+        )
+    with pytest.raises(panel.ControlPanelValidationError, match="supplied together"):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            account_manifest_generation_id=manifest.generation_id,
+            **common,
+        )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="financial mode or an exact verified",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            **common,
+        )
+
+    raw_five = _financial_manifest_kwargs(tmp_path / "raw-five", inputs["baseline"])
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="cannot be combined with legacy account-manifest inputs",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            account_manifest_generation_root=root,
+            account_manifest_generation_id=manifest.generation_id,
+            **common,
+            **raw_five,
+        )
+
+    alternate = json.loads(payload)
+    next(row for row in alternate["rows"] if row["status"] == "BLOCKED_ADMISSION")[
+        "blocking_reason"
+    ] = "SYNTHETIC_BLOCKED_ALTERNATE"
+    alternate_payload = canonical_json_bytes(alternate)
+    validate_manifest_schema(alternate)
+    alternate_subjects = dict(subject_payloads)
+    alternate_subjects[_PANEL_EPOCH_ARTIFACT] = alternate_payload
+    alternate_root = tmp_path / "alternate-bundle"
+    alternate_manifest = _stage_schema8_panel_bundle(
+        alternate_root,
+        alternate_payload,
+        subject_payloads=alternate_subjects,
+        independent_report=independent_report,
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independent verification report subjects differ from bundle bytes",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            account_manifest_generation_root=alternate_root,
+            account_manifest_generation_id=alternate_manifest.generation_id,
+            **common,
+        )
+
+    report_path = (
+        root / "generations" / manifest.generation_id / _PANEL_EPOCH_REPORT_PATH
+    )
+    report_path.write_bytes(b"tampered independent report")
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="verified epoch-manifest generation bundle",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            account_manifest_generation_root=root,
+            account_manifest_generation_id=manifest.generation_id,
+            **common,
+        )
+
+    source_root = tmp_path / "source-tampered-bundle"
+    source_manifest = _stage_schema8_panel_bundle(
+        source_root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+    receipt_path = (
+        source_root
+        / "generations"
+        / source_manifest.generation_id
+        / "generation-receipt.json"
+    )
+    receipt_path.write_bytes(b"tampered generation receipt")
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="verified epoch-manifest generation bundle",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            account_manifest_generation_root=source_root,
+            account_manifest_generation_id=source_manifest.generation_id,
+            **common,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+def test_verified_bundle_panel_schema_closes_source_report_and_readiness(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The bundle branch admits only exact source, report, and NOT_READY shapes."""
+
+    subject_payloads, independent_report = _schema8_panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_schema8_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        account_manifest_generation_root=root,
+        account_manifest_generation_id=manifest.generation_id,
+    )
+    original = _candidate_data(built)
+
+    changed_source = json.loads(canonical_json_bytes(original))
+    changed_source["meta"]["account_manifest_verification"]["epoch_manifest_source"][
+        "artifact"
+    ]["schema"]["version"] = "7"
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="panel data violates formal schema",
+    ):
+        panel._validate_panel_data_schema(changed_source)
+
+    changed_report = json.loads(canonical_json_bytes(original))
+    changed_report["meta"]["account_manifest_verification"]["independent_report"][
+        "unattested"
+    ] = True
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="panel data violates formal schema",
+    ):
+        panel._validate_panel_data_schema(changed_report)
+
+    changed_readiness = json.loads(canonical_json_bytes(original))
+    changed_readiness["meta"]["account_manifest_verification"]["producer_readiness"][
+        "independent_authority_verification"
+    ] = "PERFORMED"
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="panel data violates formal schema",
+    ):
+        panel._validate_panel_data_schema(changed_readiness)
+
+
+def test_verified_bundle_cli_dispatches_generation_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary build CLI passes the pair without legacy manifest options."""
+
+    captured: dict[str, object] = {}
+
+    def fake_build(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"status": "captured"}
+
+    monkeypatch.setattr(panel, "build_candidate", fake_build)
+    assert (
+        panel.main(
+            [
+                "build",
+                "--report-root",
+                "report",
+                "--legacy-panel",
+                "legacy",
+                "--output-root",
+                "output",
+                "--freshness-health",
+                "freshness",
+                "--baseline-root",
+                "baseline",
+                "--account-manifest-generation-root",
+                "bundle",
+                "--account-manifest-generation-id",
+                "a" * 64,
+            ]
+        )
+        == 0
+    )
+    assert captured["account_manifest_generation_root"] == Path("bundle")
+    assert captured["account_manifest_generation_id"] == "a" * 64
+    assert captured["account_manifest_path"] is None
+
+
+def test_account_manifest_blocked_flows_through_build_and_verify(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     manifest_path, authority = _produce_manifest(
@@ -5424,7 +6668,36 @@ def test_account_manifest_flows_through_build_and_verify(
         manifest_admission_policy_path=authority["policy"],
     )
     data = _candidate_data(built_with)
-    assert data["account_manifest"]["rows"][0]["gain"] == "6832.54"
+    row = data["account_manifest"]["rows"][0]
+    assert row["status"] == "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+    assert row["blocking_reason"] == "FLOW_COMPLETENESS_NOT_PROVEN"
+    assert (
+        not {
+            "start",
+            "end",
+            "opening_capital",
+            "deposits",
+            "internal_in",
+            "invested",
+            "external_withdrawals",
+            "internal_out",
+            "withdrawn",
+            "net_capital",
+            "current_value",
+            "gain",
+            "return_on_net_capital",
+            "annualized_return_on_net_capital",
+            "xirr_diagnostic",
+            "observation_linked_return",
+            "observed_hwm_index",
+            "observed_max_drawdown",
+            "opening_basis",
+            "observation_trace",
+            "capital_flow_trace",
+            "nav_observations",
+        }
+        & row.keys()
+    )
     assert data["meta"]["account_manifest_sha256"] == panel._hash(manifest_path)
     assert data["meta"]["account_manifest_size_bytes"] == len(
         manifest_path.read_bytes()
@@ -6618,11 +7891,22 @@ def _produce_manifest(
                 "sha256": hashlib.sha256(classified_bytes).hexdigest(),
                 "size_bytes": len(classified_bytes),
             },
-            "mapped_assignments_identity": {"sha256": assignment_sha256, "count": len(assignments)},
+            "mapped_assignments_identity": {
+                "sha256": assignment_sha256,
+                "count": len(assignments),
+            },
             "receipt_artifacts": [],
             "rows": [
                 {
-                    "assignment": {key: assignments[0][key] for key in ("account_id", "strategy_id", "effective_start", "effective_end")},
+                    "assignment": {
+                        key: assignments[0][key]
+                        for key in (
+                            "account_id",
+                            "strategy_id",
+                            "effective_start",
+                            "effective_end",
+                        )
+                    },
                     "requested_start": "2026-01-01",
                     "requested_end": as_of,
                     "status": "BLOCKED",
@@ -6763,7 +8047,9 @@ def test_coordinated_receipt_decoder_rejects_strict_contract_mutations(
         else:
             receipt["candidate"]["path"] += " "
         receipt_path.write_bytes(canonical_json_bytes(receipt))
-    with pytest.raises(panel.ControlPanelValidationError, match="coordinated release receipt"):
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="coordinated release receipt"
+    ):
         panel._validated_coordinated_release_receipt(
             receipt_path, output, candidate, qa
         )
@@ -6813,9 +8099,7 @@ def test_publish_rejects_every_authorization_receipt_mutation_before_pointer_wri
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "qa")
-    receipt_path = _frozen_financial_receipt(
-        tmp_path, inputs, candidate, qa, financial
-    )
+    receipt_path = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     if mutation == "missing-root-key":
         receipt.pop("release_id")
@@ -6868,7 +8152,9 @@ def test_publish_rejects_every_authorization_receipt_mutation_before_pointer_wri
         raise AssertionError(f"pointer writer invoked for {mutation}")
 
     monkeypatch.setattr(panel, "publish_generation", pointer_writer_must_not_run)
-    with pytest.raises(panel.ControlPanelValidationError, match="coordinated release receipt"):
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="coordinated release receipt"
+    ):
         panel.publish_panel(
             inputs["report"],
             inputs["legacy"],
@@ -6902,9 +8188,7 @@ def test_publish_rejects_post_receipt_tree_mutation_before_pointer_write(
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "qa")
-    receipt_path = _frozen_financial_receipt(
-        tmp_path, inputs, candidate, qa, financial
-    )
+    receipt_path = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     original = panel._validated_qa_snapshots
 
     def validate_then_mutate(*args: Any, **kwargs: Any) -> Any:
@@ -7035,9 +8319,7 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
         if command == "qa":
             return panel.validate_qa(candidate, qa)
         assert command == "publish"
-        receipt_path = Path(
-            str(args[args.index("--coordinated-release-receipt") + 1])
-        )
+        receipt_path = Path(str(args[args.index("--coordinated-release-receipt") + 1]))
         receipt_bytes = receipt_path.read_bytes()
         assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
         panel_result = panel.publish_panel(
@@ -7072,13 +8354,14 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
     )
 
     assert result["publication_state"] == "PUBLISHED"
-    assert result["coordinated_release_receipt_sha256"] == panel_result[
-        "coordinated_release_receipt_sha256"
-    ]
+    assert (
+        result["coordinated_release_receipt_sha256"]
+        == panel_result["coordinated_release_receipt_sha256"]
+    )
     assert result["release_id"] == panel_result["release_id"]
 
 
-def test_account_manifest_producer_to_publish_seam(
+def test_account_manifest_producer_to_publish_blocked_seam(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     """Reviewer P1: the producer's OWN CLI output must survive build ->
@@ -7111,10 +8394,35 @@ def test_account_manifest_producer_to_publish_seam(
         == panel.MANIFEST_AUTHORITY_FINANCIAL
     )
     row = built_data["account_manifest"]["rows"][0]
-    assert row["status"] == "OK"
-    assert Decimal(row["invested"]) == Decimal("50000")
-    assert Decimal(row["current_value"]) == Decimal("56832.54")
-    assert Decimal(row["gain"]) == Decimal("56832.54") - Decimal("50000")
+    assert row["status"] == "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+    assert row["blocking_reason"] == "FLOW_COMPLETENESS_NOT_PROVEN"
+    assert (
+        not {
+            "start",
+            "end",
+            "opening_capital",
+            "deposits",
+            "internal_in",
+            "invested",
+            "external_withdrawals",
+            "internal_out",
+            "withdrawn",
+            "net_capital",
+            "current_value",
+            "gain",
+            "return_on_net_capital",
+            "annualized_return_on_net_capital",
+            "xirr_diagnostic",
+            "observation_linked_return",
+            "observed_hwm_index",
+            "observed_max_drawdown",
+            "opening_basis",
+            "observation_trace",
+            "capital_flow_trace",
+            "nav_observations",
+        }
+        & row.keys()
+    )
 
     qa = _qa(candidate, tmp_path / "qa-primary")
     financial = {

@@ -25,6 +25,7 @@ from quant_engine.core import (
     CurrentPointer,
     FreshnessPolicy,
     GenerationConflictError,
+    GenerationBundle,
     GenerationManifest,
     ManifestValidationError,
     PointerIntegrityError,
@@ -33,6 +34,7 @@ from quant_engine.core import (
     hash_file,
     publish_generation,
     read_current,
+    read_generation_bundle,
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -81,6 +83,7 @@ BUILDER_VERSION: Final = "2.11.0"
 MANIFEST_AUTHORITY_FINANCIAL: Final = "INDEPENDENT_EXACT_REBUILD"
 MANIFEST_AUTHORITY_INTERNAL: Final = "INTERNAL_VALIDATION_ONLY_NON_RELEASEABLE"
 MANIFEST_AUTHORITY_ABSENT: Final = "NOT_SUPPLIED_NON_RELEASEABLE"
+MANIFEST_AUTHORITY_VERIFIED_BUNDLE: Final = "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
 STRATEGY_EVIDENCE_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 DEPENDENCE_HORIZONS: Final = ("5", "21", "22", "63", "126", "130", "252", "260")
 DEPENDENCE_DRAWDOWN_REGIMES: Final = (
@@ -108,6 +111,12 @@ ACCOUNT_MANIFEST_SCHEMA = (
     / "schemas"
     / "portfolio"
     / "account-strategy-manifest.schema.json"
+)
+ACCOUNT_MANIFEST_INDEPENDENT_VERIFICATION_SCHEMA = (
+    Path(__file__).resolve().parents[1]
+    / "schemas"
+    / "portfolio"
+    / "account-manifest-independent-verification.schema.json"
 )
 HWM_POLICY = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
@@ -320,7 +329,9 @@ def _is_link_or_reparse_point(path: Path) -> bool:
     try:
         attributes = getattr(path.lstat(), "st_file_attributes", 0)
     except OSError as exc:
-        raise ControlPanelValidationError(f"authorization path is unavailable: {path}") from exc
+        raise ControlPanelValidationError(
+            f"authorization path is unavailable: {path}"
+        ) from exc
     return path.is_symlink() or bool(
         attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     )
@@ -374,37 +385,69 @@ def _validated_coordinated_release_receipt(
         ) from exc
     receipt = _object(receipt, "coordinated release receipt")
     if canonical_json_bytes(receipt) != content:
-        raise ControlPanelValidationError("coordinated release receipt is not canonical")
+        raise ControlPanelValidationError(
+            "coordinated release receipt is not canonical"
+        )
     expected_keys = {
-        "schema_version", "operation", "state", "coordinator", "release_id",
-        "release_commit", "output_root", "candidate", "qa",
+        "schema_version",
+        "operation",
+        "state",
+        "coordinator",
+        "release_id",
+        "release_commit",
+        "output_root",
+        "candidate",
+        "qa",
     }
     if set(receipt) != expected_keys:
-        raise ControlPanelValidationError("coordinated release receipt root keys differ")
+        raise ControlPanelValidationError(
+            "coordinated release receipt root keys differ"
+        )
     if type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1:
         raise ControlPanelValidationError("coordinated release receipt schema differs")
     if receipt.get("operation") != "PUBLISH_PANEL_CURRENT":
-        raise ControlPanelValidationError("coordinated release receipt operation differs")
+        raise ControlPanelValidationError(
+            "coordinated release receipt operation differs"
+        )
     if receipt.get("state") != "AUTHORIZED":
         raise ControlPanelValidationError("coordinated release receipt state differs")
     if receipt.get("coordinator") != "portfolio-release-builder":
-        raise ControlPanelValidationError("coordinated release receipt coordinator differs")
+        raise ControlPanelValidationError(
+            "coordinated release receipt coordinator differs"
+        )
     release_id = _receipt_text(receipt.get("release_id"), "release_id")
     _receipt_text(receipt.get("release_commit"), "release_commit")
-    if _receipt_text(receipt.get("output_root"), "output_root") != str(output_root.resolve()):
-        raise ControlPanelValidationError("coordinated release receipt output root differs")
+    if _receipt_text(receipt.get("output_root"), "output_root") != str(
+        output_root.resolve()
+    ):
+        raise ControlPanelValidationError(
+            "coordinated release receipt output root differs"
+        )
     for name, path in (("candidate", candidate_dir), ("qa", qa_dir)):
         identity = _object(receipt.get(name), f"coordinated release receipt {name}")
         if set(identity) != {"path", "file_count", "inventory_sha256"}:
-            raise ControlPanelValidationError(f"coordinated release receipt {name} keys differ")
+            raise ControlPanelValidationError(
+                f"coordinated release receipt {name} keys differ"
+            )
         if _receipt_text(identity.get("path"), f"{name}.path") != str(path.resolve()):
-            raise ControlPanelValidationError(f"coordinated release receipt {name} path differs")
+            raise ControlPanelValidationError(
+                f"coordinated release receipt {name} path differs"
+            )
         if type(identity.get("file_count")) is not int or identity["file_count"] < 0:
-            raise ControlPanelValidationError(f"coordinated release receipt {name} file count differs")
-        expected_hash = _receipt_text(identity.get("inventory_sha256"), f"{name}.inventory_sha256")
+            raise ControlPanelValidationError(
+                f"coordinated release receipt {name} file count differs"
+            )
+        expected_hash = _receipt_text(
+            identity.get("inventory_sha256"), f"{name}.inventory_sha256"
+        )
         actual = _authorization_directory_identity(path, name)
-        if identity["file_count"] != actual["file_count"] or expected_hash != actual["inventory_sha256"]:
-            raise ControlPanelValidationError(f"coordinated release receipt {name} identity differs")
+        if (
+            identity["file_count"] != actual["file_count"]
+            or expected_hash != actual["inventory_sha256"]
+        ):
+            raise ControlPanelValidationError(
+                f"coordinated release receipt {name} identity differs"
+            )
     return receipt_sha256, release_id
 
 
@@ -430,13 +473,27 @@ def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     return value
 
 
+def _filesystem_path(path: Path) -> Path:
+    """Use the native extended-length spelling for local Windows file I/O."""
+
+    if os.name != "nt":
+        return path
+    value = str(path.absolute())
+    if value.startswith("\\\\?\\"):
+        return Path(value)
+    if value.startswith("\\\\"):
+        return Path(f"\\\\?\\UNC\\{value[2:]}")
+    return Path(f"\\\\?\\{value}")
+
+
 def _read_snapshot(path: Path, field_name: str) -> tuple[bytes, str]:
     """Read one regular-file snapshot and derive its identity from those bytes."""
 
-    if path.is_symlink() or not path.is_file():
+    candidate = _filesystem_path(path)
+    if candidate.is_symlink() or not candidate.is_file():
         raise ControlPanelValidationError(f"{field_name} is missing or linked")
     try:
-        content = path.read_bytes()
+        content = candidate.read_bytes()
     except OSError as exc:
         raise ControlPanelValidationError(f"{field_name} is not readable") from exc
     return content, hashlib.sha256(content).hexdigest()
@@ -5846,6 +5903,25 @@ def _panel_data(
             *(str(row.get("known_gap")) for row in coverage if row.get("known_gap")),
         }
     )
+    account_manifest_verification = (
+        dict(account_manifest_identity["verification"])
+        if account_manifest_identity is not None
+        else {
+            "status": "NOT_SUPPLIED",
+            "method": "NONE",
+            "producer_readiness": None,
+            "publication_readiness": "NOT_READY",
+        }
+    )
+    if (
+        account_manifest_identity is not None
+        and account_manifest_identity.get("authority_profile")
+        == MANIFEST_AUTHORITY_VERIFIED_BUNDLE
+    ):
+        account_manifest_verification["epoch_manifest_source"] = (
+            account_manifest_identity["epoch_manifest_source"]
+        )
+
     panel_data = {
         "account_summary": accounts,
         "advisory": {
@@ -5976,16 +6052,7 @@ def _panel_data(
                 if account_manifest_identity is not None
                 else MANIFEST_AUTHORITY_ABSENT
             ),
-            "account_manifest_verification": (
-                account_manifest_identity["verification"]
-                if account_manifest_identity is not None
-                else {
-                    "status": "NOT_SUPPLIED",
-                    "method": "NONE",
-                    "producer_readiness": None,
-                    "publication_readiness": "NOT_READY",
-                }
-            ),
+            "account_manifest_verification": account_manifest_verification,
             "decomposition_generation_id": decomposition_identity["generation_id"],
             "decomposition_sha256": decomposition_identity["sha256"],
             "decomposition_plan_bundle_id": accepted_decomposition_lenses.get(
@@ -6040,6 +6107,509 @@ def _panel_data(
     return panel_data
 
 
+def _financial_mvp_module() -> Any:
+    """Load the repository financial source binder used at the panel boundary."""
+
+    try:
+        module = import_module("tools.portfolio_financial_mvp_contract")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        module = import_module("portfolio_financial_mvp_contract")
+    expected = Path(__file__).resolve().parent / "portfolio_financial_mvp_contract.py"
+    module_file = getattr(module, "__file__", None)
+    if module_file is None or Path(module_file).resolve() != expected:
+        raise ControlPanelValidationError(
+            "financial MVP epoch-manifest binder origin differs"
+        )
+    return module
+
+
+_EPOCH_MANIFEST_PATH: Final = "outputs/account-strategy-manifest.json"
+_EPOCH_MANIFEST_REPORT_PATH: Final = "verification/independent-verification.json"
+_EPOCH_MANIFEST_LEGACY_SUBJECT_PATHS: Final = (
+    "authority/account-assignment-perimeter.json",
+    "authority/account-flow-coverage.json",
+    "authority/calculation-inputs.json",
+    "authority/classified-flows.json",
+    "authority/code-identities.json",
+    "authority/flow-classification-policy.json",
+    "authority/mapped-epoch-admission.json",
+    "authority/selected-input-identities.json",
+    _EPOCH_MANIFEST_PATH,
+)
+_EPOCH_MANIFEST_RECEIPT_AUTHORITY_PATH: Final = (
+    "authority/account-interval-retrieval-receipt-authority.json"
+)
+
+
+def _validate_epoch_manifest_report_schema(report: Mapping[str, Any]) -> None:
+    """Validate the detached independent report's published closed schema."""
+
+    try:
+        from jsonschema import (  # type: ignore[import-untyped]
+            Draft202012Validator,
+            FormatChecker,
+        )
+    except ImportError as exc:  # pragma: no cover - environment boundary
+        raise ControlPanelValidationError(
+            "jsonschema is required to validate the independent verification report"
+        ) from exc
+    schema = _load_json(
+        ACCOUNT_MANIFEST_INDEPENDENT_VERIFICATION_SCHEMA,
+        "account-manifest independent verification schema",
+    )
+    errors = sorted(
+        Draft202012Validator(
+            schema,
+            format_checker=FormatChecker(),
+        ).iter_errors(report),
+        key=str,
+    )
+    if errors:
+        location = ".".join(str(part) for part in errors[0].absolute_path)
+        prefix = f" at {location}" if location else ""
+        raise ControlPanelValidationError(
+            "independent verification report violates formal schema"
+            f"{prefix}: {errors[0].message}"
+        )
+
+
+def _epoch_manifest_report_attestation(
+    bundle: GenerationBundle,
+    manifest: Mapping[str, Any],
+    manifest_bytes: bytes,
+) -> dict[str, Any]:
+    """Attest a verifier report to every exact subject byte in one bundle.
+
+    This consumer does not replay the independent calculation.  It proves that
+    the report claiming that calculation is closed, canonical, and bound to the
+    exact subject bytes being exposed by the panel.
+    """
+
+    if type(bundle) is not GenerationBundle:
+        raise ControlPanelValidationError(
+            "independent verification report requires an exact generation bundle"
+        )
+    report_artifacts = tuple(
+        artifact
+        for artifact in bundle.manifest.artifacts
+        if artifact.artifact_id == _EPOCH_MANIFEST_REPORT_PATH
+    )
+    if len(report_artifacts) != 1:
+        raise ControlPanelValidationError(
+            "independent verification report artifact count differs"
+        )
+    report_artifact = report_artifacts[0]
+    if (
+        bundle.receipt.independent_report != report_artifact
+        or report_artifact.schema_name != "account-manifest-independent-verification"
+        or report_artifact.as_of_date != bundle.manifest.as_of_date
+    ):
+        raise ControlPanelValidationError(
+            "independent verification report artifact identity differs"
+        )
+    report_bytes = bundle.payloads.get(_EPOCH_MANIFEST_REPORT_PATH)
+    if (
+        type(report_bytes) is not bytes
+        or hashlib.sha256(report_bytes).hexdigest() != report_artifact.sha256
+        or len(report_bytes) != report_artifact.size_bytes
+    ):
+        raise ControlPanelValidationError(
+            "independent verification report bytes differ from receipt"
+        )
+    try:
+        decoded = json.loads(
+            report_bytes.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ControlPanelValidationError(
+            "independent verification report is not strict JSON"
+        ) from exc
+    report = _object(decoded, "independent verification report")
+    if canonical_json_bytes(report) != report_bytes:
+        raise ControlPanelValidationError(
+            "independent verification report is not canonical"
+        )
+    _validate_epoch_manifest_report_schema(report)
+    expected_keys = {
+        "artifact_id",
+        "as_of_date",
+        "blocker_chains",
+        "counts",
+        "invariants",
+        "numeric_verification",
+        "schema_version",
+        "selected_source_identities",
+        "status",
+        "subjects",
+        "subjects_semantic_sha256",
+        "verifier",
+    }
+    if set(report) != expected_keys:
+        raise ControlPanelValidationError(
+            "independent verification report root keys differ"
+        )
+    has_receipt_authority = "receipt_authority" in _object(
+        _object(
+            manifest.get("source_identities"),
+            "account manifest source identities",
+        ).get("flow_coverage"),
+        "account manifest flow coverage identity",
+    )
+    expected_version = 3 if has_receipt_authority else 2
+    if (
+        report.get("schema_version") != expected_version
+        or report_artifact.schema_version != str(expected_version)
+        or report.get("artifact_id") != _EPOCH_MANIFEST_REPORT_PATH
+        or report.get("status") != "VERIFIED"
+        or report.get("as_of_date") != bundle.manifest.as_of_date.isoformat()
+    ):
+        raise ControlPanelValidationError(
+            "independent verification report authority fields differ"
+        )
+
+    actual_subject_paths = set(bundle.payloads) - {_EPOCH_MANIFEST_REPORT_PATH}
+    if expected_version == 2:
+        expected_subject_paths = _EPOCH_MANIFEST_LEGACY_SUBJECT_PATHS
+    else:
+        fixed_paths = (
+            *_EPOCH_MANIFEST_LEGACY_SUBJECT_PATHS,
+            _EPOCH_MANIFEST_RECEIPT_AUTHORITY_PATH,
+        )
+        receipt_paths = tuple(
+            sorted(actual_subject_paths - set(fixed_paths), key=str.casefold)
+        )
+        if not 1 <= len(receipt_paths) <= 15:
+            raise ControlPanelValidationError(
+                "independent verification report receipt subject count differs"
+            )
+        expected_subject_paths = (*fixed_paths, *receipt_paths)
+    if actual_subject_paths != set(expected_subject_paths):
+        raise ControlPanelValidationError(
+            "independent verification report subject set differs from bundle"
+        )
+    expected_subjects = [
+        {
+            "path": path,
+            "sha256": hashlib.sha256(bundle.payloads[path]).hexdigest(),
+            "size_bytes": len(bundle.payloads[path]),
+        }
+        for path in expected_subject_paths
+    ]
+    if report.get("subjects") != expected_subjects:
+        raise ControlPanelValidationError(
+            "independent verification report subjects differ from bundle bytes"
+        )
+    expected_subject_digest = hashlib.sha256(
+        canonical_json_bytes({"subjects": expected_subjects})
+    ).hexdigest()
+    if report.get("subjects_semantic_sha256") != expected_subject_digest:
+        raise ControlPanelValidationError(
+            "independent verification report subject digest differs"
+        )
+    output_subject = expected_subjects[
+        expected_subject_paths.index(_EPOCH_MANIFEST_PATH)
+    ]
+    output_artifacts = tuple(
+        artifact
+        for artifact in bundle.manifest.artifacts
+        if artifact.artifact_id == _EPOCH_MANIFEST_PATH
+    )
+    if (
+        len(output_artifacts) != 1
+        or bundle.payloads.get(_EPOCH_MANIFEST_PATH) != manifest_bytes
+        or output_subject["sha256"] != output_artifacts[0].sha256
+        or output_subject["size_bytes"] != output_artifacts[0].size_bytes
+    ):
+        raise ControlPanelValidationError(
+            "independent verification report account-manifest subject differs"
+        )
+
+    selected_bytes = bundle.payloads.get("authority/selected-input-identities.json")
+    if type(selected_bytes) is not bytes:
+        raise ControlPanelValidationError(
+            "independent verification report selected identities are absent"
+        )
+    selected_identities = _json_from_bytes(
+        selected_bytes,
+        "account-manifest selected input identities",
+    )
+    if (
+        canonical_json_bytes(selected_identities) != selected_bytes
+        or report.get("selected_source_identities") != selected_identities
+    ):
+        raise ControlPanelValidationError(
+            "independent verification report selected identities differ"
+        )
+    if expected_version == 3:
+        selected_receipts = selected_identities.get("retrieval_receipts")
+        if not isinstance(selected_receipts, list):
+            raise ControlPanelValidationError(
+                "independent verification report receipt identities differ"
+            )
+        selected_receipt_map: dict[str, dict[str, object]] = {}
+        for item in selected_receipts:
+            receipt = _object(item, "selected retrieval receipt identity")
+            receipt_id = receipt.get("receipt_id")
+            if not isinstance(receipt_id, str) or receipt_id in selected_receipt_map:
+                raise ControlPanelValidationError(
+                    "independent verification report receipt identities differ"
+                )
+            selected_receipt_map[receipt_id] = {
+                "sha256": receipt.get("sha256"),
+                "size_bytes": receipt.get("size_bytes"),
+            }
+        expected_receipt_map = {
+            path: {
+                "sha256": hashlib.sha256(bundle.payloads[path]).hexdigest(),
+                "size_bytes": len(bundle.payloads[path]),
+            }
+            for path in receipt_paths
+        }
+        if selected_receipt_map != expected_receipt_map:
+            raise ControlPanelValidationError(
+                "independent verification report receipt identities differ"
+            )
+    code_sources = _object(
+        selected_identities.get("code_sources"),
+        "account-manifest selected code sources",
+    )
+    verifier_source = _object(
+        code_sources.get("independent_verifier"),
+        "account-manifest selected independent verifier",
+    )
+    expected_verifier = {
+        "artifact_id": "tools/verify_account_manifest_generation.py",
+        "as_of_date": bundle.manifest.as_of_date.isoformat(),
+        "schema": {
+            "name": "independent-account-manifest-verifier",
+            "version": "1",
+        },
+        "sha256": verifier_source.get("sha256"),
+        "size_bytes": verifier_source.get("size_bytes"),
+    }
+    if report.get("verifier") != expected_verifier:
+        raise ControlPanelValidationError(
+            "independent verification report verifier identity differs"
+        )
+
+    rows = _objects(manifest.get("rows"), "account manifest rows")
+    row_by_assignment: dict[tuple[object, object, object, object], dict[str, Any]] = {}
+    for row in rows:
+        key = tuple(
+            row.get(field)
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
+        if key in row_by_assignment:
+            raise ControlPanelValidationError(
+                "account manifest report assignment is duplicated"
+            )
+        row_by_assignment[key] = row
+    chains = _objects(report.get("blocker_chains"), "report blocker chains")
+    seen_assignments: set[tuple[object, object, object, object]] = set()
+    for chain in chains:
+        assignment = _object(chain.get("assignment"), "report blocker assignment")
+        key = tuple(
+            assignment.get(field)
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
+        row = row_by_assignment.get(key)
+        if row is None or key in seen_assignments:
+            raise ControlPanelValidationError(
+                "independent verification report blocker assignment differs"
+            )
+        seen_assignments.add(key)
+        output = _object(chain.get("output"), "report blocker output")
+        is_numeric = row.get("status") == "OK"
+        if (
+            chain.get("numeric_candidate") is not is_numeric
+            or output.get("status") != row.get("status")
+            or output.get("blocking_reason") != row.get("blocking_reason")
+        ):
+            raise ControlPanelValidationError(
+                "independent verification report row disposition differs"
+            )
+    if seen_assignments != set(row_by_assignment):
+        raise ControlPanelValidationError(
+            "independent verification report row coverage differs"
+        )
+    ok_count = sum(row.get("status") == "OK" for row in rows)
+    numeric = _object(
+        report.get("numeric_verification"),
+        "independent verification report numeric verification",
+    )
+    expected_disposition = (
+        "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+        if ok_count
+        else "NOT_APPLICABLE_NO_CANDIDATES"
+    )
+    if numeric != {
+        "candidate_count": ok_count,
+        "comparison_count": ok_count,
+        "discrepancy_count": 0,
+        "disposition": expected_disposition,
+    }:
+        raise ControlPanelValidationError(
+            "independent verification report numeric result differs"
+        )
+    counts = _object(report.get("counts"), "independent verification report counts")
+    if (
+        counts.get("output_row_count") != len(rows)
+        or counts.get("blocked_output_row_count") != len(rows) - ok_count
+        or (expected_version == 3 and counts.get("ok_output_row_count") != ok_count)
+        or (expected_version == 2 and ok_count != 0)
+    ):
+        raise ControlPanelValidationError(
+            "independent verification report output counts differ"
+        )
+    if expected_version == 3:
+        complete_coverage = sum(
+            _object(chain.get("coverage"), "report chain coverage").get("status")
+            == "COMPLETE"
+            for chain in chains
+        )
+        funded_admission = sum(
+            _object(chain.get("admission"), "report chain admission").get("status")
+            == "FUNDED"
+            for chain in chains
+        )
+        expected_count_values = {
+            "mapped_assignment_count": len(rows),
+            "calculation_input_row_count": len(rows),
+            "coverage_row_count": len(rows),
+            "admission_row_count": len(rows),
+            "output_row_count": len(rows),
+            "complete_coverage_row_count": complete_coverage,
+            "blocked_coverage_row_count": len(rows) - complete_coverage,
+            "funded_admission_row_count": funded_admission,
+            "blocked_admission_row_count": len(rows) - funded_admission,
+            "ok_output_row_count": ok_count,
+            "blocked_output_row_count": len(rows) - ok_count,
+        }
+        if any(
+            counts.get(name) != expected
+            for name, expected in expected_count_values.items()
+        ):
+            raise ControlPanelValidationError(
+                "independent verification report coverage or admission counts differ"
+            )
+
+    return {
+        "artifact_id": _EPOCH_MANIFEST_REPORT_PATH,
+        "sha256": report_artifact.sha256,
+        "size_bytes": report_artifact.size_bytes,
+        "schema": {
+            "name": report_artifact.schema_name,
+            "version": report_artifact.schema_version,
+        },
+        "report_schema_version": expected_version,
+        "status": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES",
+        "subjects_semantic_sha256": expected_subject_digest,
+        "numeric_verification": numeric,
+    }
+
+
+def _verified_bundle_account_manifest(
+    staged_manifest_path: Path,
+    generation_root: Path,
+    generation_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read one exact verified bundle and bind its staged manifest bytes."""
+
+    try:
+        bundle = read_generation_bundle(generation_root, generation_id)
+    except (
+        GenerationConflictError,
+        ManifestValidationError,
+        OSError,
+        TypeError,
+    ) as exc:
+        raise ControlPanelValidationError(
+            "verified epoch-manifest generation bundle is invalid"
+        ) from exc
+    try:
+        source = _financial_mvp_module().epoch_manifest_source_from_bundle(bundle)
+        payload = bundle.payloads[_EPOCH_MANIFEST_PATH]
+    except (
+        AttributeError,
+        ControlPanelValidationError,
+        ImportError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise ControlPanelValidationError(
+            "verified epoch-manifest generation bundle binding failed"
+        ) from exc
+    source = _object(source, "epoch manifest source")
+    if type(payload) is not bytes:
+        raise ControlPanelValidationError(
+            "verified epoch-manifest generation payload must be exact bytes"
+        )
+
+    if staged_manifest_path.is_symlink() or not staged_manifest_path.is_file():
+        raise ControlPanelValidationError(
+            "staged account manifest is missing or linked"
+        )
+    try:
+        staged_bytes = staged_manifest_path.read_bytes()
+    except OSError as exc:
+        raise ControlPanelValidationError(
+            "staged account manifest is not readable"
+        ) from exc
+    if staged_bytes != payload:
+        raise ControlPanelValidationError(
+            "staged account manifest differs from verified generation bundle"
+        )
+    try:
+        value = json.loads(staged_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ControlPanelValidationError(
+            "staged account manifest is not readable JSON"
+        ) from exc
+    value = _object(value, "account manifest")
+    try:
+        validate_manifest_schema(value)
+    except ManifestError as exc:
+        raise ControlPanelValidationError(
+            f"account manifest is invalid: {exc}"
+        ) from exc
+    readiness = _object(value["authority_readiness"], "account manifest readiness")
+    report_attestation = _epoch_manifest_report_attestation(
+        bundle,
+        value,
+        staged_bytes,
+    )
+
+    return value, {
+        "authority_profile": MANIFEST_AUTHORITY_VERIFIED_BUNDLE,
+        "sha256": hashlib.sha256(staged_bytes).hexdigest(),
+        "size_bytes": len(staged_bytes),
+        "epoch_manifest_source": source,
+        "verification": {
+            "status": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES",
+            "method": ("READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER"),
+            "producer_readiness": readiness,
+            "publication_readiness": "NOT_READY",
+            "independent_report": report_attestation,
+        },
+    }
+
+
 def _account_manifest(
     path: Path | None,
     *,
@@ -6052,6 +6622,8 @@ def _account_manifest(
     flow_coverage_path: Path | None,
     classification_policy_path: Path | None,
     admission_policy_path: Path | None,
+    account_manifest_generation_root: Path | None = None,
+    account_manifest_generation_id: str | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Bind one manifest snapshot and independently reproduce it when required.
 
@@ -6059,6 +6631,12 @@ def _account_manifest(
     mode therefore accepts it only if the same current producer reconstructs
     the identical canonical object from separately selected governed inputs.
     """
+    has_generation_root = account_manifest_generation_root is not None
+    has_generation_id = account_manifest_generation_id is not None
+    if has_generation_root != has_generation_id:
+        raise ControlPanelValidationError(
+            "account manifest generation root and generation id must be supplied together"
+        )
     authority_paths = {
         "ledger": ledger_path,
         "ledger identity": ledger_identity_path,
@@ -6069,6 +6647,28 @@ def _account_manifest(
         "flow classification policy": classification_policy_path,
         "admission policy": admission_policy_path,
     }
+    if has_generation_root:
+        assert account_manifest_generation_root is not None
+        assert account_manifest_generation_id is not None
+        if (
+            path is not None
+            or financial_mode
+            or any(candidate is not None for candidate in authority_paths.values())
+        ):
+            raise ControlPanelValidationError(
+                "verified account-manifest generation cannot be combined with legacy account-manifest inputs"
+            )
+        bundle_manifest_path = (
+            account_manifest_generation_root
+            / "generations"
+            / account_manifest_generation_id
+            / _EPOCH_MANIFEST_PATH
+        )
+        return _verified_bundle_account_manifest(
+            bundle_manifest_path,
+            account_manifest_generation_root,
+            account_manifest_generation_id,
+        )
     if not financial_mode:
         if path is None:
             return None, None
@@ -6247,6 +6847,9 @@ def _rendered_files(
     manifest_flow_coverage_path: Path | None = None,
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
+    *,
+    account_manifest_generation_root: Path | None = None,
+    account_manifest_generation_id: str | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -6359,6 +6962,8 @@ def _rendered_files(
         flow_coverage_path=manifest_flow_coverage_path,
         classification_policy_path=manifest_classification_policy_path,
         admission_policy_path=manifest_admission_policy_path,
+        account_manifest_generation_root=account_manifest_generation_root,
+        account_manifest_generation_id=account_manifest_generation_id,
     )
     if financial_mode:
         assert baseline_root is not None
@@ -6573,6 +7178,23 @@ def _rendered_files(
             authority_snapshots[ACCOUNT_MANIFEST_SCHEMA][1],
         ),
     }
+    if (
+        account_manifest_identity is not None
+        and account_manifest_identity.get("authority_profile")
+        == MANIFEST_AUTHORITY_VERIFIED_BUNDLE
+    ):
+        assert account_manifest_generation_root is not None
+        assert account_manifest_generation_id is not None
+        bound_inputs["account_manifest"] = (
+            account_manifest_generation_root
+            / "generations"
+            / account_manifest_generation_id
+            / _EPOCH_MANIFEST_PATH,
+            _text(
+                account_manifest_identity.get("sha256"),
+                "account manifest sha256",
+            ),
+        )
     for source_name, (source_path, _content, source_sha256) in legacy_snapshots.items():
         bound_inputs.setdefault(
             f"legacy_source:{source_name}", (source_path, source_sha256)
@@ -6800,6 +7422,9 @@ def build_candidate(
     manifest_flow_coverage_path: Path | None = None,
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
+    *,
+    account_manifest_generation_root: Path | None = None,
+    account_manifest_generation_id: str | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -6831,6 +7456,8 @@ def build_candidate(
         manifest_flow_coverage_path=manifest_flow_coverage_path,
         manifest_classification_policy_path=manifest_classification_policy_path,
         manifest_admission_policy_path=manifest_admission_policy_path,
+        account_manifest_generation_root=account_manifest_generation_root,
+        account_manifest_generation_id=account_manifest_generation_id,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -6913,6 +7540,9 @@ def verify_candidate(
     manifest_flow_coverage_path: Path | None = None,
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
+    *,
+    account_manifest_generation_root: Path | None = None,
+    account_manifest_generation_id: str | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -6944,6 +7574,8 @@ def verify_candidate(
         manifest_flow_coverage_path=manifest_flow_coverage_path,
         manifest_classification_policy_path=manifest_classification_policy_path,
         manifest_admission_policy_path=manifest_admission_policy_path,
+        account_manifest_generation_root=account_manifest_generation_root,
+        account_manifest_generation_id=account_manifest_generation_id,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -8165,10 +8797,20 @@ def publish_panel(
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
     coordinated_release_receipt: Path | None = None,
+    *,
+    account_manifest_generation_root: Path | None = None,
+    account_manifest_generation_id: str | None = None,
 ) -> dict[str, Any]:
-    if not financial_mode:
+    has_generation_root = account_manifest_generation_root is not None
+    has_generation_id = account_manifest_generation_id is not None
+    if has_generation_root != has_generation_id:
         raise ControlPanelValidationError(
-            "publication requires financial mode and an independent exact manifest rebuild"
+            "account manifest generation root and generation id must be supplied together"
+        )
+    verified_bundle_mode = has_generation_root and has_generation_id
+    if not financial_mode and not verified_bundle_mode:
+        raise ControlPanelValidationError(
+            "publication requires financial mode or an exact verified account-manifest generation bundle"
         )
     verification = verify_candidate(
         report_root,
@@ -8201,7 +8843,13 @@ def publish_panel(
         manifest_flow_coverage_path=manifest_flow_coverage_path,
         manifest_classification_policy_path=manifest_classification_policy_path,
         manifest_admission_policy_path=manifest_admission_policy_path,
+        account_manifest_generation_root=account_manifest_generation_root,
+        account_manifest_generation_id=account_manifest_generation_id,
     )
+    if verification.get("all_passed") is not True:
+        raise ControlPanelValidationError(
+            "publication requires a candidate reproduced from the selected authority"
+        )
     qa = validate_qa(candidate_dir, qa_dir)
     _write_exact(
         qa_dir / "semantic-validation.json", canonical_json_bytes(verification)
@@ -8236,18 +8884,41 @@ def publish_panel(
         manifest_flow_coverage_path=manifest_flow_coverage_path,
         manifest_classification_policy_path=manifest_classification_policy_path,
         manifest_admission_policy_path=manifest_admission_policy_path,
+        account_manifest_generation_root=account_manifest_generation_root,
+        account_manifest_generation_id=account_manifest_generation_id,
     )
-    if (
-        reproduced_data["meta"].get("account_manifest_authority_profile")
-        != MANIFEST_AUTHORITY_FINANCIAL
-        or _object(
-            reproduced_data["meta"].get("account_manifest_verification"),
-            "account manifest verification",
-        ).get("publication_readiness")
-        != "READY"
-    ):
+    reproduced_meta = _object(reproduced_data.get("meta"), "panel meta")
+    authority_profile = reproduced_meta.get("account_manifest_authority_profile")
+    manifest_verification = _object(
+        reproduced_meta.get("account_manifest_verification"),
+        "account manifest verification",
+    )
+    financial_authority = (
+        authority_profile == MANIFEST_AUTHORITY_FINANCIAL
+        and manifest_verification.get("publication_readiness") == "READY"
+    )
+    verified_bundle_authority = False
+    if authority_profile == MANIFEST_AUTHORITY_VERIFIED_BUNDLE:
+        producer_readiness = _object(
+            manifest_verification.get("producer_readiness"),
+            "verified bundle producer readiness",
+        )
+        verified_bundle_authority = (
+            verified_bundle_mode
+            and manifest_verification.get("status")
+            == "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+            and manifest_verification.get("method")
+            == "READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER"
+            and manifest_verification.get("publication_readiness") == "NOT_READY"
+            and producer_readiness.get("independent_authority_verification")
+            == "NOT_PERFORMED"
+            and producer_readiness.get("publication_readiness") == "NOT_READY"
+            and isinstance(manifest_verification.get("epoch_manifest_source"), dict)
+            and isinstance(manifest_verification.get("independent_report"), dict)
+        )
+    if not (financial_authority or verified_bundle_authority):
         raise ControlPanelValidationError(
-            "publication requires the independent exact manifest authority profile"
+            "publication requires an admitted independent exact manifest authority profile"
         )
     published_panel_files = _published_panel_files(candidate_driver_map_path)
     reproduced_candidate_record = canonical_json_bytes(
@@ -8340,7 +9011,7 @@ def publish_panel(
                     artifact_id="input/account-strategy-manifest.json",
                     as_of_date=publication_as_of,
                     schema_name="account-strategy-manifest",
-                    schema_version="7",
+                    schema_version=str(data["account_manifest"]["schema_version"]),
                     sha256=_text(
                         data["meta"]["account_manifest_sha256"],
                         "account manifest snapshot hash",
@@ -8349,6 +9020,7 @@ def publish_panel(
                 )
             ]
             if account_manifest_path is not None
+            or account_manifest_generation_root is not None
             else []
         ),
         snapshot_artifact(
@@ -8629,6 +9301,22 @@ def _parser() -> argparse.ArgumentParser:
             ),
         )
         command.add_argument(
+            "--account-manifest-generation-root",
+            type=Path,
+            help=(
+                "Verified account-manifest generation root; requires "
+                "--account-manifest-generation-id and cannot be combined with "
+                "legacy account-manifest inputs"
+            ),
+        )
+        command.add_argument(
+            "--account-manifest-generation-id",
+            help=(
+                "Verified account-manifest generation id; requires "
+                "--account-manifest-generation-root"
+            ),
+        )
+        command.add_argument(
             "--financial-mode",
             action="store_true",
             help=(
@@ -8758,6 +9446,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
+                account_manifest_generation_root=(
+                    args.account_manifest_generation_root
+                ),
+                account_manifest_generation_id=args.account_manifest_generation_id,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -8786,6 +9478,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
+                account_manifest_generation_root=(
+                    args.account_manifest_generation_root
+                ),
+                account_manifest_generation_id=args.account_manifest_generation_id,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -8822,6 +9518,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
+                account_manifest_generation_root=(
+                    args.account_manifest_generation_root
+                ),
+                account_manifest_generation_id=args.account_manifest_generation_id,
                 coordinated_release_receipt=args.coordinated_release_receipt,
                 hwm_portable_receipt=_load_optional_json_arg(
                     getattr(args, "hwm_portable_receipt", None)
