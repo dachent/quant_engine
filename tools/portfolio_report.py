@@ -5331,7 +5331,7 @@ def _epoch_history_snapshot_evidence(
     epoch_root: Path,
     source_bytes: bytes,
     expected_manifest_bytes: bytes,
-) -> tuple[Path, bytes, str]:
+) -> tuple[Path, bytes, str, str]:
     """Read the exact independent verifier from an explicit epoch bundle root."""
 
     source = json.loads(source_bytes)
@@ -5365,7 +5365,8 @@ def _epoch_history_snapshot_evidence(
     if (
         artifact is None
         or type(payload) is not bytes
-        or artifact.schema_name != "independent-verification"
+        or artifact.schema_name != "account-manifest-independent-verification"
+        or artifact.schema_version not in {"2", "3"}
         or hashlib.sha256(payload).hexdigest() != artifact.sha256
         or len(payload) != artifact.size_bytes
     ):
@@ -5377,7 +5378,7 @@ def _epoch_history_snapshot_evidence(
         / "verification"
         / "independent-verification.json"
     )
-    return snapshot_path, payload, artifact.schema_version
+    return snapshot_path, payload, artifact.schema_name, artifact.schema_version
 
 
 def _recheck_snapshot_identities(
@@ -5497,7 +5498,7 @@ def publish_report(
             inventories,
         )
         snapshot_history_path = history_snapshot_root / history_contract_path.name
-    epoch_history_verification: tuple[Path, bytes, str] | None = None
+    epoch_history_verification: tuple[Path, bytes, str, str] | None = None
     if "epoch_manifest" in evidence_snapshots:
         if epoch_manifest_generation_root is None:
             raise ReportValidationError("epoch manifest generation root is required")
@@ -5512,6 +5513,7 @@ def publish_report(
             epoch_verification_snapshot,
             epoch_history_verification[1],
             epoch_history_verification[2],
+            epoch_history_verification[3],
         )
     elif epoch_manifest_generation_root is not None:
         raise ReportValidationError("epoch manifest generation root is unexpected")
@@ -5651,8 +5653,8 @@ def publish_report(
             (
                 epoch_history_verification[0],
                 "input/epoch-independent-verification.json",
-                "independent-verification",
                 epoch_history_verification[2],
+                epoch_history_verification[3],
             )
         )
     if snapshot_attribution_root is not None:

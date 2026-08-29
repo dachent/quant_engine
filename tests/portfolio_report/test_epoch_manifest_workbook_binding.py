@@ -131,8 +131,8 @@ def test_epoch_history_verification_uses_explicit_independent_generation_root(
                 sha256=hashlib.sha256(verification_bytes).hexdigest(),
                 size_bytes=len(verification_bytes),
                 as_of_date=reporter.date(2026, 1, 3),
-                schema_name="independent-verification",
-                schema_version="1",
+                schema_name="account-manifest-independent-verification",
+                schema_version="3",
             ),
         ),
         verification=VerificationStatus.VERIFIED,
@@ -171,12 +171,15 @@ def test_epoch_history_verification_uses_explicit_independent_generation_root(
         }
     )
 
-    path, observed, schema_version = reporter._epoch_history_snapshot_evidence(
+    path, observed, schema_name, schema_version = (
+        reporter._epoch_history_snapshot_evidence(
         epoch_root,
         source_bytes,
         manifest_bytes,
+        )
     )
 
     assert path == verification_path
     assert observed == verification_bytes
-    assert schema_version == "1"
+    assert schema_name == "account-manifest-independent-verification"
+    assert schema_version == "3"
