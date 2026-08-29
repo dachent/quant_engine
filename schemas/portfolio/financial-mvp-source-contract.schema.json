@@ -19,7 +19,7 @@
     "$schema": {
       "const": "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     },
-    "contract_schema_version": {"const": 6},
+    "contract_schema_version": {"enum": [6, 7]},
     "product": {"$ref": "#/$defs/product"},
     "current_census": {"$ref": "#/$defs/current_census"},
     "strategies": {
@@ -39,8 +39,29 @@
       "items": {"$ref": "#/$defs/source_segment"}
     },
     "history_corrections": {"$ref": "#/$defs/history_corrections"},
-    "golden_case": {"$ref": "#/$defs/golden_case"}
+    "golden_case": {"$ref": "#/$defs/golden_case"},
+    "epoch_manifest_source": {"$ref": "#/$defs/epoch_manifest_source"}
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"contract_schema_version": {"const": 6}},
+        "required": ["contract_schema_version"]
+      },
+      "then": {
+        "not": {"required": ["epoch_manifest_source"]}
+      }
+    },
+    {
+      "if": {
+        "properties": {"contract_schema_version": {"const": 7}},
+        "required": ["contract_schema_version"]
+      },
+      "then": {
+        "required": ["epoch_manifest_source"]
+      }
+    }
+  ],
   "$defs": {
     "date_or_null": {
       "type": ["string", "null"],
@@ -49,6 +70,46 @@
     "hash_or_null": {
       "type": ["string", "null"],
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "epoch_manifest_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation_id",
+        "generation_manifest_sha256",
+        "generation_receipt_sha256",
+        "full_directory_inventory_sha256",
+        "artifact"
+      ],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "generation_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "generation_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "full_directory_inventory_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "size_bytes", "schema"],
+          "properties": {
+            "path": {"const": "outputs/account-strategy-manifest.json"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "size_bytes": {"type": "integer", "minimum": 1},
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "version"],
+              "properties": {
+                "name": {"const": "account-strategy-manifest"},
+                "version": {"const": "8"}
+              }
+            }
+          }
+        }
+      }
     },
     "nonempty_string": {
       "type": "string",

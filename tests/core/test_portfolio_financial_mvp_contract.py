@@ -7,8 +7,24 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
+
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationBundle,
+    GenerationConflictError,
+    GenerationManifest,
+    ManifestValidationError,
+    SourceArtifact,
+    VerificationStatus,
+    read_generation_bundle,
+    stage_generation_bundle,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +43,404 @@ SCHEMA_PATH = (
 )
 REGISTRY_PATH = ROOT / "docs" / "analytics" / "current-strategy-decomposition-plan.json"
 GENERATED_ROOT = ROOT / "generated" / "financial-mvp"
+HWM_POLICY_PATH = ROOT / "contracts" / "portfolio-hwm-policy-v4.json"
+
+EPOCH_MANIFEST_ARTIFACT_PATH = "outputs/account-strategy-manifest.json"
+SYNTHETIC_EPOCH_PAYLOAD = b'{"fixture":"synthetic-task-6","version":8}\n'
+SYNTHETIC_INDEPENDENT_REPORT = b'{"fixture":"synthetic-task-6-report"}\n'
+
+
+def _literal_epoch_manifest_source() -> dict[str, object]:
+    """Handwritten oracle for the deterministic synthetic Task-6 bundle."""
+
+    return {
+        "generation_id": (
+            "b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8"
+        ),
+        "generation_manifest_sha256": (
+            "2d88627c2283c31aa3c5a9333bc6ee423a1fcdd22d7df495a69c1768d384bb3d"
+        ),
+        "generation_receipt_sha256": (
+            "041b1343070f24c99488b27e227264bf6ff9d8d9a0047f8732c7bcc3887bb25f"
+        ),
+        "full_directory_inventory_sha256": (
+            "50769d0200857b7fe43c67cc814a21dea8e2564f916ab65ebfcb635b0910cfb1"
+        ),
+        "artifact": {
+            "path": "outputs/account-strategy-manifest.json",
+            "sha256": (
+                "810eb288a0d472414c805824cf91283fb3fa5b3c394ce5edec685ab9c3c64834"
+            ),
+            "size_bytes": 43,
+            "schema": {"name": "account-strategy-manifest", "version": "8"},
+        },
+    }
+
+
+def _synthetic_epoch_bundle(
+    tmp_path: Path,
+    *,
+    artifact_id: str = EPOCH_MANIFEST_ARTIFACT_PATH,
+    schema_name: str = "account-strategy-manifest",
+    schema_version: str = "8",
+    payload: bytes = SYNTHETIC_EPOCH_PAYLOAD,
+) -> GenerationBundle:
+    """Stage and re-read synthetic Task-6 evidence through the real verifier."""
+
+    as_of = date(2026, 8, 24)
+    artifact = SourceArtifact(
+        artifact_id=artifact_id,
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+        as_of_date=as_of,
+        schema_name=schema_name,
+        schema_version=schema_version,
+    )
+    independent_report = SourceArtifact(
+        artifact_id="verification/independent-verification.json",
+        sha256=hashlib.sha256(SYNTHETIC_INDEPENDENT_REPORT).hexdigest(),
+        size_bytes=len(SYNTHETIC_INDEPENDENT_REPORT),
+        as_of_date=as_of,
+        schema_name="independent-verification",
+        schema_version="1",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-task-6-prewire", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic Task-6 prewire fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=(artifact, independent_report),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        tmp_path,
+        manifest,
+        {
+            artifact.artifact_id: payload,
+            independent_report.artifact_id: SYNTHETIC_INDEPENDENT_REPORT,
+        },
+    )
+    return read_generation_bundle(tmp_path, manifest.generation_id)
+
+
+def test_epoch_manifest_source_binds_every_literal_value_from_verified_bundle(
+    tmp_path: Path,
+) -> None:
+    """Changing any receipt, directory, or artifact binding must break this oracle."""
+
+    literal_source = _literal_epoch_manifest_source()
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    generation_directory = (
+        tmp_path
+        / "generations"
+        / "b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8"
+    )
+    manifest_bytes = (generation_directory / "generation.json").read_bytes()
+    receipt_bytes = (generation_directory / "generation-receipt.json").read_bytes()
+    artifact_bytes = (
+        generation_directory / "outputs" / "account-strategy-manifest.json"
+    ).read_bytes()
+    assert generation_directory.name == literal_source["generation_id"]
+    assert (
+        hashlib.sha256(manifest_bytes).hexdigest()
+        == literal_source["generation_manifest_sha256"]
+    )
+    assert (
+        hashlib.sha256(receipt_bytes).hexdigest()
+        == literal_source["generation_receipt_sha256"]
+    )
+    assert (
+        hashlib.sha256(artifact_bytes).hexdigest()
+        == literal_source["artifact"]["sha256"]
+    )
+    assert len(artifact_bytes) == literal_source["artifact"]["size_bytes"]
+
+    persisted_files = {
+        path.relative_to(generation_directory).as_posix(): path.read_bytes()
+        for path in generation_directory.rglob("*")
+        if path.is_file()
+    }
+    directory_inventory = {
+        "files": [
+            {
+                "relative_path": relative_path,
+                "sha256": hashlib.sha256(contents).hexdigest(),
+                "size_bytes": len(contents),
+            }
+            for relative_path, contents in sorted(persisted_files.items())
+        ],
+        "inventory_schema_version": 1,
+    }
+    directory_inventory_bytes = (
+        json.dumps(
+            directory_inventory,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    assert (
+        hashlib.sha256(directory_inventory_bytes).hexdigest()
+        == literal_source["full_directory_inventory_sha256"]
+    )
+
+    assert contract_tool.epoch_manifest_source_from_bundle(bundle) == literal_source
+
+
+def test_validate_epoch_manifest_source_accepts_handwritten_literal_source(
+    tmp_path: Path,
+) -> None:
+    """An always-reject validator or shared binder drift breaks this literal input."""
+
+    contract_tool.validate_epoch_manifest_source(
+        _literal_epoch_manifest_source(), bundle=_synthetic_epoch_bundle(tmp_path)
+    )
+
+
+def test_epoch_manifest_source_rejects_non_bundle_and_forged_bundle_subclass(
+    tmp_path: Path,
+) -> None:
+    """Relaxing the exact GenerationBundle boundary would admit a structural substitute."""
+
+    bundle = _synthetic_epoch_bundle(tmp_path)
+
+    class ForgedGenerationBundle(GenerationBundle):
+        pass
+
+    forged = ForgedGenerationBundle(
+        manifest=bundle.manifest,
+        payloads=bundle.payloads,
+        inventory=bundle.inventory,
+        inventory_bytes=bundle.inventory_bytes,
+        receipt=bundle.receipt,
+        receipt_bytes=bundle.receipt_bytes,
+        full_directory_inventory_sha256=bundle.full_directory_inventory_sha256,
+    )
+    duck_typed = SimpleNamespace(
+        manifest=bundle.manifest,
+        payloads=bundle.payloads,
+        inventory=bundle.inventory,
+        inventory_bytes=bundle.inventory_bytes,
+        receipt=bundle.receipt,
+        receipt_bytes=bundle.receipt_bytes,
+        full_directory_inventory_sha256=bundle.full_directory_inventory_sha256,
+    )
+    for value in (bundle.manifest, object(), duck_typed, forged):
+        with pytest.raises(
+            contract_tool.FinancialMvpContractError, match="GenerationBundle"
+        ):
+            contract_tool.epoch_manifest_source_from_bundle(value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("artifact_id", "schema_name", "schema_version", "payload", "message"),
+    [
+        (
+            "outputs/wrong.json",
+            "account-strategy-manifest",
+            "8",
+            SYNTHETIC_EPOCH_PAYLOAD,
+            "required artifact",
+        ),
+        (
+            EPOCH_MANIFEST_ARTIFACT_PATH,
+            "wrong-schema",
+            "8",
+            SYNTHETIC_EPOCH_PAYLOAD,
+            "schema name",
+        ),
+        (
+            EPOCH_MANIFEST_ARTIFACT_PATH,
+            "account-strategy-manifest",
+            "9",
+            SYNTHETIC_EPOCH_PAYLOAD,
+            "schema version",
+        ),
+    ],
+)
+def test_epoch_manifest_source_rejects_wrong_artifact_contract(
+    tmp_path: Path,
+    artifact_id: str,
+    schema_name: str,
+    schema_version: str,
+    payload: bytes,
+    message: str,
+) -> None:
+    bundle = _synthetic_epoch_bundle(
+        tmp_path,
+        artifact_id=artifact_id,
+        schema_name=schema_name,
+        schema_version=schema_version,
+        payload=payload,
+    )
+
+    with pytest.raises(contract_tool.FinancialMvpContractError, match=message):
+        contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+
+def test_zero_byte_epoch_manifest_payload_is_rejected_by_real_envelope(
+    tmp_path: Path,
+) -> None:
+    """A zero-byte fixed JSON artifact cannot produce a GenerationBundle."""
+
+    with pytest.raises(
+        ManifestValidationError, match="payload JSON is not strict JSON"
+    ):
+        _synthetic_epoch_bundle(tmp_path, payload=b"")
+
+
+def test_empty_json_epoch_manifest_payload_is_stageable_and_re_readable(
+    tmp_path: Path,
+) -> None:
+    """The core envelope admits a real, semantically empty JSON payload only."""
+
+    bundle = _synthetic_epoch_bundle(tmp_path, payload=b"{}\n")
+
+    assert bundle.payloads["outputs/account-strategy-manifest.json"] == b"{}\n"
+    assert contract_tool.epoch_manifest_source_from_bundle(bundle)["artifact"] == {
+        "path": "outputs/account-strategy-manifest.json",
+        "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "size_bytes": 3,
+        "schema": {"name": "account-strategy-manifest", "version": "8"},
+    }
+
+
+def test_epoch_manifest_source_recomputes_persisted_payload_sha256(
+    tmp_path: Path,
+) -> None:
+    """Replacing payload hashing with manifest trust must fail this retained test."""
+
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    artifact = next(
+        item
+        for item in bundle.manifest.artifacts
+        if item.artifact_id == EPOCH_MANIFEST_ARTIFACT_PATH
+    )
+    # Deliberate in-memory tamper after a genuine staged/read bundle.
+    object.__setattr__(artifact, "sha256", "0" * 64)
+
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="bytes differ"):
+        contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+
+@pytest.mark.parametrize(
+    ("target", "attribute", "value", "message"),
+    [
+        ("manifest", "verification", VerificationStatus.PENDING, "VERIFIED"),
+        ("inventory", "generation_id", "0" * 64, "generation IDs"),
+        ("receipt", "generation_id", "0" * 64, "generation IDs"),
+    ],
+)
+def test_epoch_manifest_source_rejects_unverified_or_mismatched_controls(
+    tmp_path: Path,
+    target: str,
+    attribute: str,
+    value: object,
+    message: str,
+) -> None:
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    object.__setattr__(getattr(bundle, target), attribute, value)
+
+    with pytest.raises(contract_tool.FinancialMvpContractError, match=message):
+        contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+
+def test_generation_manifest_constructor_rejects_duplicate_epoch_artifact_ids() -> None:
+    """Duplicate artifact IDs are rejected by GenerationManifest, before a bundle exists."""
+
+    as_of = date(2026, 8, 24)
+    artifact = SourceArtifact(
+        artifact_id=EPOCH_MANIFEST_ARTIFACT_PATH,
+        sha256=hashlib.sha256(SYNTHETIC_EPOCH_PAYLOAD).hexdigest(),
+        size_bytes=len(SYNTHETIC_EPOCH_PAYLOAD),
+        as_of_date=as_of,
+        schema_name="account-strategy-manifest",
+        schema_version="8",
+    )
+    with pytest.raises(ManifestValidationError, match="unique"):
+        GenerationManifest.build(
+            as_of_date=as_of,
+            adapter=AdapterIdentity("synthetic-task-6-duplicate", "1"),
+            coverage=CoverageClaim(
+                status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+                boundary="synthetic duplicate artifact fixture",
+                fact_types=("synthetic",),
+                observed_start=as_of,
+                observed_end=as_of,
+                known_gaps=(),
+            ),
+            artifacts=(artifact, artifact),
+            verification=VerificationStatus.VERIFIED,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        ("generation_id", "0" * 64),
+        ("generation_manifest_sha256", "1" * 64),
+        ("generation_receipt_sha256", "2" * 64),
+        ("full_directory_inventory_sha256", "3" * 64),
+        ("artifact.path", "outputs/wrong.json"),
+        ("artifact.sha256", "4" * 64),
+        ("artifact.size_bytes", 47),
+        ("artifact.schema.name", "wrong-schema"),
+        ("artifact.schema.version", "9"),
+    ],
+)
+def test_validate_epoch_manifest_source_rejects_each_bound_value(
+    tmp_path: Path, mutation: tuple[str, object]
+) -> None:
+    """Removing one exact comparison would allow its independently mutated value."""
+
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    source = _literal_epoch_manifest_source()
+    path, value = mutation
+    if path.startswith("artifact.schema."):
+        source["artifact"]["schema"][path.rsplit(".", 1)[1]] = value  # type: ignore[index]
+    elif path.startswith("artifact."):
+        source["artifact"][path.split(".", 1)[1]] = value  # type: ignore[index]
+    else:
+        source[path] = value
+
+    with pytest.raises(contract_tool.FinancialMvpContractError, match=path):
+        contract_tool.validate_epoch_manifest_source(source, bundle=bundle)
+
+
+def test_validate_epoch_manifest_source_rejects_closed_key_sets_and_boolean_size(
+    tmp_path: Path,
+) -> None:
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    extra = _literal_epoch_manifest_source()
+    extra["unexpected"] = "value"
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="keys"):
+        contract_tool.validate_epoch_manifest_source(extra, bundle=bundle)
+
+    boolean_size = _literal_epoch_manifest_source()
+    boolean_size["artifact"]["size_bytes"] = True  # type: ignore[index]
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="size_bytes"):
+        contract_tool.validate_epoch_manifest_source(boolean_size, bundle=bundle)
+
+
+def test_payload_byte_mutation_fails_bundle_read_before_binder(tmp_path: Path) -> None:
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    payload_path = (
+        tmp_path
+        / "generations"
+        / bundle.manifest.generation_id
+        / EPOCH_MANIFEST_ARTIFACT_PATH
+    )
+    payload_path.write_bytes(SYNTHETIC_EPOCH_PAYLOAD[:-1] + b"!")
+
+    with pytest.raises(GenerationConflictError, match="bundle"):
+        read_generation_bundle(tmp_path, bundle.manifest.generation_id)
 
 
 def _contract() -> dict[str, object]:
@@ -197,11 +611,10 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
-    # Digest advanced from 5cef3271... when ibkr-account-generation was rebound
-    # to the enriched value-basis candidate (#368): NAV rows gained value_basis /
-    # source_artifact_id per the fail-closed #359/#361 contract.
+    # Digest includes the approved P123 admitted-set correction while retaining
+    # the owner-approved deprecated Echo history boundary.
     assert contract_tool.contract_digest(contract) == (
-        "41367349fdc454cb064a4c2f0ad23bbc890e0f638e57ccce565f2c036bc85a38"
+        "89c69cfafb4208be85852d068b503c6ce81487b42e7cc6fa4c18736bd53ef9fe"
     )
 
 
@@ -466,6 +879,38 @@ def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> N
     ]
     assert tt_funded
     assert all(row["effective_end"] is None for row in tt_funded)
+
+
+def test_p123_admitted_set_and_hwm_bind_independently_computed_contract_hashes() -> (
+    None
+):
+    """Reusing production digest helpers here would conceal stale HWM bindings."""
+
+    contract_bytes = CONTRACT_PATH.read_bytes()
+    contract = json.loads(contract_bytes)
+    p123 = _source(contract, "portfolio123-model-generation")
+    assert (
+        p123["admission"]["dataset_disposition_policy"]["admitted_item_set_sha256"]
+        == "b1fa77780c774e1d3ede18bf9698e00137447527c787aa30fdd62b5b8ad67643"
+    )
+
+    raw_sha256 = hashlib.sha256(contract_bytes).hexdigest()
+    semantic_bytes = (
+        json.dumps(
+            contract,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    semantic_digest = hashlib.sha256(semantic_bytes).hexdigest()
+    hwm_policy = json.loads(HWM_POLICY_PATH.read_bytes())
+    assert hwm_policy["product_authority"] == {
+        "path": "contracts/portfolio-financial-mvp-source-v1.json",
+        "raw_sha256": raw_sha256,
+        "semantic_digest": semantic_digest,
+    }
 
 
 def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
@@ -2219,6 +2664,327 @@ def test_every_golden_input_output_and_identity_is_reconciled() -> None:
     ] = "f" * 64
     with pytest.raises(contract_tool.FinancialMvpContractError, match="stage identity"):
         _validate(mutated)
+
+
+def _synthetic_contract_with_epoch_manifest_source(
+    source: dict[str, object] | None = None,
+) -> dict[str, object]:
+    contract = _contract()
+    contract["contract_schema_version"] = 7
+    contract["epoch_manifest_source"] = (
+        copy.deepcopy(source)
+        if source is not None
+        else _literal_epoch_manifest_source()
+    )
+    return contract
+
+
+def test_v7_epoch_manifest_source_requires_and_matches_verified_bundle(
+    tmp_path: Path,
+) -> None:
+    """A source-shaped object alone must never establish generation authority."""
+
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    source = contract_tool.epoch_manifest_source_from_bundle(bundle)
+    contract = _synthetic_contract_with_epoch_manifest_source(source)
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    assert _schema_errors(schema, contract, schema) == []
+    assert list(Draft202012Validator(schema).iter_errors(contract)) == []
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="requires a verified epoch-manifest bundle",
+    ):
+        _validate(contract)
+
+    assert (
+        contract_tool.validate_contract(
+            contract,
+            registry=_registry(),
+            epoch_manifest_bundle=bundle,
+        )
+        == contract
+    )
+
+    invented = copy.deepcopy(contract)
+    invented["epoch_manifest_source"]["generation_receipt_sha256"] = "0" * 64
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="verified bundle"
+    ):
+        contract_tool.validate_contract(
+            invented,
+            registry=_registry(),
+            epoch_manifest_bundle=bundle,
+        )
+
+
+def test_load_v7_contract_reopens_selected_generation_bundle(tmp_path: Path) -> None:
+    bundle = _synthetic_epoch_bundle(tmp_path / "runtime")
+    contract = _synthetic_contract_with_epoch_manifest_source(
+        contract_tool.epoch_manifest_source_from_bundle(bundle)
+    )
+    contract_path = tmp_path / "financial-v7.json"
+    contract_path.write_bytes(contract_tool.canonical_json_bytes(contract))
+
+    assert (
+        contract_tool.load_contract(
+            contract_path,
+            REGISTRY_PATH,
+            SCHEMA_PATH,
+            epoch_manifest_generation_root=tmp_path / "runtime",
+            epoch_manifest_generation_id=bundle.manifest.generation_id,
+        )
+        == contract
+    )
+
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="root and id must be supplied together",
+    ):
+        contract_tool.load_contract(
+            contract_path,
+            REGISTRY_PATH,
+            SCHEMA_PATH,
+            epoch_manifest_generation_root=tmp_path / "runtime",
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error_fragment"),
+    [
+        (
+            lambda contract: contract["epoch_manifest_source"].pop("generation_id"),
+            "generation_id",
+        ),
+        (
+            lambda contract: contract["epoch_manifest_source"]["artifact"].__setitem__(
+                "path", "outputs/other.json"
+            ),
+            "artifact.path",
+        ),
+        (
+            lambda contract: contract["epoch_manifest_source"]["artifact"].__setitem__(
+                "size_bytes", True
+            ),
+            "size_bytes",
+        ),
+        (
+            lambda contract: contract["epoch_manifest_source"]["artifact"].__setitem__(
+                "size_bytes", 0
+            ),
+            "size_bytes",
+        ),
+        (
+            lambda contract: contract["epoch_manifest_source"]["artifact"][
+                "schema"
+            ].__setitem__("version", "9"),
+            "artifact.schema.version",
+        ),
+    ],
+)
+def test_v7_epoch_manifest_source_rejects_missing_or_mutated_shape(
+    mutation: object, error_fragment: str
+) -> None:
+    """Weakening a closed, typed, fixed-artifact source must be observable."""
+
+    contract = _synthetic_contract_with_epoch_manifest_source()
+    assert callable(mutation)
+    mutation(contract)  # type: ignore[operator]
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    assert _schema_errors(schema, contract, schema)
+    assert list(Draft202012Validator(schema).iter_errors(contract))
+    with pytest.raises(contract_tool.FinancialMvpContractError, match=error_fragment):
+        _validate(contract)
+
+
+def test_synthetic_epoch_manifest_source_renders_exact_human_and_machine_views() -> (
+    None
+):
+    """Dropping or relabelling any dedicated lineage value breaks this oracle."""
+
+    rendered = contract_tool.render_views(
+        _synthetic_contract_with_epoch_manifest_source()
+    )
+    expected_markdown = b"""## Epoch manifest source
+
+- Generation ID: `b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8`
+- Generation manifest SHA-256: `2d88627c2283c31aa3c5a9333bc6ee423a1fcdd22d7df495a69c1768d384bb3d`
+- Generation receipt SHA-256: `041b1343070f24c99488b27e227264bf6ff9d8d9a0047f8732c7bcc3887bb25f`
+- Full directory inventory SHA-256: `50769d0200857b7fe43c67cc814a21dea8e2564f916ab65ebfcb635b0910cfb1`
+- Artifact path: `outputs/account-strategy-manifest.json`
+- Artifact SHA-256: `810eb288a0d472414c805824cf91283fb3fa5b3c394ce5edec685ab9c3c64834`
+- Artifact size bytes: `43`
+- Artifact schema: `account-strategy-manifest@8`
+"""
+    assert rendered.summary_markdown.count(expected_markdown) == 1
+
+    matrix = json.loads(rendered.source_matrix_json)
+    assert matrix["epoch_manifest_source"] == {
+        "generation_id": (
+            "b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8"
+        ),
+        "generation_manifest_sha256": (
+            "2d88627c2283c31aa3c5a9333bc6ee423a1fcdd22d7df495a69c1768d384bb3d"
+        ),
+        "generation_receipt_sha256": (
+            "041b1343070f24c99488b27e227264bf6ff9d8d9a0047f8732c7bcc3887bb25f"
+        ),
+        "full_directory_inventory_sha256": (
+            "50769d0200857b7fe43c67cc814a21dea8e2564f916ab65ebfcb635b0910cfb1"
+        ),
+        "artifact": {
+            "path": "outputs/account-strategy-manifest.json",
+            "sha256": (
+                "810eb288a0d472414c805824cf91283fb3fa5b3c394ce5edec685ab9c3c64834"
+            ),
+            "size_bytes": 43,
+            "schema": {"name": "account-strategy-manifest", "version": "8"},
+        },
+    }
+
+
+def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> None:
+    """Copying the epoch source into historical source rows breaks this proof."""
+
+    legacy_contract = _contract()
+    historical_bytes = (
+        json.dumps(
+            {"source_segments": legacy_contract["source_segments"]},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    assert hashlib.sha256(historical_bytes).hexdigest() == (
+        "c055c678ec2d1acc4a7be91cf840575edbaab95e1f8aa9a4bc7a3b48492cdb6a"
+    )
+
+    legacy_views = contract_tool.render_views(legacy_contract)
+    assert (
+        legacy_views.summary_markdown
+        == (GENERATED_ROOT / "current-product.md").read_bytes()
+    )
+    assert (
+        legacy_views.source_matrix_json
+        == (GENERATED_ROOT / "source-matrix.json").read_bytes()
+    )
+    assert b"## Epoch manifest source" not in legacy_views.summary_markdown
+    legacy_matrix = json.loads(legacy_views.source_matrix_json)
+    assert "epoch_manifest_source" not in legacy_matrix
+
+    augmented_contract = copy.deepcopy(legacy_contract)
+    augmented_contract["epoch_manifest_source"] = _literal_epoch_manifest_source()
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert _schema_errors(schema, augmented_contract, schema)
+    assert list(Draft202012Validator(schema).iter_errors(augmented_contract))
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="financial MVP contract keys differ",
+    ):
+        _validate(augmented_contract)
+    assert hashlib.sha256(
+        (
+            json.dumps(
+                {"source_segments": augmented_contract["source_segments"]},
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+    ).hexdigest() == (
+        "c055c678ec2d1acc4a7be91cf840575edbaab95e1f8aa9a4bc7a3b48492cdb6a"
+    )
+    augmented_matrix = json.loads(
+        contract_tool.render_views(augmented_contract).source_matrix_json
+    )
+    assert legacy_matrix["rows"] != augmented_matrix["rows"]
+
+    legacy_rows_without_contract_identity = [
+        {key: value for key, value in row.items() if key != "contract_sha256"}
+        for row in legacy_matrix["rows"]
+    ]
+    augmented_rows_without_contract_identity = [
+        {key: value for key, value in row.items() if key != "contract_sha256"}
+        for row in augmented_matrix["rows"]
+    ]
+    assert (
+        augmented_rows_without_contract_identity
+        == legacy_rows_without_contract_identity
+    )
+    assert all(
+        legacy_row["contract_sha256"] != augmented_row["contract_sha256"]
+        for legacy_row, augmented_row in zip(
+            legacy_matrix["rows"], augmented_matrix["rows"], strict=True
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("view_name", "failure_mode"),
+    [
+        ("current-product.md", "missing"),
+        ("source-matrix.json", "missing"),
+        ("current-product.md", "one-byte-mutated"),
+        ("source-matrix.json", "one-byte-mutated"),
+        ("current-product.md", "stale-legacy"),
+        ("source-matrix.json", "stale-legacy"),
+    ],
+)
+def test_check_views_rejects_each_synthetic_epoch_view_with_exact_path(
+    tmp_path: Path, view_name: str, failure_mode: str
+) -> None:
+    """Missing, mutated, or legacy output must identify the exact stale file."""
+
+    augmented = _synthetic_contract_with_epoch_manifest_source()
+    augmented_views = contract_tool.render_views(augmented)
+    augmented_outputs = {
+        "current-product.md": augmented_views.summary_markdown,
+        "source-matrix.json": augmented_views.source_matrix_json,
+    }
+    legacy_views = contract_tool.render_views(_contract())
+    legacy_outputs = {
+        "current-product.md": legacy_views.summary_markdown,
+        "source-matrix.json": legacy_views.source_matrix_json,
+    }
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for name, payload in augmented_outputs.items():
+        if name != view_name:
+            (tmp_path / name).write_bytes(payload)
+
+    target = tmp_path / view_name
+    if failure_mode == "one-byte-mutated":
+        payload = augmented_outputs[view_name]
+        target.write_bytes(bytes([payload[0] ^ 1]) + payload[1:])
+    elif failure_mode == "stale-legacy":
+        target.write_bytes(legacy_outputs[view_name])
+
+    with pytest.raises(contract_tool.FinancialMvpContractError) as failure:
+        contract_tool.check_views(augmented, tmp_path)
+    assert str(failure.value) == (
+        f"generated view drift: {target}; run the generate command"
+    )
+
+
+def test_check_views_accepts_exact_independently_inspected_synthetic_views(
+    tmp_path: Path,
+) -> None:
+    augmented = _synthetic_contract_with_epoch_manifest_source()
+    rendered = contract_tool.render_views(augmented)
+    matrix = json.loads(rendered.source_matrix_json)
+    assert matrix["epoch_manifest_source"]["artifact"] == {
+        "path": "outputs/account-strategy-manifest.json",
+        "schema": {"name": "account-strategy-manifest", "version": "8"},
+        "sha256": "810eb288a0d472414c805824cf91283fb3fa5b3c394ce5edec685ab9c3c64834",
+        "size_bytes": 43,
+    }
+    assert b"- Artifact size bytes: `43`\n" in rendered.summary_markdown
+
+    (tmp_path / "current-product.md").write_bytes(rendered.summary_markdown)
+    (tmp_path / "source-matrix.json").write_bytes(rendered.source_matrix_json)
+    contract_tool.check_views(augmented, tmp_path)
 
 
 def test_generated_views_are_deterministic_and_match_authoritative_bytes(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 import importlib.util
 import json
 from pathlib import Path
@@ -8,6 +9,8 @@ import sys
 from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from quant_engine.core import (
@@ -20,7 +23,9 @@ from quant_engine.core import (
     hash_file,
 )
 from quant_engine.portfolio_ledger import (
+    DatasetItemKind,
     GenerationQualification,
+    ProviderDatasetInventoryItem,
     ProviderGenerationIdentity,
 )
 
@@ -33,6 +38,518 @@ if SPEC is None or SPEC.loader is None:
 ledger = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = ledger
 SPEC.loader.exec_module(ledger)
+
+
+def _p123_provider_generation(
+    tmp_path: Path,
+    *,
+    equity_rows: list[dict[str, str]],
+    performance_data: list[list[int]] | None = None,
+    performance_data_json: str | None = None,
+    include_performance_receipt: bool = True,
+) -> tuple[dict[str, str], GenerationManifest, list[dict[str, object]]]:
+    """Stage a minimal retained-style P123 generation for ledger source tests."""
+
+    staging = tmp_path / "staging"
+    tables = staging / "tables"
+    tables.mkdir(parents=True)
+    entity_id = "exact-eu-model"
+    performance_data = performance_data or [
+        [0, 100, 50],
+        [25, 125, 60],
+        [0, 100, 70],
+    ]
+    performance_rows = [
+        {"_entity_id": entity_id, "field": field, "value": value}
+        for field, value in (
+            (
+                "data",
+                performance_data_json
+                if performance_data_json is not None
+                else json.dumps(performance_data),
+            ),
+            ("date", "2026-01-02"),
+            ("dateLast", "2026-01-06"),
+            (
+                "panels",
+                json.dumps(
+                    [
+                        {
+                            "graphs": [
+                                {"idx": 0, "s": "Strategy"},
+                                {"idx": 1, "s": "Total Value"},
+                            ]
+                        }
+                    ]
+                ),
+            ),
+        )
+    ]
+    paths = {
+        "tables/har_equity_curve.parquet": tables / "har_equity_curve.parquet",
+        "tables/har_managed_performance.parquet": (
+            tables / "har_managed_performance.parquet"
+        ),
+    }
+    pq.write_table(
+        pa.Table.from_pylist(equity_rows), paths["tables/har_equity_curve.parquet"]
+    )
+    pq.write_table(
+        pa.Table.from_pylist(performance_rows),
+        paths["tables/har_managed_performance.parquet"],
+    )
+    artifacts = tuple(
+        SourceArtifact.from_path(
+            path,
+            artifact_id=artifact_id,
+            as_of_date=date(2026, 1, 6),
+            schema_name="synthetic-retained-p123",
+            schema_version="1",
+        )
+        for artifact_id, path in paths.items()
+        if include_performance_receipt
+        or artifact_id != "tables/har_managed_performance.parquet"
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 1, 6),
+        adapter=AdapterIdentity("portfolio123", "synthetic"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic retained managed performance and reconciliation curve",
+            fact_types=("provider_strategy_returns",),
+            observed_start=date(2026, 1, 2),
+            observed_end=date(2026, 1, 6),
+        ),
+        artifacts=artifacts,
+        verification=VerificationStatus.VERIFIED,
+    )
+    generation = tmp_path / "generations" / manifest.generation_id
+    generation.parent.mkdir()
+    staging.rename(generation)
+    evidence = [
+        {
+            "generation_id": manifest.generation_id,
+            "strategy_id": "p123-eu",
+            "strategy_name": "P123 EU",
+            "provider": {
+                "provider_id": "portfolio123",
+                "entity_id": entity_id,
+                "cash_added_semantics": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
+            },
+        }
+    ]
+    return {"root": str(tmp_path)}, manifest, evidence
+
+
+def test_p123_managed_returns_select_only_evidence_from_the_bound_generation(
+    tmp_path: Path,
+) -> None:
+    """A retained P123 row from another generation is not a managed-path input."""
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "50",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-06",
+                "Total Equity": "100",
+                "Cash Added": "70",
+            },
+        ],
+    )
+    prior_generation = {
+        **evidence[0],
+        "generation_id": "f" * 64,
+        "strategy_id": "p123-ai-factor",
+        "provider": {
+            **evidence[0]["provider"],
+            "entity_id": "entity-absent-from-current-generation",
+        },
+    }
+
+    returned = ledger._portfolio123_provider_returns(
+        provider_ref,
+        manifest,
+        [prior_generation, *evidence],
+    )
+
+    assert {row["strategy_id"] for row in returned} == {"p123-eu"}
+    assert len(returned) == 2
+
+
+def test_p123_returns_use_managed_strategy_levels_not_equity_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """Changing the reconciliation curve must not change the managed return path."""
+
+    first_ref, first_manifest, evidence = _p123_provider_generation(
+        tmp_path / "first",
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "50",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-06",
+                "Total Equity": "100",
+                "Cash Added": "70",
+            },
+        ],
+    )
+    second_ref, second_manifest, second_evidence = _p123_provider_generation(
+        tmp_path / "second",
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "1700",
+                "Cash Added": "500",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-06",
+                "Total Equity": "1300",
+                "Cash Added": "900",
+            },
+        ],
+        performance_data=[[0, 1700, 500], [25, 1400, 700], [0, 1300, 900]],
+    )
+
+    first = ledger._portfolio123_provider_returns(first_ref, first_manifest, evidence)
+    second = ledger._portfolio123_provider_returns(
+        second_ref, second_manifest, second_evidence
+    )
+
+    expected = [("2026-01-05", "0.25"), ("2026-01-06", "-0.2")]
+    assert [(row["date"], row["return"]) for row in first] == expected
+    assert [(row["date"], row["return"]) for row in second] == expected
+
+
+def test_p123_returns_preserve_decimal_precision_from_managed_json(
+    tmp_path: Path,
+) -> None:
+    """Provider JSON decimals must not round-trip through binary floating point."""
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "0",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-06",
+                "Total Equity": "100",
+                "Cash Added": "0",
+            },
+        ],
+        performance_data_json=(
+            "[[0.12345678901234567890123456789,100,0],"
+            "[0.22345678901234567890123456789,100,0],"
+            "[0.32345678901234567890123456789,100,0]]"
+        ),
+    )
+
+    returned = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+
+    first_wealth = Decimal("1.0012345678901234567890123456789")
+    second_wealth = Decimal("1.0022345678901234567890123456789")
+    assert returned[0]["return"] == format(second_wealth / first_wealth - 1, "f")
+
+
+@pytest.mark.parametrize("case", ("missing", "mismatched"))
+def test_p123_provider_returns_require_managed_performance_manifest_receipt(
+    tmp_path: Path, case: str
+) -> None:
+    """A provider return path is invalid without the hash-bound managed receipt."""
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "50",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-06",
+                "Total Equity": "100",
+                "Cash Added": "70",
+            },
+        ],
+        include_performance_receipt=case != "missing",
+    )
+    if case == "mismatched":
+        performance_path = (
+            Path(provider_ref["root"])
+            / "generations"
+            / manifest.generation_id
+            / "tables"
+            / "har_managed_performance.parquet"
+        )
+        performance_path.write_bytes(b"not the manifest-bound performance receipt")
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="Portfolio123 managed performance differs from its manifest",
+    ):
+        ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+
+
+def test_p123_provider_returns_verify_equity_curve_but_keep_it_reconciliation_only(
+    tmp_path: Path,
+) -> None:
+    """Equity is hash-verified while P123 provider returns remain non-authoritative."""
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "50",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-06",
+                "Total Equity": "100",
+                "Cash Added": "70",
+            },
+        ],
+    )
+
+    returned = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+    refreshed = ledger._refresh_strategy_evidence(
+        returned,
+        evidence,
+        {"p123-eu": "P123 EU"},
+        {
+            "portfolio123": ProviderGenerationIdentity(
+                provider_id="portfolio123",
+                generation_id=manifest.generation_id,
+                manifest_sha256="a" * 64,
+                catalog_sha256="b" * 64,
+                qualification=GenerationQualification.ACCEPTED_PARTIAL,
+            )
+        },
+        {"portfolio123": date(2026, 1, 6)},
+    )
+
+    assert refreshed[0]["provider"]["cash_added_semantics"] == (
+        "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA"
+    )
+    assert (
+        ledger._admissions({}, refreshed)[0].disposition.value == "RECONCILIATION_ONLY"
+    )
+
+    equity_path = (
+        Path(provider_ref["root"])
+        / "generations"
+        / manifest.generation_id
+        / "tables"
+        / "har_equity_curve.parquet"
+    )
+    equity_path.write_bytes(b"unverified reconciliation mutation")
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="Portfolio123 equity curve differs from its manifest",
+    ):
+        ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+
+
+@pytest.mark.parametrize(
+    ("equity_rows", "message"),
+    (
+        (
+            [
+                {
+                    "_entity_id": "exact-eu-model",
+                    "Date": "2026-01-02",
+                    "Total Equity": "101",
+                    "Cash Added": "50",
+                },
+                {
+                    "_entity_id": "exact-eu-model",
+                    "Date": "2026-01-06",
+                    "Total Equity": "100",
+                    "Cash Added": "70",
+                },
+            ],
+            "Portfolio123 managed performance and equity differ",
+        ),
+        (
+            [
+                {
+                    "_entity_id": "exact-eu-model",
+                    "Date": "2026-01-02",
+                    "Total Equity": "100",
+                    "Cash Added": "50",
+                },
+                {
+                    "_entity_id": "exact-eu-model",
+                    "Date": "2026-01-02",
+                    "Total Equity": "100",
+                    "Cash Added": "51",
+                },
+                {
+                    "_entity_id": "exact-eu-model",
+                    "Date": "2026-01-06",
+                    "Total Equity": "100",
+                    "Cash Added": "70",
+                },
+            ],
+            "Portfolio123 equity curve has conflicting duplicate dates",
+        ),
+        (
+            [
+                {
+                    "_entity_id": "exact-eu-model",
+                    "Date": "2026-01-02",
+                    "Total Equity": "100",
+                    "Cash Added": "50",
+                }
+            ],
+            "Portfolio123 managed performance/equity overlap is insufficient",
+        ),
+    ),
+)
+def test_p123_provider_returns_reconcile_hash_valid_equity_evidence(
+    tmp_path: Path, equity_rows: list[dict[str, str]], message: str
+) -> None:
+    """Hash-valid equity still must reconcile to the managed total-value capture."""
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path, equity_rows=equity_rows
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match=message):
+        ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+
+
+def test_p123_managed_performance_artifact_owns_materialized_provider_returns(
+    tmp_path: Path,
+) -> None:
+    """Only the managed-performance receipt may claim P123 return materialization."""
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "50",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-06",
+                "Total Equity": "100",
+                "Cash Added": "70",
+            },
+        ],
+    )
+    returns = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+    artifacts = {artifact.artifact_id: artifact for artifact in manifest.artifacts}
+    managed = artifacts["tables/har_managed_performance.parquet"]
+    equity = artifacts["tables/har_equity_curve.parquet"]
+    managed_item = ProviderDatasetInventoryItem(
+        provider_id="portfolio123",
+        item_kind=DatasetItemKind.ARTIFACT,
+        item_id=managed.artifact_id,
+        sha256=managed.sha256,
+        size_bytes=managed.size_bytes,
+        schema_name=managed.schema_name,
+        schema_version=managed.schema_version,
+    )
+    equity_item = ProviderDatasetInventoryItem(
+        provider_id="portfolio123",
+        item_kind=DatasetItemKind.ARTIFACT,
+        item_id=equity.artifact_id,
+        sha256=equity.sha256,
+        size_bytes=equity.size_bytes,
+        schema_name=equity.schema_name,
+        schema_version=equity.schema_version,
+    )
+
+    managed_facts, managed_rows = ledger._materialized_rows(
+        "portfolio123", managed_item, {}, returns
+    )
+    equity_facts, equity_rows = ledger._materialized_rows(
+        "portfolio123", equity_item, {}, returns
+    )
+
+    assert managed_facts == ("provider_strategy_returns",)
+    assert len(managed_rows) == 2
+    assert ledger._row_bounds(managed_rows) == (date(2026, 1, 5), date(2026, 1, 6))
+    assert equity_facts == ()
+    assert equity_rows == []
+
+    source = {
+        "admission": {
+            "facts": ["P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1_CANDIDATE"],
+            "transform": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
+            "version": "1",
+        },
+        "consumers": ["REPORT"],
+        "evidence_layer": "PROVIDER_LIVE",
+        "invalidated_outputs": ["REPORT"],
+        "product_requirement": "REQUIRED",
+        "source_id": "portfolio123-model-generation",
+        "temporal": {"calendar": "BUSINESS_DAY", "timezone": "UTC"},
+        "units": {"currency": "USD", "measurement": "TOTAL_RETURN"},
+    }
+    policy = {
+        "authority_issue": 303,
+        "effective_end": None,
+        "effective_start": "2026-01-01",
+        "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
+        "policy_owner": "PRODUCT_OWNER_GOVERNING_ISSUE_303",
+        "policy_version": "1",
+    }
+    managed_disposition = ledger._dataset_disposition(
+        managed_item,
+        source,
+        policy,
+        date(2026, 1, 2),
+        date(2026, 1, 6),
+        {},
+        returns,
+        "c" * 64,
+    )
+    equity_disposition = ledger._dataset_disposition(
+        equity_item,
+        source,
+        policy,
+        date(2026, 1, 2),
+        date(2026, 1, 6),
+        {},
+        returns,
+        "c" * 64,
+    )
+
+    assert managed_disposition.action.value == "ADMIT"
+    assert managed_disposition.item_sha256 == managed.sha256
+    assert managed_disposition.materialized_record_count == 2
+    assert managed_disposition.observed_start == date(2026, 1, 5)
+    assert managed_disposition.observed_end == date(2026, 1, 6)
+    assert managed_disposition.target_facts == ("provider_strategy_returns",)
+    assert equity_disposition.action.value == "EXCLUDE"
+    assert equity_disposition.materialized_record_count == 0
 
 
 def test_matrixport_catalog_contract_accepts_observation_boundary_schema() -> None:

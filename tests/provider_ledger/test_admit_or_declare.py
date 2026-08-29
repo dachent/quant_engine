@@ -40,6 +40,131 @@ SPEC.loader.exec_module(ledger)
 
 
 DAY = date(2026, 8, 14)
+P123_GENERATION_ID = "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1"
+P123_MANIFEST_SHA256 = (
+    "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907"
+)
+P123_CATALOG_SHA256 = "19000bdbdef4e07b01e9927a7e9b2683589352ebe55ca61247f1526a8d426aed"
+P123_MANAGED_PERFORMANCE_SHA256 = (
+    "6fe41e9c558d37df4e69c273ff67781284af03d1daedd0877799976ad86e29b8"
+)
+P123_EQUITY_CURVE_SHA256 = (
+    "b87f760a1cd369bfd40ebc5e8db6b44e3626f9b4c53950e3d1e8c7ea0abf2b4e"
+)
+P123_RETURN_START = date(2025, 11, 13)
+P123_RETURN_END = date(2026, 8, 13)
+
+
+def _retained_p123_admit_or_declare_fixture() -> tuple[
+    dict[str, Any],
+    list[ProviderGenerationIdentity],
+    dict[str, GenerationManifest],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, list[dict[str, Any]]]],
+    list[dict[str, Any]],
+]:
+    """Bind the real receipt path to the retained P123 EU return evidence."""
+
+    authority, identities, manifests, catalogs, provider_facts = _fixture()
+    contract = json.loads(
+        (ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    source = next(
+        item
+        for item in contract["source_segments"]
+        if item["source_id"] == "portfolio123-model-generation"
+    )
+    authority["sources"]["portfolio123-model-generation"] = source
+    authority["contract_semantic_sha256"] = hashlib.sha256(
+        canonical_json_bytes(contract)
+    ).hexdigest()
+
+    p123_root = ROOT.parent / "dataPortfolio123"
+    generation_root = p123_root / "generations" / P123_GENERATION_ID
+    manifest = GenerationManifest.from_json_bytes(
+        (generation_root / "generation.json").read_bytes()
+    )
+    catalog = json.loads(
+        (generation_root / "portfolio123-generation.json").read_text(encoding="utf-8")
+    )
+    assert manifest.generation_id == P123_GENERATION_ID
+    assert hashlib.sha256(
+        (generation_root / "generation.json").read_bytes()
+    ).hexdigest() == (P123_MANIFEST_SHA256)
+    assert (
+        hashlib.sha256(
+            (generation_root / "portfolio123-generation.json").read_bytes()
+        ).hexdigest()
+        == P123_CATALOG_SHA256
+    )
+    artifacts = {item.artifact_id: item for item in manifest.artifacts}
+    assert artifacts["tables/har_managed_performance.parquet"].sha256 == (
+        P123_MANAGED_PERFORMANCE_SHA256
+    )
+    assert artifacts["tables/har_equity_curve.parquet"].sha256 == (
+        P123_EQUITY_CURVE_SHA256
+    )
+
+    identities = [
+        (
+            ProviderGenerationIdentity(
+                provider_id="portfolio123",
+                generation_id=P123_GENERATION_ID,
+                manifest_sha256=P123_MANIFEST_SHA256,
+                catalog_sha256=P123_CATALOG_SHA256,
+                qualification=GenerationQualification.PUBLISHED_COMPLETE,
+            )
+            if item.provider_id == "portfolio123"
+            else item
+        )
+        for item in identities
+    ]
+    manifests["portfolio123"] = manifest
+    catalogs["portfolio123"] = catalog
+    provider_facts["portfolio123"] = {}
+
+    import pyarrow.parquet as pq
+
+    entity_ids = sorted(
+        {
+            str(item["_entity_id"])
+            for item in pq.read_table(
+                generation_root / "tables" / "har_managed_performance.parquet",
+                columns=["_entity_id"],
+            ).to_pylist()
+            if item.get("_entity_id") not in {None, ""}
+        }
+    )
+    candidates = []
+    for entity_id in entity_ids:
+        rows = ledger._portfolio123_provider_returns(
+            {"root": str(p123_root)},
+            manifest,
+            [
+                {
+                    "generation_id": P123_GENERATION_ID,
+                    "strategy_id": "p123-eu",
+                    "strategy_name": "EU [P123]",
+                    "provider": {
+                        "provider_id": "portfolio123",
+                        "entity_id": entity_id,
+                        "cash_added_semantics": (
+                            "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA"
+                        ),
+                    },
+                }
+            ],
+        )
+        if (
+            len(rows) == 196
+            and rows[0]["date"] == P123_RETURN_START.isoformat()
+            and rows[-1]["date"] == P123_RETURN_END.isoformat()
+        ):
+            candidates.append(rows)
+    assert len(candidates) == 1
+    return authority, identities, manifests, catalogs, provider_facts, candidates[0]
 
 
 def _fixture(
@@ -231,6 +356,100 @@ def _receipt(
         for row in receipt["provider_generations"]
     }
     return receipt, receipt_bytes, authority, provider_generations
+
+
+def test_retained_p123_receipt_admits_managed_returns_only() -> None:
+    (
+        authority,
+        identities,
+        manifests,
+        catalogs,
+        provider_facts,
+        provider_returns,
+    ) = _retained_p123_admit_or_declare_fixture()
+
+    receipt, _ = ledger._admit_or_declare_receipt(
+        authority,
+        identities,
+        manifests,
+        catalogs,
+        provider_facts,
+        provider_returns,
+    )
+
+    p123 = [
+        row for row in receipt["dispositions"] if row["provider_id"] == "portfolio123"
+    ]
+    managed = next(
+        row
+        for row in p123
+        if row["item_id"] == "tables/har_managed_performance.parquet"
+    )
+    equity = next(
+        row for row in p123 if row["item_id"] == "tables/har_equity_curve.parquet"
+    )
+    policy = authority["sources"]["portfolio123-model-generation"]["admission"][
+        "dataset_disposition_policy"
+    ]
+
+    assert receipt["admission_gate_status"] == "PASS"
+    assert authority["sources"]["portfolio123-model-generation"]["readiness"] == (
+        "REQUIRED_NOT_READY"
+    )
+    assert managed["action"] == "ADMIT"
+    assert managed["item_kind"] == "ARTIFACT"
+    assert managed["item_sha256"] == P123_MANAGED_PERFORMANCE_SHA256
+    assert managed["source_segment_id"] == "portfolio123-model-generation"
+    assert managed["evidence_layer"] == "PROVIDER_LIVE"
+    assert managed["transform"] == "provider-ledger-portfolio123-evidence"
+    assert managed["materialized_record_count"] == 196
+    assert managed["observed_start"] == "2025-11-13"
+    assert managed["observed_end"] == "2026-08-13"
+    assert managed["target_facts"] == ["provider_strategy_returns"]
+    assert equity["action"] == "EXCLUDE"
+    assert equity["item_kind"] == "ARTIFACT"
+    assert equity["item_sha256"] == P123_EQUITY_CURVE_SHA256
+    assert equity["source_segment_id"] == "portfolio123-model-generation"
+    assert equity["materialized_record_count"] == 0
+    assert policy["admitted_item_count"] == 2
+    assert sum(row["action"] == "ADMIT" for row in p123) == 2
+    assert policy["admitted_item_set_sha256"] == (
+        "b1fa77780c774e1d3ede18bf9698e00137447527c787aa30fdd62b5b8ad67643"
+    )
+    assert (
+        policy["upstream_inventory_sha256"]
+        == "3f0d3b5bd6239b6743f739226d97cde9979e6295291cdcbb694210d710b31e5f"
+    )
+    assert policy["product_data_class_count"] == 1
+    assert policy["product_data_class_set_sha256"] == (
+        "211c807f708e2fea19065c194963775428475a7616d4b96074e21f69c0c95fcf"
+    )
+    assert authority["sources"]["portfolio123-model-generation"]["evidence_layer"] == (
+        "PROVIDER_LIVE"
+    )
+    assert authority["sources"]["portfolio123-model-generation"]["readiness"] == (
+        "REQUIRED_NOT_READY"
+    )
+    identity = next(item for item in identities if item.provider_id == "portfolio123")
+    refreshed = ledger._refresh_strategy_evidence(
+        provider_returns,
+        [
+            {
+                "strategy_id": "p123-eu",
+                "strategy_name": "P123 EU",
+                "provider": {
+                    "provider_id": "portfolio123",
+                    "cash_added_semantics": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
+                },
+            }
+        ],
+        {"p123-eu": "P123 EU"},
+        {"portfolio123": identity},
+        {"portfolio123": DAY},
+    )
+    assert ledger._admissions({}, refreshed)[0].disposition.value == (
+        "RECONCILIATION_ONLY"
+    )
 
 
 def _rehash_receipt(receipt: dict[str, Any]) -> None:

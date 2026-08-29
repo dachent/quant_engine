@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import csv
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import importlib.util
@@ -2065,6 +2065,7 @@ def _portfolio123_provider_returns(
             item["provider"].get("provider_id") == "portfolio123"
             or item.get("provider_id") == "portfolio123"
         )
+        and item.get("generation_id") == manifest.generation_id
         and item["provider"].get("entity_id") not in {None, ""}
     ]
     if not p123_rows:
@@ -2076,7 +2077,12 @@ def _portfolio123_provider_returns(
         Path("tables/har_equity_curve.parquet"),
         "Portfolio123 equity curve",
     )
-    artifact = next(
+    performance_path = _exact_file(
+        generation_root,
+        Path("tables/har_managed_performance.parquet"),
+        "Portfolio123 managed performance",
+    )
+    equity_artifact = next(
         (
             item
             for item in manifest.artifacts
@@ -2084,50 +2090,168 @@ def _portfolio123_provider_returns(
         ),
         None,
     )
-    if artifact is None or hash_file(equity_path) != (
-        artifact.sha256,
-        artifact.size_bytes,
+    performance_artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "tables/har_managed_performance.parquet"
+        ),
+        None,
+    )
+    if equity_artifact is None or hash_file(equity_path) != (
+        equity_artifact.sha256,
+        equity_artifact.size_bytes,
     ):
         raise ProviderLedgerError("Portfolio123 equity curve differs from its manifest")
+    if performance_artifact is None or hash_file(performance_path) != (
+        performance_artifact.sha256,
+        performance_artifact.size_bytes,
+    ):
+        raise ProviderLedgerError(
+            "Portfolio123 managed performance differs from its manifest"
+        )
     try:
         import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
-        table = pq.read_table(
+        equity_table = pq.read_table(
             equity_path,
             columns=["_entity_id", "Date", "Total Equity", "Cash Added"],
         )
     except Exception as exc:
         raise ProviderLedgerError("Portfolio123 equity curve is unreadable") from exc
-    selected: dict[str, dict[date, tuple[Decimal, Decimal]]] = {
+    try:
+        performance_table = pq.read_table(
+            performance_path,
+            columns=["_entity_id", "field", "value"],
+        )
+    except Exception as exc:
+        raise ProviderLedgerError(
+            "Portfolio123 managed performance is unreadable"
+        ) from exc
+    selected: dict[str, dict[str, str]] = {
         _text(item["provider"].get("entity_id"), "Portfolio123 entity_id"): {}
         for item in p123_rows
     }
-    for row in table.to_pylist():
+    equity_observations: dict[str, dict[date, tuple[Decimal, Decimal]]] = {
+        entity_id: {} for entity_id in selected
+    }
+    for row in equity_table.to_pylist():
+        entity_id = str(row.get("_entity_id") or "")
+        if entity_id not in equity_observations:
+            continue
+        observed = _day(str(row.get("Date") or ""), "Portfolio123 equity date")
+        equity_value = _decimal(row.get("Total Equity"), "Portfolio123 equity")
+        cash_added = _decimal(row.get("Cash Added") or "0", "Portfolio123 cash added")
+        if equity_value <= 0:
+            raise ProviderLedgerError("Portfolio123 equity must be positive")
+        value = (equity_value, cash_added)
+        prior = equity_observations[entity_id].get(observed)
+        if prior is not None and prior != value:
+            raise ProviderLedgerError(
+                "Portfolio123 equity curve has conflicting duplicate dates"
+            )
+        equity_observations[entity_id][observed] = value
+    for row in performance_table.to_pylist():
         entity_id = str(row.get("_entity_id") or "")
         if entity_id not in selected:
             continue
-        day = _day(str(row.get("Date") or ""), "Portfolio123 equity date")
-        selected[entity_id][day] = (
-            _decimal(row.get("Total Equity"), "Portfolio123 equity"),
-            _decimal(row.get("Cash Added") or "0", "Portfolio123 cash added"),
-        )
+        field = _text(row.get("field"), "Portfolio123 managed performance field")
+        value = _text(row.get("value"), "Portfolio123 managed performance value")
+        prior = selected[entity_id].get(field)
+        if prior is not None and prior != value:
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance has conflicting captures"
+            )
+        selected[entity_id][field] = value
+
     result: list[dict[str, Any]] = []
+    required_fields = {"data", "date", "dateLast", "panels"}
     for p123 in p123_rows:
         entity_id = _text(p123["provider"].get("entity_id"), "Portfolio123 entity_id")
-        ordered = sorted(selected[entity_id].items())
-        if len(ordered) < 2:
+        fields = selected[entity_id]
+        if not required_fields <= set(fields):
             raise ProviderLedgerError(
                 f"Portfolio123 provider path is unavailable: {entity_id}"
             )
-        previous = ordered[0][1][0]
-        for day, (equity, cash_added) in ordered[1:]:
-            period_return = (equity - cash_added) / previous - Decimal(1)
+        try:
+            performance_start = _day(fields["date"], "Portfolio123 managed start")
+            performance_end = _day(fields["dateLast"], "Portfolio123 managed end")
+            data = json.loads(fields["data"], parse_float=Decimal, parse_int=Decimal)
+            panels = json.loads(fields["panels"])
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance is invalid"
+            ) from exc
+        if not isinstance(data, list) or not isinstance(panels, list):
+            raise ProviderLedgerError("Portfolio123 managed performance shape differs")
+        graphs = [
+            graph
+            for panel in panels
+            if isinstance(panel, dict)
+            for graph in panel.get("graphs", [])
+            if isinstance(graph, dict)
+        ]
+        if not any(
+            graph.get("idx") == 0 and graph.get("s") == "Strategy" for graph in graphs
+        ) or not any(
+            graph.get("idx") == 1 and graph.get("s") == "Total Value"
+            for graph in graphs
+        ):
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance selector differs"
+            )
+        calendar: list[date] = []
+        observed = performance_start
+        while observed <= performance_end:
+            if observed.weekday() < 5:
+                calendar.append(observed)
+            observed += timedelta(days=1)
+        if len(calendar) != len(data):
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance calendar differs"
+            )
+        parsed: list[tuple[date, Decimal, Decimal, Decimal]] = []
+        for observed, raw in zip(calendar, data, strict=True):
+            if not isinstance(raw, list) or len(raw) != 3:
+                raise ProviderLedgerError(
+                    "Portfolio123 managed performance observation differs"
+                )
+            wealth = Decimal(1) + _decimal(
+                raw[0], "Portfolio123 managed strategy performance"
+            ) / Decimal(100)
+            total_equity = _decimal(raw[1], "Portfolio123 managed total value")
+            cash_added = _decimal(raw[2], "Portfolio123 managed cash added")
+            if wealth <= 0 or total_equity <= 0:
+                raise ProviderLedgerError(
+                    "Portfolio123 managed performance contains invalid values"
+                )
+            parsed.append((observed, wealth, total_equity, cash_added))
+        if len(parsed) < 2:
+            raise ProviderLedgerError(
+                f"Portfolio123 provider path is unavailable: {entity_id}"
+            )
+        ordered_equity = sorted(equity_observations[entity_id].items())
+        overlap = 0
+        for observed, _wealth, total_equity, cash_added in parsed:
+            if observed not in equity_observations[entity_id]:
+                continue
+            overlap += 1
+            if equity_observations[entity_id][observed] != (total_equity, cash_added):
+                raise ProviderLedgerError(
+                    "Portfolio123 managed performance and equity differ"
+                )
+        if len(ordered_equity) < 2 or overlap < 2:
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance/equity overlap is insufficient"
+            )
+        for previous, current in zip(parsed, parsed[1:], strict=False):
+            period_return = current[1] / previous[1] - Decimal(1)
             if period_return <= -1:
                 raise ProviderLedgerError("Portfolio123 provider return is invalid")
             result.append(
                 {
                     "cost": None,
-                    "date": day.isoformat(),
+                    "date": current[0].isoformat(),
                     "evidence_layer": "PROVIDER_LIVE",
                     "generation_id": manifest.generation_id,
                     "provider_id": "portfolio123",
@@ -2138,7 +2262,6 @@ def _portfolio123_provider_returns(
                     "strategy_name": str(p123["strategy_name"]),
                 }
             )
-            previous = equity
     result.sort(key=lambda item: (str(item["strategy_id"]), str(item["date"])))
     return result
 
@@ -2557,7 +2680,7 @@ def _materialized_rows(
     elif item.item_kind is DatasetItemKind.ARTIFACT:
         if (
             provider_id == "portfolio123"
-            and item.item_id == "tables/har_equity_curve.parquet"
+            and item.item_id == "tables/har_managed_performance.parquet"
         ):
             target_facts = ("provider_strategy_returns",)
             rows = [
