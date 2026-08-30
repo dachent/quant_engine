@@ -59,7 +59,7 @@ from quant_engine.portfolio_ledger import (
 SCHEMA_VERSION: Final = 2
 CATALOG_SCHEMA_VERSION: Final = 2
 ADMIT_OR_DECLARE_SCHEMA_VERSION: Final = 1
-ADAPTER_VERSION: Final = "4"
+ADAPTER_VERSION: Final = "5"
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 _PROVIDER_CATALOGS: Final = {
     "alpaca": ("alpaca-generation.json", frozenset({1})),
@@ -1822,6 +1822,60 @@ def _returns_within_declared_nav_gaps(
     return [row for index, row in enumerate(rows) if index not in omitted]
 
 
+def _funded_account_live_boundaries(
+    financial_contract: Mapping[str, Any],
+) -> dict[str, tuple[date, date]]:
+    """Read the accepted funded ACCOUNT_LIVE intervals from product authority."""
+
+    history = _object(
+        financial_contract.get("history_corrections"),
+        "financial MVP history_corrections",
+    )
+    boundaries: dict[str, tuple[date, date]] = {}
+    for row in _objects(
+        history.get("materialized_segment_identities"),
+        "financial MVP materialized_segment_identities",
+    ):
+        if row.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(row.get("strategy_id"), "funded strategy_id")
+        if strategy_id in boundaries:
+            raise ProviderLedgerError("funded ACCOUNT_LIVE interval is duplicated")
+        observed_start = _day(row.get("observed_start"), "funded observed_start")
+        observed_end = _day(row.get("observed_end"), "funded observed_end")
+        if observed_end < observed_start:
+            raise ProviderLedgerError("funded ACCOUNT_LIVE interval is reversed")
+        boundaries[strategy_id] = (observed_start, observed_end)
+
+    required = {
+        _text(row.get("strategy_id"), "required financial MVP strategy_id")
+        for row in _objects(financial_contract.get("strategies"), "financial MVP strategies")
+        if row.get("product_requirement") == "REQUIRED"
+    }
+    if set(boundaries) != required:
+        raise ProviderLedgerError("funded ACCOUNT_LIVE strategy boundary differs")
+    return boundaries
+
+
+def _account_live_returns_within_funded_boundaries(
+    rows: Sequence[Mapping[str, Any]],
+    boundaries: Mapping[str, tuple[date, date]],
+) -> list[Mapping[str, Any]]:
+    """Keep required strategy returns only inside accepted funded intervals."""
+
+    result: list[Mapping[str, Any]] = []
+    for row in rows:
+        strategy_id = _text(row.get("strategy_id"), "strategy return strategy_id")
+        boundary = boundaries.get(strategy_id)
+        if row.get("evidence_layer") != "ACCOUNT_LIVE" or boundary is None:
+            result.append(row)
+            continue
+        observed = _day(row.get("date"), "strategy return date")
+        if boundary[0] <= observed <= boundary[1]:
+            result.append(row)
+    return result
+
+
 def _merge_account_returns(
     source_rows: Sequence[Mapping[str, Any]],
     broker_rows: Sequence[Mapping[str, Any]],
@@ -3203,6 +3257,12 @@ def build_catalog(
     )
     strategy_returns = _merge_account_returns(
         source_strategy_returns, broker_returns, strategy_names
+    )
+    strategy_returns = _account_live_returns_within_funded_boundaries(
+        strategy_returns,
+        _funded_account_live_boundaries(
+            _object(authority.get("contract"), "financial MVP contract")
+        ),
     )
     overlap_checks = _strategy_return_overlap_checks(
         source_strategy_returns, broker_returns

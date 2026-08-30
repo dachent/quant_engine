@@ -689,6 +689,36 @@ def test_retained_returns_omit_transition_crossing_declared_nav_gap() -> None:
     ) == retained
 
 
+def test_account_live_returns_respect_funded_strategy_interval() -> None:
+    rows = [
+        {
+            "date": day,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "matrixport",
+            "return": "0.01",
+            "strategy_id": strategy_id,
+        }
+        for strategy_id, day in (
+            ("robuxio-crypto", "2025-12-05"),
+            ("robuxio-crypto", "2025-12-07"),
+            ("robuxio-crypto", "2026-08-16"),
+            ("robuxio-crypto", "2026-08-17"),
+            ("echotrade-growth-pivots", "2025-11-24"),
+        )
+    ]
+
+    bounded = ledger._account_live_returns_within_funded_boundaries(
+        rows,
+        {"robuxio-crypto": (date(2025, 12, 7), date(2026, 8, 16))},
+    )
+
+    assert [(row["strategy_id"], row["date"]) for row in bounded] == [
+        ("robuxio-crypto", "2025-12-07"),
+        ("robuxio-crypto", "2026-08-16"),
+        ("echotrade-growth-pivots", "2025-11-24"),
+    ]
+
+
 def test_broker_returns_fail_closed_on_blank_flow_amount() -> None:
     """A MAPPED flow with a blank amount is malformed evidence — fail closed,
     never compute a return as if no flow occurred."""

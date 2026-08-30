@@ -242,7 +242,7 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
         raise VerticalBuildError("reusable provider-ledger is not verified")
     if (
         manifest.adapter.name != "quant-engine-provider-ledger"
-        or manifest.adapter.version != "4"
+        or manifest.adapter.version != "5"
     ):
         raise VerticalBuildError("reusable provider-ledger adapter differs")
     required_artifacts = {
