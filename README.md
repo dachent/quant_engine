@@ -1,15 +1,25 @@
 # quant_engine
 
-`quant_engine` is a governed monorepo for investment-data acquisition, canonical
-portfolio accounting, performance analysis, and tightly controlled broker
-execution. The project is being built as one operating system with provider
+> **Positioning:** `quant_engine` is **a governed investment-data and portfolio
+> control plane that sits above mature trading infrastructure**.
+
+`quant_engine` coordinates investment-data acquisition, canonical portfolio
+accounting and authority, performance analysis, reporting, and tightly governed
+interfaces to execution systems. It is not intended to reimplement standard
+trading-engine, broker-execution, OMS, or generic data-platform capabilities
+when mature infrastructure can satisfy the required semantics, controls, and
+operability. The project should integrate or wrap such infrastructure where it
+fits, while retaining investment-specific provenance, coverage, authority,
+reconciliation, portfolio semantics, analytics, and governance in the control
+plane. It is built as one governed system with provider and infrastructure
 adapters, not as a collection of unrelated scripts.
 
 > [!IMPORTANT]
 > The Foundation is under construction. No live-trading authorization is
 > implied by code, configuration, credentials, a passing test, or access to a
 > broker. Initial broker work is limited to offline, dry-run, or explicitly
-> approved PAPER environments.
+> approved PAPER environments. This positioning does not select or authorize any
+> external trading, execution, portfolio, or data platform.
 
 ## Design goals
 
@@ -19,6 +29,9 @@ adapters, not as a collection of unrelated scripts.
   and execution events into one schema.
 - Make allocation decisions append-only and performance reproducible from an
   accepted ledger generation.
+- Reuse mature trading, execution, portfolio, and data infrastructure where it
+  satisfies the required contracts; build custom infrastructure only where the
+  investment-specific semantics or control boundary require it.
 - Fail closed when authority, source coverage, dependencies, or an external
   effect is unclear.
 - Manage all work and approvals through GitHub Issues.
