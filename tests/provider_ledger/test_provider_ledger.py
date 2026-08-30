@@ -599,6 +599,20 @@ def test_broker_returns_are_flow_adjusted_and_capital_weighted() -> None:
     assert rows[0]["flow_timing"] == "DATE_ONLY_END_OF_DAY"
 
 
+def test_single_account_return_preserves_direct_formula_precision() -> None:
+    """A one-account sleeve must not be rounded by redundant reweighting."""
+
+    nav = [
+        _nav("a", "2024-11-26", "2118.8", "a-1"),
+        _nav("a", "2024-11-27", "2100.64", "a-2"),
+    ]
+
+    rows = ledger._broker_strategy_returns(nav, [], {"schwab"})
+
+    assert rows[0]["component_account_count"] == 1
+    assert rows[0]["return"] == "-0.0085708891825561638663394374"
+
+
 def test_broker_returns_exclude_non_authoritative_provider_inputs() -> None:
     nav = [
         _nav("required", "2026-01-01", "100", "required-1"),

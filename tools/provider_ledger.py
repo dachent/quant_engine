@@ -1730,8 +1730,15 @@ def _broker_strategy_returns(
         denominator = sum((item[0] for item in items), Decimal(0))
         if denominator <= 0:
             continue
+        # A one-account sleeve is already its own exact return.  Multiplying
+        # and dividing it by the same beginning capital applies Decimal
+        # context rounding a second time and can change the final digit.
         composite = (
-            sum((capital * value for capital, value, _, _, _ in items), Decimal(0))
+            items[0][1]
+            if len(items) == 1
+            else sum(
+                (capital * value for capital, value, _, _, _ in items), Decimal(0)
+            )
             / denominator
         )
         providers = sorted({item[2] for item in items})

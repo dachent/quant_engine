@@ -169,11 +169,31 @@ _HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
     "00309632bf3afc35f4c3582883ffa765131e75d4a2a2999b59e6eb369f939512"
 )
 _HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
-    # Issue #374: the account-return path is canonical only after exact
-    # provider-ledger selection and independent Matrixport NAV reconciliation.
+    # Issue #374: the account-return path is canonical only after provider-ledger
+    # selection, independent provider reconciliation, and elimination of the
+    # redundant one-account capital-weighting round trip.  The latter changes
+    # only the final Decimal-context digits/canonical decimal bytes; date
+    # perimeters and provider-formula values remain independently checked by
+    # the layered-history builder.
+    "grizzlybears-vtma:account-live": (
+        "4c4a15c30b3fb38e2ee8df757677d7e2f645a498026634e3abf1b36fa08b6e38",
+        "1c0bbf5915e13f08342f02298e86c9e748294933e6a6c1f46793be8b3df4c529",
+    ),
+    "p123-ai-factor:account-live": (
+        "7c854731f513fb5b6b02e7800d56e842b05a2a912b5a23aa3248c3ef20e0c0cd",
+        "68582e28bae1045494561a807f1b0db0b892cca62385f74a67daca16c101c754",
+    ),
+    "p123-eu:account-live": (
+        "a5af42de3a2aa3b2b960b60fc9880bc5a73cab286d5bd3e504d21535e74db63d",
+        "340539d1ff53a1e1386846043757e0bd6ba785bf216ade8daf820faa64e38a1b",
+    ),
     "robuxio-crypto:account-live": (
         "cb9609449f633b3077fd2dbfd3cd67764f61290c0d0dee682368d235cae77b13",
-        "e65d9fbeebf5bc7b90ff140cf09da821266b03bd9809359c1a63e5432501d0d3",
+        "66bce89cab2a49833bfc47afe7db0b1d0aa06486f3e210cd172d319346cfd7c3",
+    ),
+    "volatis-strategy:account-live": (
+        "c2d93268f9b91eead304459ce029b8bf4b1110ca28d0bb8190361ab4df43183f",
+        "f989eed33cd7ce8e17d63acb5065032e56d511a765b4f0684e281df043d27016",
     ),
 }
 EPOCH_MANIFEST_ARTIFACT_PATH: Final = "outputs/account-strategy-manifest.json"

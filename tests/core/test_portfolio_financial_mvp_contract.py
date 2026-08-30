@@ -615,7 +615,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # Robuxio segment while retaining the corrected P123 inputs and deprecated
     # Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "2b44fc47536bd7e4be3c26d17e52eb20adecfda736b77ab7093f83979c52e874"
+        "f1da13b690b96e24e9852922f5c230d60cc92a2efe45af6e45d9aba9c81d8a7d"
     )
 
 
@@ -2860,7 +2860,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "0bfa870f45e16c82ba2e58c4aed6af644e1fb8615706c82beac33c994558afb9"
+        "32572bdc8149ec5774b051f3b009ce30d2151b523061fdb3ed9948156e7327bd"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -2897,7 +2897,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
         ).hexdigest() == (
-            "0bfa870f45e16c82ba2e58c4aed6af644e1fb8615706c82beac33c994558afb9"
+            "32572bdc8149ec5774b051f3b009ce30d2151b523061fdb3ed9948156e7327bd"
         )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
