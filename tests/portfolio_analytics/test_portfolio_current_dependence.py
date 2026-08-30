@@ -663,9 +663,9 @@ def _unmocked_fixture(tmp_path: Path, *, return_shift: str = "0") -> dict[str, A
         "$schema": "https://quant-engine.local/schemas/portfolio/layered-history-generation.schema.json",
         "as_of_date": "2026-01-02",
         "builder": "portfolio-target-series/layered-history-1",
-        # Literal policy-pinned producer version from the accepted c36b80c...
+        # Literal policy-pinned producer version from the accepted 31030553...
         # history receipt.  Do not derive this from the consumer constant.
-        "builder_version": "1.13.0",
+        "builder_version": "1.14.0",
         "inputs": [
             {
                 "artifact_id": "synthetic/current-dependence-input",
@@ -850,7 +850,7 @@ def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
         "manifest_sha256": "b7fda826a4ad224352e1690d44d4579ee0841a5b5c0b5c4e0fc1c7111c9c7a11",
     }
     assert receipt["history_authority"]["generation_id"] == (
-        "50292a82916a1f5e8e51e11fb62fc23ac6ce0881387e746592438f8b710b5b00"
+        "3f6ec84036e995aef4ddcf564f3d6c91738641e13c062c5310beef482cdfc375"
     )
 
 
@@ -860,7 +860,7 @@ def test_current_dependence_policy_pinned_producer_seam_kills_newer_version_muta
     fixture = _unmocked_fixture(tmp_path)
 
     with monkeypatch.context() as probe:
-        probe.setattr(current, "LAYERED_HISTORY_BUILDER_VERSION", "1.14.0")
+        probe.setattr(current, "LAYERED_HISTORY_BUILDER_VERSION", "1.15.0")
         with pytest.raises(current.CurrentDependenceError) as exc:
             _build_from_unmocked_fixture(fixture)
     assert exc.value.args == ("layered history receipt contract differs",)
