@@ -168,6 +168,14 @@ _HISTORY_AUTHORITY_RAW_SHA256: Final = (
 _HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
     "00309632bf3afc35f4c3582883ffa765131e75d4a2a2999b59e6eb369f939512"
 )
+_HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
+    # Issue #374: the account-return path is canonical only after exact
+    # provider-ledger selection and independent Matrixport NAV reconciliation.
+    "robuxio-crypto:account-live": (
+        "cb9609449f633b3077fd2dbfd3cd67764f61290c0d0dee682368d235cae77b13",
+        "e65d9fbeebf5bc7b90ff140cf09da821266b03bd9809359c1a63e5432501d0d3",
+    ),
+}
 EPOCH_MANIFEST_ARTIFACT_PATH: Final = "outputs/account-strategy-manifest.json"
 EPOCH_MANIFEST_ARTIFACT_SCHEMA_NAME: Final = "account-strategy-manifest"
 EPOCH_MANIFEST_ARTIFACT_SCHEMA_VERSION: Final = "8"
@@ -735,6 +743,17 @@ def _verify_strategy_version_history_evidence(
             "accepted history materialized_segment_identities",
         )
     }
+    for segment_id, (accepted_sha256, corrected_sha256) in (
+        _HISTORY_SEGMENT_SHA256_OVERRIDES.items()
+    ):
+        accepted_segment = accepted_segments.get(segment_id)
+        if accepted_segment is None or accepted_segment.get("sha256") != (
+            accepted_sha256
+        ):
+            raise FinancialMvpContractError(
+                f"accepted history correction authority differs: {segment_id}"
+            )
+        accepted_segment["sha256"] = corrected_sha256
     current_segments = {
         _text(row.get("segment_id"), "history segment_id"): segment_projection(row)
         for row in _objects(

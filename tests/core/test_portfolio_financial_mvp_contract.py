@@ -611,10 +611,10 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
-    # Digest binds the corrected P123 admitted set and refreshed provider-ledger
-    # generation while retaining the owner-approved deprecated Echo boundary.
+    # Digest binds the reconciled Robuxio account-return segment while retaining
+    # the corrected P123 inputs and owner-approved deprecated Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "b2c87ac16cbaec7f51b57aef2a14a8732188bbf982c1205878fdbd153ec5dcda"
+        "72b7ce7de3c50c02a5eb6a6a600b42624d26bb724616f65f0c74daff378d2450"
     )
 
 
