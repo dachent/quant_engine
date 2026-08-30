@@ -4,15 +4,15 @@
   "policy_id": "PORT-DEPENDENCE-1",
   "owner_issue": 336,
   "history_authority": {
-    "generation_id": "c36b80c23b53f4eeea90f05fd83d97e4f8ad3c63918351ea2ddb35c208e1e355",
-    "receipt_sha256": "080db6843a7a9e56e733dd74ce97a76bedae6c2ff05dcea5a6fcfc3460916d62",
+    "generation_id": "310305531cc2d2499809a1a1f42959549253ad61e4b1cb9ada2de69ff4430aa2",
+    "receipt_sha256": "dbfbacae4da1cd419550324819b2b49f64c9bcffb72c8e895075ce41a0dfddf5",
     "outputs": {
-      "coverage.json": {"sha256": "fccb961eded64c27337896aee8b23906b7482a2f662e686693f1ef27de875da4", "size_bytes": 15067},
+      "coverage.json": {"sha256": "8762ab5f42fbb8057083c66f59f8b6d59ec36762785abbf06ab259ebe864b86c", "size_bytes": 15067},
       "excluded.csv": {"sha256": "ab6e8a2cbe3d1f0419946d55e4e8ad0c65db3e6bb176f18ab8592dd6172ad3d5", "size_bytes": 1340},
-      "live-only.csv": {"sha256": "87fced25daa7a3bd93283df4e800430cb6b6e805aeb3b751ed2a041b90dc9ff1", "size_bytes": 237227},
-      "live-plus-backtest.csv": {"sha256": "87fced25daa7a3bd93283df4e800430cb6b6e805aeb3b751ed2a041b90dc9ff1", "size_bytes": 237227},
-      "returns.csv": {"sha256": "87fced25daa7a3bd93283df4e800430cb6b6e805aeb3b751ed2a041b90dc9ff1", "size_bytes": 237227},
-      "segments.csv": {"sha256": "98f5f6f9f928570bff07732ffb8ff02ca0959d250cc07fe5e04db21a965f3c20", "size_bytes": 681422}
+      "live-only.csv": {"sha256": "35dcdb5fe2fa821248b3ed105fdf965fd4edffef33d00e7d12c3d1ff6f9eefdf", "size_bytes": 237259},
+      "live-plus-backtest.csv": {"sha256": "35dcdb5fe2fa821248b3ed105fdf965fd4edffef33d00e7d12c3d1ff6f9eefdf", "size_bytes": 237259},
+      "returns.csv": {"sha256": "35dcdb5fe2fa821248b3ed105fdf965fd4edffef33d00e7d12c3d1ff6f9eefdf", "size_bytes": 237259},
+      "segments.csv": {"sha256": "7bce938683613fbd349a825fb5ced9ce7250f16a1a26a307da42a98907cc0559", "size_bytes": 681454}
     }
   },
   "allocation_authority": {
