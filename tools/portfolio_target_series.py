@@ -14,7 +14,7 @@ import argparse
 import csv
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from functools import lru_cache
 import hashlib
 import importlib.util
@@ -64,7 +64,7 @@ STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
-LAYERED_HISTORY_BUILDER_VERSION: Final = "1.13.0"
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.14.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
 LAYERED_HISTORY_ASSURANCE_PROFILES: Final = frozenset(
     {"DEVELOPMENT", "WORKSTATION_QC", "RELEASE_QC"}
@@ -98,6 +98,12 @@ MATRIXPORT_RETURN_TRANSFORM_CAPABILITIES: Final = {
         }
     )
 }
+# The retained Matrixport generation materialized account totals with Python's
+# 28-significant-digit Decimal context.  Multiplication into account value and
+# the later return/composite divisions can each contribute one rounding unit.
+# Product-NAV returns therefore corroborate account returns within this strict
+# bound, while the admitted provider-ledger account return remains canonical.
+MATRIXPORT_ACCOUNT_RETURN_RECONCILIATION_MAX_ERROR: Final = Decimal("2e-27")
 LAYERED_HISTORY_REPOSITORY_DEPENDENCIES: Final = (
     "docs/analytics/current-strategy-decomposition-plan.json",
     "packages/core/src/quant_engine/core/contracts.py",
@@ -1857,6 +1863,55 @@ def _matrixport_provider_returns(
     return rows
 
 
+def _matrixport_account_live_from_ledger(
+    ledger_rows: Sequence[Mapping[str, str]],
+    product_rows: Sequence[Mapping[str, str]],
+    unavailable_return_dates: frozenset[date],
+) -> list[dict[str, str]]:
+    """Select canonical account returns after independent product-NAV proof."""
+
+    if not product_rows:
+        raise TargetSeriesError("Matrixport account-live history is unavailable")
+    product_by_date = {row["date"]: row for row in product_rows}
+    if len(product_by_date) != len(product_rows):
+        raise TargetSeriesError("Matrixport product return date is duplicated")
+    observed_start = product_rows[0]["date"]
+    observed_end = product_rows[-1]["date"]
+    ledger_by_date: dict[str, Mapping[str, str]] = {}
+    for row in ledger_rows:
+        observed = row["date"]
+        if observed < observed_start or observed > observed_end:
+            continue
+        if observed in ledger_by_date:
+            raise TargetSeriesError("Matrixport provider-ledger return date is duplicated")
+        ledger_by_date[observed] = row
+
+    product_dates = set(product_by_date)
+    ledger_dates = set(ledger_by_date)
+    unavailable = {item.isoformat() for item in unavailable_return_dates}
+    if product_dates - ledger_dates:
+        raise TargetSeriesError("Matrixport provider-ledger account return is missing")
+    if ledger_dates - product_dates - unavailable:
+        raise TargetSeriesError(
+            "Matrixport provider-ledger return exceeds the declared gap boundary"
+        )
+
+    selected: list[dict[str, str]] = []
+    with localcontext() as context:
+        context.prec = 50
+        for product_row in product_rows:
+            ledger_row = ledger_by_date[product_row["date"]]
+            difference = abs(
+                Decimal(ledger_row["return"]) - Decimal(product_row["return"])
+            )
+            if difference > MATRIXPORT_ACCOUNT_RETURN_RECONCILIATION_MAX_ERROR:
+                raise TargetSeriesError(
+                    "Matrixport account-live return differs from provider ledger"
+                )
+            selected.append(dict(ledger_row))
+    return selected
+
+
 def _validate_robuxio_provider_interval(
     rows: Sequence[Mapping[str, str]], interval: Mapping[str, Any]
 ) -> None:
@@ -2714,7 +2769,6 @@ def build_layered_history_generation(
         robuxio_interval.get("observed_end"),
     ):
         raise TargetSeriesError("Robuxio account-live interval differs from contract")
-    live_by_strategy["robuxio-crypto"] = robuxio_live
     robuxio_provider = _matrixport_provider_returns(
         matrixport_nav_path,
         matrixport_product_id,
@@ -2729,6 +2783,11 @@ def build_layered_history_generation(
             "Robuxio provider-live interval is absent from contract"
         )
     _validate_robuxio_provider_interval(robuxio_provider, robuxio_provider_interval)
+    live_by_strategy["robuxio-crypto"] = _matrixport_account_live_from_ledger(
+        live_by_strategy["robuxio-crypto"],
+        robuxio_live,
+        matrixport_unavailable_return_dates,
+    )
 
     quantbase_artifacts = _manifest_artifacts(quantbase_manifest.get("artifacts"))
     _verify_artifact(

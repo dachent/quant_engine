@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import csv
 from datetime import date, timedelta
+from decimal import Decimal, localcontext
 import hashlib
 import importlib.util
 import io
@@ -453,6 +454,13 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
     }
     ledger_rows: list[dict[str, object]] = []
     evidence: list[dict[str, object]] = []
+    with localcontext() as context:
+        context.prec = 28
+        robuxio_account_returns = {
+            "2025-12-07": format((Decimal("106") / Decimal("105") - 1), "f"),
+            "2025-12-08": format((Decimal("107") / Decimal("106") - 1), "f"),
+            "2025-12-11": format((Decimal("110") / Decimal("109") - 1), "f"),
+        }
     for strategy_id, series_id in series.items():
         dates = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09"]
         if strategy_id == "p123-eu":
@@ -487,7 +495,11 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
                     "evidence_layer": "ACCOUNT_LIVE",
                     "generation_id": ids["ledger"],
                     "provider_id": "synthetic",
-                    "return": str(index / 1000),
+                    "return": robuxio_account_returns.get(
+                        observed, str(index / 1000)
+                    )
+                    if strategy_id == "robuxio-crypto"
+                    else str(index / 1000),
                     "return_basis": "NET",
                     "return_type": "TOTAL",
                     "strategy_id": strategy_id,
@@ -1223,14 +1235,14 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     repeated_artifacts, repeated_manifest = _build(fixture)
     assert artifacts == repeated_artifacts
     assert manifest_content == repeated_manifest
-    assert json.loads(manifest_content)["builder_version"] == "1.13.0"
+    assert json.loads(manifest_content)["builder_version"] == "1.14.0"
     generation_schema = json.loads(
         (
             ROOT / "schemas" / "portfolio" / "layered-history-generation.schema.json"
         ).read_text(encoding="utf-8")
     )
     assert generation_schema["properties"]["builder_version"] == {
-        "enum": ["1.12.0", "1.13.0"]
+        "enum": ["1.12.0", "1.13.0", "1.14.0"]
     }
     assert (
         "strategy-history"
@@ -1603,6 +1615,43 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     }
     assert changed_artifacts["returns.csv"] != artifacts["returns.csv"]
     assert changed_manifest != manifest_content
+
+
+def test_layered_history_uses_ledger_account_return_after_matrixport_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    baseline_artifacts, baseline_manifest = _build(fixture)
+    original = target_series._matrixport_returns
+    perturbation = Decimal("1e-28")
+
+    def perturbed_matrixport_returns(*args: Any, **kwargs: Any):
+        rows, coverage = original(*args, **kwargs)
+        changed = [dict(row) for row in rows]
+        with localcontext() as context:
+            context.prec = 50
+            changed[0]["return"] = format(
+                Decimal(changed[0]["return"]) + perturbation,
+                "f",
+            )
+        return changed, coverage
+
+    monkeypatch.setattr(
+        target_series,
+        "_matrixport_returns",
+        perturbed_matrixport_returns,
+    )
+    reconciled_artifacts, reconciled_manifest = _build(fixture)
+    assert reconciled_artifacts == baseline_artifacts
+    assert reconciled_manifest == baseline_manifest
+
+    perturbation = Decimal("1e-12")
+    with pytest.raises(
+        TargetSeriesError,
+        match="Matrixport account-live return differs from provider ledger",
+    ):
+        _build(fixture)
 
 
 def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage(
