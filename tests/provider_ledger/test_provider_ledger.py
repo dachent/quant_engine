@@ -630,6 +630,28 @@ def test_broker_returns_exclude_non_authoritative_provider_inputs() -> None:
     assert rows[0]["component_account_ids"] == ["required"]
 
 
+def test_broker_returns_omit_transition_crossing_declared_nav_gap() -> None:
+    nav = [
+        {**_nav("matrix", "2026-01-01", "100", "matrix-1"), "provider_id": "matrixport"},
+        {**_nav("matrix", "2026-01-03", "121", "matrix-3"), "provider_id": "matrixport"},
+        {**_nav("matrix", "2026-01-04", "133.1", "matrix-4"), "provider_id": "matrixport"},
+    ]
+
+    unbounded = ledger._broker_strategy_returns(nav, [], {"matrixport"})
+    bounded = ledger._broker_strategy_returns(
+        nav,
+        [],
+        {"matrixport"},
+        declared_nav_gap_dates_by_provider={
+            "matrixport": frozenset({date(2026, 1, 2)})
+        },
+    )
+
+    assert [row["date"] for row in unbounded] == ["2026-01-03", "2026-01-04"]
+    assert [row["date"] for row in bounded] == ["2026-01-04"]
+    assert bounded[0]["return"] == "0.1"
+
+
 def test_broker_returns_fail_closed_on_blank_flow_amount() -> None:
     """A MAPPED flow with a blank amount is malformed evidence — fail closed,
     never compute a return as if no flow occurred."""

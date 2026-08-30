@@ -59,7 +59,7 @@ from quant_engine.portfolio_ledger import (
 SCHEMA_VERSION: Final = 2
 CATALOG_SCHEMA_VERSION: Final = 2
 ADMIT_OR_DECLARE_SCHEMA_VERSION: Final = 1
-ADAPTER_VERSION: Final = "3"
+ADAPTER_VERSION: Final = "4"
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 _PROVIDER_CATALOGS: Final = {
     "alpaca": ("alpaca-generation.json", frozenset({1})),
@@ -1630,6 +1630,8 @@ def _broker_strategy_returns(
     nav_rows: Sequence[Mapping[str, Any]],
     flow_rows: Sequence[Mapping[str, Any]],
     authoritative_provider_ids: set[str],
+    *,
+    declared_nav_gap_dates_by_provider: Mapping[str, frozenset[date]] | None = None,
 ) -> list[dict[str, Any]]:
     """Create flow-adjusted account-live returns from admitted broker NAV.
 
@@ -1638,6 +1640,7 @@ def _broker_strategy_returns(
     Multiple accounts assigned to one strategy are beginning-capital weighted.
     """
 
+    declared_gaps = declared_nav_gap_dates_by_provider or {}
     flows: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
     for row in flow_rows:
         if row.get("mapping_status") != "MAPPED":
@@ -1687,6 +1690,18 @@ def _broker_strategy_returns(
         ordered = sorted(rows, key=lambda item: str(item["as_of_date"]))
         for previous, current in zip(ordered, ordered[1:]):
             if previous.get("strategy_id") != current.get("strategy_id"):
+                continue
+            previous_day = _day(previous.get("as_of_date"), "prior NAV date")
+            current_day = _day(current.get("as_of_date"), "ending NAV date")
+            provider_gaps = declared_gaps.get(provider_id, frozenset())
+            if previous_day in provider_gaps or current_day in provider_gaps:
+                raise ProviderLedgerError(
+                    "declared NAV gap contains an admitted NAV observation"
+                )
+            if any(previous_day < gap < current_day for gap in provider_gaps):
+                # The next observed account value spans an explicitly missing
+                # source date.  It is valid NAV evidence but not a one-period
+                # daily return and therefore cannot enter strategy_returns.
                 continue
             prior_nav = _observed_decimal(previous.get("nav"), "prior NAV")
             ending_nav = _observed_decimal(current.get("nav"), "ending NAV")
@@ -1750,6 +1765,24 @@ def _broker_strategy_returns(
                 "strategy_id": strategy_id,
             }
         )
+    return result
+
+
+def _declared_nav_gap_dates_by_provider(
+    manifests: Mapping[str, GenerationManifest],
+) -> dict[str, frozenset[date]]:
+    """Project explicit provider NAV omissions into return-period boundaries."""
+
+    result: dict[str, frozenset[date]] = {}
+    prefix = "nav_missing_date:"
+    for provider_id, manifest in manifests.items():
+        dates = {
+            _day(exclusion.item.removeprefix(prefix), "declared NAV gap date")
+            for exclusion in manifest.coverage.declared_exclusions
+            if exclusion.item.startswith(prefix)
+        }
+        if dates:
+            result[provider_id] = frozenset(dates)
     return result
 
 
@@ -3125,6 +3158,9 @@ def build_catalog(
         combined.get("nav_observations", []),
         combined.get("flows", []),
         authoritative_provider_ids,
+        declared_nav_gap_dates_by_provider=_declared_nav_gap_dates_by_provider(
+            manifests
+        ),
     )
     strategy_returns = _merge_account_returns(
         source_strategy_returns, broker_returns, strategy_names
