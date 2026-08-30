@@ -652,6 +652,43 @@ def test_broker_returns_omit_transition_crossing_declared_nav_gap() -> None:
     assert bounded[0]["return"] == "0.1"
 
 
+def test_retained_returns_omit_transition_crossing_declared_nav_gap() -> None:
+    retained = [
+        {
+            "date": "2026-01-01",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "matrixport",
+            "return": "0.01",
+            "strategy_id": "strategy-a",
+        },
+        {
+            "date": "2026-01-03",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "matrixport",
+            "return": "0.21",
+            "strategy_id": "strategy-a",
+        },
+        {
+            "date": "2026-01-04",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "matrixport",
+            "return": "0.1",
+            "strategy_id": "strategy-a",
+        },
+    ]
+
+    rows = ledger._returns_within_declared_nav_gaps(
+        retained,
+        {"matrixport": frozenset({date(2026, 1, 2)})},
+    )
+
+    assert [row["date"] for row in rows] == ["2026-01-01", "2026-01-04"]
+    assert ledger._returns_within_declared_nav_gaps(
+        retained,
+        {"matrixport": frozenset({date(2026, 1, 5)})},
+    ) == retained
+
+
 def test_broker_returns_fail_closed_on_blank_flow_amount() -> None:
     """A MAPPED flow with a blank amount is malformed evidence — fail closed,
     never compute a return as if no flow occurred."""

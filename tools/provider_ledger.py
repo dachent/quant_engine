@@ -1786,6 +1786,42 @@ def _declared_nav_gap_dates_by_provider(
     return result
 
 
+def _returns_within_declared_nav_gaps(
+    rows: Sequence[Mapping[str, Any]],
+    declared_nav_gap_dates_by_provider: Mapping[str, frozenset[date]],
+) -> list[Mapping[str, Any]]:
+    """Omit retained daily returns whose observation interval crosses a gap."""
+
+    grouped: dict[tuple[str, str, str], list[tuple[int, date]]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        provider_id = _text(row.get("provider_id"), "strategy return provider_id")
+        grouped[
+            (
+                provider_id,
+                _text(row.get("strategy_id"), "strategy return strategy_id"),
+                _text(row.get("evidence_layer"), "strategy return evidence_layer"),
+            )
+        ].append((index, _day(row.get("date"), "strategy return date")))
+
+    omitted: set[int] = set()
+    for (provider_id, _strategy_id, _layer), dated_rows in grouped.items():
+        gaps = declared_nav_gap_dates_by_provider.get(provider_id, frozenset())
+        if not gaps:
+            continue
+        previous_day: date | None = None
+        for index, current_day in sorted(dated_rows, key=lambda item: item[1]):
+            if current_day in gaps:
+                raise ProviderLedgerError(
+                    "declared NAV gap contains a retained strategy return"
+                )
+            if previous_day is not None and any(
+                previous_day < gap < current_day for gap in gaps
+            ):
+                omitted.add(index)
+            previous_day = current_day
+    return [row for index, row in enumerate(rows) if index not in omitted]
+
+
 def _merge_account_returns(
     source_rows: Sequence[Mapping[str, Any]],
     broker_rows: Sequence[Mapping[str, Any]],
@@ -3116,6 +3152,11 @@ def build_catalog(
         as_of,
         _object(spec["strategy_provider_map"], "strategy_provider_map"),
     )
+    declared_nav_gaps = _declared_nav_gap_dates_by_provider(manifests)
+    source_strategy_returns = _returns_within_declared_nav_gaps(
+        source_strategy_returns,
+        declared_nav_gaps,
+    )
     strategy_names = {
         _text(item.get("strategy_id"), "strategy_id"): _text(
             item.get("name"), "strategy.name"
@@ -3158,9 +3199,7 @@ def build_catalog(
         combined.get("nav_observations", []),
         combined.get("flows", []),
         authoritative_provider_ids,
-        declared_nav_gap_dates_by_provider=_declared_nav_gap_dates_by_provider(
-            manifests
-        ),
+        declared_nav_gap_dates_by_provider=declared_nav_gaps,
     )
     strategy_returns = _merge_account_returns(
         source_strategy_returns, broker_returns, strategy_names
