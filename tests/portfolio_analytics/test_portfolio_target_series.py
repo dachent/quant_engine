@@ -495,6 +495,83 @@ def test_quantbase_account_path_is_flow_adjusted_and_deterministic(
     assert proof["evidence_layer"] == "ACCOUNT_LIVE"
 
 
+def test_quantbase_independent_recalculation_selects_ledger_authority() -> None:
+    ledger_rows = [
+        {
+            "series_id": "Volatis Strategy",
+            "date": "2026-01-02",
+            "return": "-0.06",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return_basis": "NET",
+            "return_type": "TOTAL",
+            "cost": "",
+        },
+        {
+            "series_id": "Volatis Strategy",
+            "date": "2026-01-03",
+            "return": "0.0200",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return_basis": "NET",
+            "return_type": "TOTAL",
+            "cost": "",
+        },
+    ]
+    independently_recalculated = [
+        {**ledger_rows[0], "return": "-0.060"},
+        {**ledger_rows[1], "return": "0.02"},
+    ]
+
+    selected = target_series._quantbase_account_live_from_ledger(
+        ledger_rows, independently_recalculated
+    )
+
+    assert selected == ledger_rows
+
+
+@pytest.mark.parametrize(
+    ("recalculated_rows", "message"),
+    [
+        (
+            [
+                {
+                    "date": "2026-01-02",
+                    "return": "-0.07",
+                }
+            ],
+            "differs from provider ledger",
+        ),
+        (
+            [
+                {
+                    "date": "2026-01-03",
+                    "return": "-0.06",
+                }
+            ],
+            "date perimeter differs",
+        ),
+    ],
+)
+def test_quantbase_independent_recalculation_rejects_ledger_drift(
+    recalculated_rows: list[dict[str, str]], message: str
+) -> None:
+    ledger_rows = [
+        {
+            "series_id": "Volatis Strategy",
+            "date": "2026-01-02",
+            "return": "-0.06",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return_basis": "NET",
+            "return_type": "TOTAL",
+            "cost": "",
+        }
+    ]
+
+    with pytest.raises(TargetSeriesError, match=message):
+        target_series._quantbase_account_live_from_ledger(
+            ledger_rows, recalculated_rows
+        )
+
+
 def test_quantbase_account_path_rejects_manifest_drift(tmp_path: Path) -> None:
     base = tmp_path / "base.csv"
     _write(

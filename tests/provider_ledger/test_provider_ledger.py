@@ -773,6 +773,148 @@ def test_account_rollforward_appends_only_dates_newer_than_accepted_history() ->
     assert rows[-1]["strategy_name"] == "Strategy A"
 
 
+def test_native_provider_account_path_replaces_stale_retained_rows() -> None:
+    source = [
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.91",
+            "strategy_id": "strategy-native",
+        },
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+            "strategy_id": "strategy-owner",
+        },
+    ]
+    broker = [
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "quantbase",
+            "return": "-0.06",
+            "strategy_id": "strategy-native",
+        },
+        {
+            "date": "2026-01-03",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "quantbase",
+            "return": "0.02",
+            "strategy_id": "strategy-native",
+        },
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "schwab",
+            "return": "0.99",
+            "strategy_id": "strategy-owner",
+        },
+        {
+            "date": "2026-01-03",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "schwab",
+            "return": "0.03",
+            "strategy_id": "strategy-owner",
+        },
+    ]
+
+    rows = ledger._merge_account_returns(
+        source,
+        broker,
+        {
+            "strategy-native": "Native Strategy",
+            "strategy-owner": "Owner Strategy",
+        },
+        provider_native_strategy_ids={"strategy-native"},
+    )
+
+    assert [
+        (row["strategy_id"], row["date"], row["return"])
+        for row in rows
+    ] == [
+        ("strategy-native", "2026-01-02", "-0.06"),
+        ("strategy-native", "2026-01-03", "0.02"),
+        ("strategy-owner", "2026-01-02", "0.01"),
+        ("strategy-owner", "2026-01-03", "0.03"),
+    ]
+    assert rows[0]["strategy_name"] == "Native Strategy"
+
+
+def test_provider_native_return_authority_comes_from_materialized_segments() -> None:
+    contract = {
+        "history_corrections": {
+            "materialized_segment_identities": [
+                {
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "source_id": "quantbase-account-generation",
+                    "strategy_id": "volatis-strategy",
+                },
+                {
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "source_id": "matrixport-account-generation",
+                    "strategy_id": "robuxio-crypto",
+                },
+                {
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "source_id": "owner-account-live-history",
+                    "strategy_id": "qsi",
+                },
+                {
+                    "evidence_layer": "PROVIDER_LIVE",
+                    "source_id": "portfolio123-model-generation",
+                    "strategy_id": "p123-eu",
+                },
+            ]
+        }
+    }
+
+    assert ledger._provider_native_account_return_strategy_ids(contract) == {
+        "robuxio-crypto",
+        "volatis-strategy",
+    }
+
+
+def test_provider_native_strategy_evidence_must_bind_current_manifest(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "nav.csv"
+    source.write_text("date,value\n2026-01-02,100\n", encoding="utf-8")
+    manifest = _make_manifest(source, "source/csv/nav.csv")
+    artifact = manifest.artifacts[0]
+    evidence = [
+        {
+            "generation_id": manifest.generation_id,
+            "provider_id": "quantbase",
+            "sources": {
+                "account_history": {
+                    "artifact_id": artifact.artifact_id,
+                    "sha256": artifact.sha256,
+                    "size_bytes": artifact.size_bytes,
+                }
+            },
+            "strategy_id": "volatis-strategy",
+        }
+    ]
+
+    ledger._validate_provider_native_strategy_evidence(
+        evidence,
+        {"volatis-strategy"},
+        {"quantbase": manifest},
+    )
+
+    evidence[0]["sources"]["account_history"]["sha256"] = "0" * 64
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="provider artifact identity differs",
+    ):
+        ledger._validate_provider_native_strategy_evidence(
+            evidence,
+            {"volatis-strategy"},
+            {"quantbase": manifest},
+        )
+
+
 def test_account_overlap_is_retained_as_explicit_reconciliation_evidence() -> None:
     source = [
         {
@@ -816,6 +958,41 @@ def test_account_overlap_is_retained_as_explicit_reconciliation_evidence() -> No
             "tolerance": "0.000001",
         }
     ]
+
+
+def test_provider_native_overlap_reports_promoted_authority() -> None:
+    source = [
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+            "strategy_id": "strategy-a",
+        }
+    ]
+    broker = [
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "quantbase",
+            "return": "-0.06",
+            "beginning_capital": "100",
+            "strategy_id": "strategy-a",
+        }
+    ]
+
+    checks = ledger._strategy_return_overlap_checks(
+        source, broker, provider_native_strategy_ids={"strategy-a"}
+    )
+
+    assert checks[0]["authority_effect"] == (
+        "CURRENT_PROVIDER_ACCOUNT_PATH_PROMOTED; "
+        "RETAINED_ACCOUNT_PATH_SUPERSEDED"
+    )
+    assert checks[0]["adjudication"] == (
+        "CONTRACT_SELECTED_PROVIDER_GENERATION; retained tracker path is "
+        "comparison evidence only"
+    )
+    assert checks[0]["exception_date_count"] == 1
 
 
 def test_provider_mapping_is_recomputed_from_effective_assignments() -> None:

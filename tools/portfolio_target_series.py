@@ -1912,6 +1912,35 @@ def _matrixport_account_live_from_ledger(
     return selected
 
 
+def _quantbase_account_live_from_ledger(
+    ledger_rows: Sequence[Mapping[str, str]],
+    recalculated_rows: Sequence[Mapping[str, str]],
+) -> list[dict[str, str]]:
+    """Select ledger rows only after exact independent Quantbase recalculation."""
+
+    ledger_by_date = {row["date"]: row for row in ledger_rows}
+    recalculated_by_date = {row["date"]: row for row in recalculated_rows}
+    if len(ledger_by_date) != len(ledger_rows) or len(recalculated_by_date) != len(
+        recalculated_rows
+    ):
+        raise TargetSeriesError("Quantbase account-live return date is duplicated")
+    if set(ledger_by_date) != set(recalculated_by_date):
+        raise TargetSeriesError(
+            "Quantbase provider-ledger account return date perimeter differs"
+        )
+
+    selected: list[dict[str, str]] = []
+    for observed in sorted(recalculated_by_date):
+        ledger_row = ledger_by_date[observed]
+        recalculated_row = recalculated_by_date[observed]
+        if Decimal(ledger_row["return"]) != Decimal(recalculated_row["return"]):
+            raise TargetSeriesError(
+                "Quantbase account-live return differs from provider ledger"
+            )
+        selected.append(dict(ledger_row))
+    return selected
+
+
 def _validate_robuxio_provider_interval(
     rows: Sequence[Mapping[str, str]], interval: Mapping[str, Any]
 ) -> None:
@@ -2821,7 +2850,9 @@ def build_layered_history_generation(
         volatis_interval.get("observed_end"),
     ):
         raise TargetSeriesError("Volatis account-live interval differs from contract")
-    live_by_strategy["volatis-strategy"] = volatis_live
+    live_by_strategy["volatis-strategy"] = _quantbase_account_live_from_ledger(
+        live_by_strategy["volatis-strategy"], volatis_live
+    )
 
     p123_artifacts = _manifest_artifacts(p123_manifest.get("artifacts"))
     metadata_artifact = _verify_artifact(

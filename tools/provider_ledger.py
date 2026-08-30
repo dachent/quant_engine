@@ -1857,6 +1857,81 @@ def _funded_account_live_boundaries(
     return boundaries
 
 
+def _provider_native_account_return_strategy_ids(
+    financial_contract: Mapping[str, Any],
+) -> set[str]:
+    """Select account-return paths whose materialized authority is a provider."""
+
+    history = _object(
+        financial_contract.get("history_corrections"),
+        "financial MVP history_corrections",
+    )
+    native_source_ids = frozenset(_PROVIDER_SOURCE_SEGMENTS.values())
+    return {
+        _text(row.get("strategy_id"), "provider-native strategy_id")
+        for row in _objects(
+            history.get("materialized_segment_identities"),
+            "financial MVP materialized_segment_identities",
+        )
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+        and row.get("source_id") in native_source_ids
+    }
+
+
+def _validate_provider_native_strategy_evidence(
+    evidence_rows: Sequence[Mapping[str, Any]],
+    strategy_ids: set[str] | frozenset[str],
+    manifests: Mapping[str, GenerationManifest],
+) -> None:
+    """Require provider-native evidence to name exact current manifest artifacts."""
+
+    evidence_by_strategy = {
+        _text(row.get("strategy_id"), "strategy evidence strategy_id"): row
+        for row in evidence_rows
+    }
+    for strategy_id in sorted(strategy_ids):
+        row = evidence_by_strategy.get(strategy_id)
+        if row is None:
+            raise ProviderLedgerError(
+                f"provider-native strategy evidence is absent: {strategy_id}"
+            )
+        provider_id = _text(
+            row.get("provider_id"), "provider-native evidence provider_id"
+        )
+        manifest = manifests.get(provider_id)
+        if manifest is None or row.get("generation_id") != manifest.generation_id:
+            raise ProviderLedgerError(
+                "provider-native strategy evidence generation differs"
+            )
+        artifacts = {artifact.artifact_id: artifact for artifact in manifest.artifacts}
+        sources = _object(row.get("sources"), "provider-native evidence sources")
+        bound_artifact_count = 0
+        for source in sources.values():
+            source_row = _object(source, "provider-native evidence source")
+            artifact_id = source_row.get("artifact_id")
+            if artifact_id is None:
+                continue
+            artifact = artifacts.get(
+                _text(artifact_id, "provider-native evidence artifact_id")
+            )
+            if artifact is None:
+                raise ProviderLedgerError(
+                    "provider-native evidence artifact is absent from current manifest"
+                )
+            if (
+                source_row.get("sha256") != artifact.sha256
+                or source_row.get("size_bytes") != artifact.size_bytes
+            ):
+                raise ProviderLedgerError(
+                    "provider-native evidence provider artifact identity differs"
+                )
+            bound_artifact_count += 1
+        if bound_artifact_count == 0:
+            raise ProviderLedgerError(
+                "provider-native strategy evidence lacks a current manifest artifact"
+            )
+
+
 def _account_live_returns_within_funded_boundaries(
     rows: Sequence[Mapping[str, Any]],
     boundaries: Mapping[str, tuple[date, date]],
@@ -1880,10 +1955,19 @@ def _merge_account_returns(
     source_rows: Sequence[Mapping[str, Any]],
     broker_rows: Sequence[Mapping[str, Any]],
     strategy_names: Mapping[str, str],
+    *,
+    provider_native_strategy_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """Append newer broker observations without rewriting accepted history."""
+    """Apply the contract-selected account-return authority for each strategy."""
 
-    result = [dict(item) for item in source_rows]
+    result = [
+        dict(item)
+        for item in source_rows
+        if not (
+            item.get("evidence_layer") == "ACCOUNT_LIVE"
+            and str(item.get("strategy_id")) in provider_native_strategy_ids
+        )
+    ]
     last_source: dict[str, str] = {}
     for row in result:
         if row.get("evidence_layer") == "ACCOUNT_LIVE":
@@ -1893,7 +1977,10 @@ def _merge_account_returns(
             )
     for broker_row in broker_rows:
         strategy_id = str(broker_row["strategy_id"])
-        if str(broker_row["date"]) <= last_source.get(strategy_id, ""):
+        if (
+            strategy_id not in provider_native_strategy_ids
+            and str(broker_row["date"]) <= last_source.get(strategy_id, "")
+        ):
             continue
         result.append(
             {
@@ -1915,8 +2002,10 @@ def _merge_account_returns(
 def _strategy_return_overlap_checks(
     source_rows: Sequence[Mapping[str, Any]],
     broker_rows: Sequence[Mapping[str, Any]],
+    *,
+    provider_native_strategy_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
-    """Retain explicit parity evidence for broker observations not rolled forward."""
+    """Retain explicit parity evidence and state which overlapping path won."""
 
     tolerance = Decimal("0.000001")
     source = {
@@ -1950,12 +2039,19 @@ def _strategy_return_overlap_checks(
         rows.append(
             {
                 "adjudication": (
-                    "METHOD_AND_FLOW_BOUNDARY_VARIANCE; accepted tracker account "
-                    "path retains its correction set; broker NAV path is retained "
-                    "as reconciliation evidence and rollforward input only"
+                    "CONTRACT_SELECTED_PROVIDER_GENERATION; retained tracker path "
+                    "is comparison evidence only"
+                    if strategy_id in provider_native_strategy_ids
+                    else "METHOD_AND_FLOW_BOUNDARY_VARIANCE; accepted tracker "
+                    "account path retains its correction set; broker NAV path is "
+                    "retained as reconciliation evidence and rollforward input only"
                 ),
                 "authority_effect": (
-                    "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
+                    "CURRENT_PROVIDER_ACCOUNT_PATH_PROMOTED; "
+                    "RETAINED_ACCOUNT_PATH_SUPERSEDED"
+                    if strategy_id in provider_native_strategy_ids
+                    else "INHERITED_ACCOUNT_PATH_RETAINED; "
+                    "BROKER_OVERLAP_NOT_PROMOTED"
                 ),
                 "blocking": False,
                 "check_id": f"strategy-return-overlap-{strategy_id}",
@@ -3211,6 +3307,14 @@ def build_catalog(
         source_strategy_returns,
         declared_nav_gaps,
     )
+    provider_native_strategy_ids = _provider_native_account_return_strategy_ids(
+        _object(authority.get("contract"), "financial MVP contract")
+    )
+    _validate_provider_native_strategy_evidence(
+        evidence_rows,
+        provider_native_strategy_ids,
+        manifests,
+    )
     strategy_names = {
         _text(item.get("strategy_id"), "strategy_id"): _text(
             item.get("name"), "strategy.name"
@@ -3256,16 +3360,44 @@ def build_catalog(
         declared_nav_gap_dates_by_provider=declared_nav_gaps,
     )
     strategy_returns = _merge_account_returns(
-        source_strategy_returns, broker_returns, strategy_names
+        source_strategy_returns,
+        broker_returns,
+        strategy_names,
+        provider_native_strategy_ids=provider_native_strategy_ids,
+    )
+    funded_boundaries = _funded_account_live_boundaries(
+        _object(authority.get("contract"), "financial MVP contract")
+    )
+    eligible_source_strategy_returns = _account_live_returns_within_funded_boundaries(
+        source_strategy_returns,
+        funded_boundaries,
     )
     strategy_returns = _account_live_returns_within_funded_boundaries(
         strategy_returns,
-        _funded_account_live_boundaries(
-            _object(authority.get("contract"), "financial MVP contract")
-        ),
+        funded_boundaries,
+    )
+    superseded_retained_return_count = sum(
+        row.get("evidence_layer") == "ACCOUNT_LIVE"
+        and str(row.get("strategy_id")) in provider_native_strategy_ids
+        for row in eligible_source_strategy_returns
+    )
+    promoted_provider_return_count = sum(
+        row.get("evidence_layer") == "ACCOUNT_LIVE"
+        and str(row.get("strategy_id")) in provider_native_strategy_ids
+        for row in strategy_returns
+    )
+    retained_source_return_count = (
+        len(eligible_source_strategy_returns) - superseded_retained_return_count
+    )
+    appended_broker_return_count = (
+        len(strategy_returns)
+        - retained_source_return_count
+        - promoted_provider_return_count
     )
     overlap_checks = _strategy_return_overlap_checks(
-        source_strategy_returns, broker_returns
+        source_strategy_returns,
+        broker_returns,
+        provider_native_strategy_ids=provider_native_strategy_ids,
     )
     provider_strategy_returns = _portfolio123_provider_returns(
         _object(spec["providers"], "providers")["portfolio123"],
@@ -3361,10 +3493,13 @@ def build_catalog(
                 "status": "PASS",
             },
             {
-                "appended_broker_return_count": len(strategy_returns)
-                - len(source_strategy_returns),
+                "appended_broker_return_count": appended_broker_return_count,
                 "check_id": "broker-nav-rollforward",
+                "promoted_provider_return_count": promoted_provider_return_count,
                 "status": "PASS",
+                "superseded_retained_return_count": (
+                    superseded_retained_return_count
+                ),
             },
             *overlap_checks,
         ],
