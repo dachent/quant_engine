@@ -194,7 +194,7 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
     )
     manifest = GenerationManifest.build(
         as_of_date=builder.date.fromisoformat("2026-08-03"),
-        adapter=AdapterIdentity("quant-engine-provider-ledger", "3"),
+        adapter=AdapterIdentity("quant-engine-provider-ledger", "4"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="synthetic provider ledger",

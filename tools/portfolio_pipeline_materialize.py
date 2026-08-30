@@ -675,7 +675,7 @@ def _provider_admission_authority(
         manifest.generation_id != generation.name
         or manifest.verification is not VerificationStatus.VERIFIED
         or manifest.adapter.name != "quant-engine-provider-ledger"
-        or manifest.adapter.version != "2"
+        or manifest.adapter.version != "4"
     ):
         raise MaterializationError("provider ledger manifest authority differs")
     receipt_bytes = _manifest_artifact_bytes(
