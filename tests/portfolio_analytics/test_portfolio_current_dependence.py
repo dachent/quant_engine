@@ -850,7 +850,7 @@ def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
         "manifest_sha256": "b7fda826a4ad224352e1690d44d4579ee0841a5b5c0b5c4e0fc1c7111c9c7a11",
     }
     assert receipt["history_authority"]["generation_id"] == (
-        "3f6ec84036e995aef4ddcf564f3d6c91738641e13c062c5310beef482cdfc375"
+        "ec89d75223d2bc382af99ac035dd26098bf049e15e7b00ced80370cf82135730"
     )
 
 
