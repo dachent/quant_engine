@@ -611,10 +611,11 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
-    # Digest binds the gap-safe provider ledger and reconciled Robuxio segment
-    # while retaining the corrected P123 inputs and deprecated Echo boundary.
+    # Digest binds the gap-safe, funded-boundary provider ledger and reconciled
+    # Robuxio segment while retaining the corrected P123 inputs and deprecated
+    # Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "c8c5f7b655db0b64143ced54024da418bb9c65d1e154112f033461be98576492"
+        "2b44fc47536bd7e4be3c26d17e52eb20adecfda736b77ab7093f83979c52e874"
     )
 
 
@@ -2859,7 +2860,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "9f36b3ed679776a72b65f1b7ad0da628031a1f809353cd884b57183db86bf102"
+        "0bfa870f45e16c82ba2e58c4aed6af644e1fb8615706c82beac33c994558afb9"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -2896,7 +2897,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
         ).hexdigest() == (
-            "9f36b3ed679776a72b65f1b7ad0da628031a1f809353cd884b57183db86bf102"
+            "0bfa870f45e16c82ba2e58c4aed6af644e1fb8615706c82beac33c994558afb9"
         )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
