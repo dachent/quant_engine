@@ -925,7 +925,7 @@ def _restore_retained_echo_correction(contract: dict[str, Any]) -> None:
 def synthetic_history_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     """Opt-in parser for producer fixtures, deliberately separate from contract QC."""
 
-    def parse(path: Path) -> tuple[
+    def parse(path: Path, _repository_sha: str | None = None) -> tuple[
         dict[str, Any],
         dict[str, dict[str, Any]],
         dict[str, dict[str, Any]],
@@ -2289,10 +2289,67 @@ def test_layered_history_rejects_repository_dependency_outside_head(
     monkeypatch.setattr(
         target_series,
         "_committed_layered_history_dependency_sha256s",
-        lambda: committed,
+        lambda repository_sha=None: committed,
     )
     with pytest.raises(TargetSeriesError, match="repository dependency differs"):
         target_series._require_trusted_layered_history_dependencies()
+
+
+def test_layered_history_verification_accepts_recorded_commit_only_when_dependencies_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
+) -> None:
+    """A later unrelated HEAD does not invalidate a history with unchanged dependencies."""
+
+    fixture = _history_fixture(tmp_path)
+    artifacts, manifest_content = _build(fixture)
+    recorded_repository_sha = "a" * 40
+    current_repository_sha = "b" * 40
+    current_tool_sha256 = hashlib.sha256(
+        (ROOT / "tools" / "portfolio_target_series.py").read_bytes()
+    ).hexdigest()
+    matching_dependencies = {
+        relative_path: hashlib.sha256(
+            ROOT.joinpath(*relative_path.split("/")).read_bytes()
+        ).hexdigest()
+        for relative_path in target_series.LAYERED_HISTORY_REPOSITORY_DEPENDENCIES
+    }
+    rewritten = json.loads(manifest_content)
+    rewritten["repository_sha"] = recorded_repository_sha
+    rewritten_content = _reidentify_manifest(rewritten)
+
+    monkeypatch.setattr(
+        target_series,
+        "_trusted_layered_history_code_identity",
+        lambda: (current_repository_sha, current_tool_sha256),
+    )
+    monkeypatch.setattr(
+        target_series,
+        "_committed_layered_history_dependency_sha256s",
+        lambda repository_sha: matching_dependencies,
+    )
+
+    assert validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=rewritten_content,
+        contract_path=fixture["contract_path"],
+    )["verification"] == "VALID"
+    target_series._require_trusted_layered_history_dependencies(
+        recorded_repository_sha
+    )
+
+    mismatched_dependencies = dict(matching_dependencies)
+    mismatched_dependencies["tools/portfolio_financial_mvp_contract.py"] = "0" * 64
+    monkeypatch.setattr(
+        target_series,
+        "_committed_layered_history_dependency_sha256s",
+        lambda repository_sha: mismatched_dependencies,
+    )
+    with pytest.raises(TargetSeriesError, match="repository dependency differs"):
+        target_series._require_trusted_layered_history_dependencies(
+            recorded_repository_sha
+        )
 
 
 def test_layered_history_rejects_dynamic_validator_with_different_core(

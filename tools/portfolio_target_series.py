@@ -212,10 +212,13 @@ def _trusted_layered_history_code_identity() -> tuple[str, str]:
     return repository_sha, tool_sha256
 
 
-@lru_cache(maxsize=1)
-def _committed_layered_history_dependency_sha256s() -> dict[str, str]:
+@lru_cache(maxsize=16)
+def _committed_layered_history_dependency_sha256s(
+    repository_sha: str | None = None,
+) -> dict[str, str]:
     repository_root = Path(__file__).resolve().parents[1]
-    repository_sha, _tool_sha256 = _trusted_layered_history_code_identity()
+    if repository_sha is None:
+        repository_sha, _tool_sha256 = _trusted_layered_history_code_identity()
     identities: dict[str, str] = {}
     for relative_path in LAYERED_HISTORY_REPOSITORY_DEPENDENCIES:
         try:
@@ -244,9 +247,11 @@ def _committed_layered_history_dependency_sha256s() -> dict[str, str]:
     return identities
 
 
-def _require_trusted_layered_history_dependencies() -> None:
+def _require_trusted_layered_history_dependencies(
+    repository_sha: str | None = None,
+) -> None:
     repository_root = Path(__file__).resolve().parents[1]
-    expected = _committed_layered_history_dependency_sha256s()
+    expected = _committed_layered_history_dependency_sha256s(repository_sha)
     for relative_path, expected_sha256 in expected.items():
         path = repository_root.joinpath(*relative_path.split("/"))
         if (
@@ -1976,13 +1981,14 @@ def _artifact_identity(
 
 def _history_contract(
     path: Path,
+    repository_sha: str | None = None,
 ) -> tuple[
     dict[str, Any],
     dict[str, dict[str, Any]],
     dict[str, dict[str, Any]],
     dict[str, dict[str, Any]],
 ]:
-    _require_trusted_layered_history_dependencies()
+    _require_trusted_layered_history_dependencies(repository_sha)
     validator_path = Path(__file__).with_name("portfolio_financial_mvp_contract.py")
     spec = importlib.util.spec_from_file_location(
         "_portfolio_financial_mvp_contract_for_history", validator_path
@@ -2001,7 +2007,9 @@ def _history_contract(
             if callable(validator_canonical_json_bytes)
             else None
         )
-        committed_core_sha256 = _committed_layered_history_dependency_sha256s()[
+        committed_core_sha256 = _committed_layered_history_dependency_sha256s(
+            repository_sha
+        )[
             "packages/core/src/quant_engine/core/contracts.py"
         ]
         if (
@@ -4352,13 +4360,15 @@ def validate_layered_history_generation(
         or any(ch not in "0123456789abcdef" for ch in tool_sha256)
     ):
         raise TargetSeriesError("layered history code identity differs")
-    trusted_repository_sha, trusted_tool_sha256 = (
+    _trusted_repository_sha, trusted_tool_sha256 = (
         _trusted_layered_history_code_identity()
     )
-    if repository_sha != trusted_repository_sha or tool_sha256 != trusted_tool_sha256:
+    if tool_sha256 != trusted_tool_sha256:
         raise TargetSeriesError("layered history code identity is not trusted")
 
-    contract, strategies, sources, corrections = _history_contract(contract_path)
+    contract, strategies, sources, corrections = _history_contract(
+        contract_path, repository_sha
+    )
     product = manifest.get("product")
     if (
         not isinstance(product, dict)
