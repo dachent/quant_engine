@@ -85,6 +85,40 @@ def _manifest(
     )
 
 
+def _provider_ledger_manifest(
+    path: Path, as_of: str, artifacts: list[dict[str, object]]
+) -> str:
+    """Write a raw core-generation envelope for a provider-ledger input."""
+
+    manifest = {
+        "adapter": {"name": "quant-engine-provider-ledger", "version": "1.0.0"},
+        "artifacts": [
+            {
+                "artifact_id": artifact["artifact_id"],
+                "as_of_date": as_of,
+                "schema": {"name": "provider-ledger-catalog", "version": "1"},
+                "sha256": artifact["sha256"],
+                "size_bytes": artifact["size_bytes"],
+            }
+            for artifact in artifacts
+        ],
+        "as_of_date": as_of,
+        "coverage": {
+            "boundary": "synthetic provider-ledger fixture",
+            "fact_types": ["strategy_returns"],
+            "known_gaps": [],
+            "observed_end": as_of,
+            "observed_start": as_of,
+            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        },
+        "manifest_schema_version": 1,
+        "verification": "VERIFIED",
+    }
+    generation_id = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
+    _write_json(path, {"generation_id": generation_id, **manifest})
+    return generation_id
+
+
 def _pointer(path: Path, generation_id: str, manifest_path: Path) -> None:
     source_name = {
         "ledger": "provider-ledger",
@@ -108,6 +142,96 @@ def _pointer(path: Path, generation_id: str, manifest_path: Path) -> None:
             "state": "PUBLISHED",
         },
     )
+
+
+def test_immutable_provider_ledger_manifest_accepts_core_generation_envelope(
+    tmp_path: Path,
+) -> None:
+    """Accept the real provider-ledger envelope, not the catalog-style fixture."""
+
+    manifest = {
+        "adapter": {"name": "quant-engine-provider-ledger", "version": "1.0.0"},
+        "artifacts": [
+            {
+                "artifact_id": "normalized/provider-ledger.json",
+                "as_of_date": "2026-08-13",
+                "schema": {"name": "provider-ledger-catalog", "version": "1"},
+                "sha256": "a" * 64,
+                "size_bytes": 123,
+            }
+        ],
+        "as_of_date": "2026-08-13",
+        "coverage": {
+            "boundary": "accepted provider-ledger facts",
+            "fact_types": ["nav_observations"],
+            "known_gaps": [],
+            "observed_end": "2026-08-13",
+            "observed_start": "2026-01-01",
+            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        },
+        "manifest_schema_version": 1,
+        "verification": "VERIFIED",
+    }
+
+    def write_pinned(value: dict[str, object]) -> tuple[Path, dict[str, object]]:
+        payload = copy.deepcopy(value)
+        payload["generation_id"] = hashlib.sha256(
+            canonical_json_bytes(payload)
+        ).hexdigest()
+        path = tmp_path / "generation.json"
+        _write_json(path, payload)
+        return path, {
+            "schema": {"name": "provider-ledger", "version": "1"},
+            "current_generation": {
+                "as_of": payload["as_of_date"],
+                "generation_id": payload["generation_id"],
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            },
+        }
+
+    path, source = write_pinned(manifest)
+    _accepted, generation_id, as_of = target_series._verified_immutable_generation(
+        manifest_path=path, source=source, name="provider ledger"
+    )
+    assert generation_id == source["current_generation"]["generation_id"]
+    assert as_of == "2026-08-13"
+
+    for field, value in (
+        ("generation_id", "0" * 64),
+        ("sha256", "0" * 64),
+        ("as_of", "2026-08-14"),
+    ):
+        mismatched_source = copy.deepcopy(source)
+        mismatched_source["current_generation"][field] = value
+        with pytest.raises(TargetSeriesError):
+            target_series._verified_immutable_generation(
+                manifest_path=path, source=mismatched_source, name="provider ledger"
+            )
+
+    for schema in (
+        {"name": "matrixport-generation-catalog", "version": "2"},
+        {"name": "quantbase-generation", "version": "1"},
+        {"name": "portfolio123-generation", "version": "1"},
+    ):
+        generic_source = copy.deepcopy(source)
+        generic_source["schema"] = schema
+        with pytest.raises(TargetSeriesError):
+            target_series._verified_immutable_generation(
+                manifest_path=path, source=generic_source, name="generic provider"
+            )
+
+    for mutation in (
+        {"verification": "PENDING"},
+        {"manifest_schema_version": 2},
+        {"adapter": {"name": "wrong-adapter", "version": "1.0.0"}},
+    ):
+        mutated = copy.deepcopy(manifest)
+        mutated.update(mutation)
+        path, source = write_pinned(mutated)
+        with pytest.raises(TargetSeriesError):
+            target_series._verified_immutable_generation(
+                manifest_path=path, source=source, name="provider ledger"
+            )
 
 
 def test_provider_ledger_inventory_binds_admission_receipt() -> None:
@@ -562,14 +686,13 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         },
     )
     ledger_manifest = tmp_path / "ledger" / "generation.json"
-    _manifest(
+    ledger_generation_id = _provider_ledger_manifest(
         ledger_manifest,
-        ids["ledger"],
         as_of,
         [_artifact(ledger_catalog, "normalized/provider-ledger.json")],
     )
     ledger_pointer = tmp_path / "ledger" / "CURRENT.json"
-    _pointer(ledger_pointer, ids["ledger"], ledger_manifest)
+    _pointer(ledger_pointer, ledger_generation_id, ledger_manifest)
 
     matrix_root = tmp_path / "matrixport"
     matrix_nav = matrix_root / "nav_daily.csv"
@@ -2012,11 +2135,11 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     qsi_row["return"] = "0.123456"
     _write_json(ledger_catalog_path, ledger_catalog)
     ledger_manifest_path = fixture["provider_ledger_manifest_path"]
-    ledger_manifest = json.loads(ledger_manifest_path.read_text(encoding="utf-8"))
-    ledger_manifest["artifacts"] = [
-        _artifact(ledger_catalog_path, "normalized/provider-ledger.json")
-    ]
-    _write_json(ledger_manifest_path, ledger_manifest)
+    _provider_ledger_manifest(
+        ledger_manifest_path,
+        fixture["as_of_date"],
+        [_artifact(ledger_catalog_path, "normalized/provider-ledger.json")],
+    )
     contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
     _update_source_generation(
         contract,
