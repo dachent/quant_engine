@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import csv
 from datetime import date, timedelta
-from decimal import Decimal, localcontext
+from decimal import Decimal, ROUND_DOWN, getcontext, localcontext
 import hashlib
 import importlib.util
 import io
@@ -2848,6 +2848,34 @@ def test_layered_history_uses_ledger_account_return_after_matrixport_reconciliat
         match="Matrixport account-live return differs from provider ledger",
     ):
         _build(fixture)
+
+
+def test_layered_matrixport_output_isolated_from_ambient_decimal_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
+) -> None:
+    """The selected Matrixport account path is stable under caller context changes."""
+
+    fixture = _history_fixture(tmp_path)
+    baseline_artifacts, baseline_manifest = _build(fixture)
+    original = target_series._matrixport_returns
+
+    def under_changed_context(*args: Any, **kwargs: Any):
+        original_context = getcontext().copy()
+        try:
+            getcontext().prec = 16
+            getcontext().rounding = ROUND_DOWN
+            return original(*args, **kwargs)
+        finally:
+            getcontext().prec = original_context.prec
+            getcontext().rounding = original_context.rounding
+
+    monkeypatch.setattr(target_series, "_matrixport_returns", under_changed_context)
+    isolated_artifacts, isolated_manifest = _build(fixture)
+
+    assert isolated_artifacts == baseline_artifacts
+    assert isolated_manifest == baseline_manifest
 
 
 def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage(

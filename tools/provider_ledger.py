@@ -13,7 +13,8 @@ import argparse
 from collections import defaultdict
 import csv
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from functools import wraps
 import hashlib
 import importlib.util
 import io
@@ -23,7 +24,7 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Any, Final, Mapping, Sequence
+from typing import Any, Callable, Final, Mapping, Sequence
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -2008,6 +2009,20 @@ def _observed_bounds(rows: Sequence[Mapping[str, Any]]) -> tuple[date, date]:
     return min(days), max(days)
 
 
+def _catalog_decimal_context(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Run provider-ledger catalog arithmetic under its fixed Decimal context."""
+
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with localcontext() as context:
+            context.prec = 28
+            context.rounding = ROUND_HALF_EVEN
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+@_catalog_decimal_context
 def _broker_strategy_returns(
     nav_rows: Sequence[Mapping[str, Any]],
     flow_rows: Sequence[Mapping[str, Any]],
@@ -3845,6 +3860,7 @@ def _admit_or_declare_receipt(
     return receipt, canonical_json_bytes(receipt)
 
 
+@_catalog_decimal_context
 def build_catalog(
     spec_path: Path,
 ) -> tuple[dict[str, Any], GenerationManifest, bytes, bytes]:

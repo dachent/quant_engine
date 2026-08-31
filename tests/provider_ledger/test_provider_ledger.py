@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, localcontext
 import importlib.util
 import json
 from pathlib import Path
@@ -1071,6 +1071,27 @@ def test_broker_returns_are_flow_adjusted_and_capital_weighted() -> None:
     assert rows[0]["beginning_capital"] == "400"
     assert len(rows[0]["account_reconciliation_sha256"]) == 64
     assert rows[0]["flow_timing"] == "DATE_ONLY_END_OF_DAY"
+
+
+def test_matrixport_catalog_returns_ignore_ambient_decimal_context() -> None:
+    """The provider-ledger return and composite stay at the canonical value."""
+
+    nav = [
+        {**_nav("a", "2026-01-01", "3", "a-1"), "provider_id": "matrixport"},
+        {**_nav("a", "2026-01-02", "4", "a-2"), "provider_id": "matrixport"},
+        {**_nav("b", "2026-01-01", "7", "b-1"), "provider_id": "matrixport"},
+        {**_nav("b", "2026-01-02", "8", "b-2"), "provider_id": "matrixport"},
+    ]
+
+    baseline = ledger._broker_strategy_returns(nav, [], {"matrixport"})
+    with localcontext() as context:
+        context.prec = 6
+        context.rounding = ROUND_DOWN
+        altered = ledger._broker_strategy_returns(nav, [], {"matrixport"})
+
+    expected = "0.200000000000000000000000000"
+    assert baseline[0]["return"] == expected
+    assert altered[0]["return"] == expected
 
 
 def test_ibkr_return_uses_nav_recognition_date_not_cash_event_date() -> None:

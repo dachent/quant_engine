@@ -14,8 +14,8 @@ import argparse
 import csv
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, localcontext
-from functools import lru_cache
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from functools import lru_cache, wraps
 import hashlib
 import importlib.util
 import inspect
@@ -27,7 +27,7 @@ from pathlib import Path
 import statistics
 import subprocess
 import sys
-from typing import Any, Collection, Final, Mapping, Sequence
+from typing import Any, Callable, Collection, Final, Mapping, Sequence
 
 from quant_engine.core.contracts import (
     GenerationManifest,
@@ -114,11 +114,30 @@ MATRIXPORT_RETURN_TRANSFORM_CAPABILITIES: Final = {
         }
     ),
 }
-# The retained Matrixport generation materialized account totals with Python's
-# 28-significant-digit Decimal context.  Multiplication into account value and
+# The retained Matrixport generation materialized account totals with this
+# 28-significant-digit Decimal context. Multiplication into account value and
 # the later return/composite divisions can each contribute one rounding unit.
 # Product-NAV returns therefore corroborate account returns within this strict
 # bound, while the admitted provider-ledger account return remains canonical.
+MATRIXPORT_DECIMAL_CONTEXT: Final = Context(
+    prec=28,
+    rounding=ROUND_HALF_EVEN,
+)
+
+
+def _with_matrixport_decimal_context(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Run one Matrixport calculation under its retained numeric context."""
+
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with localcontext(MATRIXPORT_DECIMAL_CONTEXT):
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
 MATRIXPORT_ACCOUNT_RETURN_RECONCILIATION_MAX_ERROR: Final = Decimal("2e-27")
 LAYERED_HISTORY_REPOSITORY_DEPENDENCIES: Final = (
     "docs/analytics/current-strategy-decomposition-plan.json",
@@ -750,6 +769,7 @@ def _matrixport_span_return_receipts(
     return receipts
 
 
+@_with_matrixport_decimal_context
 def _matrixport_epoch_hpr_receipt(
     *,
     returns: Sequence[Mapping[str, str]],
@@ -891,6 +911,7 @@ def _base_rows(
     )
 
 
+@_with_matrixport_decimal_context
 def _matrixport_returns(
     nav_path: Path,
     holdings_path: Path,
