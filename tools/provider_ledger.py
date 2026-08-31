@@ -2013,6 +2013,7 @@ def _broker_strategy_returns(
     flow_rows: Sequence[Mapping[str, Any]],
     authoritative_provider_ids: set[str],
     *,
+    capital_anchors: Sequence[Mapping[str, Any]] = (),
     declared_nav_gap_dates_by_provider: Mapping[str, frozenset[date]] | None = None,
 ) -> list[dict[str, Any]]:
     """Create flow-adjusted account-live returns from admitted broker NAV.
@@ -2106,9 +2107,101 @@ def _broker_strategy_returns(
             continue
         by_account[(provider_id, str(row["account_id"]))].append(row)
 
+    quantbase_anchor_adjustments: dict[tuple[str, str, str], Decimal] = defaultdict(
+        Decimal
+    )
+    quantbase_opening_dates: set[tuple[str, str, str]] = set()
+    quantbase_anchor_strategies: dict[tuple[str, str, str], str] = {}
+    quantbase_opening_accounts: set[tuple[str, str, str]] = set()
+    quantbase_allocation_accounts: set[tuple[str, str, str]] = set()
+    seen_quantbase_anchor_ids: set[str] = set()
+    for row in capital_anchors:
+        if row.get("provider_id") != "quantbase":
+            continue
+        if "quantbase" not in authoritative_provider_ids:
+            continue
+        record_id = _text(row.get("record_id"), "quantbase capital anchor record_id")
+        if record_id in seen_quantbase_anchor_ids:
+            raise ProviderLedgerError("duplicate quantbase capital anchor record_id")
+        seen_quantbase_anchor_ids.add(record_id)
+        account_id = _text(
+            row.get("account_id"), "quantbase capital anchor account_id"
+        )
+        strategy_id = _text(
+            row.get("strategy_id"), "quantbase capital anchor strategy_id"
+        )
+        if (
+            row.get("mapping_status") != "MAPPED"
+            or row.get("evidence_layer") != "ACCOUNT_LIVE"
+            or row.get("mapping_basis")
+            != "RECONCILED_PROVIDER_STRATEGY_CAPITAL"
+        ):
+            raise ProviderLedgerError("quantbase capital anchor mapping is unavailable")
+        event_day = _day(row.get("event_date"), "quantbase capital anchor event_date")
+        recognition_day = _day(
+            row.get("nav_recognition_date"),
+            "quantbase capital anchor nav_recognition_date",
+        )
+        if recognition_day < event_day:
+            raise ProviderLedgerError(
+                "quantbase capital anchor recognition precedes economic event"
+            )
+        amount = _object(row.get("amount"), "quantbase capital anchor amount")
+        if (
+            set(amount) != {"currency", "status", "value"}
+            or amount.get("currency") != "USD"
+        ):
+            raise ProviderLedgerError("quantbase capital anchor amount is invalid")
+        amount_value = _observed_decimal(amount, "quantbase capital anchor amount")
+        if amount_value is None or amount_value <= 0:
+            raise ProviderLedgerError("quantbase capital anchor amount is invalid")
+        capital_type = row.get("capital_type")
+        if capital_type not in {
+            "OPENING_CAPITAL_ANCHOR",
+            "STRATEGY_CAPITAL_ALLOCATION",
+        }:
+            raise ProviderLedgerError("quantbase capital anchor type is invalid")
+        account_strategy = ("quantbase", account_id, strategy_id)
+        anchor_key = ("quantbase", account_id, recognition_day.isoformat())
+        previous_strategy = quantbase_anchor_strategies.setdefault(anchor_key, strategy_id)
+        if previous_strategy != strategy_id:
+            raise ProviderLedgerError(
+                "quantbase capital anchors conflict at NAV recognition date"
+            )
+        if capital_type == "OPENING_CAPITAL_ANCHOR":
+            if account_strategy in quantbase_opening_accounts:
+                raise ProviderLedgerError("duplicate quantbase opening capital anchor")
+            quantbase_opening_accounts.add(account_strategy)
+            quantbase_opening_dates.add(anchor_key)
+        else:
+            quantbase_allocation_accounts.add(account_strategy)
+            quantbase_anchor_adjustments[anchor_key] += amount_value
+            flow_timing_by_provider["quantbase"].add(
+                "PROVIDER_NAV_RECOGNITION_DATE"
+            )
+
+    for account_strategy in quantbase_allocation_accounts:
+        if account_strategy not in quantbase_opening_accounts:
+            raise ProviderLedgerError(
+                "quantbase capital allocation lacks an opening capital anchor"
+            )
+    for (provider_id, account_id, recognition_day), strategy_id in (
+        quantbase_anchor_strategies.items()
+    ):
+        if not any(
+            str(row.get("as_of_date")) == recognition_day
+            and row.get("mapping_status") == "MAPPED"
+            and row.get("strategy_id") == strategy_id
+            for row in by_account.get((provider_id, account_id), [])
+        ):
+            raise ProviderLedgerError(
+                "quantbase capital anchor does not match a mapped recognized NAV"
+            )
+
     contributions: dict[
         tuple[str, str], list[tuple[Decimal, Decimal, str, str, str]]
     ] = defaultdict(list)
+    quantbase_return_paths: set[tuple[str, str, str]] = set()
     for (provider_id, account_id), rows in by_account.items():
         ordered = sorted(rows, key=lambda item: str(item["as_of_date"]))
         for previous, current in zip(ordered, ordered[1:]):
@@ -2133,11 +2226,19 @@ def _broker_strategy_returns(
             if prior_nav <= 0 or ending_nav < 0:
                 continue
             day = str(current["as_of_date"])
+            strategy_id = _text(current.get("strategy_id"), "strategy_id")
+            if provider_id == "quantbase":
+                quantbase_return_paths.add((provider_id, account_id, strategy_id))
+            anchor_key = (provider_id, account_id, day)
+            if anchor_key in quantbase_opening_dates:
+                # An opening anchor establishes the first funded NAV baseline;
+                # it is not a period cash flow and must not fabricate a return.
+                continue
             net_flow = flows.get((provider_id, account_id, day), Decimal(0))
+            net_flow += quantbase_anchor_adjustments.get(anchor_key, Decimal(0))
             period_return = (ending_nav - net_flow) / prior_nav - Decimal(1)
             if period_return <= -1:
                 raise ProviderLedgerError("flow-adjusted account return is invalid")
-            strategy_id = _text(current.get("strategy_id"), "strategy_id")
             contributions[(strategy_id, day)].append(
                 (
                     prior_nav,
@@ -2146,6 +2247,12 @@ def _broker_strategy_returns(
                     account_id,
                     str(current["record_id"]),
                 )
+            )
+
+    for return_path in quantbase_return_paths:
+        if return_path not in quantbase_opening_accounts:
+            raise ProviderLedgerError(
+                "quantbase mapped NAV lacks exactly one opening capital anchor"
             )
 
     result: list[dict[str, Any]] = []
@@ -3855,6 +3962,7 @@ def build_catalog(
         combined.get("nav_observations", []),
         combined.get("flows", []),
         authoritative_provider_ids,
+        capital_anchors=combined.get("capital_anchors", []),
         declared_nav_gap_dates_by_provider=declared_nav_gaps,
     )
     strategy_returns = _merge_account_returns(

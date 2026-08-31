@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from jsonschema import Draft202012Validator
 import pyarrow as pa
@@ -862,6 +862,187 @@ def _nav(account: str, day: str, value: str, record: str) -> dict[str, object]:
         "record_id": record,
         "strategy_id": "strategy-a",
     }
+
+
+def _quantbase_anchor(
+    account: str,
+    *,
+    amount: str,
+    event_date: str,
+    recognition_date: str,
+    record_id: str,
+    capital_type: str,
+) -> dict[str, object]:
+    return {
+        "account_id": account,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        "capital_type": capital_type,
+        "event_date": event_date,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
+        "mapping_status": "MAPPED",
+        "nav_recognition_date": recognition_date,
+        "provider_id": "quantbase",
+        "record_id": record_id,
+        "strategy_id": "strategy-a",
+    }
+
+
+def test_broker_returns_adjust_quantbase_allocation_at_nav_recognition_date() -> None:
+    """A later Volatis allocation is not performance or an external flow."""
+
+    nav = [
+        {**_nav("qb", "2026-01-01", "100", "qb-1"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-02", "110", "qb-2"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-03", "165", "qb-3"), "provider_id": "quantbase"},
+    ]
+    flows: list[dict[str, object]] = []
+    anchors = [
+        _quantbase_anchor(
+            "qb",
+            amount="100",
+            event_date="2026-01-01",
+            recognition_date="2026-01-01",
+            record_id="qb-opening",
+            capital_type="OPENING_CAPITAL_ANCHOR",
+        ),
+        _quantbase_anchor(
+            "qb",
+            amount="50",
+            event_date="2026-01-02",
+            recognition_date="2026-01-03",
+            record_id="qb-allocation",
+            capital_type="STRATEGY_CAPITAL_ALLOCATION",
+        ),
+    ]
+
+    rows = ledger._broker_strategy_returns(
+        nav,
+        flows,
+        {"quantbase"},
+        capital_anchors=anchors,
+    )
+
+    assert flows == []
+    assert anchors[1]["capital_type"] == "STRATEGY_CAPITAL_ALLOCATION"
+    assert [(row["date"], row["return"]) for row in rows] == [
+        ("2026-01-02", "0.1"),
+        # (165 - 50) / 110 - 1: the raw 50% NAV jump is a capital allocation.
+        ("2026-01-03", "0.045454545454545454545454545"),
+    ]
+    assert {row["flow_timing"] for row in rows} == {
+        "PROVIDER_NAV_RECOGNITION_DATE"
+    }
+
+
+def test_broker_returns_reject_quantbase_nav_without_opening_anchor() -> None:
+    """Mapped Quantbase NAV cannot silently become a raw-return series."""
+
+    nav = [
+        {**_nav("qb", "2026-01-01", "100", "qb-1"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-02", "110", "qb-2"), "provider_id": "quantbase"},
+    ]
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="quantbase mapped NAV lacks exactly one opening capital anchor",
+    ):
+        ledger._broker_strategy_returns(
+            nav,
+            [],
+            {"quantbase"},
+            capital_anchors=[],
+        )
+
+
+def test_broker_returns_ignore_foreign_anchors_and_reject_duplicate_quantbase_anchor() -> None:
+    nav = [
+        {**_nav("qb", "2026-01-01", "100", "qb-1"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-02", "110", "qb-2"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-03", "165", "qb-3"), "provider_id": "quantbase"},
+    ]
+    opening = _quantbase_anchor(
+        "qb",
+        amount="100",
+        event_date="2026-01-01",
+        recognition_date="2026-01-01",
+        record_id="qb-opening",
+        capital_type="OPENING_CAPITAL_ANCHOR",
+    )
+    allocation = _quantbase_anchor(
+        "qb",
+        amount="50",
+        event_date="2026-01-02",
+        recognition_date="2026-01-03",
+        record_id="qb-allocation",
+        capital_type="STRATEGY_CAPITAL_ALLOCATION",
+    )
+    foreign = {
+        **allocation,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "10000"},
+        "provider_id": "matrixport",
+        "record_id": "matrix-only",
+    }
+
+    rows = ledger._broker_strategy_returns(
+        nav,
+        [],
+        {"quantbase"},
+        capital_anchors=[opening, allocation, foreign],
+    )
+
+    assert rows[-1]["return"] == "0.045454545454545454545454545"
+    with pytest.raises(ledger.ProviderLedgerError, match="duplicate quantbase capital anchor"):
+        ledger._broker_strategy_returns(
+            nav,
+            [],
+            {"quantbase"},
+            capital_anchors=[opening, allocation, dict(allocation)],
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda row: row.pop("amount"), "quantbase capital anchor amount"),
+        (
+            lambda row: row.pop("nav_recognition_date"),
+            "quantbase capital anchor nav_recognition_date",
+        ),
+        (
+            lambda row: row.__setitem__("account_id", ""),
+            "quantbase capital anchor account_id",
+        ),
+        (
+            lambda row: row.__setitem__("mapping_status", "UNMAPPED"),
+            "quantbase capital anchor mapping is unavailable",
+        ),
+    ],
+)
+def test_broker_returns_fail_closed_on_malformed_quantbase_anchor(
+    mutate: Callable[[dict[str, object]], None], message: str
+) -> None:
+    nav = [
+        {**_nav("qb", "2026-01-01", "100", "qb-1"), "provider_id": "quantbase"},
+        {**_nav("qb", "2026-01-02", "110", "qb-2"), "provider_id": "quantbase"},
+    ]
+    anchor = _quantbase_anchor(
+        "qb",
+        amount="100",
+        event_date="2026-01-01",
+        recognition_date="2026-01-01",
+        record_id="qb-opening",
+        capital_type="OPENING_CAPITAL_ANCHOR",
+    )
+    mutate(anchor)
+
+    with pytest.raises(ledger.ProviderLedgerError, match=message):
+        ledger._broker_strategy_returns(
+            nav,
+            [],
+            {"quantbase"},
+            capital_anchors=[anchor],
+        )
 
 
 def test_broker_returns_are_flow_adjusted_and_capital_weighted() -> None:
