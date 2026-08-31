@@ -45,6 +45,10 @@ PREWIRE_MANIFEST_SHA256 = (
 PREWIRE_REPORT_SHA256 = (
     "eee8288e0f9ac185d75cf3c7d36947cf1521bf0561e39d178649ba69b865829e"
 )
+PREWIRE_CROSSWALK_BYTES = b'{"calculation_cutoff_date":"2026-08-13","rows":[]}\n'
+PREWIRE_CROSSWALK_SHA256 = (
+    "99f66243702f5a30df36bc3adc40d358d227c5f8cf6db968e4ac0165258f789a"
+)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows path contract")
@@ -121,6 +125,63 @@ def _stage_verified_epoch_generation(
         },
     )
     return manifest, read_generation_bundle(root, manifest.generation_id)
+
+
+def _stage_verified_epoch_generation_with_crosswalk(
+    root: Path,
+) -> GenerationManifest:
+    """Create a verified bundle with independently fixed epoch inputs."""
+
+    as_of = builder.date.fromisoformat("2026-08-24")
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-epoch-triplet", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic report epoch triplet",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="outputs/account-strategy-manifest.json",
+                sha256=PREWIRE_MANIFEST_SHA256,
+                size_bytes=len(PREWIRE_MANIFEST_BYTES),
+                as_of_date=as_of,
+                schema_name="account-strategy-manifest",
+                schema_version="9",
+            ),
+            SourceArtifact(
+                artifact_id="authority/account-assignment-crosswalk.json",
+                sha256=PREWIRE_CROSSWALK_SHA256,
+                size_bytes=len(PREWIRE_CROSSWALK_BYTES),
+                as_of_date=as_of,
+                schema_name="account-strategy-current-epoch-crosswalk",
+                schema_version="1",
+            ),
+            SourceArtifact(
+                artifact_id="verification/independent-verification.json",
+                sha256=PREWIRE_REPORT_SHA256,
+                size_bytes=len(PREWIRE_REPORT_BYTES),
+                as_of_date=as_of,
+                schema_name="independent-verification",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        root,
+        manifest,
+        {
+            "outputs/account-strategy-manifest.json": PREWIRE_MANIFEST_BYTES,
+            "authority/account-assignment-crosswalk.json": PREWIRE_CROSSWALK_BYTES,
+            "verification/independent-verification.json": PREWIRE_REPORT_BYTES,
+        },
+    )
+    return manifest
 
 
 def _real_financial_contract_module() -> object:
@@ -3655,7 +3716,14 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     generation_root = tmp_path / "accepted"
-    manifest, _bundle = _stage_verified_epoch_generation(generation_root)
+    manifest = _stage_verified_epoch_generation_with_crosswalk(generation_root)
+
+    class SourceBinder:
+        @staticmethod
+        def epoch_manifest_source_from_bundle(_bundle: object) -> dict[str, object]:
+            return _LITERAL_EPOCH_MANIFEST_SOURCE
+
+    monkeypatch.setattr(builder, "_financial_mvp_module", lambda: SourceBinder)
     candidate = tmp_path / "report-candidate"
     candidate.mkdir()
     runtime = tmp_path / "xlsx-runtime.exe"
@@ -3706,10 +3774,12 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
 
     manifest_path = candidate / "account-strategy-manifest.json"
     source_path = candidate / "epoch-manifest-source.json"
+    crosswalk_path = candidate / "account-strategy-current-epoch-crosswalk.json"
     assert manifest_path.read_bytes() == PREWIRE_MANIFEST_BYTES
     assert json.loads(source_path.read_text(encoding="utf-8")) == (
         _LITERAL_EPOCH_MANIFEST_SOURCE
     )
+    assert crosswalk_path.read_bytes() == PREWIRE_CROSSWALK_BYTES
     for call in (
         call
         for call in calls
@@ -3718,16 +3788,65 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
     ):
         assert call[call.index("--epoch-manifest") + 1] == str(manifest_path)
         assert call[call.index("--epoch-manifest-source") + 1] == str(source_path)
-    publish_call = next(
-        call
-        for call in calls
-        if call[0] == "portfolio_report.py" and call[1] == "publish"
-    )
-    assert publish_call[
-        publish_call.index("--epoch-manifest-generation-root") + 1
-    ] == str(generation_root)
+        assert call[call.index("--epoch-crosswalk") + 1] == str(crosswalk_path)
+        assert call[
+            call.index("--epoch-manifest-generation-root") + 1
+        ] == str(generation_root)
     assert result["epoch_manifest_generation_id"] == manifest.generation_id
     assert result["epoch_manifest_artifact"]["sha256"] == PREWIRE_MANIFEST_SHA256
+
+
+def test_report_candidate_stages_verified_epoch_triplet_for_report_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping one epoch input would make a governed report unverifiable."""
+
+    generation_root = tmp_path / "accepted"
+    manifest = _stage_verified_epoch_generation_with_crosswalk(generation_root)
+
+    class SourceBinder:
+        @staticmethod
+        def epoch_manifest_source_from_bundle(_bundle: object) -> dict[str, object]:
+            return _LITERAL_EPOCH_MANIFEST_SOURCE
+
+    monkeypatch.setattr(builder, "_financial_mvp_module", lambda: SourceBinder)
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        return {"candidate_dir": str(tmp_path / "report-output" / "candidate")}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    output_root = tmp_path / "report-output"
+    result = builder.build_report_candidate(
+        tmp_path / "baseline",
+        tmp_path / "ledger",
+        tmp_path / "freshness.json",
+        tmp_path / "history.json",
+        tmp_path / "implementation.json",
+        tmp_path / "return-attribution.json",
+        tmp_path / "attribution",
+        output_root,
+        tmp_path / "correlation",
+        epoch_manifest_generation_root=generation_root,
+        epoch_manifest_generation_id=manifest.generation_id,
+    )
+
+    manifest_path = output_root / "account-strategy-manifest.json"
+    source_path = output_root / "epoch-manifest-source.json"
+    crosswalk_path = output_root / "account-strategy-current-epoch-crosswalk.json"
+    assert manifest_path.read_bytes() == PREWIRE_MANIFEST_BYTES
+    assert source_path.read_bytes() == canonical_json_bytes(_LITERAL_EPOCH_MANIFEST_SOURCE)
+    assert crosswalk_path.read_bytes() == PREWIRE_CROSSWALK_BYTES
+    build_call = calls[0]
+    assert build_call[0:2] == ("portfolio_report.py", "build")
+    assert build_call[build_call.index("--epoch-manifest") + 1] == str(manifest_path)
+    assert build_call[build_call.index("--epoch-manifest-source") + 1] == str(source_path)
+    assert build_call[build_call.index("--epoch-crosswalk") + 1] == str(crosswalk_path)
+    assert build_call[
+        build_call.index("--epoch-manifest-generation-root") + 1
+    ] == str(generation_root)
+    assert result["candidate_dir"] == str(output_root / "candidate")
 
 
 def test_report_wrapper_omits_unavailable_optional_attribution_input(
@@ -3793,10 +3912,10 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
     assert built["generation_id"] == "f" * 64
 
 
-def test_build_report_routes_schema10_epoch_binding_only_to_workbook(
+def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The wrapper must not send workbook-only authority into candidate build."""
+    """The wrapper keeps the same epoch authority through both report stages."""
 
     candidate = tmp_path / "candidate"
     calls: dict[str, object] = {}
@@ -3829,11 +3948,12 @@ def test_build_report_routes_schema10_epoch_binding_only_to_workbook(
     )
 
     assert result == {"generation_id": "a" * 64}
-    assert calls["candidate_kwargs"] == {}
-    assert calls["workbook_kwargs"] == {
+    expected_epoch = {
         "epoch_manifest_generation_root": generation_root,
         "epoch_manifest_generation_id": "b" * 64,
     }
+    assert calls["candidate_kwargs"] == expected_epoch
+    assert calls["workbook_kwargs"] == expected_epoch
 
 
 def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(

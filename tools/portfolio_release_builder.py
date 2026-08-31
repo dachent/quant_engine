@@ -3845,7 +3845,36 @@ def build_report_candidate(
     attribution_root: Path | None,
     output_root: Path,
     correlation_root: Path | None = None,
+    *,
+    epoch_manifest_generation_root: Path | None = None,
+    epoch_manifest_generation_id: str | None = None,
 ) -> dict[str, Any]:
+    if (epoch_manifest_generation_root is None) != (
+        epoch_manifest_generation_id is None
+    ):
+        raise VerticalBuildError(
+            "epoch-manifest generation root and id must be supplied together"
+        )
+    epoch_arguments: tuple[str, ...] = ()
+    if epoch_manifest_generation_root is not None:
+        assert epoch_manifest_generation_id is not None
+        epoch_manifest_path, epoch_source_path, epoch_crosswalk_path, _source, _identity = (
+            _stage_verified_epoch_manifest_triplet_bundle(
+                epoch_manifest_generation_root,
+                epoch_manifest_generation_id,
+                output_root,
+            )
+        )
+        epoch_arguments = (
+            "--epoch-manifest",
+            str(epoch_manifest_path),
+            "--epoch-manifest-source",
+            str(epoch_source_path),
+            "--epoch-crosswalk",
+            str(epoch_crosswalk_path),
+            "--epoch-manifest-generation-root",
+            str(epoch_manifest_generation_root),
+        )
     built = _tool(
         "portfolio_report.py",
         "build",
@@ -3871,6 +3900,7 @@ def build_report_candidate(
             if correlation_root is not None
             else ()
         ),
+        *epoch_arguments,
         "--output-root",
         str(output_root),
         timeout=7200,
@@ -3905,29 +3935,27 @@ def build_workbook(
     epoch_manifest_identity: dict[str, object] | None = None
     if epoch_manifest_generation_root is not None:
         assert epoch_manifest_generation_id is not None
-        epoch_source, epoch_payload = _verified_epoch_manifest_bundle_payload(
-            epoch_manifest_generation_root, epoch_manifest_generation_id
+        (
+            epoch_manifest_path,
+            epoch_source_path,
+            epoch_crosswalk_path,
+            epoch_source,
+            epoch_manifest_identity,
+        ) = _stage_verified_epoch_manifest_triplet_bundle(
+            epoch_manifest_generation_root,
+            epoch_manifest_generation_id,
+            candidate,
         )
-        epoch_manifest_path = candidate / "account-strategy-manifest.json"
-        epoch_source_path = candidate / "epoch-manifest-source.json"
-        _write_exact(epoch_manifest_path, epoch_payload)
-        _write_exact(epoch_source_path, canonical_json_bytes(epoch_source))
-        epoch_manifest_identity = _file_definition(epoch_manifest_path)
         epoch_arguments = (
             "--epoch-manifest",
             str(epoch_manifest_path),
             "--epoch-manifest-source",
             str(epoch_source_path),
-        )
-    epoch_publish_arguments = (
-        (
-            *epoch_arguments,
+            "--epoch-crosswalk",
+            str(epoch_crosswalk_path),
             "--epoch-manifest-generation-root",
             str(epoch_manifest_generation_root),
         )
-        if epoch_manifest_generation_root is not None
-        else ()
-    )
     if not XLSX_RUNTIME.is_file() or not XLSX_CLI.is_file():
         raise VerticalBuildError("xlsx-win durable runtime is unavailable")
     result_path = candidate / "xlsx-result.json"
@@ -4069,7 +4097,7 @@ def build_workbook(
             if correlation_root is not None
             else ()
         ),
-        *epoch_publish_arguments,
+        *epoch_arguments,
         timeout=7200,
     )
     generation_id = _generation_id(
@@ -4125,6 +4153,8 @@ def build_report(
         attribution_root,
         output_root,
         correlation_root,
+        epoch_manifest_generation_root=epoch_manifest_generation_root,
+        epoch_manifest_generation_id=epoch_manifest_generation_id,
     )
     return build_workbook(
         baseline_root,
@@ -4230,6 +4260,57 @@ def _stage_verified_epoch_manifest_bundle(
     staged = output_root / "account-strategy-manifest.json"
     _write_exact(staged, payload)
     return staged, source, _file_definition(staged)
+
+
+def _stage_verified_epoch_manifest_triplet_bundle(
+    generation_root: Path,
+    generation_id: str,
+    output_root: Path,
+) -> tuple[Path, Path, Path, dict[str, object], dict[str, object]]:
+    """Verify one epoch bundle and stage its complete report input triplet."""
+
+    try:
+        bundle = read_generation_bundle(generation_root, generation_id)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise VerticalBuildError(
+            "epoch-manifest generation bundle verification failed"
+        ) from exc
+    try:
+        source = _financial_mvp_module().epoch_manifest_source_from_bundle(bundle)
+        manifest_payload = bundle.payloads["outputs/account-strategy-manifest.json"]
+        crosswalk_payload = bundle.payloads[
+            "authority/account-assignment-crosswalk.json"
+        ]
+    except VerticalBuildError:
+        raise
+    except (
+        AttributeError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise VerticalBuildError("epoch-manifest bundle binding failed") from exc
+    if (
+        not isinstance(source, dict)
+        or type(manifest_payload) is not bytes
+        or type(crosswalk_payload) is not bytes
+    ):
+        raise VerticalBuildError("epoch-manifest bundle binding failed")
+    manifest_path = output_root / "account-strategy-manifest.json"
+    source_path = output_root / "epoch-manifest-source.json"
+    crosswalk_path = output_root / "account-strategy-current-epoch-crosswalk.json"
+    _write_exact(manifest_path, manifest_payload)
+    _write_exact(source_path, canonical_json_bytes(source))
+    _write_exact(crosswalk_path, crosswalk_payload)
+    return (
+        manifest_path,
+        source_path,
+        crosswalk_path,
+        source,
+        _file_definition(manifest_path),
+    )
 
 
 def _verified_epoch_manifest_bundle_payload(
@@ -4986,6 +5067,7 @@ def build_stage(
     elif role == "report":
         ledger = _stage_result(output_root, "ledger")
         analytics = _stage_result(output_root, "analytics")
+        epoch_identity = _epoch_manifest_panel_identity(recipe)
         result = build_report_candidate(
             stages / "baseline",
             stages / "ledger",
@@ -4996,6 +5078,12 @@ def build_stage(
             strategy_attribution_root,
             stages / "report-candidate",
             _path(analytics.get("correlation_root"), "correlation root"),
+            epoch_manifest_generation_root=(
+                epoch_identity[0] if epoch_identity is not None else None
+            ),
+            epoch_manifest_generation_id=(
+                epoch_identity[1] if epoch_identity is not None else None
+            ),
         )
     elif role == "workbook":
         ledger = _stage_result(output_root, "ledger")
