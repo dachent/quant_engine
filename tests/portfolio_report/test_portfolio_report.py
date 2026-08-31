@@ -5466,6 +5466,46 @@ def test_hwm_numerical_composite_matches_hand_computation(tmp_path: Path) -> Non
     assert report["hwm_inputs"]["contract_version"] == 1
 
 
+def test_hwm_uncovered_weight_uses_final_current_allocation_weight(
+    tmp_path: Path,
+) -> None:
+    """HWM coverage details must use the same final allocation weights shown publicly."""
+
+    catalog = _baseline_catalog()
+    _attach_hwm_envelope(catalog, _hwm_return_crosswalk())
+    freshness_path = _hwm_freshness_file(tmp_path)
+    freshness = json.loads(freshness_path.read_text(encoding="utf-8"))
+    stale = next(
+        row
+        for row in freshness["assessments"]
+        if row["subject_id"] == "strategy-7"
+    )
+    stale["state"] = "STALE"
+    stale["reason"] = "synthetic stale HWM lane"
+    freshness_path.write_text(json.dumps(freshness), encoding="utf-8")
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, freshness_health_path=freshness_path
+    )
+
+    detail = next(
+        row
+        for row in report["hwm_summary"]["uncovered_details"]
+        if row["strategy_id"] == "strategy-7"
+    )
+    strategy = next(
+        row for row in report["strategy_summary"] if row["strategy_id"] == "strategy-7"
+    )
+    allocation = next(
+        row
+        for row in report["allocation_history"]
+        if row["strategy_id"] == "strategy-7"
+    )
+    assert detail["systematic_weight"] == strategy["systematic_weight"]
+    assert detail["systematic_weight"] == allocation["systematic_weight"]
+
+
 def test_portable_hwm_proof_coexists_with_governed_report_and_workbook_hwm(
     tmp_path: Path,
 ) -> None:

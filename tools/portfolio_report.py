@@ -4837,6 +4837,25 @@ def build_report_data(
             attribution_root, baseline_ref
         )
         strategy_summary = _merge_attribution(strategy_summary, attribution_catalog)
+    allocation_history = _allocations(catalog, strategy_product_controls)
+    current_weights = {
+        _text(row.get("strategy_id"), "allocation_history.strategy_id"): row.get(
+            "systematic_weight"
+        )
+        for row in allocation_history
+        if row.get("scope") == "SYSTEMATIC"
+    }
+    strategy_summary = [
+        {
+            **row,
+            "systematic_weight": current_weights[
+                _text(row.get("strategy_id"), "strategy_summary.strategy_id")
+            ],
+        }
+        if row.get("strategy_id") in current_weights
+        else row
+        for row in strategy_summary
+    ]
     coverage = _coverage(catalog)
     dependence_analysis: dict[str, Any] = {
         "default_evidence_mode": "LIVE_ONLY",
@@ -5042,23 +5061,6 @@ def build_report_data(
         current_account_ids,
         "provider_admissions",
     )
-    allocation_history = _allocations(catalog, strategy_product_controls)
-    current_weights = {
-        _text(row.get("strategy_id"), "allocation_history.strategy_id"): row.get(
-            "systematic_weight"
-        )
-        for row in allocation_history
-        if row.get("scope") == "SYSTEMATIC"
-    }
-    strategy_summary = [
-        {
-            **row,
-            "systematic_weight": current_weights[
-                _text(row.get("strategy_id"), "strategy_summary.strategy_id")
-            ],
-        }
-        for row in strategy_summary
-    ]
     report: dict[str, Any] = {
         "account_summary": _accounts(
             catalog, strategy_product_controls, current_epoch_account_details

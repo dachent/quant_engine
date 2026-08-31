@@ -140,6 +140,11 @@ ACCOUNT_MANIFEST_INDEPENDENT_VERIFICATION_SCHEMA = (
 HWM_POLICY = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
 )
+DEPENDENCE_POLICY = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-dependence-policy-v1.json"
+)
 _PORTABLE_HWM_POLICY: Final = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v4.json"
 )
@@ -1007,6 +1012,91 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
     )
 
 
+def _report_candidate(
+    candidate_dir: Path,
+) -> tuple[dict[str, Any], dict[str, str | None], Path]:
+    """Bind one hash-addressed, non-published report candidate exactly once."""
+
+    candidate = _filesystem_path(candidate_dir)
+    if candidate.is_symlink() or not candidate.is_dir():
+        raise ControlPanelValidationError("report candidate directory is missing or linked")
+    report_path = candidate / "portfolio-report-data.json"
+    content, sha256 = _read_snapshot(report_path, "report candidate data")
+    if candidate.name != sha256:
+        raise ControlPanelValidationError("report candidate directory identity differs")
+    report = _json_from_bytes(content, "report candidate data")
+    if report.get("report_schema_version") != 1:
+        raise ControlPanelValidationError("report candidate schema is unsupported")
+    return (
+        report,
+        {
+            "generation_id": candidate.name,
+            "manifest_path": None,
+            "manifest_sha256": None,
+            "pointer_path": None,
+            "pointer_sha256": None,
+            "sha256": sha256,
+        },
+        report_path,
+    )
+
+
+def _verified_strategy_history_contract(
+    source_path: Path, report_contract: Mapping[str, Any]
+) -> tuple[dict[str, Any], tuple[Path, str]]:
+    """Verify the report-bound dependence source needed for HPR HWM parity."""
+
+    source_content, source_sha256 = _read_snapshot(
+        source_path, "strategy history contract"
+    )
+    if source_path.name != "dependence-source.json":
+        raise ControlPanelValidationError("strategy history contract filename differs")
+    report_identity = _object(report_contract, "report.strategy_history_contract")
+    expected_sha256 = _text(
+        report_identity.get("sha256"), "strategy history contract sha256"
+    )
+    expected_size = report_identity.get("size_bytes")
+    if not isinstance(expected_size, int) or expected_size < 1:
+        raise ControlPanelValidationError("strategy history contract size differs")
+    if (source_sha256, len(source_content)) != (expected_sha256, expected_size):
+        raise ControlPanelValidationError(
+            "strategy history contract differs from the report"
+        )
+    source_receipt = _json_from_bytes(source_content, "strategy history contract")
+    try:
+        current_dependence = import_module("tools.portfolio_current_dependence")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        current_dependence = import_module("portfolio_current_dependence")
+    try:
+        verified = current_dependence.verify_packaged_source(
+            source_path.parent,
+            contract_path=FINANCIAL_MVP_CONTRACT,
+            policy_path=DEPENDENCE_POLICY,
+        )
+    except current_dependence.CurrentDependenceError as exc:
+        raise ControlPanelValidationError(
+            f"strategy history contract is invalid: {exc}"
+        ) from exc
+    if (
+        source_receipt.get("bundle_id")
+        != _text(report_identity.get("bundle_id"), "strategy history bundle_id")
+        or verified.get("complete_through")
+        != _text(report_identity.get("as_of_date"), "strategy history as_of_date")
+        or source_receipt.get("returns_sha256")
+        != _text(
+            report_identity.get("returns_sha256"), "strategy history returns_sha256"
+        )
+        or source_receipt.get("returns_size_bytes")
+        != report_identity.get("returns_size_bytes")
+    ):
+        raise ControlPanelValidationError(
+            "strategy history contract differs from the report"
+        )
+    return verified, (source_path, source_sha256)
+
+
 def _baseline_catalog_snapshot_for_report(
     baseline_root: Path | None, report: Mapping[str, Any]
 ) -> tuple[dict[str, Any], dict[str, tuple[Path, str]]]:
@@ -1608,10 +1698,16 @@ def _validate_driver_map_candidates(candidates: Sequence[Mapping[str, Any]]) -> 
 
 
 def _analytics_roots(
-    report_root: Path,
+    report_root: Path | None,
     decomposition_root: Path | None,
     correlation_root: Path | None,
 ) -> tuple[Path, Path]:
+    if report_root is None:
+        if decomposition_root is None or correlation_root is None:
+            raise ControlPanelValidationError(
+                "report candidate requires explicit decomposition and correlation roots"
+            )
+        return decomposition_root, correlation_root
     analytics = report_root.parent / "analytics"
     return (
         decomposition_root or analytics / "decomposition",
@@ -1919,8 +2015,13 @@ def _financial_mvp_product_controls(
 def _current_product_baseline_projection(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, Any]],
+    calculation_cutoff_date: date | None = None,
 ) -> dict[str, Any]:
-    """Independently project current HWM authority from a retained baseline."""
+    """Independently project current HWM authority from a retained baseline.
+
+    A report cutoff limits only the two time-series collections compared back
+    to the report.  The retained baseline can safely carry later observations.
+    """
 
     required_ids = {
         strategy_id
@@ -1948,10 +2049,10 @@ def _current_product_baseline_projection(
             if strategy_id not in required_ids:
                 continue
             membership = control.get("funded_membership")
-            if membership is None:
-                projected.append(dict(row))
+            if membership is not None and membership.get("status") != "EVIDENCED":
                 continue
-            if membership.get("status") != "EVIDENCED":
+            if membership is None and calculation_cutoff_date is None:
+                projected.append(dict(row))
                 continue
             observation = row.get("date")
             if not isinstance(observation, str):
@@ -1960,6 +2061,19 @@ def _current_product_baseline_projection(
                 )
             try:
                 observation_date = date.fromisoformat(observation)
+            except ValueError as exc:
+                raise ControlPanelValidationError(
+                    f"{field_name} observation date is invalid"
+                ) from exc
+            if (
+                calculation_cutoff_date is not None
+                and observation_date > calculation_cutoff_date
+            ):
+                continue
+            if membership is None:
+                projected.append(dict(row))
+                continue
+            try:
                 start_date = date.fromisoformat(
                     str(membership["effective_start"])
                 )
@@ -2024,8 +2138,16 @@ def _validate_current_product_baseline_projection(
 ) -> dict[str, Any]:
     """Bind report HWM inputs and returns to an independent current projection."""
 
+    calculation_cutoff_date = (
+        _panel_date(
+            report["calculation_cutoff_date"],
+            "report.calculation_cutoff_date",
+        )
+        if "calculation_cutoff_date" in report
+        else None
+    )
     projection = _current_product_baseline_projection(
-        baseline_catalog, strategy_product_controls
+        baseline_catalog, strategy_product_controls, calculation_cutoff_date
     )
     if report.get("hwm_inputs") != projection.get("hwm_inputs"):
         raise ControlPanelValidationError(
@@ -3040,6 +3162,28 @@ def _governed_hwm_coverage(
         raise ControlPanelValidationError(str(exc)) from exc
 
 
+def _effective_hwm_policy_for_current_strategies(
+    strategies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Project full HWM policy exclusions onto the displayed current perimeter."""
+
+    current_strategy_ids = {
+        _text(row.get("strategy_id"), "strategy_summary.strategy_id")
+        for row in strategies
+    }
+    policy_excluded_strategy_ids = set(policy["excluded_strategy_ids"])
+    required_policy_exclusions = policy_excluded_strategy_ids & current_strategy_ids
+    if required_policy_exclusions:
+        raise ControlPanelValidationError(
+            "HWM policy excludes a required current-product strategy"
+        )
+    effective_hwm_policy = dict(policy)
+    effective_hwm_policy["excluded_strategy_ids"] = sorted(
+        policy_excluded_strategy_ids & current_strategy_ids
+    )
+    return effective_hwm_policy
+
+
 def _validate_panel_hwm_envelope(
     envelope: Mapping[str, Any], catalog: Mapping[str, Any]
 ) -> None:
@@ -3119,7 +3263,10 @@ def _panel_date(value: object, field_name: str) -> date:
         raise ControlPanelValidationError(f"{field_name} must be an ISO date") from exc
 
 
-def _compute_panel_numerical_hwm(catalog: Mapping[str, Any]) -> dict[str, Any]:
+def _compute_panel_numerical_hwm(
+    catalog: Mapping[str, Any],
+    epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Recompute the numerical full-systematic HWM from the governed
     baseline catalog so the panel can reconcile it against the report.
 
@@ -3136,6 +3283,23 @@ def _compute_panel_numerical_hwm(catalog: Mapping[str, Any]) -> dict[str, Any]:
 
     def _unavailable(reason: str) -> dict[str, Any]:
         return {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": reason}
+
+    hpr_receipts = _objects(
+        list(epoch_hpr_receipts)
+        if epoch_hpr_receipts is not None
+        else catalog.get("epoch_hpr_receipts", []),
+        "epoch_hpr_receipts",
+    )
+    if any(
+        _objects(
+            _object(receipt.get("receipt"), "epoch HPR receipt").get(
+                "span_return_receipts"
+            ),
+            "epoch HPR spans",
+        )
+        for receipt in hpr_receipts
+    ):
+        return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
 
     def _panel_decimal(value: object, field_name: str) -> Decimal:
         if not isinstance(value, str):
@@ -6976,6 +7140,7 @@ def _panel_data(
     economic_driver_snapshot: bytes | None = None,
     underwriting_policy_snapshot: bytes | None = None,
     correlation_strategy_names: Mapping[str, str] | None = None,
+    epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -7486,9 +7651,12 @@ def _panel_data(
     hwm_policy, hwm_policy_hash = _hwm_policy(
         date.fromisoformat(next(iter(freshness_dates))), hwm_policy_snapshot
     )
+    effective_hwm_policy = _effective_hwm_policy_for_current_strategies(
+        strategies, hwm_policy
+    )
     strategies, hwm_summary = _governed_hwm_coverage(
         strategies,
-        hwm_policy,
+        effective_hwm_policy,
         freshness_health,
         require_freshness=True,
     )
@@ -7609,7 +7777,9 @@ def _panel_data(
             raise ControlPanelValidationError(
                 "governed HWM proof differs from the accepted portfolio report"
             )
-    hwm_numerical = _compute_panel_numerical_hwm(current_product_catalog)
+    hwm_numerical = _compute_panel_numerical_hwm(
+        current_product_catalog, epoch_hpr_receipts
+    )
     hwm_summary = {**hwm_summary, **hwm_numerical}
     report_hwm = report.get("hwm_summary")
     if report_hwm is None:
@@ -9007,7 +9177,7 @@ def _validate_panel_data_schema(
 
 
 def _rendered_files(
-    report_root: Path,
+    report_root: Path | None,
     legacy_panel: Path,
     template_root: Path,
     decomposition_root: Path | None = None,
@@ -9037,6 +9207,8 @@ def _rendered_files(
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
     *,
+    report_candidate: Path | None = None,
+    strategy_history_contract_path: Path | None = None,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
 ) -> tuple[
@@ -9056,7 +9228,30 @@ def _rendered_files(
             raise ControlPanelValidationError(
                 "financial mode requires the repository-governed panel templates"
             )
-    report, report_identity, report_path = _current_report(report_root)
+    if (report_root is None) == (report_candidate is None):
+        raise ControlPanelValidationError(
+            "supply exactly one of report root or report candidate"
+        )
+    if report_candidate is None:
+        assert report_root is not None
+        report, report_identity, report_path = _current_report(report_root)
+        verified_strategy_history: dict[str, Any] | None = None
+        strategy_history_binding: tuple[Path, str] | None = None
+    else:
+        report, report_identity, report_path = _report_candidate(report_candidate)
+        if strategy_history_contract_path is None:
+            raise ControlPanelValidationError(
+                "report candidate requires a strategy history contract"
+            )
+        verified_strategy_history, strategy_history_binding = (
+            _verified_strategy_history_contract(
+                strategy_history_contract_path,
+                _object(
+                    report.get("strategy_history_contract"),
+                    "report.strategy_history_contract",
+                ),
+            )
+        )
     portfolio_as_of = _text(report.get("as_of_date"), "report.as_of_date")
     if freshness_health_path is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -9332,6 +9527,11 @@ def _rendered_files(
             0
         ],
         correlation_strategy_names=plan_strategy_names or baseline_strategy_names,
+        epoch_hpr_receipts=(
+            verified_strategy_history["epoch_hpr_receipts"]
+            if verified_strategy_history is not None
+            else None
+        ),
     )
     _validate_panel_data_schema(
         data,
@@ -9393,6 +9593,8 @@ def _rendered_files(
             authority_snapshots[ACCOUNT_MANIFEST_SCHEMA][1],
         ),
     }
+    if strategy_history_binding is not None:
+        bound_inputs["strategy_history_contract"] = strategy_history_binding
     if (
         account_manifest_identity is not None
         and account_manifest_identity.get("authority_profile")
@@ -9415,14 +9617,27 @@ def _rendered_files(
             f"legacy_source:{source_name}", (source_path, source_sha256)
         )
 
-    def bind_current_generation(prefix: str, identity: Mapping[str, str]) -> None:
+    def bind_current_generation(
+        prefix: str, identity: Mapping[str, str | None]
+    ) -> None:
+        manifest_path = identity.get("manifest_path")
+        manifest_sha256 = identity.get("manifest_sha256")
+        pointer_path = identity.get("pointer_path")
+        pointer_sha256 = identity.get("pointer_sha256")
+        if (
+            manifest_path is None
+            or manifest_sha256 is None
+            or pointer_path is None
+            or pointer_sha256 is None
+        ):
+            return
         bound_inputs[f"{prefix}:manifest"] = (
-            Path(identity["manifest_path"]),
-            identity["manifest_sha256"],
+            Path(manifest_path),
+            manifest_sha256,
         )
         bound_inputs[f"{prefix}:pointer"] = (
-            Path(identity["pointer_path"]),
-            identity["pointer_sha256"],
+            Path(pointer_path),
+            pointer_sha256,
         )
 
     bind_current_generation("report", report_identity)
@@ -9608,7 +9823,7 @@ def _write_exact(path: Path, content: bytes) -> None:
 
 
 def build_candidate(
-    report_root: Path,
+    report_root: Path | None,
     legacy_panel: Path,
     output_root: Path,
     template_root: Path = DEFAULT_TEMPLATE_ROOT,
@@ -9639,6 +9854,8 @@ def build_candidate(
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
     *,
+    report_candidate: Path | None = None,
+    strategy_history_contract_path: Path | None = None,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
 ) -> dict[str, Any]:
@@ -9672,6 +9889,8 @@ def build_candidate(
         manifest_flow_coverage_path=manifest_flow_coverage_path,
         manifest_classification_policy_path=manifest_classification_policy_path,
         manifest_admission_policy_path=manifest_admission_policy_path,
+        report_candidate=report_candidate,
+        strategy_history_contract_path=strategy_history_contract_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
     )
@@ -9726,7 +9945,7 @@ def _replication_disposition_counts(
 
 
 def verify_candidate(
-    report_root: Path,
+    report_root: Path | None,
     legacy_panel: Path,
     candidate_dir: Path,
     template_root: Path = DEFAULT_TEMPLATE_ROOT,
@@ -9757,6 +9976,8 @@ def verify_candidate(
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
     *,
+    report_candidate: Path | None = None,
+    strategy_history_contract_path: Path | None = None,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
 ) -> dict[str, Any]:
@@ -9790,6 +10011,8 @@ def verify_candidate(
         manifest_flow_coverage_path=manifest_flow_coverage_path,
         manifest_classification_policy_path=manifest_classification_policy_path,
         manifest_admission_policy_path=manifest_admission_policy_path,
+        report_candidate=report_candidate,
+        strategy_history_contract_path=strategy_history_contract_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
     )
@@ -10043,7 +10266,11 @@ def verify_candidate(
             "static embedded renderer",
         )
     )
-    report, _, _ = _current_report(report_root)
+    if report_candidate is None:
+        assert report_root is not None
+        report, _, _ = _current_report(report_root)
+    else:
+        report, _, _ = _report_candidate(report_candidate)
     report_expectations = _report_panel_expectations(report)
     checks.append(
         _check(
@@ -11535,7 +11762,24 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("build", "verify", "publish"):
         command = commands.add_parser(name)
-        command.add_argument("--report-root", type=Path, required=True)
+        command.add_argument("--report-root", type=Path)
+        if name != "publish":
+            command.add_argument(
+                "--report-candidate",
+                type=Path,
+                help=(
+                    "Hash-addressed local portfolio-report-data.json candidate; "
+                    "build and verify only, never a published CURRENT generation"
+                ),
+            )
+            command.add_argument(
+                "--strategy-history-contract",
+                type=Path,
+                help=(
+                    "Packaged dependence-source.json matching the report's "
+                    "strategy-history contract; required with --report-candidate"
+                ),
+            )
         command.add_argument("--legacy-panel", type=Path, required=True)
         command.add_argument(
             "--template-root", type=Path, default=DEFAULT_TEMPLATE_ROOT
@@ -11675,6 +11919,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "build":
+            if (args.report_root is None) == (args.report_candidate is None):
+                raise ControlPanelValidationError(
+                    "build requires exactly one of --report-root or --report-candidate"
+                )
+            if args.report_candidate is not None and args.strategy_history_contract is None:
+                raise ControlPanelValidationError(
+                    "build with --report-candidate requires --strategy-history-contract"
+                )
             result = build_candidate(
                 args.report_root,
                 args.legacy_panel,
@@ -11701,12 +11953,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
+                report_candidate=args.report_candidate,
+                strategy_history_contract_path=args.strategy_history_contract,
                 account_manifest_generation_root=(
                     args.account_manifest_generation_root
                 ),
                 account_manifest_generation_id=args.account_manifest_generation_id,
             )
         elif args.command == "verify":
+            if (args.report_root is None) == (args.report_candidate is None):
+                raise ControlPanelValidationError(
+                    "verify requires exactly one of --report-root or --report-candidate"
+                )
+            if args.report_candidate is not None and args.strategy_history_contract is None:
+                raise ControlPanelValidationError(
+                    "verify with --report-candidate requires --strategy-history-contract"
+                )
             result = verify_candidate(
                 args.report_root,
                 args.legacy_panel,
@@ -11733,6 +11995,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.manifest_classification_policy
                 ),
                 manifest_admission_policy_path=args.manifest_admission_policy,
+                report_candidate=args.report_candidate,
+                strategy_history_contract_path=args.strategy_history_contract,
                 account_manifest_generation_root=(
                     args.account_manifest_generation_root
                 ),
@@ -11745,6 +12009,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.launcher, args.qa_dir, args.expected_generation_id
             )
         else:
+            if args.report_root is None:
+                raise ControlPanelValidationError("publish requires --report-root")
             result = publish_panel(
                 args.report_root,
                 args.legacy_panel,
