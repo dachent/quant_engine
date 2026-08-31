@@ -2022,10 +2022,6 @@ def test_correlation_cutoff_mutation_in_any_layer_fails(
     ("surface", "payload"),
     (
         (
-            "allocations",
-            {"allocations": [{"as_of_date": "2026-08-14", "strategy_id": "probe"}]},
-        ),
-        (
             "provider_strategy_returns",
             {
                 "provider_strategy_returns": [
@@ -2043,15 +2039,152 @@ def test_calculation_cutoff_clips_post_cutoff_row_collections(
     assert projected[surface] == []
 
 
+def test_calculation_cutoff_retains_current_allocation_snapshot() -> None:
+    allocation = {
+        "as_of_date": "2026-08-16",
+        "current_value": "100",
+        "strategy_id": "strategy-current",
+    }
+    projected = reporter._calculation_catalog_through(
+        {
+            "allocations": [allocation],
+            "provider_strategy_returns": [
+                {"date": "2026-08-14", "strategy_id": "strategy-current"}
+            ],
+        },
+        "2026-08-13",
+    )
+
+    assert projected["allocations"] == [allocation]
+    assert projected["provider_strategy_returns"] == []
+
+
+def test_calculation_cutoff_retains_null_calendar_sentinel_and_clips_dated_rows() -> None:
+    sentinel = {
+        "account_id": "account-no-nav",
+        "date": None,
+        "provider": "SYNTHETIC",
+        "status": "NO_ACCOUNT_NAV_OBSERVATIONS",
+    }
+    projected = reporter._calculation_catalog_through(
+        {
+            "calendar_coverage": [
+                sentinel,
+                {
+                    "account_id": "account-dated",
+                    "date": "2026-08-13",
+                    "provider": "SYNTHETIC",
+                    "status": "OBSERVED",
+                },
+                {
+                    "account_id": "account-future",
+                    "date": "2026-08-14",
+                    "provider": "SYNTHETIC",
+                    "status": "OBSERVED",
+                },
+            ]
+        },
+        "2026-08-13",
+    )
+
+    assert projected["calendar_coverage"] == [
+        sentinel,
+        {
+            "account_id": "account-dated",
+            "date": "2026-08-13",
+            "provider": "SYNTHETIC",
+            "status": "OBSERVED",
+        },
+    ]
+
+
+def test_cutoff_recomputes_account_live_evidence_and_clips_scopes() -> None:
+    catalog = {
+        "strategy_returns": [
+            {
+                "date": "2026-08-12",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.1",
+                "strategy_id": "strategy-1",
+            },
+            {
+                "date": "2026-08-13",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "-0.1",
+                "strategy_id": "strategy-1",
+            },
+            {
+                "date": "2026-08-14",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "synthetic",
+                "return": "0.4",
+                "strategy_id": "strategy-1",
+            },
+        ],
+        "strategy_provider_evidence": [
+            {
+                "account": {
+                    "account_scopes": [
+                        {
+                            "account_id": "account-a",
+                            "observed_start": "2026-08-10",
+                            "observed_end": "2026-08-16",
+                        },
+                        {
+                            "account_id": "account-future",
+                            "observed_start": "2026-08-14",
+                            "observed_end": "2026-08-16",
+                        },
+                    ],
+                    "cumulative_return": "0.5",
+                    "current_drawdown": "0",
+                    "maximum_drawdown": "0",
+                    "observed_start": "2026-08-12",
+                    "observed_end": "2026-08-14",
+                    "provider_id": "synthetic",
+                    "return_observations": 3,
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "strategy_id": "strategy-1",
+            }
+        ],
+    }
+
+    projected = reporter._calculation_catalog_through(catalog, "2026-08-13")
+    evidence = reporter._strategy_provider_evidence(
+        projected, calculation_cutoff_date="2026-08-13"
+    )
+
+    assert evidence[0]["account"] == {
+        "account_scopes": [
+            {
+                "account_id": "account-a",
+                "observed_start": "2026-08-10",
+                "observed_end": "2026-08-13",
+            }
+        ],
+        "cumulative_return": "-0.01",
+        "current_drawdown": "-0.1",
+        "max_drawdown": "-0.1",
+        "maximum_drawdown": "-0.1",
+        "observed_start": "2026-08-12",
+        "observed_end": "2026-08-13",
+        "provider_id": "synthetic",
+        "return_observations": 2,
+        "cumulative_return_label": "DAILY_GEOMETRIC_TWR",
+        "path_dependent_metrics_status": "AVAILABLE",
+        "path_dependent_metrics_reason": None,
+        "return_series_schema": "ordered-date-return/1",
+        "return_series_sha256": "eeb41ed52f04abfce9247d43a282b67a1cd0e32edcc273a575698c32dc2375a9",
+    }
+
+
 @pytest.mark.parametrize(
     "payload",
     (
         {"strategy_live_metrics": [{"last_date": "2026-08-14"}]},
-        {
-            "strategy_provider_evidence": [
-                {"account": {"observed_end": "2026-08-14"}}
-            ]
-        },
         {"strategy_nav_coverage": [{"last_date": "2026-08-14"}]},
         {"hwm_acceptance_record": {"anchor_date": "2026-08-14"}},
         {"hwm_inputs": {"anchor": {"anchor_date": "2026-08-14"}, "periods": []}},
@@ -4774,10 +4907,15 @@ def test_excluded_product_history_cannot_enter_current_returns_or_allocations() 
     assert canonical == {
         "strategy-2": {
             "cumulative_return": "0.1",
+            "daily_cumulative_return": "0.1",
+            "cumulative_return_label": "DAILY_GEOMETRIC_TWR",
             "current_drawdown": "0",
+            "epoch_holding_period_link_observations": 2,
             "maximum_drawdown": "0",
             "observed_end": "2026-01-02",
             "observed_start": "2026-01-01",
+            "path_dependent_metrics_reason": None,
+            "path_dependent_metrics_status": "AVAILABLE",
             "provider_ids": ["synthetic"],
             "return_observations": 2,
             "return_series_schema": "ordered-date-return/1",
@@ -4801,7 +4939,15 @@ def test_excluded_product_history_cannot_enter_current_returns_or_allocations() 
         *{f"strategy-{index}" for index in range(2, 10)},
         None,
     }
-    assert next(row for row in summary if row["metric"] == "Total liquid")["value"] == "90"
+    assert next(row for row in summary if row["metric"] == "Total liquid")["value"] == "90.19"
+    assert next(row for row in summary if row["metric"] == "Systematic capital")[
+        "value"
+    ] == "80"
+    assert next(
+        row
+        for row in summary
+        if row["metric"] == "Retained excluded systematic balance"
+    )["value"] == "0.19"
 
 
 def test_legacy_account_metrics_remain_one_explicit_audit_vintage() -> None:
@@ -5127,6 +5273,20 @@ def _hwm_envelope(crosswalk: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _reconcile_fixture_replay_to_allocations(catalog: dict[str, Any]) -> None:
+    """Keep synthetic replay totals aligned to its allocation endpoints."""
+
+    totals = {"SYSTEMATIC": Decimal("0"), "RESERVE": Decimal("0")}
+    for allocation in catalog["allocations"]:
+        scope = allocation.get("scope")
+        if scope in totals:
+            totals[scope] += Decimal(str(allocation["current_value"]["value"]))
+    catalog["replay"]["systematic_total_usd"] = decimal_text(totals["SYSTEMATIC"])
+    catalog["replay"]["total_liquid_usd"] = decimal_text(
+        totals["SYSTEMATIC"] + totals["RESERVE"]
+    )
+
+
 def _attach_hwm_envelope(
     catalog: dict[str, Any], crosswalk: list[dict[str, Any]]
 ) -> None:
@@ -5195,6 +5355,7 @@ def _attach_hwm_envelope(
             if isinstance(alloc, dict) and alloc.get("scope") != "SYSTEMATIC":
                 matching_allocations.append(alloc)
     catalog["allocations"] = matching_allocations
+    _reconcile_fixture_replay_to_allocations(catalog)
 
     catalog["source_artifacts"] = [
         *catalog["source_artifacts"],
@@ -5818,6 +5979,7 @@ def test_hwm_inflated_allocation_unchanged_declaration_rejected(
             alloc["current_value"]["value"] = str(
                 _D(alloc["current_value"]["value"]) * 10
             )
+    _reconcile_fixture_replay_to_allocations(catalog)
     baseline_root = _published_baseline(tmp_path, catalog)
 
     report, _, _ = reporter.build_report_data(

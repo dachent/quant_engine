@@ -1635,6 +1635,16 @@ def build_correlation(
     default_dependence: dict[str, object]
     if spec.schema_version == 2:
         mode_returns, compositions = _evidence_mode_returns(spec, returns)
+        live_end_dates: list[date] = []
+        for definition in spec.evidence_mode_series:
+            live_rows = mode_returns["LIVE_ONLY"].get(definition.series_id, [])
+            if not live_rows:
+                raise CorrelationError(
+                    "schema v2 complete_through requires live observations for every "
+                    "declared evidence-mode series"
+                )
+            live_end_dates.append(live_rows[-1].day)
+        complete_through = min(live_end_dates)
         dependence_modes = {
             mode: _dependence_payload(
                 spec,
@@ -1646,6 +1656,7 @@ def build_correlation(
         }
         default_dependence = dependence_modes["LIVE_ONLY"]
     else:
+        complete_through = None
         default_dependence = _dependence_payload(spec, returns)
     payload: dict[str, object] = {
         "analytics_schema_version": spec.schema_version,
@@ -1673,6 +1684,7 @@ def build_correlation(
         },
     }
     if dependence_modes is not None:
+        payload["complete_through"] = complete_through.isoformat()
         payload["default_evidence_mode"] = "LIVE_ONLY"
         payload["dependence_modes"] = dependence_modes
         cast(dict[str, object], payload["policy"])["evidence_modes"] = [
@@ -1709,7 +1721,11 @@ def build_correlation(
                 "stress-correlation",
             ),
             observed_start=min(item.day for item in observed_rows),
-            observed_end=max(item.day for item in observed_rows),
+            observed_end=(
+                complete_through
+                if complete_through is not None
+                else max(item.day for item in observed_rows)
+            ),
         ),
         artifacts=(
             SourceArtifact(

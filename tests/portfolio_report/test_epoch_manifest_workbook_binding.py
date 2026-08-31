@@ -148,6 +148,10 @@ def _verified_schema9_epoch_bundle(
     verification_mutation: str | None = None,
     manifest_mutation: str | None = None,
     authority_graph_mutation: str | None = None,
+    static_receipt: bool = False,
+    static_receipt_mutation: str | None = None,
+    static_closed_epoch: bool = False,
+    all_numeric_candidates: bool = False,
 ) -> tuple[Path, bytes, bytes, bytes, bytes]:
     epoch_root = tmp_path
     for index in range(1):
@@ -175,7 +179,7 @@ def _verified_schema9_epoch_bundle(
                 "effective_end",
             )
         }
-        funded = row["strategy_id"] == "volatis-strategy"
+        funded = all_numeric_candidates or row["strategy_id"] == "volatis-strategy"
         output_status = "OK" if funded else "BLOCKED_ADMISSION"
         blocking_reason = None if funded else "FLOW_COMPLETENESS_NOT_PROVEN"
         manifest_row = {
@@ -468,6 +472,10 @@ def _verified_schema9_epoch_bundle(
         "rows": calculation_rows,
     }
     calculation_inputs = canonical_json_bytes(calculation_payload)
+    numeric_candidate_count = sum(
+        chain["numeric_candidate"] is True for chain in blocker_chains
+    )
+    blocked_candidate_count = len(blocker_chains) - numeric_candidate_count
     counts = {
         "selected_baseline_account_count": 15,
         "account_count": 15,
@@ -489,12 +497,12 @@ def _verified_schema9_epoch_bundle(
         "coverage_row_count": 13,
         "admission_row_count": 13,
         "output_row_count": 13,
-        "complete_coverage_row_count": 1,
-        "funded_admission_row_count": 1,
-        "ok_output_row_count": 1,
-        "blocked_coverage_row_count": 12,
-        "blocked_admission_row_count": 12,
-        "blocked_output_row_count": 12,
+        "complete_coverage_row_count": numeric_candidate_count,
+        "funded_admission_row_count": numeric_candidate_count,
+        "ok_output_row_count": numeric_candidate_count,
+        "blocked_coverage_row_count": blocked_candidate_count,
+        "blocked_admission_row_count": blocked_candidate_count,
+        "blocked_output_row_count": blocked_candidate_count,
     }
     coverage_rows = [
         {
@@ -528,22 +536,17 @@ def _verified_schema9_epoch_bundle(
         )
     admission_rows = [
         {
-            "assignment": chain["assignment"],
+            **chain["assignment"],
             "status": chain["admission"]["status"],
             "reason": chain["admission"]["blocker_code"],
         }
         for chain in blocker_chains
     ]
-    flow_policy_payload = {
-        "policy_id": "FLOW_CLASSIFICATION_V1",
-        "policy_version": "1",
-        "as_of_date": "2026-08-13",
-        "event_dispositions": {
-            "exact": [{"description": "independent fixture"}],
-            "prefix": [],
-        },
-    }
-    flow_policy_bytes = canonical_json_bytes(flow_policy_payload)
+    flow_policy_bytes = (
+        ROOT / "contracts" / "account-strategy-flow-classification-policy-v1.json"
+    ).read_bytes()
+    flow_policy_payload = json.loads(flow_policy_bytes)
+    emitted_flow_policy_bytes = canonical_json_bytes(flow_policy_payload)
     receipt_id = "receipt/account-interval.json"
     funded_assignment = next(
         row for row in included if row["strategy_id"] == "volatis-strategy"
@@ -555,7 +558,7 @@ def _verified_schema9_epoch_bundle(
         "sha256": "1" * 64,
         "size_bytes": 1,
     }
-    receipt_contract = {
+    receipt_contract: dict[str, object] = {
         "adapter_name": "SYNTHETIC",
         "adapter_version": "1",
         "code_sha256": "b" * 64,
@@ -601,6 +604,59 @@ def _verified_schema9_epoch_bundle(
         "completeness": "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES",
         "truncated": False,
     }
+    if static_receipt:
+        if static_closed_epoch:
+            funded_assignment = next(
+                row
+                for row in included
+                if row["strategy_id"] == "tt-portfolio"
+                and row["effective_end"] == "2026-01-04"
+            )
+        static_end = funded_assignment["effective_end"] or calculation_cutoff
+        static_staged_inputs = {
+            "provider_ledger_generation_id": "1" * 64,
+            "provider_ledger_artifact": {
+                "artifact_id": "normalized/provider-ledger.json",
+                "as_of_date": "2026-08-13",
+                "schema": {"name": "provider-ledger-catalog", "version": "1"},
+                "sha256": "2" * 64,
+                "size_bytes": 2,
+            },
+            "baseline_sha256": "5" * 64,
+            "baseline_size_bytes": 5,
+            "crosswalk_sha256": hashlib.sha256(crosswalk_bytes).hexdigest(),
+            "crosswalk_size_bytes": len(crosswalk_bytes),
+        }
+        receipt_payload = {
+            "schema_version": 3,
+            "artifact_id": receipt_id,
+            "coverage_mode": "STATIC_SNAPSHOT_COVERAGE_V1",
+            "issuer": {"adapter_name": "static-snapshot-coverage", "adapter_version": "1", "code_sha256": "b" * 64},
+            "provider": funded_assignment["provider"],
+            "account_id": funded_assignment["account_id"],
+            "strategy_id": funded_assignment["strategy_id"],
+            "requested_start": funded_assignment["effective_start"],
+            "requested_end": static_end,
+            "calculation_cutoff_date": calculation_cutoff,
+            "date_convention": "EOD_PROVIDER_NAV_RECOGNITION_DATE",
+            "provider_generation": {"generation_id": "1" * 64, "catalog_sha256": "0" * 64, "manifest_sha256": "0" * 64, "generation_as_of_date": "2026-08-13"},
+            "staged_inputs": static_staged_inputs,
+            "observed_facts": {"nav": {"row_count": 0 if static_closed_epoch else 3, "first_date": None if static_closed_epoch else "2026-08-11", "last_date": None if static_closed_epoch else "2026-08-13"}, "flows": {"row_count": 0, "first_date": None, "last_date": None}, "capital_anchors": {"row_count": 0, "first_date": None, "last_date": None}},
+            "missing_intervals": [],
+            "coverage_as_of_date": "2026-08-16",
+            "completeness": "RETAINED_STATIC_SNAPSHOT_ONLY",
+        }
+        receipt_contract = {
+            "coverage_mode": "STATIC_SNAPSHOT_COVERAGE_V1",
+            "account_id": funded_assignment["account_id"],
+            "strategy_id": funded_assignment["strategy_id"],
+            "requested_start": funded_assignment["effective_start"],
+            "requested_end": static_end,
+            "provider_generation": receipt_payload["provider_generation"],
+            "staged_inputs": static_staged_inputs,
+        }
+        if static_receipt_mutation == "crosswalk":
+            static_staged_inputs["crosswalk_sha256"] = "0" * 64
     if authority_graph_mutation == "receipt_subject_schema":
         receipt_payload["schema_version"] = 1
     receipt_bytes = canonical_json_bytes(receipt_payload)
@@ -711,6 +767,8 @@ def _verified_schema9_epoch_bundle(
         selected_source_identities["manifest_schema"]["sha256"] = "0" * 64
     elif authority_graph_mutation == "retrieval_receipt":
         selected_source_identities["retrieval_receipts"][0]["sha256"] = "0" * 64
+    elif authority_graph_mutation == "raw_policy_identity":
+        selected_source_identities["flow_classification_policy"]["sha256"] = "0" * 64
 
     perimeter_bytes = canonical_json_bytes(
         {"rows": [{"assignment": chain["assignment"]} for chain in blocker_chains]}
@@ -744,7 +802,7 @@ def _verified_schema9_epoch_bundle(
             "authority/calculation-inputs.json": calculation_inputs,
             "authority/classified-flows.json": classified_bytes,
             "authority/code-identities.json": code_identities_bytes,
-            "authority/flow-classification-policy.json": flow_policy_bytes,
+            "authority/flow-classification-policy.json": emitted_flow_policy_bytes,
             "authority/mapped-epoch-admission.json": admission_bytes,
             "authority/selected-input-identities.json": selected_identities_bytes,
             "authority/account-interval-retrieval-receipt-authority.json": (
@@ -786,9 +844,7 @@ def _verified_schema9_epoch_bundle(
                 "policy_id": flow_policy_payload["policy_id"],
                 "policy_version": flow_policy_payload["policy_version"],
                 "policy_as_of_date": flow_policy_payload["as_of_date"],
-                "policy_sha256": selected_source_identities[
-                    "flow_classification_policy"
-                ]["sha256"],
+                "policy_sha256": hashlib.sha256(emitted_flow_policy_bytes).hexdigest(),
             },
         },
         "flow_classification_policy": {
@@ -879,7 +935,7 @@ def _verified_schema9_epoch_bundle(
         "authority/calculation-inputs.json": calculation_inputs,
         "authority/classified-flows.json": classified_bytes,
         "authority/code-identities.json": code_identities_bytes,
-        "authority/flow-classification-policy.json": flow_policy_bytes,
+        "authority/flow-classification-policy.json": emitted_flow_policy_bytes,
         "authority/mapped-epoch-admission.json": admission_bytes,
         "authority/selected-input-identities.json": selected_identities_bytes,
         "outputs/account-strategy-manifest.json": manifest_bytes,
@@ -949,8 +1005,8 @@ def _verified_schema9_epoch_bundle(
             ),
         ),
         "numeric_verification": {
-            "candidate_count": 1,
-            "comparison_count": 1,
+            "candidate_count": numeric_candidate_count,
+            "comparison_count": numeric_candidate_count,
             "discrepancy_count": 0,
             "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
         },
@@ -1165,6 +1221,66 @@ def test_epoch_history_verification_accepts_real_schema9_verified_partition(
     assert schema_version == "3"
 
 
+def test_epoch_history_accepts_static_snapshot_receipt_bound_to_subjects(
+    tmp_path: Path,
+) -> None:
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(tmp_path, static_receipt=True)
+    )
+
+    reporter._epoch_history_snapshot_evidence(
+        epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+    )
+
+
+def test_epoch_history_accepts_static_snapshot_closed_epoch_end(
+    tmp_path: Path,
+) -> None:
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path, static_receipt=True, static_closed_epoch=True
+        )
+    )
+
+    reporter._epoch_history_snapshot_evidence(
+        epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+    )
+
+
+def test_epoch_history_rejects_self_consistent_static_receipt_crosswalk_mutation(
+    tmp_path: Path,
+) -> None:
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path,
+            static_receipt=True,
+            static_receipt_mutation="crosswalk",
+        )
+    )
+
+    with pytest.raises(reporter.ReportValidationError, match="receipt authority"):
+        reporter._epoch_history_snapshot_evidence(
+            epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+        )
+
+
+def test_epoch_history_rejects_selected_raw_policy_identity_mutation(
+    tmp_path: Path,
+) -> None:
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(
+            tmp_path,
+            static_receipt=True,
+            authority_graph_mutation="raw_policy_identity",
+        )
+    )
+
+    with pytest.raises(reporter.ReportValidationError, match="selected authority graph"):
+        reporter._epoch_history_snapshot_evidence(
+            epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+        )
+
+
 def test_epoch_history_verification_rejects_schema9_manifest_shell(
     tmp_path: Path,
 ) -> None:
@@ -1195,6 +1311,26 @@ def test_epoch_history_verification_rejects_schema8_tuple_only_generation(
         reporter._epoch_history_snapshot_evidence(
             epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
         )
+
+
+def test_epoch_history_verification_accepts_flat_admissions_with_all_numeric_candidates(
+    tmp_path: Path,
+) -> None:
+    epoch_root, source_bytes, manifest_bytes, crosswalk_bytes, _verification = (
+        _verified_schema9_epoch_bundle(tmp_path, all_numeric_candidates=True)
+    )
+
+    snapshot_path, _payload, schema_name, schema_version = (
+        reporter._epoch_history_snapshot_evidence(
+            epoch_root, source_bytes, manifest_bytes, crosswalk_bytes
+        )
+    )
+
+    assert snapshot_path.name == "independent-verification.json"
+    assert (schema_name, schema_version) == (
+        "account-manifest-independent-verification",
+        "3",
+    )
 
 
 @pytest.mark.parametrize("mutation", ("counts", "blocker_chain"))

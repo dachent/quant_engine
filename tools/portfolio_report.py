@@ -121,6 +121,11 @@ _PORTABLE_HWM_PRODUCT_CONTRACT: Final = (
     / "contracts"
     / "portfolio-financial-mvp-source-v1.json"
 )
+_HWM_POLICY_PRODUCT_AUTHORITY_CONTRACT: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-financial-mvp-source-v1.json"
+)
 _PORTABLE_HWM_PERFORMANCE_POLICY: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -171,6 +176,11 @@ WORKBOOK_DELIVERY_EVIDENCE_VERSION: Final = 1
 EPOCH_MANIFEST_WORKBOOK_NAME: Final = "account-strategy-manifest.json"
 EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME: Final = "epoch-manifest-source.json"
 EPOCH_CROSSWALK_WORKBOOK_NAME: Final = "account-strategy-current-epoch-crosswalk.json"
+FLOW_CLASSIFICATION_POLICY_CONTRACT: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "account-strategy-flow-classification-policy-v1.json"
+)
 PUBLISHED_EPOCH_CROSSWALK_RELATIVE_PATH: Final = (
     "input/account-strategy-current-epoch-crosswalk.json"
 )
@@ -2299,6 +2309,11 @@ def _strategy_provider_evidence(
     *,
     calculation_cutoff_date: str | None = None,
 ) -> list[dict[str, Any]]:
+    cutoff = (
+        None
+        if calculation_cutoff_date is None
+        else _date(calculation_cutoff_date, "calculation cutoff date")
+    )
     series = _account_live_return_series(
         catalog,
         strategy_product_controls,
@@ -2357,25 +2372,61 @@ def _strategy_provider_evidence(
                     f"account-live evidence has no canonical return series for {strategy_id}"
                 )
             account = _object(row.get("account"), "provider evidence account")
-            for field_name in ("cumulative_return", "current_drawdown", "maximum_drawdown"):
-                expected_value = canonical[field_name]
-                if (
-                    field_name == "cumulative_return"
-                    and canonical["path_dependent_metrics_status"] == "UNAVAILABLE"
+            if cutoff is None:
+                for field_name in (
+                    "cumulative_return",
+                    "current_drawdown",
+                    "maximum_drawdown",
                 ):
-                    expected_value = canonical["daily_cumulative_return"]
-                if expected_value is None:
-                    continue
-                _close_decimal(
-                    account.get(field_name),
-                    expected_value,
-                    f"{strategy_id}.{field_name}",
-                )
-            for field_name in ("observed_start", "observed_end", "return_observations"):
-                if account.get(field_name) != canonical[field_name]:
-                    raise ReportValidationError(
-                        f"{strategy_id}.{field_name} differs from canonical return series"
+                    expected_value = canonical[field_name]
+                    if (
+                        field_name == "cumulative_return"
+                        and canonical["path_dependent_metrics_status"] == "UNAVAILABLE"
+                    ):
+                        expected_value = canonical["daily_cumulative_return"]
+                    if expected_value is None:
+                        continue
+                    _close_decimal(
+                        account.get(field_name),
+                        expected_value,
+                        f"{strategy_id}.{field_name}",
                     )
+                for field_name in (
+                    "observed_start",
+                    "observed_end",
+                    "return_observations",
+                ):
+                    if account.get(field_name) != canonical[field_name]:
+                        raise ReportValidationError(
+                            f"{strategy_id}.{field_name} differs from canonical return series"
+                        )
+                normalized_scopes = account.get("account_scopes")
+            else:
+                raw_scopes = account.get("account_scopes")
+                normalized_scopes = None
+                if raw_scopes is not None:
+                    normalized_scopes = []
+                    for raw_scope in _objects(
+                        raw_scopes, "provider evidence account_scopes"
+                    ):
+                        scope = dict(raw_scope)
+                        start = _date(
+                            scope.get("observed_start"),
+                            "provider evidence scope.observed_start",
+                        )
+                        end = _date(
+                            scope.get("observed_end"),
+                            "provider evidence scope.observed_end",
+                        )
+                        if end < start:
+                            raise ReportValidationError(
+                                "provider evidence scope dates are reversed"
+                            )
+                        if start > cutoff:
+                            continue
+                        scope["observed_start"] = start.isoformat()
+                        scope["observed_end"] = min(end, cutoff).isoformat()
+                        normalized_scopes.append(scope)
             provider_id = _text(account.get("provider_id"), "account.provider_id")
             if provider_id not in canonical["provider_ids"]:
                 raise ReportValidationError(
@@ -2383,6 +2434,11 @@ def _strategy_provider_evidence(
                 )
             row["account"] = {
                 **account,
+                **(
+                    {"account_scopes": normalized_scopes}
+                    if normalized_scopes is not None
+                    else {}
+                ),
                 "cumulative_return": canonical["cumulative_return"],
                 "current_drawdown": canonical["current_drawdown"],
                 "max_drawdown": canonical["maximum_drawdown"],
@@ -2394,6 +2450,9 @@ def _strategy_provider_evidence(
                 "path_dependent_metrics_reason": canonical[
                     "path_dependent_metrics_reason"
                 ],
+                "observed_end": canonical["observed_end"],
+                "observed_start": canonical["observed_start"],
+                "return_observations": canonical["return_observations"],
                 "return_series_schema": canonical["return_series_schema"],
                 "return_series_sha256": canonical["return_series_sha256"],
             }
@@ -4168,7 +4227,7 @@ def _report_portable_hwm_proof(
 
     try:
         policy_bytes = _PORTABLE_HWM_POLICY.read_bytes()
-        product_contract_bytes = _PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes()
+        product_contract_bytes = _HWM_POLICY_PRODUCT_AUTHORITY_CONTRACT.read_bytes()
         performance_policy_bytes = _PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes()
         legacy_policy_bytes = HWM_POLICY.read_bytes()
         accepted = validate_as_held_hwm_receipt_generation_binding(
@@ -4230,7 +4289,7 @@ def _report_governed_hwm_proof(
             calendar_bytes=calendar_bytes,
             input_receipt_bytes=input_receipt_bytes,
             policy_bytes=_PORTABLE_HWM_POLICY.read_bytes(),
-            product_contract_bytes=_PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes(),
+            product_contract_bytes=_HWM_POLICY_PRODUCT_AUTHORITY_CONTRACT.read_bytes(),
             performance_policy_bytes=_PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes(),
             legacy_policy_bytes=HWM_POLICY.read_bytes(),
         )
@@ -4473,7 +4532,6 @@ def _calculation_catalog_through(
                     )
         projected["assignments"] = [dict(assignment) for assignment in assignments]
     dated_collections = {
-        "allocations": "as_of_date",
         "calendar_coverage": "date",
         "flows": "event_date",
         "nav_observations": "as_of_date",
@@ -4488,7 +4546,10 @@ def _calculation_catalog_through(
         projected[field_name] = [
             dict(row)
             for row in _objects(catalog.get(field_name), field_name)
-            if _date(row.get(date_field), f"{field_name}.{date_field}") <= cutoff
+            if (
+                field_name == "calendar_coverage" and row.get(date_field) is None
+            )
+            or _date(row.get(date_field), f"{field_name}.{date_field}") <= cutoff
         ]
     raw_hwm_inputs = catalog.get("hwm_inputs")
     if raw_hwm_inputs is not None:
@@ -4518,9 +4579,6 @@ def _calculation_catalog_through(
     context_boundaries = {
         "strategy_live_metrics": frozenset(
             {"first_date", "last_date", "observed_start", "observed_end"}
-        ),
-        "strategy_provider_evidence": frozenset(
-            {"observed_start", "observed_end"}
         ),
         "strategy_nav_coverage": frozenset(
             {"first_date", "last_date", "observed_start", "observed_end"}
@@ -6770,6 +6828,121 @@ def _verified_epoch_authority_details(
                 ).validate(receipt)
             except JsonSchemaValidationError as exc:
                 raise ReportValidationError(failure) from exc
+            if receipt.get("coverage_mode") == "STATIC_SNAPSHOT_COVERAGE_V1":
+                try:
+                    staged_inputs = receipt["staged_inputs"]
+                    crosswalk = subject_object(
+                        "authority/account-assignment-crosswalk.json"
+                    )
+                    calculation_rows = subject_object(
+                        "authority/calculation-inputs.json"
+                    )["rows"]
+                    assignment = (
+                        receipt["account_id"],
+                        receipt["strategy_id"],
+                        receipt["requested_start"],
+                    )
+                    matching_crosswalk = [
+                        row
+                        for row in crosswalk["rows"]
+                        if row["product_epoch_disposition"]
+                        == "INCLUDED_PRODUCT_EPOCH"
+                        and (
+                            row["account_id"],
+                            row["strategy_id"],
+                            row["effective_start"],
+                        )
+                        == assignment
+                        and row["provider"] == receipt["provider"]
+                        and (
+                            row["effective_end"] is None
+                            or row["effective_end"] == receipt["requested_end"]
+                        )
+                    ]
+                    matching_calculation = [
+                        row
+                        for row in calculation_rows
+                        if (
+                            row["epoch"]["account_id"],
+                            row["epoch"]["strategy_id"],
+                            row["epoch"]["effective_start"],
+                            row["epoch"]["effective_end"],
+                        )
+                        == (
+                            receipt["account_id"],
+                            receipt["strategy_id"],
+                            receipt["requested_start"],
+                            matching_crosswalk[0]["effective_end"],
+                        )
+                    ]
+                    expected_end = (
+                        matching_crosswalk[0]["effective_end"] or cutoff
+                    )
+                    issuer = receipt["issuer"]
+                    def observed_facts(field: str) -> dict[str, Any]:
+                        facts = matching_calculation[0][field]
+                        dates = sorted(
+                            item.get(
+                                "as_of_date",
+                                item.get("nav_recognition_date", item.get("event_date")),
+                            )
+                            for item in facts
+                        )
+                        return {
+                            "row_count": len(facts),
+                            "first_date": dates[0] if dates else None,
+                            "last_date": dates[-1] if dates else None,
+                        }
+                    expected_staged_inputs = {
+                        "provider_ledger_generation_id": selected_identities[
+                            "provider_ledger"
+                        ]["generation_id"],
+                        "provider_ledger_artifact": selected_identities[
+                            "provider_ledger"
+                        ]["artifact"],
+                        "baseline_sha256": selected_identities["baseline"]["artifact"][
+                            "sha256"
+                        ],
+                        "baseline_size_bytes": selected_identities["baseline"][
+                            "artifact"
+                        ]["size_bytes"],
+                        "crosswalk_sha256": subject_identity(
+                            "authority/account-assignment-crosswalk.json"
+                        )["sha256"],
+                        "crosswalk_size_bytes": subject_identity(
+                            "authority/account-assignment-crosswalk.json"
+                        )["size_bytes"],
+                    }
+                    expected_contract = {
+                        "coverage_mode": "STATIC_SNAPSHOT_COVERAGE_V1",
+                        "account_id": receipt["account_id"],
+                        "strategy_id": receipt["strategy_id"],
+                        "requested_start": receipt["requested_start"],
+                        "requested_end": receipt["requested_end"],
+                        "provider_generation": receipt["provider_generation"],
+                        "staged_inputs": staged_inputs,
+                    }
+                except (IndexError, KeyError, TypeError) as exc:
+                    raise ReportValidationError(failure) from exc
+                if (
+                    len(matching_crosswalk) != 1
+                    or len(matching_calculation) != 1
+                    or receipt.get("requested_end") != expected_end
+                    or receipt.get("calculation_cutoff_date") != cutoff
+                    or issuer.get("adapter_name") != "static-snapshot-coverage"
+                    or issuer.get("adapter_version") != "1"
+                    or receipt.get("coverage_as_of_date") < cutoff
+                    or staged_inputs != expected_staged_inputs
+                    or receipt.get("observed_facts")
+                    != {
+                        "nav": observed_facts("nav_observations"),
+                        "flows": observed_facts("classified_flows"),
+                        "capital_anchors": observed_facts("capital_anchors"),
+                    }
+                    or entry.get("contract") != expected_contract
+                ):
+                    raise ReportValidationError(failure)
+                continue
             issuer = receipt["issuer"]
             required_categories = receipt["required_categories"]
             raw_artifacts = receipt["raw_evidence_artifacts"]
@@ -6829,9 +7002,9 @@ def _verified_epoch_authority_details(
         flow_policy = subject_object("authority/flow-classification-policy.json")
         admission_policy = subject_object("authority/mapped-epoch-admission.json")
         code_identities = subject_object("authority/code-identities.json")
-        selected_policy_identity = selected_identities[
-            "flow_classification_policy"
-        ]
+        selected_policy_identity = selected_identities["flow_classification_policy"]
+        raw_policy_bytes = FLOW_CLASSIFICATION_POLICY_CONTRACT.read_bytes()
+        raw_policy = json.loads(raw_policy_bytes)
         expected_policy_identity = subject_identity(
             "authority/flow-classification-policy.json"
         )
@@ -6861,7 +7034,12 @@ def _verified_epoch_authority_details(
                 "as_of_date": selected_identities["as_of_date"],
                 "code_sources": selected_code_sources,
             }
-            and selected_policy_identity == expected_policy_identity
+            and selected_policy_identity
+            == {
+                "sha256": hashlib.sha256(raw_policy_bytes).hexdigest(),
+                "size_bytes": len(raw_policy_bytes),
+            }
+            and raw_policy == flow_policy
             and classified_source["classification_policy"]
             == {
                 "policy_id": flow_policy["policy_id"],
@@ -6986,22 +7164,35 @@ def _verified_epoch_authority_details(
                 "output_row_count",
             )
         )
-        or counts["funded_admission_row_count"] != 1
-        or counts["ok_output_row_count"] != 1
-        or counts["blocked_admission_row_count"] != 12
-        or counts["blocked_output_row_count"] != 12
         or counts["coverage_row_count"]
         != counts["complete_coverage_row_count"]
         + counts["blocked_coverage_row_count"]
+        or counts["admission_row_count"]
+        != counts["funded_admission_row_count"]
+        + counts["blocked_admission_row_count"]
+        or counts["output_row_count"]
+        != counts["ok_output_row_count"] + counts["blocked_output_row_count"]
+        or counts["assignment_count"]
+        != counts["mapped_assignment_count"]
+        + counts["historical_assignment_count"]
+        + counts["reserve_assignment_count"]
+        or counts["classified_event_count"]
+        != counts["classified_event_classified_count"]
+        + counts["classified_event_blocked_count"]
+        or counts["unmatched_fact_count"]
+        != counts["unmatched_nav_fact_count"]
+        + counts["unmatched_raw_flow_fact_count"]
     ):
         raise ReportValidationError("epoch verification semantic counts differ")
     numeric = verification.get("numeric_verification")
-    if numeric != {
-        "candidate_count": 1,
-        "comparison_count": 1,
-        "discrepancy_count": 0,
-        "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
-    }:
+    if (
+        not isinstance(numeric, dict)
+        or numeric.get("candidate_count") != counts["ok_output_row_count"]
+        or numeric.get("comparison_count") != counts["ok_output_row_count"]
+        or numeric.get("discrepancy_count") != 0
+        or numeric.get("disposition")
+        != "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+    ):
         raise ReportValidationError("epoch verification numeric partition differs")
     calculation_rows = _objects(
         calculation_inputs.get("rows"), "epoch calculation input rows"
@@ -7018,11 +7209,11 @@ def _verified_epoch_authority_details(
     calculation_ledger = calculation_inputs.get("calculation_ledger")
     if not isinstance(calculation_ledger, dict):
         raise ReportValidationError("epoch calculation input cutoff differs")
-    ledger_nav = _objects(
+    _objects(
         calculation_ledger.get("nav_observations"),
         "epoch calculation ledger nav observations",
     )
-    ledger_flows = _objects(
+    _objects(
         calculation_ledger.get("flows"), "epoch calculation ledger flows"
     )
     classified_payload = subject_object("authority/classified-flows.json")
@@ -7031,8 +7222,6 @@ def _verified_epoch_authority_details(
     )
     cardinalities = {
         "current_product_epoch_count": len(manifest_rows),
-        "observed_nav_fact_count": len(ledger_nav),
-        "observed_raw_flow_count": len(ledger_flows),
         "classified_event_count": len(classified_events),
         "calculation_input_row_count": len(calculation_rows),
         "coverage_row_count": len(coverage_rows),
@@ -7106,11 +7295,18 @@ def _verified_epoch_authority_details(
         by_key[key] = row
 
     def index_authority_rows(
-        rows: Sequence[Mapping[str, Any]], assignment_field: str, label: str
+        rows: Sequence[Mapping[str, Any]], assignment_field: str | None, label: str
     ) -> dict[tuple[str, str, str, str | None], Mapping[str, Any]]:
         indexed: dict[tuple[str, str, str, str | None], Mapping[str, Any]] = {}
         for authority_row in rows:
-            assignment = authority_row.get(assignment_field)
+            if assignment_field is None:
+                if not set(tuple_fields).issubset(authority_row):
+                    raise ReportValidationError(f"epoch {label} tuple differs")
+                assignment = {
+                    field: authority_row[field] for field in tuple_fields
+                }
+            else:
+                assignment = authority_row.get(assignment_field)
             if not isinstance(assignment, dict) or set(assignment) != set(tuple_fields):
                 raise ReportValidationError(f"epoch {label} tuple differs")
             key = tuple(assignment[field] for field in tuple_fields)
@@ -7128,12 +7324,12 @@ def _verified_epoch_authority_details(
         coverage_rows, "assignment", "coverage"
     )
     admission_by_key = index_authority_rows(
-        admission_rows, "assignment", "admission"
+        admission_rows, None, "admission"
     )
     assert calculation_by_key
     details: dict[tuple[str, str, str, str | None], dict[str, Any]] = {}
-    funded = 0
-    blocked = 0
+    numeric_candidate_count = 0
+    non_numeric_candidate_count = 0
     for chain in chains:
         if set(chain) != {
             "assignment",
@@ -7181,7 +7377,7 @@ def _verified_epoch_authority_details(
                 or output != {"status": "OK", "blocking_reason": None}
             ):
                 raise ReportValidationError("epoch funded semantic chain differs")
-            funded += 1
+            numeric_candidate_count += 1
         elif chain.get("numeric_candidate") is False:
             if (
                 admission.get("status") != "BLOCKED"
@@ -7193,7 +7389,7 @@ def _verified_epoch_authority_details(
                 }
             ):
                 raise ReportValidationError("epoch blocked semantic chain differs")
-            blocked += 1
+            non_numeric_candidate_count += 1
         else:
             raise ReportValidationError("epoch numeric candidate authority differs")
         details[key] = {
@@ -7203,7 +7399,11 @@ def _verified_epoch_authority_details(
             "epoch_output_status": output["status"],
             "epoch_blocking_reason": output["blocking_reason"],
         }
-    if set(details) != set(by_key) or funded != 1 or blocked != 12:
+    if (
+        set(details) != set(by_key)
+        or numeric_candidate_count != numeric.get("candidate_count")
+        or numeric_candidate_count + non_numeric_candidate_count != len(chains)
+    ):
         raise ReportValidationError("epoch verification semantic partition differs")
     return details
 
