@@ -248,10 +248,6 @@ _HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
         "cb9609449f633b3077fd2dbfd3cd67764f61290c0d0dee682368d235cae77b13",
         "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
     ),
-    "volatis-strategy:account-live": (
-        "c2d93268f9b91eead304459ce029b8bf4b1110ca28d0bb8190361ab4df43183f",
-        "f989eed33cd7ce8e17d63acb5065032e56d511a765b4f0684e281df043d27016",
-    ),
 }
 _HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {
     # Matrixport daily observations stop at the financial-MVP cutoff.  Its two

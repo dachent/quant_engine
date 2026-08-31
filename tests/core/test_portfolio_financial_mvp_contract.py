@@ -1016,7 +1016,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # spans confined to coverage) while retaining corrected P123 inputs and
     # the deprecated Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "57364aabbb51fbab5e0c64c69ea513bc1b1451921f92190e64fd1ead1bbc6283"
+        "f3c537218d73e889c607e9dd0c1e7cf02cd5452c0d22eb644e133be92539b79a"
     )
 
 
@@ -2845,6 +2845,52 @@ def test_robuxio_materialized_identity_is_daily_only_and_cannot_be_rebound() -> 
         match="materialized history version projection differs",
     ):
         _validate(hpr_folded)
+
+
+def test_volatis_account_live_materialized_authority_rejects_raw_contribution_series() -> None:
+    accepted_sha256 = (
+        "c2d93268f9b91eead304459ce029b8bf4b1110ca28d0bb8190361ab4df43183f"
+    )
+    rejected_raw_contribution_sha256 = (
+        "f989eed33cd7ce8e17d63acb5065032e56d511a765b4f0684e281df043d27016"
+    )
+    accepted = copy.deepcopy(_contract())
+    segment = next(
+        row
+        for row in accepted["history_corrections"]["materialized_segment_identities"]
+        if row["segment_id"] == "volatis-strategy:account-live"
+    )
+    volatis = next(
+        row for row in accepted["strategies"] if row["strategy_id"] == "volatis-strategy"
+    )
+    segment["sha256"] = accepted_sha256
+    volatis["live_implementation_identity"]["version_ref"] = (
+        f"account-live-segment:{accepted_sha256}"
+    )
+
+    _validate(accepted)
+
+    rejected = copy.deepcopy(accepted)
+    rejected_segment = next(
+        row
+        for row in rejected["history_corrections"]["materialized_segment_identities"]
+        if row["segment_id"] == "volatis-strategy:account-live"
+    )
+    rejected_volatis = next(
+        row for row in rejected["strategies"] if row["strategy_id"] == "volatis-strategy"
+    )
+    rejected_segment["sha256"] = rejected_raw_contribution_sha256
+    rejected_volatis["live_implementation_identity"]["version_ref"] = (
+        f"account-live-segment:{rejected_raw_contribution_sha256}"
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "materialized history version projection differs from accepted "
+            "history authority"
+        ),
+    ):
+        _validate(rejected)
 
 
 def test_history_correction_omission_and_capture_conflation_fail() -> None:
