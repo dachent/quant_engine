@@ -3567,6 +3567,34 @@ def build_analytics(
     base_factor = _path(recipe["base_factor_file"]["path"], "base factor file")
     _write_exact(base_source / "factors.csv", base_factor.read_bytes())
     base_spec_value = _load(base_spec, "base decomposition specification")
+    if current_plan:
+        selected_targets_relative = "inputs/history/selected-targets.csv"
+        selected_targets = attribution_bundle / selected_targets_relative
+        selected_target_identity = _sha(selected_targets)
+        manifest_inputs = _manifest_artifacts(
+            attribution_bundle, plan.get("inputs"), "attribution plan inputs"
+        )
+        if manifest_inputs.get(selected_targets_relative) != selected_target_identity:
+            raise VerticalBuildError("current selected targets differ from attribution input")
+        target_source = base_spec_value.get("target_source")
+        if not isinstance(target_source, dict):
+            raise VerticalBuildError("base decomposition target source is invalid")
+        derived_target_source = dict(target_source)
+        derived_target_source.update(
+            {
+                "artifact_id": "history/selected-targets.csv",
+                "expected_sha256": selected_target_identity[0],
+                "expected_size_bytes": selected_target_identity[1],
+                "relative_path": "targets.csv",
+                "schema_name": "portfolio-decomposition-target-series",
+                "schema_version": "1",
+            }
+        )
+        derived_base_spec = dict(base_spec_value)
+        derived_base_spec["target_source"] = derived_target_source
+        base_spec = output_root / "base-decomposition-spec.json"
+        _write_exact(base_spec, canonical_json_bytes(derived_base_spec))
+        _write_exact(base_source / "targets.csv", selected_targets.read_bytes())
     provenance_sources = base_spec_value.get("provenance_sources")
     if not isinstance(provenance_sources, list) or not provenance_sources:
         raise VerticalBuildError("base decomposition provenance sources are invalid")

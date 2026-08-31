@@ -1543,7 +1543,16 @@ def _current_plan_bundle(
     provenance_path = staging / provenance_relative
     provenance_path.parent.mkdir(parents=True)
     provenance_path.write_bytes(provenance_content)
+    legacy_target_content = b"series_id,date,return\nLegacy,2026-08-03,0.01\n"
     base_spec = {
+        "target_source": {
+            "artifact_id": "legacy/targets.csv",
+            "expected_sha256": hashlib.sha256(legacy_target_content).hexdigest(),
+            "expected_size_bytes": len(legacy_target_content),
+            "relative_path": "targets.csv",
+            "schema_name": "portfolio-canonical-strategy-returns",
+            "schema_version": "1",
+        },
         "provenance_sources": [
             {
                 "expected_sha256": hashlib.sha256(provenance_content).hexdigest(),
@@ -2020,6 +2029,31 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
         bindings["us-economic:STATIC"]["generation_id"]
         != bindings["us-economic:DYNAMIC_FLS"]["generation_id"]
     )
+    base_stage = next(
+        call
+        for call in calls
+        if call[0:2] == ("portfolio_decomposition.py", "stage")
+        and Path(str(call[call.index("--output-root") + 1]))
+        == output_root / "decomposition"
+    )
+    base_spec_path = Path(str(base_stage[base_stage.index("--spec") + 1]))
+    base_source_root = Path(str(base_stage[base_stage.index("--source-root") + 1]))
+    immutable_spec_path = bundle / "inputs/governance/base-decomposition-spec.json"
+    selected_targets = (bundle / "inputs/history/selected-targets.csv").read_bytes()
+    derived_spec = json.loads(base_spec_path.read_text(encoding="utf-8"))
+    assert base_spec_path != immutable_spec_path
+    assert base_source_root == output_root / "base-input"
+    immutable_spec = json.loads(immutable_spec_path.read_text(encoding="utf-8"))
+    assert immutable_spec["target_source"]["artifact_id"] == "legacy/targets.csv"
+    assert derived_spec["target_source"] == {
+        "artifact_id": "history/selected-targets.csv",
+        "expected_sha256": hashlib.sha256(selected_targets).hexdigest(),
+        "expected_size_bytes": len(selected_targets),
+        "relative_path": "targets.csv",
+        "schema_name": "portfolio-decomposition-target-series",
+        "schema_version": "1",
+    }
+    assert (base_source_root / "targets.csv").read_bytes() == selected_targets
     assert not any(
         call[0] == "portfolio_decomposition_evidence_modes.py" for call in calls
     )
