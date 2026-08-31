@@ -2820,7 +2820,18 @@ def test_layered_history_uses_ledger_account_return_after_matrixport_reconciliat
                 Decimal(changed[0]["return"]) + perturbation,
                 "f",
             )
-        return changed, coverage
+        changed_coverage = dict(coverage)
+        gap_policy = coverage["source_gap_policy"]
+        assert isinstance(gap_policy, dict)
+        changed_coverage["epoch_hpr_receipt"] = (
+            target_series._matrixport_epoch_hpr_receipt(
+                returns=changed,
+                span_return_receipts=gap_policy["span_return_receipts"],
+                source_gap_policy=gap_policy,
+                admission_cutoff=date.fromisoformat(str(coverage["admission_cutoff"])),
+            )
+        )
+        return changed, changed_coverage
 
     monkeypatch.setattr(
         target_series,

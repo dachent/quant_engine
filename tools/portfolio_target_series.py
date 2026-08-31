@@ -3292,10 +3292,13 @@ def build_layered_history_generation(
         raise TargetSeriesError(
             "Matrixport source gap policy differs from product authority"
         )
-    raw_epoch_hpr_receipt = robuxio_coverage.get("epoch_hpr_receipt")
-    if not isinstance(raw_epoch_hpr_receipt, dict):
+    if not isinstance(robuxio_coverage.get("epoch_hpr_receipt"), dict):
         raise TargetSeriesError("Matrixport epoch HPR receipt is absent")
-    robuxio_epoch_hpr_receipt = dict(raw_epoch_hpr_receipt)
+    raw_span_receipts = raw_gap_policy.get("span_return_receipts")
+    if not isinstance(raw_span_receipts, list) or any(
+        not isinstance(item, dict) for item in raw_span_receipts
+    ):
+        raise TargetSeriesError("Matrixport epoch HPR span receipts are invalid")
     matrixport_unavailable_return_dates = frozenset(
         date.fromisoformat(str(item))
         for item in raw_gap_policy.get("unavailable_return_dates", [])
@@ -3326,6 +3329,15 @@ def build_layered_history_generation(
         live_by_strategy["robuxio-crypto"],
         robuxio_live,
         matrixport_unavailable_return_dates,
+    )
+    robuxio_epoch_hpr_receipt = _matrixport_epoch_hpr_receipt(
+        returns=[
+            {"date": row["date"], "return": row["return"]}
+            for row in live_by_strategy["robuxio-crypto"]
+        ],
+        span_return_receipts=raw_span_receipts,
+        source_gap_policy=raw_gap_policy,
+        admission_cutoff=matrixport_admission_cutoff,
     )
 
     quantbase_artifacts = _manifest_artifacts(quantbase_manifest.get("artifacts"))
