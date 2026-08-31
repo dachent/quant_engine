@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import importlib.util
 import io
@@ -1040,6 +1040,7 @@ def _import_tracker(
     assignment_rows = _read_csv(assignment_path, _ASSIGNMENT_FIELDS, "assignments")
     accounts_by_alias: dict[str, dict[str, Any]] = {}
     assignments: list[dict[str, Any]] = []
+    funded_replaced_starts: dict[int, str] = {}
     strategy_ids = {str(item["strategy_id"]) for item in strategies}
     for row in assignment_rows:
         institution = _text(row["institution"], "assignment.institution")
@@ -1083,6 +1084,7 @@ def _import_tracker(
         ):
             raise ProvenanceValidationError("assignment interval is reversed")
         source_classification = _text(row["source"], "assignment.source")
+        original_period_start = period_start
         if strategy_id is not None and source_classification == "provider_account_live_start":
             try:
                 period_start = funded_memberships[strategy_id]
@@ -1112,9 +1114,10 @@ def _import_tracker(
             "strategy_id": strategy_id,
             "strategy_mapping_disposition": strategy_disposition,
         }
-        assignments.append(
-            {"assignment_id": _record_id("assignment", payload), **payload}
-        )
+        assignment = {"assignment_id": _record_id("assignment", payload), **payload}
+        assignments.append(assignment)
+        if original_period_start != period_start:
+            funded_replaced_starts[id(assignment)] = original_period_start
 
     current_mapped_by_strategy: dict[str, list[dict[str, Any]]] = {}
     for assignment in assignments:
@@ -1138,10 +1141,33 @@ def _import_tracker(
         funded_start = funded_memberships.get(strategy_id)
         if funded_start is None or len(current_assignments) != 1:
             continue
-        current_assignments[0]["effective_start"] = funded_start
-        current_assignments[0]["source_classification"] = (
+        current_assignment = current_assignments[0]
+        original_start = funded_replaced_starts.get(
+            id(current_assignment), current_assignment["effective_start"]
+        )
+        current_assignment["effective_start"] = funded_start
+        current_assignment["source_classification"] = (
             "financial_mvp_funded_membership_reconciled"
         )
+        if original_start is None or funded_start <= original_start:
+            continue
+        original_start_date = date.fromisoformat(str(original_start))
+        preceding_ends = {
+            original_start_date.isoformat(),
+            (original_start_date - timedelta(days=1)).isoformat(),
+        }
+        funded_predecessor_end = (
+            date.fromisoformat(funded_start) - timedelta(days=1)
+        ).isoformat()
+        for assignment in assignments:
+            if (
+                assignment["account_id"] == current_assignment["account_id"]
+                and assignment["mapping_status"] == "UNMAPPED"
+                and str(assignment["observed_label"]).casefold() in unmapped_labels
+                and assignment["effective_end"] in preceding_ends
+            ):
+                assignment["effective_end"] = funded_predecessor_end
+                break
 
     # A current legacy ``General`` row is the account-level implementation of
     # the reserve pool, not a missing systematic strategy.  Keep historical

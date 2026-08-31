@@ -1658,7 +1658,11 @@ def _c3_classified_flows(
             candidates = physical_candidates[record_id]
             blocker_code: str | None = None
             if not candidates:
-                blocker_code = "INTERNAL_COUNTERPARTY_MISSING"
+                fallback = selected_rules[record_id].get("unpaired_disposition")
+                if fallback is None:
+                    blocker_code = "INTERNAL_COUNTERPARTY_MISSING"
+                else:
+                    event["disposition"] = fallback
             elif len(candidates) > 1:
                 blocker_code = "INTERNAL_COUNTERPARTY_AMBIGUOUS"
             else:

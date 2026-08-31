@@ -18,6 +18,8 @@ import re
 import sys
 from typing import Any
 
+from quant_engine.core.contracts import canonical_json_bytes
+
 
 _GENERATION_ID = re.compile(r"[0-9a-f]{64}")
 _LAST_FOUR = re.compile(r"[0-9]{4}")
@@ -287,7 +289,7 @@ def _candidate_payload(template: dict[str, Any], baseline: dict[str, Any], bindi
 
 
 def _write_new(path: Path, payload: Mapping[str, Any]) -> None:
-    contents = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    contents = canonical_json_bytes(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with path.open("xb") as handle:

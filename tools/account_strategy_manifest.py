@@ -373,6 +373,7 @@ def load_flow_classification_policy(
         if set(value) not in (
             {"flow_type", "disposition", "amount_sign"},
             {"flow_type", "disposition", "amount_sign", "counterparty_rule"},
+            {"flow_type", "disposition", "amount_sign", "counterparty_rule", "unpaired_disposition"},
         ):
             raise ManifestError(
                 f"flow classification exact rule {index} keys are invalid"
@@ -410,6 +411,12 @@ def load_flow_classification_policy(
                     f"flow classification exact rule {index}.counterparty_rule is invalid"
                 )
             selected_rule["counterparty_rule"] = counterparty_rule
+        if "unpaired_disposition" in value:
+            if disposition != "INTERNAL" or value["unpaired_disposition"] != "EXTERNAL":
+                raise ManifestError(
+                    f"flow classification exact rule {index}.unpaired_disposition is invalid"
+                )
+            selected_rule["unpaired_disposition"] = "EXTERNAL"
         if (disposition == "INTERNAL") != ("counterparty_rule" in selected_rule):
             raise ManifestError(
                 f"flow classification exact rule {index} internal pairing is invalid"
@@ -426,6 +433,7 @@ def load_flow_classification_policy(
                 "disposition",
                 "amount_sign",
                 "counterparty_rule",
+                "unpaired_disposition",
             },
         ):
             raise ManifestError(
@@ -467,6 +475,12 @@ def load_flow_classification_policy(
                     f"flow classification prefix rule {index}.counterparty_rule is invalid"
                 )
             selected_prefix["counterparty_rule"] = counterparty_rule
+        if "unpaired_disposition" in value:
+            if disposition != "INTERNAL" or value["unpaired_disposition"] != "EXTERNAL":
+                raise ManifestError(
+                    f"flow classification prefix rule {index}.unpaired_disposition is invalid"
+                )
+            selected_prefix["unpaired_disposition"] = "EXTERNAL"
         if (disposition == "INTERNAL") != ("counterparty_rule" in selected_prefix):
             raise ManifestError(
                 f"flow classification prefix rule {index} internal pairing is invalid"
@@ -1698,6 +1712,12 @@ def _expected_flow_dispositions(
                 and other["account_id"] != record["account_id"]
                 and other["amount"] == -record["amount"]
             ]
+            if (
+                not candidates
+                and selected_rule.get("unpaired_disposition") == "EXTERNAL"
+            ):
+                dispositions[record_id] = "EXTERNAL"
+                continue
             if len(candidates) != 1:
                 raise ManifestError(
                     f"raw flow {record_id} counterparty is unpaired or ambiguous"
@@ -2619,7 +2639,6 @@ def analyze_epoch(
     for leg, amount in admitted_allocations.items():
         int_in_by_day[leg] = int_in_by_day.get(leg, Decimal(0)) + amount
     int_out_by_day = normalize_legs(int_out_by_day)
-    capital_flow_trace: list[dict[str, Any]] = []
     for flow_class, source in (
         ("EXTERNAL_IN", external_in_by_day),
         ("EXTERNAL_OUT", external_out_by_day),
@@ -2631,6 +2650,41 @@ def analyze_epoch(
                 raise ManifestError(
                     f"{flow_class} on {event_date} must be a positive capital flow"
                 )
+    # The only permitted NAV trimming is the deterministic leading pre-funding
+    # prefix.  Once a strictly-positive AVAILABLE NAV is observed, every later
+    # observation is a return base and must therefore itself be positive.
+    all_days = sorted(window_navs)
+    first_funded = next(
+        (day for day in all_days if window_navs[day] > 0),
+        None,
+    )
+    if first_funded is None:
+        return None
+    if prev_closing is None and opening_anchor is None:
+        # FIRST_AVAILABLE_NAV is a complete opening observation.  Any flow
+        # recognized on or before it is already represented in that NAV, so it
+        # is not an epoch movement, trace entry, or return-link obligation.
+        def post_opening_legs(
+            source: Mapping[tuple[str, str], Decimal],
+        ) -> dict[tuple[str, str], Decimal]:
+            return {
+                leg: amount
+                for leg, amount in source.items()
+                if leg[1] > first_funded
+            }
+
+        external_in_by_day = post_opening_legs(external_in_by_day)
+        external_out_by_day = post_opening_legs(external_out_by_day)
+        int_in_by_day = post_opening_legs(int_in_by_day)
+        int_out_by_day = post_opening_legs(int_out_by_day)
+    capital_flow_trace: list[dict[str, Any]] = []
+    for flow_class, source in (
+        ("EXTERNAL_IN", external_in_by_day),
+        ("EXTERNAL_OUT", external_out_by_day),
+        ("INTERNAL_IN", int_in_by_day),
+        ("INTERNAL_OUT", int_out_by_day),
+    ):
+        for (event_date, nav_recognition_date), amount in source.items():
             capital_flow_trace.append(
                 {
                     "class": flow_class,
@@ -2646,22 +2700,76 @@ def analyze_epoch(
             str(entry["class"]),
         )
     )
-    # The only permitted NAV trimming is the deterministic leading pre-funding
-    # prefix.  Once a strictly-positive AVAILABLE NAV is observed, every later
-    # observation is a return base and must therefore itself be positive.
-    all_days = sorted(window_navs)
-    first_funded = next(
-        (day for day in all_days if window_navs[day] > 0),
-        None,
-    )
-    if first_funded is None:
-        return None
-    days = [day for day in all_days if day >= first_funded]
-    if any(window_navs[day] <= 0 for day in days):
-        return {
-            "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
-            "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
-        }
+    net_flow_by_leg: dict[tuple[str, str], Decimal] = {}
+    for source, sign in (
+        (external_in_by_day, 1),
+        (external_out_by_day, -1),
+        (int_in_by_day, 1),
+        (int_out_by_day, -1),
+    ):
+        for leg, value in source.items():
+            net_flow_by_leg[leg] = net_flow_by_leg.get(leg, Decimal(0)) + sign * value
+
+    funded_days = [day for day in all_days if day >= first_funded]
+    days: list[str] = []
+    day_index = 0
+    while day_index < len(funded_days):
+        current_day = funded_days[day_index]
+        current_nav = window_navs[current_day]
+        if current_nav < 0:
+            return {
+                "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
+                "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
+            }
+        if current_nav > 0:
+            days.append(current_day)
+            day_index += 1
+            continue
+
+        # A zero NAV is only omittable when it is a bounded liquidation run:
+        # its first zero exactly reconciles the preceding positive base, the
+        # run itself carries no later flow, and a later positive NAV resumes.
+        if not days:
+            return {
+                "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
+                "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
+            }
+        prior_positive_day = days[-1]
+        first_zero_day = current_day
+        zero_end = day_index
+        while (
+            zero_end + 1 < len(funded_days)
+            and window_navs[funded_days[zero_end + 1]] == 0
+        ):
+            zero_end += 1
+        if zero_end + 1 >= len(funded_days) or window_navs[
+            funded_days[zero_end + 1]
+        ] <= 0:
+            return {
+                "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
+                "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
+            }
+        transition_flow = sum(
+            (
+                value
+                for (_event_day, recognition_day), value in net_flow_by_leg.items()
+                if prior_positive_day < recognition_day <= first_zero_day
+            ),
+            Decimal(0),
+        )
+        zero_run_end = funded_days[zero_end]
+        if (
+            window_navs[prior_positive_day] + transition_flow != 0
+            or any(
+                first_zero_day < recognition_day <= zero_run_end
+                for _event_day, recognition_day in net_flow_by_leg
+            )
+        ):
+            return {
+                "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
+                "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
+            }
+        day_index = zero_end + 1
     if len(days) < 3:
         return None
     closing_nav_date = days[-1]
@@ -2680,22 +2788,6 @@ def analyze_epoch(
         # epoch stays unavailable until a covering NAV observation exists.
         return {"unavailable_status": "FLOWS_AFTER_CLOSING_NAV"}
 
-    if prev_closing is None and opening_anchor is None and any(
-        event_day <= first_funded
-        for source in (
-            external_in_by_day,
-            external_out_by_day,
-            int_in_by_day,
-            int_out_by_day,
-        )
-        for event_day, _recognition_day in source
-    ):
-        return {
-            "unavailable_status": "BLOCKED_UNPROVABLE_OPENING_FLOWS",
-            "blocking_reason": (
-                "FLOW_ON_OR_BEFORE_FIRST_AVAILABLE_NAV_WITHOUT_PREDECESSOR_CLOSING"
-            ),
-        }
     if prev_closing is not None and opening_anchor is not None:
         raise ManifestError("provider opening anchor conflicts with predecessor continuity")
     anchor_event_date: str | None = None
@@ -2727,40 +2819,39 @@ def analyze_epoch(
         raise ManifestError(
             "predecessor closing date is required for observation trace"
         )
-    # An independently inferred opening is the first available NAV, so a flow
-    # on that date is unprovable and was blocked above.  A trusted predecessor
-    # opening is distinct and must include every successor-epoch flow,
-    # including the first observed day.
+    # An independently inferred opening absorbs recognized opening cash.  A
+    # trusted predecessor or provider-anchor opening instead includes every
+    # epoch flow, including one recognized on the first observed day.
     include_first_day_flow = prev_closing is not None or opening_anchor is not None
     dep = sum(
         (
             v
-            for (event_day, _recognition_day), v in external_in_by_day.items()
-            if include_first_day_flow or event_day != first_funded
+            for (_event_day, recognition_day), v in external_in_by_day.items()
+            if include_first_day_flow or recognition_day > first_funded
         ),
         Decimal(0),
     )
     wd = sum(
         (
             v
-            for (event_day, _recognition_day), v in external_out_by_day.items()
-            if include_first_day_flow or event_day != first_funded
+            for (_event_day, recognition_day), v in external_out_by_day.items()
+            if include_first_day_flow or recognition_day > first_funded
         ),
         Decimal(0),
     )
     int_in = sum(
         (
             v
-            for (event_day, _recognition_day), v in int_in_by_day.items()
-            if include_first_day_flow or event_day != first_funded
+            for (_event_day, recognition_day), v in int_in_by_day.items()
+            if include_first_day_flow or recognition_day > first_funded
         ),
         Decimal(0),
     )
     int_out = sum(
         (
             v
-            for (event_day, _recognition_day), v in int_out_by_day.items()
-            if include_first_day_flow or event_day != first_funded
+            for (_event_day, recognition_day), v in int_out_by_day.items()
+            if include_first_day_flow or recognition_day > first_funded
         ),
         Decimal(0),
     )
@@ -2770,16 +2861,6 @@ def analyze_epoch(
     net_capital = invested - withdrawn
     current = window_navs[days[-1]]
     gain = current - net_capital
-
-    net_flow_by_leg: dict[tuple[str, str], Decimal] = {}
-    for source, sign in (
-        (external_in_by_day, 1),
-        (external_out_by_day, -1),
-        (int_in_by_day, 1),
-        (int_out_by_day, -1),
-    ):
-        for leg, v in source.items():
-            net_flow_by_leg[leg] = net_flow_by_leg.get(leg, Decimal(0)) + sign * v
 
     linked_flow_legs: set[tuple[str, str]] = set()
 
@@ -2924,9 +3005,9 @@ def analyze_epoch(
         (int_in_by_day, -1),
         (int_out_by_day, 1),
     ):
-        for (event_day, _recognition_day), v in source.items():
+        for (event_day, recognition_day), v in source.items():
             if (
-                include_first_day_flow or first_funded < event_day
+                include_first_day_flow or recognition_day > first_funded
             ) and event_day <= days[-1]:
                 closing_cashflows.append((date.fromisoformat(event_day), sign * v))
     closing_cashflows.append((date.fromisoformat(days[-1]), current))
@@ -3073,9 +3154,9 @@ def _assemble_manifest_impl(
                 and _in_window(str(anchor["event_date"]), w0, w1)
             ]
             if manifest_schema_version == _CURRENT_MANIFEST_SCHEMA_VERSION:
-                if prev_closing is None and len(opening_anchors) != 1:
+                if prev_closing is None and len(opening_anchors) > 1:
                     raise ManifestError(
-                        "funded current-product epoch requires exactly one opening capital anchor"
+                        "funded current-product epoch permits at most one opening capital anchor"
                     )
                 if prev_closing is not None and opening_anchors:
                     raise ManifestError(

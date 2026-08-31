@@ -22,7 +22,8 @@
         "flow_type_prefix": "TRANSFER:INTERNAL:",
         "disposition": "INTERNAL",
         "amount_sign": "NONZERO",
-        "counterparty_rule": "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+        "counterparty_rule": "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT",
+        "unpaired_disposition": "EXTERNAL"
       }
     ]
   }

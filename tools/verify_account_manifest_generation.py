@@ -1090,17 +1090,79 @@ def _derive_first_available_nav_epoch(
         )
         if first_funded_index is None:
             _fail()
-        days = facts.navs[first_funded_index:]
-        if len(days) < 3 or any(nav.value <= 0 for nav in days):
+        funded_navs = facts.navs[first_funded_index:]
+        first = funded_navs[0]
+        opening_anchor = facts.opening_anchor
+        flows = facts.flows
+        if opening_anchor is None:
+            # FIRST_AVAILABLE_NAV already contains cash recognized on or
+            # before the opening observation; those facts remain authority
+            # evidence but do not enter the independently recomputed epoch.
+            flows = tuple(
+                flow
+                for flow in facts.flows
+                if (flow.nav_recognition_date or flow.event_date) > first.as_of_date
+            )
+
+        def signed_flow(
+            start_exclusive: date, end_inclusive: date
+        ) -> Decimal:
+            return sum(
+                (
+                    flow.amount
+                    * (
+                        Decimal(1)
+                        if flow.classification in {"EXTERNAL_IN", "INTERNAL_IN"}
+                        else Decimal(-1)
+                    )
+                    for flow in flows
+                    if start_exclusive
+                    < (flow.nav_recognition_date or flow.event_date)
+                    <= end_inclusive
+                ),
+                Decimal(0),
+            )
+
+        days: list[_IndependentNavFact] = []
+        nav_index = 0
+        while nav_index < len(funded_navs):
+            nav = funded_navs[nav_index]
+            if nav.value < 0:
+                _fail()
+            if nav.value > 0:
+                days.append(nav)
+                nav_index += 1
+                continue
+            if not days:
+                _fail()
+            prior_positive = days[-1]
+            first_zero = nav
+            zero_end = nav_index
+            while (
+                zero_end + 1 < len(funded_navs)
+                and funded_navs[zero_end + 1].value == 0
+            ):
+                zero_end += 1
+            if (
+                zero_end + 1 >= len(funded_navs)
+                or funded_navs[zero_end + 1].value <= 0
+                or prior_positive.value
+                + signed_flow(prior_positive.as_of_date, first_zero.as_of_date)
+                != 0
+                or any(
+                    first_zero.as_of_date
+                    < (flow.nav_recognition_date or flow.event_date)
+                    <= funded_navs[zero_end].as_of_date
+                    for flow in flows
+                )
+            ):
+                _fail()
+            nav_index = zero_end + 1
+
+        if len(days) < 3:
             _fail()
-        first = days[0]
         closing = days[-1]
         if any(flow.event_date > closing.as_of_date for flow in facts.flows):
-            _fail()
-        opening_anchor = facts.opening_anchor
-        if opening_anchor is None and any(
-            flow.event_date <= first.as_of_date for flow in facts.flows
-        ):
             _fail()
         if opening_anchor is not None and (
             opening_anchor.nav_recognition_date != first.as_of_date
@@ -1112,7 +1174,7 @@ def _derive_first_available_nav_epoch(
             flow_class: sum(
                 (
                     flow.amount
-                    for flow in facts.flows
+                    for flow in flows
                     if flow.classification == flow_class
                 ),
                 Decimal(0),
@@ -1149,10 +1211,10 @@ def _derive_first_available_nav_epoch(
                     "amount": flow.amount,
                 }
             )
-            for flow in facts.flows
+            for flow in flows
         ]
         flow_by_date: dict[date, Decimal] = {}
-        for flow in facts.flows:
+        for flow in flows:
             signed = (
                 flow.amount
                 if flow.classification in {"EXTERNAL_IN", "INTERNAL_IN"}
@@ -1228,7 +1290,7 @@ def _derive_first_available_nav_epoch(
             )
             prior = current_nav
 
-        for flow in facts.flows:
+        for flow in flows:
             recognition_date = flow.nav_recognition_date or flow.event_date
             if not any(
                 _parse_canonical_date(link["start_date"])
@@ -1252,7 +1314,7 @@ def _derive_first_available_nav_epoch(
                     if flow.classification in {"EXTERNAL_IN", "INTERNAL_IN"}
                     else flow.amount,
                 )
-                for flow in facts.flows
+                for flow in flows
             ),
             (closing.as_of_date, current),
         ]
@@ -1411,13 +1473,20 @@ def _recognition_legs_attach_to_observed_intervals(
         (prior.as_of_date, current.as_of_date)
         for prior, current in zip(funded, funded[1:])
     )
+    flows = facts.flows
+    if predecessor is None and facts.opening_anchor is None:
+        flows = tuple(
+            flow
+            for flow in flows
+            if (flow.nav_recognition_date or flow.event_date) > first.as_of_date
+        )
     return all(
         any(
             interval_start < (flow.nav_recognition_date or flow.event_date)
             <= interval_end
             for interval_start, interval_end in intervals
         )
-        for flow in facts.flows
+        for flow in flows
     )
 
 
@@ -2503,6 +2572,7 @@ def _classification_rules(
         if not isinstance(row, dict) or set(row) not in (
             {"flow_type", "disposition", "amount_sign"},
             {"flow_type", "disposition", "amount_sign", "counterparty_rule"},
+            {"flow_type", "disposition", "amount_sign", "counterparty_rule", "unpaired_disposition"},
         ):
             _fail()
         flow_type = row.get("flow_type")
@@ -2517,6 +2587,8 @@ def _classification_rules(
         if disposition == "INTERNAL":
             if row.get("counterparty_rule") != _COUNTERPARTY_RULE:
                 _fail()
+            if "unpaired_disposition" in row and row["unpaired_disposition"] != "EXTERNAL":
+                _fail()
         elif "counterparty_rule" in row:
             _fail()
         exact[flow_type] = {key: row[key] for key in row if key != "flow_type"}
@@ -2525,6 +2597,7 @@ def _classification_rules(
         if not isinstance(row, dict) or set(row) not in (
             {"flow_type_prefix", "disposition", "amount_sign"},
             {"flow_type_prefix", "disposition", "amount_sign", "counterparty_rule"},
+            {"flow_type_prefix", "disposition", "amount_sign", "counterparty_rule", "unpaired_disposition"},
         ):
             _fail()
         prefix = row.get("flow_type_prefix")
@@ -2538,6 +2611,8 @@ def _classification_rules(
             _fail()
         if disposition == "INTERNAL":
             if row.get("counterparty_rule") != _COUNTERPARTY_RULE:
+                _fail()
+            if "unpaired_disposition" in row and row["unpaired_disposition"] != "EXTERNAL":
                 _fail()
         elif "counterparty_rule" in row:
             _fail()
@@ -4742,8 +4817,6 @@ def _verify_mixed_output_and_state(
                     True,
                 )
                 fact_form = (predecessor_fact, facts)
-            elif facts.opening_anchor is None:
-                _fail()
             if not _recognition_legs_attach_to_observed_intervals(
                 facts, predecessor_fact
             ):
@@ -5811,7 +5884,11 @@ def _verify_c4b2_policy_and_flows(
             candidates = physical_candidates[record_id]
             blocker_code: str | None = None
             if not candidates:
-                blocker_code = "INTERNAL_COUNTERPARTY_MISSING"
+                fallback = selected_rules[record_id].get("unpaired_disposition")
+                if fallback is None:
+                    blocker_code = "INTERNAL_COUNTERPARTY_MISSING"
+                else:
+                    event["disposition"] = fallback
             elif len(candidates) > 1:
                 blocker_code = "INTERNAL_COUNTERPARTY_AMBIGUOUS"
             else:

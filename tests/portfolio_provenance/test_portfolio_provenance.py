@@ -335,8 +335,16 @@ def _singleton_and_multi_assignment_spec(tmp_path: Path) -> tuple[Path, dict[str
             {
                 "institution": "SYNTHETIC IBKR",
                 "account": "P123 EU",
+                "strategy": "General",
+                "period_start": "2025-09-15",
+                "period_end": "2025-11-12",
+                "source": "audit_account_tax_map",
+            },
+            {
+                "institution": "SYNTHETIC IBKR",
+                "account": "P123 EU",
                 "strategy": "P123 EU",
-                "period_start": "2025-11-12",
+                "period_start": "2025-11-13",
                 "period_end": "",
                 "source": "control_file",
             },
@@ -410,6 +418,73 @@ def test_single_current_funded_memberships_reconcile_non_provider_tracker_starts
         strategy_id: item["assignment_id"]
         for strategy_id, item in reconciled.items()
     } != stale_ids
+
+
+def test_funded_membership_extends_immediately_adjacent_general_predecessor(
+    tmp_path: Path,
+) -> None:
+    """A funded-start correction must not leave a same-account General gap."""
+
+    spec_path, spec = _singleton_and_multi_assignment_spec(tmp_path)
+    assignments_path = Path(spec["roots"]["synthetic-root"]) / "assignments.csv"
+    assignments_path.write_text(
+        assignments_path.read_text(encoding="utf-8").replace(
+            "P123 EU,2025-11-13,,control_file",
+            "P123 EU,2025-11-12,,control_file",
+        ),
+        encoding="utf-8",
+    )
+    stale_catalog, _, _ = provenance.build_catalog(spec_path)
+    stale_general = next(
+        item for item in stale_catalog["assignments"] if item["observed_label"] == "General"
+    )
+    assignments_path.write_text(
+        assignments_path.read_text(encoding="utf-8").replace(
+            "P123 EU,2025-11-12,,control_file",
+            "P123 EU,2025-11-12,,provider_account_live_start",
+        ),
+        encoding="utf-8",
+    )
+    spec["financial_mvp"] = _financial_mvp_binding()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    catalog, _, _ = provenance.build_catalog(spec_path)
+    general = next(
+        item
+        for item in catalog["assignments"]
+        if item["observed_label"] == "General"
+        and item["account_id"]
+        == next(
+            mapped["account_id"]
+            for mapped in catalog["assignments"]
+            if mapped["strategy_id"] == "p123-eu"
+        )
+    )
+
+    assert general["effective_end"] == "2025-11-19"
+    assert general["assignment_id"] != stale_general["assignment_id"]
+
+
+def test_funded_membership_does_not_extend_non_adjacent_general_predecessor(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _singleton_and_multi_assignment_spec(tmp_path)
+    assignments_path = Path(spec["roots"]["synthetic-root"]) / "assignments.csv"
+    assignments_path.write_text(
+        assignments_path.read_text(encoding="utf-8")
+        .replace("General,2025-09-15,2025-11-12", "General,2025-09-15,2025-11-10")
+        .replace(
+            "P123 EU,2025-11-13,,control_file",
+            "P123 EU,2025-11-12,,provider_account_live_start",
+        ),
+        encoding="utf-8",
+    )
+    spec["financial_mvp"] = _financial_mvp_binding()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    catalog, _, _ = provenance.build_catalog(spec_path)
+    general = next(item for item in catalog["assignments"] if item["observed_label"] == "General")
+
+    assert general["effective_end"] == "2025-11-10"
 
 
 def test_multi_account_current_membership_does_not_rewrite_each_assignment(

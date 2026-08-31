@@ -19571,7 +19571,11 @@ def test_ambiguous_flow_rule_matches_still_fail(perimeter_module: Any) -> None:
         perimeter_module._c3_rule(rules, "SYNTHETIC_AMBIGUOUS_FLOW")
 
 
-def _selected_with_internal_counterparty_boundaries(module: Any) -> object:
+def _selected_with_internal_counterparty_boundaries(
+    module: Any,
+    *,
+    unpaired_disposition: bool = False,
+) -> object:
     selected = _c3_selected_inputs(module)
     ledger = selected.provider_ledger.json_object()
     replacements = (
@@ -19594,17 +19598,48 @@ def _selected_with_internal_counterparty_boundaries(module: Any) -> object:
             "value": value,
         }
     policy = selected.flow_classification_policy.json_object()
-    policy["event_dispositions"]["exact"].append(
-        {
-            "flow_type": "SYNTHETIC_INTERNAL",
-            "disposition": "INTERNAL",
-            "amount_sign": "NONZERO",
-            "counterparty_rule": (
-                "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
-            ),
-        }
-    )
+    rule = {
+        "flow_type": "SYNTHETIC_INTERNAL",
+        "disposition": "INTERNAL",
+        "amount_sign": "NONZERO",
+        "counterparty_rule": "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT",
+    }
+    if unpaired_disposition:
+        rule["unpaired_disposition"] = "EXTERNAL"
+    policy["event_dispositions"]["exact"].append(rule)
     return _c3_with_mutated_ledger_or_policy(module, ledger, policy)
+
+
+def test_policy_declared_unpaired_internal_fallback_keeps_pair_and_blocks_ambiguity(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected = _selected_with_internal_counterparty_boundaries(
+        perimeter_module, unpaired_disposition=True
+    )
+
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    events = {
+        event["source_record_id"]: event
+        for event in json.loads(payloads["authority/classified-flows.json"])["events"]
+    }
+
+    assert events["c3-flow-01"]["classification_status"] == "CLASSIFIED"
+    assert events["c3-flow-01"]["disposition"] == "EXTERNAL"
+    assert events["c3-flow-01"]["blocker_code"] is None
+    assert "counterparty_source_record_id" not in events["c3-flow-01"]
+    assert events["c3-flow-02"]["classification_status"] == "BLOCKED"
+    assert events["c3-flow-02"]["blocker_code"] == "INTERNAL_COUNTERPARTY_AMBIGUOUS"
+    assert events["c3-flow-07"]["disposition"] == "INTERNAL"
+    assert events["c3-flow-07"]["counterparty_source_record_id"] == "c3-flow-08"
+    assert events["c3-flow-08"]["counterparty_source_record_id"] == "c3-flow-07"
+
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
 
 
 def test_internal_counterparty_gaps_are_retained_blocked_and_verified(
@@ -20735,6 +20770,140 @@ def test_current_v9_propagates_dual_dates_and_capital_anchor_lineage(
     verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, selected), payloads
     )
+
+
+def test_first_available_nav_absorbs_preopening_flow_and_counts_later_recognition(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """A first epoch absorbs recognized opening cash, but not later recognition."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["capital_anchors"] = []
+    ledger["flows"][0].update({
+        "event_date": "2026-01-30",
+        "nav_recognition_date": "2026-01-30",
+    })
+    opening_selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    opening_payloads = perimeter_module.build_account_manifest_payloads(opening_selected)
+    opening_output = json.loads(
+        opening_payloads["outputs/account-strategy-manifest.json"]
+    )
+    opening_row = next(row for row in opening_output["rows"] if row["status"] == "OK")
+    assert opening_row["opening_basis"] == "FIRST_AVAILABLE_NAV"
+    assert opening_row["opening_capital"] == "50"
+    assert opening_row["deposits"] == "0"
+    assert opening_row["capital_flow_trace"] == []
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, opening_selected), opening_payloads
+    )
+
+    later_ledger = opening_selected.provider_ledger.json_object()
+    later_ledger["flows"][0]["nav_recognition_date"] = "2026-01-31"
+    later_selected = _mixed_selected_with_ledger(
+        perimeter_module, opening_selected, later_ledger
+    )
+    later_payloads = perimeter_module.build_account_manifest_payloads(later_selected)
+    later_output = json.loads(
+        later_payloads["outputs/account-strategy-manifest.json"]
+    )
+    later_row = next(row for row in later_output["rows"] if row["status"] == "OK")
+    assert later_row["deposits"] == "10"
+    assert later_row["capital_flow_trace"] == [{
+        "class": "EXTERNAL_IN",
+        "event_date": "2026-01-30",
+        "nav_recognition_date": "2026-01-31",
+        "amount": "10",
+    }]
+    assert later_row["gain"] != opening_row["gain"]
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, later_selected), later_payloads
+    )
+
+
+def test_zero_nav_liquidation_run_bridges_only_exact_bounded_reconciliation(
+    verifier_module: Any,
+) -> None:
+    """A reconciled zero liquidation gap is not a return base or a lost flow."""
+
+    from tools import account_strategy_manifest as producer_module
+
+    navs = {
+        "2026-01-01": Decimal("32.15"),
+        "2026-01-02": Decimal("0"),
+        "2026-01-03": Decimal("0"),
+        "2026-01-04": Decimal("3.81"),
+        "2026-01-05": Decimal("3.81"),
+    }
+    withdrawal = {("2026-01-02", "2026-01-02"): Decimal("32.15")}
+    producer_row = producer_module.analyze_epoch(
+        navs, {}, withdrawal, {}, {}, None, "2026-01-01", None
+    )
+    assert producer_row is not None
+    assert "unavailable_status" not in producer_row
+    assert producer_row["start"] == "2026-01-01"
+    assert producer_row["end"] == "2026-01-05"
+    assert producer_row["nav_observations"] == 3
+    assert producer_row["withdrawn"] == Decimal("32.15")
+    assert producer_row["observation_trace"]["links"][0] == {
+        "start_date": "2026-01-01",
+        "end_date": "2026-01-04",
+        "base_nav": Decimal("32.15"),
+        "ending_nav": Decimal("3.81"),
+        "net_flow": Decimal("-32.15"),
+        "factor": Decimal("1.118506998444790046656298600311041990669"),
+        "cumulative_index": Decimal("111.8506998444790046656298600311041990669"),
+        "running_hwm_index": Decimal("111.8506998444790046656298600311041990669"),
+        "drawdown": Decimal("0"),
+    }
+
+    facts = verifier_module._IndependentEpochFacts(
+        "liquidation-account",
+        date(2026, 1, 1),
+        date(2026, 1, 5),
+        tuple(
+            verifier_module._IndependentNavFact(
+                date.fromisoformat(as_of_date), "USD", value
+            )
+            for as_of_date, value in navs.items()
+        ),
+        (
+            verifier_module._IndependentFlowFact(
+                date(2026, 1, 2), "EXTERNAL_OUT", "USD", Decimal("32.15"),
+                date(2026, 1, 2),
+            ),
+        ),
+        None,
+        True,
+    )
+    verifier_row = verifier_module._derive_first_available_nav_epoch(facts)
+    assert verifier_row["nav_observations"] == 3
+    assert verifier_row["withdrawn"] == Decimal("32.15")
+    assert verifier_row["observation_trace"]["links"][0]["end_date"] == "2026-01-04"
+    assert verifier_row["observation_trace"]["links"][0]["net_flow"] == Decimal("-32.15")
+
+    invalid_cases = (
+        ({("2026-01-02", "2026-01-02"): Decimal("32.14")}, navs),
+        ({("2026-01-02", "2026-01-02"): Decimal("32.15")}, {
+            "2026-01-01": Decimal("32.15"),
+            "2026-01-02": Decimal("0"),
+            "2026-01-03": Decimal("0"),
+        }),
+        ({
+            ("2026-01-02", "2026-01-02"): Decimal("32.15"),
+            ("2026-01-03", "2026-01-03"): Decimal("1"),
+        }, navs),
+    )
+    for invalid_withdrawals, invalid_navs in invalid_cases:
+        blocked = producer_module.analyze_epoch(
+            invalid_navs, {}, invalid_withdrawals, {}, {}, None, "2026-01-01", None
+        )
+        assert blocked == {
+            "unavailable_status": "BLOCKED_UNDEFINED_RETURN",
+            "blocking_reason": "NONPOSITIVE_NAV_RETURN_BASE",
+        }
 
 
 def test_current_cutoff_excludes_future_economic_flow_despite_earlier_recognition(

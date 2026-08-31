@@ -11,9 +11,12 @@ from typing import Any
 
 import pytest
 
+from quant_engine.core.contracts import canonical_json_bytes
+
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER_PATH = ROOT / "tools" / "rebind_current_epoch_crosswalk.py"
+CROSSWALK_PATH = ROOT / "contracts" / "account-strategy-current-epoch-crosswalk-v1.json"
 
 
 def _load_runner() -> Any:
@@ -173,6 +176,35 @@ def test_rebinds_only_baseline_derived_fields_from_exact_staged_generation(
     }
     assert rebound["rows"][13]["product_epoch_disposition"] == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
     assert rebound["rows"][14]["owner_reason"] == "OWNER_CHOICE_14"
+
+
+def test_rebind_writes_the_core_canonical_json_encoding(tmp_path: Path) -> None:
+    """Would fail if rebinding omits canonical escaping, compaction, or newline."""
+
+    runner = _load_runner()
+    rows = _rows()
+    template_path = tmp_path / "explicit-crosswalk.json"
+    template_path.write_text(json.dumps(_template(rows)), encoding="utf-8")
+    generation = _write_generation(tmp_path, _baseline(rows))
+    output = tmp_path / "candidate-crosswalk.json"
+
+    runner.rebind_current_epoch_crosswalk(
+        template_path=template_path,
+        baseline_generation_dir=generation,
+        output_path=output,
+    )
+
+    actual = output.read_bytes()
+    assert actual == canonical_json_bytes(json.loads(actual))
+    assert actual.endswith(b"\n")
+
+
+def test_tracked_current_epoch_crosswalk_uses_the_core_canonical_json_encoding() -> None:
+    """Would fail if the governed tracked crosswalk drifts from canonical bytes."""
+
+    actual = CROSSWALK_PATH.read_bytes()
+    assert actual == canonical_json_bytes(json.loads(actual))
+    assert actual.endswith(b"\n")
 
 
 def test_rejects_a_coherently_rehashed_baseline_that_changes_an_explicit_mapping(

@@ -271,6 +271,13 @@ EPOCH_INDEPENDENT_REPORT_SCHEMA_VERSION: Final = "3"
 _V9_TRACE_CLASSES: Final = frozenset(
     {"EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT"}
 )
+_V9_OPENING_BASES: Final = frozenset(
+    {
+        "PROVIDER_CAPITAL_ANCHOR",
+        "FIRST_AVAILABLE_NAV",
+        "PREDECESSOR_CLOSING_NAV",
+    }
+)
 _V9_TRACE_ITEM_KEYS: Final = frozenset(
     {"class", "event_date", "nav_recognition_date", "amount"}
 )
@@ -531,7 +538,7 @@ def _validate_v9_epoch_release_controls(
         status = row.get("status")
         if status == "OK":
             ok_rows += 1
-            if row.get("opening_basis") != "PROVIDER_CAPITAL_ANCHOR":
+            if row.get("opening_basis") not in _V9_OPENING_BASES:
                 raise FinancialMvpContractError(
                     "epoch manifest source artifact anchor differs"
                 )

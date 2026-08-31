@@ -142,6 +142,7 @@ def _synthetic_v9_epoch_bundle(
     manifest_payload: bytes | None = None,
     crosswalk_payload: bytes | None = None,
     report_payload: bytes | None = None,
+    opening_basis: str = "PROVIDER_CAPITAL_ANCHOR",
 ) -> GenerationBundle:
     """Stage a v9 bundle whose independent report pins its two binder inputs."""
 
@@ -152,7 +153,7 @@ def _synthetic_v9_epoch_bundle(
             "rows": [
                 {
                     "capital_flow_trace": [],
-                    "opening_basis": "PROVIDER_CAPITAL_ANCHOR",
+                    "opening_basis": opening_basis,
                     "status": "OK",
                 }
             ],
@@ -307,6 +308,20 @@ def test_v9_epoch_source_derives_crosswalk_from_verified_bundle(tmp_path: Path) 
             "version": "1",
         },
     }
+
+
+def test_v9_epoch_source_accepts_verified_first_available_nav_basis(
+    tmp_path: Path,
+) -> None:
+    """A verified schema-9 first-NAV opening remains a valid release source."""
+
+    bundle = _synthetic_v9_epoch_bundle(
+        tmp_path, opening_basis="FIRST_AVAILABLE_NAV"
+    )
+
+    source = contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+    assert source["artifact"]["schema"]["version"] == "9"
 
 
 @pytest.mark.parametrize(
