@@ -509,6 +509,44 @@ def _fixture(
     }
 
 
+def _canonical_public_manifest_with_renamed_inputs(
+    tmp_path: Path,
+) -> tuple[dict[str, Path], Path, str, date]:
+    """Model canonical public outputs supplied under audit-local filenames."""
+    canonical_output_names = {
+        "us_factors": "us_factors_daily.csv",
+        "europe_factors": "europe_factors_daily.csv",
+        "us_industries": "us_49_industries_value_weighted_daily.csv",
+    }
+    audit_filenames = {
+        "us_factors": "us_factors.csv",
+        "europe_factors": "europe_factors.csv",
+        "us_industries": "us_industries.csv",
+    }
+    days = _weekdays(5)
+    market_paths = {
+        "us_factors": tmp_path / "us.csv",
+        "europe_factors": tmp_path / "eu.csv",
+        "us_industries": tmp_path / "industries.csv",
+    }
+    _write_market(market_paths["us_factors"], ("rf", "mkt_rf", "smb"), days)
+    _write_market(market_paths["europe_factors"], ("rf", "unused"), days)
+    _write_market(market_paths["us_industries"], ("rf", "unused"), days)
+    catalog_sha256 = "a" * 64
+    evaluation_date = date(2026, 3, 17)
+    manifest = _public_factor_manifest(catalog_sha256, market_paths, evaluation_date)
+    outputs_by_name = {output["path"]: output for output in manifest["outputs"]}
+    for key, canonical_name in canonical_output_names.items():
+        path = market_paths[key]
+        outputs_by_name[path.name]["path"] = canonical_name
+        renamed = path.with_name(audit_filenames[key])
+        path.replace(renamed)
+        market_paths[key] = renamed
+    _reidentify_public_manifest(manifest)
+    manifest_path = _write_json(tmp_path / "public-factor-manifest.json", manifest)
+    return market_paths, manifest_path, catalog_sha256, evaluation_date
+
+
 def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -> None:
     inputs = _fixture(tmp_path)
     outputs, manifest = planner.build_bundle(
@@ -2096,6 +2134,49 @@ def test_build_rejects_manifest_drift(tmp_path: Path) -> None:
     with pytest.raises(planner.CurrentPlanError, match="differs from its manifest"):
         planner.build_bundle(
             **{key: value for key, value in inputs.items() if key != "plan_document"}
+        )
+
+
+def test_public_manifest_accepts_canonical_outputs_via_renamed_inputs(
+    tmp_path: Path,
+) -> None:
+    market_paths, manifest_path, catalog_sha256, evaluation_date = (
+        _canonical_public_manifest_with_renamed_inputs(tmp_path)
+    )
+
+    boundaries, _capture_age = planner._verify_public_factor_manifest(
+        manifest_path,
+        market_paths,
+        catalog_sha256,
+        evaluation_date,
+        "DEVELOPMENT",
+    )
+
+    assert boundaries == {key: date(2026, 1, 8) for key in market_paths}
+
+
+@pytest.mark.parametrize("failure", ("swapped", "mutated"))
+def test_public_manifest_rejects_wrong_renamed_input_bytes(
+    tmp_path: Path, failure: str
+) -> None:
+    market_paths, manifest_path, catalog_sha256, evaluation_date = (
+        _canonical_public_manifest_with_renamed_inputs(tmp_path)
+    )
+    if failure == "swapped":
+        market_paths["us_factors"], market_paths["europe_factors"] = (
+            market_paths["europe_factors"],
+            market_paths["us_factors"],
+        )
+    else:
+        market_paths["us_factors"].write_bytes(b"mutated audit input\n")
+
+    with pytest.raises(planner.CurrentPlanError, match="differs from its manifest"):
+        planner._verify_public_factor_manifest(
+            manifest_path,
+            market_paths,
+            catalog_sha256,
+            evaluation_date,
+            "DEVELOPMENT",
         )
 
 

@@ -31,6 +31,11 @@ PUBLIC_FACTOR_FRESHNESS_POLICY = {
     "receipt_rule": "CAPTURED_WITHIN_CURRENT_RUN",
 }
 PUBLIC_FACTOR_INPUT_KEYS = ("us_factors", "europe_factors", "us_industries")
+PUBLIC_FACTOR_OUTPUT_NAMES = {
+    "us_factors": "us_factors_daily.csv",
+    "europe_factors": "europe_factors_daily.csv",
+    "us_industries": "us_49_industries_value_weighted_daily.csv",
+}
 PUBLIC_FACTOR_RECEIPT_KEYS = {
     "us_factors",
     "us_momentum",
@@ -903,7 +908,7 @@ def _verify_public_factor_manifest(
     output_calendars: dict[str, tuple[date, ...]] = {}
     for key in PUBLIC_FACTOR_INPUT_KEYS:
         path = market_paths[key]
-        expected = outputs.get(path.name)
+        expected = outputs.get(PUBLIC_FACTOR_OUTPUT_NAMES[key])
         if expected is None:
             raise CurrentPlanError(
                 f"public factor manifest has no output for {path.name}"
