@@ -27,7 +27,7 @@ from pathlib import Path
 import statistics
 import subprocess
 import sys
-from typing import Any, Final, Mapping, Sequence
+from typing import Any, Collection, Final, Mapping, Sequence
 
 from quant_engine.core.contracts import (
     GenerationManifest,
@@ -2311,8 +2311,14 @@ def _matrixport_account_live_from_ledger(
 def _quantbase_account_live_from_ledger(
     ledger_rows: Sequence[Mapping[str, str]],
     recalculated_rows: Sequence[Mapping[str, str]],
+    flow_match_dates: Collection[str],
 ) -> list[dict[str, str]]:
-    """Select ledger rows only after exact independent Quantbase recalculation."""
+    """Select independently recalculated Quantbase returns after strict comparison.
+
+    Only booked-flow return dates, derived by :func:`_quantbase_returns`, may
+    differ from the retained provider-ledger values.  Every ordinary return
+    date remains an exact equality check; no numerical tolerance is applied.
+    """
 
     ledger_by_date = {row["date"]: row for row in ledger_rows}
     recalculated_by_date = {row["date"]: row for row in recalculated_rows}
@@ -2325,15 +2331,19 @@ def _quantbase_account_live_from_ledger(
             "Quantbase provider-ledger account return date perimeter differs"
         )
 
+    allowed_flow_dates = set(flow_match_dates) & set(recalculated_by_date)
     selected: list[dict[str, str]] = []
     for observed in sorted(recalculated_by_date):
         ledger_row = ledger_by_date[observed]
         recalculated_row = recalculated_by_date[observed]
-        if Decimal(ledger_row["return"]) != Decimal(recalculated_row["return"]):
+        if (
+            Decimal(ledger_row["return"]) != Decimal(recalculated_row["return"])
+            and observed not in allowed_flow_dates
+        ):
             raise TargetSeriesError(
                 "Quantbase account-live return differs from provider ledger"
             )
-        selected.append(dict(ledger_row))
+        selected.append(dict(recalculated_row))
     return selected
 
 
@@ -3350,8 +3360,27 @@ def build_layered_history_generation(
         volatis_interval.get("observed_end"),
     ):
         raise TargetSeriesError("Volatis account-live interval differs from contract")
+    raw_flow_matches = volatis_proof.get("flow_matches")
+    if not isinstance(raw_flow_matches, list):
+        raise TargetSeriesError("Volatis flow matching proof is invalid")
+    volatis_return_dates = {row["date"] for row in volatis_live}
+    volatis_flow_dates: set[str] = set()
+    for flow_match in raw_flow_matches:
+        if not isinstance(flow_match, Mapping):
+            raise TargetSeriesError("Volatis flow matching proof is invalid")
+        booked_date = flow_match.get("booked_date")
+        if not isinstance(booked_date, str):
+            raise TargetSeriesError("Volatis flow matching proof is invalid")
+        try:
+            date.fromisoformat(booked_date)
+        except ValueError as exc:
+            raise TargetSeriesError("Volatis flow matching proof is invalid") from exc
+        # The opening booking establishes the first NAV but has no return, so
+        # only proof dates in the calculated-return perimeter are exceptional.
+        if booked_date in volatis_return_dates:
+            volatis_flow_dates.add(booked_date)
     live_by_strategy["volatis-strategy"] = _quantbase_account_live_from_ledger(
-        live_by_strategy["volatis-strategy"], volatis_live
+        live_by_strategy["volatis-strategy"], volatis_live, volatis_flow_dates
     )
 
     p123_artifacts = _manifest_artifacts(p123_manifest.get("artifacts"))

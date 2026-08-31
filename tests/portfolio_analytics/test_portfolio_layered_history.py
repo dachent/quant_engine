@@ -43,6 +43,171 @@ write_layered_history_generation = target_series.write_layered_history_generatio
 verify_layered_history_generation = target_series.verify_layered_history_generation
 
 
+def test_quantbase_account_live_replaces_raw_flow_spike_with_proven_recalculation() -> None:
+    """A proven Quantbase booking date selects the independently adjusted return."""
+
+    ledger_rows = [
+        {
+            "date": "2024-10-16",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+            "series_id": "Volatis Strategy",
+        },
+        {
+            "date": "2024-10-17",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.9",
+            "series_id": "Volatis Strategy",
+        },
+        {
+            "date": "2024-10-18",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.03",
+            "series_id": "Volatis Strategy",
+        },
+    ]
+    recalculated_rows = [
+        {**row, "return": return_value}
+        for row, return_value in zip(
+            ledger_rows,
+            ("0.01", "0.02", "0.03"),
+            strict=True,
+        )
+    ]
+
+    selected = target_series._quantbase_account_live_from_ledger(
+        ledger_rows,
+        recalculated_rows,
+        {"2024-10-17"},
+    )
+
+    assert [row["return"] for row in selected] == ["0.01", "0.02", "0.03"]
+    assert (
+        target_series._quantbase_account_live_from_ledger(
+            recalculated_rows,
+            recalculated_rows,
+            {"2024-10-17"},
+        )
+        == recalculated_rows
+    )
+
+
+def test_quantbase_account_live_rejects_nonflow_mismatch_even_when_other_flow_is_proven() -> None:
+    """The narrow booked-flow exception cannot widen to ordinary performance dates."""
+
+    ledger_rows = [
+        {
+            "date": "2024-10-16",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.01",
+            "series_id": "Volatis Strategy",
+        },
+        {
+            "date": "2024-10-17",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.9",
+            "series_id": "Volatis Strategy",
+        },
+        {
+            "date": "2024-10-18",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.7",
+            "series_id": "Volatis Strategy",
+        },
+    ]
+    recalculated_rows = [
+        {**row, "return": return_value}
+        for row, return_value in zip(
+            ledger_rows,
+            ("0.01", "0.02", "0.03"),
+            strict=True,
+        )
+    ]
+
+    with pytest.raises(
+        TargetSeriesError,
+        match="Quantbase account-live return differs from provider ledger",
+    ):
+        target_series._quantbase_account_live_from_ledger(
+            ledger_rows,
+            recalculated_rows,
+            {"2024-10-17"},
+        )
+
+
+def test_quantbase_account_live_does_not_treat_unused_date_as_flow_proof() -> None:
+    """A supplied date outside the return perimeter cannot authorize a mismatch."""
+
+    ledger_rows = [
+        {
+            "date": "2024-10-16",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.7",
+            "series_id": "Volatis Strategy",
+        }
+    ]
+    recalculated_rows = [{**ledger_rows[0], "return": "0.01"}]
+
+    with pytest.raises(
+        TargetSeriesError,
+        match="Quantbase account-live return differs from provider ledger",
+    ):
+        target_series._quantbase_account_live_from_ledger(
+            ledger_rows,
+            recalculated_rows,
+            {"2030-01-01"},
+        )
+
+
+def test_layered_history_derives_quantbase_exception_from_returned_flow_proof(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+) -> None:
+    """An opening-only Quantbase booking cannot excuse a later ledger spike."""
+
+    fixture = _history_fixture(tmp_path)
+    catalog_path = fixture["provider_ledger_catalog_path"]
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    row = next(
+        candidate
+        for candidate in catalog["strategy_returns"]
+        if candidate["strategy_id"] == "volatis-strategy"
+        and candidate["date"] == "2024-10-16"
+    )
+    row["return"] = "0.9"
+    _write_json(catalog_path, catalog)
+    manifest_path = fixture["provider_ledger_manifest_path"]
+    generation_id = _core_generation_manifest(
+        manifest_path,
+        "quant-engine-provider-ledger",
+        fixture["as_of_date"],
+        [_artifact(catalog_path, "normalized/provider-ledger.json")],
+    )
+    _pointer(fixture["provider_ledger_pointer_path"], generation_id, manifest_path)
+    contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
+    _update_source_generation(
+        contract,
+        "owner-account-live-history",
+        manifest_path,
+        fixture["as_of_date"],
+    )
+    _update_correction_generations(
+        contract,
+        "owner-account-live-history",
+        manifest_path,
+        fixture["as_of_date"],
+        "PROVIDER_LEDGER",
+    )
+    _restore_retained_echo_correction(contract)
+    _write_json(fixture["contract_path"], contract)
+
+    with pytest.raises(
+        TargetSeriesError,
+        match="Quantbase account-live return differs from provider ledger",
+    ):
+        _build(fixture)
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(canonical_json_bytes(value))

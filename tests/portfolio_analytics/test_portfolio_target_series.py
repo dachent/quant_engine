@@ -747,7 +747,7 @@ def test_quantbase_account_path_is_flow_adjusted_and_deterministic(
     assert proof["evidence_layer"] == "ACCOUNT_LIVE"
 
 
-def test_quantbase_independent_recalculation_selects_ledger_authority() -> None:
+def test_quantbase_independent_recalculation_selects_recalculated_authority() -> None:
     ledger_rows = [
         {
             "series_id": "Volatis Strategy",
@@ -774,10 +774,10 @@ def test_quantbase_independent_recalculation_selects_ledger_authority() -> None:
     ]
 
     selected = target_series._quantbase_account_live_from_ledger(
-        ledger_rows, independently_recalculated
+        ledger_rows, independently_recalculated, set()
     )
 
-    assert selected == ledger_rows
+    assert selected == independently_recalculated
 
 
 @pytest.mark.parametrize(
@@ -820,7 +820,7 @@ def test_quantbase_independent_recalculation_rejects_ledger_drift(
 
     with pytest.raises(TargetSeriesError, match=message):
         target_series._quantbase_account_live_from_ledger(
-            ledger_rows, recalculated_rows
+            ledger_rows, recalculated_rows, set()
         )
 
 
