@@ -59,44 +59,22 @@ def _artifact(path: Path, artifact_id: str) -> dict[str, object]:
     }
 
 
-def _manifest(
+def _core_generation_manifest(
     path: Path,
-    generation_id: str,
+    adapter_name: str,
     as_of: str,
     artifacts: list[dict[str, object]],
-) -> None:
-    schema = {
-        "ledger": {"name": "provider-ledger", "version": "1"},
-        "matrixport": {"name": "matrixport-generation-catalog", "version": "2"},
-        "quantbase": {"name": "quantbase-generation", "version": "1"},
-        "p123": {"name": "portfolio123-generation", "version": "1"},
-    }[path.parent.name]
-    _write_json(
-        path,
-        {
-            "$schema": schema["name"],
-            "artifacts": artifacts,
-            "as_of_date": as_of,
-            "generation_id": generation_id,
-            "schema": schema,
-            "schema_version": schema["version"],
-            "verification": "VERIFIED",
-        },
-    )
-
-
-def _provider_ledger_manifest(
-    path: Path, as_of: str, artifacts: list[dict[str, object]]
+    coverage_extra: dict[str, object] | None = None,
 ) -> str:
-    """Write a raw core-generation envelope for a provider-ledger input."""
+    """Write a raw core GenerationManifest envelope without producer helpers."""
 
     manifest = {
-        "adapter": {"name": "quant-engine-provider-ledger", "version": "1.0.0"},
+        "adapter": {"name": adapter_name, "version": "1.0.0"},
         "artifacts": [
             {
                 "artifact_id": artifact["artifact_id"],
                 "as_of_date": as_of,
-                "schema": {"name": "provider-ledger-catalog", "version": "1"},
+                "schema": {"name": "synthetic-source-artifact", "version": "1"},
                 "sha256": artifact["sha256"],
                 "size_bytes": artifact["size_bytes"],
             }
@@ -114,6 +92,8 @@ def _provider_ledger_manifest(
         "manifest_schema_version": 1,
         "verification": "VERIFIED",
     }
+    if coverage_extra is not None:
+        manifest["coverage"].update(coverage_extra)
     generation_id = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
     _write_json(path, {"generation_id": generation_id, **manifest})
     return generation_id
@@ -178,7 +158,7 @@ def test_immutable_provider_ledger_manifest_accepts_core_generation_envelope(
         payload["generation_id"] = hashlib.sha256(
             canonical_json_bytes(payload)
         ).hexdigest()
-        path = tmp_path / "generation.json"
+        path = tmp_path / "ledger" / "generation.json"
         _write_json(path, payload)
         return path, {
             "schema": {"name": "provider-ledger", "version": "1"},
@@ -195,6 +175,47 @@ def test_immutable_provider_ledger_manifest_accepts_core_generation_envelope(
     )
     assert generation_id == source["current_generation"]["generation_id"]
     assert as_of == "2026-08-13"
+
+    pointer_path = path.parent / "CURRENT.json"
+    _pointer(pointer_path, generation_id, path)
+    _current, current_generation_id, current_as_of = (
+        target_series._verified_current_generation(
+            pointer_path=pointer_path,
+            manifest_path=path,
+            source=source,
+            name="provider ledger",
+            inventory_profile="provider-ledger",
+        )
+    )
+    assert (current_generation_id, current_as_of) == (generation_id, as_of)
+    cross_substituted_source = copy.deepcopy(source)
+    cross_substituted_source["schema"] = {
+        "name": "matrixport-generation-catalog",
+        "version": "2",
+    }
+    with pytest.raises(TargetSeriesError):
+        target_series._verified_current_generation(
+            pointer_path=pointer_path,
+            manifest_path=path,
+            source=cross_substituted_source,
+            name="provider ledger",
+            inventory_profile="provider-ledger",
+        )
+
+    malformed_source = copy.deepcopy(source)
+    malformed_source["schema"]["name"] = []
+    with pytest.raises(TargetSeriesError):
+        target_series._verified_immutable_generation(
+            manifest_path=path, source=malformed_source, name="provider ledger"
+        )
+    with pytest.raises(TargetSeriesError):
+        target_series._verified_current_generation(
+            pointer_path=pointer_path,
+            manifest_path=path,
+            source=malformed_source,
+            name="provider ledger",
+            inventory_profile="provider-ledger",
+        )
 
     for field, value in (
         ("generation_id", "0" * 64),
@@ -232,6 +253,106 @@ def test_immutable_provider_ledger_manifest_accepts_core_generation_envelope(
             target_series._verified_immutable_generation(
                 manifest_path=path, source=source, name="provider ledger"
             )
+
+
+@pytest.mark.parametrize(
+    ("directory", "schema", "adapter", "inventory_profile", "other_schema"),
+    (
+        (
+            "ledger",
+            {"name": "provider-ledger", "version": "1"},
+            "quant-engine-provider-ledger",
+            "provider-ledger",
+            {"name": "matrixport-generation-catalog", "version": "2"},
+        ),
+        (
+            "matrixport",
+            {"name": "matrixport-generation-catalog", "version": "2"},
+            "quant-engine-matrixport",
+            "matrixport",
+            {"name": "quantbase-generation", "version": "1"},
+        ),
+        (
+            "quantbase",
+            {"name": "quantbase-generation", "version": "1"},
+            "quant-engine-web-contract-harvester",
+            "quantbase",
+            {"name": "portfolio123-generation", "version": "1"},
+        ),
+        (
+            "p123",
+            {"name": "portfolio123-generation", "version": "1"},
+            "quant-engine-portfolio123",
+            "portfolio123",
+            {"name": "provider-ledger", "version": "1"},
+        ),
+    ),
+)
+def test_core_generation_envelopes_bind_each_contract_schema_to_its_adapter(
+    tmp_path: Path,
+    directory: str,
+    schema: dict[str, str],
+    adapter: str,
+    inventory_profile: str,
+    other_schema: dict[str, str],
+) -> None:
+    """Every retained source admits only its own raw core envelope."""
+
+    manifest_path = tmp_path / directory / "generation.json"
+    coverage_extra = (
+        {"declared_exclusions": _matrixport_exclusions("2026-08-12")}
+        if directory == "matrixport"
+        else None
+    )
+    generation_id = _core_generation_manifest(
+        manifest_path,
+        adapter,
+        "2026-08-13",
+        [
+            {
+                "artifact_id": "normalized/test.json",
+                "sha256": "b" * 64,
+                "size_bytes": 1,
+            }
+        ],
+        coverage_extra,
+    )
+    source = {
+        "schema": schema,
+        "current_generation": {
+            "as_of": "2026-08-13",
+            "generation_id": generation_id,
+            "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        },
+    }
+    assert target_series._verified_immutable_generation(
+        manifest_path=manifest_path, source=source, name=directory
+    )[1:] == (generation_id, "2026-08-13")
+
+    pointer_path = manifest_path.parent / "CURRENT.json"
+    _pointer(pointer_path, generation_id, manifest_path)
+    assert target_series._verified_current_generation(
+        pointer_path=pointer_path,
+        manifest_path=manifest_path,
+        source=source,
+        name=directory,
+        inventory_profile=inventory_profile,
+    )[1:] == (generation_id, "2026-08-13")
+
+    substituted = copy.deepcopy(source)
+    substituted["schema"] = other_schema
+    with pytest.raises(TargetSeriesError):
+        target_series._verified_immutable_generation(
+            manifest_path=manifest_path, source=substituted, name=directory
+        )
+    with pytest.raises(TargetSeriesError):
+        target_series._verified_current_generation(
+            pointer_path=pointer_path,
+            manifest_path=manifest_path,
+            source=substituted,
+            name=directory,
+            inventory_profile=inventory_profile,
+        )
 
 
 def test_provider_ledger_inventory_binds_admission_receipt() -> None:
@@ -352,9 +473,9 @@ def test_provider_ledger_schema2_does_not_promote_provider_live_returns(
         },
     )
     manifest_path = tmp_path / "generation.json"
-    _manifest(
+    _core_generation_manifest(
         manifest_path,
-        generation_id,
+        "quant-engine-provider-ledger",
         "2026-08-16",
         [_artifact(catalog_path, "normalized/provider-ledger.json")],
     )
@@ -686,8 +807,9 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         },
     )
     ledger_manifest = tmp_path / "ledger" / "generation.json"
-    ledger_generation_id = _provider_ledger_manifest(
+    ledger_generation_id = _core_generation_manifest(
         ledger_manifest,
+        "quant-engine-provider-ledger",
         as_of,
         [_artifact(ledger_catalog, "normalized/provider-ledger.json")],
     )
@@ -751,9 +873,9 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         ],
     )
     matrix_manifest = matrix_root / "generation.json"
-    _manifest(
+    matrix_generation_id = _core_generation_manifest(
         matrix_manifest,
-        ids["matrixport"],
+        "quant-engine-matrixport",
         as_of,
         [
             _artifact(matrix_nav, "csv/nav_daily.csv"),
@@ -761,16 +883,10 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
             _artifact(matrix_daily_holdings, "csv/daily_holdings.csv"),
             _artifact(matrix_subscriptions, "csv/subscription_details.csv"),
         ],
+        {"declared_exclusions": _matrixport_exclusions("2025-12-09")},
     )
-    matrix_manifest_value = json.loads(matrix_manifest.read_text(encoding="utf-8"))
-    matrix_manifest_value["coverage"] = {
-        "declared_exclusions": _matrixport_exclusions("2025-12-09"),
-        "known_gaps": [],
-        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
-    }
-    _write_json(matrix_manifest, matrix_manifest_value)
     matrix_pointer = matrix_root / "CURRENT.json"
-    _pointer(matrix_pointer, ids["matrixport"], matrix_manifest)
+    _pointer(matrix_pointer, matrix_generation_id, matrix_manifest)
 
     quantbase_root = tmp_path / "quantbase"
     quantbase_history = quantbase_root / "history.csv"
@@ -851,9 +967,9 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         ],
     )
     quantbase_manifest = quantbase_root / "generation.json"
-    _manifest(
+    quantbase_generation_id = _core_generation_manifest(
         quantbase_manifest,
-        ids["quantbase"],
+        "quant-engine-web-contract-harvester",
         as_of,
         [
             _artifact(
@@ -864,7 +980,7 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         ],
     )
     quantbase_pointer = quantbase_root / "CURRENT.json"
-    _pointer(quantbase_pointer, ids["quantbase"], quantbase_manifest)
+    _pointer(quantbase_pointer, quantbase_generation_id, quantbase_manifest)
 
     p123_root = tmp_path / "p123"
     p123_root.mkdir()
@@ -976,9 +1092,9 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         relationships_path,
     )
     p123_manifest = p123_root / "generation.json"
-    _manifest(
+    p123_generation_id = _core_generation_manifest(
         p123_manifest,
-        ids["p123"],
+        "quant-engine-portfolio123",
         as_of,
         [
             _artifact(metadata_path, "tables/har_managed_metadata.parquet"),
@@ -989,12 +1105,12 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         ],
     )
     p123_pointer = p123_root / "CURRENT.json"
-    _pointer(p123_pointer, ids["p123"], p123_manifest)
+    _pointer(p123_pointer, p123_generation_id, p123_manifest)
 
     p123_version = target_series._strategy_version(
         "p123-eu-connected-model",
         {
-            "generation_id": ids["p123"],
+            "generation_id": p123_generation_id,
             "provider_entity_ids": ["exact-asset", "exact-portfolio"],
             "strategy_name": "EU Multifactor Microcap",
         },
@@ -1676,6 +1792,7 @@ def _inject_matrixport_gap(fixture: dict[str, Any], missing_date: str) -> None:
     )
     artifact.update(_artifact(nav_path, "csv/nav_daily.csv"))
     manifest["coverage"]["declared_exclusions"] = _matrixport_exclusions(missing_date)
+    _reidentify_manifest(manifest)
     _write_json(manifest_path, manifest)
     _pointer(
         fixture["matrixport_pointer_path"], manifest["generation_id"], manifest_path
@@ -2135,8 +2252,9 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     qsi_row["return"] = "0.123456"
     _write_json(ledger_catalog_path, ledger_catalog)
     ledger_manifest_path = fixture["provider_ledger_manifest_path"]
-    _provider_ledger_manifest(
+    _core_generation_manifest(
         ledger_manifest_path,
+        "quant-engine-provider-ledger",
         fixture["as_of_date"],
         [_artifact(ledger_catalog_path, "normalized/provider-ledger.json")],
     )

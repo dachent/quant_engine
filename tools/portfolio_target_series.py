@@ -126,8 +126,12 @@ LAYERED_HISTORY_REPOSITORY_DEPENDENCIES: Final = (
     "schemas/portfolio/financial-mvp-source-contract.schema.json",
     "tools/portfolio_financial_mvp_contract.py",
 )
-PROVIDER_LEDGER_SOURCE_SCHEMA: Final = {"name": "provider-ledger", "version": "1"}
-PROVIDER_LEDGER_ADAPTER_NAME: Final = "quant-engine-provider-ledger"
+CORE_GENERATION_ADAPTER_BY_SOURCE_SCHEMA: Final = {
+    ("provider-ledger", "1"): "quant-engine-provider-ledger",
+    ("matrixport-generation-catalog", "2"): "quant-engine-matrixport",
+    ("quantbase-generation", "1"): "quant-engine-web-contract-harvester",
+    ("portfolio123-generation", "1"): "quant-engine-portfolio123",
+}
 
 
 def _clean_git_environment() -> dict[str, str]:
@@ -2078,6 +2082,36 @@ def _excluded_strategy_mode_reason(strategy: Mapping[str, Any]) -> str | None:
     raise TargetSeriesError("excluded financial MVP strategy lifecycle differs")
 
 
+def _verified_core_generation_envelope(
+    manifest_content: bytes, source: Mapping[str, Any], error: str
+) -> GenerationManifest:
+    """Validate one retained provider generation against its contract schema."""
+
+    expected_schema = source.get("schema")
+    if (
+        not isinstance(expected_schema, dict)
+        or set(expected_schema) != {"name", "version"}
+        or not isinstance(expected_schema["name"], str)
+        or not isinstance(expected_schema["version"], str)
+    ):
+        raise TargetSeriesError(error)
+    expected_adapter = CORE_GENERATION_ADAPTER_BY_SOURCE_SCHEMA.get(
+        (expected_schema.get("name"), expected_schema.get("version"))
+    )
+    if expected_adapter is None:
+        raise TargetSeriesError(error)
+    try:
+        manifest = GenerationManifest.from_json_bytes(manifest_content)
+    except ManifestValidationError as exc:
+        raise TargetSeriesError(error) from exc
+    if (
+        manifest.adapter.name != expected_adapter
+        or manifest.verification is not VerificationStatus.VERIFIED
+    ):
+        raise TargetSeriesError(error)
+    return manifest
+
+
 def _verified_current_generation(
     *,
     pointer_path: Path,
@@ -2093,6 +2127,11 @@ def _verified_current_generation(
     current = source.get("current_generation")
     if not isinstance(current, dict):
         raise TargetSeriesError(f"{name} current generation is absent from contract")
+    _verified_core_generation_envelope(
+        manifest_content,
+        source,
+        f"{name} generation manifest differs from contract",
+    )
     generation_id = str(manifest.get("generation_id", ""))
     if (
         manifest.get("verification") != "VERIFIED"
@@ -2150,46 +2189,23 @@ def _verified_immutable_generation(
     manifest_content = manifest_path.read_bytes()
     manifest = _load_json(manifest_path, f"{name} generation manifest")
     current = source.get("current_generation")
-    expected_schema = source.get("schema")
     generation_id = str(manifest.get("generation_id", ""))
     manifest_hash = hashlib.sha256(manifest_content).hexdigest()
     as_of = str(manifest.get("as_of_date", ""))
     common_valid = (
         manifest_content == canonical_json_bytes(manifest)
         and isinstance(current, dict)
-        and isinstance(expected_schema, dict)
-        and set(expected_schema) == {"name", "version"}
         and len(generation_id) == 64
         and current.get("generation_id") == generation_id
         and current.get("sha256") == manifest_hash
         and current.get("as_of") == as_of
     )
-    if expected_schema == PROVIDER_LEDGER_SOURCE_SCHEMA:
-        try:
-            provider_manifest = GenerationManifest.from_json_bytes(manifest_content)
-        except ManifestValidationError:
-            provider_manifest = None
-        if (
-            not common_valid
-            or provider_manifest is None
-            or provider_manifest.adapter.name != PROVIDER_LEDGER_ADAPTER_NAME
-            or provider_manifest.verification is not VerificationStatus.VERIFIED
-        ):
-            raise TargetSeriesError(
-                f"{name} immutable generation differs from contract"
-            )
-        return manifest, generation_id, as_of
-    if (
-        not common_valid
-        or manifest.get("$schema") != expected_schema.get("name")
-        or manifest.get("schema_version") != expected_schema.get("version")
-        or manifest.get("schema") != expected_schema
-        or manifest.get("verification") != "VERIFIED"
-        or len(generation_id) != 64
-        or current.get("generation_id") != generation_id
-        or current.get("sha256") != manifest_hash
-        or current.get("as_of") != as_of
-    ):
+    _verified_core_generation_envelope(
+        manifest_content,
+        source,
+        f"{name} immutable generation differs from contract",
+    )
+    if not common_valid:
         raise TargetSeriesError(f"{name} immutable generation differs from contract")
     try:
         observed_as_of = date.fromisoformat(as_of)
